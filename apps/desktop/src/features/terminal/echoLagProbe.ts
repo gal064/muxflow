@@ -58,12 +58,58 @@ export const ECHO_INCIDENT_INTERVAL_MS = 10_000;
  */
 export const ECHO_KEY_RECENCY_MS = 250;
 
+/** One reading of the native link reader's cumulative counters. */
+export interface EchoLinkCounters {
+  bytesRead: number;
+  framesRead: number;
+}
+
+/**
+ * How much other traffic the echo waited behind: what the native reader took
+ * off the ssh stream between the keystroke and its echo.
+ *
+ * This is the same head-of-line evidence `perf.timeline` reports for a tmux
+ * action, for the one measurement that lives entirely in the renderer. Absent
+ * whenever the counters were not sampled — an unmeasured process, or an echo
+ * inside the sampling interval below.
+ */
+export interface EchoAhead {
+  bytesAhead?: number;
+  framesAhead?: number;
+}
+
+/**
+ * At most one sampled measurement per pane per this interval.
+ *
+ * Sampling costs two native calls per measurement, and the fast baseline the
+ * campaign needs is a distribution, not every keystroke: four samples a second
+ * describe it and cannot themselves become the lag being measured.
+ */
+export const ECHO_SAMPLE_INTERVAL_MS = 250;
+
+/** One completed echo, sampled: the compact baseline record. */
+export interface EchoRecord extends EchoAhead {
+  paneId: string;
+  sentAt: number;
+  echoAt: number;
+  lagMs: number;
+  inputCount: number;
+}
+
 export type EchoLagIncident =
-  | { kind: "input.echoLag"; paneId: string; lagMs: number; inputCount: number }
-  | { kind: "input.echoTimeout"; paneId: string; waitedMs: number; inputCount: number };
+  | ({ kind: "input.echoLag"; paneId: string; lagMs: number; inputCount: number } & EchoAhead)
+  | ({ kind: "input.echoTimeout"; paneId: string; waitedMs: number; inputCount: number } & EchoAhead);
 
 export interface EchoLagProbeOptions {
   onIncident: (incident: EchoLagIncident) => void;
+  /**
+   * Reads the native reader's cumulative counters, or returns `undefined` when
+   * there is nothing to read — which is every unmeasured process, and is what
+   * keeps this whole path free in a normal launch.
+   */
+  sampleLinkCounters?: () => Promise<EchoLinkCounters | undefined> | undefined;
+  /** Every sampled echo, fast or slow. The tail is `onIncident`; this is the baseline. */
+  onEcho?: (echo: EchoRecord) => void;
   /**
    * Every completed measurement, outlier or not.
    *
@@ -92,12 +138,37 @@ interface PendingEcho {
   t0: number;
   inputCount: number;
   timer: ReturnType<typeof setTimeout>;
+  /** The counters as of the keystroke, when this measurement was sampled. */
+  before?: Promise<EchoLinkCounters | undefined>;
 }
 
-export function createEchoLagProbe({ onIncident, onSample, now = () => Date.now() }: EchoLagProbeOptions): EchoLagProbe {
+export function createEchoLagProbe({
+  onIncident,
+  onSample,
+  onEcho,
+  sampleLinkCounters,
+  now = () => Date.now(),
+}: EchoLagProbeOptions): EchoLagProbe {
   const pending = new Map<string, PendingEcho>();
   const lastIncidentAt = new Map<string, number>();
   const lastKeyAt = new Map<string, number>();
+  const lastSampleAt = new Map<string, number>();
+
+  /**
+   * The second reading has to be taken now, at the echo — awaiting the first
+   * one before asking for it would fold this call's own latency into the
+   * difference the record reports.
+   */
+  const ahead = async (before: Promise<EchoLinkCounters | undefined>): Promise<EchoAhead> => {
+    const after = await Promise.all([before, sampleLinkCounters?.()]).then(
+      ([start, end]) => (start && end ? { start, end } : undefined),
+    ).catch(() => undefined);
+    if (!after) return {};
+    return {
+      bytesAhead: Math.max(0, after.end.bytesRead - after.start.bytesRead),
+      framesAhead: Math.max(0, after.end.framesRead - after.start.framesRead),
+    };
+  };
 
   const report = (incident: EchoLagIncident): void => {
     const at = now();
@@ -130,31 +201,53 @@ export function createEchoLagProbe({ onIncident, onSample, now = () => Date.now(
         const expired = pending.get(paneId);
         pending.delete(paneId);
         if (!expired || expired.inputCount < ECHO_TIMEOUT_MIN_INPUTS) return;
-        report({
-          kind: "input.echoTimeout",
-          paneId,
-          waitedMs: now() - expired.t0,
-          inputCount: expired.inputCount,
-        });
+        const waitedMs = now() - expired.t0;
+        const timeout = { kind: "input.echoTimeout" as const, paneId, waitedMs, inputCount: expired.inputCount };
+        if (!expired.before) {
+          report(timeout);
+          return;
+        }
+        void ahead(expired.before)
+          .then((counters) => report({ ...timeout, ...counters }))
+          .catch(() => report(timeout));
       }, ECHO_TIMEOUT_MS);
-      pending.set(paneId, { t0, inputCount: 1, timer });
+      const sampledAt = lastSampleAt.get(paneId);
+      const before = sampledAt === undefined || t0 - sampledAt >= ECHO_SAMPLE_INTERVAL_MS
+        ? sampleLinkCounters?.()
+        : undefined;
+      if (before) lastSampleAt.set(paneId, t0);
+      pending.set(paneId, { t0, inputCount: 1, timer, before });
     },
     noteOutput(paneId) {
       const open = pending.get(paneId);
       if (!open) return;
       pending.delete(paneId);
       clearTimeout(open.timer);
-      const lagMs = now() - open.t0;
+      const echoAt = now();
+      const lagMs = echoAt - open.t0;
       onSample?.(paneId, lagMs);
-      if (lagMs > ECHO_LAG_THRESHOLD_MS) {
-        report({ kind: "input.echoLag", paneId, lagMs, inputCount: open.inputCount });
+      const outlier = lagMs > ECHO_LAG_THRESHOLD_MS;
+      if (!open.before) {
+        if (outlier) report({ kind: "input.echoLag", paneId, lagMs, inputCount: open.inputCount });
+        return;
       }
+      // A measurement that cannot read its counters still reports the lag: a
+      // diagnostic must never fail the thing it is describing.
+      void ahead(open.before)
+        .catch(() => ({}) as EchoAhead)
+        .then((counters) => {
+          onEcho?.({ paneId, sentAt: open.t0, echoAt, lagMs, inputCount: open.inputCount, ...counters });
+          if (outlier) {
+            report({ kind: "input.echoLag", paneId, lagMs, inputCount: open.inputCount, ...counters });
+          }
+        });
     },
     dispose() {
       for (const open of pending.values()) clearTimeout(open.timer);
       pending.clear();
       lastIncidentAt.clear();
       lastKeyAt.clear();
+      lastSampleAt.clear();
     },
   };
 }

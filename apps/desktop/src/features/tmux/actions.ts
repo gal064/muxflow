@@ -46,11 +46,21 @@ export interface AuthoritativePrecondition {
   generation: number;
 }
 
+/**
+ * The native half of one action's switch timeline, passed straight through to
+ * the `perf.timeline` record. Present only when the process is running a
+ * measured build with `ADE_PERF_LOG` set; see `perf_log/switch_timing.rs` for
+ * what each stamp means. Deliberately opaque here: this layer joins it, it does
+ * not interpret it.
+ */
+export type TmuxActionTiming = Record<string, unknown>;
+
 export interface TmuxActionResult {
   sessionId?: string;
   windowId?: string;
   paneId?: string;
   topologyGeneration: number;
+  timing?: TmuxActionTiming;
 }
 
 interface WireTmuxAction {

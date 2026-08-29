@@ -50,8 +50,19 @@ source_digest=$(
       -type f -not -path '*/target/*' -not -path '*/tmp/*' -print0
   fi | LC_ALL=C sort -z -u | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
 )
+# MUXFLOW_PERF_BUILD=1 compiles the switch-timing instrumentation into the
+# helper. It is part of the cache identity, not just the command line: a
+# measured and an unmeasured helper are different artifacts from identical
+# source, and sharing one cache entry would hand back the wrong one.
+perf_features=()
+perf_tag=""
+if [[ ${MUXFLOW_PERF_BUILD:-0} == 1 ]]; then
+  perf_features=(--features perf-log)
+  perf_tag="-perf-log"
+  echo "perf-log: enabled" >&2
+fi
 architecture_cache="$work_root/cache/compatible-host/$arch"
-artifact_dir="$architecture_cache/artifacts/$source_digest"
+artifact_dir="$architecture_cache/artifacts/$source_digest$perf_tag"
 target_dir="$architecture_cache/target"
 cached_binary="$artifact_dir/muxflow-host"
 mkdir -p "$artifact_dir" "$target_dir"
@@ -78,6 +89,7 @@ docker run --rm --platform "$docker_platform" --user "$(id -u):$(id -g)" \
   -v "$work_root/cache:/artifact-cache" \
   -w /workspace rust:1.97.1-slim-bookworm \
   cargo build --locked --release --bin muxflow-host \
+    ${perf_features[@]+"${perf_features[@]}"} \
     --target-dir /artifact-build/target
 install -m 0755 "$target_dir/release/muxflow-host" "$cached_binary"
 install -m 0755 "$cached_binary" "$output"

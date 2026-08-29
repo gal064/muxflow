@@ -47,6 +47,10 @@ pub(crate) mod git;
 pub(crate) mod git_content;
 use git_content::GitContentReads;
 pub(crate) mod tmux_action;
+// Switch-timeline instrumentation. Compiled out of a plain release build with
+// the rest of `perf_log`; see `perf_log/switch_timing.rs` for what each stamp
+// means and why the counters are relaxed.
+use crate::perf_log::switch_timing::{AnswerMark, CountingReader, LinkCounters, RequestTiming};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a written request may wait for its answer. The host answers a
@@ -110,6 +114,18 @@ use transport::{
 };
 pub(crate) use transport::{close_all_control_masters, spawn_orphan_reaper};
 
+/// One answer, as the reader delivers it to the thread that is waiting.
+///
+/// The mark travels with the response rather than through a side map because a
+/// waiter that has already given up must not leave a stamp behind: dropping the
+/// answer drops it.
+pub(crate) struct PendingAnswer {
+    response: v1::Response,
+    /// D4 and the reader's counters ahead of this answer. `None` outside a
+    /// measurement build, and for any answer read before the marks existed.
+    mark: Option<AnswerMark>,
+}
+
 pub(crate) struct TerminalClient {
     bulk_scope: Uuid,
     writer: Mutex<Option<ControlWriterHandle>>,
@@ -139,7 +155,10 @@ pub(crate) struct TerminalClient {
     ready: AtomicBool,
     read_only: AtomicBool,
     next_request_id: AtomicU64,
-    pending: Mutex<HashMap<u64, mpsc::Sender<Result<v1::Response, String>>>>,
+    pending: Mutex<HashMap<u64, mpsc::Sender<Result<PendingAnswer, String>>>>,
+    /// Everything this link's reader has taken off the ssh stream, so a late
+    /// answer can be attributed to the bytes that were ahead of it.
+    link_counters: LinkCounters,
     operations: Arc<OperationRegistry>,
     /// Deferred Git diff-body reads this connection owns, so replacing the
     /// connection cancels them rather than leaving them streaming.
@@ -201,6 +220,7 @@ impl TerminalClient {
             read_only: AtomicBool::new(false),
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
+            link_counters: LinkCounters::new(),
             operations: Arc::new(OperationRegistry::default()),
             git_content_reads: Arc::new(GitContentReads::default()),
             input_queue: Mutex::new(ClientInputQueue::default()),
@@ -433,7 +453,32 @@ impl TerminalClient {
     }
 
     fn request(&self, request: v1::Request) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, REQUEST_TIMEOUT, HOST_RESPONSE_TIMEOUT, None)
+        self.request_with_timeout(
+            request,
+            REQUEST_TIMEOUT,
+            HOST_RESPONSE_TIMEOUT,
+            None,
+            &mut RequestTiming::inert(),
+        )
+    }
+
+    /// `request`, with the native half of the switch timeline filled in.
+    ///
+    /// Only the tmux action path asks for this: it is the round trip the slow
+    /// link made unusable, and `timing` is what says whether its seconds were
+    /// spent on the wire or after the answer arrived.
+    pub(crate) fn request_timed(
+        &self,
+        request: v1::Request,
+        timing: &mut RequestTiming,
+    ) -> Result<v1::Response, String> {
+        self.request_with_timeout(
+            request,
+            REQUEST_TIMEOUT,
+            HOST_RESPONSE_TIMEOUT,
+            None,
+            timing,
+        )
     }
 
     /// Writes a request without registering a waiter for its response.
@@ -477,6 +522,7 @@ impl TerminalClient {
             GIT_REQUEST_TIMEOUT,
             GIT_REQUEST_TIMEOUT,
             Some(claim),
+            &mut RequestTiming::inert(),
         )
     }
 
@@ -491,7 +537,13 @@ impl TerminalClient {
         request: v1::Request,
         claim: Option<OperationClaim>,
     ) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, REQUEST_TIMEOUT, HOST_RESPONSE_TIMEOUT, claim)
+        self.request_with_timeout(
+            request,
+            REQUEST_TIMEOUT,
+            HOST_RESPONSE_TIMEOUT,
+            claim,
+            &mut RequestTiming::inert(),
+        )
     }
 
     fn request_with_timeout(
@@ -500,6 +552,7 @@ impl TerminalClient {
         write_timeout: Duration,
         response_timeout: Duration,
         operation: Option<OperationClaim>,
+        timing: &mut RequestTiming,
     ) -> Result<v1::Response, String> {
         let deadline = Instant::now() + write_timeout;
         let response_deadline = Instant::now() + response_timeout;
@@ -543,6 +596,15 @@ impl TerminalClient {
             self.reconnect_transport("a control request could not be written before its deadline");
             return Err(error);
         }
+        // D3: the frame's last byte has been accepted by the ssh child's stdin.
+        // The delivery window's outstanding bytes are read at the same instant
+        // because they are the size of the queue this answer now sits behind.
+        timing.mark_written(request_id, &self.link_counters, || {
+            let window = self.delivery_window.lock().unwrap().clone();
+            window
+                .and_then(|window| window.totals())
+                .map(|(reserved, acked)| reserved.bytes.saturating_sub(acked.bytes))
+        });
         // A cancel raised between the bind above and the write that has just
         // finished reached the host *before* the request it names, and the host
         // discards a cancel for a request it has never seen — so the request
@@ -565,11 +627,20 @@ impl TerminalClient {
                 .store(monotonic_millis(), Ordering::Release);
         }
         let result = match received {
-            Ok(Ok(response)) if response.ok => Ok(response),
-            Ok(Ok(response)) => Err(format!(
-                "{}: {}",
-                response.error_code, response.display_message
-            )),
+            Ok(Ok(answer)) => {
+                // D4, as the reader stamped it: kept for a refusal too, since a
+                // refusal that arrived late is the same wire question.
+                timing.mark_answer(answer.mark);
+                let response = answer.response;
+                if response.ok {
+                    Ok(response)
+                } else {
+                    Err(format!(
+                        "{}: {}",
+                        response.error_code, response.display_message
+                    ))
+                }
+            }
             Ok(Err(error)) => Err(error),
             Err(_) => {
                 self.cancel_request(request_id);
@@ -1049,6 +1120,16 @@ pub struct TerminalLinkStats {
     ms_since_last_host_event: u64,
     /// Requests given up on after the response deadline, since this client started.
     late_requests_total: u32,
+    /// Bytes and frames this link's reader has taken off the ssh stream since
+    /// the connection started. Null unless the process is running a measured
+    /// build with `ADE_PERF_LOG` set. The renderer's echo probe samples these
+    /// at the keystroke and again at its echo: the difference is how much other
+    /// traffic the echo waited behind, the same head-of-line number
+    /// `perf.timeline` reports for a tmux action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_read_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frames_read_total: Option<u64>,
 }
 
 #[tauri::command]
@@ -1065,6 +1146,7 @@ pub fn terminal_link_stats(
     let (reserved, acked) = window
         .and_then(|window| window.totals())
         .ok_or("terminal delivery window is unavailable")?;
+    let read_totals = client.link_counters.totals();
     Ok(TerminalLinkStats {
         reserved_bytes: reserved.bytes,
         acked_bytes: acked.bytes,
@@ -1072,6 +1154,8 @@ pub fn terminal_link_stats(
         acked_records: acked.records,
         ms_since_last_host_event: monotonic_millis().saturating_sub(last_frame_at),
         late_requests_total: client.late_requests_total.load(Ordering::Acquire),
+        bytes_read_total: read_totals.map(|(bytes, _)| bytes),
+        frames_read_total: read_totals.map(|(_, frames)| frames),
     })
 }
 
