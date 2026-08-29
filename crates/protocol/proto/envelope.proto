@@ -81,7 +81,7 @@ enum Operation {
   OPERATION_SHUTDOWN_DAEMON = 7;
   OPERATION_TMUX_ACTION = 8;
   OPERATION_SET_TERMINAL_VISIBILITY = 9;
-    OPERATION_REQUEST_TERMINAL_SEED = 10;
+  OPERATION_REQUEST_TERMINAL_SEED = 10;
   OPERATION_RESOLVE_ACTIVE_ROOT = 11;
   OPERATION_LIST_DIRECTORY = 12;
   OPERATION_WATCH_DIRECTORY = 13;
@@ -165,6 +165,13 @@ message Request {
   string scope = 2;
   string session_id = 3;
   repeated string pane_ids = 4;
+  // The operation's payload — terminal input, a file body, and so on.
+  //
+  // On SET_TERMINAL_VISIBILITY it is reserved, not free: a hide used to carry
+  // the renderer's serialized screen here and a desktop from before
+  // `terminal_renderer_holds_snapshot` still sends one. This host ignores those
+  // bytes, and the number stays spoken for so that nothing else claims it while
+  // such a desktop can still connect.
   bytes data = 5;
   uint32 columns = 6;
   uint32 rows = 7;
@@ -176,11 +183,12 @@ message Request {
   FileServiceRequest file = 13;
   GitRequest git = 14;
   AgentRequest agent = 15;
-  // On a hide: the renderer kept its own copy of the screen it is handing off,
-  // so the host needs to store no bytes. On a reveal: it still holds that copy,
-  // and a verified tail may be written on top of it. A peer that does not set
-  // this is answered with a seed, which is what makes the flag — not the
-  // payload — the thing the resume path turns on.
+  // The renderer keeps its own copy of the screen it hands off, so the host
+  // stores no bytes for a hidden pane at all. Set on both halves of the
+  // handoff, and read on the reveal: it says the copy is still held, and a
+  // verified tail may be written on top of it. A peer that does not set it is
+  // answered with a seed, which is what makes the flag — not the payload — the
+  // thing the resume path turns on.
   bool terminal_renderer_holds_snapshot = 16;
   // How many lines above the screen REQUEST_TERMINAL_HISTORY asks for. Read by
   // no other operation, and clamped by the host: the number decides the size of
@@ -430,6 +438,9 @@ enum PaneResourceState {
 message PaneResource {
   string pane_id = 1;
   PaneResourceState state = 2;
+  // Kept on the wire for one release so a desktop that still reads it finds a
+  // field rather than a gap. Nothing writes it: the renderer owns its screen,
+  // and this host answers a reveal with a verified tail or with a seed.
   bytes serialized_snapshot = 3;
   bytes raw_tail = 4;
   uint64 generation = 5;

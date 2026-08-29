@@ -28,24 +28,15 @@ export interface CachedTerminalState {
    */
   historyExhausted: boolean;
   /**
-   * How many pages of scrollback are already spliced into these bytes.
-   *
-   * Not load-bearing for correctness — the next request starts above whatever
-   * rows the restored buffer reports holding, whatever this says — but it is
-   * how a restored pane's paging shows up in the journal, and how a test tells
-   * "restored partway up its history" from "restored at the bottom of it".
-   */
-  historyPagesLoaded: number;
-  /**
    * How many lines the *next* page above these bytes should ask for.
    *
    * Paging grows geometrically, because each page is applied by rewriting the
    * whole buffer: N pages of a fixed size cost O(N^2) bytes through xterm and,
    * past a couple of hundred kilobytes, split the reset and the content across
    * frames — which the user reads as a flicker. Kept here for the same reason
-   * as `historyPagesLoaded`: the growth is a property of how far these bytes
-   * have already been paged, and a restore that forgot it would start the
-   * ladder again from the smallest page.
+   * as `screenSeeded`: the growth is a property of how far these bytes have
+   * already been paged, and a restore that forgot it would start the ladder
+   * again from the smallest page.
    *
    * Zero means "these bytes say nothing about it", which the pane reads as the
    * first page size — an entry written before this field existed, and a screen
@@ -58,7 +49,6 @@ export interface CachedTerminalState {
 export interface CachedHistoryState {
   screenSeeded: boolean;
   historyExhausted: boolean;
-  historyPagesLoaded: number;
   historyNextPageLines: number;
 }
 
@@ -143,7 +133,6 @@ export class TerminalStateCache {
       outputGeneration: checkpoint?.outputGeneration ?? 0,
       screenSeeded: history?.screenSeeded ?? false,
       historyExhausted: history?.historyExhausted ?? false,
-      historyPagesLoaded: history?.historyPagesLoaded ?? 0,
       historyNextPageLines: history?.historyNextPageLines ?? 0,
     });
     this.#retainedBytes += byteLength;

@@ -71,7 +71,10 @@ interface Options {
  * mutable state sat alongside six others that had nothing to do with them.
  */
 export function useActiveRoot(options: Options): {
-  /** Something happened that could genuinely have moved the root. Probes now. */
+  /**
+   * Something happened that could genuinely have moved the root. Probes behind
+   * the active pane's paint — see `resolveBehindPaint`.
+   */
   rearm: () => void;
   /**
    * A person asked for this answer. Probes now, in front of the paint gate.

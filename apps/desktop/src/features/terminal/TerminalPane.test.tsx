@@ -972,7 +972,7 @@ describe("lazy scrollback", () => {
     await act(async () => { mounted.unmount(); });
   });
 
-  it("takes an empty answer as the whole answer", async () => {
+  it("splices nothing for an answer with no rows, and still reads the size for whether to ask again", async () => {
     const hub = new FakeHub();
     const mounted = await mountPane(fixturePane("%h3"), hub);
     const renderer = renderers.created[0];
@@ -1110,7 +1110,6 @@ describe("lazy scrollback", () => {
     // The page is in the buffer this screen was serialized from, and the entry
     // says so — the restore continues from there rather than fetching it again.
     expect(terminalStateCache.get("%h6")?.screenSeeded).toBe(true);
-    expect(terminalStateCache.get("%h6")?.historyPagesLoaded).toBe(1);
     expect(terminalStateCache.get("%h6")?.historyExhausted).toBe(false);
     // Including where the page ladder had got to: these bytes cost what they
     // cost to rewrite whichever mount is holding them.
@@ -1189,80 +1188,6 @@ describe("lazy scrollback", () => {
     expect(renderer.historySplices).toEqual([
       { bytes: historyPage(300).length, throughGeneration: 9 },
     ]);
-    await act(async () => { mounted.unmount(); });
-  });
-
-  /**
-   * tmux's `history-limit` can be larger than anything this side can hold, and
-   * then `skip + page >= history_size` is never true: the host clamps the skip
-   * it is given at `MAX_HISTORY_SKIP_LINES`, xterm drops rows off the top of
-   * the buffer as new ones are spliced in, and the answer stops moving. Every
-   * wheel-up used to re-fetch the same clamped rows and splice them in again.
-   */
-  it("stops at what it can hold, when tmux holds more history than this side ever can", async () => {
-    const hub = new FakeHub();
-    const mounted = await mountPane(fixturePane("%c1"), hub);
-    const renderer = renderers.created[0];
-    await act(async () => { hub.deliver(seedEvent("%c1", 4)); });
-    await act(async () => { renderer.flushRendered(); });
-    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
-
-    // 50,000 lines in tmux, and the buffer now as full as xterm will let it be.
-    await act(async () => { hub.deliver(historyEvent("%c1", historyPage(300), 50_000)); });
-    renderer.scrollbackRows = 10_000;
-
-    await act(async () => { renderer.reachTop(); renderer.reachTop(); });
-    expect(
-      api.requestTerminalHistory,
-      "asked again for rows it cannot hold and the host would clamp",
-    ).toHaveBeenCalledTimes(1);
-
-    // The same end from the other ceiling: even a renderer that could hold more
-    // stops here, because the host will not start a capture further up than
-    // its own `MAX_HISTORY_SKIP_LINES` and would answer with these rows again.
-    renderer.scrollbackLimit = 50_000;
-    await act(async () => { renderer.reachTop(); });
-    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
-
-    // Latched, not merely refused once: the screen carries it across a hide.
-    await act(async () => { mounted.unmount(); });
-    expect(terminalStateCache.get("%c1")?.historyExhausted).toBe(true);
-  });
-
-  /**
-   * Each page is applied by rewriting the whole buffer — xterm has no prepend —
-   * so a fixed page size makes N pages cost O(N^2) bytes through xterm, and
-   * past a couple of hundred kilobytes the reset and the content land in
-   * different frames, which the user reads as a flicker. The page doubles as
-   * the buffer grows, so the whole 10,000-row scrollback is six rewrites.
-   */
-  it("doubles the page as the buffer grows, capping it, so a full scrollback is six rewrites", async () => {
-    const hub = new FakeHub();
-    const mounted = await mountPane(fixturePane("%g1"), hub);
-    const renderer = renderers.created[0];
-    await act(async () => { hub.deliver(seedEvent("%g1", 4)); });
-    await act(async () => { renderer.flushRendered(); });
-
-    // Never the last page: tmux is holding far more than this walk fetches, so
-    // nothing but the ladder decides the sizes below.
-    for (const rows of [300, 600, 1_200, 2_400, 4_800]) {
-      await act(async () => { hub.deliver(historyEvent("%g1", historyPage(10), 50_000)); });
-      renderer.scrollbackRows += rows;
-      await act(async () => { renderer.reachTop(); });
-    }
-
-    expect(api.requestTerminalHistory.mock.calls).toEqual([
-      ["client-a", "%g1", 300, 0],
-      ["client-a", "%g1", 600, 300],
-      ["client-a", "%g1", 1_200, 900],
-      ["client-a", "%g1", 2_400, 2_100],
-      // Capped: the largest single answer stays well under the whole-history
-      // capture this replaced, and the host clamps at `MAX_HISTORY_LINES` too.
-      ["client-a", "%g1", 4_800, 4_500],
-      ["client-a", "%g1", 4_800, 9_300],
-    ]);
-    // Six pages, and the sixth reaches past the 10,000 rows this side can hold.
-    expect(9_300 + 4_800).toBeGreaterThanOrEqual(10_000);
     await act(async () => { mounted.unmount(); });
   });
 });

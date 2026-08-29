@@ -5,10 +5,16 @@
 // notice reading "A restore through generation 4 arrived for a pane that has
 // already been given generation 5…", which is an internal sentence about an
 // event nobody has to act on. It belongs in the journal.
+//
+// A history splice is here for the same reason and not a second subject: xterm
+// has no prepend, so putting scrollback above row 0 is a rewrite of the whole
+// buffer — a restore in disguise, refused on this same generation rule, and
+// journalled rather than spoken when it is. The rows it counts and the order it
+// splices them in are what that refusal is protecting.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { recordIncident } from "../../diagnostics/incidents";
 import { XtermRenderer } from "./TerminalRenderer";
-import { ownTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
+import { ownTerminalBytes } from "./TerminalBytes";
 
 vi.mock("../../diagnostics/incidents", () => ({ recordIncident: vi.fn() }));
 
@@ -72,9 +78,6 @@ describe("stale cached restore", () => {
   // of speaking. Nothing is lost: the scrollback is still in tmux, and the next
   // time the user reaches the top the question is asked again.
   it("refuses a history splice when the stream moved under it", async () => {
-    type HistorySplice = {
-      prependHistory(history: OwnedTerminalBytes, throughGeneration: number): Promise<"applied" | "superseded">;
-    };
     const diagnostics: Array<string | undefined> = [];
     const renderer = new XtermRenderer({
       paneId: "%9",
@@ -84,9 +87,8 @@ describe("stale cached restore", () => {
     renderer.write(ownTerminalBytes(new TextEncoder().encode("live")), undefined, 5);
     diagnostics.length = 0;
 
-    const splice = renderer as unknown as HistorySplice;
     const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
-    await expect(splice.prependHistory(history, 4)).resolves.toBe("superseded");
+    await expect(renderer.prependHistory(history, 4)).resolves.toBe("superseded");
 
     expect(recordIncident).toHaveBeenCalledWith("pane.historySuperseded", {
       paneId: "%9",
@@ -113,11 +115,8 @@ describe("stale cached restore", () => {
     renderer.write(ownTerminalBytes(new TextEncoder().encode("the screen")), undefined, 5);
     await waitFor(() => renderer.serialize().includes("the screen"), "the screen to be applied");
 
-    const splice = renderer as unknown as {
-      prependHistory(history: OwnedTerminalBytes, throughGeneration: number): Promise<"applied" | "superseded">;
-    };
     const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
-    await expect(splice.prependHistory(history, 5)).resolves.toBe("applied");
+    await expect(renderer.prependHistory(history, 5)).resolves.toBe("applied");
 
     await waitFor(() => renderer.serialize().includes("earlier output"), "the history to be spliced");
     const spliced = renderer.serialize();
@@ -167,11 +166,8 @@ describe("stale cached restore", () => {
     renderer.open(document.createElement("div"));
     renderer.write(ownTerminalBytes(new TextEncoder().encode("the screen")), undefined, 5);
 
-    const splice = renderer as unknown as {
-      prependHistory(history: OwnedTerminalBytes, throughGeneration: number): Promise<"applied" | "superseded">;
-    };
     // Asked against the stream as it stands, so the first gate lets it through.
-    const outcome = splice.prependHistory(
+    const outcome = renderer.prependHistory(
       ownTerminalBytes(new TextEncoder().encode("earlier output")),
       5,
     );

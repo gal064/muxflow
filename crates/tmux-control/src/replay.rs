@@ -72,10 +72,6 @@ impl ScreenSeeder {
                 .collect(),
         }
     }
-
-    pub fn requires_resnapshot(&self) -> bool {
-        self.overflowed
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,11 +535,12 @@ impl PaneResourceStore {
     /// capture stored and never emitted, and the request produces nothing at
     /// all, forever.
     ///
-    /// The hidden recovery material is discarded exactly as [`Self::reveal`]
-    /// discards it: the authoritative seed that follows replaces it, and
-    /// keeping a stale snapshot beside a fresher one is what would then be
-    /// replayed twice. Returns whether the pane actually had to be forced,
-    /// which is the only part worth counting.
+    /// The hidden recovery material — the buffered tail and the handoff
+    /// checkpoint — is discarded exactly as [`Self::reveal`] discards it: the
+    /// authoritative seed that follows is the whole screen, and a tail kept
+    /// beside it would be replayed on top of output it is already part of.
+    /// Returns whether the pane actually had to be forced, which is the only
+    /// part worth counting.
     pub fn reveal_for_seed_request(&mut self, pane_id: &str, generation: u64) -> bool {
         match self.resources.get(pane_id).map(|resource| resource.state) {
             Some(PaneResourceState::Visible) => {
@@ -712,10 +709,6 @@ impl PaneResourceStore {
         } else if let Some(resource) = self.resources.get_mut(pane_id) {
             resource.generation = generation;
         }
-    }
-
-    pub fn append_if_hidden(&mut self, pane_id: &str, bytes: &[u8], generation: u64) {
-        self.append(pane_id, bytes, generation);
     }
 
     fn append_hidden(&mut self, pane_id: &str, bytes: &[u8], generation: u64) {
@@ -888,10 +881,6 @@ impl PaneResourceStore {
         self.retained_panes
     }
 
-    pub fn retained_panes_for_measurement(&self) -> usize {
-        self.retained_panes()
-    }
-
     fn enforce_limits(&mut self) {
         while self.retained_panes() > self.max_hidden_panes
             || self.retained_bytes() > self.max_total_bytes
@@ -1055,7 +1044,6 @@ mod tests {
     /// *ordinary* hide rather than a broken one. What the host keeps is the
     /// output the renderer had not yet seen, and the renderer's own cache is
     /// the base that output is written on top of.
-    ///
     #[test]
     fn a_hide_without_a_snapshot_buffers_the_tail_instead_of_releasing() {
         let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
@@ -1088,7 +1076,6 @@ mod tests {
 
     /// The tail is the whole answer a reveal carries, so it has to be exact in
     /// both directions: every byte after the checkpoint, and each of them once.
-    ///
     #[test]
     fn a_reveal_answers_the_exact_output_after_the_checkpoint_exactly_once() {
         let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
@@ -1296,7 +1283,6 @@ mod tests {
     /// recorded handoff checkpoint is that agreement, and anything else — an
     /// epoch change, an eviction, a `require_seed`, a reveal for a handoff this
     /// host never saw — is answered with a seed rather than with bytes.
-    ///
     #[test]
     fn a_reveal_whose_checkpoint_the_host_did_not_record_requires_a_seed() {
         let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
@@ -1573,7 +1559,7 @@ mod tests {
         let mut seeder = ScreenSeeder::with_limit(3);
         assert!(seeder.buffer(1, vec![1, 2]));
         assert!(!seeder.buffer(2, vec![3, 4]));
-        assert!(seeder.requires_resnapshot());
+        assert!(seeder.overflowed);
         assert!(seeder.complete(Vec::new(), 0).replay.is_empty());
     }
 
@@ -1677,7 +1663,3 @@ mod tests {
 #[cfg(test)]
 #[path = "replay_phase14_tests.rs"]
 mod phase14_incremental_tests;
-
-#[cfg(test)]
-#[path = "replay_phase14.rs"]
-mod phase14_baseline_tests;

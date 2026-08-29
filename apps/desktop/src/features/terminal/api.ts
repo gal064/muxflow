@@ -20,13 +20,10 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "output"; paneId: string; generation: number; data: OwnedTerminalBytes }
   | { kind: "seedDiagnostic"; paneId: string; message: string }
   /**
-   * The scrollback above a pane's screen, answering one
+   * One page of the scrollback above a pane's screen, answering one
    * `requestTerminalHistory`. Deliberately not a seed: it carries no
    * generation, because it claims no place in the output ordering — the
    * renderer splices it above what it is already showing, or discards it.
-   */
-  /**
-   * One page of the scrollback above a pane's screen.
    *
    * `historySize` is how many lines tmux holds for the pane, which is what the
    * renderer compares against the rows it asked for to know whether this page

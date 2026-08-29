@@ -1294,10 +1294,13 @@ const MAX_HISTORY_LINES: u32 = 10_000;
 
 /// The furthest above the display one request may start.
 ///
-/// The renderer reports how much scrollback it is already holding, and a
-/// number larger than any buffer it could have is not a claim this host acts
-/// on: an unclamped one would put both bounds past the top of tmux's history,
-/// where the answer is empty and the pane concludes there is nothing above it.
+/// The renderer reports how much scrollback it is already holding, and a number
+/// larger than any buffer it could have is not a claim this host acts on: an
+/// unclamped one would put both bounds arbitrarily far past the top of tmux's
+/// history, and the capture command carrying them is written straight onto the
+/// control lane. The renderer mirrors this number and stops paging on it, which
+/// is what keeps a clamp from becoming a pane that asks for the same clamped
+/// rows on every wheel-up.
 const MAX_HISTORY_SKIP_LINES: u32 = MAX_HISTORY_LINES;
 
 /// Photographs the scrollback *above* one pane's screen.

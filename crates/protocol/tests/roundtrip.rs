@@ -765,7 +765,7 @@ fn a_renderer_handoff_across_a_version_skew_degrades_to_a_seed() {
     // the request is still a valid hide, just one whose empty payload that host
     // reads as "no recoverable screen". Its answer sets no
     // `resume_from_renderer`, which the desktop reads as seed debt.
-    let mut new_desktop_hide = v1::Request {
+    let new_desktop_hide = v1::Request {
         operation: v1::Operation::SetTerminalVisibility.into(),
         scope: "%2".into(),
         visible: false,
@@ -778,7 +778,7 @@ fn a_renderer_handoff_across_a_version_skew_degrades_to_a_seed() {
     // A field number neither peer assigns, to state the tolerance itself.
     bytes.extend_from_slice(&[0xf8, 0x06, 0x01]);
     let decoded = v1::Request::decode(bytes.as_slice()).unwrap();
-    new_desktop_hide.terminal_renderer_holds_snapshot = decoded.terminal_renderer_holds_snapshot;
+    assert!(decoded.terminal_renderer_holds_snapshot);
     assert!(decoded.data.is_empty());
 
     let old_host_answer = v1::PaneResource {
