@@ -13,14 +13,6 @@ export const STRIP_APPEAR_DELAY_MS = 400;
 interface DisconnectedStripProps {
   phase: ConnectionPhase;
   detail: string;
-  /**
-   * A standing verdict on the link's quality — "your connection is unstable"
-   * — shown in this same row while the phase is healthy. Nothing else is
-   * allowed on screen while connected; this is the one exception, because a
-   * link that keeps dropping is exactly the condition the strip exists for,
-   * and between drops there was nothing left on screen to say so.
-   */
-  notice?: string;
   hasSnapshot: boolean;
   onReconnect(): void;
   onOpenSettings(): void;
@@ -63,16 +55,7 @@ export function DisconnectedStrip(props: DisconnectedStripProps) {
     const timer = setTimeout(() => setSettled(true), STRIP_APPEAR_DELAY_MS);
     return () => clearTimeout(timer);
   }, [degraded]);
-  if (!degraded) {
-    if (!props.notice) return null;
-    return <div className="link-strip">
-      <span aria-live="polite" className="link-strip-message" role="status">
-        <span className="link-strip-title" title={props.notice}>{props.notice}</span>
-      </span>
-      <button className="link-strip-action" onClick={props.onOpenSettings} type="button">Connection…</button>
-    </div>;
-  }
-  if (!settled) return null;
+  if (!degraded || !settled) return null;
   const readOnly = props.phase === "readOnly";
   const title = TITLES[props.phase] ?? "Disconnected from tmux";
   const detail = props.detail

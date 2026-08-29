@@ -37,6 +37,11 @@ fn a_timed_out_host_response_reconnects_instead_of_reusing_the_ordered_lane() {
     client.ready.store(true, Ordering::Release);
     *client.writer.lock().unwrap() =
         Some(ControlWriterHandle::start_with(write_end, "response-timeout-reconnect").unwrap());
+    // Two late answers are a slow link, not a stalled lane; only the third
+    // in a row proves the lane has stopped answering.
+    client
+        .unanswered_requests
+        .store(STALLED_LANE_UNANSWERED_REQUESTS - 1, Ordering::Release);
 
     let error = client
         .request_with_timeout(
@@ -55,6 +60,57 @@ fn a_timed_out_host_response_reconnects_instead_of_reusing_the_ordered_lane() {
     assert!(!client.ready.load(Ordering::Acquire));
     assert!(client.writer.lock().unwrap().is_none());
     assert!(client.pending.lock().unwrap().is_empty());
+    drop(read_end);
+}
+
+/// The shaped-link storm: a reply that is late because the lane is busy is
+/// not a lane that has stopped answering. The bridge stays up through two
+/// late answers; the third in a row, with nothing answered between them, is
+/// the stalled lane and is still torn down.
+#[test]
+fn a_late_answer_keeps_the_bridge_and_a_run_of_them_does_not() {
+    use std::{fs::File, os::fd::FromRawFd};
+
+    let mut fds = [0; 2];
+    // SAFETY: pipe initializes both descriptors on success, and each is moved
+    // into exactly one File below.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let read_end = unsafe { File::from_raw_fd(fds[0]) };
+    let write_end = unsafe { File::from_raw_fd(fds[1]) };
+
+    let client = TerminalClient::new();
+    client.ready.store(true, Ordering::Release);
+    *client.writer.lock().unwrap() =
+        Some(ControlWriterHandle::start_with(write_end, "late-answer-keeps-bridge").unwrap());
+    let late = || {
+        client
+            .request_with_timeout(
+                v1::Request {
+                    operation: v1::Operation::SelectTerminalSession.into(),
+                    session_id: "$1".into(),
+                    ..Default::default()
+                },
+                Duration::from_millis(25),
+                None,
+            )
+            .unwrap_err()
+    };
+
+    for _ in 0..(STALLED_LANE_UNANSWERED_REQUESTS - 1) {
+        let error = late();
+        assert!(error.contains("host request timed out"), "{error}");
+        assert!(error.contains("was kept"), "{error}");
+        assert!(client.ready.load(Ordering::Acquire));
+        assert!(client.writer.lock().unwrap().is_some());
+        assert!(client.pending.lock().unwrap().is_empty());
+    }
+
+    let error = late();
+    assert!(error.contains("reconnecting"), "{error}");
+    assert!(!client.ready.load(Ordering::Acquire));
+    assert!(client.writer.lock().unwrap().is_none());
+    // The count died with the lane it described.
+    assert_eq!(client.unanswered_requests.load(Ordering::Acquire), 0);
     drop(read_end);
 }
 
