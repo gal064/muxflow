@@ -7,8 +7,14 @@ import type { SessionStore } from "../../store/sessionStore";
 
 export interface CreatedWindow { windowId: string; paneId: string }
 
-/** How long a stale_topology retry waits for the newer TOPOLOGY_SNAPSHOT to land (the desktop waits the same). */
-export const STALE_TOPOLOGY_WAIT_MS = 250;
+/**
+ * How long a stale_topology retry waits for the newer TOPOLOGY_SNAPSHOT to
+ * land. Returns the moment it does, so a fast link is unchanged; the ceiling
+ * is link-sized (the desktop's `actionReconciliation.ts`, 1 s) because a 250 ms
+ * wait was never met by a 300 ms round trip and an ordinary refusal reached
+ * the user (docs/bugs/slow-link.md).
+ */
+export const STALE_TOPOLOGY_WAIT_MS = 1_000;
 
 function waitForNewerGeneration(store: SessionStore, seen: bigint, timeoutMs: number): Promise<void> {
   return new Promise((resolve) => {

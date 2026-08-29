@@ -7,8 +7,7 @@ import { markSeenIfNeeded } from "../../src/features/agents/markSeen";
 import { refreshAgents } from "../../src/features/agents/refresh";
 import { NotificationsOffBanner } from "../../src/features/notifications/ui/NotificationsOffBanner";
 import { toast } from "../../src/session/connectionManager";
-import { agentPinned, agentWindowName, agentWorkspaceName, displayState, needsAttention, pinnedDividers, sortedAgentsPinnedFirst } from "../../src/store/selectors";
-import { ListDivider } from "../../src/ui/components/ListDivider";
+import { agentWindowName, agentWorkspaceName, displayState, needsAttention, sortedAgents } from "../../src/store/selectors";
 import type { Agent } from "../../src/store/sessionStore";
 import { EmptyState } from "../../src/ui/components/EmptyState";
 import { ListRow } from "../../src/ui/components/ListRow";
@@ -20,8 +19,7 @@ import { colors, metrics, radii, terminalTheme } from "../../src/ui/tokens";
 export default function AgentsScreen() {
   const router = useRouter();
   const state = useSession((s) => s);
-  const agents = sortedAgentsPinnedFirst(state);
-  const dividers = pinnedDividers(agents.map((agent) => agentPinned(state, agent)));
+  const agents = sortedAgents(state);
   const [refreshing, setRefreshing] = useState(false);
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -61,13 +59,11 @@ export default function AgentsScreen() {
       ListEmptyComponent={state.connection.state === "connected" ? empty : null}
       ListHeaderComponent={NotificationsOffBanner}
       refreshControl={<RefreshControl colors={[colors.accent]} progressBackgroundColor={colors.chromeRaised} onRefresh={onRefresh} refreshing={refreshing} />}
-      renderItem={({ item, index }) => {
+      renderItem={({ item }) => {
         const attention = needsAttention(item);
         const shown = displayState(item);
         return (
           <>
-          {index === dividers.pinnedAt ? <ListDivider label="Pinned" /> : null}
-          {index === dividers.restAt ? <ListDivider label="Agents" /> : null}
           <ListRow
             dimmed={!item.present}
             edgeColor={attention ? (shown === "done" ? terminalTheme.green : colors.danger) : undefined}
