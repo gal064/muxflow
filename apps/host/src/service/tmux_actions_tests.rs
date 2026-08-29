@@ -104,6 +104,98 @@ fn a_pin_names_a_live_session_and_only_its_own_window() {
     assert!(!postcondition(&pin("$1", "@2"), &snapshot));
 }
 
+/// The refusal loop this exempts selections from: on a slow link every switch
+/// resizes the visible session, the resize bumps the generation, and the
+/// snapshot carrying it is still on the wire when the next switch is sent - so
+/// the switch that would have fixed the screen was refused for being "stale".
+/// Selections are idempotent and validated by target id, so an older generation
+/// tells nothing about them. Everything that acts on the topology the caller
+/// reasoned about keeps its guard.
+#[test]
+fn a_stale_generation_refuses_every_action_but_a_selection() {
+    let stale = |kind: v1::TmuxActionKind| {
+        staleness_refusal(
+            kind,
+            &v1::TmuxAction {
+                kind: kind.into(),
+                expected_generation: 4,
+                ..Default::default()
+            },
+            9,
+            "tmux:live",
+        )
+    };
+    for kind in [
+        v1::TmuxActionKind::SelectSession,
+        v1::TmuxActionKind::SelectWindow,
+        v1::TmuxActionKind::FocusPane,
+    ] {
+        assert_eq!(stale(kind), None, "{kind:?}");
+        assert!(selection_only(kind), "{kind:?}");
+    }
+    for kind in [
+        v1::TmuxActionKind::CloseSession,
+        v1::TmuxActionKind::CloseWindow,
+        v1::TmuxActionKind::ClosePane,
+        v1::TmuxActionKind::CreateSession,
+        v1::TmuxActionKind::CreateWindow,
+        v1::TmuxActionKind::RenameWindow,
+        v1::TmuxActionKind::ReorderWindow,
+        v1::TmuxActionKind::ReorderSession,
+        v1::TmuxActionKind::SplitPaneRight,
+        v1::TmuxActionKind::SplitPaneDown,
+        v1::TmuxActionKind::ResizePaneLeft,
+        v1::TmuxActionKind::ZoomPane,
+        v1::TmuxActionKind::SetPinned,
+    ] {
+        assert_eq!(
+            stale(kind),
+            Some("stale topology: generation changed"),
+            "{kind:?}"
+        );
+        assert!(!selection_only(kind), "{kind:?}");
+    }
+}
+
+/// A different tmux server is real staleness for everything: nothing the caller
+/// named exists on it, and a selection is no exception. A missing target still
+/// fails through `validate_targets`, which the exemption above leaves in place.
+#[test]
+fn a_selection_still_refuses_another_server_and_a_target_that_is_gone() {
+    let select_window = |identity: &str| v1::TmuxAction {
+        kind: v1::TmuxActionKind::SelectWindow.into(),
+        window_id: "@9".into(),
+        expected_server_identity: identity.into(),
+        expected_generation: 4,
+        ..Default::default()
+    };
+    assert_eq!(
+        staleness_refusal(
+            v1::TmuxActionKind::SelectWindow,
+            &select_window("tmux:other"),
+            9,
+            "tmux:live",
+        ),
+        Some("stale topology: tmux server identity changed")
+    );
+    assert_eq!(
+        staleness_refusal(
+            v1::TmuxActionKind::SelectWindow,
+            &select_window("tmux:live"),
+            9,
+            "tmux:live",
+        ),
+        None
+    );
+    let missing = validate_targets(
+        v1::TmuxActionKind::SelectWindow,
+        &select_window("tmux:live"),
+        &topology(),
+    )
+    .unwrap_err();
+    assert_eq!(missing.to_string(), "window no longer exists");
+}
+
 #[test]
 fn creating_the_first_session_is_the_only_action_allowed_with_no_tmux_server() {
     assert!(bootstraps_server(

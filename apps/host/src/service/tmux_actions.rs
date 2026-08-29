@@ -50,11 +50,8 @@ pub(super) fn execute(
     // external-client race between the last precheck and the mutation.
     let mut before = expected_snapshot;
     let identity = expected_identity;
-    if !action.expected_server_identity.is_empty() && action.expected_server_identity != identity {
-        bail!("stale topology: tmux server identity changed");
-    }
-    if action.expected_generation != 0 && action.expected_generation != known_generation {
-        bail!("stale topology: generation changed");
+    if let Some(refusal) = staleness_refusal(kind, &action, known_generation, &identity) {
+        bail!("{refusal}");
     }
 
     require_confirmation(kind, action.confirmed)?;
@@ -243,6 +240,52 @@ pub(super) fn execute(
         server_identity,
         covered_dirty_epoch,
     })
+}
+
+/// Selection actions: idempotent, carrying no state of their own, and validated
+/// entirely by the target id `validate_targets` looks up in the pre-action
+/// snapshot. Selecting `@7` means the same thing whatever the pane geometry did
+/// since the caller last saw the topology, and re-running it changes nothing.
+///
+/// Everything else is excluded on purpose. Create/close/kill/rename/reorder act
+/// on a topology the caller reasoned about (an index, a neighbour, the one they
+/// meant), split and resize change geometry, zoom flips a window's layout, and
+/// a pin writes host state - for those a generation guard is the caller's
+/// consent stamp and must keep refusing.
+pub(super) fn selection_only(kind: v1::TmuxActionKind) -> bool {
+    matches!(
+        kind,
+        v1::TmuxActionKind::SelectSession
+            | v1::TmuxActionKind::SelectWindow
+            | v1::TmuxActionKind::FocusPane
+    )
+}
+
+/// The staleness gate every action passes before its tmux command runs.
+///
+/// A different tmux server is always real staleness: nothing the caller named
+/// exists on it. A newer *generation* is not, for a selection: on a slow link
+/// every switch resizes the visible session, which bumps the generation, and
+/// the snapshot carrying it is still crossing the wire when the user's next
+/// switch is sent - so the switch that would fix the screen was the one being
+/// refused. `validate_targets` still runs, so a selection naming something that
+/// has gone away fails as cleanly as before.
+fn staleness_refusal(
+    kind: v1::TmuxActionKind,
+    action: &v1::TmuxAction,
+    known_generation: u64,
+    identity: &str,
+) -> Option<&'static str> {
+    if !action.expected_server_identity.is_empty() && action.expected_server_identity != identity {
+        return Some("stale topology: tmux server identity changed");
+    }
+    if selection_only(kind) {
+        return None;
+    }
+    if action.expected_generation != 0 && action.expected_generation != known_generation {
+        return Some("stale topology: generation changed");
+    }
+    None
 }
 
 fn interaction_pane_id(
