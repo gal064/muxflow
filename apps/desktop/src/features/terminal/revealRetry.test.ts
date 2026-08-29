@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isQuietRevealError,
   isStaleEpochRevealError,
   isTransientRevealError,
   REVEAL_RETRY_LIMIT,
@@ -19,8 +20,7 @@ describe("isTransientRevealError", () => {
     expect(isTransientRevealError(new Error("host bridge is disconnected"))).toBe(true);
     expect(isTransientRevealError("terminal client is no longer attached")).toBe(true);
     expect(isTransientRevealError("connection_unavailable: host connection is disconnected or reconciling")).toBe(true);
-    expect(isTransientRevealError("host request timed out; the link was kept, but commit outcome is unknown and the request will not be replayed")).toBe(true);
-    expect(TRANSIENT_REVEAL_ERRORS).toHaveLength(4);
+    expect(TRANSIENT_REVEAL_ERRORS).toHaveLength(3);
   });
 
   it("treats anything else as a real failure", () => {
@@ -77,5 +77,15 @@ describe("revealFailureAction", () => {
     const error = "connection_unavailable: host connection is disconnected or reconciling";
     expect(revealFailureAction({ error, current: true, retriesUsed: 0 })).toBe("retry");
     expect(revealFailureAction({ error, current: true, retriesUsed: REVEAL_RETRY_LIMIT })).toBe("degrade");
+  });
+});
+
+describe("late reveal answers", () => {
+  const late = "host request timed out; the link was kept, but commit outcome is unknown and the request will not be replayed";
+  it("are quiet but not resent on the fast ladder", () => {
+    expect(isQuietRevealError(late)).toBe(true);
+    expect(isQuietRevealError("host bridge is disconnected")).toBe(true);
+    expect(isQuietRevealError(new Error("visibility conflict"))).toBe(false);
+    expect(revealFailureAction({ error: late, current: true, retriesUsed: 0 })).toBe("degrade");
   });
 });

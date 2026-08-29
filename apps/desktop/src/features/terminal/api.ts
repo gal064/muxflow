@@ -27,8 +27,6 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "exit"; reason: string }
   | { kind: "connectionState"; state: "connecting" | "connected" | "reconnecting" | "resyncing" | "disconnected" | "readOnly" }
   | { kind: "protocolProgress" }
-  /** The native side gave up waiting on a host request and kept the link. */
-  | { kind: "requestLate" }
   | {
       kind: "paneResource";
       paneId: string;
@@ -151,8 +149,6 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
       requireHostSequence(sequence, "protocol progress");
       if (label !== "protocol" || data.byteLength !== 0) throw new Error("protocol progress frame is malformed");
       return { kind: "protocolProgress", sequence };
-    case 18:
-      return { kind: "requestLate", sequence };
     case 9: return decodePaneResource(label, sequence, data, measurements);
     case 10: {
       requireLocalSequence(sequence, "terminal generation epoch");
@@ -884,6 +880,8 @@ export interface TerminalLinkStats {
   reservedRecords: number;
   ackedRecords: number;
   msSinceLastHostEvent: number;
+  /** Requests the native side gave up waiting on, since this client started. */
+  lateRequestsTotal: number;
 }
 
 /**

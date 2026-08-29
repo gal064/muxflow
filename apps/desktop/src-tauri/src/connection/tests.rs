@@ -52,6 +52,7 @@ fn a_timed_out_host_response_reconnects_instead_of_reusing_the_ordered_lane() {
                 ..Default::default()
             },
             Duration::from_millis(25),
+            Duration::from_millis(25),
             None,
         )
         .unwrap_err();
@@ -92,6 +93,7 @@ fn a_late_answer_keeps_the_bridge_and_a_run_of_them_does_not() {
                     ..Default::default()
                 },
                 Duration::from_millis(25),
+                Duration::from_millis(25),
                 None,
             )
             .unwrap_err()
@@ -119,8 +121,14 @@ fn a_late_answer_keeps_the_bridge_and_a_run_of_them_does_not() {
     assert!(error.contains("reconnecting"), "{error}");
     assert!(!client.ready.load(Ordering::Acquire));
     assert!(client.writer.lock().unwrap().is_none());
-    // The count died with the lane it described.
+    // The count died with the lane it described, and the late requests it
+    // kept were counted for the link stats.
     assert_eq!(client.unanswered_requests.load(Ordering::Acquire), 0);
+    assert_eq!(client.late_requests_total.load(Ordering::Acquire), 3);
+    // A lane becoming ready owes the full silence from that moment.
+    client.last_answer_at.store(0, Ordering::Release);
+    client.lane_ready();
+    assert_ne!(client.last_answer_at.load(Ordering::Acquire), 0);
     drop(read_end);
 }
 

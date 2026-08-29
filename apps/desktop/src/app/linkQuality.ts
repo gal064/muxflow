@@ -42,9 +42,11 @@ export const SLOW_LAG_ALONE_MS = 1_500;
 export const LINK_QUALITY_CLEAR_MS = 120_000;
 /** How often the owner should ask whether the quiet window has elapsed. */
 export const LINK_QUALITY_POLL_MS = 10_000;
+/** How often the native late-request counter is read while the link is up. */
+export const LINK_STATS_POLL_MS = 5_000;
 
 export type LinkQualityChange =
-  | { kind: "degraded"; state: LinkQualityState; losses: number; lagEvents: number }
+  | { kind: "degraded"; state: LinkQualityState; losses: number; lagEvents: number; lateRequests: number }
   | { kind: "cleared"; afterMs: number };
 
 /**
@@ -86,6 +88,7 @@ function prune(times: number[], at: number, windowMs: number): void {
 export function createLinkQualityMonitor(): LinkQualityMonitor {
   const losses: number[] = [];
   const lags: number[] = [];
+  const lates: number[] = [];
   let state: LinkQualityState | undefined;
   /** Set by a signal that means "slow" on its own; consumed by `evaluate`. */
   let slowAlone = false;
@@ -95,6 +98,7 @@ export function createLinkQualityMonitor(): LinkQualityMonitor {
   const evaluate = (at: number): LinkQualityChange | undefined => {
     prune(losses, at, UNSTABLE_WINDOW_MS);
     prune(lags, at, SLOW_WINDOW_MS);
+    prune(lates, at, SLOW_WINDOW_MS);
     const next = losses.length >= UNSTABLE_LOSS_COUNT
       ? "unstable"
       : lags.length >= SLOW_LAG_COUNT || slowAlone ? "slow" : undefined;
@@ -106,7 +110,9 @@ export function createLinkQualityMonitor(): LinkQualityMonitor {
     if (state === "unstable") return undefined;
     if (state === undefined) episodeStartedAt = at;
     state = next;
-    return { kind: "degraded", state: next, losses: losses.length, lagEvents: lags.length };
+    return {
+      kind: "degraded", state: next, losses: losses.length, lagEvents: lags.length, lateRequests: lates.length,
+    };
   };
 
   return {
@@ -124,7 +130,7 @@ export function createLinkQualityMonitor(): LinkQualityMonitor {
     },
     noteLateRequest(at) {
       slowAlone = true;
-      lags.push(at);
+      lates.push(at);
       lastTriggerAt = at;
       return evaluate(at);
     },
@@ -136,6 +142,7 @@ export function createLinkQualityMonitor(): LinkQualityMonitor {
       lastTriggerAt = undefined;
       losses.length = 0;
       lags.length = 0;
+      lates.length = 0;
       return { kind: "cleared", afterMs };
     },
     reset() {
@@ -144,6 +151,7 @@ export function createLinkQualityMonitor(): LinkQualityMonitor {
       episodeStartedAt = 0;
       losses.length = 0;
       lags.length = 0;
+      lates.length = 0;
     },
     get state() {
       return state;

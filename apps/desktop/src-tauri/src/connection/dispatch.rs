@@ -361,7 +361,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(INPUT_MESSAGE_BUDGET);
         client.input_queue.lock().unwrap().sender = Some(sender);
         mark_input_reconnected(&client);
-        client.ready.store(true, Ordering::Release);
+        client.lane_ready();
 
         for marker in 0..4_u8 {
             assert_eq!(
@@ -388,7 +388,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(INPUT_MESSAGE_BUDGET);
         client.input_queue.lock().unwrap().sender = Some(sender);
         mark_input_reconnected(&client);
-        client.ready.store(true, Ordering::Release);
+        client.lane_ready();
 
         for marker in 0..INPUT_MESSAGE_BUDGET {
             assert_eq!(
@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn legacy_and_binary_input_share_the_atomic_per_message_limit() {
         let client = TerminalClient::new();
-        client.ready.store(true, Ordering::Release);
+        client.lane_ready();
         let oversized = vec![b'x'; MAX_INPUT_REQUEST_BYTES + 1];
         let error = client
             .enqueue_input("%1".into(), oversized)
@@ -532,7 +532,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(8);
         client.input_queue.lock().unwrap().sender = Some(sender.clone());
         mark_input_reconnected(&client);
-        client.ready.store(true, Ordering::Release);
+        client.lane_ready();
         let worker = thread::spawn({
             let client = Arc::clone(&client);
             move || run_client_input_dispatch(client, receiver)

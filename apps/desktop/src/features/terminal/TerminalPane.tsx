@@ -24,7 +24,7 @@ import { ownTerminalBytes } from "./TerminalBytes";
 import { DeferredTerminalOutputQueue } from "./DeferredTerminalOutputQueue";
 import { describePaneDegradation, PaneDegradedWatchdog } from "./PaneDegradedWatchdog";
 import { awaitWithin } from "./timeBound";
-import { isTransientRevealError, REVEAL_RETRY_DELAY_MS, revealFailureAction } from "./revealRetry";
+import { isQuietRevealError, REVEAL_RETRY_DELAY_MS, revealFailureAction } from "./revealRetry";
 import { TerminalTransferSurface, type TerminalTransferSurfaceController } from "./TerminalTransferSurface";
 import type { TerminalTransferRegistry } from "./terminalTransferRegistry";
 import type { TerminalTransferClient, TerminalTransferConnectionScope, TerminalTransferScope } from "./terminalTransfers";
@@ -647,7 +647,7 @@ export function TerminalPane({
         recordIncident("pane.reseedFailed", { paneId: pane.id, error: String(error).slice(0, 200) });
         // Same rule as the reveal path: a transport still coming up is journal
         // material, not a toast — the watchdog re-arms and asks again.
-        if (!isTransientRevealError(error)) {
+        if (!isQuietRevealError(error)) {
           diagnosticRef.current?.(`${reason}; fresh seed request failed: ${String(error)}`);
         }
       });
@@ -1069,7 +1069,7 @@ export function TerminalPane({
         // stale-epoch rebuild path's reseed.
         void requestTerminalSeed(clientId, pane.id).catch((seedError) => {
           recordIncident("pane.reseedFailed", { paneId: pane.id, error: String(seedError).slice(0, 200) });
-          if (!isTransientRevealError(seedError)) {
+          if (!isQuietRevealError(seedError)) {
             diagnosticRef.current?.(`Could not reseed ${pane.id} after a reveal produced nothing: ${String(seedError)}`);
           }
         });
@@ -1176,7 +1176,7 @@ export function TerminalPane({
               // A reseed that fails is invisible everywhere else, and in the
               // 04:38 episode three reseeds went out with no proof any landed.
               recordIncident("pane.reseedFailed", { paneId: pane.id, error: String(seedError).slice(0, 200) });
-              if (!isTransientRevealError(seedError)) {
+              if (!isQuietRevealError(seedError)) {
                 diagnosticRef.current?.(`Could not reseed ${pane.id} after a stale visibility epoch: ${String(seedError)}`);
               }
             });
@@ -1221,13 +1221,13 @@ export function TerminalPane({
         // and on a slow reconnect (7 s and 28 s of `connection_unavailable`
         // are on record in blank-panes.md) the same refusal would otherwise
         // reach here through an exhausted retry budget and become a toast.
-        if (!isTransientRevealError(error)) {
+        if (!isQuietRevealError(error)) {
           diagnosticRef.current?.(`Could not mark ${pane.id} visible: ${String(error)}`);
         }
         if (clientIdRef.current === clientId && hub.generationEpoch === currentCheckpoint.terminalEpoch) {
           void requestTerminalSeed(clientId, pane.id).catch((seedError) => {
             recordIncident("pane.reseedFailed", { paneId: pane.id, error: String(seedError).slice(0, 200) });
-            if (!isTransientRevealError(seedError)) {
+            if (!isQuietRevealError(seedError)) {
               diagnosticRef.current?.(`Could not reseed ${pane.id} after a visibility conflict: ${String(seedError)}`);
             }
           });

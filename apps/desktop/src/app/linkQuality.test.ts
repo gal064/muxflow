@@ -24,8 +24,7 @@ describe("link quality", () => {
       kind: "degraded",
       state: "unstable",
       losses: 2,
-      lagEvents: 0,
-    });
+      lagEvents: 0, lateRequests: 0 });
     // The episode is already spoken for; further drops only extend it.
     expect(monitor.noteLinkLost(40_000)).toBeUndefined();
     expect(monitor.state).toBe("unstable");
@@ -38,8 +37,7 @@ describe("link quality", () => {
       kind: "degraded",
       state: "slow",
       losses: 0,
-      lagEvents: 2,
-    });
+      lagEvents: 2, lateRequests: 0 });
     expect(monitor.noteEchoLag(SLOW_WINDOW_MS + 1_000, 1_000)).toBeUndefined();
   });
 
@@ -52,8 +50,7 @@ describe("link quality", () => {
       kind: "degraded",
       state: "unstable",
       losses: 2,
-      lagEvents: 2,
-    });
+      lagEvents: 2, lateRequests: 0 });
     // The lag records age out of their own minute; the episode stays unstable
     // rather than announcing itself a second time as merely slow.
     expect(monitor.noteLinkLost(4_000 + SLOW_WINDOW_MS)).toBeUndefined();
