@@ -115,7 +115,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => ({
 }));
 
 import { TerminalPane } from "./TerminalPane";
-import { prepareTerminalSnapshot, type TerminalEvent } from "./api";
+import { type TerminalEvent } from "./api";
 import { terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
 import type { PaneHealth, TerminalEventHub } from "./TerminalEventHub";
@@ -241,6 +241,7 @@ function paneDiagnostic(mounted: ReactTestRenderer): string {
 function awaitSeedResource(paneId: string, hostOwnsTheRequest: boolean): PaneEvent {
   return {
     kind: "paneResource", paneId, state: "released", requiresSeed: hostOwnsTheRequest,
+    resumeFromRenderer: false,
     recoveryReason: "Host recovery pending", generation: 4, snapshotGeneration: 4,
     tailThroughGeneration: 4, sequence: 1,
     serializedSnapshot: ownTerminalBytes(new Uint8Array()),
@@ -367,7 +368,7 @@ describe("TerminalPane pane-paint span lifecycle", () => {
   });
 
   it("closes a switch span when the pane restores from the local cache", async () => {
-    terminalStateCache.set("%5", prepareTerminalSnapshot("warm-screen"), { terminalEpoch: 7, outputGeneration: 3 });
+    terminalStateCache.set("%5", "warm-screen", { terminalEpoch: 7, outputGeneration: 3 });
     const token = openPanePaintSpan("window.switch", "client-a");
     targetPanePaintSpan(token, "%5");
 
@@ -398,6 +399,7 @@ describe("TerminalPane pane-paint span lifecycle", () => {
     await act(async () => {
       hub.deliver({
         kind: "paneResource", paneId: "%await", state: "released", requiresSeed: false,
+        resumeFromRenderer: false,
         recoveryReason: "Renderer state was released", generation: 4, snapshotGeneration: 4,
         tailThroughGeneration: 4, sequence: 1,
         serializedSnapshot: ownTerminalBytes(new Uint8Array()),

@@ -14,8 +14,6 @@
  * hub and the reveal reducer are the real ones, because the risk this pins is
  * on the desktop side: a zero-byte answer read as "no recovery" is a pane that
  * stays blank forever.
- *
- * Lands with steps 3 and 4.
  */
 import { describe, expect, it } from "vitest";
 import type { TerminalEvent } from "./api";
@@ -24,10 +22,8 @@ import { copyTerminalBytes } from "./TerminalBytes";
 import { TerminalEventHub } from "./TerminalEventHub";
 
 type Resource = Extract<TerminalEvent, { kind: "paneResource" }>;
-/** `resume_from_renderer`, the step 3 proto field (§2). */
-type ResumeAnswer = Resource & { resumeFromRenderer: boolean };
 
-/** `REVEAL_TAIL_BOUND` (§3.4): past this a screen is both cheaper and fresher. */
+/** `REVEAL_TAIL_BOUND`: past this a screen is both cheaper and fresher. */
 const REVEAL_TAIL_BOUND = 16 * 1024;
 
 const encoder = new TextEncoder();
@@ -87,7 +83,7 @@ class FakeHost {
   reveal(rendererHoldsScreenAt: number): void {
     this.#generation += 1;
     const resumable = !this.#released && rendererHoldsScreenAt === this.#checkpoint;
-    const answer: ResumeAnswer = {
+    const answer: Resource = {
       kind: "paneResource",
       paneId: this.paneId,
       state: "visible",
@@ -123,7 +119,7 @@ function payloadBytes(events: readonly TerminalEvent[]): number {
 }
 
 describe("what one hide and reveal puts on the wire", () => {
-  it.skip("costs nothing at all for a pane that printed nothing while hidden", () => {
+  it("costs nothing at all for a pane that printed nothing while hidden", () => {
     const hub = new TerminalEventHub();
     const delivered: TerminalEvent[] = [];
     hub.subscribePane("%1", (event) => delivered.push(event));
@@ -144,7 +140,7 @@ describe("what one hide and reveal puts on the wire", () => {
     expect(result.state.ready).toBe(true);
   });
 
-  it.skip("costs exactly the output printed while the pane was hidden", () => {
+  it("costs exactly the output printed while the pane was hidden", () => {
     const hub = new TerminalEventHub();
     const delivered: TerminalEvent[] = [];
     hub.subscribePane("%1", (event) => delivered.push(event));
@@ -159,7 +155,7 @@ describe("what one hide and reveal puts on the wire", () => {
     expect(payloadBytes(delivered)).toBe(4 * 1024);
   });
 
-  it.skip("stops at the bound and answers with a seed instead of a longer tail", () => {
+  it("stops at the bound and answers with a seed instead of a longer tail", () => {
     const hub = new TerminalEventHub();
     const delivered: TerminalEvent[] = [];
     hub.subscribePane("%1", (event) => delivered.push(event));

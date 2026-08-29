@@ -210,29 +210,37 @@ fn disconnected_input_is_rejected_and_reconnect_starts_a_fresh_epoch() {
 }
 
 #[test]
-fn raw_visibility_frame_carries_its_scalars_and_snapshot_without_a_json_number_array() {
+fn raw_visibility_frame_carries_its_scalars_without_a_json_number_array() {
     let mut frame = Vec::new();
     frame.extend_from_slice(&(6_u16).to_be_bytes());
     frame.extend_from_slice(b"client");
     frame.extend_from_slice(&(2_u16).to_be_bytes());
     frame.extend_from_slice(b"%3");
     frame.push(0);
+    frame.push(1);
     frame.extend_from_slice(&7_u64.to_be_bytes());
     frame.extend_from_slice(&42_u64.to_be_bytes());
-    frame.extend_from_slice(b"screen");
     let decoded = decode_terminal_visibility_frame(&frame).unwrap();
     assert_eq!(decoded.client_id, "client");
     assert_eq!(decoded.pane_id, "%3");
     assert!(!decoded.visible);
+    assert!(decoded.renderer_holds_snapshot);
     assert_eq!(decoded.terminal_epoch, 7);
     assert_eq!(decoded.output_generation, 42);
-    assert_eq!(decoded.serialized_snapshot, b"screen");
 
-    // A truncated or malformed frame is refused rather than read past.
-    assert!(decode_terminal_visibility_frame(&frame[..frame.len() - 20]).is_err());
+    // A truncated or malformed frame is refused rather than read past, and so
+    // is a screen: this frame carries none any more, and a trailing payload
+    // means an encoder this decoder does not agree with.
+    assert!(decode_terminal_visibility_frame(&frame[..frame.len() - 4]).is_err());
+    let mut with_a_screen = frame.clone();
+    with_a_screen.extend_from_slice(b"screen");
+    assert!(decode_terminal_visibility_frame(&with_a_screen).is_err());
     let mut invalid_flag = frame.clone();
     invalid_flag[12] = 2;
     assert!(decode_terminal_visibility_frame(&invalid_flag).is_err());
+    let mut unknown_flags = frame.clone();
+    unknown_flags[13] = 2;
+    assert!(decode_terminal_visibility_frame(&unknown_flags).is_err());
 }
 
 #[test]
@@ -322,6 +330,7 @@ fn pane_resource_frame_is_compact_and_sequence_atomic() {
             pane_id: "%1".into(),
             state: "hiddenBuffered".into(),
             requires_seed: true,
+            resume_from_renderer: false,
             recovery_reason: "overflow".into(),
             generation: 9,
             snapshot_generation: 7,
@@ -362,6 +371,7 @@ fn oversized_pane_resource_crosses_native_delivery_and_releases_exact_credit() {
         pane_id: "%1".into(),
         state: "hiddenBuffered".into(),
         requires_seed: true,
+        resume_from_renderer: false,
         recovery_reason: "oversized-recovery".into(),
         generation: 9,
         snapshot_generation: 8,
@@ -448,7 +458,7 @@ fn terminal_seed_command_builds_a_scoped_validated_request() {
 
 #[test]
 fn visibility_handoff_rejects_stale_epoch_and_preserves_cutoff() {
-    let stale = terminal_visibility_request("%1".into(), false, Vec::new(), 6, 10, 7).unwrap_err();
+    let stale = terminal_visibility_request("%1".into(), false, true, 6, 10, 7).unwrap_err();
     // The desktop branches on this prefix to skip a retry series that cannot
     // ever succeed, so the code — not just the sentence — is the contract.
     assert!(
@@ -456,15 +466,16 @@ fn visibility_handoff_rejects_stale_epoch_and_preserves_cutoff() {
         "{stale}"
     );
     assert!(
-        terminal_visibility_request("%1".into(), false, Vec::new(), 0, 10, 0)
+        terminal_visibility_request("%1".into(), false, true, 0, 10, 0)
             .unwrap_err()
             .starts_with("terminal_visibility_epoch_rejected: "),
     );
-    let request =
-        terminal_visibility_request("%1".into(), false, b"snapshot".to_vec(), 7, 42, 7).unwrap();
+    let request = terminal_visibility_request("%1".into(), false, true, 7, 42, 7).unwrap();
     assert_eq!(request.terminal_epoch, 7);
     assert_eq!(request.terminal_generation_cutoff, 42);
-    assert_eq!(request.data, b"snapshot");
+    // The renderer keeps its screen; the request says so and carries none.
+    assert!(request.terminal_renderer_holds_snapshot);
+    assert!(request.data.is_empty());
 }
 
 #[test]

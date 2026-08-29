@@ -27,26 +27,21 @@ const resource = (
   const { serializedSnapshot = Uint8Array.of(generation), rawTail = Uint8Array.of(generation + 10), ...metadata } = overrides;
   return {
     kind: "paneResource", paneId: "%1", state: "hiddenBuffered", requiresSeed: false,
-    recoveryReason: "", generation, snapshotGeneration: Math.max(0, generation - 1), tailThroughGeneration: generation,
+    resumeFromRenderer: false, recoveryReason: "", generation, snapshotGeneration: Math.max(0, generation - 1), tailThroughGeneration: generation,
     serializedSnapshot: copyTerminalBytes(serializedSnapshot), rawTail: copyTerminalBytes(rawTail), sequence, ...metadata,
   };
 };
 
 /**
  * The host's answer to a reveal it could verify: no screen, the output since
- * the checkpoint, and the flag that says so. `resumeFromRenderer` lands with
- * the proto change in step 3 (§2).
+ * the checkpoint, and the flag that says so.
  */
-const resumeAnswer = (sequence: number, generation: number): TerminalEvent => {
-  const answer: Resource & { resumeFromRenderer: boolean } = {
-    ...(resource(sequence, generation, {
-      serializedSnapshot: new Uint8Array(),
-      rawTail: new Uint8Array(),
-    }) as Resource),
+const resumeAnswer = (sequence: number, generation: number): TerminalEvent =>
+  resource(sequence, generation, {
     resumeFromRenderer: true,
-  };
-  return answer;
-};
+    serializedSnapshot: new Uint8Array(),
+    rawTail: new Uint8Array(),
+  });
 
 describe("TerminalEventHub hidden-pane buffering", () => {
   it("replays byte-exact hidden output when a pane becomes visible", () => {
@@ -674,9 +669,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
   // count today, and a verified resume answer carries no bytes. Reading the
   // count instead of the flag leaves the pane waiting for a seed nobody owes
   // it — the single most likely way to ship a permanently blank pane.
-  //
-  // Lands with steps 3 and 4 (§4.3).
-  it.skip("clears seed debt for a zero-byte answer only when it carries the resume flag", () => {
+  it("clears seed debt for a zero-byte answer only when it carries the resume flag", () => {
     const hub = new TerminalEventHub();
     hub.subscribePane("%1", () => undefined);
     hub.publish(resource(1, 1, {

@@ -37,6 +37,7 @@ pub(super) enum TerminalEvent {
         pane_id: String,
         state: String,
         requires_seed: bool,
+        resume_from_renderer: bool,
         recovery_reason: String,
         generation: u64,
         snapshot_generation: u64,
@@ -141,6 +142,7 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
             pane_id,
             state,
             requires_seed,
+            resume_from_renderer,
             recovery_reason,
             generation,
             snapshot_generation,
@@ -158,7 +160,11 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
                 38 + recovery_reason.len() + serialized_snapshot.len() + raw_tail.len();
             encode_parts(9, &pane_id, sequence, payload_len, |frame| {
                 frame.push(state);
-                frame.push(u8::from(requires_seed));
+                // One flags byte, not one byte per flag: bit 0 is the seed the
+                // host owes this pane, bit 1 is the tail it verified against
+                // the renderer's own screen. The two are exclusive, and the
+                // decoder refuses any bit it does not know.
+                frame.push(u8::from(requires_seed) | (u8::from(resume_from_renderer) << 1));
                 frame.extend_from_slice(&generation.to_be_bytes());
                 frame.extend_from_slice(&snapshot_generation.to_be_bytes());
                 frame.extend_from_slice(&tail_through_generation.to_be_bytes());

@@ -7,6 +7,7 @@ const hiddenResource = (overrides = {}) => ({
   paneId: "%1",
   state: "hiddenBuffered" as const,
   requiresSeed: false,
+  resumeFromRenderer: false,
   recoveryReason: "",
   generation: 1,
   snapshotGeneration: 0,
@@ -20,18 +21,14 @@ const hiddenResource = (overrides = {}) => ({
 /**
  * A reveal the host answered from its record of the handoff rather than from a
  * screen it stored: no snapshot, and here an idle pane's empty tail.
- * `resumeFromRenderer` is the step 3 proto field (§2), attached here so these
- * tests state the shape the reducer has to answer.
  */
-const resumeAnswer = () => ({
-  ...hiddenResource({
-    state: "visible",
-    generation: 21,
-    snapshotGeneration: 20,
-    tailThroughGeneration: 20,
-    serializedSnapshot: copyTerminalBytes(new Uint8Array()),
-    rawTail: copyTerminalBytes(new Uint8Array()),
-  }),
+const resumeAnswer = () => hiddenResource({
+  state: "visible",
+  generation: 21,
+  snapshotGeneration: 20,
+  tailThroughGeneration: 20,
+  serializedSnapshot: copyTerminalBytes(new Uint8Array()),
+  rawTail: copyTerminalBytes(new Uint8Array()),
   resumeFromRenderer: true,
 });
 
@@ -105,9 +102,7 @@ describe("mounted pane reveal ordering", () => {
   // readiness off a byte count turns that answer into a permanently blank pane,
   // which is why the flag — not the length — is the signal.
   //
-  // The `resumeFromRenderer` field lands with the proto change in step 3 (§2)
-  // and this branch of the reducer with step 4 (§4.3).
-  it.skip("makes the pane ready on a zero-byte resume answer", () => {
+  it("makes the pane ready on a zero-byte resume answer", () => {
     const result = reducePaneReveal({ ready: false, hasLocalState: true }, resumeAnswer());
     expect(result.state).toEqual({ ready: true, hasLocalState: true });
     const effect: { kind: string; snapshotGeneration?: number; tailThroughGeneration?: number } =
@@ -120,10 +115,25 @@ describe("mounted pane reveal ordering", () => {
   // The mirror image, and the reason the flag alone is not enough: the host
   // verified its own record of the handoff, not this renderer's cache. A pane
   // with nothing to resume from has to say so and be seeded.
-  it.skip("asks for a seed when a resume answer reaches a pane holding no screen", () => {
+  it("asks for a seed when a resume answer reaches a pane holding no screen", () => {
     const result = reducePaneReveal({ ready: false, hasLocalState: false }, resumeAnswer());
     expect(result.state).toEqual({ ready: false, hasLocalState: false });
     expect(result.effect).toMatchObject({ kind: "awaitSeed", requestSeed: true });
+  });
+
+  // Every hide is acknowledged with an empty `hiddenBuffered` answer, which the
+  // hub buffers and replays into the pane's next mount. The pane reading it is
+  // showing its own cached screen and waiting for the answer to the reveal it
+  // has already sent; treating the echo as a dead end spends one capture per
+  // switch on a pane that is not blank.
+  it("ignores the hide echo replayed into a pane that is showing its cached screen", () => {
+    const state: PaneRevealState = { ready: false, hasLocalState: true };
+    const echo = reducePaneReveal(state, hiddenResource({
+      serializedSnapshot: copyTerminalBytes(new Uint8Array()),
+      rawTail: copyTerminalBytes(new Uint8Array()),
+    }));
+    expect(echo.effect).toEqual({ kind: "none" });
+    expect(echo.state).toEqual(state);
   });
 
   it("treats a seed diagnostic as nonfatal and leaves reveal readiness unchanged", () => {

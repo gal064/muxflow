@@ -1,4 +1,4 @@
-import type { PreparedTerminalSnapshot } from "./api";
+const encoder = new TextEncoder();
 
 export interface CachedTerminalState {
   serialized: string;
@@ -26,14 +26,23 @@ export class TerminalStateCache {
     return value;
   }
 
+  /**
+   * Keeps one pane's screen, measuring it here.
+   *
+   * The measurement used to be done by the encoder that also produced the bytes
+   * for the host. There are no such bytes any more — this cache *is* where a
+   * hidden pane's screen lives — so the only thing left to weigh is the string,
+   * and a screen too large for this cache is simply not kept: the pane's next
+   * reveal is answered with a seed, which is the same recovery without a
+   * sentence about it.
+   */
   set(
     paneId: string,
-    prepared: PreparedTerminalSnapshot,
+    serialized: string,
     checkpoint?: { terminalEpoch: number; outputGeneration: number },
   ): void {
-    const { serialized } = prepared;
-    const byteLength = prepared.data.byteLength;
-    if (!prepared.retained || !serialized || byteLength > this.maxSerializedBytes || byteLength > this.maxTotalBytes) {
+    const byteLength = serialized ? encoder.encode(serialized).byteLength : 0;
+    if (!serialized || byteLength > this.maxSerializedBytes || byteLength > this.maxTotalBytes) {
       this.delete(paneId);
       return;
     }

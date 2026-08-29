@@ -203,9 +203,12 @@ export class TerminalEventHub {
       this.#deleteBacklog(pane);
       // Neither incremental output nor an empty handoff can repair content
       // discarded with an evicted hidden backlog. Do not let either advance
-      // the generation watermark ahead of the fresh seed we already owe.
+      // the generation watermark ahead of the fresh seed we already owe. A
+      // resume answer is not such an emptiness: it is the host verifying the
+      // screen this renderer is holding, which is a complete recovery whatever
+      // it weighs.
       const cannotRepairDebt = event.kind === "output"
-        || (event.kind === "paneResource" && !event.requiresSeed
+        || (event.kind === "paneResource" && !event.requiresSeed && !event.resumeFromRenderer
           && event.serializedSnapshot.byteLength + event.rawTail.byteLength === 0);
       if (cannotRepairDebt) {
         if (requiresConservativeSeed && !hadEvictedSeedDebt && !alreadyAwaiting) {
@@ -243,8 +246,11 @@ export class TerminalEventHub {
         pane.conflictReseedRequested = false;
       } else if (event.kind === "paneResource") {
         // Recovery material is an authoritative replacement for a locally
-        // evicted backlog. An empty reveal does not cancel a pending seed.
-        if (event.serializedSnapshot.byteLength + event.rawTail.byteLength > 0) {
+        // evicted backlog. An empty reveal does not cancel a pending seed —
+        // unless it is a resume, whose emptiness means "nothing printed while
+        // you were away", not "nothing to give you".
+        if (event.resumeFromRenderer
+          || event.serializedSnapshot.byteLength + event.rawTail.byteLength > 0) {
           pane.awaitingSeed = false;
           pane.conflictReseedRequested = false;
         } else if (pane.awaitingSeed) {
@@ -752,6 +758,7 @@ function samePaneResource(
   if (identityBytes > MAX_EXACT_RESOURCE_IDENTITY_BYTES) return false;
   return left.state === right.state
     && left.requiresSeed === right.requiresSeed
+    && left.resumeFromRenderer === right.resumeFromRenderer
     && left.generation === right.generation
     && left.snapshotGeneration === right.snapshotGeneration
     && left.tailThroughGeneration === right.tailThroughGeneration

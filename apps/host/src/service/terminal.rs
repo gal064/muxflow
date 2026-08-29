@@ -16,7 +16,8 @@ use tmux_agent_protocol::v1;
 #[cfg(test)]
 use tmux_control::{CommandTag, ScreenSeeder};
 use tmux_control::{
-    PaneResourceState as StoredResourceState, PaneResourceStore, VisibilityCheckpoint,
+    PaneResourceState as StoredResourceState, PaneResourceStore, REVEAL_TAIL_BOUND,
+    VisibilityCheckpoint,
 };
 use tokio::sync::mpsc;
 
@@ -95,7 +96,11 @@ pub(super) struct TerminalAttachment {
 
 pub(super) struct VisibilityChange {
     pub(super) visible: bool,
-    pub(super) serialized_snapshot: Vec<u8>,
+    /// The renderer's own claim about the screen it is holding: on a hide, that
+    /// it kept a copy; on a reveal, that it still has the one the checkpoint
+    /// names. A reveal without it is answered with a seed, which is what makes
+    /// a desktop too old to send it correct rather than blank.
+    pub(super) renderer_holds_snapshot: bool,
     pub(super) checkpoint: VisibilityCheckpoint,
 }
 
@@ -454,10 +459,12 @@ impl TerminalClients {
             last_size: None,
             session_attached: HashMap::new(),
             input_session: None,
+            // A hidden pane costs its tail and nothing else now, so the whole
+            // hidden-pane store is 512 KB instead of 16 MB.
             resources: Arc::new(Mutex::new(PaneResourceStore::with_total_limit(
                 32,
-                4 * 1024 * 1024,
-                16 * 1024 * 1024,
+                REVEAL_TAIL_BOUND,
+                32 * REVEAL_TAIL_BOUND,
             ))),
             generation: Arc::new(AtomicU64::new(0)),
             input: None,
@@ -517,26 +524,6 @@ impl TerminalClients {
             }
             if make_visible {
                 self.select_session(session_id)?;
-                // Every mounted pane, not only the ones membership just added.
-                // `register_mounted_panes` above has already forced each of
-                // them Visible (`PaneResourceStore::set_visible`), which drops
-                // the handoff checkpoint and leaves the reveal that follows on
-                // `reveal`'s already-Visible path: an empty resource with
-                // `requires_seed` false, and the hidden pane's buffered tail
-                // stranded. So this is the only thing that repairs a pane
-                // switched away from and back, and it costs one capture per
-                // pane rather than per caller now that `request_seed`
-                // coalesces. It can go when the reveal carries the renderer's
-                // checkpoint and answers a seed on any mismatch (§3.3).
-                for pane_id in pane_ids {
-                    // The same debt `set_visibility` records: this is an
-                    // internal seed request, and a pane whose request failed
-                    // must not be left waiting on a capture nobody re-asks for.
-                    if let Err(error) = self.request_seed(pane_id) {
-                        self.owe_seed(pane_id);
-                        return Err(error);
-                    }
-                }
             }
             self.settle_owed_seeds();
             return Ok(());
@@ -902,7 +889,7 @@ impl TerminalClients {
     ) -> anyhow::Result<()> {
         let VisibilityChange {
             visible,
-            serialized_snapshot,
+            renderer_holds_snapshot,
             checkpoint,
         } = change;
         // Whichever operation owns this fence performs both its resource
@@ -926,12 +913,20 @@ impl TerminalClients {
         let (mut resource, requires_seed) = {
             let mut resources = self.resources.lock().unwrap();
             let resource = if visible {
+                // The checkpoint is passed only when the renderer says it is
+                // still holding that screen; the store answers anything else
+                // with a seed, because a tail written onto a screen nobody
+                // verified is a defect nothing later repairs.
                 resources
-                    .reveal(pane_id, generation)
+                    .reveal(
+                        pane_id,
+                        generation,
+                        renderer_holds_snapshot.then_some(checkpoint),
+                    )
                     .context("pane resource missing")?
             } else {
                 resources
-                    .hide_with_checkpoint(pane_id, serialized_snapshot, checkpoint, generation)
+                    .hide_with_checkpoint(pane_id, checkpoint, generation)
                     .map_err(anyhow::Error::msg)?
             };
             let requires_seed =
@@ -941,12 +936,9 @@ impl TerminalClients {
         if visible {
             resource.state = StoredResourceState::Visible;
         }
-        let charge = OutputCharge::terminal(
-            resource
-                .serialized_snapshot
-                .len()
-                .saturating_add(resource.raw_tail.len()),
-        );
+        // The tail is the whole payload: the host stores no screen to charge
+        // for, and a reveal it cannot verify carries no bytes at all.
+        let charge = OutputCharge::terminal(resource.raw_tail.len());
         // Charged, never waited for. This runs as a blocking task that the
         // connection's ordered-operation lane awaits. Waiting for credit here
         // would wait on an acknowledgement consumed by that connection's frame

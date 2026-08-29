@@ -363,7 +363,7 @@ pub(crate) async fn handle_request(
                     &request.scope,
                     VisibilityChange {
                         visible: request.visible,
-                        serialized_snapshot: request.data,
+                        renderer_holds_snapshot: request.terminal_renderer_holds_snapshot,
                         checkpoint: tmux_control::VisibilityCheckpoint {
                             epoch: request.terminal_epoch,
                             generation: request.terminal_generation_cutoff,

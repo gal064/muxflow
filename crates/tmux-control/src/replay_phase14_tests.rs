@@ -9,7 +9,7 @@ fn timed_pane_resource_round(pane_count: usize) -> u128 {
     for pane in 0..pane_count {
         let pane_id = format!("%{pane}");
         store.set_visible(&pane_id, false, 1);
-        store.snapshot(&pane_id, format!("screen-{pane}").into_bytes(), 2);
+        store.seeded(&pane_id, 2);
         for generation in 0..CHUNKS_PER_PANE {
             store.append(&pane_id, &chunk, generation as u64 + 3);
         }
@@ -40,9 +40,11 @@ fn phase14_pane_resource_per_operation_time() {
 }
 
 fn assert_incremental_accounting_matches_model(store: &PaneResourceStore) {
-    let resource_bytes = store.resources.values().fold(0_usize, |total, resource| {
-        total + resource.serialized_snapshot.len() + resource.raw_tail.len()
-    });
+    let resource_bytes = store
+        .resources
+        .values()
+        .map(|resource| resource.raw_tail.len())
+        .sum::<usize>();
     let journal_bytes = store
         .output_journals
         .values()
@@ -54,7 +56,6 @@ fn assert_incremental_accounting_matches_model(store: &PaneResourceStore) {
         .iter()
         .filter(|(pane_id, resource)| {
             resource.state == PaneResourceState::HiddenBuffered
-                || !resource.serialized_snapshot.is_empty()
                 || !resource.raw_tail.is_empty()
                 || store
                     .output_journals
@@ -105,7 +106,7 @@ fn randomized_resource_transitions_match_the_scanning_model() {
         match next() % 9 {
             0 => store.ensure(&pane_id, next() & 1 == 0, step),
             1 => store.append(&pane_id, &bytes, step),
-            2 => store.snapshot(&pane_id, bytes, step),
+            2 => store.seeded(&pane_id, step),
             3 => {
                 store.set_visible(&pane_id, true, step);
                 let first_generation = step.saturating_mul(4);
@@ -114,7 +115,6 @@ fn randomized_resource_transitions_match_the_scanning_model() {
                 let hidden = store
                     .hide_with_checkpoint(
                         &pane_id,
-                        bytes,
                         VisibilityCheckpoint {
                             epoch: step,
                             generation: first_generation,
@@ -128,19 +128,20 @@ fn randomized_resource_transitions_match_the_scanning_model() {
             }
             4 => {
                 let expected = store.get(&pane_id).cloned();
-                let revealed = store.reveal(&pane_id, step);
+                let revealed = store.reveal(&pane_id, step, None);
                 if let (Some(expected), Some(revealed)) = (expected, revealed)
                     && expected.state != PaneResourceState::Visible
                 {
-                    assert_eq!(revealed.serialized_snapshot, expected.serialized_snapshot);
-                    assert_eq!(revealed.raw_tail, expected.raw_tail);
+                    // A reveal carrying no renderer checkpoint is answered with
+                    // a seed, never with the tail the store was holding.
+                    assert!(revealed.requires_seed);
+                    assert!(revealed.raw_tail.is_empty());
                 }
             }
             5 => {
                 let expected = store.get(&pane_id).cloned();
                 let taken = store.take_recovery(&pane_id);
                 if let (Some(expected), Some(taken)) = (expected, taken) {
-                    assert_eq!(taken.serialized_snapshot, expected.serialized_snapshot);
                     assert_eq!(taken.raw_tail, expected.raw_tail);
                 }
             }
@@ -212,25 +213,21 @@ fn phase14_pane_resource_scaling_and_reveal_parity() {
         for pane in 0..pane_count {
             let pane_id = format!("%{pane}");
             store.set_visible(&pane_id, false, 1);
-            store.snapshot(&pane_id, format!("screen-{pane}").into_bytes(), 2);
+            store.seeded(&pane_id, 2);
             for generation in 0..chunks_per_pane {
                 store.append(&pane_id, &chunk, generation as u64 + 3);
             }
         }
-        let expected_bytes = (0..pane_count)
-            .map(|pane| format!("screen-{pane}").len() + chunks_per_pane * chunk.len())
-            .sum::<usize>();
+        let expected_bytes = pane_count * chunks_per_pane * chunk.len();
         let retained_bytes = store.retained_bytes();
         let retained_panes = store.retained_panes_for_measurement();
         assert_eq!(retained_bytes, expected_bytes);
         assert_eq!(retained_panes, pane_count);
-        let recovery = store.reveal(&format!("%{}", pane_count - 1), 99).unwrap();
+        let recovery = store
+            .take_recovery(&format!("%{}", pane_count - 1))
+            .unwrap();
         let elapsed_nanos = started.elapsed().as_nanos();
         let measured_operations = pane_count * (chunks_per_pane + 2) + 1;
-        assert_eq!(
-            recovery.serialized_snapshot,
-            format!("screen-{}", pane_count - 1).as_bytes()
-        );
         assert_eq!(recovery.raw_tail, vec![b'x'; chunks_per_pane * chunk.len()]);
         let measurements = pane_resource_measurement_snapshot();
         assert_eq!(measurements.full_accounting_scans, 0);
@@ -264,8 +261,8 @@ fn phase14_pane_resource_scaling_and_reveal_parity() {
 
     begin_pane_resource_measurement();
     let mut eviction_store = PaneResourceStore::with_total_limit(1, 1_024, 4_096);
-    eviction_store.snapshot("%old", vec![b'a'; 64], 1);
-    eviction_store.snapshot("%new", vec![b'b'; 64], 2);
+    eviction_store.seeded("%old", 1);
+    eviction_store.seeded("%new", 2);
     assert_eq!(
         eviction_store.get("%old").unwrap().state,
         PaneResourceState::Released

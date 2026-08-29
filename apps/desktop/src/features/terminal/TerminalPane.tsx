@@ -19,7 +19,7 @@ import { readAtlasInvalidationCount } from "./atlasStaleProbe";
 import { notePaint, startLongTaskTracker } from "./paintTailProbe";
 import { createGridMismatchProbe, type GridMismatchProbe } from "./gridMismatchProbe";
 import { outputAfterRecovery, reducePaneReveal, type PaneRevealState } from "./PaneRevealState";
-import { prepareTerminalSnapshot, requestTerminalSeed, setTerminalVisibility } from "./api";
+import { requestTerminalSeed, setTerminalVisibility } from "./api";
 import { ownTerminalBytes } from "./TerminalBytes";
 import { DeferredTerminalOutputQueue } from "./DeferredTerminalOutputQueue";
 import { describePaneDegradation, PaneDegradedWatchdog } from "./PaneDegradedWatchdog";
@@ -685,14 +685,16 @@ export function TerminalPane({
       const effect = transition.effect;
       const generation = "generation" in event ? event.generation : 0;
       const eventEpoch = hub.generationEpoch;
-      // Content — of any size, from any of the three paths that put bytes on
-      // this terminal — is proof the reveal reached a host that is streaming
-      // this pane, which is the one thing the void watch is waiting to learn.
-      // An empty seed counts: the host answering at all means the subscription
-      // is live. Deliberately not extended to `deferOutput` or `awaitSeed`,
-      // which are output this pane cannot show yet and seed debt respectively —
-      // neither is a screen, and both leave the recovery worth asking for.
-      if (effect.kind === "seed" || effect.kind === "output" || effect.kind === "restore") {
+      // Content — of any size, from any of the paths that put bytes on this
+      // terminal — is proof the reveal reached a host that is streaming this
+      // pane, which is the one thing the void watch is waiting to learn. An
+      // empty seed counts, and so does a resume the host verified: the host
+      // answering at all means the subscription is live. Deliberately not
+      // extended to `deferOutput` or `awaitSeed`, which are output this pane
+      // cannot show yet and seed debt respectively — neither is a screen, and
+      // both leave the recovery worth asking for.
+      if (effect.kind === "seed" || effect.kind === "output" || effect.kind === "restore"
+        || effect.kind === "resume") {
         contentArrivalsRef.current += 1;
         cancelRevealVoidWatch(revealVoidTimerRef);
       }
@@ -793,6 +795,55 @@ export function TerminalPane({
         // what is happening either way, and the fallback armed at the top of
         // this effect owns the case where that seed never comes.
         if (effect.requestSeed) requestFreshSeed(effect.reason);
+      } else if (effect.kind === "resume") {
+        // The host verified its record of the handoff; only this side can
+        // verify that the screen on the terminal is the one that record names.
+        // A tail spliced onto the wrong screen is a hole nothing later repairs,
+        // so any doubt is answered with a photograph.
+        const holdingTheVerifiedScreen = screenOnDisplay !== undefined
+          && screenOnDisplay.terminalEpoch === eventEpoch
+          && screenOnDisplay.generation === effect.snapshotGeneration;
+        if (!holdingTheVerifiedScreen) {
+          revealStateRef.current = { ready: false, hasLocalState: false };
+          terminalStateCache.delete(pane.id);
+          clearDeferredOutput();
+          screenOnDisplay = undefined;
+          watchdog.note("paneAwaitingSeed");
+          renderer.seed(ownTerminalBytes(new Uint8Array()));
+          const reason = `Pane ${pane.id} is not showing the screen the host resumed it from`;
+          setRendererDiagnostic(`${reason}; waiting for a fresh terminal seed…`);
+          requestFreshSeed(reason);
+        } else {
+          const markRecoveryRendered = () => {
+            publishInitialPaint(effect.tailThroughGeneration, eventEpoch, true);
+          };
+          // Written even when it is empty: the scheduler queues a zero-byte
+          // record as an ordered barrier, and that barrier is what carries the
+          // acknowledgement and the reveal for an idle pane — the whole answer
+          // to the ordinary switch.
+          const tailQueued = renderer.write(
+            effect.rawTail,
+            markRecoveryRendered,
+            effect.tailThroughGeneration,
+          );
+          if (!tailQueued) {
+            clearDeferredOutput();
+            screenOnDisplay = undefined;
+            revealStateRef.current = { ready: false, hasLocalState: false };
+            // The scheduler dropped the record and the callback with it, so
+            // this pane just lost its acknowledgement and its reveal with
+            // nothing said. Say it, and ask.
+            watchdog.note("rendererReseed");
+            requestFreshSeed(`Pane ${pane.id} could not queue the tail of its resumed screen`);
+          } else {
+            // Bytes on top of the cached screen mean it is no longer the bare
+            // snapshot a later handshake answer could be asked to skip.
+            if (effect.rawTail.byteLength > 0) screenOnDisplay = undefined;
+            flushDeferredOutput(effect.tailThroughGeneration);
+            watchdog.noteHealthy();
+            setRendererDiagnostic(undefined);
+          }
+        }
       } else if (effect.kind === "restore") {
         const markRecoveryRendered = () => {
           publishInitialPaint(effect.tailThroughGeneration, eventEpoch, true);
@@ -966,23 +1017,24 @@ export function TerminalPane({
           const checkpoint = snapshotMatchesEpoch
             ? { ...currentCheckpoint, outputGeneration: drained.outputGeneration }
             : { ...currentCheckpoint, outputGeneration: 0 };
-          const prepared = prepareTerminalSnapshot(drained.serialized);
-          if (snapshotMatchesEpoch) {
-            terminalStateCache.set(pane.id, prepared, checkpoint);
-          }
+          // The screen stays here. What crosses is the checkpoint it was taken
+          // at and one bit saying it was kept — the host answers the next
+          // reveal with the output since that checkpoint, and the 180-390 KB it
+          // used to hand back was this renderer's own screen returning to it.
+          if (snapshotMatchesEpoch) terminalStateCache.set(pane.id, drained.serialized, checkpoint);
           else terminalStateCache.delete(pane.id);
-          if (!prepared.retained && snapshotMatchesEpoch) {
-            diagnosticRef.current?.(
-              `The ${pane.id} renderer snapshot is ${prepared.originalByteLength} bytes; host recovery will use a fresh seed.`,
-            );
-          }
+          // A cache that declined the screen (too large for its budget) leaves
+          // nothing to resume from, and saying so is what makes the reveal ask
+          // for a seed instead of a tail.
+          const rendererHoldsSnapshot = snapshotMatchesEpoch
+            && terminalStateCache.get(pane.id) !== undefined;
           if (!currentClientId || clientIdRef.current !== currentClientId) return;
           try {
             await setTerminalVisibility(
               currentClientId,
               pane.id,
               false,
-              snapshotMatchesEpoch ? prepared.data : new Uint8Array(),
+              rendererHoldsSnapshot,
               checkpoint,
             );
           } catch (error) {
@@ -1109,11 +1161,22 @@ export function TerminalPane({
       if (!active || lastRevealKeyRef.current !== revealKey) return;
       const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
       if (!currentCheckpoint || currentCheckpoint.terminalEpoch !== checkpoint.terminalEpoch) return;
+      const rendererMatchesEpoch = rendererEpochRef.current === currentCheckpoint.terminalEpoch;
+      // The screen this terminal is showing, decided synchronously. The mount
+      // restores the cached screen before this runs and deletes the entry if
+      // the restore was refused, so a cache entry in the current epoch *is* the
+      // screen on the glass — and the checkpoint it was cached under is the one
+      // the host recorded for the handoff, which is what the resume is matched
+      // against. `rendererEpochRef` cannot answer this: it is set from a paint
+      // callback that has not necessarily run yet, and a reveal that waited for
+      // a frame would be a switch that waited for a frame.
+      const held = terminalStateCache.get(pane.id);
+      const holdsHandoffScreen = held !== undefined
+        && held.terminalEpoch === currentCheckpoint.terminalEpoch;
       revealStateRef.current = {
         ready: false,
-        hasLocalState: rendererEpochRef.current === currentCheckpoint.terminalEpoch,
+        hasLocalState: rendererMatchesEpoch || holdsHandoffScreen,
       };
-      const rendererMatchesEpoch = rendererEpochRef.current === currentCheckpoint.terminalEpoch;
       // Read before the request goes out, so the host answering it *during* the
       // call still counts as this reveal having produced something.
       const contentBeforeReveal = contentArrivalsRef.current;
@@ -1122,8 +1185,13 @@ export function TerminalPane({
           clientId,
           pane.id,
           true,
-          new Uint8Array(),
-          rendererMatchesEpoch ? currentCheckpoint : { ...currentCheckpoint, outputGeneration: 0 },
+          holdsHandoffScreen,
+          // A pane holding the handoff screen names *that* screen's cutoff, not
+          // the hub's rendered watermark: it is the one the host recorded, and
+          // the tail it answers with continues exactly it.
+          holdsHandoffScreen
+            ? { terminalEpoch: currentCheckpoint.terminalEpoch, outputGeneration: held.outputGeneration }
+            : rendererMatchesEpoch ? currentCheckpoint : { ...currentCheckpoint, outputGeneration: 0 },
         );
         watchdogRef.current?.clear("revealFailed");
         // The host took the request; nothing here proves it acted on it. Start
