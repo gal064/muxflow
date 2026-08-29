@@ -8,7 +8,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { recordIncident } from "../../diagnostics/incidents";
 import { XtermRenderer } from "./TerminalRenderer";
-import { ownTerminalBytes } from "./TerminalBytes";
+import { ownTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
 
 vi.mock("../../diagnostics/incidents", () => ({ recordIncident: vi.fn() }));
 
@@ -50,6 +50,41 @@ describe("stale cached restore", () => {
     });
     // The host is still asked for the seed; only the sentence is withheld.
     expect(reseeds).toHaveLength(1);
+    expect(diagnostics).toEqual([]);
+
+    renderer.dispose();
+  });
+
+  // Loading earlier output is a re-seed in disguise: xterm has no prepend, so
+  // the only way to put scrollback above row 0 is to rewrite the buffer with
+  // the history and the current screen together. If live output landed while
+  // the history was in flight, that rewrite would drop it — so the splice is
+  // refused on the same rule a stale restore is, and like it, journals instead
+  // of speaking. The affordance stays available; nothing is lost.
+  //
+  // Lands with step 5 (§4.4), which adds `XtermRenderer.prependHistory`.
+  it.skip("refuses a history splice when the stream moved under it", () => {
+    type HistorySplice = {
+      prependHistory(history: OwnedTerminalBytes, throughGeneration: number): "applied" | "superseded";
+    };
+    const diagnostics: Array<string | undefined> = [];
+    const renderer = new XtermRenderer({
+      paneId: "%9",
+      onDiagnostic: (message) => diagnostics.push(message),
+    });
+    renderer.open(document.createElement("div"));
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("live")), undefined, 5);
+    diagnostics.length = 0;
+
+    const splice = renderer as unknown as HistorySplice;
+    const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
+    expect(splice.prependHistory(history, 4)).toBe("superseded");
+
+    expect(recordIncident).toHaveBeenCalledWith("pane.historySuperseded", {
+      paneId: "%9",
+      throughGeneration: 4,
+      lastEnqueuedGeneration: 5,
+    });
     expect(diagnostics).toEqual([]);
 
     renderer.dispose();

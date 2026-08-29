@@ -64,6 +64,14 @@ pub(super) struct TerminalAttachment {
     stopped: Arc<AtomicBool>,
     stream_tx: std_mpsc::Sender<StreamControl>,
     flow: Arc<FlowControl>,
+    /// Panes whose capture has been written to tmux and not yet answered.
+    ///
+    /// Shared with the reader, which is the only thing that can observe a
+    /// capture finishing. A capture in flight *is* this pane's next seed, so a
+    /// second request for the same pane buys nothing and costs the wire another
+    /// screen — five independent callers ask for one pane's screen on a single
+    /// workspace switch. See [`TerminalAttachment::request_seed`].
+    capture_in_flight: Arc<Mutex<HashSet<String>>>,
     /// The connection-wide delivery window, held so [`Self::stop`] can wake
     /// this attachment's workers parked in [`OutputCredit::reserve`].
     output_credit: Arc<OutputCredit>,
@@ -162,6 +170,7 @@ impl TerminalAttachment {
                 pane_ids,
                 &self.stream_tx,
                 &mut *stdin,
+                &self.capture_in_flight,
                 self.reports_terminal_colors,
             )
         };
@@ -189,13 +198,26 @@ impl TerminalAttachment {
     /// drops a paused pane's output rather than replaying it — which is exactly
     /// what the user reported: switching to another tab and back refreshes the
     /// pane once, and it freezes again.
+    ///
+    /// A pane whose capture is already in flight is left alone: that capture is
+    /// the seed this request would ask for, and photographing the same screen
+    /// twice only puts a second copy of it on the wire ahead of the answer the
+    /// user is waiting for. The reader clears the entry on *every* exit from
+    /// the capture block, a discarded seed included, and [`Self::stop`] clears
+    /// the rest, so a pane cannot be held out of a seed it still needs.
+    /// `owed_seeds` is unaffected — it is the ledger for a request that could
+    /// not be written at all, which is a different failure.
     pub(super) fn request_seed(&mut self, pane_id: &str) -> anyhow::Result<()> {
         validate_tmux_id(pane_id, '%')?;
         if !self.contains_pane(pane_id) {
             bail!("pane is not owned by this session control client");
         }
+        if self.capture_in_flight.lock().unwrap().contains(pane_id) {
+            return Ok(());
+        }
         write_capture_request_resuming(
             &self.stdin,
+            &self.capture_in_flight,
             pane_id,
             self.flow.resume_before_capture(pane_id),
         )
@@ -253,6 +275,11 @@ impl TerminalAttachment {
 
     pub(super) fn stop(&mut self) {
         stop_process(&self.stopped, &self.child);
+        // Nothing this client wrote will be answered now, and the reader that
+        // would have cleared these entries is on its way out. A pane must not
+        // inherit a capture that died with its attachment: the next client's
+        // seed for it has to be written, not coalesced away.
+        self.capture_in_flight.lock().unwrap().clear();
         // The store above is not a wakeup. A worker parked in `reserve`
         // re-checks `stopped` only when the shared credit's condvar fires, and
         // without this its join in `Drop` hangs the service thread.
@@ -272,6 +299,7 @@ fn apply_membership_update(
     desired: &HashSet<String>,
     stream_tx: &std_mpsc::Sender<StreamControl>,
     stdin: &mut impl Write,
+    capture_in_flight: &Mutex<HashSet<String>>,
     reports_terminal_colors: bool,
 ) -> anyhow::Result<Vec<String>> {
     let (added, removed) = membership_delta(current, desired);
@@ -292,7 +320,7 @@ fn apply_membership_update(
             if reports_terminal_colors {
                 write_terminal_color_reports(stdin, pane_id)?;
             }
-            queue_capture(stdin, pane_id)?;
+            queue_capture(stdin, capture_in_flight, pane_id)?;
         }
         stdin.flush()?;
         Ok(())
@@ -489,6 +517,17 @@ impl TerminalClients {
             }
             if make_visible {
                 self.select_session(session_id)?;
+                // Every mounted pane, not only the ones membership just added.
+                // `register_mounted_panes` above has already forced each of
+                // them Visible (`PaneResourceStore::set_visible`), which drops
+                // the handoff checkpoint and leaves the reveal that follows on
+                // `reveal`'s already-Visible path: an empty resource with
+                // `requires_seed` false, and the hidden pane's buffered tail
+                // stranded. So this is the only thing that repairs a pane
+                // switched away from and back, and it costs one capture per
+                // pane rather than per caller now that `request_seed`
+                // coalesces. It can go when the reveal carries the renderer's
+                // checkpoint and answers a seed on any mismatch (§3.3).
                 for pane_id in pane_ids {
                     // The same debt `set_visibility` records: this is an
                     // internal seed request, and a pane whose request failed
@@ -1088,10 +1127,18 @@ fn remove_unmounted_pane_resources(
 /// is still verified authoritatively — the `__ADE_META__` line inside the
 /// capture carries tmux's own `#{pane_id}` and `capture_metadata` refuses a
 /// capture whose metadata names a different pane.
-fn queue_capture(stdin: &mut impl Write, pane_id: &str) -> anyhow::Result<()> {
+///
+/// Recorded in `capture_in_flight` only once both lines were written, so a
+/// capture tmux never received cannot coalesce away the one that replaces it.
+fn queue_capture(
+    stdin: &mut impl Write,
+    capture_in_flight: &Mutex<HashSet<String>>,
+    pane_id: &str,
+) -> anyhow::Result<()> {
     validate_tmux_id(pane_id, '%')?;
     writeln!(stdin, "{}", queue_marker("__ADE_CAPTURE__", pane_id))?;
     writeln!(stdin, "{}", capture_command(pane_id))?;
+    capture_in_flight.lock().unwrap().insert(pane_id.to_owned());
     Ok(())
 }
 
@@ -1127,6 +1174,7 @@ pub(super) struct ControlWrite {
 /// other writer can land between them.
 fn write_capture_request_resuming<W: Write>(
     stdin: &Arc<Mutex<W>>,
+    capture_in_flight: &Mutex<HashSet<String>>,
     pane_id: &str,
     resume_first: bool,
 ) -> anyhow::Result<()> {
@@ -1144,7 +1192,7 @@ fn write_capture_request_resuming<W: Write>(
             resume_command(pane_id, take_injected_rejection())
         )?;
     }
-    queue_capture(&mut *writer, pane_id)?;
+    queue_capture(&mut *writer, capture_in_flight, pane_id)?;
     writer.flush()?;
     Ok(())
 }
@@ -1170,9 +1218,17 @@ pub(super) fn queue_input(input_id: u64, pane_id: &str) -> String {
     format!("display-message -p '__ADE_INPUT__:{input_id}:{digits}'")
 }
 
+/// Photographs one pane's *screen*.
+///
+/// No history range: the first capture takes what tmux is displaying and
+/// nothing above it. A 200x50 screen is ~10 KB where `-S -2000` was ~191 KB,
+/// and on a slow link that difference is the answer to a workspace switch
+/// arriving behind a quarter of a megabyte of scrollback the user cannot see.
+/// The scrollback is not lost — it is still in tmux, and it is fetched on
+/// demand rather than pushed on every reveal.
 fn capture_command(pane_id: &str) -> String {
     format!(
-        "capture-pane -p -e -J -S -2000 -t {pane_id} ; capture-pane -p -e -J -a -q -t {pane_id} ; display-message -p -t {pane_id} '__ADE_META__:#{{pane_id}}:#{{cursor_x}}:#{{cursor_y}}:#{{alternate_on}}:#{{bracket_paste_flag}}:#{{mouse_standard_flag}}:#{{mouse_button_flag}}:#{{mouse_any_flag}}:#{{mouse_sgr_flag}}:#{{mouse_utf8_flag}}:#{{cursor_flag}}:#{{keypad_cursor_flag}}:#{{keypad_flag}}:#{{wrap_flag}}:#{{pane_width}}:#{{focus_flag}}'"
+        "capture-pane -p -e -J -t {pane_id} ; capture-pane -p -e -J -a -q -t {pane_id} ; display-message -p -t {pane_id} '__ADE_META__:#{{pane_id}}:#{{cursor_x}}:#{{cursor_y}}:#{{alternate_on}}:#{{bracket_paste_flag}}:#{{mouse_standard_flag}}:#{{mouse_button_flag}}:#{{mouse_any_flag}}:#{{mouse_sgr_flag}}:#{{mouse_utf8_flag}}:#{{cursor_flag}}:#{{keypad_cursor_flag}}:#{{keypad_flag}}:#{{wrap_flag}}:#{{pane_width}}:#{{focus_flag}}'"
     )
 }
 
