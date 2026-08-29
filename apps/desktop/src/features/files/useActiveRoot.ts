@@ -74,6 +74,18 @@ export function useActiveRoot(options: Options): {
   /** Something happened that could genuinely have moved the root. Probes now. */
   rearm: () => void;
   /**
+   * A person asked for this answer. Probes now, in front of the paint gate.
+   *
+   * The gate orders the Explorer behind the pane's own screen because on a
+   * *switch* the screen is what the user is waiting for and the root probe is
+   * speculative. Neither is true of a gesture: pressing Refresh is a request
+   * for this answer and nothing else, and making it wait up to
+   * `PANE_PAINT_TIMEOUT_MS` for a paint the person did not ask about is the
+   * one control they reach for when the Explorer looks stuck taking two thirds
+   * of a second to do anything at all.
+   */
+  rearmNow: () => void;
+  /**
    * The user is working, so stop being settled — but issue nothing.
    *
    * The distinction matters because these are the two different facts callers
@@ -86,6 +98,7 @@ export function useActiveRoot(options: Options): {
 } {
   const probeSerial = useRef(0);
   const rearmRef = useRef<(() => void) | undefined>(undefined);
+  const rearmNowRef = useRef<(() => void) | undefined>(undefined);
   const activityRef = useRef<(() => void) | undefined>(undefined);
   // Read only from the probe, which runs long after the render that set it.
   const latest = useCommittedRef(options);
@@ -162,6 +175,9 @@ export function useActiveRoot(options: Options): {
      * is not there for — a `cd` in the pane the user is already looking at, or
      * the backstop's tick — because a pane that has already painted resolves
      * the wait synchronously.
+     *
+     * Every entry point *that the user did not ask for*, to be exact. A gesture
+     * goes through `rearmNow` and calls `resolve` directly: see its note.
      */
     const resolveBehindPaint = () => {
       const painting = latest.current.scope()?.paneId;
@@ -200,7 +216,16 @@ export function useActiveRoot(options: Options): {
       noteActivity();
       if (foreground()) resolveBehindPaint();
     };
+    // Ungated on purpose, and only ever reached from an explicit gesture. The
+    // `foreground()` check stays: a hidden window's Refresh is not a thing that
+    // happens, and the rule that a hidden window issues nothing is worth more
+    // than the case it would cover.
+    const rearmNow = () => {
+      noteActivity();
+      if (foreground()) void resolve();
+    };
     rearmRef.current = rearm;
+    rearmNowRef.current = rearmNow;
     activityRef.current = noteActivity;
     const onVisibility = () => { if (foreground()) rearm(); };
     document?.addEventListener?.("visibilitychange", onVisibility);
@@ -210,6 +235,7 @@ export function useActiveRoot(options: Options): {
       window.clearInterval(backstop);
       document?.removeEventListener?.("visibilitychange", onVisibility);
       rearmRef.current = undefined;
+      rearmNowRef.current = undefined;
       activityRef.current = undefined;
     };
   }, [client, scopeKey]);
@@ -243,6 +269,7 @@ export function useActiveRoot(options: Options): {
   // Stable, because callers keep it in dependency arrays and in event
   // handlers that must not be rebuilt on every render.
   const rearm = useCallback(() => rearmRef.current?.(), []);
+  const rearmNow = useCallback(() => rearmNowRef.current?.(), []);
   const noteActivity = useCallback(() => activityRef.current?.(), []);
-  return { rearm, noteActivity };
+  return { rearm, rearmNow, noteActivity };
 }

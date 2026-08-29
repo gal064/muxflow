@@ -53,6 +53,8 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     enqueuedGeneration = 0;
     /** Rows above the screen, as the real renderer counts them. */
     scrollbackRows = 0;
+    /** The ceiling `scrollbackRows` walks up to, as xterm's `scrollback` sets it. */
+    scrollbackLimit = 10_000;
     /** A TUI is drawing: there is no scrollback to prepend to. */
     alternateScreen = false;
 
@@ -876,9 +878,11 @@ describe("lazy scrollback", () => {
 
     await act(async () => { renderer.reachTop(); });
 
+    // And it asks for twice as much, because it is about to pay for rewriting
+    // twice as much: every page replaces the whole buffer.
     expect(api.requestTerminalHistory.mock.calls).toEqual([
       ["client-a", "%h8", 300, 0],
-      ["client-a", "%h8", 300, 300],
+      ["client-a", "%h8", 600, 300],
     ]);
     await act(async () => { mounted.unmount(); });
   });
@@ -918,9 +922,10 @@ describe("lazy scrollback", () => {
     await act(async () => { hub.deliver(historyEvent("%h11", historyPage(300), 900)); });
     renderer.scrollbackRows = 800;
     await act(async () => { renderer.reachTop(); });
-    expect(api.requestTerminalHistory.mock.calls.at(-1)).toEqual(["client-a", "%h11", 300, 800]);
+    expect(api.requestTerminalHistory.mock.calls.at(-1)).toEqual(["client-a", "%h11", 600, 800]);
 
-    // 800 + 300 >= 900: that was the last of it.
+    // 800 + 600 >= 900: that was the last of it. Read from the page this
+    // request actually asked for, which is no longer the first page's size.
     await act(async () => { hub.deliver(historyEvent("%h11", historyPage(100), 900)); });
     renderer.scrollbackRows = 900;
     await act(async () => { renderer.reachTop(); });
@@ -943,7 +948,7 @@ describe("lazy scrollback", () => {
     renderer.scrollbackRows = 300;
 
     await act(async () => { renderer.reachTop(); });
-    expect(api.requestTerminalHistory.mock.calls.at(-1)).toEqual(["client-a", "%h12", 300, 300]);
+    expect(api.requestTerminalHistory.mock.calls.at(-1)).toEqual(["client-a", "%h12", 600, 300]);
     await act(async () => { mounted.unmount(); });
   });
 
@@ -1107,13 +1112,16 @@ describe("lazy scrollback", () => {
     expect(terminalStateCache.get("%h6")?.screenSeeded).toBe(true);
     expect(terminalStateCache.get("%h6")?.historyPagesLoaded).toBe(1);
     expect(terminalStateCache.get("%h6")?.historyExhausted).toBe(false);
+    // Including where the page ladder had got to: these bytes cost what they
+    // cost to rewrite whichever mount is holding them.
+    expect(terminalStateCache.get("%h6")?.historyNextPageLines).toBe(600);
     api.requestTerminalHistory.mockClear();
 
     const remounted = await mountPane(fixturePane("%h6"), hub);
     const restored = renderers.created[1];
     restored.scrollbackRows = 300;
     await act(async () => { restored.reachTop(); });
-    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h6", 300, 300]]);
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h6", 600, 300]]);
     await act(async () => { remounted.unmount(); });
   });
 
@@ -1137,5 +1145,124 @@ describe("lazy scrollback", () => {
     await act(async () => { restored.reachTop(); });
     expect(api.requestTerminalHistory).not.toHaveBeenCalled();
     await act(async () => { remounted.unmount(); });
+  });
+
+  /**
+   * A page in flight can outlive the screen it was asked against: a watchdog
+   * reseed, or the host's own `emit_resnapshot` after it rejected a block,
+   * replaces the screen while the answer is still on the wire — and the hub
+   * delivers history outside its seed-debt ladder, so that answer still
+   * arrives. It belongs to a buffer nothing is holding any more.
+   */
+  it("drops a page the reseed outran, and leaves the new screen's own page outstanding", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%r1"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%r1", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    // Request A, anchored to the screen the seed at generation 4 laid down.
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%r1", 300, 0]]);
+
+    // The screen A was asked against is replaced, and the new one prefetches
+    // its own first page: request B, anchored to generation 9.
+    await act(async () => { hub.deliver(seedEvent("%r1", 9)); });
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory.mock.calls).toEqual([
+      ["client-a", "%r1", 300, 0],
+      ["client-a", "%r1", 300, 0],
+    ]);
+
+    // A's answer, late. Its anchor and its skip describe the screen that is
+    // gone; splicing it now would put the user's earlier output above a screen
+    // it never sat above, using numbers B overwrote.
+    await act(async () => { hub.deliver(historyEvent("%r1", historyPage(300), 2_000)); });
+    expect(renderer.historySplices, "a superseded page was spliced above the new screen").toEqual([]);
+
+    // And it is not B's answer either, so B's latch stands: reaching the top is
+    // still the same outstanding question, not a third request that would fetch
+    // rows B is about to deliver and show them twice.
+    await act(async () => { renderer.reachTop(); renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(2);
+
+    // B's own answer, spliced against B's anchor.
+    await act(async () => { hub.deliver(historyEvent("%r1", historyPage(300), 2_000)); });
+    expect(renderer.historySplices).toEqual([
+      { bytes: historyPage(300).length, throughGeneration: 9 },
+    ]);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  /**
+   * tmux's `history-limit` can be larger than anything this side can hold, and
+   * then `skip + page >= history_size` is never true: the host clamps the skip
+   * it is given at `MAX_HISTORY_SKIP_LINES`, xterm drops rows off the top of
+   * the buffer as new ones are spliced in, and the answer stops moving. Every
+   * wheel-up used to re-fetch the same clamped rows and splice them in again.
+   */
+  it("stops at what it can hold, when tmux holds more history than this side ever can", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%c1"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%c1", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+
+    // 50,000 lines in tmux, and the buffer now as full as xterm will let it be.
+    await act(async () => { hub.deliver(historyEvent("%c1", historyPage(300), 50_000)); });
+    renderer.scrollbackRows = 10_000;
+
+    await act(async () => { renderer.reachTop(); renderer.reachTop(); });
+    expect(
+      api.requestTerminalHistory,
+      "asked again for rows it cannot hold and the host would clamp",
+    ).toHaveBeenCalledTimes(1);
+
+    // The same end from the other ceiling: even a renderer that could hold more
+    // stops here, because the host will not start a capture further up than
+    // its own `MAX_HISTORY_SKIP_LINES` and would answer with these rows again.
+    renderer.scrollbackLimit = 50_000;
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+
+    // Latched, not merely refused once: the screen carries it across a hide.
+    await act(async () => { mounted.unmount(); });
+    expect(terminalStateCache.get("%c1")?.historyExhausted).toBe(true);
+  });
+
+  /**
+   * Each page is applied by rewriting the whole buffer — xterm has no prepend —
+   * so a fixed page size makes N pages cost O(N^2) bytes through xterm, and
+   * past a couple of hundred kilobytes the reset and the content land in
+   * different frames, which the user reads as a flicker. The page doubles as
+   * the buffer grows, so the whole 10,000-row scrollback is six rewrites.
+   */
+  it("doubles the page as the buffer grows, capping it, so a full scrollback is six rewrites", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%g1"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%g1", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+
+    // Never the last page: tmux is holding far more than this walk fetches, so
+    // nothing but the ladder decides the sizes below.
+    for (const rows of [300, 600, 1_200, 2_400, 4_800]) {
+      await act(async () => { hub.deliver(historyEvent("%g1", historyPage(10), 50_000)); });
+      renderer.scrollbackRows += rows;
+      await act(async () => { renderer.reachTop(); });
+    }
+
+    expect(api.requestTerminalHistory.mock.calls).toEqual([
+      ["client-a", "%g1", 300, 0],
+      ["client-a", "%g1", 600, 300],
+      ["client-a", "%g1", 1_200, 900],
+      ["client-a", "%g1", 2_400, 2_100],
+      // Capped: the largest single answer stays well under the whole-history
+      // capture this replaced, and the host clamps at `MAX_HISTORY_LINES` too.
+      ["client-a", "%g1", 4_800, 4_500],
+      ["client-a", "%g1", 4_800, 9_300],
+    ]);
+    // Six pages, and the sixth reaches past the 10,000 rows this side can hold.
+    expect(9_300 + 4_800).toBeGreaterThanOrEqual(10_000);
+    await act(async () => { mounted.unmount(); });
   });
 });
