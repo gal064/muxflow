@@ -4,8 +4,14 @@ import { recordIncident } from "../../diagnostics/incidents";
 
 type EpochEvent = Extract<TerminalEvent, { kind: "generationEpoch" }>;
 type EpochListener = (event: EpochEvent) => void;
-type PaneEvent = Extract<TerminalEvent, { kind: "seed" | "output" | "paneResource" | "seedDiagnostic" }>;
+type PaneEvent = Extract<TerminalEvent, { kind: "seed" | "output" | "paneResource" | "seedDiagnostic" | "terminalHistory" }>;
 type PaneListener = (event: PaneEvent) => void;
+/**
+ * The pane events that are part of the output stream, and so carry a
+ * generation, a place in the watermark ladder, and a bearing on seed debt. A
+ * history answer is the one pane event that is none of those.
+ */
+type StreamedPaneEvent = Exclude<PaneEvent, { kind: "terminalHistory" }>;
 
 /**
  * The degraded states this hub holds a pane in.
@@ -174,6 +180,7 @@ export class TerminalEventHub {
       }
     }
     if (event.kind === "generationEpoch") return admission;
+    if (event.kind === "terminalHistory") return this.#publishHistory(event, admission);
     if (event.kind !== "seed" && event.kind !== "output" && event.kind !== "paneResource" && event.kind !== "seedDiagnostic") return admission;
     const wasTracked = this.#activePaneStates.has(event.paneId) || this.#dormantPaneStates.has(event.paneId);
     const hadEvictedSeedDebt = this.#evictedSeedDebt.delete(event.paneId);
@@ -190,8 +197,39 @@ export class TerminalEventHub {
     }
   }
 
+  /**
+   * Hands one history answer to the pane that asked for it, and does nothing
+   * else.
+   *
+   * Deliberately outside the ladder every other pane event goes through. That
+   * ladder is about the output stream's ordering and this pane's debts: history
+   * carries no generation, so it can neither advance nor conflict with the
+   * watermark, and it repairs no seed debt — a pane still owing a seed needs
+   * the screen, and splicing scrollback above a screen it has not got is a hole
+   * nothing later repairs. An answer for an unmounted pane is dropped rather
+   * than buffered: the renderer that asked the question is gone, and its
+   * successor asks again if the user asks again.
+   */
+  #publishHistory(
+    event: Extract<PaneEvent, { kind: "terminalHistory" }>,
+    admission: TerminalEventAdmission,
+  ): TerminalEventAdmission {
+    const listener = this.#paneListeners.get(event.paneId);
+    if (!listener) return admission;
+    this.measurements?.add("terminal.hub.fanoutDeliveries");
+    try {
+      listener(event);
+    } catch {
+      // Same rule as every other delivery this pane's consumer rejects: the
+      // hub can no longer prove what reached xterm, so the pane recovers from
+      // an authoritative screen rather than from guesswork.
+      this.#requireSeed(event.paneId, "terminal pane consumer rejected a history answer");
+    }
+    return admission;
+  }
+
   #publishToPane(
-    event: PaneEvent,
+    event: StreamedPaneEvent,
     pane: PaneStreamState,
     admission: TerminalEventAdmission,
     hadEvictedSeedDebt: boolean,
@@ -203,9 +241,12 @@ export class TerminalEventHub {
       this.#deleteBacklog(pane);
       // Neither incremental output nor an empty handoff can repair content
       // discarded with an evicted hidden backlog. Do not let either advance
-      // the generation watermark ahead of the fresh seed we already owe.
+      // the generation watermark ahead of the fresh seed we already owe. A
+      // resume answer is not such an emptiness: it is the host verifying the
+      // screen this renderer is holding, which is a complete recovery whatever
+      // it weighs.
       const cannotRepairDebt = event.kind === "output"
-        || (event.kind === "paneResource" && !event.requiresSeed
+        || (event.kind === "paneResource" && !event.requiresSeed && !event.resumeFromRenderer
           && event.serializedSnapshot.byteLength + event.rawTail.byteLength === 0);
       if (cannotRepairDebt) {
         if (requiresConservativeSeed && !hadEvictedSeedDebt && !alreadyAwaiting) {
@@ -243,8 +284,11 @@ export class TerminalEventHub {
         pane.conflictReseedRequested = false;
       } else if (event.kind === "paneResource") {
         // Recovery material is an authoritative replacement for a locally
-        // evicted backlog. An empty reveal does not cancel a pending seed.
-        if (event.serializedSnapshot.byteLength + event.rawTail.byteLength > 0) {
+        // evicted backlog. An empty reveal does not cancel a pending seed —
+        // unless it is a resume, whose emptiness means "nothing printed while
+        // you were away", not "nothing to give you".
+        if (event.resumeFromRenderer
+          || event.serializedSnapshot.byteLength + event.rawTail.byteLength > 0) {
           pane.awaitingSeed = false;
           pane.conflictReseedRequested = false;
         } else if (pane.awaitingSeed) {
@@ -752,6 +796,7 @@ function samePaneResource(
   if (identityBytes > MAX_EXACT_RESOURCE_IDENTITY_BYTES) return false;
   return left.state === right.state
     && left.requiresSeed === right.requiresSeed
+    && left.resumeFromRenderer === right.resumeFromRenderer
     && left.generation === right.generation
     && left.snapshotGeneration === right.snapshotGeneration
     && left.tailThroughGeneration === right.tailThroughGeneration

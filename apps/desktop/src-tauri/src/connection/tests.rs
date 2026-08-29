@@ -210,29 +210,37 @@ fn disconnected_input_is_rejected_and_reconnect_starts_a_fresh_epoch() {
 }
 
 #[test]
-fn raw_visibility_frame_carries_its_scalars_and_snapshot_without_a_json_number_array() {
+fn raw_visibility_frame_carries_its_scalars_without_a_json_number_array() {
     let mut frame = Vec::new();
     frame.extend_from_slice(&(6_u16).to_be_bytes());
     frame.extend_from_slice(b"client");
     frame.extend_from_slice(&(2_u16).to_be_bytes());
     frame.extend_from_slice(b"%3");
     frame.push(0);
+    frame.push(1);
     frame.extend_from_slice(&7_u64.to_be_bytes());
     frame.extend_from_slice(&42_u64.to_be_bytes());
-    frame.extend_from_slice(b"screen");
     let decoded = decode_terminal_visibility_frame(&frame).unwrap();
     assert_eq!(decoded.client_id, "client");
     assert_eq!(decoded.pane_id, "%3");
     assert!(!decoded.visible);
+    assert!(decoded.renderer_holds_snapshot);
     assert_eq!(decoded.terminal_epoch, 7);
     assert_eq!(decoded.output_generation, 42);
-    assert_eq!(decoded.serialized_snapshot, b"screen");
 
-    // A truncated or malformed frame is refused rather than read past.
-    assert!(decode_terminal_visibility_frame(&frame[..frame.len() - 20]).is_err());
+    // A truncated or malformed frame is refused rather than read past, and so
+    // is a screen: this frame carries none any more, and a trailing payload
+    // means an encoder this decoder does not agree with.
+    assert!(decode_terminal_visibility_frame(&frame[..frame.len() - 4]).is_err());
+    let mut with_a_screen = frame.clone();
+    with_a_screen.extend_from_slice(b"screen");
+    assert!(decode_terminal_visibility_frame(&with_a_screen).is_err());
     let mut invalid_flag = frame.clone();
     invalid_flag[12] = 2;
     assert!(decode_terminal_visibility_frame(&invalid_flag).is_err());
+    let mut unknown_flags = frame.clone();
+    unknown_flags[13] = 2;
+    assert!(decode_terminal_visibility_frame(&unknown_flags).is_err());
 }
 
 #[test]
@@ -322,6 +330,7 @@ fn pane_resource_frame_is_compact_and_sequence_atomic() {
             pane_id: "%1".into(),
             state: "hiddenBuffered".into(),
             requires_seed: true,
+            resume_from_renderer: false,
             recovery_reason: "overflow".into(),
             generation: 9,
             snapshot_generation: 7,
@@ -362,6 +371,7 @@ fn oversized_pane_resource_crosses_native_delivery_and_releases_exact_credit() {
         pane_id: "%1".into(),
         state: "hiddenBuffered".into(),
         requires_seed: true,
+        resume_from_renderer: false,
         recovery_reason: "oversized-recovery".into(),
         generation: 9,
         snapshot_generation: 8,
@@ -399,10 +409,35 @@ fn assert_snapshot_frame_sequence(frame: &[u8], expected: u64) {
     assert_eq!(payload["sequence"].as_u64(), Some(expected));
 }
 
+/// The reconciliation acknowledgement rides the same frame as a described
+/// snapshot — it is the same event kind, and the perf timeline counts it as
+/// one — but carries no tree at all, so its whole cost is the header and a few
+/// dozen bytes of JSON rather than the 7–39 KB the server used to cost.
+#[test]
+fn a_reconciliation_acknowledgement_frame_carries_no_tree() {
+    let frame = encode_event(TerminalEvent::Snapshot {
+        snapshot: None,
+        sequence: 12,
+        generation: 5,
+        server_identity: "local:test".into(),
+        authoritative: false,
+    });
+    assert_snapshot_frame_sequence(&frame, 12);
+    let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    let payload: serde_json::Value = serde_json::from_slice(&frame[3 + label_len + 8..]).unwrap();
+    assert!(payload["snapshot"].is_null());
+    assert_eq!(payload["generation"].as_u64(), Some(5));
+    assert!(
+        frame.len() < 128,
+        "an acknowledgement cost {} bytes",
+        frame.len()
+    );
+}
+
 #[test]
 fn fresh_reconnect_snapshot_frame_uses_accepted_sequence_atomically() {
     let frame = encode_event(TerminalEvent::Snapshot {
-        snapshot: tmux_control::TmuxSnapshot::default(),
+        snapshot: Some(tmux_control::TmuxSnapshot::default()),
         sequence: 41,
         generation: 3,
         server_identity: "local:test".into(),
@@ -415,7 +450,7 @@ fn fresh_reconnect_snapshot_frame_uses_accepted_sequence_atomically() {
 fn resync_snapshot_frame_cannot_diverge_from_payload_sequence() {
     let frame = event_frame::encode_event_with_sequence(
         TerminalEvent::Snapshot {
-            snapshot: tmux_control::TmuxSnapshot::default(),
+            snapshot: Some(tmux_control::TmuxSnapshot::default()),
             sequence: 97,
             generation: 8,
             server_identity: "ssh:test".into(),
@@ -447,8 +482,86 @@ fn terminal_seed_command_builds_a_scoped_validated_request() {
 }
 
 #[test]
+fn terminal_history_command_builds_a_scoped_request_with_a_real_line_count() {
+    let request = terminal_history_request("%12".into(), 2000, 37).unwrap();
+    assert_eq!(
+        v1::Operation::try_from(request.operation).unwrap(),
+        v1::Operation::RequestTerminalHistory
+    );
+    assert_eq!(request.scope, "%12");
+    assert_eq!(request.terminal_history_lines, 2000);
+    // What this renderer already holds, so the host's capture starts above it
+    // instead of handing back rows that scrolled off since the seed.
+    assert_eq!(request.terminal_history_skip_lines, 37);
+    // It photographs and nothing else: no visibility claim rides along with it.
+    assert!(!request.visible);
+    assert_eq!(request.terminal_epoch, 0);
+    assert!(terminal_history_request("%12; kill-server".into(), 2000, 0).is_err());
+    // Zero lines would ask tmux for a range it reads as the whole history.
+    assert!(terminal_history_request("%12".into(), 0, 0).is_err());
+}
+
+/// A history frame is its own kind, so nothing downstream can read the
+/// scrollback as the pane's screen — and it carries the one number the
+/// scrollback itself cannot express: how much of it tmux is holding.
+#[test]
+fn a_history_frame_is_labelled_by_its_pane_and_carries_the_scrollback_and_its_size() {
+    let frame = event_frame::encode_event_with_sequence(
+        TerminalEvent::History {
+            pane_id: "%3".into(),
+            data: b"older\r\nnewer".to_vec(),
+            history_size: Some(1_200),
+        },
+        41,
+    );
+    assert_eq!(frame[0], 18);
+    let label_length = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    assert_eq!(&frame[3..3 + label_length], b"%3");
+    let payload_offset = 11 + label_length;
+    // No generation prefix, unlike a seed or an output frame: the history
+    // claims no place in the output ordering. One presence byte and a u32
+    // instead, which is what the renderer stops paging on.
+    assert_eq!(frame[payload_offset], 1);
+    assert_eq!(
+        u32::from_be_bytes(
+            frame[payload_offset + 1..payload_offset + 5]
+                .try_into()
+                .unwrap()
+        ),
+        1_200
+    );
+    assert_eq!(&frame[payload_offset + 5..], b"older\r\nnewer");
+}
+
+/// A size the host could not read is absent rather than zero: the renderer
+/// asks again, where a real zero would mean there is nothing above the screen.
+#[test]
+fn a_history_frame_whose_size_probe_went_unanswered_says_so() {
+    let frame = event_frame::encode_event_with_sequence(
+        TerminalEvent::History {
+            pane_id: "%3".into(),
+            data: b"older".to_vec(),
+            history_size: None,
+        },
+        41,
+    );
+    let label_length = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    let payload_offset = 11 + label_length;
+    assert_eq!(frame[payload_offset], 0);
+    assert_eq!(
+        u32::from_be_bytes(
+            frame[payload_offset + 1..payload_offset + 5]
+                .try_into()
+                .unwrap()
+        ),
+        0
+    );
+    assert_eq!(&frame[payload_offset + 5..], b"older");
+}
+
+#[test]
 fn visibility_handoff_rejects_stale_epoch_and_preserves_cutoff() {
-    let stale = terminal_visibility_request("%1".into(), false, Vec::new(), 6, 10, 7).unwrap_err();
+    let stale = terminal_visibility_request("%1".into(), false, true, 6, 10, 7).unwrap_err();
     // The desktop branches on this prefix to skip a retry series that cannot
     // ever succeed, so the code — not just the sentence — is the contract.
     assert!(
@@ -456,15 +569,16 @@ fn visibility_handoff_rejects_stale_epoch_and_preserves_cutoff() {
         "{stale}"
     );
     assert!(
-        terminal_visibility_request("%1".into(), false, Vec::new(), 0, 10, 0)
+        terminal_visibility_request("%1".into(), false, true, 0, 10, 0)
             .unwrap_err()
             .starts_with("terminal_visibility_epoch_rejected: "),
     );
-    let request =
-        terminal_visibility_request("%1".into(), false, b"snapshot".to_vec(), 7, 42, 7).unwrap();
+    let request = terminal_visibility_request("%1".into(), false, true, 7, 42, 7).unwrap();
     assert_eq!(request.terminal_epoch, 7);
     assert_eq!(request.terminal_generation_cutoff, 42);
-    assert_eq!(request.data, b"snapshot");
+    // The renderer keeps its screen; the request says so and carries none.
+    assert!(request.terminal_renderer_holds_snapshot);
+    assert!(request.data.is_empty());
 }
 
 #[test]

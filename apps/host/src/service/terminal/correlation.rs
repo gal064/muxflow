@@ -17,8 +17,15 @@ use super::validate_tmux_id;
 /// having to know which marker shapes exist.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum MarkerBlock {
-    Input { input_id: u64, pane_id: String },
+    Input {
+        input_id: u64,
+        pane_id: String,
+    },
     Resume(String),
+    /// The pane whose scrollback the block after this one carries. Named
+    /// separately from `Capture` because the answer is not a screen: it moves
+    /// no generation, replaces nothing, and must never reach the seed builder.
+    History(String),
     Capture(Option<String>),
 }
 
@@ -28,6 +35,9 @@ pub(super) fn classify_marker_block(pane_id: Option<String>, lines: &[Vec<u8>]) 
     }
     if let Some(pane_id) = lines.iter().find_map(|line| resume_marker_pane(line)) {
         return MarkerBlock::Resume(pane_id);
+    }
+    if let Some(pane_id) = lines.iter().find_map(|line| history_marker_pane(line)) {
+        return MarkerBlock::History(pane_id);
     }
     MarkerBlock::Capture(pane_id.or_else(|| lines.iter().find_map(|line| marker_pane(line))))
 }
@@ -47,6 +57,40 @@ fn input_marker(line: &[u8]) -> Option<(u64, String)> {
 
 fn resume_marker_pane(line: &[u8]) -> Option<String> {
     marker_pane_with_prefix(line, b"__ADE_RESUME__:")
+}
+
+/// `__ADE_HISTORY__:<lines>:<pane digits>`. The count is written so the request
+/// is legible in a tmux log beside the answer it produced; only the pane is
+/// carried from it, but a count that is not a number means this is not a marker
+/// this host wrote, and the block goes uncorrelated rather than misattributed.
+fn history_marker_pane(line: &[u8]) -> Option<String> {
+    let value = std::str::from_utf8(line.strip_prefix(b"__ADE_HISTORY__:")?).ok()?;
+    let (lines, digits) = value.split_once(':')?;
+    lines.parse::<u32>().ok()?;
+    let pane = format!("%{digits}");
+    validate_tmux_id(&pane, '%').ok()?;
+    Some(pane)
+}
+
+/// `__ADE_HISTORY_META__:<history_size>`, the probe that closes a history
+/// request.
+///
+/// Deliberately a separate line from the leading `__ADE_HISTORY__` marker, and
+/// deliberately after the capture rather than before it: `#{history_size}` is a
+/// pane-scoped format, which only a *targeted* `display-message` can expand,
+/// and the leading marker must stay untargeted so that it always succeeds — it
+/// is there to name the pane whose next block fails. So the number arrives the
+/// way the seed's `__ADE_META__` does, at the end of its own command sequence.
+///
+/// A line that is not a number is not this host's marker, and answering `None`
+/// is what makes the renderer ask again instead of concluding it has reached
+/// the top of the history.
+pub(super) fn history_size_marker(line: &[u8]) -> Option<u32> {
+    std::str::from_utf8(line.strip_prefix(b"__ADE_HISTORY_META__:")?)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Restores the `%` sigil `queue_marker` had to strip: tmux's display message
@@ -117,6 +161,13 @@ mod tests {
             resume_marker_pane(b"__ADE_RESUME__:12").as_deref(),
             Some("%12")
         );
+        assert_eq!(
+            history_marker_pane(b"__ADE_HISTORY__:2000:12").as_deref(),
+            Some("%12")
+        );
+        assert_eq!(history_marker_pane(b"__ADE_HISTORY__:12"), None);
+        assert_eq!(history_marker_pane(b"__ADE_HISTORY__:x:12"), None);
+        assert_eq!(history_marker_pane(b"__ADE_HISTORY__:2000:%12"), None);
         assert_eq!(input_marker(b"__ADE_INPUT__:41:%12"), None);
         assert_eq!(input_marker(b"__ADE_INPUT__:"), None);
         assert_eq!(input_marker(b"__ADE_INPUT__:x:12"), None);
@@ -141,6 +192,10 @@ mod tests {
         assert_eq!(
             classify_marker_block(None, &[b"__ADE_RESUME__:2".to_vec()]),
             MarkerBlock::Resume("%2".into())
+        );
+        assert_eq!(
+            classify_marker_block(None, &[b"__ADE_HISTORY__:2000:2".to_vec()]),
+            MarkerBlock::History("%2".into())
         );
         assert_eq!(
             classify_marker_block(None, &[b"__ADE_MEMBERSHIP__".to_vec()]),

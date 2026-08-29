@@ -20,11 +20,13 @@ import {
 const api = vi.hoisted(() => ({
   setTerminalVisibility: vi.fn(async (..._args: unknown[]) => undefined),
   requestTerminalSeed: vi.fn(async (..._args: unknown[]) => undefined),
+  requestTerminalHistory: vi.fn(async (..._args: unknown[]) => undefined),
 }));
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
   setTerminalVisibility: api.setTerminalVisibility,
   requestTerminalSeed: api.requestTerminalSeed,
+  requestTerminalHistory: api.requestTerminalHistory,
 }));
 
 const { FakeRenderer, renderers } = vi.hoisted(() => {
@@ -44,6 +46,17 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     fontSizes: number[] = [];
     #pendingRendered: Array<() => void> = [];
     #measurementListeners = new Set<() => void>();
+    #topListeners = new Set<() => void>();
+    /** What every splice this pane attempts is answered with. */
+    historyOutcome: "applied" | "superseded" = "applied";
+    historySplices: Array<{ bytes: number; throughGeneration: number }> = [];
+    enqueuedGeneration = 0;
+    /** Rows above the screen, as the real renderer counts them. */
+    scrollbackRows = 0;
+    /** The ceiling `scrollbackRows` walks up to, as xterm's `scrollback` sets it. */
+    scrollbackLimit = 10_000;
+    /** A TUI is drawing: there is no scrollback to prepend to. */
+    alternateScreen = false;
 
     open(): void {}
     measure(): Size | undefined { return this.measured; }
@@ -63,9 +76,22 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       this.resizes.push(size);
       return { kind: "applied", size };
     }
+    isAlternateScreenActive(): boolean { return this.alternateScreen; }
     onInput(): () => void { return () => undefined; }
     onSelectionChange(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
+    onScrollbackTopReached(listener: () => void): () => void {
+      this.#topListeners.add(listener);
+      return () => { this.#topListeners.delete(listener); };
+    }
+    /** The user scrolling up against the top of this pane. */
+    reachTop(): void {
+      for (const listener of this.#topListeners) listener();
+    }
+    async prependHistory(history: Uint8Array, throughGeneration: number): Promise<"applied" | "superseded"> {
+      this.historySplices.push({ bytes: history.byteLength, throughGeneration });
+      return this.historyOutcome;
+    }
     focus(): void { this.focusCalls += 1; }
     hasSelection(): boolean { return false; }
     getSelection(): string { return ""; }
@@ -80,8 +106,9 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       if (config.wedgeDrain) return new Promise<never>(() => undefined);
       return { serialized: "cached-screen", outputGeneration: 3 };
     }
-    seed(bytes: Uint8Array, onRendered?: () => void): void {
+    seed(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
       this.writes.push(`seed:${bytes.byteLength}`);
+      this.enqueuedGeneration = generation;
       if (onRendered) this.#pendingRendered.push(onRendered);
     }
     restore(serialized: string, onRendered?: () => void): boolean {
@@ -89,8 +116,9 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       if (onRendered) this.#pendingRendered.push(onRendered);
       return true;
     }
-    write(bytes: Uint8Array, onRendered?: () => void): boolean {
+    write(bytes: Uint8Array, onRendered?: () => void, generation = 0): boolean {
       this.writes.push(`write:${bytes.byteLength}`);
+      if (generation > this.enqueuedGeneration) this.enqueuedGeneration = generation;
       if (onRendered) this.#pendingRendered.push(onRendered);
       return true;
     }
@@ -115,12 +143,12 @@ vi.mock("./TerminalRenderer", async (importOriginal) => ({
 }));
 
 import { TerminalPane } from "./TerminalPane";
-import { prepareTerminalSnapshot, type TerminalEvent } from "./api";
+import { type TerminalEvent } from "./api";
 import { terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
 import type { PaneHealth, TerminalEventHub } from "./TerminalEventHub";
 
-type PaneEvent = Extract<TerminalEvent, { kind: "seed" | "output" | "paneResource" | "seedDiagnostic" }>;
+type PaneEvent = Extract<TerminalEvent, { kind: "seed" | "output" | "paneResource" | "seedDiagnostic" | "terminalHistory" }>;
 
 class FakeHub {
   generationEpoch: number | undefined = 7;
@@ -241,6 +269,7 @@ function paneDiagnostic(mounted: ReactTestRenderer): string {
 function awaitSeedResource(paneId: string, hostOwnsTheRequest: boolean): PaneEvent {
   return {
     kind: "paneResource", paneId, state: "released", requiresSeed: hostOwnsTheRequest,
+    resumeFromRenderer: false,
     recoveryReason: "Host recovery pending", generation: 4, snapshotGeneration: 4,
     tailThroughGeneration: 4, sequence: 1,
     serializedSnapshot: ownTerminalBytes(new Uint8Array()),
@@ -299,6 +328,7 @@ beforeEach(() => {
   // the next one, and a failing assertion skips any cleanup the test itself does.
   api.setTerminalVisibility.mockReset();
   api.requestTerminalSeed.mockReset();
+  api.requestTerminalHistory.mockReset();
   Object.assign(globalThis, {
     IS_REACT_ACT_ENVIRONMENT: true,
     ResizeObserver: class {
@@ -367,7 +397,7 @@ describe("TerminalPane pane-paint span lifecycle", () => {
   });
 
   it("closes a switch span when the pane restores from the local cache", async () => {
-    terminalStateCache.set("%5", prepareTerminalSnapshot("warm-screen"), { terminalEpoch: 7, outputGeneration: 3 });
+    terminalStateCache.set("%5", "warm-screen", { terminalEpoch: 7, outputGeneration: 3 });
     const token = openPanePaintSpan("window.switch", "client-a");
     targetPanePaintSpan(token, "%5");
 
@@ -398,6 +428,7 @@ describe("TerminalPane pane-paint span lifecycle", () => {
     await act(async () => {
       hub.deliver({
         kind: "paneResource", paneId: "%await", state: "released", requiresSeed: false,
+        resumeFromRenderer: false,
         recoveryReason: "Renderer state was released", generation: 4, snapshotGeneration: 4,
         tailThroughGeneration: 4, sequence: 1,
         serializedSnapshot: ownTerminalBytes(new Uint8Array()),
@@ -761,5 +792,402 @@ describe("TerminalPane degraded-state watchdog", () => {
 
     vi.useRealTimers();
     await act(async () => mounted.unmount());
+  });
+});
+
+/**
+ * A seed is the visible grid and nothing above it, so the scrollback the user
+ * scrolls up looking for is still in tmux. It comes back a page at a time, the
+ * way tmux's own copy-mode reads it: reaching the top is the request for the
+ * next page — there is no button, because the gesture already says what a
+ * button would — and the first page is fetched behind the pane's first paint so
+ * a wheel a moment after a switch finds something already there.
+ */
+describe("lazy scrollback", () => {
+  /** One line per captured row, joined the way the host joins them. */
+  function historyPage(rows: number): string {
+    return Array.from({ length: rows }, (_, index) => `row-${index}`).join("\r\n");
+  }
+
+  /**
+   * @param historySize what tmux says it is holding for this pane. Omitted is
+   * the host's size probe going unanswered, which is a page to ask about again
+   * rather than the end of the history.
+   */
+  function historyEvent(paneId: string, text: string, historySize?: number): PaneEvent {
+    return {
+      kind: "terminalHistory", paneId, sequence: 2,
+      data: ownTerminalBytes(new TextEncoder().encode(text)),
+      ...(historySize === undefined ? {} : { historySize }),
+    };
+  }
+
+  it("asks for one page when a screen-seeded pane is scrolled to the top, and not again while the ask is outstanding", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h1"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h1", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    // A page, not the whole history: 2,000 lines was ~195 KB in front of the
+    // user's next keystroke.
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h1", 300, 0]]);
+
+    // The answer has not arrived, so the second and third gestures are the same
+    // question and cost nothing.
+    await act(async () => { renderer.reachTop(); renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+
+    await act(async () => { hub.deliver(historyEvent("%h1", "earlier output", 2_000)); });
+    // Quoted back so the renderer can refuse a splice onto a stream that moved.
+    expect(renderer.historySplices).toEqual([{ bytes: 14, throughGeneration: 4 }]);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("says how much scrollback it already holds, so the answer starts above it", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h7"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h7", 4)); });
+    // A seeded pane that has since printed: those rows scrolled off the screen
+    // and are in this terminal's own scrollback. tmux measures its capture from
+    // the *current* display, so without this number the answer would hand them
+    // back a second time and the splice would show them twice.
+    renderer.scrollbackRows = 37;
+
+    await act(async () => { renderer.reachTop(); });
+
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h7", 300, 37]]);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("pages: a full answer leaves the next page to ask for, above the rows it just added", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h8"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h8", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    // 2,000 lines above the screen and 300 asked for from the bottom of them:
+    // there is more behind this page.
+    await act(async () => { hub.deliver(historyEvent("%h8", historyPage(300), 2_000)); });
+    // The splice put those rows in this buffer, so the next page starts above
+    // them — the same rule as a pane that printed, and the reason no row is
+    // ever fetched twice.
+    renderer.scrollbackRows = 300;
+
+    await act(async () => { renderer.reachTop(); });
+
+    // And it asks for twice as much, because it is about to pay for rewriting
+    // twice as much: every page replaces the whole buffer.
+    expect(api.requestTerminalHistory.mock.calls).toEqual([
+      ["client-a", "%h8", 300, 0],
+      ["client-a", "%h8", 600, 300],
+    ]);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("stops when the page it asked for reached the top of tmux's history", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h9"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h9", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    // The rows asked for were 0 held + 300, and tmux holds 120: this page is
+    // the whole of it. Decided on that number and never on the answer's own
+    // rows — `-J` joins wrapped lines, so a full page routinely carries fewer
+    // lines than it covers rows, and tmux answers a range past the top with one
+    // clamped row rather than with nothing.
+    await act(async () => { hub.deliver(historyEvent("%h9", historyPage(120), 120)); });
+    expect(renderer.historySplices).toHaveLength(1);
+    renderer.scrollbackRows = 120;
+
+    await act(async () => { renderer.reachTop(); renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("keeps paging when a page fills but leaves history behind it, counted from the rows it asked for", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h11"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h11", 4)); });
+    // Already holding 500 rows, so this page asks for 501-800 of tmux's 900.
+    renderer.scrollbackRows = 500;
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h11", 300, 500]]);
+
+    // 500 + 300 < 900: a hundred rows are still above this.
+    await act(async () => { hub.deliver(historyEvent("%h11", historyPage(300), 900)); });
+    renderer.scrollbackRows = 800;
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls.at(-1)).toEqual(["client-a", "%h11", 600, 800]);
+
+    // 800 + 600 >= 900: that was the last of it. Read from the page this
+    // request actually asked for, which is no longer the first page's size.
+    await act(async () => { hub.deliver(historyEvent("%h11", historyPage(100), 900)); });
+    renderer.scrollbackRows = 900;
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(2);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("asks again when the host could not read how much history there is", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h12"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h12", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    // The size probe is targeted and the pane went away under it. The rows
+    // still arrived, so they are still spliced — but "tmux did not answer" is
+    // not "there is nothing above this", and the question stays open.
+    await act(async () => { hub.deliver(historyEvent("%h12", historyPage(300))); });
+    expect(renderer.historySplices).toHaveLength(1);
+    renderer.scrollbackRows = 300;
+
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls.at(-1)).toEqual(["client-a", "%h12", 600, 300]);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("asks again after a splice the stream moved out from under", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h2"), hub);
+    const renderer = renderers.created[0];
+    renderer.historyOutcome = "superseded";
+    await act(async () => { hub.deliver(seedEvent("%h2", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    // A short page that could not be applied is not an answer about the history:
+    // nothing was spliced, so nothing is latched either.
+    await act(async () => { hub.deliver(historyEvent("%h2", historyPage(3), 3)); });
+    expect(renderer.historySplices).toHaveLength(1);
+
+    // Nothing was applied, so the question is still open and the next gesture
+    // asks it again — against the screen the user is now looking at.
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(2);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("splices nothing for an answer with no rows, and still reads the size for whether to ask again", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h3"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h3", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    await act(async () => { hub.deliver(historyEvent("%h3", "", 0)); });
+
+    // There is nothing above this screen, so nothing is spliced and nothing is
+    // asked for again.
+    expect(renderer.historySplices).toEqual([]);
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("fetches the first page as soon as the seeded pane has painted, and never before", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%p1"), hub);
+    const renderer = renderers.created[0];
+
+    await act(async () => { hub.deliver(seedEvent("%p1", 4)); });
+    // The screen the user is waiting for goes first. Nothing is asked for while
+    // the seed is still on its way to the glass.
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
+
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%p1", 300, 0]]);
+
+    // Once, not once per paint.
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("does not ask a second time when the user reaches the top during the prefetch", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%p2"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%p2", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+
+    await act(async () => { renderer.reachTop(); renderer.reachTop(); });
+
+    // Same question, already outstanding.
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("asks again for a pane the host reseeds while a page is still in flight", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%p5"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%p5", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+
+    // The answer to that page never comes — the hub drops this pane's events
+    // while it owes a seed. A latch left standing would leave the new screen
+    // unable to ask for its own first page for the life of this mount.
+    await act(async () => { hub.deliver(seedEvent("%p5", 9)); });
+    await act(async () => { renderer.flushRendered(); });
+
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(2);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("asks for nothing on the alternate screen, where there is no scrollback to prepend to", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%p3"), hub);
+    const renderer = renderers.created[0];
+    renderer.alternateScreen = true;
+
+    await act(async () => { hub.deliver(seedEvent("%p3", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    await act(async () => { renderer.reachTop(); });
+
+    // The splice would be refused, so the page would have crossed the link to
+    // be thrown away.
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("never prefetches for a pane that came up from its own cached screen", async () => {
+    terminalStateCache.set("%p4", "warm-screen", { terminalEpoch: 7, outputGeneration: 3 });
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%p4"), hub);
+    const renderer = renderers.created[0];
+    expect(renderer.restoredSerialized).toBe("warm-screen");
+
+    // That screen is a serialization of this pane's own buffer, scrollback
+    // included: there is nothing above it the host is holding.
+    await act(async () => { renderer.flushRendered(); });
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("still asks when the cached screen was itself a photograph", async () => {
+    const hub = new FakeHub();
+    const first = await mountPane(fixturePane("%h5"), hub);
+    await act(async () => { hub.deliver(seedEvent("%h5", 4)); });
+    await act(async () => { renderers.created[0].flushRendered(); });
+    // The hide keeps that screen here and tells the host it did.
+    await act(async () => { first.unmount(); });
+    expect(terminalStateCache.get("%h5")?.screenSeeded).toBe(true);
+    expect(terminalStateCache.get("%h5")?.historyExhausted).toBe(false);
+    api.requestTerminalHistory.mockClear();
+
+    const remounted = await mountPane(fixturePane("%h5"), hub);
+    const renderer = renderers.created[1];
+    expect(renderer.restoredSerialized).toBe("cached-screen");
+
+    // Putting a photograph back on a fresh terminal does not give it a
+    // scrollback: what is above this screen is still only in tmux. Restored
+    // rather than seeded, so nothing is prefetched — the gesture asks.
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { remounted.unmount(); });
+  });
+
+  it("carries its paging across a hide: the restored screen continues above the pages it holds", async () => {
+    const hub = new FakeHub();
+    const first = await mountPane(fixturePane("%h6"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h6", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    await act(async () => { hub.deliver(historyEvent("%h6", historyPage(300), 2_000)); });
+    renderer.scrollbackRows = 300;
+    await act(async () => { first.unmount(); });
+
+    // The page is in the buffer this screen was serialized from, and the entry
+    // says so — the restore continues from there rather than fetching it again.
+    expect(terminalStateCache.get("%h6")?.screenSeeded).toBe(true);
+    expect(terminalStateCache.get("%h6")?.historyExhausted).toBe(false);
+    // Including where the page ladder had got to: these bytes cost what they
+    // cost to rewrite whichever mount is holding them.
+    expect(terminalStateCache.get("%h6")?.historyNextPageLines).toBe(600);
+    api.requestTerminalHistory.mockClear();
+
+    const remounted = await mountPane(fixturePane("%h6"), hub);
+    const restored = renderers.created[1];
+    restored.scrollbackRows = 300;
+    await act(async () => { restored.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h6", 600, 300]]);
+    await act(async () => { remounted.unmount(); });
+  });
+
+  it("carries the top of the history across a hide, so a restored pane stops asking too", async () => {
+    const hub = new FakeHub();
+    const first = await mountPane(fixturePane("%h10"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h10", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    await act(async () => { hub.deliver(historyEvent("%h10", historyPage(12), 12)); });
+    renderer.scrollbackRows = 12;
+    await act(async () => { first.unmount(); });
+
+    expect(terminalStateCache.get("%h10")?.historyExhausted).toBe(true);
+    api.requestTerminalHistory.mockClear();
+
+    const remounted = await mountPane(fixturePane("%h10"), hub);
+    const restored = renderers.created[1];
+    restored.scrollbackRows = 12;
+    await act(async () => { restored.flushRendered(); });
+    await act(async () => { restored.reachTop(); });
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
+    await act(async () => { remounted.unmount(); });
+  });
+
+  /**
+   * A page in flight can outlive the screen it was asked against: a watchdog
+   * reseed, or the host's own `emit_resnapshot` after it rejected a block,
+   * replaces the screen while the answer is still on the wire — and the hub
+   * delivers history outside its seed-debt ladder, so that answer still
+   * arrives. It belongs to a buffer nothing is holding any more.
+   */
+  it("drops a page the reseed outran, and leaves the new screen's own page outstanding", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%r1"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%r1", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    // Request A, anchored to the screen the seed at generation 4 laid down.
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%r1", 300, 0]]);
+
+    // The screen A was asked against is replaced, and the new one prefetches
+    // its own first page: request B, anchored to generation 9.
+    await act(async () => { hub.deliver(seedEvent("%r1", 9)); });
+    await act(async () => { renderer.flushRendered(); });
+    expect(api.requestTerminalHistory.mock.calls).toEqual([
+      ["client-a", "%r1", 300, 0],
+      ["client-a", "%r1", 300, 0],
+    ]);
+
+    // A's answer, late. Its anchor and its skip describe the screen that is
+    // gone; splicing it now would put the user's earlier output above a screen
+    // it never sat above, using numbers B overwrote.
+    await act(async () => { hub.deliver(historyEvent("%r1", historyPage(300), 2_000)); });
+    expect(renderer.historySplices, "a superseded page was spliced above the new screen").toEqual([]);
+
+    // And it is not B's answer either, so B's latch stands: reaching the top is
+    // still the same outstanding question, not a third request that would fetch
+    // rows B is about to deliver and show them twice.
+    await act(async () => { renderer.reachTop(); renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(2);
+
+    // B's own answer, spliced against B's anchor.
+    await act(async () => { hub.deliver(historyEvent("%r1", historyPage(300), 2_000)); });
+    expect(renderer.historySplices).toEqual([
+      { bytes: historyPage(300).length, throughGeneration: 9 },
+    ]);
+    await act(async () => { mounted.unmount(); });
   });
 });

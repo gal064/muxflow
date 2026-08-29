@@ -363,7 +363,7 @@ pub(crate) async fn handle_request(
                     &request.scope,
                     VisibilityChange {
                         visible: request.visible,
-                        serialized_snapshot: request.data,
+                        renderer_holds_snapshot: request.terminal_renderer_holds_snapshot,
                         checkpoint: tmux_control::VisibilityCheckpoint {
                             epoch: request.terminal_epoch,
                             generation: request.terminal_generation_cutoff,
@@ -406,6 +406,25 @@ pub(crate) async fn handle_request(
                 request_id,
                 result.map_or_else(
                     |error| response_error("terminal_seed_rejected", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
+        (Handler::Terminal, Some(v1::Operation::RequestTerminalHistory)) => {
+            // Nothing about the pane's state changes here, so — unlike a seed
+            // request — this makes no claim of visibility and settles no debt.
+            // It writes one capture and the answer arrives as its own event.
+            let result = terminal.lock().unwrap().request_history(
+                &request.scope,
+                request.terminal_history_lines,
+                request.terminal_history_skip_lines,
+            );
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_history_rejected", &error.to_string()),
                     |_| response_ok(),
                 ),
             )

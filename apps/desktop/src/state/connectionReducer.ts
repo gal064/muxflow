@@ -13,6 +13,17 @@ export interface NormalizedHostState {
   canMutate: boolean;
   serverIdentity?: string;
   generation: number;
+  /**
+   * Whether `generation` was stamped by the connection that is live now.
+   *
+   * The host counts topology generations from zero, per process, so the number
+   * only means anything inside one connection: a reconnected link — or a
+   * different tmux server — legitimately starts over, and the first snapshot it
+   * sends is the new baseline whatever it is numbered. Until a snapshot has set
+   * that baseline, a lower generation cannot be told from a restarted one, so
+   * none is refused.
+   */
+  generationBaselined: boolean;
   lastSequence: number;
   resyncRequested: boolean;
   /**
@@ -34,8 +45,13 @@ export interface NormalizedHostState {
 
 export type HostAction =
   | { type: "connection"; phase: ConnectionPhase }
-  | { type: "snapshot"; snapshot: TmuxSnapshot; sequence: number; serverIdentity: string; generation?: number }
-  | { type: "orderedSnapshot"; snapshot: TmuxSnapshot; sequence: number; serverIdentity: string; generation?: number }
+  /**
+   * A topology answer. Without a `snapshot` it is the host's reconciliation
+   * acknowledgement — a notified pass that found the world unchanged — and
+   * carries nothing to apply. See `replaceSnapshot`.
+   */
+  | { type: "snapshot"; snapshot?: TmuxSnapshot; sequence: number; serverIdentity: string; generation?: number }
+  | { type: "orderedSnapshot"; snapshot?: TmuxSnapshot; sequence: number; serverIdentity: string; generation?: number }
   | { type: "orderedEvent"; sequence: number }
   | { type: "reset" };
 
@@ -43,6 +59,7 @@ export const initialHostState: NormalizedHostState = {
   phase: "disconnected",
   canMutate: false,
   generation: 0,
+  generationBaselined: false,
   lastSequence: 0,
   resyncRequested: false,
   sessions: {},
@@ -64,14 +81,56 @@ function requestResync(state: NormalizedHostState, reason: string): NormalizedHo
   };
 }
 
+/**
+ * A snapshot the transport delivered late, after a newer one for the same tmux
+ * server already landed.
+ *
+ * Applying it would walk `generation` backwards, and every action stamped
+ * against a generation the host has already left is refused as stale — until
+ * some later snapshot happens to carry the world forward again. The baseline
+ * flag is what keeps this from swallowing a restart, which is the one time a
+ * lower generation is the truth.
+ */
+function precedesLiveGeneration(
+  state: NormalizedHostState,
+  action: Extract<HostAction, { type: "snapshot" | "orderedSnapshot" }>,
+): boolean {
+  return state.generationBaselined
+    && action.serverIdentity === state.serverIdentity
+    && action.generation !== undefined
+    && action.generation < state.generation;
+}
+
 function replaceSnapshot(
   state: NormalizedHostState,
   action: Extract<HostAction, { type: "snapshot" | "orderedSnapshot" }>,
 ): NormalizedHostState {
+  // Nothing to replace. The host reconciled a notification burst, found the
+  // world exactly as it had already described it, and said so with the
+  // generation alone — it used to resend the whole server to say that, which
+  // on a busy tree is tens of kilobytes, several times per window switch, and
+  // ahead of the switch's own answer on the same lane. The entities held here
+  // are that same world, so the frame spends its sequence and changes nothing
+  // else. `resyncRequested` is deliberately untouched: a rebuild this process
+  // asked for is answered by a world, never by word that none was needed.
+  //
+  // The generation is the one thing the acknowledgement does carry, and it is
+  // adopted: every action this side sends is stamped against it, and holding a
+  // stale number is how a switch is refused for describing a world the host has
+  // already left. Forward only — `precedesLiveGeneration` has refused a stale
+  // frame before this, and a frame with no world in it is never the baseline
+  // that may walk the generation back.
+  if (!action.snapshot) {
+    const generation = action.generation !== undefined && action.generation > state.generation
+      ? action.generation
+      : state.generation;
+    return { ...state, generation, lastSequence: action.sequence };
+  }
   return {
     ...state,
     serverIdentity: action.serverIdentity,
     generation: action.generation ?? state.generation + 1,
+    generationBaselined: true,
     lastSequence: action.sequence,
     resyncRequested: false,
     resyncReason: undefined,
@@ -90,8 +149,20 @@ export function connectionReducer(state: NormalizedHostState, action: HostAction
         ...state,
         phase: action.phase,
         canMutate: action.phase === "connected",
+        // A transport transition can be a restarted host process behind the
+        // same tmux server, counting generations from zero again. Whatever the
+        // next snapshot carries is the baseline from here.
+        //
+        // Only a transition *away* from connected says that, though. The
+        // bridge announces a new link as GenerationEpoch, then the
+        // authoritative snapshot, and only then ConnectionState{connected} —
+        // so clearing the flag on the way in disarmed the guard immediately
+        // after the baseline it was meant to protect had landed, and the next
+        // late lower-generation snapshot walked the generation backwards.
+        generationBaselined: action.phase === "connected" && state.generationBaselined,
       };
     case "snapshot":
+      if (precedesLiveGeneration(state, action)) return state;
       return replaceSnapshot(state, action);
     case "orderedEvent": {
       // Stale frames are still dropped; a jump forward is not this layer's to
@@ -109,6 +180,7 @@ export function connectionReducer(state: NormalizedHostState, action: HostAction
         return requestResync(state, `snapshot-identity had=${state.serverIdentity} received=${action.serverIdentity}`);
       }
       if (action.sequence <= state.lastSequence) return state;
+      if (precedesLiveGeneration(state, action)) return state;
       return replaceSnapshot(state, action);
     }
   }
