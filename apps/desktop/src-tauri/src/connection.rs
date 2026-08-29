@@ -49,10 +49,13 @@ use git_content::GitContentReads;
 pub(crate) mod tmux_action;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-/// Timeouts in a row before the lane is judged stalled rather than slow.
-/// Three is fifteen seconds without an answer of any kind, which is the
-/// stalled-lane incident caught early rather than a slow link punished.
+/// Timeouts in a row before the lane is judged stalled rather than slow —
+/// and, because parallel requests time out together, only once the host has
+/// answered nothing for `STALLED_LANE_SILENCE` either. Together they are the
+/// stalled-lane incident caught within fifteen seconds rather than a slow
+/// link punished for a burst.
 const STALLED_LANE_UNANSWERED_REQUESTS: u32 = 3;
+const STALLED_LANE_SILENCE: Duration = Duration::from_secs(15);
 const GIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,6 +118,13 @@ pub(crate) struct TerminalClient {
     /// is a stalled ordered lane. Git requests share the count on their own,
     /// sixty-times-longer deadline: a five-minute silence is a strike too.
     unanswered_requests: AtomicU32,
+    /// Monotonic millis of the host's last answer to a request — or of this
+    /// lane's start, so a fresh lane is owed the full silence before it is
+    /// judged stalled. Zero means never, which only a test sets.
+    last_answer_at: AtomicU64,
+    /// Where a late-but-kept request is reported to the shell. Absent until
+    /// `start_terminal` opens the event channel.
+    events: Mutex<Option<TerminalEventChannel>>,
     stop_signal: StopSignal,
     ready: AtomicBool,
     read_only: AtomicBool,
@@ -174,6 +184,8 @@ impl TerminalClient {
             child: Mutex::new(None),
             teardown_reason: Mutex::new(None),
             unanswered_requests: AtomicU32::new(0),
+            last_answer_at: AtomicU64::new(monotonic_millis()),
+            events: Mutex::new(None),
             stop_signal: StopSignal::default(),
             ready: AtomicBool::new(false),
             read_only: AtomicBool::new(false),
@@ -282,6 +294,8 @@ impl TerminalClient {
         }
         // The count belongs to the lane being torn down, not its successor.
         self.unanswered_requests.store(0, Ordering::Release);
+        self.last_answer_at
+            .store(monotonic_millis(), Ordering::Release);
         files::invalidate_bulk_scope(
             self.bulk_scope,
             "bulk transfer control connection is reconnecting",
@@ -521,6 +535,8 @@ impl TerminalClient {
         // Any answer at all proves the lane still answers.
         if received.is_ok() {
             self.unanswered_requests.store(0, Ordering::Release);
+            self.last_answer_at
+                .store(monotonic_millis(), Ordering::Release);
         }
         let result = match received {
             Ok(Ok(response)) if response.ok => Ok(response),
@@ -550,7 +566,14 @@ impl TerminalClient {
                 // consulted: an idle workspace produces none, and the rule has
                 // to hold the same there.
                 let unanswered = self.unanswered_requests.fetch_add(1, Ordering::AcqRel) + 1;
-                if unanswered < STALLED_LANE_UNANSWERED_REQUESTS {
+                let silence = match self.last_answer_at.load(Ordering::Acquire) {
+                    0 => Duration::MAX,
+                    at => Duration::from_millis(monotonic_millis().saturating_sub(at)),
+                };
+                if unanswered < STALLED_LANE_UNANSWERED_REQUESTS || silence < STALLED_LANE_SILENCE {
+                    if let Some(events) = self.events.lock().unwrap().as_ref() {
+                        let _ = events.send(encode_event(TerminalEvent::RequestLate));
+                    }
                     Err(
                         "host request timed out; the link was kept, but commit outcome is unknown and the request will not be replayed"
                             .into(),
@@ -690,6 +713,7 @@ pub fn start_terminal(
         on_event,
         Arc::clone(&client.delivery_window),
     );
+    *client.events.lock().unwrap() = Some(event_channel.clone());
     // Publish local progress before the supervisor can perform DNS, ProxyJump,
     // authentication, or any other network work.
     let _ = event_channel.send(encode_event(TerminalEvent::ConnectionState {

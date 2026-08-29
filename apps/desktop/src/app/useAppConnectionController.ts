@@ -490,6 +490,8 @@ export function useAppConnectionController({
           }
           topologyDirtyCount += 1;
           setStatus("Topology changed; reconciling…");
+        } else if (event.kind === "requestLate") {
+          if (linkQualityHostRef.current) applyLinkQuality(linkQuality.noteLateRequest(Date.now()));
         } else if (event.kind === "flowPaused") {
           // Journal only — the host resumes the pane itself. This is the
           // per-pane mute window tmux opens when the pipeline falls behind,

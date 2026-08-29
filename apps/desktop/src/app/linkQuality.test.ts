@@ -3,6 +3,7 @@ import {
   createLinkQualityMonitor,
   describeLinkQuality,
   LINK_QUALITY_CLEAR_MS,
+  SLOW_LAG_ALONE_MS,
   SLOW_LAG_MIN_MS,
   SLOW_WINDOW_MS,
   UNSTABLE_WINDOW_MS,
@@ -102,4 +103,13 @@ it("does not count an echo that is late by less than a network's worth", () => {
   expect(monitor.state).toBeUndefined();
   expect(monitor.noteEchoLag(2_000, SLOW_LAG_MIN_MS)).toBeUndefined();
   expect(monitor.noteEchoLag(3_000, SLOW_LAG_MIN_MS)).toMatchObject({ kind: "degraded", state: "slow" });
+});
+
+it("calls the link slow on one late request, or one echo late by a network's worth", () => {
+  const late = createLinkQualityMonitor();
+  expect(late.noteLateRequest(0)).toMatchObject({ kind: "degraded", state: "slow" });
+  const echo = createLinkQualityMonitor();
+  expect(echo.noteEchoLag(0, SLOW_LAG_ALONE_MS)).toMatchObject({ kind: "degraded", state: "slow" });
+  const mild = createLinkQualityMonitor();
+  expect(mild.noteEchoLag(0, SLOW_LAG_ALONE_MS - 1)).toBeUndefined();
 });

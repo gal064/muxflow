@@ -33,6 +33,9 @@ pub(super) enum TerminalEvent {
         state: String,
     },
     ProtocolProgress,
+    /// A host request the native side gave up waiting on and kept the link
+    /// through: the slow link itself, reported so the shell can say so.
+    RequestLate,
     PaneResource {
         pane_id: String,
         state: String,
@@ -137,6 +140,7 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
         TerminalEvent::Exit { reason } => encode_empty(5, reason, sequence),
         TerminalEvent::ConnectionState { state } => encode_empty(6, state, sequence),
         TerminalEvent::ProtocolProgress => encode_empty(8, "protocol".into(), sequence),
+        TerminalEvent::RequestLate => encode_empty(18, "late".into(), sequence),
         TerminalEvent::PaneResource {
             pane_id,
             state,

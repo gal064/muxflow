@@ -39,6 +39,10 @@ export const TRANSIENT_REVEAL_ERRORS = [
   // `link.epoch`). Treating it as a conflict sent a reseed through the same
   // gate and surfaced the pair as an error toast; it clears on its own.
   "connection_unavailable",
+  // The native side gave up waiting for the answer but kept the link (or is
+  // rebuilding it): a slow link, and the pane watchdog's business. Toasting
+  // it named an internal pane id for a request that heals itself.
+  "host request timed out",
 ] as const;
 
 /**
