@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
 import { act, create } from "react-test-renderer";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope, WorkspaceEvent } from "./types";
 import { keyForTransferConnection } from "./api";
+import {
+  armPanePaint,
+  notePanePainted,
+  PANE_PAINT_TIMEOUT_MS,
+  resetPanePaintGate,
+} from "../terminal/panePaintGate";
 import { enablePerfProbe, perfSummary, resetPerfProbe } from "../../perf/probe";
 import { ACTIVE_ROOT_SETTLED_MULTIPLIER, ACTIVE_ROOT_STABLE_PROBES, useWorkspaceFiles } from "./useWorkspaceFiles";
 
@@ -86,6 +92,11 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+// The paint gate is a module singleton, so a pane one test armed would gate
+// the next one's probe. Every test that does not arm it wants the ordinary
+// case: nothing pending, nothing waited for.
+afterEach(() => { resetPanePaintGate(); });
 
 describe("useWorkspaceFiles", () => {
   it("keeps the authoritative tree through a transport gap and revalidates it once connected", async () => {
@@ -1257,5 +1268,52 @@ describe("useWorkspaceFiles", () => {
     });
     expect(current?.transfers[0]?.error).not.toBe("cancel was already terminal");
     await act(async () => { renderer.unmount(); });
+  });
+
+  it("holds the root probe behind the revealed pane's first paint", async () => {
+    // The scope effect fires on the *optimistic* switch, and the root it
+    // produces cascades into a directory listing and a Git lease — all on the
+    // link that is carrying the pane's own reveal. The paint gate is what puts
+    // the sidebar behind the screen the user actually asked for.
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    armPanePaint("%1");
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(
+      fixture.client.resolveActiveRoot,
+      "the Explorer asked for a root ahead of the pane's own screen",
+    ).not.toHaveBeenCalled();
+
+    await act(async () => { notePanePainted("%1"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(1);
+    expect(current?.root).toEqual(root);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("resolves the root anyway when the pane never paints", async () => {
+    // A timeout, never a barrier: a wedged renderer or a reveal the host never
+    // answers must not also cost the user their file tree.
+    vi.useFakeTimers();
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    armPanePaint("%1");
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(PANE_PAINT_TIMEOUT_MS - 1); });
+    expect(fixture.client.resolveActiveRoot).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(1);
+    expect(current?.root).toEqual(root);
+    await act(async () => { renderer.unmount(); });
+    vi.useRealTimers();
   });
 });

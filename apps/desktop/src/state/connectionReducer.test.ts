@@ -129,6 +129,36 @@ describe("connectionReducer", () => {
     expect(reconnected.panes).toEqual({});
   });
 
+  it("keeps the world a reconciliation acknowledgement did not describe", () => {
+    // The host answered a notification burst by finding nothing moved. It
+    // carries the generation and no tree — resending the server to say
+    // "unchanged" is tens of kilobytes ahead of the switch that burst belongs
+    // to — so the entities, the identity and the generation all stand, and
+    // only the sequence watermark advances.
+    const live = connectionReducer(initialHostState, {
+      type: "snapshot", snapshot: populated, sequence: 7, generation: 4, serverIdentity: "server-a",
+    });
+    const acknowledged = connectionReducer(live, {
+      type: "snapshot", sequence: 8, generation: 4, serverIdentity: "server-a",
+    });
+    expect(acknowledged.panes).toEqual(live.panes);
+    expect(acknowledged.windows).toEqual(live.windows);
+    expect(acknowledged.sessions).toEqual(live.sessions);
+    expect(acknowledged.generation).toBe(4);
+    expect(acknowledged.serverIdentity).toBe("server-a");
+    expect(acknowledged.lastSequence).toBe(8);
+
+    // And it never answers a rebuild this process asked for: only a world can.
+    const resyncing = connectionReducer(live, {
+      type: "orderedSnapshot", snapshot: empty, sequence: 9, serverIdentity: "server-b",
+    });
+    expect(resyncing.resyncRequested).toBe(true);
+    const stillResyncing = connectionReducer(resyncing, {
+      type: "snapshot", sequence: 10, generation: 4, serverIdentity: "server-a",
+    });
+    expect(stillResyncing.resyncRequested).toBe(true);
+  });
+
   it("accepts a lower sequence authoritative reconnect snapshot for the same server", () => {
     const state = connectionReducer(initialHostState, {
       type: "snapshot", snapshot: populated, sequence: 42, serverIdentity: "same-server",

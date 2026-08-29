@@ -622,11 +622,19 @@ export function useAppConnectionController({
           }
           serverIdentityRef.current = event.serverIdentity;
           dispatchHost({ type: "snapshot", snapshot: event.snapshot, sequence: event.sequence, generation: event.generation, serverIdentity: event.serverIdentity });
-          setActiveSessionId((current) => resolveSelectedSession(
-            event.snapshot.sessions,
-            current,
-            snapshotRef.current.sessions.find((session) => session.id === current)?.name,
-          )?.id);
+          // An event with no snapshot is the host's reconciliation
+          // acknowledgement: the notification burst is answered and the world
+          // is the one already on screen. It closes the reconciling status
+          // above and re-selects nothing — there are no sessions to select
+          // from, and the ones held here did not move.
+          const described = event.snapshot;
+          if (described) {
+            setActiveSessionId((current) => resolveSelectedSession(
+              described.sessions,
+              current,
+              snapshotRef.current.sessions.find((session) => session.id === current)?.name,
+            )?.id);
+          }
           setStatus("Live");
         } else if (event.kind === "fileService") {
           fileClient.publishWireEvent(event.event);

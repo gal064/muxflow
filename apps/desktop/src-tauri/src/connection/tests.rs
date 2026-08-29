@@ -409,10 +409,35 @@ fn assert_snapshot_frame_sequence(frame: &[u8], expected: u64) {
     assert_eq!(payload["sequence"].as_u64(), Some(expected));
 }
 
+/// The reconciliation acknowledgement rides the same frame as a described
+/// snapshot — it is the same event kind, and the perf timeline counts it as
+/// one — but carries no tree at all, so its whole cost is the header and a few
+/// dozen bytes of JSON rather than the 7–39 KB the server used to cost.
+#[test]
+fn a_reconciliation_acknowledgement_frame_carries_no_tree() {
+    let frame = encode_event(TerminalEvent::Snapshot {
+        snapshot: None,
+        sequence: 12,
+        generation: 5,
+        server_identity: "local:test".into(),
+        authoritative: false,
+    });
+    assert_snapshot_frame_sequence(&frame, 12);
+    let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    let payload: serde_json::Value = serde_json::from_slice(&frame[3 + label_len + 8..]).unwrap();
+    assert!(payload["snapshot"].is_null());
+    assert_eq!(payload["generation"].as_u64(), Some(5));
+    assert!(
+        frame.len() < 128,
+        "an acknowledgement cost {} bytes",
+        frame.len()
+    );
+}
+
 #[test]
 fn fresh_reconnect_snapshot_frame_uses_accepted_sequence_atomically() {
     let frame = encode_event(TerminalEvent::Snapshot {
-        snapshot: tmux_control::TmuxSnapshot::default(),
+        snapshot: Some(tmux_control::TmuxSnapshot::default()),
         sequence: 41,
         generation: 3,
         server_identity: "local:test".into(),
@@ -425,7 +450,7 @@ fn fresh_reconnect_snapshot_frame_uses_accepted_sequence_atomically() {
 fn resync_snapshot_frame_cannot_diverge_from_payload_sequence() {
     let frame = event_frame::encode_event_with_sequence(
         TerminalEvent::Snapshot {
-            snapshot: tmux_control::TmuxSnapshot::default(),
+            snapshot: Some(tmux_control::TmuxSnapshot::default()),
             sequence: 97,
             generation: 8,
             server_identity: "ssh:test".into(),

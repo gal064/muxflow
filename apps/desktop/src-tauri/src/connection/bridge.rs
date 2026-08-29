@@ -242,7 +242,7 @@ fn run_bridge_once(
             sequence,
             TerminalEvent::Snapshot {
                 server_identity: hello.server_identity.clone(),
-                snapshot: initial.snapshot,
+                snapshot: Some(initial.snapshot),
                 sequence,
                 generation: initial.generation,
                 authoritative: true,
@@ -569,7 +569,7 @@ fn read_protocol_stream(
                     channel,
                     response.accepted_sequence,
                     TerminalEvent::Snapshot {
-                        snapshot: snapshot_from_proto(protocol_snapshot),
+                        snapshot: Some(snapshot_from_proto(protocol_snapshot)),
                         sequence: response.accepted_sequence,
                         generation,
                         server_identity: snapshot_identity,
@@ -759,6 +759,26 @@ fn process_event(
     let event_sequence = frame.sequence;
     let mut scoped_seed = None;
     match v1::EventKind::try_from(event.kind).unwrap_or_default() {
+        // A topology event with no snapshot is a reconciliation
+        // acknowledgement: a notified pass found the world exactly as the
+        // desktop already holds it and says so with the generation alone.
+        // Forwarded rather than dropped because it spent an event sequence,
+        // and because closing the frontend's reconciliation state is the whole
+        // point of it. Its identity is this connection's own — an
+        // acknowledgement asserts nothing about which server answered, and a
+        // server that really did change arrives as a described snapshot, which
+        // is where that check lives.
+        v1::EventKind::TopologySnapshot if event.snapshot.is_none() => send_protocol_event(
+            channel,
+            event_sequence,
+            TerminalEvent::Snapshot {
+                snapshot: None,
+                sequence: frame.sequence,
+                generation: event.topology_generation,
+                server_identity: expected_server_identity.to_owned(),
+                authoritative: false,
+            },
+        )?,
         v1::EventKind::TopologySnapshot => {
             let value = event
                 .snapshot
@@ -775,7 +795,7 @@ fn process_event(
                 channel,
                 event_sequence,
                 TerminalEvent::Snapshot {
-                    snapshot: snapshot_from_proto(value),
+                    snapshot: Some(snapshot_from_proto(value)),
                     sequence: frame.sequence,
                     generation,
                     server_identity,
