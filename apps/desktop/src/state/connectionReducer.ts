@@ -152,7 +152,14 @@ export function connectionReducer(state: NormalizedHostState, action: HostAction
         // A transport transition can be a restarted host process behind the
         // same tmux server, counting generations from zero again. Whatever the
         // next snapshot carries is the baseline from here.
-        generationBaselined: false,
+        //
+        // Only a transition *away* from connected says that, though. The
+        // bridge announces a new link as GenerationEpoch, then the
+        // authoritative snapshot, and only then ConnectionState{connected} —
+        // so clearing the flag on the way in disarmed the guard immediately
+        // after the baseline it was meant to protect had landed, and the next
+        // late lower-generation snapshot walked the generation backwards.
+        generationBaselined: action.phase === "connected" && state.generationBaselined,
       };
     case "snapshot":
       if (precedesLiveGeneration(state, action)) return state;

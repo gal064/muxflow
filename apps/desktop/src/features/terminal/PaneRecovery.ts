@@ -24,7 +24,9 @@ export function paneRecoveryPlan(
   event: Extract<TerminalEvent, { kind: "paneResource" }>,
 ): PaneRecoveryPlan {
   if (event.requiresSeed || event.state === "released") {
-    return { kind: "awaitSeed", reason: event.recoveryReason || "Renderer state was released" };
+    // An empty reason is the ordinary case — the renderer kept nothing and the
+    // pane simply seeds — and is not spoken; a host-given reason is.
+    return { kind: "awaitSeed", reason: event.recoveryReason };
   }
   // The flag, never the byte count. The host holds no copy of this pane's
   // screen: a verified reveal answers with the output since the checkpoint,
