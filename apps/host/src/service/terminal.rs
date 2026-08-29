@@ -1318,6 +1318,24 @@ const MAX_HISTORY_SKIP_LINES: u32 = MAX_HISTORY_LINES;
 /// legible in a tmux log beside the answer it produced; the reader needs only
 /// the pane. There is no `__ADE_META__` leg — this is not a screen, and nothing
 /// in the answer may be mistaken for a seed the reader has to store.
+///
+/// The trailing `__ADE_HISTORY_META__` leg is how the answer says whether it
+/// reached the top. The renderer cannot tell from the rows: `-J` joins wrapped
+/// lines — kept, because scrollback spliced in without it is hard-broken at the
+/// width it was captured at and never reflows — so a full page of wrapped
+/// output answers with far fewer lines than it covers rows (measured: 60 rows,
+/// 20 lines). And an emptier answer is not the signal either, because tmux
+/// clamps a range that runs past the top of its history and answers one
+/// entirely above it with a single row rather than with nothing. `#{history_size}`
+/// is the fact itself, and the renderer compares it against the rows it asked
+/// for.
+///
+/// It is a third command, and targeted, for the same reason the seed's
+/// `__ADE_META__` leg is: a pane-scoped format can only be expanded by a
+/// targeted `display-message`, and the leading marker has to stay untargeted so
+/// that it always succeeds. A targeted probe against a pane that has gone away
+/// is rejected — the reader answers that page without a size, and the renderer
+/// asks again.
 fn capture_history_command(pane_id: &str, lines: u32, skip: u32) -> String {
     let lines = lines.clamp(1, MAX_HISTORY_LINES);
     let skip = skip.min(MAX_HISTORY_SKIP_LINES);
@@ -1325,7 +1343,7 @@ fn capture_history_command(pane_id: &str, lines: u32, skip: u32) -> String {
     let end = skip.saturating_add(1);
     let digits = pane_id.strip_prefix('%').unwrap_or(pane_id);
     format!(
-        "display-message -p '__ADE_HISTORY__:{lines}:{digits}' ; capture-pane -p -e -J -S -{start} -E -{end} -t {pane_id}"
+        "display-message -p '__ADE_HISTORY__:{lines}:{digits}' ; capture-pane -p -e -J -S -{start} -E -{end} -t {pane_id} ; display-message -p -t {pane_id} '__ADE_HISTORY_META__:#{{history_size}}'"
     )
 }
 

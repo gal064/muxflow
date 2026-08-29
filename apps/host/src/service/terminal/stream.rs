@@ -19,7 +19,8 @@ use tokio::sync::mpsc;
 use super::super::{SequencerControl, emit_event};
 use super::OutputCredit;
 use super::correlation::{
-    MarkerBlock, classify_marker_block, error_reason, marker_pane, wants_error_line,
+    MarkerBlock, classify_marker_block, error_reason, history_size_marker, marker_pane,
+    wants_error_line,
 };
 use super::degradation::emit_pane_degradations;
 use super::flow_control::RejectedResume;
@@ -305,6 +306,21 @@ pub(super) enum CommandBlock {
         pane_id: String,
         lines: Vec<Vec<u8>>,
     },
+    /// The `#{history_size}` probe that closes a history request.
+    ///
+    /// A third block rather than a number in the leading marker: the marker is
+    /// untargeted so that it always succeeds (it exists to name the pane whose
+    /// *next* block fails), and a pane-scoped format can only be read by a
+    /// targeted `display-message`. So the probe runs after the capture, in the
+    /// same place and for the same reason the seed's `__ADE_META__` leg does,
+    /// and the captured rows wait here for it: the answer is emitted once, with
+    /// the number that tells the renderer whether it has reached the top.
+    CaptureHistoryMeta {
+        tag: CommandTag,
+        pane_id: String,
+        history: Vec<u8>,
+        lines: Vec<Vec<u8>>,
+    },
 }
 
 pub(super) struct StreamState {
@@ -314,6 +330,7 @@ pub(super) struct StreamState {
     pub(super) expected_history: Option<String>,
     pub(super) pending_alternate: Option<(String, Vec<Vec<u8>>, u64)>,
     pub(super) pending_metadata: Option<PendingCaptureMetadata>,
+    pub(super) pending_history_meta: Option<PendingHistoryMeta>,
     command_block: CommandBlock,
     /// When tmux began answering the capture the pending seed is being built
     /// from, which is the one number the perf-log `seed` line cannot take at
@@ -323,6 +340,12 @@ pub(super) struct StreamState {
     /// desktop reveals a pane: a seed for a pane tmux has paused has to carry
     /// the resume or it re-photographs a screen that then stops moving again.
     flow: Arc<super::FlowControl>,
+}
+
+/// One pane's captured scrollback, waiting for the size probe that follows it.
+pub(super) struct PendingHistoryMeta {
+    pub(super) pane_id: String,
+    pub(super) history: Vec<u8>,
 }
 
 pub(super) struct PendingCaptureMetadata {
@@ -371,6 +394,7 @@ impl StreamState {
             expected_history: None,
             pending_alternate: None,
             pending_metadata: None,
+            pending_history_meta: None,
             command_block: CommandBlock::None,
             capture_started: None,
         }
@@ -400,6 +424,13 @@ impl StreamState {
         }
         if owned_by_scope(self.expected_history.as_deref()) {
             self.expected_history = None;
+        }
+        if owned_by_scope(
+            self.pending_history_meta
+                .as_ref()
+                .map(|pending| &*pending.pane_id),
+        ) {
+            self.pending_history_meta = None;
         }
         if owned_by_scope(self.pending_alternate.as_ref().map(|pending| &*pending.0)) {
             self.pending_alternate = None;
@@ -505,7 +536,8 @@ impl StreamState {
                 CommandBlock::CapturePrimary { lines, .. }
                 | CommandBlock::CaptureAlternate { lines, .. }
                 | CommandBlock::CaptureMetadata { lines, .. }
-                | CommandBlock::CaptureHistory { lines, .. } => lines.push(line),
+                | CommandBlock::CaptureHistory { lines, .. }
+                | CommandBlock::CaptureHistoryMeta { lines, .. } => lines.push(line),
                 CommandBlock::None => emit_resnapshot(
                     sender,
                     overflowed,
@@ -584,8 +616,35 @@ impl StreamState {
                 // this one. The capture ledger is one of those slots: a pane
                 // whose capture died here must be free to be photographed again.
                 capture_in_flight.lock().unwrap().clear();
-                self.command_block = CommandBlock::None;
+                // With one exception, because one of those sequences has an
+                // answer already in hand. The size probe is targeted, so a pane
+                // that goes away between the capture and it is rejected here —
+                // and the rows tmux already handed over are still the page the
+                // renderer asked for. Dropping them would leave it waiting on a
+                // request nothing will ever answer. It goes without a size,
+                // which the renderer reads as "ask again", never as the top of
+                // the history.
+                let orphaned_history =
+                    match std::mem::replace(&mut self.command_block, CommandBlock::None) {
+                        CommandBlock::CaptureHistoryMeta {
+                            pane_id, history, ..
+                        } => Some((pane_id, history)),
+                        _ => None,
+                    };
                 self.release_correlation(None);
+                if let Some((pane_id, history)) = orphaned_history
+                    && emit_terminal_history(
+                        sender,
+                        overflowed,
+                        pane_id,
+                        history,
+                        None,
+                        stopped,
+                        output_credit,
+                    )
+                {
+                    output_credit.await_window(stopped);
+                }
                 // Exactly one event per rejection, and for a rejected resume
                 // which one it is depends on what this thread is about to do.
                 //
@@ -1017,26 +1076,46 @@ impl StreamState {
                 }
             }
             CommandBlock::CaptureHistory { pane_id, lines, .. } => {
-                // One event carrying the joined rows, and nothing else: no
-                // generation is taken, no resource is touched, and no seed debt
-                // is settled. The renderer splices this above the screen it is
-                // already showing, or discards it — either way the output
-                // stream is exactly as it was.
+                // Held here rather than emitted: the size probe in the block
+                // after this one is what says whether the page reached the top
+                // of tmux's history, and the renderer gets one answer carrying
+                // both. It cannot work that out from the rows themselves —
+                // `-J` joins wrapped ones, so a full page routinely answers
+                // with fewer lines than it covers rows.
+                self.pending_history_meta = Some(PendingHistoryMeta {
+                    pane_id,
+                    history: lines.join(&b"\r\n"[..]),
+                });
+            }
+            CommandBlock::CaptureHistoryMeta {
+                pane_id,
+                history,
+                lines,
+                ..
+            } => {
+                // One event carrying the joined rows and the size, and nothing
+                // else: no generation is taken, no resource is touched, and no
+                // seed debt is settled. The renderer splices this above the
+                // screen it is already showing, or discards it — either way the
+                // output stream is exactly as it was.
                 //
                 // Charged like a seed so a large scrollback cannot starve the
                 // delivery window the live panes share, and outside the
                 // emission fence because the fence orders visibility against
                 // output and this answer belongs to neither.
+                //
                 // An empty answer is still an answer — "there is nothing above
-                // your screen" — and the renderer is waiting for one.
-                let history = lines.join(&b"\r\n"[..]);
-                if emit_terminal(
+                // your screen" — and the renderer is waiting for one. A probe
+                // that printed nothing this host can read is an answer too, and
+                // a different one: the size is unknown, which the renderer reads
+                // as a page to ask for again.
+                let history_size = lines.iter().find_map(|line| history_size_marker(line));
+                if emit_terminal_history(
                     sender,
                     overflowed,
-                    v1::EventKind::TerminalHistory,
                     pane_id,
                     history,
-                    0,
+                    history_size,
                     stopped,
                     output_credit,
                 ) {
@@ -1055,7 +1134,8 @@ impl StreamState {
             | CommandBlock::CapturePrimary { tag: active, .. }
             | CommandBlock::CaptureAlternate { tag: active, .. }
             | CommandBlock::CaptureMetadata { tag: active, .. }
-            | CommandBlock::CaptureHistory { tag: active, .. } => *active == tag,
+            | CommandBlock::CaptureHistory { tag: active, .. }
+            | CommandBlock::CaptureHistoryMeta { tag: active, .. } => *active == tag,
             CommandBlock::None => false,
         }
     }
@@ -1070,7 +1150,8 @@ impl StreamState {
             | CommandBlock::CapturePrimary { pane_id, .. }
             | CommandBlock::CaptureAlternate { pane_id, .. }
             | CommandBlock::CaptureMetadata { pane_id, .. }
-            | CommandBlock::CaptureHistory { pane_id, .. } => pane_id.clone(),
+            | CommandBlock::CaptureHistory { pane_id, .. }
+            | CommandBlock::CaptureHistoryMeta { pane_id, .. } => pane_id.clone(),
             _ => "terminal".into(),
         }
     }
@@ -1083,7 +1164,8 @@ impl StreamState {
             | CommandBlock::CapturePrimary { tag, .. }
             | CommandBlock::CaptureAlternate { tag, .. }
             | CommandBlock::CaptureMetadata { tag, .. }
-            | CommandBlock::CaptureHistory { tag, .. } => Some(*tag),
+            | CommandBlock::CaptureHistory { tag, .. }
+            | CommandBlock::CaptureHistoryMeta { tag, .. } => Some(*tag),
             CommandBlock::None => None,
         }
     }
@@ -1125,6 +1207,13 @@ impl StreamState {
                 pane_id,
                 visible_lines,
                 visible_boundary,
+                lines: Vec::new(),
+            }
+        } else if let Some(pending) = self.pending_history_meta.take() {
+            CommandBlock::CaptureHistoryMeta {
+                tag,
+                pane_id: pending.pane_id,
+                history: pending.history,
                 lines: Vec::new(),
             }
         } else if let Some(pending) = self.pending_metadata.take() {
@@ -1178,7 +1267,8 @@ mod stream_helpers;
 pub(in crate::service::terminal) use stream_helpers::OutputEmission as TestOutputEmission;
 pub(super) use stream_helpers::with_active_resources;
 use stream_helpers::{
-    OutputEmission, emit_resnapshot, emit_terminal, is_topology_notification, notification_pane,
+    OutputEmission, emit_resnapshot, emit_terminal, emit_terminal_history,
+    is_topology_notification, notification_pane,
 };
 
 #[cfg(test)]

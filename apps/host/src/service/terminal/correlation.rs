@@ -72,6 +72,27 @@ fn history_marker_pane(line: &[u8]) -> Option<String> {
     Some(pane)
 }
 
+/// `__ADE_HISTORY_META__:<history_size>`, the probe that closes a history
+/// request.
+///
+/// Deliberately a separate line from the leading `__ADE_HISTORY__` marker, and
+/// deliberately after the capture rather than before it: `#{history_size}` is a
+/// pane-scoped format, which only a *targeted* `display-message` can expand,
+/// and the leading marker must stay untargeted so that it always succeeds — it
+/// is there to name the pane whose next block fails. So the number arrives the
+/// way the seed's `__ADE_META__` does, at the end of its own command sequence.
+///
+/// A line that is not a number is not this host's marker, and answering `None`
+/// is what makes the renderer ask again instead of concluding it has reached
+/// the top of the history.
+pub(super) fn history_size_marker(line: &[u8]) -> Option<u32> {
+    std::str::from_utf8(line.strip_prefix(b"__ADE_HISTORY_META__:")?)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// Restores the `%` sigil `queue_marker` had to strip: tmux's display message
 /// goes through `strftime`, which eats a literal `%0`.
 fn marker_pane_with_prefix(line: &[u8], prefix: &[u8]) -> Option<String> {

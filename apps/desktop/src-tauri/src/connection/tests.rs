@@ -502,13 +502,15 @@ fn terminal_history_command_builds_a_scoped_request_with_a_real_line_count() {
 }
 
 /// A history frame is its own kind, so nothing downstream can read the
-/// scrollback as the pane's screen.
+/// scrollback as the pane's screen — and it carries the one number the
+/// scrollback itself cannot express: how much of it tmux is holding.
 #[test]
-fn a_history_frame_is_labelled_by_its_pane_and_carries_only_the_scrollback() {
+fn a_history_frame_is_labelled_by_its_pane_and_carries_the_scrollback_and_its_size() {
     let frame = event_frame::encode_event_with_sequence(
         TerminalEvent::History {
             pane_id: "%3".into(),
             data: b"older\r\nnewer".to_vec(),
+            history_size: Some(1_200),
         },
         41,
     );
@@ -517,8 +519,44 @@ fn a_history_frame_is_labelled_by_its_pane_and_carries_only_the_scrollback() {
     assert_eq!(&frame[3..3 + label_length], b"%3");
     let payload_offset = 11 + label_length;
     // No generation prefix, unlike a seed or an output frame: the history
-    // claims no place in the output ordering.
-    assert_eq!(&frame[payload_offset..], b"older\r\nnewer");
+    // claims no place in the output ordering. One presence byte and a u32
+    // instead, which is what the renderer stops paging on.
+    assert_eq!(frame[payload_offset], 1);
+    assert_eq!(
+        u32::from_be_bytes(
+            frame[payload_offset + 1..payload_offset + 5]
+                .try_into()
+                .unwrap()
+        ),
+        1_200
+    );
+    assert_eq!(&frame[payload_offset + 5..], b"older\r\nnewer");
+}
+
+/// A size the host could not read is absent rather than zero: the renderer
+/// asks again, where a real zero would mean there is nothing above the screen.
+#[test]
+fn a_history_frame_whose_size_probe_went_unanswered_says_so() {
+    let frame = event_frame::encode_event_with_sequence(
+        TerminalEvent::History {
+            pane_id: "%3".into(),
+            data: b"older".to_vec(),
+            history_size: None,
+        },
+        41,
+    );
+    let label_length = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    let payload_offset = 11 + label_length;
+    assert_eq!(frame[payload_offset], 0);
+    assert_eq!(
+        u32::from_be_bytes(
+            frame[payload_offset + 1..payload_offset + 5]
+                .try_into()
+                .unwrap()
+        ),
+        0
+    );
+    assert_eq!(&frame[payload_offset + 5..], b"older");
 }
 
 #[test]

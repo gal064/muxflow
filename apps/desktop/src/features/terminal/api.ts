@@ -25,7 +25,16 @@ export type TerminalEvent = SequencedTerminalEvent & (
    * generation, because it claims no place in the output ordering — the
    * renderer splices it above what it is already showing, or discards it.
    */
-  | { kind: "terminalHistory"; paneId: string; data: OwnedTerminalBytes }
+  /**
+   * One page of the scrollback above a pane's screen.
+   *
+   * `historySize` is how many lines tmux holds for the pane, which is what the
+   * renderer compares against the rows it asked for to know whether this page
+   * reached the top. It is absent when the host's probe went unanswered — the
+   * pane went away mid-request — and that is not the same as a history of zero
+   * rows: an absent size means ask again.
+   */
+  | { kind: "terminalHistory"; paneId: string; data: OwnedTerminalBytes; historySize?: number }
   | { kind: "flowStalled"; paneId: string; message: string }
   | { kind: "flowPaused"; paneId: string; message: string }
   | { kind: "clipboardWrite"; text: string }
@@ -72,6 +81,8 @@ const encoder = new TextEncoder();
 export const MAX_HOST_TERMINAL_INPUT_BYTES = 1024 * 1024;
 const COMMON_HEADER_BYTES = 11;
 const PANE_RESOURCE_HEADER_BYTES = 38;
+/** One presence byte and the big-endian `history_size` that follows it. */
+const TERMINAL_HISTORY_HEADER_BYTES = 5;
 
 export interface TerminalVisibilityCheckpoint {
   terminalEpoch: number;
@@ -221,10 +232,21 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
       } catch {
         throw new Error("terminal clipboard write payload is not valid UTF-8");
       }
-    case 18:
+    case 18: {
       requireHostSequence(sequence, "terminal history");
       requirePaneId(label, "terminal history");
-      return { kind: "terminalHistory", paneId: label, data: copyTerminalBytes(data), sequence };
+      if (data.byteLength < TERMINAL_HISTORY_HEADER_BYTES) throw new Error("terminal history frame is truncated");
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      const known = view.getUint8(0) === 1;
+      const historySize = view.getUint32(1);
+      return {
+        kind: "terminalHistory",
+        paneId: label,
+        data: copyTerminalBytes(data.subarray(TERMINAL_HISTORY_HEADER_BYTES)),
+        ...(known ? { historySize } : {}),
+        sequence,
+      };
+    }
     default: throw new Error(`unknown terminal frame kind ${frame[0]}`);
   }
 }

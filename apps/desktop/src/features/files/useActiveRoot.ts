@@ -144,16 +144,30 @@ export function useActiveRoot(options: Options): {
       }
     };
 
-    // Behind the pane's own screen, not ahead of it. This effect fires on the
-    // *optimistic* switch — before the tmux action is even acked — and the
-    // root it produces cascades into a directory listing and a Git lease, all
-    // of it on the link the reveal is being answered over. The gate is a
-    // timeout and never a barrier: a pane that never paints costs this probe
-    // 600 ms and nothing more, and the backstop below plus the
-    // `activePaneCurrentPath` effect are unchanged, so the root still arrives
-    // on every signal it ever did.
-    const painting = latest.current.scope()?.paneId;
-    void (painting === undefined ? Promise.resolve() : awaitPanePaint(painting)).then(resolve);
+    /**
+     * Probes behind the pane's own screen, not ahead of it.
+     *
+     * Every entry point goes through here, and that is the point. The root
+     * cascades into a directory listing *and* a Git watch whose bootstrap is a
+     * whole `git status` — 60-80 KB, on the same ordered lane as the answer to
+     * the switch — so a probe that skips the gate puts all of it in front of the
+     * screen the user is waiting for. Gating only the scope effect was not
+     * enough: a switch changes the active pane's `current_path` as well as the
+     * scope, and the effect watching that path calls `rearm` *synchronously* in
+     * the same commit, taking the `resolving` latch and reducing the gated call
+     * to a no-op. That is the ordering the timeline caught.
+     *
+     * The gate is a timeout and never a barrier: a pane that never paints costs
+     * a probe 600 ms and nothing more. It costs nothing at all on the paths it
+     * is not there for — a `cd` in the pane the user is already looking at, or
+     * the backstop's tick — because a pane that has already painted resolves
+     * the wait synchronously.
+     */
+    const resolveBehindPaint = () => {
+      const painting = latest.current.scope()?.paneId;
+      void (painting === undefined ? Promise.resolve() : awaitPanePaint(painting)).then(resolve);
+    };
+    resolveBehindPaint();
     // A foreground backstop, not a pipeline. Pane and window changes rebuild
     // this scope and re-resolve immediately, so the only thing left for a timer
     // to catch is `cd` inside the pane the user is already in — for which tmux
@@ -176,7 +190,7 @@ export function useActiveRoot(options: Options): {
       // why this slows down rather than stopping.
       const settled = unchangedProbes >= ACTIVE_ROOT_STABLE_PROBES;
       if (settled && ticks % ACTIVE_ROOT_SETTLED_MULTIPLIER !== 0) return;
-      void resolve();
+      resolveBehindPaint();
     }, ACTIVE_ROOT_BACKSTOP_MS);
     const noteActivity = () => {
       unchangedProbes = 0;
@@ -184,7 +198,7 @@ export function useActiveRoot(options: Options): {
     };
     const rearm = () => {
       noteActivity();
-      if (foreground()) void resolve();
+      if (foreground()) resolveBehindPaint();
     };
     rearmRef.current = rearm;
     activityRef.current = noteActivity;

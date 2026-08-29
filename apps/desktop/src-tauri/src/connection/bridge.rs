@@ -930,6 +930,11 @@ fn process_event(
                 TerminalEvent::History {
                     pane_id: terminal.pane_id,
                     data: terminal.data,
+                    // Absent, not zero, when the host could not read it: the
+                    // renderer stops paging at the top of the history and must
+                    // not mistake "tmux did not answer" for "there is nothing
+                    // above this".
+                    history_size: terminal.history_size_known.then_some(terminal.history_size),
                 },
                 delivery_charge,
             )?;
