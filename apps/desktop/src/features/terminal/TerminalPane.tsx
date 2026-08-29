@@ -701,6 +701,12 @@ export function TerminalPane({
     const unsubscribeTopReached = renderer.onScrollbackTopReached(() => {
       historyPager.requestPage("scrolledToTop");
     });
+    // A reflow moves rows between what tmux keeps in its history and what it
+    // shows on its display, so a page already on the wire was asked against a
+    // boundary that no longer exists. Subscribed here rather than at each of
+    // the three places a grid is applied, because what matters is that the grid
+    // changed and not who asked for it.
+    const unsubscribeGrid = renderer.onGridApplied(() => historyPager.noteGridChanged());
     const unsubscribeInput = renderer.onInput((input) => inputRef.current(pane.id, input));
     const unsubscribeViewport = renderer.onViewportChange(setViewport);
     const unsubscribeEvents = hub.subscribePane(pane.id, (event) => {
@@ -976,13 +982,23 @@ export function TerminalPane({
         // a pane the user was looking at and blank it.
         recordIncident("pane.hideEchoAfterReady", { paneId: pane.id });
       } else if (effect.kind === "awaitAnswer") {
-        // The same echo, at a pane whose reveal is still outstanding. Nothing to
-        // draw and nothing to ask for: that reveal's answer is the authoritative
-        // one and it is still coming. A pane showing the screen it kept can wait
-        // for it silently; a pane showing nothing gets the bound the dead end
-        // used to arm on its way past, so a reveal that is never answered still
-        // degrades visibly rather than sitting blank for the rest of its life.
-        if (!effect.showingScreen) watchdog.note("paneAwaitingSeed");
+        // The same echo, at a pane whose reveal is still outstanding. The echo
+        // itself says nothing — the reveal's own answer is the authoritative one
+        // and it is still coming — so a pane showing the screen it kept waits
+        // for it silently and keeps that screen.
+        //
+        // A pane showing *nothing* is a different matter, and it is the one the
+        // dead end used to serve: it asks for the seed straight away, exactly as
+        // the dead end did, because two seconds of blank terminal is the cost of
+        // waiting to find out whether the reveal is coming. The bound stays on
+        // top of that for the case where the seed does not come either. What is
+        // deliberately not done is the rest of the dead end: no blanking, no
+        // banner — the watchdog raises one if it ever fires — and no cache
+        // eviction, because none of that was ever this event's to do.
+        if (!effect.showingScreen) {
+          watchdog.note("paneAwaitingSeed");
+          requestFreshSeed(`Pane ${pane.id} has nothing to show while its reveal goes unanswered`);
+        }
       } else if (effect.kind === "diagnostic") {
         // Seed diagnostics describe fidelity limitations in this pane only.
         // They do not invalidate recovery or escalate to connection status.
@@ -1079,6 +1095,7 @@ export function TerminalPane({
       unsubscribeEvents();
       unsubscribeViewport();
       unsubscribeTopReached();
+      unsubscribeGrid();
       historyPager.dispose();
       unsubscribeInput();
       terminalContainer.removeEventListener("paste", interceptPaste, true);

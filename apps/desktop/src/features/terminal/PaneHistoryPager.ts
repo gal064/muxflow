@@ -98,15 +98,31 @@ export interface PaneHistoryPagerOptions {
 interface HistoryRequest {
   serial: number;
   /**
-   * How much scrollback the pane held at the request. Kept because the answer
-   * is read against it: the rows requested are this plus the page, and tmux's
-   * own history size says whether that reached the top.
+   * How much scrollback the pane held at the request.
+   *
+   * Kept because the answer is read against it twice. The rows requested are
+   * this plus the page, and tmux's own history size says whether that reached
+   * the top; and it is the number the splice needs to know how much of the page
+   * the pane printed over while it was on the wire, because tmux measures its
+   * capture from the display at the moment it runs rather than at the moment it
+   * was asked.
    */
   skip: number;
   lines: number;
   /** Cleared when the screen this page was asked against is replaced. */
   current: boolean;
+  /** What replaced it, once it has been. Journalled when the answer arrives. */
+  orphanedBy?: OrphanReason;
 }
+
+/** Why a page in flight stopped describing the buffer it was asked against. */
+type OrphanReason =
+  /** A seed replaced the screen. */
+  | "reseed"
+  /** The screen went away without one: a blank pane, or a host-owned restore. */
+  | "screenGone"
+  /** The terminal reflowed, moving rows across tmux's history boundary. */
+  | "gridChanged";
 
 /**
  * One pane's walk up its own scrollback.
@@ -227,7 +243,7 @@ export class PaneHistoryPager {
     this.#screenSeeded = true;
     this.#exhausted = false;
     this.#nextPageLines = HISTORY_PAGE_LINES;
-    this.#orphan();
+    this.#orphan("reseed");
   }
 
   /**
@@ -240,7 +256,24 @@ export class PaneHistoryPager {
    */
   noteScreenGone(): void {
     this.#screenSeeded = false;
-    this.#orphan();
+    this.#orphan("screenGone");
+  }
+
+  /**
+   * The terminal reflowed.
+   *
+   * A resize moves rows across the boundary between what tmux keeps in its
+   * history and what it shows on its display, so the `skip` a page in flight
+   * was asked with no longer names where this buffer begins — and unlike
+   * ordinary output, the difference is not rows this side has gained, so the
+   * overlap the splice trims cannot repair it. The page is orphaned, the latch
+   * reopens, and the next reach-the-top asks with numbers that describe the
+   * buffer the user is now looking at. The screen itself is untouched: it is
+   * the same screen, rewrapped, and everything already spliced into it is still
+   * above it.
+   */
+  noteGridChanged(): void {
+    this.#orphan("gridChanged");
   }
 
   /**
@@ -249,8 +282,11 @@ export class PaneHistoryPager {
    * The orphaned requests stay in `#awaiting` because the host will still answer
    * them and the queue is how the answers are told apart.
    */
-  #orphan(): void {
-    for (const request of this.#awaiting) request.current = false;
+  #orphan(reason: OrphanReason): void {
+    for (const request of this.#awaiting) {
+      request.current = false;
+      request.orphanedBy = reason;
+    }
     this.#busy = false;
   }
 
@@ -339,7 +375,8 @@ export class PaneHistoryPager {
       return;
     }
     // The screen this scrollback belongs above is gone — a reseed replaced it
-    // while the page was on the wire, or the pane is waiting for a seed.
+    // while the page was on the wire, the pane is waiting for a seed, or the
+    // terminal reflowed under it.
     // Splicing it onto whatever is there now would put the user's earlier output
     // above a screen it never sat above, using a skip that describes a buffer
     // nothing is holding any more. Deliberately touching no latch: whatever
@@ -347,7 +384,11 @@ export class PaneHistoryPager {
     // answer, and clearing its latch here is what let a third request duplicate
     // rows.
     if (!request.current || !this.#screenSeeded) {
-      this.#journal("pane.historySupersededByReseed", { paneId: this.#paneId, serial: request.serial });
+      this.#journal("pane.historySupersededByReseed", {
+        paneId: this.#paneId,
+        serial: request.serial,
+        reason: request.orphanedBy ?? "screenGone",
+      });
       return;
     }
     // Whether this page reached the top of tmux's history. The rows asked for
@@ -382,7 +423,7 @@ export class PaneHistoryPager {
     // does not queue a second one. A refusal leaves the latch open on purpose —
     // the buffer could not take these rows, and the next time the user reaches
     // the top the question is asked against the screen they are looking at.
-    void this.#renderer.prependHistory(event.data).then((outcome) => {
+    void this.#renderer.prependHistory(event.data, request.skip).then((outcome) => {
       // A reseed during the splice orphans this request as surely as one during
       // the wire time: it is the new screen that owns the latch and the paging
       // state now.
