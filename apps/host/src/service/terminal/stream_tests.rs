@@ -52,6 +52,7 @@ struct Harness {
     resources: Arc<Mutex<PaneResourceStore>>,
     generation: Arc<AtomicU64>,
     stopped: AtomicBool,
+    capture_in_flight: Mutex<HashSet<String>>,
     output_credit: Arc<super::OutputCredit>,
     emission_order: Arc<Mutex<()>>,
     topology_trigger: TopologyOutputTrigger,
@@ -77,6 +78,7 @@ impl Harness {
                 ))),
                 generation: Arc::new(AtomicU64::new(0)),
                 stopped: AtomicBool::new(false),
+                capture_in_flight: Mutex::new(HashSet::new()),
                 output_credit: Arc::new(super::OutputCredit::negotiated(false)),
                 emission_order: Arc::new(Mutex::new(())),
                 topology_trigger: TopologyOutputTrigger::default(),
@@ -92,6 +94,7 @@ impl Harness {
             resources: &self.resources,
             terminal_generation: &self.generation,
             stopped: &self.stopped,
+            capture_in_flight: &self.capture_in_flight,
             output_credit: &self.output_credit,
             emission_order: &self.emission_order,
             topology_trigger: &self.topology_trigger,
@@ -295,9 +298,12 @@ fn losing_a_pane_forgets_that_it_was_paused() {
         harness.runtime(),
     );
     assert!(harness.flow.resume_before_capture("%1"));
-    state.apply_control(StreamControl::Membership {
-        pane_ids: Vec::new(),
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: Vec::new(),
+        },
+        &harness.capture_in_flight,
+    );
     assert!(!harness.flow.resume_before_capture("%1"));
 }
 
@@ -342,9 +348,12 @@ fn pane_close_prunes_capture_state_without_disturbing_sibling() {
         saved_normal_lines: Vec::new(),
         visible_boundary: 1,
     });
-    state.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%2".into()],
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &Mutex::new(HashSet::new()),
+    );
     assert!(!state.pane_states.contains_key("%1"));
     assert!(state.pane_states.contains_key("%2"));
     assert!(matches!(state.command_block, CommandBlock::Draining { .. }));
@@ -397,9 +406,12 @@ fn pane_close_drains_every_in_flight_block_until_its_tmux_fence() {
     for block in blocks {
         let mut state = StreamState::new(&["%1".into()], Arc::new(FlowControl::default()));
         state.command_block = block;
-        state.apply_control(StreamControl::Membership {
-            pane_ids: Vec::new(),
-        });
+        state.apply_control(
+            StreamControl::Membership {
+                pane_ids: Vec::new(),
+            },
+            &Mutex::new(HashSet::new()),
+        );
         assert!(state.active_tag_matches(tag));
         assert!(matches!(state.command_block, CommandBlock::Draining { .. }));
         assert!(!state.pane_states.contains_key("%1"));
@@ -416,9 +428,12 @@ fn pane_close_during_capture_keeps_parser_and_stream_correlation_aligned() {
     parser.push(b"%begin 1 2 1\n");
     state.handle(parser.next_record().unwrap().unwrap(), harness.runtime());
 
-    state.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%2".into()],
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &Mutex::new(HashSet::new()),
+    );
     parser.push(b"captured row\n%end 1 2 1\n");
     while let Some(record) = parser.next_record() {
         state.handle(record.unwrap(), harness.runtime());
@@ -445,9 +460,12 @@ fn pane_close_during_rejected_command_drains_the_stale_error() {
         pane_id: "%1".into(),
         lines: vec![b"pane disappeared".to_vec()],
     };
-    state.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%2".into()],
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &Mutex::new(HashSet::new()),
+    );
     state.handle(
         ControlRecord::Error {
             tag,
@@ -476,12 +494,18 @@ fn pane_remove_and_readd_before_fence_cannot_publish_the_old_capture() {
         lines: vec![b"1,1,0,0,0,0,0,0,0,0,0".to_vec()],
     };
 
-    state.apply_control(StreamControl::Membership {
-        pane_ids: Vec::new(),
-    });
-    state.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%1".into()],
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: Vec::new(),
+        },
+        &harness.capture_in_flight,
+    );
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%1".into()],
+        },
+        &harness.capture_in_flight,
+    );
     state.handle(
         ControlRecord::End {
             tag,
@@ -508,7 +532,7 @@ fn parser_error_inside_capture_drains_rows_until_the_matching_fence() {
     while let Some(record) = parser.next_record() {
         match record {
             Ok(record) => state.handle(record, harness.runtime()),
-            Err(_) => state.resnapshot_all(&harness.writer),
+            Err(_) => state.resnapshot_all(&harness.writer, &harness.resources, &harness.stopped),
         }
     }
 
@@ -519,6 +543,101 @@ fn parser_error_inside_capture_drains_rows_until_the_matching_fence() {
         state.pane_states.get("%1"),
         Some(PaneSeedState::Pending { .. })
     ));
+}
+
+/// A pane's capture leaves membership with the pane.
+///
+/// Only the metadata block clears a ledger entry, and a capture whose marker is
+/// filtered away for leaving membership never reaches one. Left behind, that
+/// entry outlives the pane: the id is re-added later, every seed it asks for is
+/// coalesced against a photograph nobody is taking, and the pane stays blank
+/// for as long as the control client lives.
+#[test]
+fn a_pane_leaving_membership_takes_its_capture_out_of_the_ledger() {
+    let (mut state, _harness) = Harness::new(&["%1".into(), "%2".into()]);
+    let ledger = Mutex::new(HashSet::from(["%1".to_owned(), "%2".to_owned()]));
+
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &ledger,
+    );
+
+    assert_eq!(
+        ledger.lock().unwrap().iter().cloned().collect::<Vec<_>>(),
+        vec!["%2".to_owned()]
+    );
+}
+
+/// Every exit from a command block frees the capture ledger, the drained one
+/// included.
+///
+/// A block is drained because the capture inside it was abandoned — a
+/// membership change, a resnapshot — so nothing is going to answer it. The
+/// ledger's one job is to suppress a second photograph while one is coming, and
+/// an entry nobody will ever clear suppresses every seed this pane asks for for
+/// as long as the client lives.
+#[test]
+fn a_drained_block_that_errors_frees_the_capture_ledger() {
+    let (mut state, harness) = Harness::new(&["%1".into()]);
+    let tag = CommandTag {
+        timestamp: 1,
+        number: 1,
+        flags: 1,
+    };
+    state.command_block = CommandBlock::Draining { tag };
+    harness
+        .capture_in_flight
+        .lock()
+        .unwrap()
+        .insert("%1".into());
+
+    state.handle(
+        ControlRecord::Error {
+            tag,
+            arguments: "1 2 1".into(),
+        },
+        harness.runtime(),
+    );
+
+    assert!(
+        harness.capture_in_flight.lock().unwrap().is_empty(),
+        "a drained capture stayed in the ledger and would silence the seed that replaces it"
+    );
+    assert!(matches!(state.command_block, CommandBlock::None));
+}
+
+/// A resnapshot photographs the panes somebody is looking at.
+///
+/// A hidden pane's screen is discarded on the way out — only a visible pane's
+/// seed is emitted — so capturing it is work tmux does for nobody, and its
+/// reveal takes a fresh photograph regardless. What it must not do is answer
+/// that reveal with the tail it was holding when the stream lost bytes, so the
+/// pane is marked as owing a seed here instead of being captured.
+#[test]
+fn a_resnapshot_photographs_the_visible_panes_and_indebts_the_hidden_ones() {
+    let (mut state, harness) = Harness::new(&["%1".into(), "%2".into()]);
+    {
+        let mut resources = harness.resources.lock().unwrap();
+        resources.set_visible("%1", true, 1);
+        resources.set_visible("%2", false, 1);
+    }
+
+    state.resnapshot_all(&harness.writer, &harness.resources, &harness.stopped);
+
+    assert_eq!(harness.writes(), vec![("%1".into(), false)]);
+    assert!(matches!(
+        state.pane_states.get("%1"),
+        Some(PaneSeedState::Pending { .. })
+    ));
+    assert!(matches!(
+        state.pane_states.get("%2"),
+        Some(PaneSeedState::Live)
+    ));
+    let resources = harness.resources.lock().unwrap();
+    assert!(resources.get("%2").unwrap().requires_seed);
+    assert!(!resources.get("%1").unwrap().requires_seed);
 }
 
 #[test]
@@ -613,6 +732,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
             resources: &resources,
             terminal_generation: &generation,
             stopped: &stopped,
+            capture_in_flight: &Mutex::new(HashSet::new()),
             output_credit: &output_credit,
             emission_order: &emission_order,
             topology_trigger: &topology_trigger,
@@ -708,4 +828,282 @@ fn dropping_the_sequencer_receiver_releases_a_parked_terminal_emitter() {
     }
     emitted.join().unwrap();
     assert!(overflowed.load(Ordering::Acquire));
+}
+
+/// The scrollback a screen-only seed leaves behind, fetched on demand.
+///
+/// The whole point of the block is what it does *not* do: the pane stays
+/// exactly as pending or as live as it was, the generation counter does not
+/// move, and no seed is built. It is an answer to a question, delivered beside
+/// the output stream rather than inside it.
+#[test]
+fn a_history_block_answers_with_the_scrollback_and_moves_nothing_else() {
+    let (mut state, mut harness) = Harness::new(&["%1".into()]);
+    let generation_before = harness.generation.load(Ordering::Acquire);
+
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"__ADE_HISTORY__:300:1".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    assert_eq!(state.expected_history.as_deref(), Some("%1"));
+
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    for line in [b"older".to_vec(), b"newer".to_vec()] {
+        state.handle(ControlRecord::CommandOutput(line), harness.runtime());
+    }
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    // Nothing yet: the rows wait for the size probe, so the renderer gets one
+    // answer that says both what is above its screen and whether that is all.
+    assert!(harness.events().is_empty());
+
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"__ADE_HISTORY_META__:1200".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+
+    let events = harness.events();
+    assert_eq!(
+        kinds(&events),
+        vec![(v1::EventKind::TerminalHistory, String::new())]
+    );
+    let terminal = events[0].terminal.as_ref().expect("history carries bytes");
+    assert_eq!(terminal.pane_id, "%1");
+    assert_eq!(terminal.data, b"older\r\nnewer");
+    // The whole point of the third block: 1,200 lines above the screen, which
+    // is how the renderer knows a 300-line page from 40 above the display has
+    // more behind it.
+    assert_eq!(terminal.history_size, 1_200);
+    assert!(terminal.history_size_known);
+    // Not part of the output stream: it claims no place in the generation
+    // ordering, so a renderer's monotonic gate can never discard output because
+    // a history answer went past it.
+    assert_eq!(terminal.generation, 0);
+    assert_eq!(
+        harness.generation.load(Ordering::Acquire),
+        generation_before
+    );
+    assert!(matches!(
+        state.pane_states.get("%1"),
+        Some(PaneSeedState::Pending { .. })
+    ));
+    assert!(state.expected_history.is_none());
+    assert!(state.pending_history_meta.is_none());
+    assert!(harness.writes().is_empty());
+}
+
+/// The size probe is targeted, so a pane that goes away mid-request rejects it
+/// — and the rows tmux already handed over are still the page that was asked
+/// for. They are delivered without a size, which the renderer reads as "ask
+/// again", never as the top of the history. Dropping them instead would leave
+/// the pane waiting on a request nothing will ever answer.
+#[test]
+fn a_history_whose_size_probe_is_rejected_is_still_answered_without_one() {
+    let (mut state, mut harness) = Harness::new(&["%1".into()]);
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"__ADE_HISTORY__:300:1".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"older".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::Error {
+            tag: TAG,
+            arguments: "1 7 1".into(),
+        },
+        harness.runtime(),
+    );
+
+    let events = harness.events();
+    let history = events
+        .iter()
+        .find(|event| event.kind == i32::from(v1::EventKind::TerminalHistory))
+        .expect("the captured page is still answered");
+    let terminal = history.terminal.as_ref().expect("history carries bytes");
+    assert_eq!(terminal.data, b"older");
+    assert!(!terminal.history_size_known);
+    assert_eq!(terminal.history_size, 0);
+    // And the sequence is over: nothing is left to be mistaken for the missing
+    // half of it.
+    assert!(state.pending_history_meta.is_none());
+    assert!(state.expected_history.is_none());
+}
+
+/// A probe that answered something this host cannot read is the same answer as
+/// one that did not answer at all: a page to ask about again, never the end.
+#[test]
+fn a_history_size_that_is_not_a_number_is_no_size_at_all() {
+    assert_eq!(
+        history_size_marker(b"__ADE_HISTORY_META__:1200"),
+        Some(1_200)
+    );
+    assert_eq!(history_size_marker(b"__ADE_HISTORY_META__:0"), Some(0));
+    assert_eq!(history_size_marker(b"__ADE_HISTORY_META__:"), None);
+    assert_eq!(
+        history_size_marker(b"__ADE_HISTORY_META__:#{history_size}"),
+        None
+    );
+    // Not the leading marker, which names a pane rather than a size.
+    assert_eq!(history_size_marker(b"__ADE_HISTORY__:300:1"), None);
+}
+
+/// A history marker for a pane this client does not own is addressed to
+/// nobody, and the block after it must not be read as one.
+#[test]
+fn a_history_marker_for_an_unowned_pane_correlates_to_nothing() {
+    let (mut state, harness) = Harness::new(&["%1".into()]);
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"__ADE_HISTORY__:2000:9".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    assert!(state.expected_history.is_none());
+}
+
+/// Drives one untargeted marker block — the shape every correlation starts as.
+fn marker_block(state: &mut StreamState, harness: &Harness, marker: &[u8]) {
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(marker.to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+}
+
+/// A recovery releases *every* correlation slot, not the two it happens to
+/// name.
+///
+/// `start_block` reads `expected_history` before `expected_capture`, so a
+/// history slot outliving a resnapshot is spent on the recovery's own capture:
+/// the marker line goes out to the desktop as scrollback, the screen behind it
+/// falls through as an unrecognised block, and the pane sits Pending with
+/// nothing left coming to seed it.
+#[test]
+fn a_resnapshot_releases_a_pending_history_so_its_own_capture_is_read_as_one() {
+    let (mut state, mut harness) = Harness::new(&["%1".into()]);
+    marker_block(&mut state, &harness, b"__ADE_HISTORY__:2000:1");
+    assert_eq!(state.expected_history.as_deref(), Some("%1"));
+
+    state.resnapshot_all(&harness.writer, &harness.resources, &harness.stopped);
+    assert!(state.expected_history.is_none());
+    assert_eq!(harness.writes(), vec![("%1".to_owned(), false)]);
+
+    marker_block(&mut state, &harness, b"__ADE_CAPTURE__:1");
+    assert_eq!(state.expected_capture.as_deref(), Some("%1"));
+    assert!(state.expected_history.is_none());
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    assert!(matches!(
+        state.command_block,
+        CommandBlock::CapturePrimary { .. }
+    ));
+    // Nothing was published as the answer to a question nobody asked.
+    assert_eq!(harness.events(), Vec::new());
 }

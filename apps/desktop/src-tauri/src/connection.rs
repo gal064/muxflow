@@ -970,7 +970,7 @@ pub async fn set_terminal_visibility(
     let request = terminal_visibility_request(
         visibility.pane_id.to_owned(),
         visibility.visible,
-        visibility.serialized_snapshot.to_vec(),
+        visibility.renderer_holds_snapshot,
         visibility.terminal_epoch,
         visibility.output_generation,
         client.terminal_epoch.load(Ordering::Acquire),
@@ -985,15 +985,21 @@ struct TerminalVisibilityFrame<'a> {
     client_id: &'a str,
     pane_id: &'a str,
     visible: bool,
+    renderer_holds_snapshot: bool,
     terminal_epoch: u64,
     output_generation: u64,
-    serialized_snapshot: &'a [u8],
 }
 
 /// `u16` client-id length, client id, `u16` pane-id length, pane id, one
-/// visibility byte, two big-endian `u64`s, then the snapshot bytes.
+/// visibility byte, one flags byte, two big-endian `u64`s.
+///
+/// The frame used to end with the renderer's serialized screen, up to 4 MiB of
+/// it. It carries no screen at all now — the renderer keeps its own, and this
+/// frame's flags byte is how it says so — but the body stays raw, because the
+/// visibility call is on the switch path and JSON would put a stringify and a
+/// parse on the thread that is painting the tab the user just switched to.
 fn decode_terminal_visibility_frame(body: &[u8]) -> Result<TerminalVisibilityFrame<'_>, String> {
-    const SCALARS: usize = 1 + 8 + 8;
+    const SCALARS: usize = 1 + 1 + 8 + 8;
     let mut offset = 0;
     let client_id = take_length_prefixed(body, &mut offset)?;
     let pane_id = take_length_prefixed(body, &mut offset)?;
@@ -1001,18 +1007,25 @@ fn decode_terminal_visibility_frame(body: &[u8]) -> Result<TerminalVisibilityFra
         .checked_add(SCALARS)
         .filter(|end| *end <= body.len())
         .ok_or("terminal visibility frame is truncated")?;
+    if scalars_end != body.len() {
+        return Err("terminal visibility frame carries an unexpected payload".into());
+    }
     let visible = match body[offset] {
         0 => false,
         1 => true,
         _ => return Err("terminal visibility flag must be 0 or 1".into()),
     };
+    let flags = body[offset + 1];
+    if flags & !1 != 0 {
+        return Err("terminal visibility frame has unknown flags".into());
+    }
     let terminal_epoch = u64::from_be_bytes(
-        body[offset + 1..offset + 9]
+        body[offset + 2..offset + 10]
             .try_into()
             .map_err(|_| "terminal visibility epoch is truncated")?,
     );
     let output_generation = u64::from_be_bytes(
-        body[offset + 9..scalars_end]
+        body[offset + 10..scalars_end]
             .try_into()
             .map_err(|_| "terminal visibility cutoff is truncated")?,
     );
@@ -1020,9 +1033,9 @@ fn decode_terminal_visibility_frame(body: &[u8]) -> Result<TerminalVisibilityFra
         client_id,
         pane_id,
         visible,
+        renderer_holds_snapshot: flags & 1 == 1,
         terminal_epoch,
         output_generation,
-        serialized_snapshot: &body[scalars_end..],
     })
 }
 
@@ -1056,15 +1069,12 @@ const STALE_VISIBILITY_EPOCH_CODE: &str = "terminal_visibility_epoch_rejected";
 fn terminal_visibility_request(
     pane_id: String,
     visible: bool,
-    serialized_snapshot: Vec<u8>,
+    renderer_holds_snapshot: bool,
     terminal_epoch: u64,
     output_generation: u64,
     current_epoch: u64,
 ) -> Result<v1::Request, String> {
     validate_tmux_id(&pane_id, '%')?;
-    if serialized_snapshot.len() > 4 * 1024 * 1024 {
-        return Err("serialized terminal snapshot exceeds 4 MiB".into());
-    }
     if terminal_epoch == 0 || terminal_epoch != current_epoch {
         return Err(format!(
             "{STALE_VISIBILITY_EPOCH_CODE}: terminal visibility checkpoint belongs to a stale connection epoch"
@@ -1073,10 +1083,10 @@ fn terminal_visibility_request(
     Ok(v1::Request {
         operation: v1::Operation::SetTerminalVisibility.into(),
         scope: pane_id,
-        data: serialized_snapshot,
         visible,
         terminal_epoch,
         terminal_generation_cutoff: output_generation,
+        terminal_renderer_holds_snapshot: renderer_holds_snapshot,
         ..Default::default()
     })
 }
@@ -1093,6 +1103,50 @@ pub async fn request_terminal_seed(
         .await
         .map_err(|error| format!("terminal seed task failed: {error}"))??;
     Ok(())
+}
+
+/// Asks the host for the scrollback above one pane's screen.
+///
+/// Kept separate from `request_terminal_seed` rather than folded into it with a
+/// flag: a seed request is also a claim that the pane is visible and settles the
+/// pane's seed debt, and neither is true of a photograph of the scrollback.
+///
+/// `skip_lines` is the scrollback the renderer is already holding. tmux
+/// measures its capture from the pane's current display, so a pane that has
+/// printed since it was seeded would otherwise be handed the rows that scrolled
+/// off in the meantime a second time.
+#[tauri::command]
+pub async fn request_terminal_history(
+    client_id: String,
+    pane_id: String,
+    lines: u32,
+    skip_lines: u32,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    let request = terminal_history_request(pane_id, lines, skip_lines)?;
+    let client = get_client(&clients, &client_id)?;
+    tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("terminal history task failed: {error}"))??;
+    Ok(())
+}
+
+fn terminal_history_request(
+    pane_id: String,
+    lines: u32,
+    skip_lines: u32,
+) -> Result<v1::Request, String> {
+    validate_tmux_id(&pane_id, '%')?;
+    if lines == 0 {
+        return Err("terminal history request must ask for at least one line".into());
+    }
+    Ok(v1::Request {
+        operation: v1::Operation::RequestTerminalHistory.into(),
+        scope: pane_id,
+        terminal_history_lines: lines,
+        terminal_history_skip_lines: skip_lines,
+        ..Default::default()
+    })
 }
 
 fn terminal_seed_request(pane_id: String) -> Result<v1::Request, String> {

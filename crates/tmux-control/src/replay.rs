@@ -72,10 +72,6 @@ impl ScreenSeeder {
                 .collect(),
         }
     }
-
-    pub fn requires_resnapshot(&self) -> bool {
-        self.overflowed
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,14 +84,29 @@ pub enum PaneResourceState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneResource {
     pub state: PaneResourceState,
-    pub serialized_snapshot: Vec<u8>,
     pub raw_tail: Vec<u8>,
     pub generation: u64,
     pub snapshot_generation: u64,
     pub tail_through_generation: u64,
     pub requires_seed: bool,
+    /// The renderer's own cached screen is the recovery base, and `raw_tail` is
+    /// the complete output since the checkpoint this store recorded for it.
+    /// Never set together with `requires_seed`.
+    pub resume_from_renderer: bool,
     pub recovery_reason: String,
 }
+
+/// The largest tail a reveal answers with instead of a photograph.
+///
+/// A screen-only capture of a 200x50 pane is ~10 KB, and that is what the
+/// alternative answer costs. Below about one and a half screens the tail is
+/// both cheaper and better — it preserves the renderer's scrollback continuity
+/// rather than replacing its buffer — and above it the screen is cheaper and
+/// fresher. So the per-switch worst case is `panes-in-window * 16 KiB` (~48 KB
+/// for a three-pane window) and the ordinary case, an idle hidden pane, is
+/// zero. A pane that outgrows this is not a fault: it is a busy pane, and the
+/// answer to a busy pane is a photograph.
+pub const REVEAL_TAIL_BOUND: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputDisposition {
@@ -111,6 +122,21 @@ pub enum PaneDegradationCause {
     GlobalBudget,
     /// A hidden pane's raw output tail outgrew the per-pane budget.
     HiddenTailOverflow,
+}
+
+impl PaneDegradationCause {
+    /// Whether the owner of this store tells the desktop about this discard or
+    /// only counts it.
+    ///
+    /// A hidden pane outgrowing its tail bound is what a busy background pane
+    /// does, not a fault — its reveal is answered with a photograph — so the
+    /// service suppresses it. An eviction is the opposite: nobody asked for it
+    /// and nothing else will mention it. The predicate lives here so that the
+    /// service's filter and [`PaneResourceStore::record_degradation`]'s
+    /// latest-wins rule cannot disagree about which is which.
+    pub fn reportable(self) -> bool {
+        matches!(self, Self::GlobalBudget)
+    }
 }
 
 /// One pane whose recovery material this store discarded on its own.
@@ -136,6 +162,10 @@ pub struct PaneDegradation {
 /// idempotent), so this bound is only ever reached by a store holding more
 /// panes than any topology this host attaches to.
 const MAX_RECORDED_PANE_DEGRADATIONS: usize = 256;
+
+/// Why a reveal is answered with a photograph rather than a tail.
+const UNVERIFIED_REVEAL_REASON: &str =
+    "the reveal did not match the renderer handoff this host recorded";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisibilityCheckpoint {
@@ -209,6 +239,9 @@ pub struct PaneResourceStore {
     resources: HashMap<String, PaneResource>,
     output_journals: HashMap<String, VecDeque<BufferedOutput>>,
     output_journal_bytes: HashMap<String, usize>,
+    /// The newest sequence [`PaneResourceStore::trim_journal_to_tail_bound`]
+    /// dropped from a pane's journal, for as long as that journal exists.
+    journal_trimmed_through: HashMap<String, u64>,
     handoff_checkpoints: HashMap<String, VisibilityCheckpoint>,
     degradations: Vec<PaneDegradation>,
     retained_lru: Lru,
@@ -239,6 +272,7 @@ impl PaneResourceStore {
             resources: HashMap::new(),
             output_journals: HashMap::new(),
             output_journal_bytes: HashMap::new(),
+            journal_trimmed_through: HashMap::new(),
             handoff_checkpoints: HashMap::new(),
             degradations: Vec::new(),
             retained_lru: Lru::default(),
@@ -265,12 +299,12 @@ impl PaneResourceStore {
                 } else {
                     PaneResourceState::HiddenBuffered
                 },
-                serialized_snapshot: Vec::new(),
                 raw_tail: Vec::new(),
                 generation,
                 snapshot_generation: generation,
                 tail_through_generation: generation,
                 requires_seed: false,
+                resume_from_renderer: false,
                 recovery_reason: String::new(),
             },
         );
@@ -291,8 +325,7 @@ impl PaneResourceStore {
                 resource.tail_through_generation = generation;
             }
             self.handoff_checkpoints.remove(pane_id);
-            self.output_journals.remove(pane_id);
-            self.output_journal_bytes.remove(pane_id);
+            self.forget_journal(pane_id);
         } else if let Some(resource) = self.resources.get_mut(pane_id) {
             if resource.state != PaneResourceState::Released {
                 resource.state = PaneResourceState::HiddenBuffered;
@@ -305,13 +338,17 @@ impl PaneResourceStore {
         self.enforce_limits();
     }
 
-    /// Atomically transfers renderer ownership to the host. The renderer
-    /// snapshot includes output through `checkpoint.generation`; output
-    /// observed by the host after that cutoff is retained exactly once.
+    /// Atomically transfers renderer ownership to the host, storing no copy of
+    /// the renderer's screen.
+    ///
+    /// The renderer keeps that screen; what this records is the checkpoint it
+    /// kept it at, and the output observed after that cutoff — retained exactly
+    /// once, and only up to [`REVEAL_TAIL_BOUND`]. The checkpoint is the whole
+    /// authority for the reveal: without a stored screen, the only thing that
+    /// makes a tail safe to write is agreement about which screen it continues.
     pub fn hide_with_checkpoint(
         &mut self,
         pane_id: &str,
-        snapshot: Vec<u8>,
         checkpoint: VisibilityCheckpoint,
         generation: u64,
     ) -> Result<PaneResource, String> {
@@ -346,6 +383,16 @@ impl PaneResourceStore {
             .output_journal_bytes
             .remove(pane_id)
             .unwrap_or_default();
+        // Trimming drops the *oldest* entries, and this cutoff is normally
+        // newer than all of them: the renderer was drawing that output as it
+        // arrived, so a tail starting above the watermark quotes nothing that
+        // was dropped and has lost nothing. Only a cutoff below the last
+        // sequence dropped leaves a hole in the tail, and only that costs this
+        // pane its resume.
+        let trimmed_past_cutoff = self
+            .journal_trimmed_through
+            .remove(pane_id)
+            .is_some_and(|watermark| checkpoint.generation < watermark);
         let mut tail = Vec::with_capacity(journal_bytes);
         let mut tail_through_generation = checkpoint.generation;
         if let Some(journal) = self.output_journals.remove(pane_id) {
@@ -356,25 +403,19 @@ impl PaneResourceStore {
                 }
             }
         }
-        let exceeds_resource = snapshot.len().saturating_add(tail.len()) > self.max_resource_bytes;
+        // No bound is checked on `tail`: it cannot exceed one. Every
+        // `record_output` trims this pane's journal back under
+        // `max_resource_bytes` before returning, and the tail is a suffix of
+        // that journal — so the hide has nothing left to reject, and the
+        // release it used to perform here was unreachable.
         let resource = self.resources.get_mut(pane_id).expect("resource ensured");
         resource.generation = tail_through_generation.max(generation);
         resource.snapshot_generation = checkpoint.generation;
         resource.tail_through_generation = tail_through_generation;
-        if resource.requires_seed {
+        if resource.requires_seed || trimmed_past_cutoff {
             release(resource, "visible output handoff journal was not retained");
-        } else if snapshot.is_empty() {
-            // An empty IPC payload cannot distinguish a valid blank renderer
-            // serialization from an omitted oversized/refused serialization.
-            // Never claim HiddenBuffered without a usable recovery base: the
-            // reveal path will request one authoritative seed instead of
-            // deferring later output until its overflow bound.
-            release(resource, "renderer handoff omitted a recoverable snapshot");
-        } else if exceeds_resource {
-            release(resource, "renderer handoff exceeded the hidden-pane budget");
         } else {
             resource.state = PaneResourceState::HiddenBuffered;
-            resource.serialized_snapshot = snapshot;
             resource.raw_tail = tail;
             resource.requires_seed = false;
             resource.recovery_reason.clear();
@@ -390,40 +431,98 @@ impl PaneResourceStore {
             .clone())
     }
 
-    /// Makes a pane renderer-owned and consumes host recovery bytes once.
-    pub fn reveal(&mut self, pane_id: &str, generation: u64) -> Option<PaneResource> {
+    /// Makes a pane renderer-owned and answers its reveal exactly once.
+    ///
+    /// `holding` is the checkpoint the renderer says it is still showing, or
+    /// `None` from a renderer that kept nothing. The tail is handed back only
+    /// when that checkpoint is the one this store recorded for the handoff and
+    /// the pane is still buffering against it; every other case — a renderer
+    /// holding nothing, a new epoch, an eviction, a [`Self::require_seed`], a
+    /// reveal for a handoff this host never saw, a pane already visible — is
+    /// answered with `requires_seed` and no bytes at all. Since the host keeps
+    /// no copy of the screen, that agreement is the only thing that makes a
+    /// tail safe to write, and a tail written onto the wrong screen is a defect
+    /// nothing later repairs.
+    pub fn reveal(
+        &mut self,
+        pane_id: &str,
+        generation: u64,
+        holding: Option<VisibilityCheckpoint>,
+    ) -> Option<PaneResource> {
         let before = self.accounted_state(pane_id);
+        // A renderer that kept nothing is not a disagreement: it is a cache
+        // miss, the ordinary way a pane comes back after its state was dropped,
+        // and the pane simply seeds. Only a renderer naming a checkpoint this
+        // host did not record is the mismatch worth telling the user about —
+        // the desktop puts this string on screen as a banner.
+        let mismatched =
+            holding.is_some() && self.handoff_checkpoints.get(pane_id).copied() != holding;
+        let resumes = holding.is_some()
+            && !mismatched
+            && self.resources.get(pane_id).is_some_and(|resource| {
+                resource.state == PaneResourceState::HiddenBuffered && !resource.requires_seed
+            });
         let resource = self.resources.get_mut(pane_id)?;
+        // A pane this store already believes is renderer-owned has no handoff
+        // to verify and no bytes to hand back: this is a re-assertion of a
+        // visibility nothing took away — the degraded-pane watchdog's, or a
+        // reveal the desktop sent twice. Answering it like a fresh reveal would
+        // stamp `requires_seed` onto a working pane, which costs a capture and
+        // blanks the buffer it is drawing correctly. Its own seed debt, if it
+        // has one, is reported unchanged.
         if resource.state == PaneResourceState::Visible {
             resource.generation = generation;
             return Some(PaneResource {
                 state: PaneResourceState::Visible,
-                serialized_snapshot: Vec::new(),
                 raw_tail: Vec::new(),
                 generation,
                 snapshot_generation: generation,
                 tail_through_generation: generation,
                 requires_seed: resource.requires_seed,
+                resume_from_renderer: false,
                 recovery_reason: resource.recovery_reason.clone(),
             });
         }
-        let recovery = PaneResource {
-            state: resource.state,
-            serialized_snapshot: std::mem::take(&mut resource.serialized_snapshot),
-            raw_tail: std::mem::take(&mut resource.raw_tail),
-            generation: resource.generation,
-            snapshot_generation: resource.snapshot_generation,
-            tail_through_generation: resource.tail_through_generation,
-            requires_seed: resource.requires_seed,
-            recovery_reason: resource.recovery_reason.clone(),
+        let answer = if resumes {
+            PaneResource {
+                state: PaneResourceState::Visible,
+                raw_tail: std::mem::take(&mut resource.raw_tail),
+                generation,
+                snapshot_generation: resource.snapshot_generation,
+                tail_through_generation: resource.tail_through_generation,
+                requires_seed: false,
+                resume_from_renderer: true,
+                recovery_reason: String::new(),
+            }
+        } else {
+            resource.raw_tail.clear();
+            PaneResource {
+                state: PaneResourceState::Visible,
+                raw_tail: Vec::new(),
+                generation,
+                snapshot_generation: generation,
+                tail_through_generation: generation,
+                requires_seed: true,
+                resume_from_renderer: false,
+                recovery_reason: if !resource.recovery_reason.is_empty() {
+                    resource.recovery_reason.clone()
+                } else if mismatched {
+                    UNVERIFIED_REVEAL_REASON.to_owned()
+                } else {
+                    String::new()
+                },
+            }
         };
         resource.state = PaneResourceState::Visible;
         resource.generation = generation;
-        self.output_journals.remove(pane_id);
-        self.output_journal_bytes.remove(pane_id);
+        resource.snapshot_generation = generation;
+        resource.tail_through_generation = generation;
+        resource.requires_seed = !resumes;
+        resource.recovery_reason = answer.recovery_reason.clone();
+        self.forget_journal(pane_id);
         self.handoff_checkpoints.remove(pane_id);
         self.refresh_accounting(pane_id, before);
-        Some(recovery)
+        Some(answer)
     }
 
     /// Makes a pane renderer-owned because the renderer explicitly asked for a
@@ -436,19 +535,20 @@ impl PaneResourceStore {
     /// capture stored and never emitted, and the request produces nothing at
     /// all, forever.
     ///
-    /// The hidden recovery material is discarded exactly as [`Self::reveal`]
-    /// discards it: the authoritative seed that follows replaces it, and
-    /// keeping a stale snapshot beside a fresher one is what would then be
-    /// replayed twice. Returns whether the pane actually had to be forced,
-    /// which is the only part worth counting.
+    /// The hidden recovery material — the buffered tail and the handoff
+    /// checkpoint — is discarded exactly as [`Self::reveal`] discards it: the
+    /// authoritative seed that follows is the whole screen, and a tail kept
+    /// beside it would be replayed on top of output it is already part of.
+    /// Returns whether the pane actually had to be forced, which is the only
+    /// part worth counting.
     pub fn reveal_for_seed_request(&mut self, pane_id: &str, generation: u64) -> bool {
         match self.resources.get(pane_id).map(|resource| resource.state) {
             Some(PaneResourceState::Visible) => {
-                self.reveal(pane_id, generation);
+                self.reveal(pane_id, generation, None);
                 false
             }
             Some(_) => {
-                self.reveal(pane_id, generation);
+                self.reveal(pane_id, generation, None);
                 true
             }
             // A pane with no resource at all is hidden by `is_hidden`'s own
@@ -460,28 +560,96 @@ impl PaneResourceStore {
         }
     }
 
-    pub fn snapshot(&mut self, pane_id: &str, snapshot: Vec<u8>, generation: u64) {
+    /// Records that an authoritative seed was captured for this pane, without
+    /// keeping a copy of it.
+    ///
+    /// The seed goes to the renderer, which is the only side that needs a
+    /// screen; what the host keeps is the boundary it is current through, so
+    /// the tail that follows starts a fresh epoch and the pane stops owing a
+    /// seed. Storing the bytes as well would put a whole screen back inside the
+    /// per-pane bound this store now enforces — the seed would be refused for
+    /// being too large, which releases the pane, which asks for another seed.
+    ///
+    /// The recorded handoff goes with it, and that is the whole of why this is
+    /// safe for a pane that is *hidden*. A capture can complete over a hidden
+    /// pane — a resnapshot, a flow-control pause — and the seed it produces is
+    /// discarded on the way out, because only a visible pane's seed is emitted.
+    /// Leaving the checkpoint behind would let the reveal that follows match it
+    /// and answer "resume, nothing printed while you were away" with the empty
+    /// tail this call just cleared: everything the pane printed while hidden,
+    /// silently gone. Without the checkpoint the reveal cannot match, so it
+    /// answers with a photograph.
+    pub fn seeded(&mut self, pane_id: &str, generation: u64) {
         self.ensure(pane_id, false, generation);
         let before = self.accounted_state(pane_id);
-        self.output_journals.remove(pane_id);
-        self.output_journal_bytes.remove(pane_id);
+        self.forget_journal(pane_id);
+        self.handoff_checkpoints.remove(pane_id);
         let resource = self.resources.get_mut(pane_id).expect("resource ensured");
-        if snapshot.len() > self.max_resource_bytes {
-            release(
-                resource,
-                "serialized snapshot exceeded the hidden-pane budget",
-            );
-        } else {
-            resource.serialized_snapshot = snapshot;
-            resource.raw_tail.clear();
-            resource.snapshot_generation = generation;
-            resource.tail_through_generation = generation;
-            resource.requires_seed = false;
-            resource.recovery_reason.clear();
-        }
+        resource.raw_tail.clear();
+        resource.snapshot_generation = generation;
+        resource.tail_through_generation = generation;
+        resource.requires_seed = false;
+        resource.recovery_reason.clear();
         resource.generation = generation;
         self.refresh_accounting(pane_id, before);
         self.enforce_limits();
+    }
+
+    /// Forgets a visible pane's handoff journal and everything derived from it.
+    ///
+    /// The trim watermark is part of that journal: it says which of *these*
+    /// entries were dropped, and it means nothing about the entries a later
+    /// visible window records.
+    fn forget_journal(&mut self, pane_id: &str) {
+        self.output_journals.remove(pane_id);
+        self.output_journal_bytes.remove(pane_id);
+        self.journal_trimmed_through.remove(pane_id);
+    }
+
+    /// Drops the oldest journal entries a hide could never hand back anyway.
+    ///
+    /// A visible pane's journal is read for one purpose: the tail a hide gives
+    /// the host, which is the output after the renderer's cutoff and is bounded
+    /// by `max_resource_bytes`. Anything older than the last bound's worth of
+    /// bytes can only ever be part of a tail that overflows that bound, and an
+    /// overflowing tail is answered with a photograph rather than with a
+    /// truncated one. Keeping it is how a build log in one visible pane grew
+    /// until the global budget evicted some *other* pane's recovery material —
+    /// a seed and a blank frame for a pane that was working.
+    ///
+    /// What is dropped is recorded as a watermark rather than as a verdict.
+    /// These are the *oldest* entries, and the cutoff a later hide carries is
+    /// normally newer than all of them — an active pane's renderer is drawing
+    /// the output as it arrives — so a tail that quotes nothing below the
+    /// watermark has lost nothing. Only [`Self::hide_with_checkpoint`] knows
+    /// which cutoff it was, so only it can say whether this cost the pane its
+    /// resume; deciding here instead is what put a blank frame and a seed in
+    /// front of most switches back to a busy pane.
+    fn trim_journal_to_tail_bound(&mut self, pane_id: &str) {
+        let Some(bytes) = self.output_journal_bytes.get_mut(pane_id) else {
+            return;
+        };
+        if *bytes <= self.max_resource_bytes {
+            return;
+        }
+        let Some(journal) = self.output_journals.get_mut(pane_id) else {
+            return;
+        };
+        let mut trimmed_through = None;
+        while *bytes > self.max_resource_bytes {
+            let Some(oldest) = journal.pop_front() else {
+                break;
+            };
+            *bytes -= oldest.bytes.len();
+            trimmed_through = Some(oldest.sequence);
+        }
+        if let Some(sequence) = trimmed_through {
+            let watermark = self
+                .journal_trimmed_through
+                .entry(pane_id.to_owned())
+                .or_default();
+            *watermark = (*watermark).max(sequence);
+        }
     }
 
     /// Records output before deciding whether to emit it. This mutex-protected
@@ -508,6 +676,7 @@ impl PaneResourceStore {
                     .output_journal_bytes
                     .entry(pane_id.to_owned())
                     .or_default() += bytes.len();
+                self.trim_journal_to_tail_bound(pane_id);
                 if let Some(resource) = self.resources.get_mut(pane_id) {
                     resource.generation = generation;
                     resource.tail_through_generation = generation;
@@ -542,10 +711,6 @@ impl PaneResourceStore {
         }
     }
 
-    pub fn append_if_hidden(&mut self, pane_id: &str, bytes: &[u8], generation: u64) {
-        self.append(pane_id, bytes, generation);
-    }
-
     fn append_hidden(&mut self, pane_id: &str, bytes: &[u8], generation: u64) {
         record_pane_resource_measurement!(|measurements: &mut PaneResourceMeasurements| {
             measurements.append_operations += 1;
@@ -554,25 +719,24 @@ impl PaneResourceStore {
         let before = self.accounted_state(pane_id);
         let resource = self.resources.get_mut(pane_id).expect("resource ensured");
         const OVERFLOW_REASON: &str = "raw output tail exceeded the hidden-pane budget";
-        let released = if resource
-            .serialized_snapshot
-            .len()
-            .saturating_add(resource.raw_tail.len())
-            .saturating_add(bytes.len())
-            > self.max_resource_bytes
-        {
-            release(resource, OVERFLOW_REASON);
-            true
-        } else {
-            resource.raw_tail.extend_from_slice(bytes);
-            resource.tail_through_generation = generation;
-            false
-        };
+        let released =
+            if resource.raw_tail.len().saturating_add(bytes.len()) > self.max_resource_bytes {
+                release(resource, OVERFLOW_REASON);
+                true
+            } else {
+                resource.raw_tail.extend_from_slice(bytes);
+                resource.tail_through_generation = generation;
+                false
+            };
         resource.generation = generation;
         if released {
-            // Silent until this: a hidden pane that overran its tail budget was
-            // released with nothing said, so the renderer that eventually
-            // revealed it waited on recovery material that had been discarded.
+            // Recorded, and — unlike an eviction — not reported to the desktop.
+            // A hidden pane outgrowing `REVEAL_TAIL_BOUND` is the expected
+            // outcome for a busy pane, not a fault: its reveal answers with a
+            // photograph, which is fresher than the tail would have been.
+            // Emitting here would put an ordered pane-resource event in front
+            // of every switch for every noisy background pane, which is the
+            // traffic this bound exists to remove. The counter still moves.
             self.record_degradation(PaneDegradation {
                 pane_id: pane_id.to_owned(),
                 cause: PaneDegradationCause::HiddenTailOverflow,
@@ -608,12 +772,12 @@ impl PaneResourceStore {
         let resource = self.resources.get_mut(pane_id)?;
         let recovery = PaneResource {
             state: resource.state,
-            serialized_snapshot: std::mem::take(&mut resource.serialized_snapshot),
             raw_tail: std::mem::take(&mut resource.raw_tail),
             generation: resource.generation,
             snapshot_generation: resource.snapshot_generation,
             tail_through_generation: resource.tail_through_generation,
             requires_seed: resource.requires_seed,
+            resume_from_renderer: false,
             recovery_reason: resource.recovery_reason.clone(),
         };
         self.refresh_accounting(pane_id, before);
@@ -622,8 +786,7 @@ impl PaneResourceStore {
 
     pub fn remove(&mut self, pane_id: &str) {
         let before = self.accounted_state(pane_id);
-        self.output_journals.remove(pane_id);
-        self.output_journal_bytes.remove(pane_id);
+        self.forget_journal(pane_id);
         self.handoff_checkpoints.remove(pane_id);
         self.resources.remove(pane_id);
         self.refresh_accounting(pane_id, before);
@@ -636,8 +799,7 @@ impl PaneResourceStore {
     pub fn require_seed(&mut self, pane_id: &str, reason: &str) {
         self.ensure(pane_id, false, 0);
         let before = self.accounted_state(pane_id);
-        self.output_journals.remove(pane_id);
-        self.output_journal_bytes.remove(pane_id);
+        self.forget_journal(pane_id);
         self.handoff_checkpoints.remove(pane_id);
         release(
             self.resources.get_mut(pane_id).expect("resource ensured"),
@@ -660,12 +822,7 @@ impl PaneResourceStore {
 
     fn accounted_state(&self, pane_id: &str) -> AccountedState {
         let resource = self.resources.get(pane_id);
-        let resource_bytes = resource.map_or(0, |resource| {
-            resource
-                .serialized_snapshot
-                .len()
-                .saturating_add(resource.raw_tail.len())
-        });
+        let resource_bytes = resource.map_or(0, |resource| resource.raw_tail.len());
         let journal_bytes = self
             .output_journal_bytes
             .get(pane_id)
@@ -724,10 +881,6 @@ impl PaneResourceStore {
         self.retained_panes
     }
 
-    pub fn retained_panes_for_measurement(&self) -> usize {
-        self.retained_panes()
-    }
-
     fn enforce_limits(&mut self) {
         while self.retained_panes() > self.max_hidden_panes
             || self.retained_bytes() > self.max_total_bytes
@@ -737,8 +890,7 @@ impl PaneResourceStore {
                 break;
             };
             let before = self.accounted_state(&pane_id);
-            self.output_journals.remove(&pane_id);
-            self.output_journal_bytes.remove(&pane_id);
+            self.forget_journal(&pane_id);
             let degradation = self.resources.get_mut(&pane_id).map(|resource| {
                 record_pane_resource_measurement!(|measurements: &mut PaneResourceMeasurements| {
                     measurements.evictions += 1;
@@ -749,7 +901,6 @@ impl PaneResourceStore {
                     "global pane-resource LRU capacity was exceeded"
                 };
                 if resource.state == PaneResourceState::Visible {
-                    resource.serialized_snapshot.clear();
                     resource.raw_tail.clear();
                     resource.requires_seed = true;
                     resource.recovery_reason = reason.into();
@@ -780,13 +931,22 @@ impl PaneResourceStore {
     /// Latest-wins per pane because the signal is idempotent — "this pane needs
     /// an authoritative seed" does not become truer by being recorded twice —
     /// and because that is what bounds this list without a drain.
+    ///
+    /// With one exception: a discard the owner does not report must never
+    /// displace one it does. A hidden pane that overflows its tail bound after
+    /// an eviction would otherwise swallow the eviction's entry on its way out,
+    /// and the drain would then have nothing to say about a pane whose recovery
+    /// material this store threw away unasked — the silence the record exists
+    /// to end.
     fn record_degradation(&mut self, degradation: PaneDegradation) {
         if let Some(existing) = self
             .degradations
             .iter_mut()
             .find(|existing| existing.pane_id == degradation.pane_id)
         {
-            *existing = degradation;
+            if degradation.cause.reportable() || !existing.cause.reportable() {
+                *existing = degradation;
+            }
             return;
         }
         if self.degradations.len() >= MAX_RECORDED_PANE_DEGRADATIONS {
@@ -804,9 +964,9 @@ impl PaneResourceStore {
 
 fn release(resource: &mut PaneResource, reason: &str) {
     resource.state = PaneResourceState::Released;
-    resource.serialized_snapshot.clear();
     resource.raw_tail.clear();
     resource.requires_seed = true;
+    resource.resume_from_renderer = false;
     resource.recovery_reason = reason.into();
 }
 
@@ -850,9 +1010,7 @@ mod tests {
             epoch: 7,
             generation: 10,
         };
-        let hidden = store
-            .hide_with_checkpoint("%1", b"snapshot@10".to_vec(), checkpoint, 12)
-            .unwrap();
+        let hidden = store.hide_with_checkpoint("%1", checkpoint, 12).unwrap();
         assert_eq!(hidden.raw_tail, b"between");
         assert_eq!(hidden.snapshot_generation, 10);
         assert_eq!(hidden.tail_through_generation, 11);
@@ -860,48 +1018,334 @@ mod tests {
             store.record_output("%1", b"after", 13),
             OutputDisposition::Hidden
         );
-        let repeated = store
-            .hide_with_checkpoint("%1", b"must-not-replace".to_vec(), checkpoint, 14)
-            .unwrap();
-        assert_eq!(repeated.serialized_snapshot, b"snapshot@10");
+        let repeated = store.hide_with_checkpoint("%1", checkpoint, 14).unwrap();
         assert_eq!(repeated.raw_tail, b"betweenafter");
         assert_eq!(repeated.snapshot_generation, 10);
         assert_eq!(repeated.tail_through_generation, 13);
-        let recovery = store.reveal("%1", 15).unwrap();
-        assert_eq!(recovery.serialized_snapshot, b"snapshot@10");
+        let recovery = store.reveal("%1", 15, Some(checkpoint)).unwrap();
+        assert!(recovery.resume_from_renderer);
         assert_eq!(recovery.raw_tail, b"betweenafter");
         assert_eq!(recovery.snapshot_generation, 10);
         assert_eq!(recovery.tail_through_generation, 13);
-        assert!(store.reveal("%1", 16).unwrap().raw_tail.is_empty());
+        // The same reveal arriving twice — a retry, a remount, the watchdog
+        // re-asserting — finds a pane this store already calls renderer-owned.
+        // The tail is handed back exactly once, so the second answer carries no
+        // bytes; it carries no new debt either, because forcing a seed onto a
+        // pane that is drawing correctly costs a capture and an `ESC c`. A
+        // renderer that genuinely has nothing to show asks for its own seed —
+        // it is the only side that knows whether it is holding a screen.
+        let repeated_reveal = store.reveal("%1", 16, Some(checkpoint)).unwrap();
+        assert!(repeated_reveal.raw_tail.is_empty());
+        assert!(!repeated_reveal.requires_seed);
     }
 
+    /// The rule the switch-payload work turns around: the host stops holding a
+    /// copy of the renderer's screen, so a hide that carries no bytes is the
+    /// *ordinary* hide rather than a broken one. What the host keeps is the
+    /// output the renderer had not yet seen, and the renderer's own cache is
+    /// the base that output is written on top of.
     #[test]
-    fn empty_or_omitted_renderer_handoff_requires_seed_before_later_output() {
+    fn a_hide_without_a_snapshot_buffers_the_tail_instead_of_releasing() {
         let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
-        for pane_id in ["%1", "%2"] {
-            store.ensure(pane_id, true, 1);
-            let hidden = store
-                .hide_with_checkpoint(
-                    pane_id,
-                    Vec::new(),
-                    VisibilityCheckpoint {
-                        epoch: 7,
-                        generation: 0,
-                    },
-                    2,
-                )
-                .unwrap();
-            assert_eq!(hidden.state, PaneResourceState::Released);
-            assert!(hidden.requires_seed);
+        store.ensure("%1", true, 1);
+        assert_eq!(
+            store.record_output("%1", b"before", 10),
+            OutputDisposition::Visible
+        );
+        assert_eq!(
+            store.record_output("%1", b"after", 11),
+            OutputDisposition::Visible
+        );
+        let hidden = store
+            .hide_with_checkpoint(
+                "%1",
+                VisibilityCheckpoint {
+                    epoch: 7,
+                    generation: 10,
+                },
+                12,
+            )
+            .unwrap();
+        assert_eq!(hidden.state, PaneResourceState::HiddenBuffered);
+        assert!(!hidden.requires_seed);
+        // Exactly the output the renderer had not drawn when it let go, and
+        // nothing it had.
+        assert_eq!(hidden.raw_tail, b"after");
+        assert_eq!(hidden.snapshot_generation, 10);
+    }
+
+    /// The tail is the whole answer a reveal carries, so it has to be exact in
+    /// both directions: every byte after the checkpoint, and each of them once.
+    #[test]
+    fn a_reveal_answers_the_exact_output_after_the_checkpoint_exactly_once() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
+        store.ensure("%1", true, 1);
+        for (generation, bytes) in [
+            (30, b"one".as_slice()),
+            (31, b"two".as_slice()),
+            (32, b"three".as_slice()),
+        ] {
             assert_eq!(
-                store.record_output(pane_id, b"later", 3),
-                OutputDisposition::Released
+                store.record_output("%1", bytes, generation),
+                OutputDisposition::Visible
             );
-            let reveal = store.reveal(pane_id, 4).unwrap();
-            assert!(reveal.requires_seed);
-            assert!(reveal.serialized_snapshot.is_empty());
-            assert!(reveal.raw_tail.is_empty());
         }
+        let checkpoint = VisibilityCheckpoint {
+            epoch: 4,
+            generation: 29,
+        };
+        store.hide_with_checkpoint("%1", checkpoint, 33).unwrap();
+        let revealed = store.reveal("%1", 34, Some(checkpoint)).unwrap();
+        assert!(revealed.resume_from_renderer);
+        assert_eq!(revealed.raw_tail, b"onetwothree");
+        assert_eq!(revealed.snapshot_generation, checkpoint.generation);
+        assert_eq!(revealed.tail_through_generation, 32);
+        // A second reveal is the same reveal arriving twice — a retry, a
+        // remount — and replaying the tail again would double every byte.
+        let repeated = store.reveal("%1", 35, Some(checkpoint)).unwrap();
+        assert!(repeated.raw_tail.is_empty());
+    }
+
+    /// Past the bound the tail is no longer the cheaper answer, and a truncated
+    /// one is worse than none: it splices bytes onto a screen with a hole in the
+    /// middle that nothing later repairs. The pane is released instead and the
+    /// reveal asks for a fresh photograph.
+    ///
+    /// The store's per-resource bound is `REVEAL_TAIL_BOUND` in production; a
+    /// small one here keeps the test about the boundary rather than about
+    /// allocating.
+    #[test]
+    fn a_tail_past_the_reveal_bound_requires_a_seed_and_never_a_partial_tail() {
+        let mut store = PaneResourceStore::with_total_limit(32, 64, 4096);
+        store.ensure("%1", true, 1);
+        let checkpoint = VisibilityCheckpoint {
+            epoch: 2,
+            generation: 1,
+        };
+        store.hide_with_checkpoint("%1", checkpoint, 2).unwrap();
+        store.append("%1", &[b'x'; 32], 3);
+        store.append("%1", &[b'y'; 64], 4);
+        let revealed = store.reveal("%1", 5, Some(checkpoint)).unwrap();
+        assert!(revealed.requires_seed);
+        assert!(!revealed.resume_from_renderer);
+        assert!(
+            revealed.raw_tail.is_empty(),
+            "a tail past the bound must be dropped whole, never truncated"
+        );
+    }
+
+    /// A busy *visible* pane is the ordinary case, and it must not cost some
+    /// other pane its recovery material.
+    ///
+    /// Its journal is only ever read to compute the tail a hide hands over, and
+    /// that tail is bounded — so everything past the bound is dropped as it
+    /// arrives rather than retained until the global budget evicts a stranger.
+    /// The pane that printed is the only one that pays, and it pays with a
+    /// photograph instead of a tail.
+    #[test]
+    fn a_visible_panes_journal_stays_within_the_tail_bound_and_the_hide_says_so() {
+        let mut store = PaneResourceStore::with_total_limit(32, 64, 4096);
+        store.ensure("%1", true, 1);
+        for generation in 10..20 {
+            assert_eq!(
+                store.record_output("%1", &[b'x'; 16], generation),
+                OutputDisposition::Visible
+            );
+        }
+        assert!(store.journal_bytes() <= 64);
+        assert!(
+            store.take_degradations().is_empty(),
+            "a pane printing to the screen is not a degradation"
+        );
+        let hidden = store
+            .hide_with_checkpoint(
+                "%1",
+                VisibilityCheckpoint {
+                    epoch: 1,
+                    generation: 10,
+                },
+                21,
+            )
+            .unwrap();
+        assert_eq!(hidden.state, PaneResourceState::Released);
+        assert!(hidden.requires_seed);
+        assert!(hidden.raw_tail.is_empty());
+    }
+
+    /// The other side of the trim comparison, and the ordinary one.
+    ///
+    /// Trimming drops the oldest entries, and an active pane's renderer has
+    /// already drawn them: the cutoff a hide carries is newer than all of them,
+    /// so the tail quotes nothing that was dropped. Condemning the pane on the
+    /// fact of a trim alone put a blank frame and a seed in front of most
+    /// switches back to a busy pane.
+    #[test]
+    fn a_hide_whose_cutoff_is_newer_than_every_trimmed_byte_still_answers_with_a_tail() {
+        let mut store = PaneResourceStore::with_total_limit(32, 64, 4096);
+        store.ensure("%1", true, 1);
+        for generation in 10..20 {
+            assert_eq!(
+                store.record_output("%1", &[b'x'; 16], generation),
+                OutputDisposition::Visible
+            );
+        }
+        assert!(store.journal_bytes() <= 64);
+        let hidden = store
+            .hide_with_checkpoint(
+                "%1",
+                VisibilityCheckpoint {
+                    epoch: 1,
+                    generation: 16,
+                },
+                21,
+            )
+            .unwrap();
+        assert_eq!(hidden.state, PaneResourceState::HiddenBuffered);
+        assert!(!hidden.requires_seed);
+        assert_eq!(hidden.raw_tail, [b'x'; 48]);
+        assert_eq!(hidden.tail_through_generation, 19);
+    }
+
+    /// Re-asserting a visibility nothing took away costs the pane nothing.
+    ///
+    /// The degraded-pane watchdog re-sends a reveal for a pane it believes the
+    /// host is holding, and a desktop can send one twice. Treating that as a
+    /// fresh reveal stamps seed debt onto a pane that is drawing correctly: a
+    /// capture the user did not need, and an `ESC c` that blanks the buffer on
+    /// the way to redrawing what was already there.
+    #[test]
+    fn a_reveal_of_a_pane_the_host_already_calls_visible_changes_nothing() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
+        store.ensure("%1", true, 1);
+        assert_eq!(
+            store.record_output("%1", b"on-screen", 2),
+            OutputDisposition::Visible
+        );
+
+        let answer = store.reveal("%1", 3, None).expect("resource");
+        assert!(!answer.requires_seed);
+        assert!(!answer.resume_from_renderer);
+
+        // And the handoff journal is still there, so the next hide answers with
+        // a tail rather than with a photograph.
+        let hidden = store
+            .hide_with_checkpoint(
+                "%1",
+                VisibilityCheckpoint {
+                    epoch: 1,
+                    generation: 1,
+                },
+                4,
+            )
+            .unwrap();
+        assert_eq!(hidden.state, PaneResourceState::HiddenBuffered);
+        assert_eq!(hidden.raw_tail, b"on-screen");
+    }
+
+    /// A seed the renderer never received must not be mistaken for one it did.
+    ///
+    /// A capture can complete over a *hidden* pane — a resnapshot after a parse
+    /// error, a flow-control pause — and the screen it produces is discarded,
+    /// because only a visible pane's seed is emitted. What it also discards is
+    /// the tail. If the recorded handoff survived that, the reveal would match
+    /// it and answer "resume: nothing printed while you were away" with an
+    /// empty tail, and everything the pane printed while hidden would be gone
+    /// with no sign that anything was lost.
+    #[test]
+    fn a_seed_completed_over_a_hidden_pane_leaves_its_reveal_asking_for_one() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
+        store.ensure("%1", true, 1);
+        let checkpoint = VisibilityCheckpoint {
+            epoch: 1,
+            generation: 1,
+        };
+        store.hide_with_checkpoint("%1", checkpoint, 2).unwrap();
+        assert_eq!(
+            store.record_output("%1", b"printed-while-hidden", 3),
+            OutputDisposition::Hidden
+        );
+
+        store.seeded("%1", 4);
+
+        let answer = store.reveal("%1", 5, Some(checkpoint)).expect("resource");
+        assert!(
+            answer.requires_seed,
+            "a reveal whose tail was discarded must ask for a photograph"
+        );
+        assert!(!answer.resume_from_renderer);
+        assert!(answer.raw_tail.is_empty());
+    }
+
+    /// The invariant that replaces the uploaded snapshot as the authority.
+    ///
+    /// Once the host holds no copy of the screen, the only thing that makes a
+    /// tail safe to apply is agreement about *which* screen it applies to. The
+    /// recorded handoff checkpoint is that agreement, and anything else — an
+    /// epoch change, an eviction, a `require_seed`, a reveal for a handoff this
+    /// host never saw — is answered with a seed rather than with bytes.
+    #[test]
+    fn a_reveal_whose_checkpoint_the_host_did_not_record_requires_a_seed() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
+        store.ensure("%1", true, 1);
+        assert_eq!(
+            store.record_output("%1", b"tail", 10),
+            OutputDisposition::Visible
+        );
+        let recorded = VisibilityCheckpoint {
+            epoch: 7,
+            generation: 9,
+        };
+        store.hide_with_checkpoint("%1", recorded, 11).unwrap();
+        assert_eq!(store.handoff_checkpoints.get("%1"), Some(&recorded));
+        // The renderer comes back on a new epoch, so the screen it is holding
+        // is not the one this tail continues.
+        let revealed = store
+            .reveal(
+                "%1",
+                13,
+                Some(VisibilityCheckpoint {
+                    epoch: 8,
+                    generation: 9,
+                }),
+            )
+            .unwrap();
+        assert!(revealed.requires_seed);
+        assert!(!revealed.resume_from_renderer);
+        assert!(revealed.raw_tail.is_empty());
+        // Naming a screen this host did not record is a real disagreement, and
+        // the desktop puts this reason on screen.
+        assert_eq!(revealed.recovery_reason, UNVERIFIED_REVEAL_REASON);
+
+        // And the renderer that kept no screen at all — an oversized
+        // serialization its cache declined, a mount with nothing cached — is
+        // the same answer for the same reason.
+        store.ensure("%2", true, 1);
+        assert_eq!(
+            store.record_output("%2", b"tail", 14),
+            OutputDisposition::Visible
+        );
+        store
+            .hide_with_checkpoint(
+                "%2",
+                VisibilityCheckpoint {
+                    epoch: 7,
+                    generation: 13,
+                },
+                15,
+            )
+            .unwrap();
+        let revealed = store.reveal("%2", 16, None).unwrap();
+        assert!(revealed.requires_seed);
+        assert!(revealed.raw_tail.is_empty());
+        // Same answer, but not the same accusation: a renderer holding nothing
+        // contradicts nothing this host recorded. Reporting a handoff mismatch
+        // for an ordinary cache miss put that sentence in front of the user on
+        // a switch that was working exactly as designed.
+        assert!(
+            revealed.recovery_reason.is_empty(),
+            "a renderer that kept nothing is a cache miss, not a mismatch: {}",
+            revealed.recovery_reason
+        );
     }
 
     #[test]
@@ -914,23 +1358,18 @@ mod tests {
                 OutputDisposition::Visible
             );
         }
-        let recovery = store
-            .hide_with_checkpoint(
-                "%1",
-                b"screen+A".to_vec(),
-                VisibilityCheckpoint {
-                    epoch: 3,
-                    generation: 20,
-                },
-                22,
-            )
-            .unwrap();
+        let checkpoint = VisibilityCheckpoint {
+            epoch: 3,
+            generation: 20,
+        };
+        let recovery = store.hide_with_checkpoint("%1", checkpoint, 22).unwrap();
         assert_eq!(
             store.record_output("%1", b"D", 23),
             OutputDisposition::Hidden
         );
-        let recovery = store.reveal("%1", 24).unwrap_or(recovery);
-        assert_eq!(recovery.serialized_snapshot, b"screen+A");
+        let recovery = store.reveal("%1", 24, Some(checkpoint)).unwrap_or(recovery);
+        // The screen this tail continues is the renderer's, not the host's.
+        let screen_the_renderer_kept = b"screen+A";
         assert_eq!(recovery.raw_tail, b"BCD");
         assert_eq!(recovery.snapshot_generation, 20);
         assert_eq!(recovery.tail_through_generation, 23);
@@ -943,7 +1382,12 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(remaining, b"E");
-        let combined = [recovery.serialized_snapshot, recovery.raw_tail, remaining].concat();
+        let combined = [
+            screen_the_renderer_kept.to_vec(),
+            recovery.raw_tail,
+            remaining,
+        ]
+        .concat();
         assert_eq!(combined, b"screen+ABCDE");
     }
 
@@ -954,7 +1398,6 @@ mod tests {
         let error = store
             .hide_with_checkpoint(
                 "%1",
-                b"screen".to_vec(),
                 VisibilityCheckpoint {
                     epoch: 1,
                     generation: 6,
@@ -972,7 +1415,7 @@ mod tests {
         for index in 0..100_u64 {
             let pane = format!("%{index}");
             store.ensure(&pane, true, index);
-            store.snapshot(&pane, vec![b'x'; 1024], index);
+            store.record_output(&pane, &[b'x'; 1024], index);
         }
         assert!(store.retained_bytes() <= 8 * 1024);
         assert!(store.resources.values().any(|resource| {
@@ -986,7 +1429,7 @@ mod tests {
         for index in 0..4_u64 {
             let pane = format!("%{index}");
             store.ensure(&pane, true, index);
-            store.snapshot(&pane, vec![b'x'; 1024], index);
+            store.record_output(&pane, &[b'x'; 1024], index);
         }
         let degradations = store.take_degradations();
         assert!(
@@ -1006,11 +1449,50 @@ mod tests {
         assert!(store.take_degradations().is_empty());
     }
 
+    /// The per-pane record is latest-wins, but only among discards that are
+    /// spoken.
+    ///
+    /// A hidden pane's tail overflow is suppressed on the way out, so letting
+    /// it take the entry an eviction had already claimed does not merely
+    /// reorder the report — it deletes it. The eviction is the only account
+    /// anyone gets of recovery material this store threw away unasked.
+    #[test]
+    fn a_suppressed_overflow_never_displaces_a_reportable_eviction() {
+        let mut store = PaneResourceStore::with_total_limit(32, 64, 32);
+        store.ensure("%1", true, 1);
+        // Retained bytes past the global budget: the pane is evicted, and that
+        // is the entry that must survive.
+        store.record_output("%1", &[b'x'; 48], 2);
+        assert!(store.get("%1").unwrap().requires_seed);
+
+        // The desktop reseeds it and hides it again, and it then prints more
+        // than its own tail bound while hidden.
+        store.set_visible("%1", false, 3);
+        store.seeded("%1", 4);
+        store.append("%1", &[b'x'; 128], 5);
+        assert_eq!(store.get("%1").unwrap().state, PaneResourceState::Released);
+
+        let degradations = store.take_degradations();
+        assert_eq!(degradations.len(), 1);
+        assert_eq!(
+            degradations[0].cause,
+            PaneDegradationCause::GlobalBudget,
+            "the overflow is never reported, so taking the entry would report nothing at all"
+        );
+        assert!(PaneDegradationCause::GlobalBudget.reportable());
+        assert!(!PaneDegradationCause::HiddenTailOverflow.reportable());
+    }
+
+    /// Recorded by the store, and — since the tail bound became the ordinary
+    /// limit of a busy hidden pane rather than a fault — reported to the
+    /// desktop by nobody. The record is what keeps the counter honest and what
+    /// makes the release visible to a test; the event it used to become is what
+    /// put a pane-resource frame in front of every switch.
     #[test]
     fn hidden_tail_overflow_surfaces_its_release() {
         let mut store = PaneResourceStore::with_total_limit(32, 16, 4096);
         store.set_visible("%1", false, 1);
-        store.snapshot("%1", b"seed".to_vec(), 2);
+        store.seeded("%1", 2);
         assert!(store.take_degradations().is_empty());
         store.append("%1", &[b'x'; 64], 3);
         let degradations = store.take_degradations();
@@ -1029,7 +1511,7 @@ mod tests {
     fn an_explicit_seed_request_reveals_a_released_pane_so_its_snapshot_can_be_emitted() {
         let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
         store.set_visible("%1", false, 1);
-        store.snapshot("%1", b"stale".to_vec(), 2);
+        store.seeded("%1", 2);
         store.require_seed("%1", "test");
         assert_eq!(store.get("%1").unwrap().state, PaneResourceState::Released);
         assert!(store.is_hidden("%1"));
@@ -1039,10 +1521,9 @@ mod tests {
         assert!(!store.is_hidden("%1"));
         // The seed capture that follows lands on a pane the emission gate now
         // passes, and clears the debt it was requested for.
-        store.snapshot("%1", b"fresh".to_vec(), 4);
+        store.seeded("%1", 4);
         assert!(!store.is_hidden("%1"));
         assert!(!store.get("%1").unwrap().requires_seed);
-        assert_eq!(store.get("%1").unwrap().serialized_snapshot, b"fresh");
 
         // Already visible: nothing forced, and nothing counted.
         assert!(!store.reveal_for_seed_request("%1", 5));
@@ -1059,7 +1540,6 @@ mod tests {
         store
             .hide_with_checkpoint(
                 "%1",
-                b"screen".to_vec(),
                 VisibilityCheckpoint {
                     epoch: 1,
                     generation: 1,
@@ -1071,7 +1551,6 @@ mod tests {
         assert!(store.reveal_for_seed_request("%1", 3));
         let resource = store.get("%1").unwrap();
         assert_eq!(resource.state, PaneResourceState::Visible);
-        assert!(resource.serialized_snapshot.is_empty());
         assert!(resource.raw_tail.is_empty());
     }
 
@@ -1080,7 +1559,7 @@ mod tests {
         let mut seeder = ScreenSeeder::with_limit(3);
         assert!(seeder.buffer(1, vec![1, 2]));
         assert!(!seeder.buffer(2, vec![3, 4]));
-        assert!(seeder.requires_resnapshot());
+        assert!(seeder.overflowed);
         assert!(seeder.complete(Vec::new(), 0).replay.is_empty());
     }
 
@@ -1102,11 +1581,14 @@ mod tests {
         );
     }
 
+    /// The per-pane bound is a tail bound now: there is no stored screen left
+    /// for it to measure, and a pane that outgrows it is released for the next
+    /// reveal to photograph.
     #[test]
-    fn oversized_snapshot_and_thirty_third_hidden_pane_require_seed() {
+    fn an_oversized_tail_and_a_thirty_third_hidden_pane_require_seed() {
         let mut store = PaneResourceStore::new(32, 4 * 1024 * 1024);
         store.set_visible("%0", false, 1);
-        store.snapshot("%0", vec![0; 4 * 1024 * 1024 + 1], 2);
+        store.append("%0", &vec![b'x'; 4 * 1024 * 1024 + 1], 2);
         assert!(store.get("%0").unwrap().requires_seed);
         for index in 1..=33 {
             store.set_visible(&format!("%{index}"), false, index + 2);
@@ -1127,13 +1609,13 @@ mod tests {
     }
 
     #[test]
-    fn a_new_snapshot_starts_a_fresh_raw_tail_epoch() {
+    fn a_new_seed_starts_a_fresh_raw_tail_epoch() {
         let mut store = PaneResourceStore::new(32, 1024);
         store.set_visible("%1", false, 1);
-        store.snapshot("%1", b"first".to_vec(), 2);
+        store.seeded("%1", 2);
         store.append("%1", b"old-tail", 3);
-        store.snapshot("%1", b"second".to_vec(), 4);
-        assert_eq!(store.get("%1").unwrap().serialized_snapshot, b"second");
+        store.seeded("%1", 4);
+        assert_eq!(store.get("%1").unwrap().snapshot_generation, 4);
         assert!(store.get("%1").unwrap().raw_tail.is_empty());
         store.append("%1", b"new-tail", 5);
         assert_eq!(store.get("%1").unwrap().raw_tail, b"new-tail");
@@ -1143,19 +1625,17 @@ mod tests {
     fn repeated_hide_show_consumes_each_recovery_epoch_exactly_once() {
         let mut store = PaneResourceStore::new(32, 1024);
         store.set_visible("%1", false, 1);
-        store.snapshot("%1", b"screen-one".to_vec(), 2);
+        store.seeded("%1", 2);
         store.append("%1", b"tail-one", 3);
         store.set_visible("%1", true, 4);
         let first = store.take_recovery("%1").unwrap();
-        assert_eq!(first.serialized_snapshot, b"screen-one");
         assert_eq!(first.raw_tail, b"tail-one");
 
         store.set_visible("%1", false, 5);
-        store.snapshot("%1", b"screen-two".to_vec(), 6);
+        store.seeded("%1", 6);
         store.append("%1", b"tail-two", 7);
         store.set_visible("%1", true, 8);
         let second = store.take_recovery("%1").unwrap();
-        assert_eq!(second.serialized_snapshot, b"screen-two");
         assert_eq!(second.raw_tail, b"tail-two");
         assert_ne!(first.raw_tail, second.raw_tail);
         assert!(store.get("%1").unwrap().raw_tail.is_empty());
@@ -1167,8 +1647,7 @@ mod tests {
         for index in 0..100 {
             let pane_id = format!("%{index}");
             store.ensure(&pane_id, false, index);
-            store.snapshot(&pane_id, vec![b's'; 512], index);
-            store.append(&pane_id, &[b't'; 512], index);
+            store.append(&pane_id, &[b't'; 1024], index);
         }
         assert!(store.retained_bytes() <= 8 * 1024);
         assert!(
@@ -1184,7 +1663,3 @@ mod tests {
 #[cfg(test)]
 #[path = "replay_phase14_tests.rs"]
 mod phase14_incremental_tests;
-
-#[cfg(test)]
-#[path = "replay_phase14.rs"]
-mod phase14_baseline_tests;

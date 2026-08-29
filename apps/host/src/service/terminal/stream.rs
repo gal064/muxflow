@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{BufReader, Read},
     process::ChildStdout,
     sync::{
@@ -19,7 +19,8 @@ use tokio::sync::mpsc;
 use super::super::{SequencerControl, emit_event};
 use super::OutputCredit;
 use super::correlation::{
-    MarkerBlock, classify_marker_block, error_reason, marker_pane, wants_error_line,
+    MarkerBlock, classify_marker_block, error_reason, history_size_marker, marker_pane,
+    wants_error_line,
 };
 use super::degradation::emit_pane_degradations;
 use super::flow_control::RejectedResume;
@@ -75,6 +76,10 @@ pub(super) struct ControlStreamReader {
     pub(super) stopped: Arc<AtomicBool>,
     pub(super) controls: std_mpsc::Receiver<StreamControl>,
     pub(super) flow: Arc<super::FlowControl>,
+    /// Panes whose capture this client has written and tmux has not answered.
+    /// The service thread coalesces a seed request against it; this reader is
+    /// the only thing that can see a capture finish, so it owns the clearing.
+    pub(super) capture_in_flight: Arc<Mutex<HashSet<String>>>,
     pub(super) output_credit: Arc<OutputCredit>,
     pub(super) emission_order: Arc<Mutex<()>>,
     pub(super) topology_trigger: TopologyOutputTrigger,
@@ -101,6 +106,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         stopped,
         controls,
         flow,
+        capture_in_flight,
         output_credit,
         emission_order,
         topology_trigger,
@@ -117,6 +123,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         resources: &resources,
         terminal_generation: &terminal_generation,
         stopped: &stopped,
+        capture_in_flight: &capture_in_flight,
         output_credit: &output_credit,
         emission_order: &emission_order,
         topology_trigger: &topology_trigger,
@@ -133,7 +140,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                 // per 64 KiB rather than one per record.
                 let read_started = Instant::now();
                 while let Ok(control) = controls.try_recv() {
-                    state.apply_control(control);
+                    state.apply_control(control, &capture_in_flight);
                 }
                 parser.push(&buffer[..length]);
                 while let Some(record) = parser.next_record() {
@@ -154,7 +161,12 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                                 state.handle(output, runtime(read_started));
                             }
                             emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
-                            state.resnapshot_all(&writer);
+                            // Every visible pane is about to be captured
+                            // again, and every hidden one is about to be put
+                            // in seed debt, so no pane's abandoned capture may
+                            // coalesce away the photograph that replaces it.
+                            capture_in_flight.lock().unwrap().clear();
+                            state.resnapshot_all(&writer, &resources, &stopped);
                         }
                     }
                 }
@@ -169,6 +181,10 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
             Err(_) => break,
         }
     }
+    // This client is finished, so every capture it wrote is unanswerable. The
+    // ledger has to go with it: a pane still recorded here would have its next
+    // seed request coalesced against a capture nobody is going to complete.
+    capture_in_flight.lock().unwrap().clear();
     parser.finish();
     while let Some(Err(error)) = parser.next_record() {
         emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
@@ -283,14 +299,40 @@ pub(super) enum CommandBlock {
         visible_boundary: u64,
         lines: Vec<Vec<u8>>,
     },
+    /// The scrollback above a pane's screen, answering one
+    /// `RequestTerminalHistory`. Deliberately its own block: it is an answer to
+    /// a question the user asked, not part of the output stream, so it touches
+    /// no `PaneSeedState`, no `PaneResourceStore`, and no generation.
+    CaptureHistory {
+        tag: CommandTag,
+        pane_id: String,
+        lines: Vec<Vec<u8>>,
+    },
+    /// The `#{history_size}` probe that closes a history request.
+    ///
+    /// A third block rather than a number in the leading marker: the marker is
+    /// untargeted so that it always succeeds (it exists to name the pane whose
+    /// *next* block fails), and a pane-scoped format can only be read by a
+    /// targeted `display-message`. So the probe runs after the capture, in the
+    /// same place and for the same reason the seed's `__ADE_META__` leg does,
+    /// and the captured rows wait here for it: the answer is emitted once, with
+    /// the number that tells the renderer whether it has reached the top.
+    CaptureHistoryMeta {
+        tag: CommandTag,
+        pane_id: String,
+        history: Vec<u8>,
+        lines: Vec<Vec<u8>>,
+    },
 }
 
 pub(super) struct StreamState {
     pub(super) pane_states: HashMap<String, PaneSeedState>,
     pub(super) expected_capture: Option<String>,
     pub(super) expected_resume: Option<String>,
+    pub(super) expected_history: Option<String>,
     pub(super) pending_alternate: Option<(String, Vec<Vec<u8>>, u64)>,
     pub(super) pending_metadata: Option<PendingCaptureMetadata>,
+    pub(super) pending_history_meta: Option<PendingHistoryMeta>,
     command_block: CommandBlock,
     /// When tmux began answering the capture the pending seed is being built
     /// from, which is the one number the perf-log `seed` line cannot take at
@@ -300,6 +342,12 @@ pub(super) struct StreamState {
     /// desktop reveals a pane: a seed for a pane tmux has paused has to carry
     /// the resume or it re-photographs a screen that then stops moving again.
     flow: Arc<super::FlowControl>,
+}
+
+/// One pane's captured scrollback, waiting for the size probe that follows it.
+pub(super) struct PendingHistoryMeta {
+    pub(super) pane_id: String,
+    pub(super) history: Vec<u8>,
 }
 
 pub(super) struct PendingCaptureMetadata {
@@ -316,6 +364,7 @@ struct StreamRuntime<'a> {
     resources: &'a Arc<Mutex<PaneResourceStore>>,
     terminal_generation: &'a Arc<AtomicU64>,
     stopped: &'a AtomicBool,
+    capture_in_flight: &'a Mutex<HashSet<String>>,
     output_credit: &'a OutputCredit,
     emission_order: &'a Arc<Mutex<()>>,
     topology_trigger: &'a TopologyOutputTrigger,
@@ -344,10 +393,56 @@ impl StreamState {
                 .collect(),
             expected_capture: None,
             expected_resume: None,
+            expected_history: None,
             pending_alternate: None,
             pending_metadata: None,
+            pending_history_meta: None,
             command_block: CommandBlock::None,
             capture_started: None,
+        }
+    }
+
+    /// Release every slot that ties a marker block to the block tmux sends
+    /// next — optionally narrowing to the one pane that owns them, for a reset
+    /// that is about that pane alone.
+    ///
+    /// These slots are one unit. `start_block` reads them in a fixed order, so
+    /// a reset that releases some and keeps others does not leave a harmless
+    /// remnant: it leaves the next block to be answered as the missing half of
+    /// a sequence that was abandoned. Keeping `expected_history` across a
+    /// resnapshot spent the recovery's own capture block as a history answer —
+    /// its marker line published as scrollback, its seed dropped as Unknown,
+    /// and the pane Pending forever.
+    pub(in crate::service::terminal) fn release_correlation(&mut self, only: Option<&str>) {
+        let owned_by_scope = |pane_id: Option<&str>| match only {
+            Some(scope) => pane_id == Some(scope),
+            None => true,
+        };
+        if owned_by_scope(self.expected_capture.as_deref()) {
+            self.expected_capture = None;
+        }
+        if owned_by_scope(self.expected_resume.as_deref()) {
+            self.expected_resume = None;
+        }
+        if owned_by_scope(self.expected_history.as_deref()) {
+            self.expected_history = None;
+        }
+        if owned_by_scope(
+            self.pending_history_meta
+                .as_ref()
+                .map(|pending| &*pending.pane_id),
+        ) {
+            self.pending_history_meta = None;
+        }
+        if owned_by_scope(self.pending_alternate.as_ref().map(|pending| &*pending.0)) {
+            self.pending_alternate = None;
+        }
+        if owned_by_scope(
+            self.pending_metadata
+                .as_ref()
+                .map(|pending| &*pending.pane_id),
+        ) {
+            self.pending_metadata = None;
         }
     }
 
@@ -359,6 +454,7 @@ impl StreamState {
             resources,
             terminal_generation,
             stopped,
+            capture_in_flight,
             output_credit,
             emission_order,
             topology_trigger,
@@ -406,6 +502,9 @@ impl StreamState {
             ControlRecord::Begin { tag, .. } => {
                 if !matches!(self.command_block, CommandBlock::None) {
                     let scope = self.active_scope();
+                    // The abandoned block may be the capture a pane's seed is
+                    // waiting on, and nothing will answer it now.
+                    capture_in_flight.lock().unwrap().clear();
                     emit_resnapshot(
                         sender,
                         overflowed,
@@ -438,7 +537,9 @@ impl StreamState {
                 }
                 CommandBlock::CapturePrimary { lines, .. }
                 | CommandBlock::CaptureAlternate { lines, .. }
-                | CommandBlock::CaptureMetadata { lines, .. } => lines.push(line),
+                | CommandBlock::CaptureMetadata { lines, .. }
+                | CommandBlock::CaptureHistory { lines, .. }
+                | CommandBlock::CaptureHistoryMeta { lines, .. } => lines.push(line),
                 CommandBlock::None => emit_resnapshot(
                     sender,
                     overflowed,
@@ -455,6 +556,7 @@ impl StreamState {
                     resources,
                     terminal_generation,
                     stopped,
+                    capture_in_flight,
                     output_credit,
                     emission_order,
                     topology_trigger,
@@ -472,11 +574,15 @@ impl StreamState {
                     );
                 }
                 if matches!(self.command_block, CommandBlock::Draining { .. }) {
+                    // The ledger is one of the slots this releases, exactly as
+                    // the ordinary error path below does. A block is drained
+                    // because the capture inside it was abandoned — a
+                    // membership change, a resnapshot — and leaving the pane
+                    // recorded here would coalesce away the photograph that
+                    // replaces it, for as long as the client lives.
+                    capture_in_flight.lock().unwrap().clear();
                     self.command_block = CommandBlock::None;
-                    self.expected_capture = None;
-                    self.expected_resume = None;
-                    self.pending_alternate = None;
-                    self.pending_metadata = None;
+                    self.release_correlation(None);
                     return;
                 }
                 let scope = self.active_scope();
@@ -509,12 +615,38 @@ impl StreamState {
                 // An error abandons whatever multi-block sequence was running,
                 // so every correlation slot has to be released too — otherwise
                 // the next unrelated block is mistaken for the missing half of
-                // this one.
-                self.command_block = CommandBlock::None;
-                self.expected_capture = None;
-                self.expected_resume = None;
-                self.pending_alternate = None;
-                self.pending_metadata = None;
+                // this one. The capture ledger is one of those slots: a pane
+                // whose capture died here must be free to be photographed again.
+                capture_in_flight.lock().unwrap().clear();
+                // With one exception, because one of those sequences has an
+                // answer already in hand. The size probe is targeted, so a pane
+                // that goes away between the capture and it is rejected here —
+                // and the rows tmux already handed over are still the page the
+                // renderer asked for. Dropping them would leave it waiting on a
+                // request nothing will ever answer. It goes without a size,
+                // which the renderer reads as "ask again", never as the top of
+                // the history.
+                let orphaned_history =
+                    match std::mem::replace(&mut self.command_block, CommandBlock::None) {
+                        CommandBlock::CaptureHistoryMeta {
+                            pane_id, history, ..
+                        } => Some((pane_id, history)),
+                        _ => None,
+                    };
+                self.release_correlation(None);
+                if let Some((pane_id, history)) = orphaned_history
+                    && emit_terminal_history(
+                        sender,
+                        overflowed,
+                        pane_id,
+                        history,
+                        None,
+                        stopped,
+                        output_credit,
+                    )
+                {
+                    output_credit.await_window(stopped);
+                }
                 // Exactly one event per rejection, and for a rejected resume
                 // which one it is depends on what this thread is about to do.
                 //
@@ -613,6 +745,21 @@ impl StreamState {
                     notification_pane(&arguments).filter(|id| self.pane_states.contains_key(id))
                 {
                     self.flow.paused(&pane_id);
+                    // tmux drops a paused pane's output rather than replaying
+                    // it, so whatever tail this store is holding for a hidden
+                    // pane now has a hole in it. Said while the pane is still
+                    // hidden, so its reveal is answered with a photograph
+                    // instead of with a tail missing its middle. A visible pane
+                    // needs no such note: the capture written below is its
+                    // seed, and it is delivered.
+                    with_active_resources(resources, stopped, |store| {
+                        if store.is_hidden(&pane_id) {
+                            store.require_seed(
+                                &pane_id,
+                                "tmux paused this pane's output while it was hidden",
+                            );
+                        }
+                    });
                     emit_event(
                         sender,
                         overflowed,
@@ -659,6 +806,7 @@ impl StreamState {
             resources,
             terminal_generation,
             stopped,
+            capture_in_flight,
             output_credit,
             emission_order,
             // Seed and replay emission below is a reconnect artefact, not fresh
@@ -680,6 +828,7 @@ impl StreamState {
                 &scope,
                 format!("mismatched end command tag {}", end_tag.number),
             );
+            capture_in_flight.lock().unwrap().clear();
             self.command_block = CommandBlock::None;
             return;
         }
@@ -694,7 +843,16 @@ impl StreamState {
                         "input marker arrived on an output-only tmux client".into(),
                     ),
                     MarkerBlock::Resume(pane_id) => self.expected_resume = Some(pane_id),
+                    // Same membership filter as a capture: a history answer for
+                    // a pane this client no longer owns is addressed to nobody.
+                    MarkerBlock::History(pane_id) => {
+                        self.expected_history =
+                            Some(pane_id).filter(|pane_id| self.pane_states.contains_key(pane_id));
+                    }
                     MarkerBlock::Capture(pane_id) => {
+                        // A capture for a pane that left membership is
+                        // addressed to nobody. Its ledger entry left with it —
+                        // see `apply_control` — so nothing here has to.
                         self.expected_capture =
                             pane_id.filter(|pane_id| self.pane_states.contains_key(pane_id));
                     }
@@ -737,6 +895,10 @@ impl StreamState {
                 lines,
                 ..
             } => {
+                // The capture is answered, whatever it answered with. Cleared
+                // before the retry below so the replacement it asks for is
+                // written rather than coalesced against the capture it replaces.
+                capture_in_flight.lock().unwrap().remove(&pane_id);
                 let mut retry = false;
                 if let Some(state) = self.pane_states.get_mut(&pane_id) {
                     if let PaneSeedState::Pending {
@@ -790,11 +952,7 @@ impl StreamState {
                                     let diagnostics = seed_build.diagnostics;
                                     let (visible, degradations) =
                                         with_active_resources(resources, stopped, |resources| {
-                                            resources.snapshot(
-                                                &pane_id,
-                                                seed.clone(),
-                                                seed_generation,
-                                            );
+                                            resources.seeded(&pane_id, seed_generation);
                                             (
                                                 !resources.is_hidden(&pane_id),
                                                 resources.take_degradations(),
@@ -919,6 +1077,53 @@ impl StreamState {
                     request_capture(writer, &pane_id, self.flow.resume_before_capture(&pane_id));
                 }
             }
+            CommandBlock::CaptureHistory { pane_id, lines, .. } => {
+                // Held here rather than emitted: the size probe in the block
+                // after this one is what says whether the page reached the top
+                // of tmux's history, and the renderer gets one answer carrying
+                // both. It cannot work that out from the rows themselves —
+                // `-J` joins wrapped ones, so a full page routinely answers
+                // with fewer lines than it covers rows.
+                self.pending_history_meta = Some(PendingHistoryMeta {
+                    pane_id,
+                    history: lines.join(&b"\r\n"[..]),
+                });
+            }
+            CommandBlock::CaptureHistoryMeta {
+                pane_id,
+                history,
+                lines,
+                ..
+            } => {
+                // One event carrying the joined rows and the size, and nothing
+                // else: no generation is taken, no resource is touched, and no
+                // seed debt is settled. The renderer splices this above the
+                // screen it is already showing, or discards it — either way the
+                // output stream is exactly as it was.
+                //
+                // Charged like a seed so a large scrollback cannot starve the
+                // delivery window the live panes share, and outside the
+                // emission fence because the fence orders visibility against
+                // output and this answer belongs to neither.
+                //
+                // An empty answer is still an answer — "there is nothing above
+                // your screen" — and the renderer is waiting for one. A probe
+                // that printed nothing this host can read is an answer too, and
+                // a different one: the size is unknown, which the renderer reads
+                // as a page to ask for again.
+                let history_size = lines.iter().find_map(|line| history_size_marker(line));
+                if emit_terminal_history(
+                    sender,
+                    overflowed,
+                    pane_id,
+                    history,
+                    history_size,
+                    stopped,
+                    output_credit,
+                ) {
+                    output_credit.await_window(stopped);
+                }
+            }
             CommandBlock::None => {}
         }
     }
@@ -930,7 +1135,9 @@ impl StreamState {
             | CommandBlock::Resume { tag: active, .. }
             | CommandBlock::CapturePrimary { tag: active, .. }
             | CommandBlock::CaptureAlternate { tag: active, .. }
-            | CommandBlock::CaptureMetadata { tag: active, .. } => *active == tag,
+            | CommandBlock::CaptureMetadata { tag: active, .. }
+            | CommandBlock::CaptureHistory { tag: active, .. }
+            | CommandBlock::CaptureHistoryMeta { tag: active, .. } => *active == tag,
             CommandBlock::None => false,
         }
     }
@@ -944,7 +1151,9 @@ impl StreamState {
             | CommandBlock::Resume { pane_id, .. }
             | CommandBlock::CapturePrimary { pane_id, .. }
             | CommandBlock::CaptureAlternate { pane_id, .. }
-            | CommandBlock::CaptureMetadata { pane_id, .. } => pane_id.clone(),
+            | CommandBlock::CaptureMetadata { pane_id, .. }
+            | CommandBlock::CaptureHistory { pane_id, .. }
+            | CommandBlock::CaptureHistoryMeta { pane_id, .. } => pane_id.clone(),
             _ => "terminal".into(),
         }
     }
@@ -956,7 +1165,9 @@ impl StreamState {
             | CommandBlock::Resume { tag, .. }
             | CommandBlock::CapturePrimary { tag, .. }
             | CommandBlock::CaptureAlternate { tag, .. }
-            | CommandBlock::CaptureMetadata { tag, .. } => Some(*tag),
+            | CommandBlock::CaptureMetadata { tag, .. }
+            | CommandBlock::CaptureHistory { tag, .. }
+            | CommandBlock::CaptureHistoryMeta { tag, .. } => Some(*tag),
             CommandBlock::None => None,
         }
     }
@@ -964,6 +1175,12 @@ impl StreamState {
     pub(super) fn start_block(&mut self, tag: CommandTag) -> CommandBlock {
         if let Some(pane_id) = self.expected_resume.take() {
             CommandBlock::Resume {
+                tag,
+                pane_id,
+                lines: Vec::new(),
+            }
+        } else if let Some(pane_id) = self.expected_history.take() {
+            CommandBlock::CaptureHistory {
                 tag,
                 pane_id,
                 lines: Vec::new(),
@@ -992,6 +1209,13 @@ impl StreamState {
                 pane_id,
                 visible_lines,
                 visible_boundary,
+                lines: Vec::new(),
+            }
+        } else if let Some(pending) = self.pending_history_meta.take() {
+            CommandBlock::CaptureHistoryMeta {
+                tag,
+                pane_id: pending.pane_id,
+                history: pending.history,
                 lines: Vec::new(),
             }
         } else if let Some(pending) = self.pending_metadata.take() {
@@ -1045,7 +1269,8 @@ mod stream_helpers;
 pub(in crate::service::terminal) use stream_helpers::OutputEmission as TestOutputEmission;
 pub(super) use stream_helpers::with_active_resources;
 use stream_helpers::{
-    OutputEmission, emit_resnapshot, emit_terminal, is_topology_notification, notification_pane,
+    OutputEmission, emit_resnapshot, emit_terminal, emit_terminal_history,
+    is_topology_notification, notification_pane,
 };
 
 #[cfg(test)]

@@ -87,6 +87,8 @@ export function useWorkspaceFiles(
   const pendingExpandPaints = useRef(new Map<string, { paint: PaintTicket; generation: number }>());
   /** The active-root backstop's re-arm, held so callers declared above it can use it. */
   const rearmRoot = useRef<(() => void) | undefined>(undefined);
+  /** The same, for a re-check a person asked for: it does not queue behind a paint. */
+  const rearmRootNow = useRef<(() => void) | undefined>(undefined);
   const noteRootActivity = useRef<(() => void) | undefined>(undefined);
   const cache = useRef(new DirectoryListingCache());
   const leases = useRef(new DirectoryWatchLeases());
@@ -610,7 +612,7 @@ export function useWorkspaceFiles(
     }));
   }, [abortListing, selectionKey]);
 
-  const { rearm, noteActivity } = useActiveRoot({
+  const { rearm, rearmNow, noteActivity } = useActiveRoot({
     activePaneCurrentPath,
     client,
     scope: () => scopeRef.current,
@@ -621,6 +623,7 @@ export function useWorkspaceFiles(
     lifecycle: () => scopeEpoch.current,
   });
   useEffect(() => { rearmRoot.current = rearm; }, [rearm]);
+  useEffect(() => { rearmRootNow.current = rearmNow; }, [rearmNow]);
   useEffect(() => { noteRootActivity.current = noteActivity; }, [noteActivity]);
   /**
    * The connection and root capability the *watch set* belongs to — which is
@@ -823,6 +826,13 @@ export function useWorkspaceFiles(
    * first one's completion clear the second one's signal.
    */
   const refresh = useCallback((directory?: string) => {
+    // The root re-check goes out ungated on both paths below. The paint gate
+    // exists to keep a *switch's* speculative sidebar work off the link ahead
+    // of the pane's screen; a person pressing Refresh is waiting on this answer
+    // and nothing else, and making them wait out a pane's paint budget for it
+    // is the control that looks broken doing nothing for two thirds of a
+    // second. The listing that follows is likewise theirs to wait for.
+    //
     // Nothing is *read* against a tree that is on its way out: the root such a
     // read would be authorised by is the previous selection's, and its answer
     // would land in whatever replaces it. Re-checking the root is a different
@@ -830,13 +840,13 @@ export function useWorkspaceFiles(
     // happens — otherwise the one control a person reaches for when the
     // Explorer looks stuck is the one that does nothing.
     if (!paintsSelection()) {
-      rearmRoot.current?.();
+      rearmRootNow.current?.();
       return;
     }
     const root = stateRef.current.root;
     const target = directory ?? root?.path;
     if (!root || !target) return;
-    rearmRoot.current?.();
+    rearmRootNow.current?.();
     setState((current) => ({ ...current, requestedReads: current.requestedReads + 1 }));
     void loadDirectory(root, target).finally(() => {
       setState((current) => ({ ...current, requestedReads: Math.max(0, current.requestedReads - 1) }));

@@ -94,17 +94,19 @@ export class TerminalWriteScheduler {
     return true;
   }
 
-  replace(bytes: Uint8Array, recoverOverflow = true, onRendered?: () => void): void {
-    if (this.#disposed || (this.#overflowed && !recoverOverflow)) return;
+  /** Returns whether the rewrite was committed, on the same rule as `enqueue`. */
+  replace(bytes: Uint8Array, recoverOverflow = true, onRendered?: () => void): boolean {
+    if (this.#disposed || (this.#overflowed && !recoverOverflow)) return false;
     this.#dropQueued();
     this.#overflowed = false;
     const length = bytes.byteLength + 2;
-    if (!this.#admit(length)) return;
+    if (!this.#admit(length)) return false;
     const resetAndBytes = new Uint8Array(length);
     resetAndBytes.set([0x1b, 0x63]);
     resetAndBytes.set(bytes, 2);
     this.measurements?.add("terminal.scheduler.copiedBytes", bytes.byteLength);
     this.#commit(resetAndBytes, onRendered);
+    return true;
   }
 
   clear(): void {

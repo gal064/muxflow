@@ -81,7 +81,7 @@ enum Operation {
   OPERATION_SHUTDOWN_DAEMON = 7;
   OPERATION_TMUX_ACTION = 8;
   OPERATION_SET_TERMINAL_VISIBILITY = 9;
-    OPERATION_REQUEST_TERMINAL_SEED = 10;
+  OPERATION_REQUEST_TERMINAL_SEED = 10;
   OPERATION_RESOLVE_ACTIVE_ROOT = 11;
   OPERATION_LIST_DIRECTORY = 12;
   OPERATION_WATCH_DIRECTORY = 13;
@@ -150,6 +150,11 @@ enum Operation {
   // credentials this host deliberately cannot supply interactively, and its
   // outcome is therefore never inferable from the local repository alone.
   OPERATION_GIT_PUSH = 47;
+  // Photographs the scrollback above a pane's screen, which a screen-only seed
+  // deliberately does not carry. It answers a question the user asked by
+  // scrolling to the top of a pane, so it is not part of the output stream:
+  // the answer is one TERMINAL_HISTORY event and it moves no generation.
+  OPERATION_REQUEST_TERMINAL_HISTORY = 48;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -160,6 +165,13 @@ message Request {
   string scope = 2;
   string session_id = 3;
   repeated string pane_ids = 4;
+  // The operation's payload — terminal input, a file body, and so on.
+  //
+  // On SET_TERMINAL_VISIBILITY it is reserved, not free: a hide used to carry
+  // the renderer's serialized screen here and a desktop from before
+  // `terminal_renderer_holds_snapshot` still sends one. This host ignores those
+  // bytes, and the number stays spoken for so that nothing else claims it while
+  // such a desktop can still connect.
   bytes data = 5;
   uint32 columns = 6;
   uint32 rows = 7;
@@ -171,6 +183,23 @@ message Request {
   FileServiceRequest file = 13;
   GitRequest git = 14;
   AgentRequest agent = 15;
+  // The renderer keeps its own copy of the screen it hands off, so the host
+  // stores no bytes for a hidden pane at all. Set on both halves of the
+  // handoff, and read on the reveal: it says the copy is still held, and a
+  // verified tail may be written on top of it. A peer that does not set it is
+  // answered with a seed, which is what makes the flag — not the payload — the
+  // thing the resume path turns on.
+  bool terminal_renderer_holds_snapshot = 16;
+  // How many lines above the screen REQUEST_TERMINAL_HISTORY asks for. Read by
+  // no other operation, and clamped by the host: the number decides the size of
+  // a capture the user is waiting on.
+  uint32 terminal_history_lines = 17;
+  // How many lines above the screen the renderer is already holding, so
+  // REQUEST_TERMINAL_HISTORY answers with the lines above *those*. tmux
+  // captures everything above the current display, which after a screen-only
+  // seed includes every row that has scrolled off since — rows the renderer
+  // has, and would be given a second copy of. Read by no other operation.
+  uint32 terminal_history_skip_lines = 18;
 }
 
 message Response {
@@ -239,6 +268,11 @@ enum EventKind {
   // paste buffer. The desktop may write `detail` to the system clipboard and
   // must never answer with clipboard contents.
   EVENT_KIND_TERMINAL_CLIPBOARD_WRITE = 18;
+  // The scrollback above a pane's screen, in `terminal.data`, answering one
+  // REQUEST_TERMINAL_HISTORY. Deliberately not a seed: it carries no
+  // generation, replaces no screen, and repairs no seed debt — the renderer
+  // splices it above what it is already showing, or discards it.
+  EVENT_KIND_TERMINAL_HISTORY = 19;
 }
 
 message HostEvent {
@@ -253,6 +287,12 @@ message HostEvent {
   AgentEvent agent = 9;
   uint64 terminal_delivery_bytes = 10;
   uint64 terminal_delivery_records = 11;
+  // The topology generation a TOPOLOGY_SNAPSHOT that carries no `snapshot`
+  // acknowledges. A notified reconciliation pass that found the world
+  // unchanged says so with the generation alone rather than with the whole
+  // server; the desktop closes its reconciliation state and keeps the
+  // entities it already holds. Zero on every other event.
+  uint64 topology_generation = 12;
 }
 
 message Cancel {
@@ -312,6 +352,20 @@ message TerminalBytes {
   string pane_id = 1;
   bytes data = 2;
   uint64 generation = 3;
+  // EVENT_KIND_TERMINAL_HISTORY only: how many lines of scrollback tmux is
+  // holding for this pane (`#{history_size}`), read by a targeted
+  // display-message that runs after the capture. It is what tells the renderer
+  // whether the page it just received reached the top of the history: the rows
+  // it asked for are the `skip` it already held plus the page, and anything at
+  // or past this number is the end.
+  //
+  // `history_size_known` because "tmux did not answer" is a different claim
+  // from "this pane has no scrollback". The probe is targeted, so a pane that
+  // went away between the capture and it fails, and the renderer must read that
+  // as a page to ask for again rather than as the end of the history. Zero and
+  // false on every other event.
+  uint32 history_size = 4;
+  bool history_size_known = 5;
 }
 
 enum TmuxActionKind {
@@ -384,6 +438,9 @@ enum PaneResourceState {
 message PaneResource {
   string pane_id = 1;
   PaneResourceState state = 2;
+  // Kept on the wire for one release so a desktop that still reads it finds a
+  // field rather than a gap. Nothing writes it: the renderer owns its screen,
+  // and this host answers a reveal with a verified tail or with a seed.
   bytes serialized_snapshot = 3;
   bytes raw_tail = 4;
   uint64 generation = 5;
@@ -395,6 +452,12 @@ message PaneResource {
   // through this generation, in order. A renderer may discard deferred output
   // at or below this boundary after applying snapshot + raw_tail.
   uint64 tail_through_generation = 9;
+  // The host verified this pane's recorded handoff checkpoint against the
+  // reveal's, and raw_tail is the complete output since it. The renderer
+  // restores from its own cache and writes raw_tail on top; an empty raw_tail
+  // is the ordinary answer for an idle pane and still says "you may draw".
+  // Never set together with requires_seed.
+  bool resume_from_renderer = 10;
 }
 
 message TransferChunk {

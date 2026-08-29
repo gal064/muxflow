@@ -27,10 +27,26 @@ const resource = (
   const { serializedSnapshot = Uint8Array.of(generation), rawTail = Uint8Array.of(generation + 10), ...metadata } = overrides;
   return {
     kind: "paneResource", paneId: "%1", state: "hiddenBuffered", requiresSeed: false,
-    recoveryReason: "", generation, snapshotGeneration: Math.max(0, generation - 1), tailThroughGeneration: generation,
+    resumeFromRenderer: false, recoveryReason: "", generation, snapshotGeneration: Math.max(0, generation - 1), tailThroughGeneration: generation,
     serializedSnapshot: copyTerminalBytes(serializedSnapshot), rawTail: copyTerminalBytes(rawTail), sequence, ...metadata,
   };
 };
+
+/** The scrollback above a pane's screen, answering a question the user asked. */
+const history = (sequence: number, paneId = "%1", data = Uint8Array.of(7)): TerminalEvent => ({
+  kind: "terminalHistory", paneId, data: copyTerminalBytes(data), sequence,
+});
+
+/**
+ * The host's answer to a reveal it could verify: no screen, the output since
+ * the checkpoint, and the flag that says so.
+ */
+const resumeAnswer = (sequence: number, generation: number): TerminalEvent =>
+  resource(sequence, generation, {
+    resumeFromRenderer: true,
+    serializedSnapshot: new Uint8Array(),
+    rawTail: new Uint8Array(),
+  });
 
 describe("TerminalEventHub hidden-pane buffering", () => {
   it("replays byte-exact hidden output when a pane becomes visible", () => {
@@ -652,6 +668,73 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.retryPaneSeed("%1");
     hub.retryPaneSeed("%unknown");
     expect(requests).toEqual(["%1", "%1"]);
+  });
+
+  // The ladder that decides whether a pane is still owed a seed reads a byte
+  // count today, and a verified resume answer carries no bytes. Reading the
+  // count instead of the flag leaves the pane waiting for a seed nobody owes
+  // it — the single most likely way to ship a permanently blank pane.
+  it("clears seed debt for a zero-byte answer only when it carries the resume flag", () => {
+    const hub = new TerminalEventHub();
+    hub.subscribePane("%1", () => undefined);
+    hub.publish(resource(1, 1, {
+      requiresSeed: true,
+      recoveryReason: "host recovery pending",
+      serializedSnapshot: new Uint8Array(),
+      rawTail: new Uint8Array(),
+    }));
+    expect(hub.paneHealth("%1").awaitingSeed).toBe(true);
+
+    // An empty answer that is not a resume repairs nothing, and must not
+    // cancel the seed this pane is owed.
+    hub.publish(resource(2, 2, { serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array() }));
+    expect(hub.paneHealth("%1").awaitingSeed).toBe(true);
+
+    // The same zero bytes, carrying the host's verified checkpoint, are the
+    // whole recovery: the renderer already holds the screen they continue.
+    hub.publish(resumeAnswer(3, 3));
+    expect(hub.paneHealth("%1").awaitingSeed).toBe(false);
+  });
+
+  /**
+   * A history answer is the one pane event that is not part of the output
+   * stream. Putting it through the ladder every other pane event goes through
+   * would let a photograph of the scrollback advance the generation watermark
+   * — silently discarding the output that follows it — or settle a seed debt
+   * with something that is not a screen.
+   */
+  it("delivers a history answer beside the output stream rather than inside it", () => {
+    const hub = new TerminalEventHub();
+    const received: TerminalEvent[] = [];
+    hub.subscribePane("%1", (event) => received.push(event));
+    hub.publish(seed(1, 5));
+    received.length = 0;
+
+    hub.publish(history(2));
+    expect(received.map((event) => event.kind)).toEqual(["terminalHistory"]);
+    // The watermark did not move, so output the host already sent is still
+    // ahead of it and is still delivered.
+    hub.publish(output(3, 6));
+    expect(received.map((event) => event.kind)).toEqual(["terminalHistory", "output"]);
+
+    // And it settles no debt: a pane owed a screen is still owed one.
+    hub.publish(resource(4, 7, { requiresSeed: true, recoveryReason: "host recovery pending" }));
+    expect(hub.paneHealth("%1").awaitingSeed).toBe(true);
+    hub.publish(history(5));
+    expect(hub.paneHealth("%1").awaitingSeed).toBe(true);
+  });
+
+  it("drops a history answer for a pane nothing is rendering", () => {
+    const hub = new TerminalEventHub();
+    const received: TerminalEvent[] = [];
+    const unsubscribe = hub.subscribePane("%1", (event) => received.push(event));
+    unsubscribe();
+    // Nothing buffers it: the renderer that asked the question is gone, and its
+    // successor asks again if the user asks again.
+    hub.publish(history(1));
+    hub.subscribePane("%1", (event) => received.push(event));
+    hub.publish(output(2, 1));
+    expect(received.map((event) => event.kind)).toEqual(["output"]);
   });
 
   it("contains a failing pane health observer like every other observer", () => {
