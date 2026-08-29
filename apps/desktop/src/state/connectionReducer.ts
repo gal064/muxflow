@@ -45,8 +45,13 @@ export interface NormalizedHostState {
 
 export type HostAction =
   | { type: "connection"; phase: ConnectionPhase }
-  | { type: "snapshot"; snapshot: TmuxSnapshot; sequence: number; serverIdentity: string; generation?: number }
-  | { type: "orderedSnapshot"; snapshot: TmuxSnapshot; sequence: number; serverIdentity: string; generation?: number }
+  /**
+   * A topology answer. Without a `snapshot` it is the host's reconciliation
+   * acknowledgement — a notified pass that found the world unchanged — and
+   * carries nothing to apply. See `replaceSnapshot`.
+   */
+  | { type: "snapshot"; snapshot?: TmuxSnapshot; sequence: number; serverIdentity: string; generation?: number }
+  | { type: "orderedSnapshot"; snapshot?: TmuxSnapshot; sequence: number; serverIdentity: string; generation?: number }
   | { type: "orderedEvent"; sequence: number }
   | { type: "reset" };
 
@@ -100,6 +105,15 @@ function replaceSnapshot(
   state: NormalizedHostState,
   action: Extract<HostAction, { type: "snapshot" | "orderedSnapshot" }>,
 ): NormalizedHostState {
+  // Nothing to replace. The host reconciled a notification burst, found the
+  // world exactly as it had already described it, and said so with the
+  // generation alone — it used to resend the whole server to say that, which
+  // on a busy tree is tens of kilobytes, several times per window switch, and
+  // ahead of the switch's own answer on the same lane. The entities held here
+  // are that same world, so the frame spends its sequence and changes nothing
+  // else. `resyncRequested` is deliberately untouched: a rebuild this process
+  // asked for is answered by a world, never by word that none was needed.
+  if (!action.snapshot) return { ...state, lastSequence: action.sequence };
   return {
     ...state,
     serverIdentity: action.serverIdentity,

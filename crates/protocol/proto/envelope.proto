@@ -253,6 +253,12 @@ message HostEvent {
   AgentEvent agent = 9;
   uint64 terminal_delivery_bytes = 10;
   uint64 terminal_delivery_records = 11;
+  // The topology generation a TOPOLOGY_SNAPSHOT that carries no `snapshot`
+  // acknowledges. A notified reconciliation pass that found the world
+  // unchanged says so with the generation alone rather than with the whole
+  // server; the desktop closes its reconciliation state and keeps the
+  // entities it already holds. Zero on every other event.
+  uint64 topology_generation = 12;
 }
 
 message Cancel {

@@ -130,6 +130,23 @@ describe("binary terminal IPC", () => {
     expect(() => decodeTerminalEvent(frame(7, "snapshot", 13, payload))).toThrow("conflicts");
   });
 
+  it("decodes a topology frame with no tree as a reconciliation acknowledgement", () => {
+    // The host reconciled a notification burst and found the world exactly as
+    // this process holds it. The frame still spends its sequence — dropping it
+    // would read as a lost one — and carries the generation alone.
+    const payload = textEncoder.encode(JSON.stringify({
+      snapshot: null, sequence: 12, generation: 7, serverIdentity: "tmux:test", authoritative: false,
+    }));
+    const decoded = decodeTerminalEvent(frame(7, "snapshot", 12, payload));
+    expect(decoded).toEqual({
+      kind: "snapshot", sequence: 12, generation: 7, serverIdentity: "tmux:test",
+      authoritative: false, snapshot: undefined,
+    });
+    expect(() => decodeTerminalEvent(frame(7, "snapshot", 12, textEncoder.encode(JSON.stringify({
+      snapshot: 7, sequence: 12, generation: 7, serverIdentity: "tmux:test", authoritative: false,
+    }))))).toThrow("metadata");
+  });
+
   it("decodes kind 8 only as standalone protocol progress", () => {
     expect(decodeTerminalEvent(frame(8, "protocol", 9))).toEqual({ kind: "protocolProgress", sequence: 9 });
     expect(() => decodeTerminalEvent(frame(8, "9", 9))).toThrow("malformed");
