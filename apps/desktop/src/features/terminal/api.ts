@@ -882,6 +882,14 @@ export interface TerminalLinkStats {
   msSinceLastHostEvent: number;
   /** Requests the native side gave up waiting on, since this client started. */
   lateRequestsTotal: number;
+  /**
+   * Bytes and frames the native reader has taken off the ssh stream since this
+   * connection started. Absent unless the process is running a measured build
+   * with `ADE_PERF_LOG` set: sampled at a keystroke and again at its echo, the
+   * difference is how much other traffic the echo waited behind.
+   */
+  bytesReadTotal?: number;
+  framesReadTotal?: number;
 }
 
 /**

@@ -32,7 +32,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-CARGO_INCREMENTAL=0 cargo build --locked --release -p muxflow-host
+# MUXFLOW_PERF_BUILD=1 compiles the switch-timing instrumentation into this
+# package: the host writes `timing.log` and the app answers `perf_log_enabled`
+# when launched with `ADE_PERF_LOG` set. Both are compiled out otherwise, so an
+# ordinary package is unchanged. One knob covers the helper, both Linux
+# helpers, and the app.
+perf_features=()
+if [[ ${MUXFLOW_PERF_BUILD:-0} == 1 ]]; then
+  perf_features=(--features perf-log)
+  echo "perf-log: enabled"
+fi
+export MUXFLOW_PERF_BUILD
+
+CARGO_INCREMENTAL=0 cargo build --locked --release -p muxflow-host \
+  ${perf_features[@]+"${perf_features[@]}"}
 
 # The shipped Linux helpers are produced by release/linux/build-compatible-host.sh,
 # the same builder every Phase 8/9 gate validates. They previously had their own
@@ -59,7 +72,13 @@ fi
 # tauri's own externalBin handling, so this flow and a plain `tauri build` ship
 # the same sidecar by the same mechanism. It used to be installed and re-signed
 # by hand here, which left the bundler's path exercised only by the bare flow.
-pnpm --dir apps/desktop tauri build --bundles app
+# `--features` is the tauri CLI's own flag for the app crate's cargo features,
+# which is why the feature is named here rather than passed through after `--`.
+if [[ ${MUXFLOW_PERF_BUILD:-0} == 1 ]]; then
+  pnpm --dir apps/desktop tauri build --bundles app --features perf-log
+else
+  pnpm --dir apps/desktop tauri build --bundles app
+fi
 app="$CARGO_TARGET_DIR/release/bundle/macos/Muxflow.app"
 # Re-seal with an ad-hoc identity after the plist edit: macOS UserNotifications
 # requires a stable application identity even for an internal build, while this
