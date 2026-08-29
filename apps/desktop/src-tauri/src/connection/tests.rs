@@ -22,49 +22,6 @@ fn incompatible_or_disconnected_client_rejects_mutation_without_queueing() {
     assert!(client.pending.lock().unwrap().is_empty());
 }
 
-#[test]
-fn a_timed_out_host_response_reconnects_instead_of_reusing_the_ordered_lane() {
-    use std::{fs::File, os::fd::FromRawFd};
-
-    let mut fds = [0; 2];
-    // SAFETY: pipe initializes both descriptors on success, and each is moved
-    // into exactly one File below.
-    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-    let read_end = unsafe { File::from_raw_fd(fds[0]) };
-    let write_end = unsafe { File::from_raw_fd(fds[1]) };
-
-    let client = TerminalClient::new();
-    client.ready.store(true, Ordering::Release);
-    *client.writer.lock().unwrap() =
-        Some(ControlWriterHandle::start_with(write_end, "response-timeout-reconnect").unwrap());
-    // Two late answers are a slow link, not a stalled lane; only the third
-    // in a row, after a full silence, proves the lane has stopped answering.
-    client
-        .unanswered_requests
-        .store(STALLED_LANE_UNANSWERED_REQUESTS - 1, Ordering::Release);
-    client.last_answer_at.store(0, Ordering::Release);
-
-    let error = client
-        .request_with_timeout(
-            v1::Request {
-                operation: v1::Operation::SelectTerminalSession.into(),
-                session_id: "$1".into(),
-                ..Default::default()
-            },
-            Duration::from_millis(25),
-            Duration::from_millis(25),
-            None,
-        )
-        .unwrap_err();
-
-    assert!(error.contains("host request timed out"), "{error}");
-    assert!(error.contains("reconnecting"), "{error}");
-    assert!(!client.ready.load(Ordering::Acquire));
-    assert!(client.writer.lock().unwrap().is_none());
-    assert!(client.pending.lock().unwrap().is_empty());
-    drop(read_end);
-}
-
 /// The shaped-link storm: a reply that is late because the lane is busy is
 /// not a lane that has stopped answering. The bridge stays up through two
 /// late answers; the third in a row, with nothing answered between them, is
@@ -121,9 +78,8 @@ fn a_late_answer_keeps_the_bridge_and_a_run_of_them_does_not() {
     assert!(error.contains("reconnecting"), "{error}");
     assert!(!client.ready.load(Ordering::Acquire));
     assert!(client.writer.lock().unwrap().is_none());
-    // The count died with the lane it described, and the late requests it
-    // kept were counted for the link stats.
-    assert_eq!(client.unanswered_requests.load(Ordering::Acquire), 0);
+    assert!(client.pending.lock().unwrap().is_empty());
+    // The late requests it kept were counted for the link stats.
     assert_eq!(client.late_requests_total.load(Ordering::Acquire), 3);
     // A lane becoming ready owes the full silence from that moment.
     client.last_answer_at.store(0, Ordering::Release);

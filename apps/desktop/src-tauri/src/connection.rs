@@ -59,9 +59,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Timeouts in a row before the lane is judged stalled rather than slow —
 /// and, because parallel requests time out together, only once the host has
-/// answered nothing for `STALLED_LANE_SILENCE` either. Together they are the
-/// stalled-lane incident caught within fifteen seconds rather than a slow
-/// link punished for a burst.
+/// answered nothing for `STALLED_LANE_SILENCE` either. Together they catch
+/// the stalled-lane incident within a minute of serial requests (three
+/// `HOST_RESPONSE_TIMEOUT`s) and never punish a slow link for a burst.
 const STALLED_LANE_UNANSWERED_REQUESTS: u32 = 3;
 const STALLED_LANE_SILENCE: Duration = Duration::from_secs(15);
 const GIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -312,10 +312,6 @@ impl TerminalClient {
         if child.is_some() {
             *self.teardown_reason.lock().unwrap() = Some(reason);
         }
-        // The count belongs to the lane being torn down, not its successor.
-        self.unanswered_requests.store(0, Ordering::Release);
-        self.last_answer_at
-            .store(monotonic_millis(), Ordering::Release);
         files::invalidate_bulk_scope(
             self.bulk_scope,
             "bulk transfer control connection is reconnecting",
@@ -464,7 +460,9 @@ impl TerminalClient {
                 Instant::now() + REQUEST_TIMEOUT,
             )
             .inspect_err(|_| {
-                self.reconnect_transport("a request could not be written before its deadline")
+                self.reconnect_transport(
+                    "an input request could not be written before its deadline",
+                )
             })
     }
 

@@ -26,6 +26,7 @@ import {
 } from "../features/terminal/api";
 import { terminalStateCache } from "../features/terminal/TerminalStateCache";
 import { connectionReducer, denormalizeSnapshot, initialHostState } from "../state/connectionReducer";
+import { userFacingBridgeFailure } from "./bridgeFailureText";
 import {
   createLinkQualityMonitor,
   describeLinkQuality,
@@ -169,12 +170,9 @@ export function useAppConnectionController({
    * The one thing six drops in two minutes never told the user: it is the
    * network.
    *
-   * Both signals it tallies already exist here — the degraded transitions the
-   * strip is driven by, and the echo probe's own outliers — so this is glue
-   * around `linkQuality`, not a new measurement. The message it produces goes
-   * through the amber strip because that is the surface for a standing
-   * condition; a toast for it would be one more line in the stack of
-   * reconnect notices the user is already ignoring.
+   * The signals it tallies already exist here — a bridge error arriving while
+   * the link was up, the echo probe's outliers, and the native late-request
+   * counter — so this is glue around `linkQuality`, not a new measurement.
    */
   const linkQuality = useMemo(() => createLinkQualityMonitor(), []);
   // The standing verdict, while an episode lasts. It is spoken once, as a
@@ -189,8 +187,9 @@ export function useAppConnectionController({
   // monitor is not fed at all.
   const linkQualityHostRef = useRef("");
   linkQualityHostRef.current = connection.mode === "local" ? "" : connection.target;
-  const applyLinkQuality = useCallback((change: LinkQualityChange | undefined) => {
-    if (!change) return;
+  /** Returns whether a verdict was just spoken, so the caller can hold its own notice. */
+  const applyLinkQuality = useCallback((change: LinkQualityChange | undefined): boolean => {
+    if (!change) return false;
     if (change.kind === "degraded") {
       recordIncident("link.quality", {
         state: change.state,
@@ -202,11 +201,13 @@ export function useAppConnectionController({
       linkQualityVerdictRef.current = verdict;
       setLinkQualityVerdict(verdict);
       setStatus(verdict);
+      return true;
     } else {
       recordIncident("link.quality", { state: "ok", afterMs: change.afterMs });
       linkQualityVerdictRef.current = "";
       setLinkQualityVerdict("");
     }
+    return false;
   }, [setStatus]);
   /**
    * The journal's record of typing lag, which nothing else can report.
@@ -382,13 +383,13 @@ export function useAppConnectionController({
       recordIncident("link.restored", { afterMs: Date.now() - linkDegradedSince.current });
       linkDegradedSince.current = undefined;
     }
-  }, [applyLinkQuality, hostState.phase, linkQuality]);
+  }, [hostState.phase]);
 
   /**
-   * Late requests are the slow link itself — five seconds without an answer —
-   * and the native side counts them (it cannot send an event from a request
-   * thread: the delivery ledger belongs to the bridge thread). Read on a slow
-   * cadence while the link is up; each increment is one late request.
+   * Late requests are the slow link itself — a host answer that missed its
+   * deadline — and the native side counts them (it cannot send an event from
+   * a request thread: the delivery ledger belongs to the bridge thread). Read
+   * on a slow cadence while the link is up; each increment is one late request.
    */
   useEffect(() => {
     if (hostState.phase !== "connected" || !clientId || !linkQualityHostRef.current) return;
@@ -546,17 +547,17 @@ export function useAppConnectionController({
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
           recordIncident("link.bridgeDown", { event: event.kind, detail });
-          // The native supervisor names a teardown this side ordered on the
-          // error it causes. That is for the journal line above; the words a
-          // person reads stay the plain failure.
-          const shown = detail.split(" (torn down locally:")[0];
+          const shown = userFacingBridgeFailure(detail);
           // An error while the link is up is the link dropping under the app —
           // exactly one per outage, whatever the backoff ladder reports after
           // it, and none for the restarts the app orders itself (a resume, a
           // flow-stall recovery, a host switch), which arrive without one.
-          if (event.kind === "error" && hostPhaseRef.current === "connected" && linkQualityHostRef.current) {
-            applyLinkQuality(linkQuality.noteLinkLost(Date.now()));
-          }
+          // A verdict spoken here is the notice for this drop; the raw failure
+          // would only be a second line saying less.
+          const verdictSpoken = event.kind === "error"
+            && hostPhaseRef.current === "connected"
+            && Boolean(linkQualityHostRef.current)
+            && applyLinkQuality(linkQuality.noteLinkLost(Date.now()));
           // Under a link that keeps dropping the reconnecting strip is on
           // screen most of the time, and its detail line is where the verdict
           // is worth more than the reader's symptom. Only a bridge failure is
@@ -568,7 +569,7 @@ export function useAppConnectionController({
           // outage, which always speaks.
           const repeated = hostPhaseRef.current !== "connected" && shown === lastBridgeFailureRef.current;
           lastBridgeFailureRef.current = shown;
-          if (!repeated) setStatus(shown);
+          if (!repeated && !verdictSpoken) setStatus(shown);
           // The message is the only thing that separates "this host has no
           // helper" from "this host cannot be reached": both arrive as a dead
           // bridge, and only the first one has a fix the app can offer. The

@@ -7,9 +7,10 @@
  * only thing left on screen was a link that kept flickering. The journal had
  * every fact and the person watching had none.
  *
- * This is the missing summary. It counts the two signals the app already
- * produces — a link that dropped, and a keystroke that echoed late — and once
- * either one repeats inside its window it says the connection is the problem.
+ * This is the missing summary. It counts the signals the app already
+ * produces — a link that dropped, a keystroke that echoed late, a host answer
+ * the native side gave up waiting on — and once one of them repeats inside
+ * its window (or is bad enough alone) it says the connection is the problem.
  * Nothing here probes, pings or measures: it is a pure tally over injected
  * time, so the controller owns every clock and this owns the judgement.
  */
@@ -69,9 +70,9 @@ export interface LinkQualityMonitor {
    */
   noteEchoLag(at: number, lagMs: number): LinkQualityChange | undefined;
   /**
-   * A host request the native side gave up waiting on (`requestLate`) and
-   * kept the link through. Five seconds without an answer is the slow link
-   * itself, not a symptom of it, so one is enough.
+   * A host request the native side gave up waiting on and kept the link
+   * through (read off its late-request counter). An answer that misses its
+   * deadline is the slow link itself, not a symptom of it, so one is enough.
    */
   noteLateRequest(at: number): LinkQualityChange | undefined;
   /** Time passing is the only thing that ends an episode; call it on a bound. */
