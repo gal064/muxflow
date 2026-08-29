@@ -538,6 +538,89 @@ fn external_mutation_before_poll_invalidates_cached_action_baseline() {
     assert!(baseline_changed(Some(&cached), &cached.0, "tmux:restarted"));
 }
 
+/// Each section is reported in order, so the coarsest true statement is the
+/// one the timing log carries.
+#[test]
+fn a_refreshed_baseline_names_what_moved() {
+    let pane = |width: u16, window_id: &str| tmux_control::Pane {
+        id: "%1".into(),
+        session_id: "$1".into(),
+        window_id: window_id.into(),
+        index: 0,
+        active: true,
+        width,
+        height: 24,
+        left: 0,
+        top: 0,
+        current_path: String::new(),
+        current_command: "bash".into(),
+        pane_pid: 0,
+        start_command: String::new(),
+    };
+    let base = tmux_control::TmuxSnapshot {
+        sessions: vec![tmux_control::Session {
+            id: "$1".into(),
+            name: "one".into(),
+            window_count: 1,
+            attached_clients: 0,
+            order: 0,
+            pinned: false,
+        }],
+        windows: vec![tmux_control::Window {
+            id: "@1".into(),
+            session_id: "$1".into(),
+            index: 0,
+            name: "shell".into(),
+            active: true,
+            layout: "layout".into(),
+            zoomed: false,
+            pinned: false,
+        }],
+        panes: vec![pane(80, "@1")],
+    };
+    let cached = (base.clone(), "tmux:live".to_owned());
+    assert_eq!(
+        action_topology_diff(None, &base, "tmux:live"),
+        "baseline:absent"
+    );
+    assert_eq!(
+        action_topology_diff(Some(&cached), &base, "tmux:restarted"),
+        "identity"
+    );
+    assert_eq!(
+        action_topology_diff(Some(&cached), &base, "tmux:live"),
+        "none"
+    );
+
+    let mut resized = base.clone();
+    resized.panes[0].width = 120;
+    assert_eq!(
+        action_topology_diff(Some(&cached), &resized, "tmux:live"),
+        "panes:geometry"
+    );
+
+    let mut moved = base.clone();
+    moved.panes[0].window_id = "@2".into();
+    assert_eq!(
+        action_topology_diff(Some(&cached), &moved, "tmux:live"),
+        "panes:membership"
+    );
+
+    let mut windows = base.clone();
+    windows.windows[0].zoomed = true;
+    assert_eq!(
+        action_topology_diff(Some(&cached), &windows, "tmux:live"),
+        "windows"
+    );
+
+    let mut sessions = base.clone();
+    sessions.sessions[0].window_count = 2;
+    assert_eq!(
+        action_topology_diff(Some(&cached), &sessions, "tmux:live"),
+        "sessions"
+    );
+}
+
 /// The counterpart to `saturated_process_wide_sink_gets_resync_instead_of_silent_drop`.
 ///
 /// A resync is the right answer for an ordinary event the queue could not take:

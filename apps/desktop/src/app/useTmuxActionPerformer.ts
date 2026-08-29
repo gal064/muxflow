@@ -9,6 +9,7 @@ import { recordIncident } from "../diagnostics/incidents";
 import {
   abandonPanePaintSpan,
   openPanePaintSpan,
+  recordPerfRecord,
   targetPanePaintSpan,
   type PanePaintSpan,
 } from "../perf/probe";
@@ -55,6 +56,16 @@ export function useTmuxActionPerformer(options: Options) {
       ? undefined
       : INTERACTION_SPAN_BY_ACTION[action.kind];
     const paneSpanHandle = paneSpan ? openPanePaintSpan(paneSpan, options.clientId) : undefined;
+    // The renderer's two ends of the switch timeline. Recorded for every
+    // action, not only slow ones: the question being asked is how a switch on a
+    // fast link differs from one on a slow one, and that needs the fast
+    // baseline in the same log. `d1` is wall clock because the other four
+    // stamps are taken on two different machines and only a shared epoch joins
+    // them; `sentAt` stays monotonic because `elapsedMs` must not move when the
+    // clock does. This is a perf-log record, not an incident: it is measurement
+    // and it is inert unless the process opted in.
+    const d1 = Date.now();
+    const sentAt = performance.now();
     try {
       const result = await (options.requestAction ?? requestReconciledTmuxAction)({
         clientId: options.clientId,
@@ -63,6 +74,20 @@ export function useTmuxActionPerformer(options: Options) {
         initialScope,
         currentScope: () => options.hostScopeRef.current,
         ...options.reconciliation,
+      });
+      recordPerfRecord("perf.timeline", {
+        action: action.kind,
+        // d2..d5 and the head-of-line counters, exactly as native measured
+        // them. Absent when the native half is not compiled in, which leaves a
+        // record that still brackets the round trip with d1/d6.
+        ...result.timing,
+        d1,
+        // D6: this caller resumed. `d1` to `d6` spans the whole reconciliation,
+        // including any stale-topology retry, while `d2`..`d5` describe the
+        // final attempt only.
+        d6: Date.now(),
+        elapsedMs: Math.round(performance.now() - sentAt),
+        ok: true,
       });
       if (!sameHostConnection(initialScope, options.hostScopeRef.current)) {
         abandonPanePaintSpan(paneSpanHandle);
@@ -79,6 +104,16 @@ export function useTmuxActionPerformer(options: Options) {
       // nobody kept. One line per refusal: refusals are exceptional, and the
       // largest burst is one per tab in a bulk close.
       recordIncident("action.refused", { action: action.kind, error: String(error).slice(0, 200) });
+      // A refusal carries no native timing — the invoke rejected — so the
+      // record is the renderer's bracket plus the reason.
+      recordPerfRecord("perf.timeline", {
+        action: action.kind,
+        d1,
+        d6: Date.now(),
+        elapsedMs: Math.round(performance.now() - sentAt),
+        ok: false,
+        code: String(error).slice(0, 120),
+      });
       if (reportStatus && sameHostConnection(initialScope, options.hostScopeRef.current)) options.setStatus(String(error));
       if (execution?.kind === "navigation") throw error;
       return undefined;

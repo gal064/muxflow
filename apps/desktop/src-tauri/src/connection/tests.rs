@@ -52,6 +52,7 @@ fn a_late_answer_keeps_the_bridge_and_a_run_of_them_does_not() {
                 Duration::from_millis(25),
                 Duration::from_millis(25),
                 None,
+                &mut RequestTiming::inert(),
             )
             .unwrap_err()
     };

@@ -18,11 +18,13 @@ pub(crate) mod bridge;
 pub(crate) mod operations;
 #[cfg(any(debug_assertions, feature = "perf-log"))]
 pub(crate) mod sink;
+#[cfg(any(debug_assertions, feature = "perf-log"))]
+pub(crate) mod switch_timing;
 
 #[cfg(not(any(debug_assertions, feature = "perf-log")))]
 mod stub;
 #[cfg(not(any(debug_assertions, feature = "perf-log")))]
-pub(crate) use stub::{bridge, operations, sink};
+pub(crate) use stub::{bridge, operations, sink, switch_timing};
 
 pub(crate) use bridge::{quiesce_bridge_measurement, send_bridge_frame};
 pub(crate) use operations::{

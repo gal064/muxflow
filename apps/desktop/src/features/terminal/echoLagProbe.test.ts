@@ -6,7 +6,13 @@ import {
   ECHO_LAG_THRESHOLD_MS,
   ECHO_TIMEOUT_MS,
   type EchoLagIncident,
+  type EchoRecord,
 } from "./echoLagProbe";
+
+/** Fake timers are installed, so the counter samples settle on microtasks only. */
+async function flushMicrotasks(): Promise<void> {
+  for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+}
 
 /** The injected clock is advanced by hand so a timer can fire at any lag. */
 function probeWithClock() {
@@ -222,6 +228,85 @@ describe("createEchoLagProbe", () => {
     advance(ECHO_TIMEOUT_MS);
     // Nothing echoed, so there is no round trip to put in the distribution.
     expect(samples).toEqual([]);
+    probe.dispose();
+  });
+
+  it("reports how much other traffic the echo waited behind, at most once per interval", async () => {
+    const echoes: EchoRecord[] = [];
+    const incidents: EchoLagIncident[] = [];
+    let clock = 0;
+    let bytesRead = 0;
+    let framesRead = 0;
+    const probe = createEchoLagProbe({
+      onIncident: (incident) => incidents.push(incident),
+      // Every reading advances: this stands in for the native reader taking
+      // other frames — seeds, output — off the ssh stream while the echo waits.
+      sampleLinkCounters: () => {
+        bytesRead += 1_000;
+        framesRead += 2;
+        return Promise.resolve({ bytesRead, framesRead });
+      },
+      onEcho: (echo) => echoes.push(echo),
+      now: () => clock,
+    });
+    const type = (paneId: string) => {
+      probe.noteKey(paneId);
+      probe.noteInput(paneId);
+    };
+
+    type("%1");
+    clock += ECHO_LAG_THRESHOLD_MS + 50;
+    probe.noteOutput("%1");
+    await flushMicrotasks();
+
+    expect(echoes[0]).toMatchObject({
+      paneId: "%1",
+      sentAt: 0,
+      echoAt: ECHO_LAG_THRESHOLD_MS + 50,
+      lagMs: ECHO_LAG_THRESHOLD_MS + 50,
+      bytesAhead: 1_000,
+      framesAhead: 2,
+    });
+    // The outlier line carries the same evidence, so the journal and the perf
+    // log agree about one echo instead of describing two.
+    expect(incidents[0]).toMatchObject({ kind: "input.echoLag", bytesAhead: 1_000, framesAhead: 2 });
+
+    // The interval has elapsed, so this one is sampled too.
+    type("%1");
+    clock += 10;
+    probe.noteOutput("%1");
+    await flushMicrotasks();
+    expect(echoes).toHaveLength(2);
+
+    // The next keystroke falls inside the interval: still measured, still in
+    // the histogram, but it costs no native call and writes no record.
+    const sampledBytes = bytesRead;
+    type("%1");
+    clock += 10;
+    probe.noteOutput("%1");
+    await flushMicrotasks();
+    expect(echoes).toHaveLength(2);
+    expect(bytesRead).toBe(sampledBytes);
+    probe.dispose();
+  });
+
+  it("still reports an echo when the link counters are unavailable", async () => {
+    const echoes: EchoRecord[] = [];
+    let clock = 0;
+    const probe = createEchoLagProbe({
+      onIncident: () => undefined,
+      // An unmeasured process has nothing to read, and must not pay a promise
+      // or a microtask per keystroke for the privilege of finding that out.
+      sampleLinkCounters: () => undefined,
+      onEcho: (echo) => echoes.push(echo),
+      now: () => clock,
+    });
+    probe.noteKey("%1");
+    probe.noteInput("%1");
+    clock += 20;
+    probe.noteOutput("%1");
+    await flushMicrotasks();
+    expect(echoes).toEqual([]);
     probe.dispose();
   });
 
