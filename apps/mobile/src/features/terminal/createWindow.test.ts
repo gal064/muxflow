@@ -58,8 +58,8 @@ describe("New terminal (§9.4, §7.5)", () => {
     const pending = createTerminalWindow(connection, store, "$1");
     const stale = (requestId: bigint) => transport.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "stale_topology", displayMessage: "again" }) }, { requestId }));
     stale(transport.drain()[0]!.requestId);
-    // No newer snapshot arrives: the retry goes out after the 250 ms wait.
-    await vi.advanceTimersByTimeAsync(249);
+    // No newer snapshot arrives: the retry goes out after the 1 s wait.
+    await vi.advanceTimersByTimeAsync(999);
     expect(transport.drain()).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(1);
     stale(transport.drain()[0]!.requestId);

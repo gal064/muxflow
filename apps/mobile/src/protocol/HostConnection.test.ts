@@ -318,10 +318,40 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
     const timeout = expect(third).rejects.toThrow("The host didn't answer in time.");
     await vi.advanceTimersByTimeAsync(20_000);
     await timeout;
-    // A timed-out control request drops the transport: the request is never
-    // replayed and the ordered lane is not trusted with later input.
+    // One late answer fails only its request: a slow link is not a dead lane.
+    expect(transport.closed).toBe(false);
+    expect(h.store.getState().connection).toMatchObject({ state: "connected" });
+  });
+
+  it("drops the lane only after three unanswered requests in a row and 15 s of silence", async () => {
+    const h = harness();
+    const transport = await connectHappily(h);
+    transport.drain();
+    const send = () => h.connection.request(terminalInput("%1", new Uint8Array([1])));
+    // Two misses back to back: still connected.
+    const miss1 = expect(send()).rejects.toThrow("The host didn't answer in time.");
+    await vi.advanceTimersByTimeAsync(20_000);
+    await miss1;
+    const miss2 = expect(send()).rejects.toThrow("The host didn't answer in time.");
+    await vi.advanceTimersByTimeAsync(20_000);
+    await miss2;
+    expect(transport.closed).toBe(false);
+    // An answer in between resets the count.
+    const answered = send();
+    transport.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: transport.drain().at(-1)!.requestId }));
+    await expect(answered).resolves.toMatchObject({ ok: true });
+    const miss3 = expect(send()).rejects.toThrow("The host didn't answer in time.");
+    await vi.advanceTimersByTimeAsync(20_000);
+    await miss3;
+    expect(transport.closed).toBe(false);
+    // Three in a row with no answer for over 15 s: the lane is stalled.
+    for (const _ of [1, 2]) {
+      const miss = expect(send()).rejects.toThrow("The host didn't answer in time.");
+      await vi.advanceTimersByTimeAsync(20_000);
+      await miss;
+    }
     expect(transport.closed).toBe(true);
-    expect(h.store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1 });
+    expect(h.store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1, message: "host stopped answering; reconnecting" });
   });
 
   it("reconnects with exponential backoff on network loss and resets after 60 s connected", async () => {

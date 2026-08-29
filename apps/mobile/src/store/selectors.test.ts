@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentWindowName, agentWorkspaceName, compareAgents, displayState, needsAttention, sortedAgents, agentPinned, pinnedDividers, sortedAgentsPinnedFirst } from "./selectors";
+import { agentWindowName, agentWorkspaceName, compareAgents, displayState, needsAttention, sortedAgents, agentPinned, pinnedDividers } from "./selectors";
 import type { Agent, SessionState } from "./sessionStore";
 
 function agent(overrides: Partial<Agent> & { id: string }): Agent {
@@ -12,6 +12,7 @@ function agent(overrides: Partial<Agent> & { id: string }): Agent {
     attentionGeneration: 0n,
     seenGeneration: 0n,
     updatedAtMs: 1000,
+    lifecycleChangedAtMs: 1000,
     present: true,
     route: { sessionId: "$1", sessionNameFallback: "fallback-ws", windowId: "@1", windowNameFallback: "fallback-win", paneId: "%1", paneIndexFallback: 0 },
     ...overrides,
@@ -48,14 +49,14 @@ describe("agents list order (§8.2)", () => {
       agent({ id: "blocked-seen", lifecycle: "blocked", attentionKind: "blocked", attentionGeneration: 2n, seenGeneration: 2n }),
       agent({ id: "blocked-new", lifecycle: "blocked", attentionKind: "blocked", attentionGeneration: 2n, seenGeneration: 1n }),
     ]) agents[a.id] = a;
-    expect(sortedAgents({ agents }).map((a) => a.id)).toEqual([
+    expect(sortedAgents({ agents, sessions: {}, windows: {} }).map((a) => a.id)).toEqual([
       "blocked-new", "blocked-seen", "done", "working", "idle", "unknown", "gone-blocked",
     ]);
   });
 
-  it("breaks ties by updatedAtMs descending, then name", () => {
-    const older = agent({ id: "older", updatedAtMs: 1 });
-    const newer = agent({ id: "newer", updatedAtMs: 2 });
+  it("breaks ties by the last lifecycle change descending, not by every hook update, then name", () => {
+    const older = agent({ id: "older", lifecycleChangedAtMs: 1, updatedAtMs: 9 });
+    const newer = agent({ id: "newer", lifecycleChangedAtMs: 2, updatedAtMs: 3 });
     expect([older, newer].sort(compareAgents).map((a) => a.id)).toEqual(["newer", "older"]);
     const a = agent({ id: "a", displayName: "Alpha" });
     const b = agent({ id: "b", displayName: "Beta" });
@@ -95,7 +96,7 @@ describe("pinned block (host-owned pins, desktop sidebar rule)", () => {
     expect(agentPinned({ sessions, windows }, agent({ id: "ws", route: route("$2", "@3") }))).toBe(true);
   });
 
-  it("lifts pinned rows to the front without reordering within each block", () => {
+  it("leads pinned rows only within their own status", () => {
     const agents: Record<string, Agent> = {};
     for (const a of [
       agent({ id: "blocked-plain", lifecycle: "blocked", attentionKind: "blocked", attentionGeneration: 2n, seenGeneration: 1n, route: route("$1", "@1") }),
@@ -103,8 +104,8 @@ describe("pinned block (host-owned pins, desktop sidebar rule)", () => {
       agent({ id: "working-plain", lifecycle: "working", route: route("$1", "@1") }),
       agent({ id: "working-pinned", lifecycle: "working", route: route("$1", "@2") }),
     ]) agents[a.id] = a;
-    expect(sortedAgentsPinnedFirst({ agents, sessions, windows }).map((a) => a.id)).toEqual([
-      "working-pinned", "idle-pinned", "blocked-plain", "working-plain",
+    expect(sortedAgents({ agents, sessions, windows }).map((a) => a.id)).toEqual([
+      "blocked-plain", "working-pinned", "working-plain", "idle-pinned",
     ]);
   });
 

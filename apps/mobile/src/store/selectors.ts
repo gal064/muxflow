@@ -35,14 +35,27 @@ function rank(agent: Agent): number {
 export function compareAgents(left: Agent, right: Agent): number {
   // Agents that are gone are shown last, whatever their retained state.
   if (left.present !== right.present) return left.present ? -1 : 1;
+  // Inside a state, only a real lifecycle transition changes recency, so
+  // repeated hooks and route-only updates cannot reshuffle rows.
   return rank(left) - rank(right)
-    || right.updatedAtMs - left.updatedAtMs
+    || right.lifecycleChangedAtMs - left.lifecycleChangedAtMs
     || left.displayName.localeCompare(right.displayName)
     || left.id.localeCompare(right.id);
 }
 
-export function sortedAgents(state: Pick<SessionState, "agents">): Agent[] {
-  return Object.values(state.agents).sort(compareAgents);
+/**
+ * The Agents tab order: status first, and inside each status the pinned rows
+ * lead their unpinned peers — a pin organises peers within a status, it does
+ * not outrank a louder status (the desktop's `byStatus` in
+ * `apps/desktop/src/features/agents/agentsList.ts`).
+ */
+export function sortedAgents(state: Pick<SessionState, "agents" | "sessions" | "windows">): Agent[] {
+  return Object.values(state.agents).sort((left, right) => {
+    if (left.present !== right.present) return left.present ? -1 : 1;
+    return rank(left) - rank(right)
+      || Number(agentPinned(state, right)) - Number(agentPinned(state, left))
+      || compareAgents(left, right);
+  });
 }
 
 export function agentWorkspaceName(state: Pick<SessionState, "sessions">, agent: Agent): string {
@@ -58,18 +71,11 @@ export function blockedAgentCount(state: Pick<SessionState, "agents">): number {
 }
 
 /**
- * Whether an agent sits in the leading "Pinned" block: its workspace or its
- * tab is pinned on the host (same rule as the desktop agents panel,
- * `apps/desktop/src/features/agents/agentsList.ts`).
+ * Whether an agent's workspace or tab is pinned on the host. Used to lead its
+ * status peers in `sortedAgents`.
  */
 export function agentPinned(state: Pick<SessionState, "sessions" | "windows">, agent: Agent): boolean {
   return Boolean(state.sessions[agent.route.sessionId]?.pinned || state.windows[agent.route.windowId]?.pinned);
-}
-
-/** Priority order, with the pinned rows lifted to the front in that same order. */
-export function sortedAgentsPinnedFirst(state: Pick<SessionState, "agents" | "sessions" | "windows">): Agent[] {
-  const agents = sortedAgents(state);
-  return [...agents.filter((agent) => agentPinned(state, agent)), ...agents.filter((agent) => !agentPinned(state, agent))];
 }
 
 /**

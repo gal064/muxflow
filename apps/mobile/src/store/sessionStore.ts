@@ -77,6 +77,12 @@ export interface Agent {
   attentionGeneration: bigint;
   seenGeneration: bigint;
   updatedAtMs: number;
+  /**
+   * When `lifecycle` last changed on the host. Repeated hooks that report the
+   * same lifecycle and route-only updates move `updatedAtMs` but not this, so
+   * lists ordered by it do not reshuffle on every hook.
+   */
+  lifecycleChangedAtMs: number;
   present: boolean;
   route: AgentRoute;
 }
@@ -275,6 +281,9 @@ export function agentFromProto(record: ProtoAgentRecord): Agent {
     attentionGeneration: record.attentionGeneration,
     seenGeneration: record.seenGeneration,
     updatedAtMs: Number(record.updatedAtUnixMillis),
+    // A helper from before the field decodes it as zero; its update time is
+    // the only clock it can offer.
+    lifecycleChangedAtMs: Number(record.lifecycleChangedAtUnixMillis) || Number(record.updatedAtUnixMillis),
     present: record.present,
     route: {
       sessionId: route?.sessionId ?? "",

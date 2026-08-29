@@ -25,6 +25,16 @@ import { TransportDialError, type Transport, type TransportClose, type Transport
 import type { AgentTransition, ConnectionState, SavedHostRef, SessionStore } from "../store/sessionStore";
 
 export const REQUEST_TIMEOUT_MS = 20_000;
+/**
+ * A late answer fails only its request. The lane is torn down only after this
+ * many unanswered requests in a row *and* `STALLED_LANE_SILENCE_MS` without
+ * any answer — the desktop's rule (`connection.rs`, docs/bugs/slow-link.md):
+ * on a slow link a workspace switch can legitimately answer 8 s late, and
+ * dropping the lane for it re-sends every screen and makes the next answer
+ * late too.
+ */
+export const STALLED_LANE_UNANSWERED_REQUESTS = 3;
+export const STALLED_LANE_SILENCE_MS = 15_000;
 export const FILE_STREAM_TIMEOUT_MS = 60_000;
 /** A connection `connected` this long resets the reconnect attempt counter (§7.2). */
 export const STABLE_AFTER_MS = 60_000;
@@ -150,6 +160,10 @@ interface Attempt {
   credit?: OutputCreditLedger;
   connectionEpoch: bigint;
   handshakeTimer?: ReturnType<typeof setTimeout> | undefined;
+  /** Requests that missed their deadline since the host last answered one. */
+  unansweredRequests: number;
+  /** When the host last answered a request — or when this lane started, so a fresh lane is owed the full silence. */
+  lastAnswerAt: number;
   /** Set once we decided the outcome of this attempt, so its close is not re-diagnosed. */
   outcome?: { state: "failed" | "incompatible"; message: string } | { state: "reconnect"; message: string };
 }
@@ -236,13 +250,19 @@ export class HostConnection {
       const timer = setTimeout(() => {
         attempt.pending.delete(requestId);
         reject(new RequestTimeoutError(requestId));
-        // A control request that missed its deadline is not request-scoped:
-        // the host may still complete it, so it is never replayed, and the
-        // ordered lane it sat on has proved it cannot make bounded progress —
-        // later input would queue behind it. Drop this transport; the
-        // supervisor reconnects and reconciles from a fresh snapshot (the
-        // desktop's rule, apps/desktop/src-tauri/src/connection.rs).
-        if (!this.options.bulk) this.reconnectNow(attempt, "host request timed out; reconnecting");
+        // A missed deadline is never replayed (the host may still complete
+        // it), but on its own it only fails this request. The lane is dropped
+        // once the host has stopped answering altogether: three misses in a
+        // row and nothing answered for 15 s. The supervisor then reconnects
+        // and reconciles from a fresh snapshot.
+        if (this.options.bulk) return;
+        attempt.unansweredRequests += 1;
+        const silence = Date.now() - attempt.lastAnswerAt;
+        if (attempt.unansweredRequests >= STALLED_LANE_UNANSWERED_REQUESTS && silence >= STALLED_LANE_SILENCE_MS) {
+          this.reconnectNow(attempt, "host stopped answering; reconnecting");
+        } else {
+          this.log(`request.late requestId=${requestId} unanswered=${attempt.unansweredRequests} silenceMs=${silence}`);
+        }
       }, timeoutMs);
       attempt.pending.set(requestId, {
         resolve,
@@ -294,6 +314,8 @@ export class HostConnection {
       nextRequestId: 3n,
       pending: new Map(),
       connectionEpoch: this.options.bulk?.connectionEpoch ?? BigInt(this.options.nextConnectionEpoch()),
+      unansweredRequests: 0,
+      lastAnswerAt: Date.now(),
     };
     this.attempt = attempt;
     transport.onData((chunk) => {
@@ -490,6 +512,7 @@ export class HostConnection {
         }
         attempt.pending.delete(frame.requestId);
         clearTimeout(pending.timer);
+        this.noteAnswer(attempt);
         const response = payload.value;
         if (response.ok) pending.resolve(response);
         else pending.reject(new HostError(response.errorCode, response.displayMessage));
@@ -533,6 +556,7 @@ export class HostConnection {
         if (pending) {
           attempt.pending.delete(frame.requestId);
           clearTimeout(pending.timer);
+          this.noteAnswer(attempt);
           pending.reject(new HostError(error.code, error.displayMessage));
         }
         return;
@@ -637,6 +661,12 @@ export class HostConnection {
   }
 
   /** Drops the current transport and reconnects on the backoff schedule. */
+  /** Any answer, even a refusal, proves the lane is alive. */
+  private noteAnswer(attempt: Attempt): void {
+    attempt.unansweredRequests = 0;
+    attempt.lastAnswerAt = Date.now();
+  }
+
   private reconnectNow(attempt: Attempt, reason: string): void {
     if (this.attempt !== attempt) return;
     attempt.outcome = { state: "reconnect", message: reason };
