@@ -6,7 +6,6 @@ import {
   FINAL_BRIDGE_DELIVERY_WAIT_MS,
   FINAL_BRIDGE_SHUTDOWN_WAIT_MS,
   MAX_HOST_TERMINAL_INPUT_BYTES,
-  prepareTerminalSnapshot,
   requestTerminalSeed,
   sendBinaryInput,
   sendInput,
@@ -179,11 +178,21 @@ describe("binary terminal IPC", () => {
     });
     expect(decodeTerminalEvent(frame(9, "%7", 20, payload))).toEqual({
       kind: "paneResource", paneId: "%7", state: "hiddenBuffered", requiresSeed: true,
+      resumeFromRenderer: false,
       recoveryReason: "overflow λ", generation: 19, snapshotGeneration: 17, tailThroughGeneration: 19,
       serializedSnapshot: Uint8Array.from([27, 91, 109]),
       rawTail: Uint8Array.from([255, 0]), sequence: 20,
     });
     expect(payload.byteLength).toBe(54);
+  });
+
+  // One flags byte, two exclusive answers: bit 0 is the seed the host owes,
+  // bit 1 is the tail it verified against the screen this renderer is holding.
+  it("decodes a verified resume as a flag rather than as a byte count", () => {
+    const answer = decodeTerminalEvent(frame(9, "%7", 20, paneResourcePayload({ flags: 2 })));
+    expect(answer).toMatchObject({ kind: "paneResource", requiresSeed: false, resumeFromRenderer: true });
+    if (answer.kind !== "paneResource") throw new Error("expected pane resource fixture");
+    expect(answer.rawTail.byteLength).toBe(0);
   });
 
   it("owns compact recovery segments without retaining their full transport frame", () => {
@@ -203,7 +212,7 @@ describe("binary terminal IPC", () => {
 
   it("rejects compact pane recovery truncation, unknown flags, invalid state, and malformed UTF-8", () => {
     expect(() => decodeTerminalEvent(frame(9, "%7", 1, new Uint8Array(37)))).toThrow("truncated");
-    expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({ flags: 2 })))).toThrow("flags");
+    expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({ flags: 4 })))).toThrow("flags");
     expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({ state: 4 })))).toThrow("state");
     expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({ reason: Uint8Array.of(0xff) })))).toThrow("UTF-8");
     const lengthMismatch = paneResourcePayload({ snapshot: Uint8Array.of(1) }).slice(0, -1);
@@ -213,20 +222,10 @@ describe("binary terminal IPC", () => {
     })))).toThrow("generation metadata");
   });
 
-  it("encodes serialized renderer snapshots within the host cap", () => {
-    const prepared = prepareTerminalSnapshot("shell: λ", 32);
-    expect(new TextDecoder().decode(prepared.data)).toBe("shell: λ");
-    expect(prepared).toMatchObject({ retained: true, originalByteLength: 9 });
-    expect(prepareTerminalSnapshot("λλ", 3)).toMatchObject({ retained: false, originalByteLength: 4 });
-  });
-
-  it("sends pane visibility with the exact epoch, rendered cutoff, and serialized bytes", async () => {
-    await setTerminalVisibility(
-      "client-1", "%7", false, Uint8Array.from([0, 255, 27]),
-      { terminalEpoch: 17, outputGeneration: 42 },
-    );
-    // One raw framed body, not a JSON array of numbers: a hide carries up to
-    // 4 MiB of serialized screen on the thread that has to paint the new tab.
+  it("sends pane visibility with the exact epoch, rendered cutoff, and no screen at all", async () => {
+    await setTerminalVisibility("client-1", "%7", false, true, { terminalEpoch: 17, outputGeneration: 42 });
+    // The screen stays in the renderer's own cache; what crosses is the
+    // checkpoint and one bit saying the renderer kept it.
     const [command, payload] = vi.mocked(invoke).mock.calls.at(-1)!;
     expect(command).toBe("set_terminal_visibility");
     const frame = payload as unknown as Uint8Array;
@@ -235,9 +234,15 @@ describe("binary terminal IPC", () => {
     expect(new TextDecoder().decode(frame.subarray(2, 10))).toBe("client-1");
     expect(new TextDecoder().decode(frame.subarray(12, 14))).toBe("%7");
     expect(frame[14]).toBe(0);
-    expect(view.getBigUint64(15, false)).toBe(17n);
-    expect(view.getBigUint64(23, false)).toBe(42n);
-    expect([...frame.subarray(31)]).toEqual([0, 255, 27]);
+    expect(frame[15]).toBe(1);
+    expect(view.getBigUint64(16, false)).toBe(17n);
+    expect(view.getBigUint64(24, false)).toBe(42n);
+    expect(frame.byteLength).toBe(32);
+
+    await setTerminalVisibility("client-1", "%7", true, false, { terminalEpoch: 17, outputGeneration: 42 });
+    const revealed = vi.mocked(invoke).mock.calls.at(-1)![1] as unknown as Uint8Array;
+    expect(revealed[14]).toBe(1);
+    expect(revealed[15]).toBe(0);
   });
 
   it("requests one scoped seed for bounded or conflicting recovery", async () => {

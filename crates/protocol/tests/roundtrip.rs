@@ -685,3 +685,108 @@ fn operation_additions_are_required_capabilities() {
         HOST_CAPABILITIES.count_ones() as usize
     );
 }
+
+/// The two bools the renderer-owned screen is built on, and their numbers.
+///
+/// The host stores no copy of a hidden pane's screen any more: the renderer
+/// keeps it and says so, and the host answers a reveal with the output since
+/// the checkpoint it recorded. Both halves of that are one bool each, and each
+/// one has to survive the wire at the number it was assigned — a field number
+/// that moves is read as a neighbouring field by every peer that did not move
+/// with it.
+#[test]
+fn renderer_holds_snapshot_and_resume_from_renderer_round_trip_at_their_own_numbers() {
+    let request = v1::Request {
+        operation: v1::Operation::SetTerminalVisibility.into(),
+        scope: "%2".into(),
+        visible: true,
+        terminal_epoch: 7,
+        terminal_generation_cutoff: 42,
+        terminal_renderer_holds_snapshot: true,
+        ..Default::default()
+    };
+    let bytes = request.encode_to_vec();
+    assert_eq!(v1::Request::decode(bytes.as_slice()).unwrap(), request);
+    // Field 16, varint: tag 0x80 0x01, value 1.
+    assert!(
+        bytes.windows(3).any(|window| window == [0x80, 0x01, 0x01]),
+        "terminal_renderer_holds_snapshot moved off field 16"
+    );
+
+    let answer = v1::PaneResource {
+        pane_id: "%2".into(),
+        state: v1::PaneResourceState::Visible.into(),
+        raw_tail: b"printed while hidden".to_vec(),
+        generation: 44,
+        snapshot_generation: 42,
+        tail_through_generation: 43,
+        resume_from_renderer: true,
+        ..Default::default()
+    };
+    let bytes = answer.encode_to_vec();
+    assert_eq!(v1::PaneResource::decode(bytes.as_slice()).unwrap(), answer);
+    // Field 10, varint: tag 0x50, value 1.
+    assert!(
+        bytes.windows(2).any(|window| window == [0x50, 0x01]),
+        "resume_from_renderer moved off field 10"
+    );
+    // The two answers are exclusive: a resume says "draw what you are holding
+    // and add this", a seed says "throw it away". A message carrying both would
+    // be read differently by the two sides of the same reveal.
+    assert!(!answer.requires_seed);
+    assert!(answer.serialized_snapshot.is_empty());
+}
+
+/// Both skew directions degrade to screen-first seeding, which is slower than
+/// the resume and never wrong.
+#[test]
+fn a_renderer_handoff_across_a_version_skew_degrades_to_a_seed() {
+    // Old desktop, new host: the hide still uploads a screen and neither the
+    // hide nor the reveal carries the flag. The host's rule — a tail only for a
+    // renderer that says it is still holding the screen the tail continues —
+    // is therefore never satisfied, and every reveal is answered with a seed.
+    let old_desktop_reveal = v1::Request {
+        operation: v1::Operation::SetTerminalVisibility.into(),
+        scope: "%2".into(),
+        visible: true,
+        data: b"a screen the host ignores".to_vec(),
+        terminal_epoch: 7,
+        terminal_generation_cutoff: 42,
+        ..Default::default()
+    };
+    let decoded = v1::Request::decode(old_desktop_reveal.encode_to_vec().as_slice()).unwrap();
+    assert!(!decoded.terminal_renderer_holds_snapshot);
+    assert_eq!(decoded, old_desktop_reveal);
+
+    // New desktop, old host: the flag rides in a field number the old host has
+    // never heard of, and an unknown field is skipped rather than refused — so
+    // the request is still a valid hide, just one whose empty payload that host
+    // reads as "no recoverable screen". Its answer sets no
+    // `resume_from_renderer`, which the desktop reads as seed debt.
+    let mut new_desktop_hide = v1::Request {
+        operation: v1::Operation::SetTerminalVisibility.into(),
+        scope: "%2".into(),
+        visible: false,
+        terminal_epoch: 7,
+        terminal_generation_cutoff: 42,
+        terminal_renderer_holds_snapshot: true,
+        ..Default::default()
+    };
+    let mut bytes = new_desktop_hide.encode_to_vec();
+    // A field number neither peer assigns, to state the tolerance itself.
+    bytes.extend_from_slice(&[0xf8, 0x06, 0x01]);
+    let decoded = v1::Request::decode(bytes.as_slice()).unwrap();
+    new_desktop_hide.terminal_renderer_holds_snapshot = decoded.terminal_renderer_holds_snapshot;
+    assert!(decoded.data.is_empty());
+
+    let old_host_answer = v1::PaneResource {
+        pane_id: "%2".into(),
+        state: v1::PaneResourceState::Released.into(),
+        requires_seed: true,
+        recovery_reason: "renderer handoff omitted a recoverable snapshot".into(),
+        ..Default::default()
+    };
+    let decoded = v1::PaneResource::decode(old_host_answer.encode_to_vec().as_slice()).unwrap();
+    assert!(!decoded.resume_from_renderer);
+    assert!(decoded.requires_seed);
+}

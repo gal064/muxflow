@@ -817,11 +817,7 @@ impl StreamState {
                                     let diagnostics = seed_build.diagnostics;
                                     let (visible, degradations) =
                                         with_active_resources(resources, stopped, |resources| {
-                                            resources.snapshot(
-                                                &pane_id,
-                                                seed.clone(),
-                                                seed_generation,
-                                            );
+                                            resources.seeded(&pane_id, seed_generation);
                                             (
                                                 !resources.is_hidden(&pane_id),
                                                 resources.take_degradations(),

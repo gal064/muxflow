@@ -7,7 +7,7 @@ import type { WireFileEvent } from "../files/api";
 import type { WireGitEvent } from "../git/api";
 import type { WireAgentEvent, WireAgentSnapshot } from "../agents/api";
 import type { OperationRecorder } from "../../perf/operations";
-import { copyTerminalBytes, ownTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
+import { copyTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
 import type { RustInputLatencyHistogram } from "./inputLatencyStats";
 
 interface SequencedTerminalEvent {
@@ -32,10 +32,20 @@ export type TerminalEvent = SequencedTerminalEvent & (
       paneId: string;
       state: "visible" | "hiddenBuffered" | "released" | "unspecified";
       requiresSeed: boolean;
+      /**
+       * The host verified its record of this pane's handoff against the
+       * reveal's checkpoint: `rawTail` is the complete output since it, and the
+       * screen it continues is the one this renderer is already holding. An
+       * empty tail is the ordinary answer for a pane that printed nothing while
+       * hidden, and it still means "you may draw" — which is why every decision
+       * about this answer reads the flag and never the byte count.
+       */
+      resumeFromRenderer: boolean;
       recoveryReason: string;
       generation: number;
       snapshotGeneration: number;
       tailThroughGeneration: number;
+      /** Legacy/degradation shape only; no host path writes it. */
       serializedSnapshot: OwnedTerminalBytes;
       rawTail: OwnedTerminalBytes;
     }
@@ -47,45 +57,13 @@ export type TerminalEvent = SequencedTerminalEvent & (
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const encoder = new TextEncoder();
-export const MAX_HOST_TERMINAL_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 export const MAX_HOST_TERMINAL_INPUT_BYTES = 1024 * 1024;
 const COMMON_HEADER_BYTES = 11;
 const PANE_RESOURCE_HEADER_BYTES = 38;
 
-declare const preparedTerminalSnapshot: unique symbol;
-
-export interface PreparedTerminalSnapshot {
-  readonly [preparedTerminalSnapshot]: true;
-  readonly serialized: string;
-  readonly data: OwnedTerminalBytes;
-  readonly originalByteLength: number;
-  readonly retained: boolean;
-}
-
 export interface TerminalVisibilityCheckpoint {
   terminalEpoch: number;
   outputGeneration: number;
-}
-
-export function prepareTerminalSnapshot(
-  serialized: string,
-  maxBytes = MAX_HOST_TERMINAL_SNAPSHOT_BYTES,
-): PreparedTerminalSnapshot {
-  const encoded = encoder.encode(serialized);
-  if (encoded.byteLength > maxBytes) {
-    return Object.freeze({
-      serialized,
-      data: ownTerminalBytes(new Uint8Array()),
-      originalByteLength: encoded.byteLength,
-      retained: false,
-    }) as PreparedTerminalSnapshot;
-  }
-  return Object.freeze({
-    serialized,
-    data: ownTerminalBytes(encoded),
-    originalByteLength: encoded.byteLength,
-    retained: true,
-  }) as PreparedTerminalSnapshot;
 }
 
 export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: OperationRecorder): TerminalEvent {
@@ -515,7 +493,7 @@ function decodePaneResource(
   const state = (["unspecified", "visible", "hiddenBuffered", "released"] as const)[payload[0]];
   if (!state) throw new Error("invalid pane resource state");
   const flags = payload[1];
-  if ((flags & ~1) !== 0) throw new Error("pane resource payload has unknown flags");
+  if ((flags & ~3) !== 0) throw new Error("pane resource payload has unknown flags");
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   const generation = safeBigIntToNumber(view.getBigUint64(2, false), "pane resource generation");
   const snapshotGeneration = safeBigIntToNumber(view.getBigUint64(10, false), "pane resource snapshot generation");
@@ -544,6 +522,7 @@ function decodePaneResource(
     paneId,
     state,
     requiresSeed: Boolean(flags & 1),
+    resumeFromRenderer: Boolean(flags & 2),
     recoveryReason,
     generation,
     snapshotGeneration,
@@ -819,10 +798,10 @@ export function setTerminalVisibility(
   clientId: string,
   paneId: string,
   visible: boolean,
-  serializedSnapshot: Uint8Array,
+  rendererHoldsSnapshot: boolean,
   checkpoint: TerminalVisibilityCheckpoint,
 ): Promise<void> {
-  const frame = encodeTerminalVisibilityFrame(clientId, paneId, visible, serializedSnapshot, checkpoint);
+  const frame = encodeTerminalVisibilityFrame(clientId, paneId, visible, rendererHoldsSnapshot, checkpoint);
   return measurePerfRequest(
     visible ? "invoke.set_terminal_visibility.reveal" : "invoke.set_terminal_visibility.hide",
     "terminal",
@@ -834,25 +813,30 @@ export function setTerminalVisibility(
 
 /**
  * Frames a visibility change as a raw IPC body: the input frame's header, then
- * a visibility byte, the terminal epoch and the output cutoff as big-endian
- * `u64`s, then the snapshot bytes.
+ * a visibility byte, a flags byte, and the terminal epoch and output cutoff as
+ * big-endian `u64`s.
  *
- * A hide carries the renderer's serialized screen, up to 4 MiB. As a JSON
- * argument that becomes an array of numbers — around 15 MB of text to
- * stringify here and re-parse on the other side, on the thread that is
- * supposed to be painting the tab the user just switched to.
+ * A hide used to carry the renderer's serialized screen, up to 4 MiB of it,
+ * which is why this body is raw rather than JSON — an array of numbers that
+ * size is around 15 MB of text to stringify here and re-parse on the other
+ * side, on the thread that is supposed to be painting the tab the user just
+ * switched to. It carries no screen now: bit 0 of the flags byte says the
+ * renderer kept its own, which is what lets the host answer the reveal with the
+ * output since the checkpoint instead of a copy of the screen. The body stays
+ * raw because the frame is still on the switch path and a JSON round trip there
+ * costs more than the frame does.
  */
 export function encodeTerminalVisibilityFrame(
   clientId: string,
   paneId: string,
   visible: boolean,
-  serializedSnapshot: Uint8Array,
+  rendererHoldsSnapshot: boolean,
   checkpoint: TerminalVisibilityCheckpoint,
 ): Uint8Array {
   const client = encoder.encode(clientId);
   const pane = encoder.encode(paneId);
   const scalarsOffset = 4 + client.byteLength + pane.byteLength;
-  const frame = new Uint8Array(scalarsOffset + 17 + serializedSnapshot.byteLength);
+  const frame = new Uint8Array(scalarsOffset + 18);
   const view = new DataView(frame.buffer);
   view.setUint16(0, client.byteLength, false);
   frame.set(client, 2);
@@ -860,9 +844,9 @@ export function encodeTerminalVisibilityFrame(
   view.setUint16(paneOffset, pane.byteLength, false);
   frame.set(pane, paneOffset + 2);
   frame[scalarsOffset] = visible ? 1 : 0;
-  view.setBigUint64(scalarsOffset + 1, BigInt(checkpoint.terminalEpoch), false);
-  view.setBigUint64(scalarsOffset + 9, BigInt(checkpoint.outputGeneration), false);
-  frame.set(serializedSnapshot, scalarsOffset + 17);
+  frame[scalarsOffset + 1] = rendererHoldsSnapshot ? 1 : 0;
+  view.setBigUint64(scalarsOffset + 2, BigInt(checkpoint.terminalEpoch), false);
+  view.setBigUint64(scalarsOffset + 10, BigInt(checkpoint.outputGeneration), false);
   return frame;
 }
 

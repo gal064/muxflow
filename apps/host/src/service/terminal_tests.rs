@@ -423,7 +423,6 @@ async fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() 
         resources
             .hide_with_checkpoint(
                 &pane_id,
-                vec![b'S'],
                 VisibilityCheckpoint {
                     epoch: 1,
                     generation: 0,
@@ -467,10 +466,10 @@ async fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() 
                 "%1",
                 VisibilityChange {
                     visible: true,
-                    serialized_snapshot: Vec::new(),
+                    renderer_holds_snapshot: true,
                     checkpoint: VisibilityCheckpoint {
                         epoch: 1,
-                        generation: 1,
+                        generation: 0,
                     },
                 },
                 permit,
@@ -549,10 +548,9 @@ async fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() 
         v1::EventKind::try_from(recovery.kind).unwrap(),
         v1::EventKind::PaneResource
     );
-    assert_eq!(
-        recovery.pane_resource.unwrap().serialized_snapshot,
-        vec![b'S']
-    );
+    // The renderer's own screen is the recovery base; what crosses is the
+    // host's verification of it and the output since.
+    assert!(recovery.pane_resource.unwrap().resume_from_renderer);
     assert_eq!(
         v1::EventKind::try_from(output_event.kind).unwrap(),
         v1::EventKind::TerminalOutput
@@ -670,7 +668,7 @@ fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
             "%1",
             VisibilityChange {
                 visible: false,
-                serialized_snapshot: vec![b'S'],
+                renderer_holds_snapshot: true,
                 checkpoint: VisibilityCheckpoint {
                     epoch: 1,
                     generation: 1,
@@ -716,7 +714,6 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
             .unwrap()
             .hide_with_checkpoint(
                 "%1",
-                vec![b'S'],
                 VisibilityCheckpoint {
                     epoch: 1,
                     generation: 0,
@@ -746,7 +743,6 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
             let resources = clients.resources.lock().unwrap();
             let resource = resources.get("%1").unwrap();
             assert_eq!(resource.state, StoredResourceState::HiddenBuffered);
-            assert_eq!(resource.serialized_snapshot, vec![b'S']);
             continue;
         }
         assert!(
@@ -755,10 +751,10 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
                     "%1",
                     VisibilityChange {
                         visible: true,
-                        serialized_snapshot: Vec::new(),
+                        renderer_holds_snapshot: true,
                         checkpoint: VisibilityCheckpoint {
                             epoch: 1,
-                            generation: 1,
+                            generation: 0,
                         },
                     },
                     permit.unwrap(),
@@ -771,7 +767,6 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
         let resource = resources.get("%1").unwrap();
         assert_eq!(resource.state, StoredResourceState::Released);
         assert!(resource.requires_seed);
-        assert!(resource.serialized_snapshot.is_empty());
         assert!(resource.raw_tail.is_empty());
     }
 }
@@ -1486,12 +1481,11 @@ fn a_reveal_whose_seed_request_fails_owes_the_pane_a_seed_and_settles_it_later()
     {
         let mut resources = clients.resources.lock().unwrap();
         resources.ensure("%1", true, 0);
-        // An omitted renderer snapshot releases the resource, so the reveal
-        // below is the one that owes the pane an authoritative seed.
+        // The hide the reveal below cannot be matched against: it is answered
+        // with a seed, and that seed is the one the pane ends up owed.
         resources
             .hide_with_checkpoint(
                 "%1",
-                Vec::new(),
                 VisibilityCheckpoint {
                     epoch: 1,
                     generation: 0,
@@ -1536,7 +1530,7 @@ fn a_reveal_whose_seed_request_fails_owes_the_pane_a_seed_and_settles_it_later()
             "%1",
             VisibilityChange {
                 visible: true,
-                serialized_snapshot: Vec::new(),
+                renderer_holds_snapshot: false,
                 checkpoint: VisibilityCheckpoint {
                     epoch: 1,
                     generation: 1,
@@ -1624,7 +1618,7 @@ fn an_evicted_pane_is_reported_to_the_desktop_as_requiring_a_seed() {
         let mut store = resources.lock().unwrap();
         store.set_visible("%1", true, 0);
         store.ensure("%2", false, 0);
-        store.snapshot("%2", vec![b'x'; 64], 1);
+        store.append("%2", &[b'x'; 64], 1);
         assert!(store.take_degradations().is_empty());
     }
     let (events, mut receiver) = mpsc::channel(8);

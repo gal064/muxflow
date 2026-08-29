@@ -922,6 +922,7 @@ fn process_event(
                     pane_id: resource.pane_id,
                     state,
                     requires_seed: resource.requires_seed,
+                    resume_from_renderer: resource.resume_from_renderer,
                     recovery_reason: resource.recovery_reason,
                     generation: resource.generation,
                     snapshot_generation: resource.snapshot_generation,

@@ -852,11 +852,24 @@ describe("native terminal paste interception", () => {
 describe("pane resource recovery", () => {
   const resource = {
     kind: "paneResource", paneId: "%1", state: "hiddenBuffered", requiresSeed: false,
+    resumeFromRenderer: false,
     recoveryReason: "", generation: 2, snapshotGeneration: 1, tailThroughGeneration: 2,
     serializedSnapshot: copyTerminalBytes(new TextEncoder().encode("screen λ")),
     rawTail: copyTerminalBytes(Uint8Array.of(27, 91, 109)),
     sequence: 2,
   } as const;
+
+  it("resumes from the renderer's own screen when the host verified the handoff", () => {
+    // The flag, not the byte count: an idle pane's answer carries nothing at
+    // all and is still the whole recovery.
+    expect(paneRecoveryPlan({
+      ...resource, resumeFromRenderer: true,
+      serializedSnapshot: copyTerminalBytes(new Uint8Array()),
+      rawTail: copyTerminalBytes(new Uint8Array()),
+    })).toEqual({
+      kind: "resume", rawTail: new Uint8Array(), snapshotGeneration: 1, tailThroughGeneration: 2,
+    });
+  });
 
   it("restores a valid serialized snapshot before its byte-exact raw tail", () => {
     expect(paneRecoveryPlan(resource)).toEqual({
