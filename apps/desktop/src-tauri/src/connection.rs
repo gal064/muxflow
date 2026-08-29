@@ -49,6 +49,14 @@ use git_content::GitContentReads;
 pub(crate) mod tmux_action;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a written request may wait for its answer. The host answers a
+/// request *after* the ordered events it caused, and a workspace switch causes
+/// every pane's seed — two thousand lines of scrollback each — so on a 2 Mbit/s
+/// link the answer sits behind ~2 MB of screens for eight seconds or more. Five
+/// seconds turned every switch on such a link into a refusal, a retry, and
+/// eventually a teardown (2026-08-29). The write keeps its short deadline: a
+/// pipe that will not take five seconds' worth of bytes is a different fault.
+const HOST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Timeouts in a row before the lane is judged stalled rather than slow —
 /// and, because parallel requests time out together, only once the host has
 /// answered nothing for `STALLED_LANE_SILENCE` either. Together they are the
@@ -122,9 +130,11 @@ pub(crate) struct TerminalClient {
     /// lane's start, so a fresh lane is owed the full silence before it is
     /// judged stalled. Zero means never, which only a test sets.
     last_answer_at: AtomicU64,
-    /// Where a late-but-kept request is reported to the shell. Absent until
-    /// `start_terminal` opens the event channel.
-    events: Mutex<Option<TerminalEventChannel>>,
+    /// Requests the host answered late enough to give up on, for the link
+    /// stats the shell polls. Not an event: the event channel's delivery
+    /// ledger commits in order and is owned by the bridge thread, and a send
+    /// from a request thread would race it.
+    late_requests_total: AtomicU32,
     stop_signal: StopSignal,
     ready: AtomicBool,
     read_only: AtomicBool,
@@ -185,7 +195,7 @@ impl TerminalClient {
             teardown_reason: Mutex::new(None),
             unanswered_requests: AtomicU32::new(0),
             last_answer_at: AtomicU64::new(monotonic_millis()),
-            events: Mutex::new(None),
+            late_requests_total: AtomicU32::new(0),
             stop_signal: StopSignal::default(),
             ready: AtomicBool::new(false),
             read_only: AtomicBool::new(false),
@@ -206,6 +216,16 @@ impl TerminalClient {
             input_latency_buckets: [const { AtomicU64::new(0) }; INPUT_LATENCY_BUCKETS],
             input_latency_max_micros: AtomicU64::new(0),
         }
+    }
+
+    /// The lane can carry requests again. The stall clock starts here: a
+    /// fresh lane is owed the full silence before it can be judged stalled,
+    /// however long its own setup took.
+    pub(super) fn lane_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+        self.unanswered_requests.store(0, Ordering::Release);
+        self.last_answer_at
+            .store(monotonic_millis(), Ordering::Release);
     }
 
     pub(super) fn note_host_frame(&self) {
@@ -417,7 +437,7 @@ impl TerminalClient {
     }
 
     fn request(&self, request: v1::Request) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, REQUEST_TIMEOUT, None)
+        self.request_with_timeout(request, REQUEST_TIMEOUT, HOST_RESPONSE_TIMEOUT, None)
     }
 
     /// Writes a request without registering a waiter for its response.
@@ -454,7 +474,12 @@ impl TerminalClient {
         operation_id: &str,
     ) -> Result<v1::Response, String> {
         let claim = self.operations.claim(OperationLane::Git, operation_id)?;
-        self.request_with_timeout(request, GIT_REQUEST_TIMEOUT, Some(claim))
+        self.request_with_timeout(
+            request,
+            GIT_REQUEST_TIMEOUT,
+            GIT_REQUEST_TIMEOUT,
+            Some(claim),
+        )
     }
 
     /// A control-lane file request the renderer can cancel by operation id.
@@ -468,16 +493,18 @@ impl TerminalClient {
         request: v1::Request,
         claim: Option<OperationClaim>,
     ) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, REQUEST_TIMEOUT, claim)
+        self.request_with_timeout(request, REQUEST_TIMEOUT, HOST_RESPONSE_TIMEOUT, claim)
     }
 
     fn request_with_timeout(
         &self,
         request: v1::Request,
-        timeout: Duration,
+        write_timeout: Duration,
+        response_timeout: Duration,
         operation: Option<OperationClaim>,
     ) -> Result<v1::Response, String> {
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + write_timeout;
+        let response_deadline = Instant::now() + response_timeout;
         if !self.ready.load(Ordering::Acquire) {
             return Err(
                 "connection_unavailable: host connection is disconnected or reconciling".into(),
@@ -531,7 +558,8 @@ impl TerminalClient {
         {
             self.cancel_request(request_id);
         }
-        let received = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        let received =
+            receiver.recv_timeout(response_deadline.saturating_duration_since(Instant::now()));
         // Any answer at all proves the lane still answers.
         if received.is_ok() {
             self.unanswered_requests.store(0, Ordering::Release);
@@ -571,8 +599,10 @@ impl TerminalClient {
                     at => Duration::from_millis(monotonic_millis().saturating_sub(at)),
                 };
                 if unanswered < STALLED_LANE_UNANSWERED_REQUESTS || silence < STALLED_LANE_SILENCE {
-                    if let Some(events) = self.events.lock().unwrap().as_ref() {
-                        let _ = events.send(encode_event(TerminalEvent::RequestLate));
+                    // A five-minute Git deadline missed says nothing about the
+                    // link; only the ordinary request class counts as late.
+                    if write_timeout != GIT_REQUEST_TIMEOUT {
+                        self.late_requests_total.fetch_add(1, Ordering::AcqRel);
                     }
                     Err(
                         "host request timed out; the link was kept, but commit outcome is unknown and the request will not be replayed"
@@ -713,7 +743,6 @@ pub fn start_terminal(
         on_event,
         Arc::clone(&client.delivery_window),
     );
-    *client.events.lock().unwrap() = Some(event_channel.clone());
     // Publish local progress before the supervisor can perform DNS, ProxyJump,
     // authentication, or any other network work.
     let _ = event_channel.send(encode_event(TerminalEvent::ConnectionState {
@@ -1020,6 +1049,8 @@ pub struct TerminalLinkStats {
     reserved_records: u64,
     acked_records: u64,
     ms_since_last_host_event: u64,
+    /// Requests given up on after the response deadline, since this client started.
+    late_requests_total: u32,
 }
 
 #[tauri::command]
@@ -1042,6 +1073,7 @@ pub fn terminal_link_stats(
         reserved_records: reserved.records,
         acked_records: acked.records,
         ms_since_last_host_event: monotonic_millis().saturating_sub(last_frame_at),
+        late_requests_total: client.late_requests_total.load(Ordering::Acquire),
     })
 }
 

@@ -39,11 +39,25 @@ export const TRANSIENT_REVEAL_ERRORS = [
   // `link.epoch`). Treating it as a conflict sent a reseed through the same
   // gate and surfaced the pair as an error toast; it clears on its own.
   "connection_unavailable",
-  // The native side gave up waiting for the answer but kept the link (or is
-  // rebuilding it): a slow link, and the pane watchdog's business. Toasting
-  // it named an internal pane id for a request that heals itself.
-  "host request timed out",
 ] as const;
+
+/**
+ * The native side gave up waiting for the answer. Unlike the transient list
+ * this is a *slow* failure — five seconds each — so it is not resent on the
+ * 250 ms ladder (eight of those would be forty seconds of a dark pane and
+ * eight more unanswered requests on a link already behind); the watchdog's
+ * own backoff re-asserts it. Quiet, though: it is the link, not the pane.
+ */
+export const LATE_REVEAL_ERROR = "host request timed out";
+
+export function isLateRevealError(error: unknown): boolean {
+  return String(error).includes(LATE_REVEAL_ERROR);
+}
+
+/** Failures that are the link's state, not news for the user. */
+export function isQuietRevealError(error: unknown): boolean {
+  return isTransientRevealError(error) || isLateRevealError(error);
+}
 
 /**
  * The one refusal a retry can never satisfy.

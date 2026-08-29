@@ -30,6 +30,7 @@ import {
   createLinkQualityMonitor,
   describeLinkQuality,
   LINK_QUALITY_POLL_MS,
+  LINK_STATS_POLL_MS,
   type LinkQualityChange,
 } from "./linkQuality";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
@@ -195,6 +196,7 @@ export function useAppConnectionController({
         state: change.state,
         losses: change.losses,
         lagEvents: change.lagEvents,
+        lateRequests: change.lateRequests,
       });
       const verdict = describeLinkQuality(change.state, linkQualityHostRef.current);
       linkQualityVerdictRef.current = verdict;
@@ -382,6 +384,27 @@ export function useAppConnectionController({
     }
   }, [applyLinkQuality, hostState.phase, linkQuality]);
 
+  /**
+   * Late requests are the slow link itself — five seconds without an answer —
+   * and the native side counts them (it cannot send an event from a request
+   * thread: the delivery ledger belongs to the bridge thread). Read on a slow
+   * cadence while the link is up; each increment is one late request.
+   */
+  useEffect(() => {
+    if (hostState.phase !== "connected" || !clientId || !linkQualityHostRef.current) return;
+    let seen: number | undefined;
+    const timer = setInterval(() => {
+      void fetchLinkStats(clientId).then((stats) => {
+        if (!stats) return;
+        if (seen !== undefined && stats.lateRequestsTotal > seen) {
+          applyLinkQuality(linkQuality.noteLateRequest(Date.now()));
+        }
+        seen = stats.lateRequestsTotal;
+      });
+    }, LINK_STATS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [applyLinkQuality, clientId, hostState.phase, linkQuality]);
+
   /** Only time ends an episode, and only an episode pays for the timer. */
   useEffect(() => {
     if (!linkQualityVerdict) return;
@@ -490,8 +513,6 @@ export function useAppConnectionController({
           }
           topologyDirtyCount += 1;
           setStatus("Topology changed; reconciling…");
-        } else if (event.kind === "requestLate") {
-          if (linkQualityHostRef.current) applyLinkQuality(linkQuality.noteLateRequest(Date.now()));
         } else if (event.kind === "flowPaused") {
           // Journal only — the host resumes the pane itself. This is the
           // per-pane mute window tmux opens when the pipeline falls behind,

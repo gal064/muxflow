@@ -328,7 +328,7 @@ fn run_bridge_once(
         *client.writer.lock().unwrap() = Some(published_writer);
         if !read_only {
             mark_input_reconnected(client);
-            client.ready.store(true, Ordering::Release);
+            client.lane_ready();
             client.resize_queue.reconnected();
             send_event(
                 channel,
@@ -581,7 +581,7 @@ fn read_protocol_stream(
                 // must clear before the loop reads another event. Nothing else
                 // latches: a later gap re-arms the same two fields.
                 resync_request_id = None;
-                client.ready.store(true, Ordering::Release);
+                client.lane_ready();
                 // The transport never went away, so the input epoch and the
                 // resize queue are deliberately left alone: keystrokes queued
                 // while the screen was reconciling are still bound for the same
