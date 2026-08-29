@@ -292,8 +292,9 @@ pub(super) struct StreamState {
     pub(super) pending_alternate: Option<(String, Vec<Vec<u8>>, u64)>,
     pub(super) pending_metadata: Option<PendingCaptureMetadata>,
     command_block: CommandBlock,
-    /// Switch-timing instrumentation; delete with `timing.log`. When tmux began
-    /// answering the capture the pending seed is being built from.
+    /// When tmux began answering the capture the pending seed is being built
+    /// from, which is the one number the perf-log `seed` line cannot take at
+    /// the point it is written.
     capture_started: Option<Instant>,
     /// Shared with the service thread, which is what writes a seed when the
     /// desktop reveals a pane: a seed for a pane tmux has paused has to carry
@@ -780,8 +781,8 @@ impl StreamState {
                                     let seed_generation =
                                         terminal_generation.fetch_add(1, Ordering::AcqRel) + 1;
                                     let seed = replay.seed;
-                                    // Switch-timing instrumentation; delete
-                                    // with `timing.log`.
+                                    // Both halves of the perf-log `seed` line,
+                                    // taken before the seed is handed on.
                                     let seed_bytes = seed.len();
                                     let capture_elapsed =
                                         self.capture_started.take().map(|at| at.elapsed());
@@ -968,7 +969,7 @@ impl StreamState {
                 lines: Vec::new(),
             }
         } else if let Some(pane_id) = self.expected_capture.take() {
-            // Switch-timing instrumentation; delete with `timing.log`.
+            // tmux has begun answering the capture this seed will be built from.
             self.capture_started = Some(Instant::now());
             self.pane_states.insert(
                 pane_id.clone(),

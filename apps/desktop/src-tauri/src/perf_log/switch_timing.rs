@@ -3,9 +3,9 @@
 //! The host can finish a workspace switch in six milliseconds and put its
 //! answer on the socket with no queueing, and the desktop can still measure
 //! seconds from issuing the action to holding the result. Only two places can
-//! hold that time: the wire, behind whatever bytes the host had already sent
-//! (a workspace switch makes it send every pane's screen), or the desktop
-//! between reading the answer's bytes and resolving the caller's promise.
+//! hold that time: the wire, behind whatever bytes the host had already
+//! queued ahead of the answer, or the desktop between reading the answer's
+//! bytes and resolving the caller's promise.
 //!
 //! This module stamps the second half of that timeline and counts the first.
 //! Its numbers travel back to the renderer inside the invoke result, which
@@ -39,10 +39,12 @@ fn unix_millis() -> u64 {
 
 /// One label per `v1::EventKind` discriminant, in discriminant order.
 ///
-/// The histogram is what turns "the answer waited behind 1.8 MB" into "behind
-/// 1.8 MB of *seeds*", which is the difference between a link problem and a
-/// payload problem. A kind added to the protocol without a label here simply
-/// lands in `other`; nothing breaks.
+/// The histogram is what turns "the answer waited behind 400 KB" into which
+/// frames those 400 KB were, which is the difference between a link problem
+/// and a payload problem — and it is what showed the wait to be pane-resource
+/// snapshots, buffered output, sidebar answers and topology snapshots rather
+/// than the seeds the first reading blamed. A kind added to the protocol
+/// without a label here simply lands in `other`; nothing breaks.
 const EVENT_KIND_LABELS: [&str; 19] = [
     "unspecified",
     "topologySnapshot",
