@@ -90,8 +90,13 @@ export interface BulkBinding {
 }
 
 export interface HostConnectionOptions {
-  /** Opens the SSH exec channel (or whatever pipe) to `muxflow-host bridge --stdio`. */
-  dial: () => Promise<Transport>;
+  /**
+   * Opens the SSH exec channel (or whatever pipe) to `muxflow-host bridge --stdio`.
+   * `signal` aborts when the user disconnects mid-dial: an SSH login can be
+   * held open indefinitely (Tailscale SSH check mode), and nothing else could
+   * reach a channel that has not produced a transport yet.
+   */
+  dial: (signal: AbortSignal) => Promise<Transport>;
   appVersion: string;
   /** Persisted per saved host, incremented on every attempt; must return >= 1. */
   nextConnectionEpoch: () => number | bigint;
@@ -152,6 +157,8 @@ interface Attempt {
 export class HostConnection {
   private attempt: Attempt | undefined;
   private attemptCounter = 0;
+  /** Cancels the dial in flight, if any, when the user disconnects before it produced a transport. */
+  private dialAbort: AbortController | undefined;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private stableTimer: ReturnType<typeof setTimeout> | undefined;
@@ -208,6 +215,7 @@ export class HostConnection {
     this.wantConnected = false;
     this.clearReconnectTimer();
     this.clearStableTimer();
+    this.dialAbort?.abort();
     const attempt = this.attempt;
     if (attempt) {
       this.teardown(attempt, new ConnectionClosedError("disconnected"));
@@ -257,10 +265,13 @@ export class HostConnection {
 
   private async open(): Promise<void> {
     const token = ++this.attemptCounter;
+    const dialAbort = new AbortController();
+    this.dialAbort = dialAbort;
     let transport: Transport;
     try {
-      transport = await this.options.dial();
+      transport = await this.options.dial(dialAbort.signal);
     } catch (error) {
+      if (this.dialAbort === dialAbort) this.dialAbort = undefined;
       if (token !== this.attemptCounter || !this.wantConnected) return;
       const close: TransportClose = error instanceof TransportDialError
         ? error.close
@@ -268,6 +279,7 @@ export class HostConnection {
       this.afterClose(close);
       return;
     }
+    if (this.dialAbort === dialAbort) this.dialAbort = undefined;
     if (token !== this.attemptCounter || !this.wantConnected) {
       transport.close();
       return;
@@ -726,7 +738,7 @@ function closeMessage(close: TransportClose, host: SavedHostRef | undefined): st
     case "connectFailed":
       return `Couldn't reach ${where}.`;
     case "authFailed":
-      return `${host?.host ?? "The host"} rejected this phone's SSH key. Add the key under Your SSH key to ~/.ssh/authorized_keys on the host.`;
+      return `${host?.host ?? "The host"} rejected this phone's SSH login. Over Tailscale SSH, check the tailnet's SSH policy; otherwise add the key under Your SSH key to ~/.ssh/authorized_keys on the host.`;
     case "exited":
       if (close.exitCode === HELPER_MISSING_EXIT_CODE) {
         return "muxflow-host isn't installed on this host. Install it from the Muxflow desktop app (Settings → Connection).";

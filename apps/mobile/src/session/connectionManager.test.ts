@@ -90,7 +90,7 @@ describe("connectionManager", () => {
     const pending = connectHost(host);
     await settle();
     dials[0]!.transport.closeFromRemote({ reason: "authFailed" });
-    await expect(pending).rejects.toThrow(/rejected this phone's SSH key/);
+    await expect(pending).rejects.toThrow(/rejected this phone's SSH login/);
     await disconnectHost();
     expect(sessionStore.getState().connection.state).toBe("idle");
     expect(getConnection()).toBeNull();

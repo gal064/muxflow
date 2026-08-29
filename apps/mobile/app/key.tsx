@@ -18,7 +18,10 @@ export default function KeyScreen() {
         {publicKey === undefined ? (
           <Text style={styles.dim}>Reading the key…</Text>
         ) : publicKey === null ? (
-          <Text style={styles.dim}>This phone has no SSH key yet.</Text>
+          <Text style={styles.dim}>
+            This phone has no SSH key. Hosts on your tailnet with Tailscale SSH don&apos;t need one;
+            generate a key for any other host.
+          </Text>
         ) : (
           <Text style={styles.key} selectable>
             {publicKey}
@@ -47,6 +50,7 @@ export default function KeyScreen() {
       {error === null ? null : <Text style={styles.error}>{error}</Text>}
 
       <View style={styles.steps}>
+        <Text style={styles.step}>Over Tailscale SSH the phone signs in with its tailnet identity — skip these steps.</Text>
         <Text style={styles.step}>1. Copy the key.</Text>
         <Text style={styles.step}>2. On the host, append it to ~/.ssh/authorized_keys.</Text>
         <Text style={styles.step}>3. Make sure Muxflow desktop has installed the helper on that host.</Text>

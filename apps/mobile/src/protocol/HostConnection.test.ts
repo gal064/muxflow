@@ -373,6 +373,32 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
     });
   });
 
+  it("disconnect() while the dial is still pending aborts that dial", async () => {
+    const h = harness();
+    let signal: AbortSignal | undefined;
+    const store = createSessionStore();
+    const connection = new HostConnection({
+      dial: (s) =>
+        new Promise<never>((_resolve, reject) => {
+          signal = s;
+          s.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+      appVersion: "0.1.0-test",
+      nextConnectionEpoch: () => (h.epoch += 1),
+      store,
+      host: { id: "h", label: "Dev box", host: "dev.local", port: 22, user: "dev" },
+      terminals: { seed: () => undefined, output: () => undefined },
+      log: () => undefined,
+    });
+    connection.connect();
+    await settle();
+    expect(signal?.aborted).toBe(false);
+    connection.disconnect();
+    expect(signal?.aborted).toBe(true);
+    await settle();
+    expect(store.getState().connection.state).toBe("idle");
+  });
+
   it("disconnect() goes idle, rejects in-flight requests, and never reconnects", async () => {
     const h = harness();
     const transport = await connectHappily(h);

@@ -14,7 +14,7 @@ import { openSshTransport } from "./sshTransport";
 
 let attempts = 0;
 
-export function sshTransportFactory(host: SavedHost, lane: TransportLane) {
+export function sshTransportFactory(host: SavedHost, lane: TransportLane, signal?: AbortSignal) {
   attempts += 1;
   // The pin may have been added (or forgotten) since the caller read the host.
   const saved = hostsStore.getState().hosts.find((candidate) => candidate.id === host.id) ?? host;
@@ -24,6 +24,7 @@ export function sshTransportFactory(host: SavedHost, lane: TransportLane) {
     target: { host: saved.host, port: saved.port, user: saved.user },
     trustedHostKeyFingerprint: saved.trustedHostKeyFingerprint,
     hostAddress: { host: saved.host, port: saved.port },
+    signal,
     onHostKey: async (prompt) => {
       // Only the control lane may ask. The bulk lane joins the same
       // authenticated SSH transport, so a prompt there would mean it is

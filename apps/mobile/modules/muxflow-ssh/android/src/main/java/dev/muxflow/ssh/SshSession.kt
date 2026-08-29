@@ -21,6 +21,10 @@ import net.schmizz.sshj.common.KeyType
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.transport.verification.HostKeyVerifier
 import net.schmizz.sshj.userauth.UserAuthException
+import net.schmizz.sshj.userauth.keyprovider.KeyPairWrapper
+import net.schmizz.sshj.userauth.method.AuthMethod
+import net.schmizz.sshj.userauth.method.AuthNone
+import net.schmizz.sshj.userauth.method.AuthPublickey
 
 /** The exact close reason strings the TypeScript facade accepts (design doc §6.1). */
 internal object CloseReason {
@@ -56,7 +60,7 @@ internal class SshTransport(
   private val host: String,
   private val port: Int,
   private val user: String,
-  private val keyPair: KeyPair,
+  keyPair: KeyPair?,
   private val emitEvent: (Map<String, Any?>) -> Unit,
 ) {
   private val control =
@@ -67,6 +71,19 @@ internal class SshTransport(
   private val hostKeyDecision = ArrayBlockingQueue<Boolean>(1)
 
   @Volatile private var client: SSHClient? = null
+
+  /**
+   * The key the next authentication offers. Refreshed on every [open], so a key generated after a
+   * refused login (or regenerated while connected) is what the next attempt sends.
+   */
+  @Volatile private var keyPair: KeyPair? = keyPair
+
+  /**
+   * The client [ensureConnected] is currently connecting or authenticating. Closing it from another
+   * thread is the only way to end that wait early: Tailscale SSH in check mode holds the login open
+   * until the user signs in on another device, and the transport has no read timeout.
+   */
+  @Volatile private var connecting: SSHClient? = null
   @Volatile private var pendingFingerprint: String? = null
 
   /** The fingerprint this transport actually authenticated against, once it has one. */
@@ -81,8 +98,10 @@ internal class SshTransport(
     connectionId: String,
     command: String,
     trustedFingerprint: String?,
+    keyPair: KeyPair?,
     onTerminated: (SshChannel, String, Int?) -> Unit,
   ): SshChannel {
+    this.keyPair = keyPair
     val channel =
       SshChannel(connectionId, key, command, emitEvent, onTerminated, ::onChannelCloseRequested)
     channels[connectionId] = channel
@@ -112,9 +131,15 @@ internal class SshTransport(
    * disconnect during the trust dialog ends as `closedByClient` instead of sitting out the 60 s.
    */
   private fun onChannelCloseRequested() {
-    if (pendingFingerprint != null && channels.values.none { !it.isCloseRequested }) {
+    if (channels.values.any { !it.isCloseRequested }) {
+      return
+    }
+    if (pendingFingerprint != null) {
       hostKeyDecision.offer(false)
     }
+    // Ends a connect or authentication still in flight; `ensureConnected` then fails and the
+    // closing channel finishes as `closedByClient` instead of parking the control thread forever.
+    closeQuietly { connecting?.close() }
   }
 
   /** Answers a pending `hostKey` event; false when no decision is outstanding for that fingerprint. */
@@ -167,9 +192,11 @@ internal class SshTransport(
       val keepAlive = fresh.connection.keepAlive
       keepAlive.keepAliveInterval = KEEP_ALIVE_INTERVAL_SECONDS
       (keepAlive as? KeepAliveRunner)?.maxAliveCount = KEEP_ALIVE_MAX_COUNT
+      connecting = fresh
       fresh.connect(host, port)
-      fresh.authPublickey(user, fresh.loadKeys(keyPair))
+      fresh.auth(user, authMethods())
     } catch (t: Throwable) {
+      connecting = null
       val reason =
         verifierReason
           ?: if (generateSequence(t) { it.cause }.any { it is UserAuthException }) {
@@ -182,8 +209,21 @@ internal class SshTransport(
       // than inheriting the reason an earlier, unrelated attempt failed with.
       throw TransportSetupException(reason, t)
     }
+    connecting = null
     client = fresh
     return fresh
+  }
+
+  /**
+   * The same order the OpenSSH client uses. `none` goes first: Tailscale SSH has already
+   * authenticated the phone by its tailnet identity and accepts it outright, so a tailnet host
+   * needs no key on the phone at all. A regular sshd answers `none` with the methods it does
+   * accept, and sshj only moves on to `publickey` when the server listed it.
+   */
+  private fun authMethods(): List<AuthMethod> {
+    val methods = mutableListOf<AuthMethod>(AuthNone())
+    keyPair?.let { methods.add(AuthPublickey(KeyPairWrapper(it))) }
+    return methods
   }
 
   private fun hostKeyVerifier(connectionId: String, trustedFingerprint: String?) =
