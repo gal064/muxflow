@@ -880,6 +880,8 @@ export interface TerminalLinkStats {
   reservedRecords: number;
   ackedRecords: number;
   msSinceLastHostEvent: number;
+  /** Requests the native side gave up waiting on, since this client started. */
+  lateRequestsTotal: number;
 }
 
 /**

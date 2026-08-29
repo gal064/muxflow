@@ -3,7 +3,7 @@ use std::{
     process::Child,
     sync::{
         Arc, LazyLock, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -49,6 +49,21 @@ use git_content::GitContentReads;
 pub(crate) mod tmux_action;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a written request may wait for its answer. The host answers a
+/// request *after* the ordered events it caused, and a workspace switch causes
+/// every pane's seed — two thousand lines of scrollback each — so on a 2 Mbit/s
+/// link the answer sits behind ~2 MB of screens for eight seconds or more. Five
+/// seconds turned every switch on such a link into a refusal, a retry, and
+/// eventually a teardown (2026-08-29). The write keeps its short deadline: a
+/// pipe that will not take five seconds' worth of bytes is a different fault.
+const HOST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Timeouts in a row before the lane is judged stalled rather than slow —
+/// and, because parallel requests time out together, only once the host has
+/// answered nothing for `STALLED_LANE_SILENCE` either. Together they catch
+/// the stalled-lane incident within a minute of serial requests (three
+/// `HOST_RESPONSE_TIMEOUT`s) and never punish a slow link for a burst.
+const STALLED_LANE_UNANSWERED_REQUESTS: u32 = 3;
+const STALLED_LANE_SILENCE: Duration = Duration::from_secs(15);
 const GIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,6 +114,27 @@ pub(crate) struct TerminalClient {
     bulk_scope: Uuid,
     writer: Mutex<Option<ControlWriterHandle>>,
     child: Mutex<Option<Child>>,
+    /// Why this side last tore its own transport down, for the bridge
+    /// supervisor to append to the error the dying bridge reports. Without it
+    /// every local teardown reaches the journal as the *reader's* symptom
+    /// ("host bridge closed", "frame I/O failed") and the six places that can
+    /// order one are indistinguishable — which is what left the 2026-08-28
+    /// throttled-link reconnect storm without a cause.
+    teardown_reason: Mutex<Option<&'static str>>,
+    /// Requests that timed out since the host last answered one. One late
+    /// answer is a slow link; a run of them with nothing answered in between
+    /// is a stalled ordered lane. Git requests share the count on their own,
+    /// sixty-times-longer deadline: a five-minute silence is a strike too.
+    unanswered_requests: AtomicU32,
+    /// Monotonic millis of the host's last answer to a request — or of this
+    /// lane's start, so a fresh lane is owed the full silence before it is
+    /// judged stalled. Zero means never, which only a test sets.
+    last_answer_at: AtomicU64,
+    /// Requests the host answered late enough to give up on, for the link
+    /// stats the shell polls. Not an event: the event channel's delivery
+    /// ledger commits in order and is owned by the bridge thread, and a send
+    /// from a request thread would race it.
+    late_requests_total: AtomicU32,
     stop_signal: StopSignal,
     ready: AtomicBool,
     read_only: AtomicBool,
@@ -156,6 +192,10 @@ impl TerminalClient {
             bulk_scope: Uuid::new_v4(),
             writer: Mutex::new(None),
             child: Mutex::new(None),
+            teardown_reason: Mutex::new(None),
+            unanswered_requests: AtomicU32::new(0),
+            last_answer_at: AtomicU64::new(monotonic_millis()),
+            late_requests_total: AtomicU32::new(0),
             stop_signal: StopSignal::default(),
             ready: AtomicBool::new(false),
             read_only: AtomicBool::new(false),
@@ -176,6 +216,16 @@ impl TerminalClient {
             input_latency_buckets: [const { AtomicU64::new(0) }; INPUT_LATENCY_BUCKETS],
             input_latency_max_micros: AtomicU64::new(0),
         }
+    }
+
+    /// The lane can carry requests again. The stall clock starts here: a
+    /// fresh lane is owed the full silence before it can be judged stalled,
+    /// however long its own setup took.
+    pub(super) fn lane_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+        self.unanswered_requests.store(0, Ordering::Release);
+        self.last_answer_at
+            .store(monotonic_millis(), Ordering::Release);
     }
 
     pub(super) fn note_host_frame(&self) {
@@ -252,7 +302,16 @@ impl TerminalClient {
         }
     }
 
-    fn reconnect_transport(&self) {
+    fn reconnect_transport(&self, reason: &'static str) {
+        // The reason is recorded only when there is a live transport to tear
+        // down. A caller that fails *after* the supervisor has already reaped
+        // a dead bridge — a write parked on the closed writer, a request
+        // outliving the link that carried it — orders nothing, and a reason
+        // left behind then would be pinned on the next bridge's death.
+        let child = self.child.lock().unwrap().take();
+        if child.is_some() {
+            *self.teardown_reason.lock().unwrap() = Some(reason);
+        }
         files::invalidate_bulk_scope(
             self.bulk_scope,
             "bulk transfer control connection is reconnecting",
@@ -265,7 +324,7 @@ impl TerminalClient {
         if let Some(writer) = self.writer.lock().unwrap().take() {
             writer.close();
         }
-        if let Some(mut child) = self.child.lock().unwrap().take() {
+        if let Some(mut child) = child {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -374,7 +433,7 @@ impl TerminalClient {
     }
 
     fn request(&self, request: v1::Request) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, REQUEST_TIMEOUT, None)
+        self.request_with_timeout(request, REQUEST_TIMEOUT, HOST_RESPONSE_TIMEOUT, None)
     }
 
     /// Writes a request without registering a waiter for its response.
@@ -400,7 +459,11 @@ impl TerminalClient {
                 envelope(request_id, 0, Payload::Request(request)),
                 Instant::now() + REQUEST_TIMEOUT,
             )
-            .inspect_err(|_| self.reconnect_transport())
+            .inspect_err(|_| {
+                self.reconnect_transport(
+                    "an input request could not be written before its deadline",
+                )
+            })
     }
 
     fn request_git(
@@ -409,7 +472,12 @@ impl TerminalClient {
         operation_id: &str,
     ) -> Result<v1::Response, String> {
         let claim = self.operations.claim(OperationLane::Git, operation_id)?;
-        self.request_with_timeout(request, GIT_REQUEST_TIMEOUT, Some(claim))
+        self.request_with_timeout(
+            request,
+            GIT_REQUEST_TIMEOUT,
+            GIT_REQUEST_TIMEOUT,
+            Some(claim),
+        )
     }
 
     /// A control-lane file request the renderer can cancel by operation id.
@@ -423,16 +491,18 @@ impl TerminalClient {
         request: v1::Request,
         claim: Option<OperationClaim>,
     ) -> Result<v1::Response, String> {
-        self.request_with_timeout(request, REQUEST_TIMEOUT, claim)
+        self.request_with_timeout(request, REQUEST_TIMEOUT, HOST_RESPONSE_TIMEOUT, claim)
     }
 
     fn request_with_timeout(
         &self,
         request: v1::Request,
-        timeout: Duration,
+        write_timeout: Duration,
+        response_timeout: Duration,
         operation: Option<OperationClaim>,
     ) -> Result<v1::Response, String> {
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + write_timeout;
+        let response_deadline = Instant::now() + response_timeout;
         if !self.ready.load(Ordering::Acquire) {
             return Err(
                 "connection_unavailable: host connection is disconnected or reconciling".into(),
@@ -470,7 +540,7 @@ impl TerminalClient {
             // has already proved it cannot make bounded progress. The bridge
             // supervisor owns reconnect policy; removing this one transport is
             // the smallest recovery that reaches it.
-            self.reconnect_transport();
+            self.reconnect_transport("a control request could not be written before its deadline");
             return Err(error);
         }
         // A cancel raised between the bind above and the write that has just
@@ -486,8 +556,15 @@ impl TerminalClient {
         {
             self.cancel_request(request_id);
         }
-        let result = match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        {
+        let received =
+            receiver.recv_timeout(response_deadline.saturating_duration_since(Instant::now()));
+        // Any answer at all proves the lane still answers.
+        if received.is_ok() {
+            self.unanswered_requests.store(0, Ordering::Release);
+            self.last_answer_at
+                .store(monotonic_millis(), Ordering::Release);
+        }
+        let result = match received {
             Ok(Ok(response)) if response.ok => Ok(response),
             Ok(Ok(response)) => Err(format!(
                 "{}: {}",
@@ -498,18 +575,44 @@ impl TerminalClient {
                 self.cancel_request(request_id);
                 self.pending.lock().unwrap().remove(&request_id);
                 // The host may still complete a mutation after our deadline,
-                // so it is not safe to replay the request. It is equally unsafe
-                // to keep using the same ordered lane: production showed one
-                // timed-out selection leaving later selections and terminal
+                // so it is not safe to replay the request. Whether the lane is
+                // safe to keep is a separate question. Production once showed
+                // one timed-out selection leaving later selections and terminal
                 // input several minutes behind it while fresh connections to
-                // the same daemon stayed healthy. Tear down only this bridge;
-                // the existing supervisor reconnects and reconciles from an
-                // authoritative snapshot without replaying the request.
-                self.reconnect_transport();
-                Err(
-                    "host request timed out; reconnecting because commit outcome is unknown and the request will not be replayed"
-                        .into(),
-                )
+                // the same daemon stayed healthy — a stalled lane, and tearing
+                // the bridge down is the right answer to it. But a link that is
+                // merely slow answers late too, and tearing it down for that
+                // starts a loop: every reconnect re-sends every pane's screen,
+                // which is exactly the traffic that made the reply late
+                // (2026-08-28, shaped to 150 ms / 2 Mbit/s: six drops in two
+                // minutes, every one ordered here). So one late answer keeps
+                // the lane, and only a run of them with nothing answered in
+                // between is torn down for the supervisor to rebuild from an
+                // authoritative snapshot. Pane output is deliberately not
+                // consulted: an idle workspace produces none, and the rule has
+                // to hold the same there.
+                let unanswered = self.unanswered_requests.fetch_add(1, Ordering::AcqRel) + 1;
+                let silence = match self.last_answer_at.load(Ordering::Acquire) {
+                    0 => Duration::MAX,
+                    at => Duration::from_millis(monotonic_millis().saturating_sub(at)),
+                };
+                if unanswered < STALLED_LANE_UNANSWERED_REQUESTS || silence < STALLED_LANE_SILENCE {
+                    // A five-minute Git deadline missed says nothing about the
+                    // link; only the ordinary request class counts as late.
+                    if write_timeout != GIT_REQUEST_TIMEOUT {
+                        self.late_requests_total.fetch_add(1, Ordering::AcqRel);
+                    }
+                    Err(
+                        "host request timed out; the link was kept, but commit outcome is unknown and the request will not be replayed"
+                            .into(),
+                    )
+                } else {
+                    self.reconnect_transport("a request went unanswered past its deadline");
+                    Err(
+                        "host request timed out; reconnecting because commit outcome is unknown and the request will not be replayed"
+                            .into(),
+                    )
+                }
             }
         };
         if let Some(claim) = &operation {
@@ -567,7 +670,9 @@ impl TerminalClient {
                 ),
                 Instant::now() + REQUEST_TIMEOUT,
             )
-            .inspect_err(|_| self.reconnect_transport())
+            .inspect_err(|_| {
+                self.reconnect_transport("a cancel could not be written before its deadline")
+            })
     }
 
     /// Best-effort `Cancel` for a request already on the wire.
@@ -942,6 +1047,8 @@ pub struct TerminalLinkStats {
     reserved_records: u64,
     acked_records: u64,
     ms_since_last_host_event: u64,
+    /// Requests given up on after the response deadline, since this client started.
+    late_requests_total: u32,
 }
 
 #[tauri::command]
@@ -964,6 +1071,7 @@ pub fn terminal_link_stats(
         reserved_records: reserved.records,
         acked_records: acked.records,
         ms_since_last_host_event: monotonic_millis().saturating_sub(last_frame_at),
+        late_requests_total: client.late_requests_total.load(Ordering::Acquire),
     })
 }
 

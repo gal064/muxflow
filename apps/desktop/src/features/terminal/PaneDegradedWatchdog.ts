@@ -53,7 +53,7 @@ const REASON_PRIORITY: readonly PaneDegradedReason[] = [
 ];
 
 const REASON_DESCRIPTIONS: Record<PaneDegradedReason, string> = {
-  revealFailed: "This pane could not be marked visible",
+  revealFailed: "This pane is waiting for the host to show it",
   deferredOverflow: "Output outran this pane's recovery buffer",
   rendererReseed: "The terminal renderer refused this pane's content",
   hubConflictReseed: "A conflicting terminal handoff was rejected",

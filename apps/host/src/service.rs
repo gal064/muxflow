@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, bail};
 use tmux_agent_protocol::{
     CAP_BULK_DOWNLOAD, CAP_TERMINAL_OUTPUT_CREDIT, FrameError, HELPER_VERSION, HOST_CAPABILITIES,
     PROTOCOL_MAJOR, envelope, read_frame,
@@ -100,6 +99,161 @@ const ORDERED_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// A socket writer that cannot advance is no longer a usable connection.
 const PROTOCOL_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Why a connection ended — the one field of its end-of-life line that tells an
+/// ordinary teardown apart from a desktop that vanished mid-session.
+///
+/// Every exit from [`serve_connection`] maps to exactly one of these. They are
+/// fixed labels rather than the error text they stand for: the line they end up
+/// in is a log the user may share, and an error string can carry a path, a
+/// session name or a byte of terminal output with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectionEndReason {
+    /// No first frame arrived inside the handshake window.
+    HandshakeTimeout,
+    /// The handshake frame could not be read, was not a `ClientHello`, or the
+    /// hello answering it could not be written.
+    HandshakeFailed,
+    /// The client closed its side of the socket: the ordinary teardown.
+    ClientEof,
+    /// The transport dropped under a client that never closed it — the shape a
+    /// killed SSH session leaves behind.
+    ClientReset,
+    /// The frame reader failed for any other reason.
+    ReadFailed,
+    /// The client acknowledged terminal output it was never charged for.
+    InvalidAck,
+    /// The event writer made no progress before [`PROTOCOL_WRITE_TIMEOUT`] —
+    /// the deadline that finally reaps a connection whose peer is gone.
+    WriterDeadline,
+    /// The event writer's socket write failed outright.
+    WriterFailed,
+    /// Every event sender was released while the reader was still running.
+    ///
+    /// The reader holds one of those senders for its whole life, so today this
+    /// says the writer drained for a reason nothing else can produce. It is
+    /// here because the writer can stop this way, not because it is expected.
+    SequencerClosed,
+    /// An ordered host operation exceeded its execution bound, or its lane
+    /// stopped.
+    OrderedLaneStalled,
+    /// The ordered lane stopped draining and its admission queue filled.
+    OrderedQueueFull,
+    /// This connection asked the daemon to shut down.
+    DaemonShutdown,
+    /// The connection was already marked closed when the reader came back for
+    /// its next frame, and no lane had said why.
+    ConnectionClosed,
+}
+
+impl ConnectionEndReason {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::HandshakeTimeout => "handshake-timeout",
+            Self::HandshakeFailed => "handshake-failed",
+            Self::ClientEof => "client-eof",
+            Self::ClientReset => "client-reset",
+            Self::ReadFailed => "read-failed",
+            Self::InvalidAck => "invalid-ack",
+            Self::WriterDeadline => "writer-deadline",
+            Self::WriterFailed => "writer-failed",
+            Self::SequencerClosed => "sequencer-closed",
+            Self::OrderedLaneStalled => "ordered-lane-stalled",
+            Self::OrderedQueueFull => "ordered-queue-full",
+            Self::DaemonShutdown => "daemon-shutdown",
+            Self::ConnectionClosed => "connection-closed",
+        }
+    }
+}
+
+/// Why the event writer stopped, kept as a class beside the message the reader
+/// reports, so the end-of-life line never has to parse — or print — the text.
+enum WriterStop {
+    SequencerClosed,
+    Failed(String),
+    Deadline,
+}
+
+impl WriterStop {
+    fn reason(&self) -> ConnectionEndReason {
+        match self {
+            Self::SequencerClosed => ConnectionEndReason::SequencerClosed,
+            Self::Failed(_) => ConnectionEndReason::WriterFailed,
+            Self::Deadline => ConnectionEndReason::WriterDeadline,
+        }
+    }
+
+    fn message(self) -> String {
+        match self {
+            Self::SequencerClosed => "host event sequencer closed".to_owned(),
+            Self::Failed(message) => message,
+            Self::Deadline => "host event writer made no progress before its deadline".to_owned(),
+        }
+    }
+}
+
+/// When this connection last carried a frame in each direction.
+///
+/// A connection killed with the laptop that owned it stays open and stays
+/// silent, so the interesting number at teardown is not only how long it lived
+/// but how long it had already been quiet. The socket's peer is the local
+/// bridge process rather than the desktop itself, so these are the ages of the
+/// last frame the bridge relayed and of the last frame the host handed it —
+/// the desktop's silence only as closely as the bridge reflects it. Both marks
+/// are milliseconds since
+/// the connection started, in one relaxed atomic each: the writer lane and the
+/// frame reader are the only writers, they never read each other's mark, and
+/// neither can afford a lock on its hot path.
+struct FrameActivity {
+    started: Instant,
+    last_client_frame_ms: AtomicU64,
+    last_host_frame_ms: AtomicU64,
+}
+
+impl FrameActivity {
+    fn started_now() -> Self {
+        Self {
+            started: Instant::now(),
+            last_client_frame_ms: AtomicU64::new(0),
+            last_host_frame_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn lifetime(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    fn mark_client_frame(&self) {
+        self.last_client_frame_ms
+            .store(self.elapsed_ms(), Ordering::Relaxed);
+    }
+
+    fn mark_host_frame(&self) {
+        self.last_host_frame_ms
+            .store(self.elapsed_ms(), Ordering::Relaxed);
+    }
+
+    /// Zero until the first frame of that direction, which is the handshake:
+    /// before it, the age of the connection is the age of the silence.
+    fn since_last_client_frame(&self) -> Duration {
+        self.since(&self.last_client_frame_ms)
+    }
+
+    fn since_last_host_frame(&self) -> Duration {
+        self.since(&self.last_host_frame_ms)
+    }
+
+    fn since(&self, mark: &AtomicU64) -> Duration {
+        Duration::from_millis(
+            self.elapsed_ms()
+                .saturating_sub(mark.load(Ordering::Relaxed)),
+        )
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
 #[cfg(test)]
 static TEST_LAST_TERMINAL_ACK_EPOCH: AtomicU64 = AtomicU64::new(0);
 
@@ -164,21 +318,69 @@ async fn run_ordered_requests(
 }
 
 pub async fn serve_with_shutdown(
-    mut stream: UnixStream,
+    stream: UnixStream,
     shutdown: Option<tokio::sync::mpsc::UnboundedSender<()>>,
 ) -> anyhow::Result<()> {
-    let hello = timeout(Duration::from_secs(5), read_frame(&mut stream))
-        .await
-        .context("client handshake timed out")??
-        .context("client disconnected before handshake")?;
+    let activity = Arc::new(FrameActivity::started_now());
+    serve_connection(stream, shutdown, &activity).await.0
+}
+
+async fn serve_connection(
+    mut stream: UnixStream,
+    shutdown: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    activity: &Arc<FrameActivity>,
+) -> (anyhow::Result<()>, ConnectionEndReason) {
+    // Reports the end and hands the reason back, so no exit below can name a
+    // reason without leaving its line behind. It runs where the connection
+    // ended rather than after the teardown that follows: teardown can spend
+    // ten seconds on its two grace periods, and a silence measured across
+    // those is not the silence this line exists to record.
+    let ended = |reason: ConnectionEndReason| {
+        crate::diagnostics::write_connection_ended_log(
+            reason.label(),
+            activity.lifetime(),
+            activity.since_last_client_frame(),
+            activity.since_last_host_frame(),
+        );
+        reason
+    };
+    let hello = match timeout(Duration::from_secs(5), read_frame(&mut stream)).await {
+        Err(elapsed) => {
+            return (
+                Err(anyhow::Error::new(elapsed).context("client handshake timed out")),
+                ended(ConnectionEndReason::HandshakeTimeout),
+            );
+        }
+        Ok(Err(error)) => {
+            return (
+                Err(error.into()),
+                ended(ConnectionEndReason::HandshakeFailed),
+            );
+        }
+        Ok(Ok(None)) => {
+            return (
+                Err(anyhow::anyhow!("client disconnected before handshake")),
+                ended(ConnectionEndReason::HandshakeFailed),
+            );
+        }
+        Ok(Ok(Some(hello))) => hello,
+    };
+    activity.mark_client_frame();
     let Some(Payload::ClientHello(client_hello)) = hello.payload else {
-        send_handshake_error(
+        let outcome = match send_handshake_error(
             &mut stream,
             "handshake_required",
             "first frame must be ClientHello",
         )
-        .await?;
-        bail!("first frame was not ClientHello");
+        .await
+        {
+            Ok(()) => {
+                activity.mark_host_frame();
+                Err(anyhow::anyhow!("first frame was not ClientHello"))
+            }
+            Err(error) => Err(error),
+        };
+        return (outcome, ended(ConnectionEndReason::HandshakeFailed));
     };
 
     let host_protocol_major = advertised_protocol_major();
@@ -240,7 +442,13 @@ pub async fn serve_with_shutdown(
         }),
     );
     server_hello.protocol_major = host_protocol_major;
-    write_frame(&mut stream, &server_hello).await?;
+    if let Err(error) = write_frame(&mut stream, &server_hello).await {
+        return (
+            Err(error.into()),
+            ended(ConnectionEndReason::HandshakeFailed),
+        );
+    }
+    activity.mark_host_frame();
 
     let (mut reader, mut writer) = stream.into_split();
     let (control_tx, mut control_rx) = mpsc::channel::<SequencerControl>(EVENT_QUEUE);
@@ -251,12 +459,13 @@ pub async fn serve_with_shutdown(
     let topology_signal = TopologySignal::default();
     let writer_topology_signal = topology_signal.clone();
     let writer_closed = Arc::clone(&closed);
-    let (writer_stopped_tx, mut writer_stopped_rx) = mpsc::unbounded_channel::<String>();
+    let (writer_stopped_tx, mut writer_stopped_rx) = mpsc::unbounded_channel::<WriterStop>();
+    let writer_activity = Arc::clone(activity);
     let mut writer_task = tokio::spawn(async move {
         let mut sequencer = ProtocolSequencer::default();
         let mut gap_fault = events::GapFaultInjector::for_connection();
         let mut pending_message = None;
-        let mut stopped_reason = "host event sequencer closed".to_owned();
+        let mut stopped_reason = WriterStop::SequencerClosed;
         loop {
             let message = match pending_message.take() {
                 Some(message) => message,
@@ -276,28 +485,28 @@ pub async fn serve_with_shutdown(
             let injected_gap = gap_fault.after(&message);
             let frame = sequencer.frame(message);
             match timeout(PROTOCOL_WRITE_TIMEOUT, write_frame(&mut writer, &frame)).await {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => writer_activity.mark_host_frame(),
                 Ok(Err(error)) => {
-                    stopped_reason = format!("host event writer failed: {error}");
+                    stopped_reason =
+                        WriterStop::Failed(format!("host event writer failed: {error}"));
                     break;
                 }
                 Err(_) => {
-                    stopped_reason =
-                        "host event writer made no progress before its deadline".into();
+                    stopped_reason = WriterStop::Deadline;
                     break;
                 }
             }
             if let Some(injected_gap) = injected_gap {
                 let frame = sequencer.frame(injected_gap);
                 match timeout(PROTOCOL_WRITE_TIMEOUT, write_frame(&mut writer, &frame)).await {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(())) => writer_activity.mark_host_frame(),
                     Ok(Err(error)) => {
-                        stopped_reason = format!("host event writer failed: {error}");
+                        stopped_reason =
+                            WriterStop::Failed(format!("host event writer failed: {error}"));
                         break;
                     }
                     Err(_) => {
-                        stopped_reason =
-                            "host event writer made no progress before its deadline".into();
+                        stopped_reason = WriterStop::Deadline;
                         break;
                     }
                 }
@@ -349,31 +558,56 @@ pub async fn serve_with_shutdown(
     let mut ordered_task = tokio::spawn(run_ordered_requests(ordered_rx, ordered_failed_tx));
 
     let mut read_error = None;
+    // Set at every exit below, so the end-of-life line names the same event the
+    // returned result stands for. The loop condition is the one exit nothing
+    // breaks out of: it means someone else marked the connection closed.
+    let mut end_reason = ConnectionEndReason::ConnectionClosed;
+    let mut shutdown_requested = false;
     while !closed.load(Ordering::Acquire) {
         let read = tokio::select! {
             read = read_frame(&mut reader) => read,
             failure = ordered_failed_rx.recv() => {
+                end_reason = ConnectionEndReason::OrderedLaneStalled;
                 read_error = Some(FrameError::Io(std::io::Error::other(
                     failure.unwrap_or_else(|| "ordered host operation lane stopped".into()),
                 )));
                 break;
             }
             failure = writer_stopped_rx.recv() => {
-                read_error = Some(FrameError::Io(std::io::Error::other(
-                    failure.unwrap_or_else(|| "host event writer stopped".into()),
-                )));
+                match failure {
+                    Some(stop) => {
+                        end_reason = stop.reason();
+                        read_error = Some(FrameError::Io(std::io::Error::other(stop.message())));
+                    }
+                    // The writer dropped its sender without reporting: it can
+                    // only have been aborted or have panicked.
+                    None => {
+                        end_reason = ConnectionEndReason::WriterFailed;
+                        read_error = Some(FrameError::Io(std::io::Error::other(
+                            "host event writer stopped",
+                        )));
+                    }
+                }
                 break;
             }
         };
         let frame = match read {
             Ok(Some(frame)) => frame,
-            Ok(None) => break,
-            Err(error) if is_clean_peer_disconnect(&error) => break,
+            Ok(None) => {
+                end_reason = ConnectionEndReason::ClientEof;
+                break;
+            }
+            Err(error) if is_clean_peer_disconnect(&error) => {
+                end_reason = ConnectionEndReason::ClientReset;
+                break;
+            }
             Err(error) => {
+                end_reason = ConnectionEndReason::ReadFailed;
                 read_error = Some(error);
                 break;
             }
         };
+        activity.mark_client_frame();
         if frame.protocol_major != host_protocol_major {
             send_response(
                 &control_tx,
@@ -399,6 +633,7 @@ pub async fn serve_with_shutdown(
                         })
                         .is_err()
                 {
+                    end_reason = ConnectionEndReason::InvalidAck;
                     read_error = Some(FrameError::Io(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "invalid terminal delivery acknowledgement",
@@ -439,6 +674,11 @@ pub async fn serve_with_shutdown(
                 // and exhaustively tested with every other generated operation.
                 if policy.handler == requests::operation_policy::Handler::Daemon {
                     if let Some(shutdown) = shutdown.clone() {
+                        // The client hangs up right after this, and its EOF is
+                        // the exit this loop actually takes. Remember the ask,
+                        // so an orderly stop is not filed as a desktop that
+                        // walked away.
+                        shutdown_requested = true;
                         send_response(&control_tx, frame.request_id, response_ok()).await;
                         tokio::spawn(async move {
                             sleep(Duration::from_millis(100)).await;
@@ -535,6 +775,7 @@ pub async fn serve_with_shutdown(
                     })
                     .is_err()
                 {
+                    end_reason = ConnectionEndReason::OrderedQueueFull;
                     read_error = Some(FrameError::Io(std::io::Error::other(
                         "ordered host operation queue is full or closed",
                     )));
@@ -552,6 +793,30 @@ pub async fn serve_with_shutdown(
         }
     }
 
+    // Both the writer and the ordered lane mark the connection closed before
+    // they report why, so the loop's own condition can win that race and the
+    // exit arrives with the reason still sitting unread in a channel. Nothing
+    // else consumes these, and taking one now only names the end: the result
+    // this connection returns — and with it the safe log and the error
+    // counters the daemon keeps — is deliberately left as the loop left it.
+    if end_reason == ConnectionEndReason::ConnectionClosed {
+        if let Ok(stop) = writer_stopped_rx.try_recv() {
+            end_reason = stop.reason();
+        } else if ordered_failed_rx.try_recv().is_ok() {
+            end_reason = ConnectionEndReason::OrderedLaneStalled;
+        }
+    }
+    // Only over an ordinary departure: a connection that asked for a shutdown
+    // and then died of a writer deadline died of the writer deadline.
+    if shutdown_requested
+        && matches!(
+            end_reason,
+            ConnectionEndReason::ClientEof | ConnectionEndReason::ClientReset
+        )
+    {
+        end_reason = ConnectionEndReason::DaemonShutdown;
+    }
+    let end_reason = ended(end_reason);
     closed.store(true, Ordering::Release);
     drop(ordered_tx);
     ordered_task.abort();
@@ -595,9 +860,9 @@ pub async fn serve_with_shutdown(
         eprintln!("connection teardown: terminal workers did not join within grace; leaking them");
     }
     if let Some(error) = read_error {
-        Err(error.into())
+        (Err(error.into()), end_reason)
     } else {
-        Ok(())
+        (Ok(()), end_reason)
     }
 }
 
