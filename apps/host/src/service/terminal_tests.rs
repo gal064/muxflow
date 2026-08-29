@@ -1273,16 +1273,9 @@ fn a_capture_already_in_flight_is_not_queued_twice() {
 /// range alone, answering a question the user asked rather than joining the
 /// output stream.
 ///
-/// Red until step 5 (§3.7), which replaces the literal below with
-/// `capture_history_command("%1", 2000)` and adds the `__ADE_HISTORY__` block
-/// that emits one `TerminalHistory` event without touching `PaneSeedState`.
 #[test]
-#[ignore = "lands with step 5: capture_history_command and the __ADE_HISTORY__ block"]
 fn a_history_request_captures_only_the_scrollback_range() {
-    let command = concat!(
-        "display-message -p '__ADE_HISTORY__:2000' ; ",
-        "capture-pane -p -e -J -S -2000 -E -1 -t %1"
-    );
+    let command = capture_history_command("%1", 2000);
     assert!(command.contains("__ADE_HISTORY__:2000"));
     // `-E -1` stops at the line above the screen: the history and the seed
     // meet exactly once, with no row in both and none missing between them.

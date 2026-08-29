@@ -482,6 +482,43 @@ fn terminal_seed_command_builds_a_scoped_validated_request() {
 }
 
 #[test]
+fn terminal_history_command_builds_a_scoped_request_with_a_real_line_count() {
+    let request = terminal_history_request("%12".into(), 2000).unwrap();
+    assert_eq!(
+        v1::Operation::try_from(request.operation).unwrap(),
+        v1::Operation::RequestTerminalHistory
+    );
+    assert_eq!(request.scope, "%12");
+    assert_eq!(request.terminal_history_lines, 2000);
+    // It photographs and nothing else: no visibility claim rides along with it.
+    assert!(!request.visible);
+    assert_eq!(request.terminal_epoch, 0);
+    assert!(terminal_history_request("%12; kill-server".into(), 2000).is_err());
+    // Zero lines would ask tmux for a range it reads as the whole history.
+    assert!(terminal_history_request("%12".into(), 0).is_err());
+}
+
+/// A history frame is its own kind, so nothing downstream can read the
+/// scrollback as the pane's screen.
+#[test]
+fn a_history_frame_is_labelled_by_its_pane_and_carries_only_the_scrollback() {
+    let frame = event_frame::encode_event_with_sequence(
+        TerminalEvent::History {
+            pane_id: "%3".into(),
+            data: b"older\r\nnewer".to_vec(),
+        },
+        41,
+    );
+    assert_eq!(frame[0], 18);
+    let label_length = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    assert_eq!(&frame[3..3 + label_length], b"%3");
+    let payload_offset = 11 + label_length;
+    // No generation prefix, unlike a seed or an output frame: the history
+    // claims no place in the output ordering.
+    assert_eq!(&frame[payload_offset..], b"older\r\nnewer");
+}
+
+#[test]
 fn visibility_handoff_rejects_stale_epoch_and_preserves_cutoff() {
     let stale = terminal_visibility_request("%1".into(), false, true, 6, 10, 7).unwrap_err();
     // The desktop branches on this prefix to skip a retry series that cannot

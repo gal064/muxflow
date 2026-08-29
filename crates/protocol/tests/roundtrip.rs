@@ -530,8 +530,9 @@ fn open_file_stream_operation_and_payload_are_append_only() {
     // Push reuses the Git lane's request and result messages, so it costs one
     // operation number and nothing else on the wire.
     assert_eq!(v1::Operation::GitPush as i32, 47);
+    assert_eq!(v1::Operation::RequestTerminalHistory as i32, 48);
     assert_eq!(v1::Operation::TestDelay as i32, 100);
-    assert!(v1::Operation::try_from(48).is_err());
+    assert!(v1::Operation::try_from(49).is_err());
 }
 
 #[test]
@@ -789,4 +790,94 @@ fn a_renderer_handoff_across_a_version_skew_degrades_to_a_seed() {
     let decoded = v1::PaneResource::decode(old_host_answer.encode_to_vec().as_slice()).unwrap();
     assert!(!decoded.resume_from_renderer);
     assert!(decoded.requires_seed);
+}
+
+/// The lazy-scrollback contract: one operation number, one event number, one
+/// field.
+///
+/// The numbers matter more than the shapes. A screen-only seed leaves the
+/// scrollback in tmux, and this is the only way back to it — so an operation or
+/// event number that moves does not degrade the feature, it points a peer at a
+/// different one.
+#[test]
+fn terminal_history_request_and_answer_round_trip_at_their_own_numbers() {
+    assert_eq!(v1::Operation::RequestTerminalHistory as i32, 48);
+    assert_eq!(v1::EventKind::TerminalHistory as i32, 19);
+
+    let request = v1::Request {
+        operation: v1::Operation::RequestTerminalHistory.into(),
+        scope: "%3".into(),
+        terminal_history_lines: 2000,
+        ..Default::default()
+    };
+    let bytes = request.encode_to_vec();
+    assert_eq!(v1::Request::decode(bytes.as_slice()).unwrap(), request);
+    // Field 17, varint: tag 0x88 0x01, then 2000 as a varint.
+    assert!(
+        bytes
+            .windows(4)
+            .any(|window| window == [0x88, 0x01, 0xd0, 0x0f]),
+        "terminal_history_lines moved off field 17"
+    );
+    // It asks for a photograph and nothing else: no visibility claim, no
+    // checkpoint, no payload. A history request that carried one of those would
+    // be a second, quieter way to change a pane's state.
+    assert!(!request.visible);
+    assert_eq!(request.terminal_epoch, 0);
+    assert_eq!(request.terminal_generation_cutoff, 0);
+    assert!(request.data.is_empty());
+
+    let answer = v1::HostEvent {
+        kind: v1::EventKind::TerminalHistory.into(),
+        terminal: Some(v1::TerminalBytes {
+            pane_id: "%3".into(),
+            data: b"older\r\nnewer".to_vec(),
+            // Zero, deliberately: the history is not part of the ordered output
+            // stream and claims no place in it.
+            generation: 0,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        v1::HostEvent::decode(answer.encode_to_vec().as_slice()).unwrap(),
+        answer
+    );
+}
+
+/// An old desktop must not mistake a history answer for a seed.
+///
+/// Both carry `TerminalBytes` for one pane, so the only thing separating "put
+/// this above your screen" from "this *is* your screen" is the event kind. An
+/// unknown enum value decodes as its number and `try_from` refuses it, which is
+/// what makes the answer inert rather than destructive on a peer that predates
+/// it.
+#[test]
+fn an_unknown_terminal_history_event_is_inert_rather_than_a_seed() {
+    let answer = v1::HostEvent {
+        kind: v1::EventKind::TerminalHistory.into(),
+        terminal: Some(v1::TerminalBytes {
+            pane_id: "%3".into(),
+            data: b"scrollback".to_vec(),
+            generation: 0,
+        }),
+        ..Default::default()
+    };
+    let decoded = v1::HostEvent::decode(answer.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded.kind, 19);
+    assert_ne!(decoded.kind, v1::EventKind::TerminalSeed as i32);
+    assert_ne!(decoded.kind, v1::EventKind::TerminalOutput as i32);
+    // The shape a peer that has never heard of 19 sees: `try_from` fails, and
+    // the fallback is the unspecified kind — an event it drops, never a screen
+    // it applies.
+    assert!(v1::EventKind::try_from(999).is_err());
+    assert_eq!(
+        v1::EventKind::try_from(999).unwrap_or_default(),
+        v1::EventKind::Unspecified
+    );
+
+    // And the same in the other direction: an operation number a host predating
+    // 48 cannot resolve is refused at admission rather than run as its
+    // neighbour.
+    assert!(v1::Operation::try_from(48).is_ok());
+    assert!(v1::Operation::try_from(49).is_err());
 }

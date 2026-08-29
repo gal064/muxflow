@@ -296,12 +296,22 @@ pub(super) enum CommandBlock {
         visible_boundary: u64,
         lines: Vec<Vec<u8>>,
     },
+    /// The scrollback above a pane's screen, answering one
+    /// `RequestTerminalHistory`. Deliberately its own block: it is an answer to
+    /// a question the user asked, not part of the output stream, so it touches
+    /// no `PaneSeedState`, no `PaneResourceStore`, and no generation.
+    CaptureHistory {
+        tag: CommandTag,
+        pane_id: String,
+        lines: Vec<Vec<u8>>,
+    },
 }
 
 pub(super) struct StreamState {
     pub(super) pane_states: HashMap<String, PaneSeedState>,
     pub(super) expected_capture: Option<String>,
     pub(super) expected_resume: Option<String>,
+    pub(super) expected_history: Option<String>,
     pub(super) pending_alternate: Option<(String, Vec<Vec<u8>>, u64)>,
     pub(super) pending_metadata: Option<PendingCaptureMetadata>,
     command_block: CommandBlock,
@@ -358,6 +368,7 @@ impl StreamState {
                 .collect(),
             expected_capture: None,
             expected_resume: None,
+            expected_history: None,
             pending_alternate: None,
             pending_metadata: None,
             command_block: CommandBlock::None,
@@ -456,7 +467,8 @@ impl StreamState {
                 }
                 CommandBlock::CapturePrimary { lines, .. }
                 | CommandBlock::CaptureAlternate { lines, .. }
-                | CommandBlock::CaptureMetadata { lines, .. } => lines.push(line),
+                | CommandBlock::CaptureMetadata { lines, .. }
+                | CommandBlock::CaptureHistory { lines, .. } => lines.push(line),
                 CommandBlock::None => emit_resnapshot(
                     sender,
                     overflowed,
@@ -494,6 +506,7 @@ impl StreamState {
                     self.command_block = CommandBlock::None;
                     self.expected_capture = None;
                     self.expected_resume = None;
+                    self.expected_history = None;
                     self.pending_alternate = None;
                     self.pending_metadata = None;
                     return;
@@ -534,6 +547,7 @@ impl StreamState {
                 self.command_block = CommandBlock::None;
                 self.expected_capture = None;
                 self.expected_resume = None;
+                self.expected_history = None;
                 self.pending_alternate = None;
                 self.pending_metadata = None;
                 // Exactly one event per rejection, and for a rejected resume
@@ -717,6 +731,12 @@ impl StreamState {
                         "input marker arrived on an output-only tmux client".into(),
                     ),
                     MarkerBlock::Resume(pane_id) => self.expected_resume = Some(pane_id),
+                    // Same membership filter as a capture: a history answer for
+                    // a pane this client no longer owns is addressed to nobody.
+                    MarkerBlock::History(pane_id) => {
+                        self.expected_history =
+                            Some(pane_id).filter(|pane_id| self.pane_states.contains_key(pane_id));
+                    }
                     MarkerBlock::Capture(pane_id) => {
                         self.expected_capture =
                             pane_id.filter(|pane_id| self.pane_states.contains_key(pane_id));
@@ -942,6 +962,33 @@ impl StreamState {
                     request_capture(writer, &pane_id, self.flow.resume_before_capture(&pane_id));
                 }
             }
+            CommandBlock::CaptureHistory { pane_id, lines, .. } => {
+                // One event carrying the joined rows, and nothing else: no
+                // generation is taken, no resource is touched, and no seed debt
+                // is settled. The renderer splices this above the screen it is
+                // already showing, or discards it — either way the output
+                // stream is exactly as it was.
+                //
+                // Charged like a seed so a large scrollback cannot starve the
+                // delivery window the live panes share, and outside the
+                // emission fence because the fence orders visibility against
+                // output and this answer belongs to neither.
+                // An empty answer is still an answer — "there is nothing above
+                // your screen" — and the renderer is waiting for one.
+                let history = lines.join(&b"\r\n"[..]);
+                if emit_terminal(
+                    sender,
+                    overflowed,
+                    v1::EventKind::TerminalHistory,
+                    pane_id,
+                    history,
+                    0,
+                    stopped,
+                    output_credit,
+                ) {
+                    output_credit.await_window(stopped);
+                }
+            }
             CommandBlock::None => {}
         }
     }
@@ -953,7 +1000,8 @@ impl StreamState {
             | CommandBlock::Resume { tag: active, .. }
             | CommandBlock::CapturePrimary { tag: active, .. }
             | CommandBlock::CaptureAlternate { tag: active, .. }
-            | CommandBlock::CaptureMetadata { tag: active, .. } => *active == tag,
+            | CommandBlock::CaptureMetadata { tag: active, .. }
+            | CommandBlock::CaptureHistory { tag: active, .. } => *active == tag,
             CommandBlock::None => false,
         }
     }
@@ -967,7 +1015,8 @@ impl StreamState {
             | CommandBlock::Resume { pane_id, .. }
             | CommandBlock::CapturePrimary { pane_id, .. }
             | CommandBlock::CaptureAlternate { pane_id, .. }
-            | CommandBlock::CaptureMetadata { pane_id, .. } => pane_id.clone(),
+            | CommandBlock::CaptureMetadata { pane_id, .. }
+            | CommandBlock::CaptureHistory { pane_id, .. } => pane_id.clone(),
             _ => "terminal".into(),
         }
     }
@@ -979,7 +1028,8 @@ impl StreamState {
             | CommandBlock::Resume { tag, .. }
             | CommandBlock::CapturePrimary { tag, .. }
             | CommandBlock::CaptureAlternate { tag, .. }
-            | CommandBlock::CaptureMetadata { tag, .. } => Some(*tag),
+            | CommandBlock::CaptureMetadata { tag, .. }
+            | CommandBlock::CaptureHistory { tag, .. } => Some(*tag),
             CommandBlock::None => None,
         }
     }
@@ -987,6 +1037,12 @@ impl StreamState {
     pub(super) fn start_block(&mut self, tag: CommandTag) -> CommandBlock {
         if let Some(pane_id) = self.expected_resume.take() {
             CommandBlock::Resume {
+                tag,
+                pane_id,
+                lines: Vec::new(),
+            }
+        } else if let Some(pane_id) = self.expected_history.take() {
+            CommandBlock::CaptureHistory {
                 tag,
                 pane_id,
                 lines: Vec::new(),
