@@ -55,6 +55,12 @@ export function useTmuxActionPerformer(options: Options) {
       ? undefined
       : INTERACTION_SPAN_BY_ACTION[action.kind];
     const paneSpanHandle = paneSpan ? openPanePaintSpan(paneSpan, options.clientId) : undefined;
+    // Switch-timing instrumentation; delete with the `perf.tmuxAction` lines.
+    // Recorded for every action, not only slow ones: the question being asked
+    // is how a switch on a fast link differs from one on a slow one, and that
+    // needs the fast baseline in the same journal. `action` rather than `kind`
+    // because `recordIncident` reserves `kind` for the record's own label.
+    const sentAt = performance.now();
     try {
       const result = await (options.requestAction ?? requestReconciledTmuxAction)({
         clientId: options.clientId,
@@ -63,6 +69,11 @@ export function useTmuxActionPerformer(options: Options) {
         initialScope,
         currentScope: () => options.hostScopeRef.current,
         ...options.reconciliation,
+      });
+      recordIncident("perf.tmuxAction", {
+        action: action.kind,
+        elapsedMs: Math.round(performance.now() - sentAt),
+        ok: true,
       });
       if (!sameHostConnection(initialScope, options.hostScopeRef.current)) {
         abandonPanePaintSpan(paneSpanHandle);
@@ -79,6 +90,12 @@ export function useTmuxActionPerformer(options: Options) {
       // nobody kept. One line per refusal: refusals are exceptional, and the
       // largest burst is one per tab in a bulk close.
       recordIncident("action.refused", { action: action.kind, error: String(error).slice(0, 200) });
+      recordIncident("perf.tmuxAction", {
+        action: action.kind,
+        elapsedMs: Math.round(performance.now() - sentAt),
+        ok: false,
+        code: String(error).slice(0, 120),
+      });
       if (reportStatus && sameHostConnection(initialScope, options.hostScopeRef.current)) options.setStatus(String(error));
       if (execution?.kind === "navigation") throw error;
       return undefined;

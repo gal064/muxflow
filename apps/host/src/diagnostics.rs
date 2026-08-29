@@ -750,6 +750,152 @@ pub fn write_safe_log(class: SafeErrorClass) {
     eprintln!("{line}");
 }
 
+// ---------------------------------------------------------------------------
+// Switch-timing instrumentation.
+//
+// Temporary: one JSON line per tmux action, per tmux-action response reaching
+// the wire, per unusually slow frame write, and per emitted seed, appended to
+// `timing.log` in the runtime directory (`/tmp/muxflow-<uid>/timing.log` where
+// that is the runtime directory). Nothing reads it but a human with `jq`, and
+// nothing in the daemon branches on it — this block and its call sites are
+// meant to be deleted once the switch latency question is answered.
+//
+// The fields are request ids, tmux's own ordinals, durations and byte counts:
+// no path, hostname, session name or terminal content, so this stays inside
+// the privacy declaration above.
+// ---------------------------------------------------------------------------
+
+/// Past this the timing log starts over. It is a debugging artefact, not
+/// history, and it is written far more often than the other daemon logs.
+const MAX_TIMING_LOG_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Appends one line to `timing.log`, on the same terms as `bridge.log`: the
+/// runtime directory is the user's own, and a symlink out of it is refused.
+fn append_timing_line(line: &serde_json::Value) {
+    let path = paths::runtime_dir().join("timing.log");
+    let oversized = fs::symlink_metadata(&path)
+        .map(|metadata| metadata.is_file() && metadata.len() > MAX_TIMING_LOG_BYTES)
+        .unwrap_or(false);
+    let mut options = OpenOptions::new();
+    options
+        .create(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    if oversized {
+        options.truncate(true);
+    } else {
+        options.append(true);
+    }
+    if let Ok(mut file) = options.open(&path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// When each tmux-action response was handed to the sequencer, keyed by request
+/// id, so the writer task can name the queue-to-wire delay it then paid.
+static RESPONSE_ENQUEUED_AT: OnceLock<Mutex<std::collections::HashMap<u64, Instant>>> =
+    OnceLock::new();
+
+fn response_enqueued_at() -> &'static Mutex<std::collections::HashMap<u64, Instant>> {
+    RESPONSE_ENQUEUED_AT.get_or_init(Default::default)
+}
+
+/// Marks a response as one the writer should time. Only the tmux action
+/// dispatch calls this, so every other response stays untracked and untimed.
+pub(crate) fn note_response_enqueued(request_id: u64) {
+    response_enqueued_at()
+        .lock()
+        .unwrap()
+        .insert(request_id, Instant::now());
+}
+
+/// One line per tmux action, written where its response is handed to the
+/// sequencer. The two writer-side numbers are a separate `responseWritten`
+/// line, joined to this one by `requestId`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_tmux_action_timing_log(
+    request_id: u64,
+    kind: &str,
+    session_id: &str,
+    window_id: &str,
+    flush_discover: Duration,
+    execute: Duration,
+    barrier: Option<(Duration, bool)>,
+    total_to_enqueue: Duration,
+    queue_depth_at_enqueue: usize,
+    outcome: &str,
+) {
+    append_timing_line(&serde_json::json!({
+        "atUnixMillis": now_epoch_millis(),
+        "subsystem": "host_daemon",
+        "event": "tmuxAction",
+        "requestId": request_id,
+        "kind": kind,
+        "sessionId": (!session_id.is_empty()).then_some(session_id),
+        "windowId": (!window_id.is_empty()).then_some(window_id),
+        "flushDiscoverMs": whole_millis(flush_discover),
+        "executeMs": whole_millis(execute),
+        "barrierWaitMs": barrier.map(|(wait, _)| whole_millis(wait)),
+        "barrierTimedOut": barrier.map(|(_, timed_out)| timed_out),
+        "totalToEnqueueMs": whole_millis(total_to_enqueue),
+        "queueDepthAtEnqueue": queue_depth_at_enqueue,
+        "outcome": outcome,
+    }));
+}
+
+/// The writer half of the line above: how long the response sat on the
+/// sequencer channel, and how long its own socket write took. Silent for every
+/// response `note_response_enqueued` did not mark.
+pub(crate) fn record_response_written(request_id: u64, write_started: Instant, write: Duration) {
+    let Some(enqueued) = response_enqueued_at().lock().unwrap().remove(&request_id) else {
+        return;
+    };
+    append_timing_line(&serde_json::json!({
+        "atUnixMillis": now_epoch_millis(),
+        "subsystem": "host_daemon",
+        "event": "responseWritten",
+        "requestId": request_id,
+        "enqueueToWireMs": whole_millis(write_started.saturating_duration_since(enqueued)),
+        "writeMs": whole_millis(write),
+    }));
+}
+
+/// How slow one frame write has to be before it is worth a line of its own.
+const SLOW_FRAME_WRITE_THRESHOLD: Duration = Duration::from_millis(250);
+
+/// Names a single frame write that blocked the one ordered writer for a
+/// quarter of a second — the shape a stalled link takes from inside the daemon.
+///
+/// The frame size is a closure because measuring it means walking the encoded
+/// message, and a write this fast path performs normally must not pay for it.
+pub(crate) fn record_frame_write(kind: &str, frame_bytes: impl FnOnce() -> usize, write: Duration) {
+    if write < SLOW_FRAME_WRITE_THRESHOLD {
+        return;
+    }
+    append_timing_line(&serde_json::json!({
+        "atUnixMillis": now_epoch_millis(),
+        "subsystem": "host_daemon",
+        "event": "slowWrite",
+        "frameBytes": frame_bytes(),
+        "writeMs": whole_millis(write),
+        "kind": kind,
+    }));
+}
+
+/// One line per seed handed to the sequencer, with how long the pane's capture
+/// block took to arrive from tmux.
+pub(crate) fn write_seed_timing_log(pane_id: &str, bytes: usize, capture: Option<Duration>) {
+    append_timing_line(&serde_json::json!({
+        "atUnixMillis": now_epoch_millis(),
+        "subsystem": "host_daemon",
+        "event": "seed",
+        "paneId": pane_id,
+        "bytes": bytes,
+        "captureMs": capture.map(whole_millis),
+    }));
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DiagnosticsReport {

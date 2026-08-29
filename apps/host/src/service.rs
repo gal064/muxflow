@@ -483,9 +483,31 @@ async fn serve_connection(
             }
             writer_topology_signal.observe_event(&message);
             let injected_gap = gap_fault.after(&message);
+            // Switch-timing instrumentation; delete with `timing.log`.
+            let (timed_response, frame_kind) = match &message {
+                SequencerControl::Response { request_id, .. } => (Some(*request_id), "response"),
+                SequencerControl::FileStream { .. } => (None, "fileStream"),
+                _ => (None, "event"),
+            };
             let frame = sequencer.frame(message);
+            let write_started = Instant::now();
             match timeout(PROTOCOL_WRITE_TIMEOUT, write_frame(&mut writer, &frame)).await {
-                Ok(Ok(())) => writer_activity.mark_host_frame(),
+                Ok(Ok(())) => {
+                    writer_activity.mark_host_frame();
+                    let write_elapsed = write_started.elapsed();
+                    if let Some(request_id) = timed_response {
+                        crate::diagnostics::record_response_written(
+                            request_id,
+                            write_started,
+                            write_elapsed,
+                        );
+                    }
+                    crate::diagnostics::record_frame_write(
+                        frame_kind,
+                        || prost::Message::encoded_len(&frame),
+                        write_elapsed,
+                    );
+                }
                 Ok(Err(error)) => {
                     stopped_reason =
                         WriterStop::Failed(format!("host event writer failed: {error}"));
