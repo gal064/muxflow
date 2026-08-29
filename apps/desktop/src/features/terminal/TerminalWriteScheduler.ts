@@ -17,6 +17,16 @@ interface QueuedWrite {
    * `#queuedRecords`.
    */
   partialled?: boolean;
+  /**
+   * Whether this record must reach xterm on its own.
+   *
+   * A flush coalesces up to a frame budget, so without this a rewrite composed
+   * at a barrier is written together with whatever the owner queued after
+   * `replace` returned — and its callback then fires on a buffer that already
+   * holds those bytes, and they have already left the queue the rewrite was
+   * about to put its own backlog at the head of.
+   */
+  fenced?: boolean;
 }
 
 /**
@@ -115,13 +125,14 @@ export class TerminalWriteScheduler {
    * run: their callbacks travel with them, so nothing hanging off a write is
    * resolved early, resolved twice, or lost.
    *
-   * And re-queued only once the rewrite itself is on the terminal, so the
-   * rewrite gets a frame of its own. A flush coalesces up to a frame budget, so
-   * committing them straight away puts the reset, the payload and the retained
-   * records into one xterm write — and `onRendered` then fires on a buffer that
-   * already holds the retained rows. The caller measuring what the rewrite
-   * added would count those rows too and scroll the user past the lines they
-   * were reading by exactly that much.
+   * And re-queued only once the rewrite itself is on the terminal. A flush
+   * coalesces up to a frame budget, so a rewrite committed beside the records it
+   * is putting back reaches xterm in one write, and `onRendered` then fires on a
+   * buffer that already holds them. The rewrite is fenced for the same reason
+   * from the other side: whatever the owner queues in the window between
+   * `replace` returning and that callback running must not be written with it
+   * either, or those bytes leave the queue before the retained records can be
+   * put back in front of them and the terminal sees the backlog out of order.
    */
   replace(bytes: Uint8Array, recoverOverflow = true, onRendered?: () => void, keepQueued = false): boolean {
     if (this.#disposed || (this.#overflowed && !recoverOverflow)) return false;
@@ -133,11 +144,11 @@ export class TerminalWriteScheduler {
     if (!this.#admit(length)) {
       // `#admit` refuses two ways. Past the bound it has already latched
       // overflow and told the owner, and what was retained goes with the queue
-      // that overflowed — that is the overflow path doing its job, and it takes
-      // a single payload past `maxPendingBytes` to reach. Sealed for a hide
-      // drain it refuses silently, and dropping accepted output on the way to a
+      // that overflowed — `#requeue` drops it for that reason, and it takes a
+      // single payload past `maxPendingBytes` to reach. Sealed for a hide drain
+      // it refuses silently, and dropping accepted output on the way to a
       // refusal nobody hears is how a pane loses bytes with nothing said.
-      if (!this.#overflowed) this.#requeue(retained);
+      this.#requeue(retained);
       return false;
     }
     const resetAndBytes = new Uint8Array(length);
@@ -152,6 +163,7 @@ export class TerminalWriteScheduler {
         onRendered?.();
         this.#requeue(retained);
       },
+      keepQueued,
     );
     return true;
   }
@@ -159,11 +171,30 @@ export class TerminalWriteScheduler {
   /**
    * Puts records back on the queue without re-admitting them.
    *
-   * They were admitted once already, and the bound governs new output rather
-   * than bytes being returned to where they were.
+   * At the head, not the tail. This runs from inside the rewrite's own callback,
+   * which is a whole xterm write after `replace` returned — long enough for the
+   * owner to have queued more output — and those records belong *behind* the
+   * ones being put back, because that is the order the terminal accepted them
+   * in. Appending would replay the splice's own backlog after output that came
+   * later than all of it.
+   *
+   * Not re-admitted: they were admitted once already, and the bound governs new
+   * output rather than bytes being returned to where they were. Dropped outright
+   * on the two states where putting them back is wrong rather than merely
+   * unnecessary — a disposed scheduler will never write again, and one that
+   * overflowed in the meantime has thrown its queue away and told the owner to
+   * expect a seed, which is about to replace the screen these rows are for.
    */
   #requeue(records: readonly QueuedWrite[]): void {
-    for (const record of records) this.#commit(record.bytes, record.onRendered);
+    if (records.length === 0 || this.#disposed || this.#overflowed) return;
+    this.#queue.splice(this.#queueHead, 0, ...records);
+    for (const record of records) {
+      this.#pendingBytes += record.bytes.byteLength;
+      this.#queuedBackingBytes += record.backingByteLength;
+    }
+    this.measurements?.highWater?.("terminal.scheduler.queueDepth", this.#queueLength());
+    this.#notifyPendingBytes();
+    this.#schedule();
   }
 
   /**
@@ -248,12 +279,12 @@ export class TerminalWriteScheduler {
     return false;
   }
 
-  #commit(bytes: Uint8Array, onRendered?: () => void): void {
+  #commit(bytes: Uint8Array, onRendered?: () => void, fenced = false): void {
     this.measurements?.add("terminal.scheduler.enqueueOperations");
     this.measurements?.add("terminal.scheduler.inputBytes", bytes.byteLength);
     if (onRendered) this.measurements?.add("terminal.scheduler.callbacksQueued");
     const backingByteLength = bytes.buffer.byteLength;
-    this.#queue.push({ bytes, backingByteLength, onRendered });
+    this.#queue.push({ bytes, backingByteLength, onRendered, fenced });
     this.#pendingBytes += bytes.byteLength;
     this.#queuedBackingBytes += backingByteLength;
     this.measurements?.highWater?.("terminal.scheduler.pendingBytes", this.#pendingBytes);
@@ -393,6 +424,11 @@ export class TerminalWriteScheduler {
       const first = this.#queue[this.#queueHead];
       if (!first) throw new Error("terminal scheduler queue invariant violated");
       const remainingBudget = this.maxBytesPerFrame - length;
+      // A fenced record is written by itself, whichever side the company would
+      // have come from. Split across writes if it is larger than one budget —
+      // the pieces are still only its own bytes, and its callback still fires
+      // with nothing else applied — but never beside another record.
+      if (first.fenced && pieces.length > 0) break;
       // A joined chunk duplicates its pieces. Never include a partial record
       // after earlier pieces, because its full backing must remain queued.
       if (pieces.length > 0 && first.bytes.byteLength > remainingBudget) break;
@@ -415,6 +451,7 @@ export class TerminalWriteScheduler {
         first.partialled = true;
         partialRecord = true;
       }
+      if (first.fenced) break;
     }
     this.#compactQueue();
     if (length === 0) {

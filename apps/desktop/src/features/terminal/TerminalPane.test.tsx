@@ -50,7 +50,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     #gridListeners = new Set<() => void>();
     /** What every splice this pane attempts is answered with. */
     historyOutcome: "applied" | "superseded" = "applied";
-    historySplices: Array<{ bytes: number; skip: number }> = [];
+    historySplices: Array<{ bytes: number; skip: number; columns: number; rows: number }> = [];
     /** Rows above the screen, as the real renderer counts them. */
     scrollbackRows = 0;
     /** The ceiling `scrollbackRows` walks up to, as xterm's `scrollback` sets it. */
@@ -93,8 +93,11 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     reachTop(): void {
       for (const listener of this.#topListeners) listener();
     }
-    async prependHistory(history: Uint8Array, skip: number): Promise<"applied" | "superseded"> {
-      this.historySplices.push({ bytes: history.byteLength, skip });
+    async prependHistory(
+      history: Uint8Array,
+      anchor: { skip: number; columns: number; rows: number },
+    ): Promise<"applied" | "superseded"> {
+      this.historySplices.push({ bytes: history.byteLength, ...anchor });
       return this.historyOutcome;
     }
     focus(): void { this.focusCalls += 1; }
@@ -842,7 +845,7 @@ describe("lazy scrollback", () => {
     expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
 
     await act(async () => { hub.deliver(historyEvent("%h1", "earlier output", 2_000)); });
-    expect(renderer.historySplices).toEqual([{ bytes: 14, skip: 0 }]);
+    expect(renderer.historySplices).toEqual([{ bytes: 14, skip: 0, columns: 80, rows: 24 }]);
     await act(async () => { mounted.unmount(); });
   });
 
@@ -935,9 +938,8 @@ describe("lazy scrollback", () => {
     await act(async () => { renderer.reachTop(); });
     // The rows asked for were 0 held + 300, and tmux holds 120: this page is
     // the whole of it. Decided on that number and never on the answer's own
-    // rows — `-J` joins wrapped lines, so a full page routinely carries fewer
-    // lines than it covers rows, and tmux answers a range past the top with one
-    // clamped row rather than with nothing.
+    // rows, because tmux answers a range past the top with one clamped row
+    // rather than with nothing.
     await act(async () => { hub.deliver(historyEvent("%h9", historyPage(120), 120)); });
     expect(renderer.historySplices).toHaveLength(1);
     renderer.scrollbackRows = 120;
@@ -1225,7 +1227,7 @@ describe("lazy scrollback", () => {
     // B's own answer, spliced above the screen B was asked against.
     await act(async () => { hub.deliver(historyEvent("%r1", historyPage(300), 2_000)); });
     expect(renderer.historySplices).toEqual([
-      { bytes: historyPage(300).length, skip: 0 },
+      { bytes: historyPage(300).length, skip: 0, columns: 80, rows: 24 },
     ]);
     await act(async () => { mounted.unmount(); });
   });

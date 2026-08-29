@@ -220,10 +220,9 @@ describe("TerminalWriteScheduler", () => {
    *
    * A flush coalesces up to a frame budget, so a rewrite committed alongside the
    * records it is putting back reaches xterm in one write — and `onRendered`
-   * then fires on a buffer that already holds those records' rows. The one
-   * caller that passes `keepQueued` measures what the rewrite added, to keep the
-   * user on the rows they were reading; counting the re-queued rows too scrolls
-   * them past exactly that many lines.
+   * then fires on a buffer that already holds those records' rows. Committing
+   * them from the callback answers that; the record's fence answers the other
+   * half, which is anything the owner queues after `replace` returns.
    */
   it("gives the rewrite a write of its own, so its callback sees only the rewrite", () => {
     const h = harness();
@@ -247,6 +246,36 @@ describe("TerminalWriteScheduler", () => {
     expect(writesWhenRewriteRendered).toEqual([2]);
     expect(h.written[1]).toEqual([0x1b, 0x63, 7]);
     expect(h.written.flat()).toEqual([1, 0x1b, 0x63, 7, 2, 3]);
+  });
+
+  /**
+   * And they go back at the *head*.
+   *
+   * The re-queue runs from inside the rewrite's callback, which is a whole xterm
+   * write after `replace` returned — long enough for the owner to have queued
+   * more output on top. Appending would replay the splice's own backlog after
+   * output that arrived later than all of it, which is the one thing an ordered
+   * queue exists to prevent.
+   */
+  it("puts the retained records ahead of anything queued after the rewrite", () => {
+    const h = harness();
+    const order: string[] = [];
+    expect(h.scheduler.enqueue(Uint8Array.of(1), () => order.push("A"))).toBe(true);
+    expect(h.scheduler.enqueue(new Uint8Array(), () => {
+      h.scheduler.replace(Uint8Array.of(7), false, () => order.push("rewrite"), true);
+      // The owner carries on the moment `replace` returns, long before the
+      // retained records are put back.
+      h.scheduler.enqueue(Uint8Array.of(4), () => order.push("D"));
+    })).toBe(true);
+    expect(h.scheduler.enqueue(Uint8Array.of(2), () => order.push("B"))).toBe(true);
+    expect(h.scheduler.enqueue(Uint8Array.of(3), () => order.push("C"))).toBe(true);
+
+    h.completions.shift()!();
+    drain(h);
+
+    expect(h.written.flat()).toEqual([1, 0x1b, 0x63, 7, 2, 3, 4]);
+    expect(order).toEqual(["A", "rewrite", "B", "C", "D"]);
+    expect(h.scheduler.pendingBytes).toBe(0);
   });
 
   /**

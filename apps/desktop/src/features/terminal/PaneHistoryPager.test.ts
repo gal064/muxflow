@@ -6,18 +6,20 @@ import {
   type PagerRenderer,
 } from "./PaneHistoryPager";
 import { ownTerminalBytes } from "./TerminalBytes";
+import type { HistoryPageAnchor } from "./TerminalRenderer";
 import type { TerminalEvent } from "./api";
 
 /**
- * The four renderer members the pager reads, and nothing else — no xterm, no
+ * The five renderer members the pager reads, and nothing else — no xterm, no
  * DOM, no React. What the pager decides is arithmetic over the rows a terminal
  * reports holding, and this is the whole of what it needs to do it.
  */
 class FakeRenderer implements PagerRenderer {
   scrollbackRows = 0;
   scrollbackLimit = 10_000;
+  grid = { columns: 80, rows: 24 };
   alternateScreen = false;
-  readonly splices: Array<{ bytes: number; skip: number }> = [];
+  readonly splices: Array<{ bytes: number } & HistoryPageAnchor> = [];
   #outcome: "applied" | "superseded" = "applied";
   #pending: Array<() => void> = [];
 
@@ -25,8 +27,8 @@ class FakeRenderer implements PagerRenderer {
     return this.alternateScreen;
   }
 
-  prependHistory(history: Uint8Array, skip: number): Promise<"applied" | "superseded"> {
-    this.splices.push({ bytes: history.byteLength, skip });
+  prependHistory(history: Uint8Array, anchor: HistoryPageAnchor): Promise<"applied" | "superseded"> {
+    this.splices.push({ bytes: history.byteLength, ...anchor });
     const outcome = this.#outcome;
     return new Promise((resolve) => this.#pending.push(() => resolve(outcome)));
   }
@@ -182,6 +184,51 @@ describe("PaneHistoryPager", () => {
   });
 
   /**
+   * The latch is held through the splice, not just through the wire.
+   *
+   * `prependHistory` waits on a barrier, so the rewrite outlives the call: from
+   * the answer until the promise settles this buffer is about to be replaced,
+   * and a page asked for meanwhile would quote a skip the rewrite is about to
+   * invalidate. A reflow orphans the page in flight without releasing that.
+   */
+  it("holds its latch through the splice, so a reflow cannot start a page mid-rewrite", async () => {
+    const renderer = new FakeRenderer();
+    const { pager, request } = pagerFor(renderer);
+    pager.noteScreenSeeded();
+    pager.requestPage("prefetch");
+    expect(request).toHaveBeenCalledTimes(1);
+
+    // The answer lands and the splice starts; this renderer holds it open.
+    pager.receive(historyEvent(historyPage(10), 2_000));
+    pager.noteGridChanged();
+
+    pager.requestPage("scrolledToTop");
+    expect(request, "a page was asked for while the rewrite was still landing").toHaveBeenCalledTimes(1);
+
+    await renderer.settleSplices();
+    pager.requestPage("scrolledToTop");
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * Except for the one thing that takes the rewrite away with it. A seed drops
+   * everything queued for the terminal, the splice's barrier included, so that
+   * splice will never answer — and a latch waiting on an answer that cannot come
+   * is a pane that never pages again.
+   */
+  it("releases it at once for a reseed, whose barrier went with the queue", () => {
+    const renderer = new FakeRenderer();
+    const { pager, request } = pagerFor(renderer);
+    pager.noteScreenSeeded();
+    pager.requestPage("prefetch");
+    pager.receive(historyEvent(historyPage(10), 2_000));
+
+    pager.noteScreenSeeded();
+    pager.requestPage("prefetch");
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  /**
    * A request the host never answers — a link that dropped under it — would
    * otherwise sit at the head of the expectation queue forever and misattribute
    * every answer after it. Unreachable through the component, because getting
@@ -268,7 +315,9 @@ describe("PaneHistoryPager", () => {
     pager.receive(historyEvent(historyPage(10), 2_000));
     await renderer.settleSplices();
 
-    expect(renderer.splices).toEqual([{ bytes: historyPage(10).length, skip: 12 }]);
+    expect(renderer.splices).toEqual([
+      { bytes: historyPage(10).length, skip: 12, columns: 80, rows: 24 },
+    ]);
   });
 
   /**

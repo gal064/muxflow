@@ -16,6 +16,7 @@ import {
   type TerminalSize,
 } from "./cellMetrics";
 import type { OwnedTerminalBytes } from "./TerminalBytes";
+import { composeHistoryPage, splitHistoryRows } from "./historyPage";
 import { TerminalGenerationWatermark } from "./TerminalGenerationWatermark";
 import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 import { settleWithin } from "./timeBound";
@@ -123,14 +124,15 @@ export interface TerminalRenderer {
    * nothing was touched and the caller may ask again.
    *
    * Output printed while the page was on the wire is not a reason to refuse.
-   * Whatever arrived since is *inside* the serialization, and `skip` — the rows
-   * this buffer held when the page was asked for — is what says how much of the
-   * page's tail those rows have already covered, because tmux measures its
-   * capture from the display at the moment it runs rather than at the moment it
-   * was asked. Only a scrollback that filled up in the meantime is unrepairable,
-   * and that is what the refusal is for.
+   * Whatever arrived since is *inside* the serialization, and the anchor's
+   * `skip` — the rows this buffer held when the page was asked for — is what
+   * says how many rows of the page's tail those rows have already covered,
+   * because tmux measures its capture from the display at the moment it runs
+   * rather than at the moment it was asked. A scrollback that filled up in the
+   * meantime is unrepairable, and so is a grid that changed under the page: a
+   * row is only the same thing on both sides at one width.
    */
-  prependHistory(history: OwnedTerminalBytes, skip: number): Promise<"applied" | "superseded">;
+  prependHistory(history: OwnedTerminalBytes, anchor: HistoryPageAnchor): Promise<"applied" | "superseded">;
   /**
    * How many rows of scrollback sit above this terminal's screen.
    *
@@ -171,6 +173,13 @@ export interface TerminalRenderer {
   setFontSize(fontSize: number): void;
   /** Forces the grid tmux says this pane has, whatever the CSS box measured. */
   setGrid(size: TerminalSize): GridOutcome;
+  /**
+   * The cols and rows this terminal is rendering at.
+   *
+   * What a page of scrollback is anchored to: tmux's captured rows are this
+   * terminal's rows only while the two agree on how wide a row is.
+   */
+  readonly grid: TerminalSize;
   /**
    * Fires when a `setGrid` actually reflowed the buffer.
    *
@@ -254,26 +263,19 @@ export function sanitizeSerializedScreen(serialized: string): string {
 }
 
 /**
- * Drops whole rows off the end of a captured page.
+ * What a page of scrollback was asked against.
  *
- * tmux evaluates `-S`/`-E` against the pane's display at the moment it *runs*
- * the capture, not at the moment this side asked for it. Rows printed in
- * between move that display down, so the page comes back ending that many rows
- * too low, and its last rows are rows this buffer already holds — spliced in
- * whole, they appear twice, and the next page inherits the error through the
- * skip it is asked with.
- *
- * The stream is ordered, so every row tmux printed before running the capture
- * was emitted before the answer and is on this terminal by the time the splice
- * barrier runs. That is what makes the overlap countable rather than guessable:
- * it is exactly the rows this buffer has gained since the request.
- *
- * Rows are `\r\n`-separated — `capture-pane -J` joins wrapped lines, and the
- * only escapes `-e` emits are SGR, which can hold neither a CR nor an LF — so
- * this is a scan for row boundaries and a subarray. Returns `undefined` when
- * the page holds no more rows than it is asked to drop: there is nothing left
- * of it to splice.
+ * A page is only splicable onto the buffer it was asked for: `skip` says where
+ * that buffer began, and the grid says what a row was. Both are read at the
+ * moment of the request and quoted back at the splice.
  */
+export interface HistoryPageAnchor {
+  /** Rows of scrollback this terminal held when the page was asked for. */
+  skip: number;
+  columns: number;
+  rows: number;
+}
+
 /** Why a page of scrollback was not put above a screen. Journalled, never spoken. */
 type HistorySupersededReason =
   | "disposed"
@@ -281,28 +283,11 @@ type HistorySupersededReason =
   | "overflowed"
   | "scrollbackCapped"
   | "overlapExceedsPage"
+  /** The terminal reflowed between the request and the splice. */
+  | "gridChanged"
   | "replaceRefused"
   /** The scheduler would not even take the barrier: disposed, sealed or overflowed. */
   | "barrierRefused";
-
-export function trimHistoryRows(history: Uint8Array, drop: number): Uint8Array | undefined {
-  if (drop <= 0) return history;
-  if (history.byteLength === 0) return undefined;
-  const boundaries: number[] = [];
-  for (let index = 0; index + 1 < history.byteLength; index += 1) {
-    if (history[index] === 0x0d && history[index + 1] === 0x0a) {
-      boundaries.push(index);
-      index += 1;
-    }
-  }
-  // A trailing separator ends the last row rather than starting another one.
-  const rows = boundaries.length > 0 && boundaries[boundaries.length - 1] === history.byteLength - 2
-    ? boundaries.length
-    : boundaries.length + 1;
-  const keep = rows - drop;
-  if (keep <= 0) return undefined;
-  return history.subarray(0, boundaries[keep - 1]);
-}
 
 /**
  * Whether a cached or host-owned screen may replace what this terminal shows.
@@ -571,14 +556,16 @@ export class XtermRenderer implements TerminalRenderer {
    * latches "this pane is holding its scrollback" on this answer, and latching
    * it on the attempt is how a pane stops asking for history it never received.
    *
-   * A pane printing continuously is the ordinary case, not a refusal. `skip` is
-   * the row count the request quoted — where this buffer began when it was
-   * asked — and tmux measures its capture from the display at the moment it
-   * *runs*, so a page can come back overlapping the rows printed in between.
-   * That overlap is countable here rather than guessable, and it is trimmed off
-   * the end of the page before the two halves are composed.
+   * A pane printing continuously is the ordinary case, not a refusal. The
+   * anchor's `skip` is the row count the request quoted — where this buffer
+   * began when it was asked — and tmux measures its capture from the display at
+   * the moment it *runs*, so a page can come back overlapping the rows printed
+   * in between. Everything on both sides of that arithmetic is a physical row
+   * (the history capture drops `-J` so that it can be), which makes the overlap
+   * countable here rather than guessable, and it is trimmed off the end of the
+   * page before the two halves are composed.
    */
-  prependHistory(history: OwnedTerminalBytes, skip: number): Promise<"applied" | "superseded"> {
+  prependHistory(history: OwnedTerminalBytes, anchor: HistoryPageAnchor): Promise<"applied" | "superseded"> {
     // A TUI's alternate screen has no scrollback to prepend to, and rewriting
     // the buffer under it would destroy the frame the program is drawing.
     if (this.#disposed) return this.#supersede("disposed");
@@ -603,22 +590,29 @@ export class XtermRenderer implements TerminalRenderer {
         if (this.scrollbackRows >= this.scrollbackLimit) {
           return resolve(this.#noteHistorySuperseded("scrollbackCapped"));
         }
+        // A row is the same thing on both sides of this only at one width. A
+        // reflow moved rows across tmux's history boundary and rewrapped this
+        // buffer, so the page's rows are neither this buffer's rows nor
+        // countable against its skip. The pager orphans pages on a reflow it
+        // hears about; this closes the window where one lands in between.
+        if (this.#terminal.cols !== anchor.columns || this.#terminal.rows !== anchor.rows) {
+          return resolve(this.#noteHistorySuperseded("gridChanged"));
+        }
         // What the page and this buffer have in common. tmux measured its
         // capture from the display as it stood when the capture ran, and the
         // ordered stream has already put every row printed before that on this
         // terminal — so the rows this buffer has gained since the request are
         // exactly the rows at the foot of the page, and they come off it.
-        const page = trimHistoryRows(history, this.scrollbackRows - skip);
+        const captured = splitHistoryRows(history);
+        const overlap = Math.max(0, this.scrollbackRows - anchor.skip);
         // The whole page was rows this buffer already held. Nothing to splice,
         // and nothing to latch: the next reach-the-top asks from where this
         // buffer actually begins now, which is above everything this page held.
-        if (!page) return resolve(this.#noteHistorySuperseded("overlapExceedsPage"));
-        // Read here rather than at the request, because the rewrite is measured
-        // against the buffer it actually replaces: output that landed in
-        // between grew this buffer too, and counting from the older length
-        // would scroll the user past the rows they were reading by exactly that
-        // much.
-        const previousLength = this.#terminal.buffer.normal.length;
+        if (overlap >= captured.length) {
+          return resolve(this.#noteHistorySuperseded("overlapExceedsPage"));
+        }
+        const kept = overlap === 0 ? captured : captured.slice(0, captured.length - overlap);
+        const page = composeHistoryPage(kept, anchor.columns);
         const screen = new TextEncoder().encode(sanitizeSerializedScreen(this.serialize()));
         const spliced = new Uint8Array(page.byteLength + HISTORY_SEPARATOR.byteLength + screen.byteLength);
         spliced.set(page);
@@ -629,12 +623,13 @@ export class XtermRenderer implements TerminalRenderer {
           spliced,
           false,
           () => {
-            // Keep the user on the rows they were reading: everything the
-            // splice added sits above them. The scheduler gives this rewrite a
-            // frame of its own, so what this measures is the splice and not the
-            // writes re-queued behind it.
-            const grown = this.#terminal.buffer.normal.length - previousLength;
-            if (grown > 0) this.#terminal.scrollToLine(grown);
+            // Keep the user on the rows they were reading: the splice put
+            // exactly `kept.length` rows above them, because a composed page
+            // occupies as many rows as it was captured with whether xterm
+            // wrapped them or this side broke them. Counted rather than measured
+            // off the buffer — a length taken before and after is corrupted by
+            // any output the scheduler coalesced into the same write.
+            this.#terminal.scrollToLine(kept.length);
           },
           // Writes queued behind the barrier are not in the serialization and
           // have not been applied. They would have run after the barrier, so
@@ -670,6 +665,10 @@ export class XtermRenderer implements TerminalRenderer {
       scrollbackLimit: this.scrollbackLimit,
     });
     return "superseded";
+  }
+
+  get grid(): TerminalSize {
+    return { columns: this.#terminal.cols, rows: this.#terminal.rows };
   }
 
   get scrollbackRows(): number {
