@@ -768,7 +768,7 @@ export function App() {
 
     closeAppTab: closeWorkspaceAppTab,
     combinedTabs, controllers, currentHostProfileId, deletableHostProfile: deletableProfile,
-    focusDirection, generation: hostState.generation, hostScope: currentHostScope,
+    focusDirection, hostScope: currentHostScope,
     isHostScopeCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
     jumpToUnreadAgent: () => {
       const target = jumpTarget(agentRows);
