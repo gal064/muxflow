@@ -36,6 +36,8 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 pending.lock().unwrap().remove(&request_id);
                 return;
             };
+            // Switch-timing instrumentation; delete with `timing.log`.
+            let started = std::time::Instant::now();
             let (_topology_guard, known_generation) =
                 lock_topology_generation(topology_lock, generation).await;
             let cached_baseline = topology_baseline.lock().unwrap().clone();
@@ -43,6 +45,30 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
             // first session is allowed to run with no tmux server, and every
             // other action is not (M10-E060).
             let action_kind = v1::TmuxActionKind::try_from(action.kind).unwrap_or_default();
+            // Switch-timing instrumentation; delete with `timing.log`. Held
+            // apart from `action` because `execute` takes it by value.
+            let timing_kind = format!("{action_kind:?}");
+            let timing_session_id = action.session_id.clone();
+            let timing_window_id = action.window_id.clone();
+            let log_timing = |flush_discover: Duration,
+                              execute: Duration,
+                              barrier: Option<(Duration, bool)>,
+                              queue_depth: usize,
+                              outcome: &str| {
+                crate::diagnostics::write_tmux_action_timing_log(
+                    request_id,
+                    &timing_kind,
+                    &timing_session_id,
+                    &timing_window_id,
+                    flush_discover,
+                    execute,
+                    barrier,
+                    started.elapsed(),
+                    queue_depth,
+                    outcome,
+                );
+            };
+            let discover_started = std::time::Instant::now();
             // Accepted terminal input must land before the one fresh topology
             // precheck used by the action. Doing this after discovery made the
             // action rediscover inside `execute`, paying a second remote tmux
@@ -57,36 +83,58 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
             ) {
                 Ok(task) => task,
                 Err(error) => {
-                    send_response(
+                    let depth = send_timed_response(
                         control_tx,
                         request_id,
                         response_error("terminal_input_flush_failed", &error.to_string()),
                     )
                     .await;
+                    log_timing(
+                        discover_started.elapsed(),
+                        Duration::ZERO,
+                        None,
+                        depth,
+                        "terminal_input_flush_failed",
+                    );
                     pending.lock().unwrap().remove(&request_id);
                     return;
                 }
             };
             let fresh = fresh_task.await;
+            let flush_discover = discover_started.elapsed();
             let (fresh_snapshot, fresh_identity) = match fresh {
                 Ok(Ok(value)) => value,
                 Ok(Err(error)) => {
-                    send_response(
+                    let depth = send_timed_response(
                         control_tx,
                         request_id,
                         response_error("tmux_action_rejected", &error.to_string()),
                     )
                     .await;
+                    log_timing(
+                        flush_discover,
+                        Duration::ZERO,
+                        None,
+                        depth,
+                        "tmux_action_rejected",
+                    );
                     pending.lock().unwrap().remove(&request_id);
                     return;
                 }
                 Err(error) => {
-                    send_response(
+                    let depth = send_timed_response(
                         control_tx,
                         request_id,
                         response_error("tmux_action_task_failed", &error.to_string()),
                     )
                     .await;
+                    log_timing(
+                        flush_discover,
+                        Duration::ZERO,
+                        None,
+                        depth,
+                        "tmux_action_task_failed",
+                    );
                     pending.lock().unwrap().remove(&request_id);
                     return;
                 }
@@ -113,7 +161,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                         ..Default::default()
                     }))
                     .await;
-                send_response(
+                let depth = send_timed_response(
                     control_tx,
                     request_id,
                     response_error(
@@ -122,13 +170,26 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                     ),
                 )
                 .await;
+                log_timing(
+                    flush_discover,
+                    Duration::ZERO,
+                    None,
+                    depth,
+                    "stale_topology",
+                );
                 pending.lock().unwrap().remove(&request_id);
                 return;
             }
             let barrier_sender = event_tx.clone();
+            // Switch-timing instrumentation; delete with `timing.log`. The
+            // barrier runs on the blocking pool inside `execute`, so its wait
+            // is reported back rather than measured here.
+            let barrier_report = Arc::new(Mutex::new(None::<(Duration, bool)>));
+            let barrier_timing = Arc::clone(&barrier_report);
             let selection_terminal = Arc::clone(terminal);
             let selection_events = event_tx.clone();
             let selection_overflowed = Arc::clone(overflowed);
+            let execute_started = std::time::Instant::now();
             let result = tokio::task::spawn_blocking(move || {
                 tmux_actions::execute(
                     action,
@@ -143,11 +204,17 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                             &selection_events,
                             &selection_overflowed,
                         )?;
-                        Ok(topology_epoch_barrier(&barrier_sender))
+                        let barrier_started = std::time::Instant::now();
+                        let covered = topology_epoch_barrier(&barrier_sender);
+                        *barrier_timing.lock().unwrap() =
+                            Some((barrier_started.elapsed(), covered.is_none()));
+                        Ok(covered)
                     },
                 )
             })
             .await;
+            let execute_elapsed = execute_started.elapsed();
+            let barrier = *barrier_report.lock().unwrap();
             match result {
                 Ok(Ok(mut outcome)) => {
                     let selection_required = action_selects_session(action_kind);
@@ -175,12 +242,13 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                         // before its topology event on the one ordered
                         // sequencer so the desktop can suppress its generic
                         // visibility restatement before applying the snapshot.
-                        send_response(
+                        let depth = send_timed_response(
                             control_tx,
                             request_id,
                             success_response.take().expect("success response exists"),
                         )
                         .await;
+                        log_timing(flush_discover, execute_elapsed, barrier, depth, "ok");
                     }
                     let _ = event_tx
                         .send(SequencerControl::OrderedEvent(v1::HostEvent {
@@ -191,7 +259,8 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                         }))
                         .await;
                     if let Some(response) = success_response {
-                        send_response(control_tx, request_id, response).await;
+                        let depth = send_timed_response(control_tx, request_id, response).await;
+                        log_timing(flush_discover, execute_elapsed, barrier, depth, "ok");
                     }
                 }
                 Ok(Err(error)) => {
@@ -207,20 +276,48 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                     } else {
                         "tmux_action_rejected"
                     };
-                    send_response(control_tx, request_id, response_error(code, &message)).await;
+                    let depth =
+                        send_timed_response(control_tx, request_id, response_error(code, &message))
+                            .await;
+                    log_timing(flush_discover, execute_elapsed, barrier, depth, code);
                 }
                 Err(error) => {
-                    send_response(
+                    let depth = send_timed_response(
                         control_tx,
                         request_id,
                         response_error("tmux_action_task_failed", &error.to_string()),
                     )
                     .await;
+                    log_timing(
+                        flush_discover,
+                        execute_elapsed,
+                        barrier,
+                        depth,
+                        "tmux_action_task_failed",
+                    );
                 }
             }
         }
         _ => unreachable!(),
     }
+}
+
+/// Switch-timing instrumentation; delete with `timing.log`.
+///
+/// Notes the enqueue instant for the writer task to join against, and returns
+/// the sequencer queue depth this response was put behind. Ordinary
+/// `send_response` in every other dispatcher stays untimed.
+async fn send_timed_response(
+    control_tx: &mpsc::Sender<SequencerControl>,
+    request_id: u64,
+    response: v1::Response,
+) -> usize {
+    let depth = control_tx
+        .max_capacity()
+        .saturating_sub(control_tx.capacity());
+    crate::diagnostics::note_response_enqueued(request_id);
+    send_response(control_tx, request_id, response).await;
+    depth
 }
 
 fn action_selects_session(action_kind: v1::TmuxActionKind) -> bool {
