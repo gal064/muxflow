@@ -43,14 +43,14 @@ export const TRANSIENT_REVEAL_ERRORS = [
 
 /**
  * The native side gave up waiting for the answer. Unlike the transient list
- * this is a *slow* failure — five seconds each — so it is not resent on the
- * 250 ms ladder (eight of those would be forty seconds of a dark pane and
- * eight more unanswered requests on a link already behind); the watchdog's
+ * this is a *slow* failure — a whole response deadline each — so it is not
+ * resent on the 250 ms ladder (eight of those would be minutes of a dark pane
+ * and eight more unanswered requests on a link already behind); the watchdog's
  * own backoff re-asserts it. Quiet, though: it is the link, not the pane.
  */
-export const LATE_REVEAL_ERROR = "host request timed out";
+const LATE_REVEAL_ERROR = "host request timed out";
 
-export function isLateRevealError(error: unknown): boolean {
+function isLateRevealError(error: unknown): boolean {
   return String(error).includes(LATE_REVEAL_ERROR);
 }
 
