@@ -98,6 +98,7 @@ pub(crate) struct LinkSnapshot {
     bytes: u64,
     frames: u64,
     kinds: [u64; FRAME_KINDS],
+    kind_bytes: [u64; FRAME_KINDS],
 }
 
 /// Everything one host link's reader has taken off the ssh stream.
@@ -111,6 +112,7 @@ pub(crate) struct LinkCounters {
     bytes_read: AtomicU64,
     frames_read: AtomicU64,
     kinds: [AtomicU64; FRAME_KINDS],
+    kind_bytes: [AtomicU64; FRAME_KINDS],
 }
 
 impl LinkCounters {
@@ -119,6 +121,7 @@ impl LinkCounters {
             bytes_read: AtomicU64::new(0),
             frames_read: AtomicU64::new(0),
             kinds: [const { AtomicU64::new(0) }; FRAME_KINDS],
+            kind_bytes: [const { AtomicU64::new(0) }; FRAME_KINDS],
         }
     }
 
@@ -131,6 +134,7 @@ impl LinkCounters {
             bytes,
             frames: self.frames_read.load(Ordering::Relaxed),
             kinds: std::array::from_fn(|index| self.kinds[index].load(Ordering::Relaxed)),
+            kind_bytes: std::array::from_fn(|index| self.kind_bytes[index].load(Ordering::Relaxed)),
         }
     }
 
@@ -152,6 +156,9 @@ impl LinkCounters {
         });
         self.frames_read.fetch_add(1, Ordering::Relaxed);
         self.kinds[kind].fetch_add(1, Ordering::Relaxed);
+        // The counting reader has already added this frame's bytes.
+        let frame_bytes = self.bytes_read().saturating_sub(bytes_before);
+        self.kind_bytes[kind].fetch_add(frame_bytes, Ordering::Relaxed);
         mark
     }
 
@@ -305,6 +312,13 @@ impl RequestTiming {
             timing["bytesAhead"] = after.bytes.saturating_sub(before.bytes).into();
             timing["framesAhead"] = after.frames.saturating_sub(before.frames).into();
             timing["framesAheadByKind"] = by_kind.into();
+            let bytes_by_kind = (0..FRAME_KINDS)
+                .filter_map(|index| {
+                    let ahead = after.kind_bytes[index].saturating_sub(before.kind_bytes[index]);
+                    (ahead > 0).then(|| (kind_label(index).to_owned(), ahead.into()))
+                })
+                .collect::<serde_json::Map<String, serde_json::Value>>();
+            timing["bytesAheadByKind"] = bytes_by_kind.into();
         }
         Some(timing)
     }

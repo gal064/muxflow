@@ -521,6 +521,7 @@ async fn serve_connection(
                         frame_kind,
                         frame_event_kind,
                         frame_pane_id,
+                        frame.request_id,
                         || prost::Message::encoded_len(&frame),
                         write_elapsed,
                     );

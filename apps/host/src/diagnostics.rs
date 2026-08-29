@@ -846,10 +846,21 @@ mod switch_timing {
         REQUEST_READ_AT.get_or_init(Default::default)
     }
 
+    static REQUEST_OPERATION: OnceLock<Mutex<HashMap<u64, i32>>> = OnceLock::new();
+
+    fn request_operation() -> &'static Mutex<HashMap<u64, i32>> {
+        REQUEST_OPERATION.get_or_init(Default::default)
+    }
+
     /// Stamps a tmux-action request frame the moment the reader decoded it.
     /// Every other operation is ignored, so the map only ever holds requests a
     /// `tmuxAction` line will come back for.
     pub(crate) fn note_request_read(request_id: u64, operation: i32) {
+        {
+            let mut operations = request_operation().lock().unwrap();
+            prune(&mut operations);
+            operations.insert(request_id, operation);
+        }
         if operation != tmux_agent_protocol::v1::Operation::TmuxAction as i32 {
             return;
         }
@@ -947,6 +958,9 @@ mod switch_timing {
     }
 
     /// How slow one frame write has to be before it is worth a line of its own.
+    /// Frames at least this large are named in the log: on a slow link they
+    /// are what a later answer waits behind.
+    const BIG_FRAME_THRESHOLD: usize = 32 * 1024;
     const SLOW_FRAME_WRITE_THRESHOLD: Duration = Duration::from_millis(250);
 
     /// Names a single frame write that blocked the one ordered writer for a
@@ -964,9 +978,29 @@ mod switch_timing {
         kind: &str,
         event_kind: Option<&str>,
         pane_id: Option<&str>,
+        request_id: u64,
         frame_bytes: impl FnOnce() -> usize,
         write: Duration,
     ) {
+        let bytes = frame_bytes();
+        if bytes >= BIG_FRAME_THRESHOLD {
+            let operation = (kind == "response")
+                .then(|| request_operation().lock().unwrap().remove(&request_id))
+                .flatten()
+                .and_then(|operation| tmux_agent_protocol::v1::Operation::try_from(operation).ok())
+                .map(|operation| operation.as_str_name());
+            append_timing_line(&serde_json::json!({
+                "atUnixMillis": now_epoch_millis(),
+                "subsystem": "host_daemon",
+                "event": "bigFrame",
+                "frameBytes": bytes,
+                "kind": kind,
+                "eventKind": event_kind,
+                "paneId": pane_id,
+                "requestId": request_id,
+                "operation": operation,
+            }));
+        }
         if write < SLOW_FRAME_WRITE_THRESHOLD {
             return;
         }
@@ -974,7 +1008,7 @@ mod switch_timing {
             "atUnixMillis": now_epoch_millis(),
             "subsystem": "host_daemon",
             "event": "slowWrite",
-            "frameBytes": frame_bytes(),
+            "frameBytes": bytes,
             "writeMs": whole_millis(write),
             "kind": kind,
             "eventKind": event_kind,
@@ -1044,6 +1078,7 @@ mod switch_timing {
         _kind: &str,
         _event_kind: Option<&str>,
         _pane_id: Option<&str>,
+        _request_id: u64,
         _frame_bytes: impl FnOnce() -> usize,
         _write: Duration,
     ) {
