@@ -55,18 +55,36 @@ describe("TerminalStateCache", () => {
 
   // A screen carries how far up its own history it has been paged, because the
   // pages are part of the bytes: a restore that forgot would fetch them again.
+  // The size of the *next* page rides along for the same reason — the ladder
+  // that grows it is sizing the cost of rewriting these bytes, and a restore
+  // that forgot it would climb from the bottom again.
   it("carries a screen's paging state, defaulting to a screen nobody paged", () => {
     const cache = new TerminalStateCache();
     cache.set("%1", "plain");
     expect(cache.get("%1")).toMatchObject({
-      screenSeeded: false, historyExhausted: false, historyPagesLoaded: 0,
+      screenSeeded: false, historyExhausted: false, historyPagesLoaded: 0, historyNextPageLines: 0,
     });
     cache.set("%2", "paged", undefined, {
-      screenSeeded: true, historyExhausted: true, historyPagesLoaded: 3,
+      screenSeeded: true, historyExhausted: true, historyPagesLoaded: 3, historyNextPageLines: 2_400,
     });
     expect(cache.get("%2")).toMatchObject({
-      screenSeeded: true, historyExhausted: true, historyPagesLoaded: 3,
+      screenSeeded: true, historyExhausted: true, historyPagesLoaded: 3, historyNextPageLines: 2_400,
     });
+  });
+
+  // The invariant the docstring claims: a read is a use. `Map` iterates in
+  // insertion order and eviction takes the front of it, so a `get` that did not
+  // reorder would make this a FIFO — and a FIFO evicts the pane the user keeps
+  // returning to, which costs that pane a full host seed on its next reveal.
+  it("counts a read as a use, so the pane a reveal keeps returning to survives", () => {
+    const cache = new TerminalStateCache(2, 100, 100);
+    cache.set("%1", "one");
+    cache.set("%2", "two");
+    // %1 is the oldest by insertion and the newest by use.
+    expect(cache.get("%1")?.serialized).toBe("one");
+    cache.set("%3", "three");
+    expect(cache.get("%1")?.serialized, "the least *recently used* screen was evicted").toBe("one");
+    expect(cache.get("%2")).toBeUndefined();
   });
 
   // This cache is now the only copy of a hidden pane's screen, so declining one

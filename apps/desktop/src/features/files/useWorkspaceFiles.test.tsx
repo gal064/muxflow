@@ -1338,6 +1338,45 @@ describe("useWorkspaceFiles", () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  /**
+   * The gate orders the *switch's* speculative sidebar work behind the screen
+   * the user asked for. A gesture is not speculative: pressing Refresh is a
+   * request for this answer, and the control a person reaches for when the
+   * Explorer looks stuck must not itself sit there doing nothing for the
+   * pane's whole paint budget.
+   */
+  it("answers the Refresh gesture in front of the paint gate", async () => {
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    armPanePaint("%1");
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    // The switch's own probe is behind the pane, where it belongs.
+    expect(fixture.client.resolveActiveRoot).not.toHaveBeenCalled();
+
+    // Pressed before the tree has a root at all — the Explorer looking stuck is
+    // exactly when this happens — so this is the path that only re-checks.
+    await act(async () => { current?.refresh(); await Promise.resolve(); });
+    expect(
+      fixture.client.resolveActiveRoot,
+      "the person's own Refresh waited out the pane's paint budget",
+    ).toHaveBeenCalledTimes(1);
+
+    await act(async () => { notePanePainted("%1"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.root).toEqual(root);
+    const afterSwitch = vi.mocked(fixture.client.resolveActiveRoot).mock.calls.length;
+
+    // And again on the painted path, where the press also reads a directory:
+    // a fresh arm (the next switch) does not hold the gesture either.
+    armPanePaint("%1");
+    await act(async () => { current?.refresh(); await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(afterSwitch + 1);
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("resolves the root anyway when the pane never paints", async () => {
     // A timeout, never a barrier: a wedged renderer or a reveal the host never
     // answers must not also cost the user their file tree.

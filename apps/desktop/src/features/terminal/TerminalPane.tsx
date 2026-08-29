@@ -73,6 +73,56 @@ const PANE_HANDOFF_TIMEOUT_MS = 2_000;
 const HISTORY_PAGE_LINES = 300;
 
 /**
+ * The largest page a later request may grow to.
+ *
+ * Every page is applied by rewriting the whole buffer — xterm has no prepend,
+ * so `prependHistory` serializes what is on the terminal and replaces it with
+ * the history plus that serialization. The rewrite costs what the buffer
+ * weighs, not what the page weighs, so a fixed page size makes N pages O(N^2)
+ * bytes through xterm, and past ~256 KB the reset and the content land in
+ * different frames, which the user reads as a flicker.
+ *
+ * So the page doubles as the buffer grows: 300, 600, 1200, 2400, and then this
+ * ceiling. A full 10,000-row scrollback is six pages rather than thirty-four,
+ * and the first one — the prefetch that rides behind the switch's own paint —
+ * stays the small one the link can carry inside a frame. The ceiling keeps the
+ * largest single answer near a tenth of the whole-history capture this replaced
+ * (~470 KB at the measured ~98 bytes a row), and the host clamps at
+ * `MAX_HISTORY_LINES` regardless.
+ */
+const HISTORY_MAX_PAGE_LINES = 4_800;
+
+/**
+ * The furthest above its screen a pane may ask the host to start.
+ *
+ * The host's own `MAX_HISTORY_SKIP_LINES`, mirrored here because both ends
+ * clamping and neither *ending* is a loop: the host answers a skip past this
+ * with the rows at the clamp, so a pane whose tmux `history-limit` is larger
+ * than this asks for the same rows on every wheel-up and splices them in again
+ * each time. Reaching it is the end of what this protocol can fetch, and the
+ * pane latches exhausted on it rather than asking a question whose answer it
+ * has already had.
+ *
+ * Kept as a number rather than plumbed from the host: it is a property of the
+ * request this side makes, an old host clamps to exactly this, and a newer one
+ * can only clamp lower — either way the pane stops.
+ */
+const HISTORY_MAX_SKIP_LINES = 10_000;
+
+/**
+ * How many unanswered history requests this pane will remember.
+ *
+ * The answers carry no request identity, so a pane matches them to its own
+ * requests by order — see `historyAwaiting`. A request the host never answers
+ * (a link that dropped under it) would otherwise sit at the head of that queue
+ * forever and misattribute every answer after it. The bound is what makes that
+ * failure finite: the oldest expectation is dropped, and the worst that costs
+ * is one page of scrollback attributed to the request before it, which is
+ * refused at the splice because its anchor is stale.
+ */
+const HISTORY_MAX_AWAITING = 8;
+
+/**
  * How often one pane may contribute a render-cost sample.
  *
  * The render segment of the typing-lag journal (`inputLatencyStats`) is timed
@@ -628,20 +678,64 @@ export function TerminalPane({
     // answer shorter than the page that was asked for. Until it does, every
     // reach-the-top is a page this pane has not fetched yet.
     let historyExhausted = false;
-    let historyRequested = false;
     // How many pages have been spliced in. Kept for the cache, so a screen
     // restored on a later mount knows it is partway up its own history rather
     // than at the bottom of it, and for the journal.
     let historyPagesLoaded = 0;
-    // What this terminal had been handed when the history was asked for. The
-    // renderer refuses a splice onto a stream that has moved past it, because
-    // output printed since scrolls the screen and moves the rows above it.
-    let historyAnchorGeneration = 0;
-    // How much scrollback this pane held when the outstanding page was asked
-    // for. Kept because the answer is read against it: the rows requested are
-    // this plus one page, and tmux's own history size says whether that reached
-    // the top.
-    let historySkipAtRequest = 0;
+    // How many lines the next page asks for. Grows with the buffer — see
+    // `HISTORY_MAX_PAGE_LINES` — and resets with the screen, because the cost
+    // it is tracking is the cost of rewriting *this* buffer.
+    let historyNextPageLines = HISTORY_PAGE_LINES;
+    // Per-pane, per-mount request identity. The history answer carries none of
+    // its own, so this is what a page is matched by.
+    let historySerial = 0;
+    /**
+     * The requests whose answers have not arrived, oldest first.
+     *
+     * There is only ever one page *outstanding* — `historyBusy` is that rule —
+     * but a page can outlive the screen it was asked against: a watchdog
+     * reseed, or the host's own `emit_resnapshot` after it rejected a block,
+     * replaces the screen while the answer is still on the wire. That answer
+     * still arrives (the hub delivers history outside its seed-debt ladder),
+     * and before this queue existed it was spliced above the *new* screen using
+     * an anchor and a skip the post-reseed prefetch had already overwritten,
+     * and then cleared the newer request's latch — so a third request fetched
+     * rows the buffer already held and showed them twice.
+     *
+     * Answers arrive in the order the requests went out, so the head of this
+     * queue is whose answer this is. A request the screen outlived is marked
+     * `current: false` and its answer is journalled and dropped, touching
+     * nothing the live request owns.
+     */
+    let historyAwaiting: Array<{
+      serial: number;
+      // What this terminal had been handed when the page was asked for. The
+      // renderer refuses a splice onto a stream that has moved past it, because
+      // output printed since scrolls the screen and moves the rows above it.
+      anchorGeneration: number;
+      // How much scrollback this pane held at the request. Kept because the
+      // answer is read against it: the rows requested are this plus the page,
+      // and tmux's own history size says whether that reached the top.
+      skip: number;
+      lines: number;
+      // Cleared when the screen this page was asked against is replaced.
+      current: boolean;
+    }> = [];
+    // Whether a page is on the wire or being spliced. One at a time: a wheel-up
+    // during the prefetch, or three of them in a row, is the same question.
+    let historyBusy = false;
+    /**
+     * Every page still in flight belonged to a screen that is gone.
+     *
+     * Called wherever the screen is replaced, so the next screen may ask its own
+     * first question immediately. The orphaned requests stay in `historyAwaiting`
+     * because the host will still answer them and the queue is how the answers
+     * are told apart.
+     */
+    const orphanHistoryRequests = () => {
+      for (const request of historyAwaiting) request.current = false;
+      historyBusy = false;
+    };
     const cached = terminalStateCache.get(pane.id);
     const currentCached = cached?.terminalEpoch !== undefined && cached.terminalEpoch === hub.generationEpoch
       ? cached
@@ -671,6 +765,10 @@ export function TerminalPane({
         screenSeeded = currentCached.screenSeeded;
         historyExhausted = currentCached.historyExhausted;
         historyPagesLoaded = currentCached.historyPagesLoaded;
+        // Zero is an entry that says nothing about the ladder — one written
+        // before this was carried, or a screen nobody paged — and the next page
+        // above such a screen is the first size.
+        historyNextPageLines = currentCached.historyNextPageLines || HISTORY_PAGE_LINES;
       } else terminalStateCache.delete(pane.id);
     } else if (cached) {
       terminalStateCache.delete(pane.id);
@@ -738,11 +836,11 @@ export function TerminalPane({
     /**
      * Asks for the page of scrollback immediately above what this pane holds.
      *
-     * One request at a time, and one page at a time. The three latches are the
-     * whole protocol: `screenSeeded` says there is anything above this screen to
-     * ask for, `historyExhausted` says the host has already answered "no more",
-     * and `historyRequested` says a page is on the wire — so a wheel-up during
-     * the prefetch, or three of them in a row, is the same question and costs
+     * One request at a time, and one page at a time. The latches are the whole
+     * protocol: `screenSeeded` says there is anything above this screen to ask
+     * for, `historyExhausted` says there is nothing further above it, and
+     * `historyBusy` says a page is on the wire — so a wheel-up during the
+     * prefetch, or three of them in a row, is the same question and costs
      * nothing.
      *
      * Refused outright on the alternate screen: a TUI's frame has no scrollback
@@ -750,23 +848,54 @@ export function TerminalPane({
      * a whole page of it — would have crossed the link to be thrown away.
      */
     const requestHistoryPage = (trigger: "prefetch" | "scrolledToTop") => {
-      if (!rendererActive || !screenSeeded || historyExhausted || historyRequested) return;
+      if (!rendererActive || !screenSeeded || historyExhausted || historyBusy) return;
       if (renderer.isAlternateScreenActive()) return;
       const currentClientId = clientIdRef.current;
       if (!currentClientId) return;
-      historyRequested = true;
-      historyAnchorGeneration = renderer.enqueuedGeneration;
       // Everything above the screen that this terminal already holds — the
       // pages already spliced in included, because they are part of this buffer
-      // now. Asked for at the moment of the request, alongside the generation it
-      // is anchored to, because both describe the same buffer.
-      const held = renderer.scrollbackRows;
-      historySkipAtRequest = held;
-      void requestTerminalHistory(currentClientId, pane.id, HISTORY_PAGE_LINES, held).catch((error) => {
-        // The latch reopens, so the next time the user reaches the top they ask
-        // again. Journalled rather than spoken: nothing on screen is wrong, and
-        // the pane is showing everything it has.
-        historyRequested = false;
+      // now. Read at the moment of the request, alongside the generation it is
+      // anchored to, because both describe the same buffer.
+      const skip = renderer.scrollbackRows;
+      // The end of what this protocol can reach, which is not the same as the
+      // top of tmux's history and is the only thing that ends paging when the
+      // two disagree. A pane whose `history-limit` is larger than either ceiling
+      // never satisfies `skip + page >= history_size`: the host clamps the skip
+      // it is given, xterm drops rows off the top of the buffer as new ones are
+      // spliced in, and every wheel-up re-fetches the same clamped rows and
+      // shows them again. Latched here so the gesture stops asking.
+      const rendererLimit = renderer.scrollbackLimit;
+      const heldAllItCan = Number.isFinite(rendererLimit) && skip >= rendererLimit;
+      if (skip >= HISTORY_MAX_SKIP_LINES || heldAllItCan) {
+        historyExhausted = true;
+        recordIncident("pane.historyCapped", { paneId: pane.id, trigger, skip, rendererLimit });
+        return;
+      }
+      const lines = historyNextPageLines;
+      const request = {
+        serial: (historySerial += 1),
+        anchorGeneration: renderer.enqueuedGeneration,
+        skip,
+        lines,
+        current: true,
+      };
+      historyBusy = true;
+      historyAwaiting.push(request);
+      // Dropped from the front, because the head is the expectation a lost
+      // answer stranded and everything behind it is legitimate.
+      while (historyAwaiting.length > HISTORY_MAX_AWAITING) {
+        const dropped = historyAwaiting.shift();
+        recordIncident("pane.historyExpectationDropped", { paneId: pane.id, serial: dropped?.serial ?? 0 });
+      }
+      void requestTerminalHistory(currentClientId, pane.id, lines, skip).catch((error) => {
+        // The request never went out, so no answer will ever come for it: it
+        // leaves the queue rather than shifting every later answer by one. The
+        // latch reopens only if this is still the page the pane is waiting for
+        // — a seed since then has already reopened it for its own screen.
+        historyAwaiting = historyAwaiting.filter((awaited) => awaited !== request);
+        if (request.current) historyBusy = false;
+        // Journalled rather than spoken: nothing on screen is wrong, and the
+        // pane is showing everything it has.
         recordIncident("pane.historyRequestFailed", {
           paneId: pane.id,
           trigger,
@@ -785,17 +914,34 @@ export function TerminalPane({
     const unsubscribeViewport = renderer.onViewportChange(setViewport);
     const unsubscribeEvents = hub.subscribePane(pane.id, (event) => {
       if (event.kind === "terminalHistory") {
-        // The screen this scrollback belongs above is gone — the pane is
-        // waiting for a seed, or has been given a host-owned one. Splicing
-        // history onto whatever is there now would put the user's earlier
-        // output above a screen it never sat above.
-        if (!screenSeeded) {
-          historyRequested = false;
+        // Whose answer this is. The host echoes nothing that identifies the
+        // request, and it does not have to: one page is outstanding at a time
+        // and the answers come back in the order the requests went out, so the
+        // head of the queue is this one's.
+        const request = historyAwaiting.shift();
+        if (!request) {
+          // A page nobody outstanding asked for — a duplicate answer, or one
+          // for a request this mount never made. Nothing here can place it.
+          recordIncident("pane.historyUnrequested", { paneId: pane.id });
+          return;
+        }
+        // The screen this scrollback belongs above is gone — a reseed replaced
+        // it while the page was on the wire, or the pane is waiting for a seed.
+        // Splicing it onto whatever is there now would put the user's earlier
+        // output above a screen it never sat above, using an anchor and a skip
+        // that describe a buffer nothing is holding any more. Deliberately
+        // touching no latch: whatever asked for the *current* screen's page is
+        // still waiting for its own answer, and clearing its latch here is what
+        // let a third request duplicate rows.
+        if (!request.current || !screenSeeded) {
+          recordIncident("pane.historySupersededByReseed", { paneId: pane.id, serial: request.serial });
           return;
         }
         // Whether this page reached the top of tmux's history. The rows asked
-        // for were the skip this pane already held plus one page, so anything at
-        // or past what tmux is holding is the end of it.
+        // for were the skip this pane already held plus the page it asked for,
+        // so anything at or past what tmux is holding is the end of it. Both
+        // numbers come from the request rather than from the pane's current
+        // state, because the page size grows and the skip has moved on.
         //
         // Never inferred from the answer's own rows. `-J` joins wrapped lines —
         // kept, because scrollback spliced in without it is hard-broken at the
@@ -808,12 +954,12 @@ export function TerminalPane({
         // question open rather than closing it: this page is spliced like any
         // other and the next reach-the-top asks again.
         const lastPage = event.historySize !== undefined
-          && historySkipAtRequest + HISTORY_PAGE_LINES >= event.historySize;
+          && request.skip + request.lines >= event.historySize;
         // Nothing above this screen after all. Nothing to splice — a rewrite of
         // the whole buffer to add no rows is a frame the user pays for and does
         // not see — but the size still decides whether to ask again.
         if (event.data.byteLength === 0) {
-          historyRequested = false;
+          historyBusy = false;
           historyExhausted = lastPage;
           return;
         }
@@ -824,12 +970,19 @@ export function TerminalPane({
         // leaves the latch open on purpose — the stream moved under the answer,
         // and the next time the user reaches the top the question is asked
         // against the screen they are actually looking at.
-        void renderer.prependHistory(event.data, historyAnchorGeneration).then((outcome) => {
+        void renderer.prependHistory(event.data, request.anchorGeneration).then((outcome) => {
+          // A reseed during the splice orphans this request as surely as one
+          // during the wire time: it is the new screen that owns the latch and
+          // the paging state now.
+          if (!request.current) return;
           if (outcome === "applied") {
             historyPagesLoaded += 1;
             historyExhausted = lastPage;
+            // The next page pays for rewriting a buffer this one just grew, so
+            // it fetches proportionally more of what it is paying for.
+            historyNextPageLines = Math.min(request.lines * 2, HISTORY_MAX_PAGE_LINES);
           }
-          historyRequested = false;
+          historyBusy = false;
         });
         return;
       }
@@ -861,11 +1014,16 @@ export function TerminalPane({
         screenSeeded = true;
         historyExhausted = false;
         historyPagesLoaded = 0;
-        // Including the in-flight latch. A page asked for against the screen
-        // this one replaces will be refused at the splice (its anchor is behind
-        // the seed's generation), so leaving the latch standing would only stop
-        // this screen from ever asking for its own first page.
-        historyRequested = false;
+        // The page ladder starts over with the buffer it is sizing: this screen
+        // holds nothing above it, so its first page is the small one again.
+        historyNextPageLines = HISTORY_PAGE_LINES;
+        // Including whatever page is in flight. It was asked for against the
+        // screen this one replaces — its anchor and its skip describe a buffer
+        // that no longer exists — so it is orphaned rather than left standing,
+        // which both lets this screen ask its own first question straight away
+        // and keeps the answer, when it arrives, from being spliced above a
+        // screen it never sat above.
+        orphanHistoryRequests();
         // A seed replaces the screen wholesale, so whatever was up is not what
         // this terminal shows any more.
         screenOnDisplay = undefined;
@@ -952,8 +1110,10 @@ export function TerminalPane({
         clearDeferredOutput();
         screenOnDisplay = undefined;
         // Nothing is on the terminal to splice above; the seed this is waiting
-        // for is what makes the scrollback askable again.
+        // for is what makes the scrollback askable again, and any page still on
+        // the wire belongs to the screen that just went away.
         screenSeeded = false;
+        orphanHistoryRequests();
         // A handshake answer this reducer has no rule for used to fall through
         // to nothing at all. It recovers like any other seed debt now; what it
         // still owes is a record, because the shape itself is the finding.
@@ -988,6 +1148,9 @@ export function TerminalPane({
           terminalStateCache.delete(pane.id);
           clearDeferredOutput();
           screenOnDisplay = undefined;
+          // The screen is about to be blanked and reseeded; a page asked for
+          // against it has nowhere left to land.
+          orphanHistoryRequests();
           watchdog.note("paneAwaitingSeed");
           renderer.seed(ownTerminalBytes(new Uint8Array()));
           const reason = `Pane ${pane.id} is not showing the screen the host resumed it from`;
@@ -1082,8 +1245,10 @@ export function TerminalPane({
             ? { generation: effect.tailThroughGeneration, terminalEpoch: eventEpoch, serialized: effect.serialized }
             : undefined;
           // A host-owned screen is a serialization, scrollback and all, not a
-          // photograph of the grid.
+          // photograph of the grid — and it replaces whatever the page in
+          // flight was asked against.
           screenSeeded = false;
+          orphanHistoryRequests();
           flushDeferredOutput(effect.tailThroughGeneration);
           // Recovery material laid a real screen down; the pane is whole again.
           watchdog.noteHealthy();
@@ -1216,6 +1381,7 @@ export function TerminalPane({
               screenSeeded,
               historyExhausted,
               historyPagesLoaded,
+              historyNextPageLines,
             });
           } else terminalStateCache.delete(pane.id);
           // A cache that declined the screen (too large for its budget) leaves

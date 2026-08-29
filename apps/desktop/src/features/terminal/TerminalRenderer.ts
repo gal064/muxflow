@@ -138,6 +138,17 @@ export interface TerminalRenderer {
    */
   readonly scrollbackRows: number;
   /**
+   * The most rows of scrollback this terminal will ever hold above its screen.
+   *
+   * The ceiling `scrollbackRows` walks up to, and the reason paging has to be
+   * able to end on this side as well as on tmux's: a pane whose `history-limit`
+   * is larger than this can never reach the top of it, because every row
+   * spliced in past the ceiling pushes an older one out and the count stops
+   * moving. A pager that only watches tmux's `history_size` would ask for the
+   * same clamped rows forever.
+   */
+  readonly scrollbackLimit: number;
+  /**
    * Fires when the user asks to see above the top of what this pane holds:
    * either scrolling up onto row 0, or scrolling up again once already there.
    * Silent on the alternate screen, which has no scrollback.
@@ -189,6 +200,17 @@ export interface TerminalRenderer {
  * smoothness. Zero means each tick lands on the frame it arrives in.
  */
 const SMOOTH_SCROLL_DURATION_MS = 0;
+
+/**
+ * How much scrollback one pane keeps above its screen.
+ *
+ * One number for the three places that have to agree: xterm's own buffer bound,
+ * the serialization a hide keeps, and the ceiling [`scrollbackLimit`] reports
+ * to the pager. They were three literals, and the pager's termination now
+ * depends on the third being the same as the first — a pane cannot page above
+ * rows xterm has already dropped off the top of its buffer.
+ */
+const TERMINAL_SCROLLBACK_ROWS = 10_000;
 
 /**
  * What sits between spliced history and the screen below it.
@@ -340,7 +362,7 @@ export class XtermRenderer implements TerminalRenderer {
       // settings surface that Phase 12 deferred this to, so a user who needs
       // terminal content read aloud can now turn it on.
       screenReaderMode: terminalScreenReaderMode(),
-      scrollback: 10_000,
+      scrollback: TERMINAL_SCROLLBACK_ROWS,
       scrollOnUserInput: true,
       smoothScrollDuration: SMOOTH_SCROLL_DURATION_MS,
       windowOptions: {
@@ -570,6 +592,12 @@ export class XtermRenderer implements TerminalRenderer {
     return Math.max(0, this.#terminal.buffer.normal.length - this.#terminal.rows);
   }
 
+  get scrollbackLimit(): number {
+    // The option, not a re-derivation: xterm is the thing that enforces it, and
+    // a second copy of the number here is a second thing to keep in step.
+    return this.#terminal.options.scrollback ?? TERMINAL_SCROLLBACK_ROWS;
+  }
+
   onScrollbackTopReached(listener: () => void): () => void {
     this.#topListeners.add(listener);
     return () => this.#topListeners.delete(listener);
@@ -739,7 +767,7 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   serialize(): string {
-    return this.#serialize.serialize({ scrollback: 10_000 });
+    return this.#serialize.serialize({ scrollback: TERMINAL_SCROLLBACK_ROWS });
   }
 
   /**

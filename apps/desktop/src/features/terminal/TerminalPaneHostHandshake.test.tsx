@@ -151,6 +151,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     onScrollbackTopReached(): () => void { return () => undefined; }
     isAlternateScreenActive(): boolean { return false; }
     get scrollbackRows(): number { return 0; }
+    get scrollbackLimit(): number { return 10_000; }
     async prependHistory(): Promise<"applied" | "superseded"> { return "applied"; }
     get enqueuedGeneration(): number { return this.#generations.enqueuedGeneration; }
     focus(): void {}

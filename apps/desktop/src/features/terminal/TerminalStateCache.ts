@@ -36,6 +36,22 @@ export interface CachedTerminalState {
    * "restored partway up its history" from "restored at the bottom of it".
    */
   historyPagesLoaded: number;
+  /**
+   * How many lines the *next* page above these bytes should ask for.
+   *
+   * Paging grows geometrically, because each page is applied by rewriting the
+   * whole buffer: N pages of a fixed size cost O(N^2) bytes through xterm and,
+   * past a couple of hundred kilobytes, split the reset and the content across
+   * frames — which the user reads as a flicker. Kept here for the same reason
+   * as `historyPagesLoaded`: the growth is a property of how far these bytes
+   * have already been paged, and a restore that forgot it would start the
+   * ladder again from the smallest page.
+   *
+   * Zero means "these bytes say nothing about it", which the pane reads as the
+   * first page size — an entry written before this field existed, and a screen
+   * nobody has paged, are the same case.
+   */
+  historyNextPageLines: number;
 }
 
 /** What a screen carries about how far up its own history it has been fetched. */
@@ -43,6 +59,7 @@ export interface CachedHistoryState {
   screenSeeded: boolean;
   historyExhausted: boolean;
   historyPagesLoaded: number;
+  historyNextPageLines: number;
 }
 
 export class TerminalStateCache {
@@ -70,9 +87,24 @@ export class TerminalStateCache {
     // very large buffers. It is enforced on every insert, so the count and the
     // bytes are both hard limits and the larger capacity cannot turn into a
     // larger footprint.
+    //
+    // It counts UTF-8 bytes and retains a UTF-16 string, so the resident cost
+    // of a screen is about twice what is charged for it: mostly-ASCII terminal
+    // output is one byte here and two in memory. The bound is deliberately the
+    // wire-shaped number — it is the same measurement the host-side budget for
+    // a screen uses — so read this as ~48 MB of heap at the ceiling, not 24.
     readonly maxTotalBytes = 24 * 1024 * 1024,
   ) {}
 
+  /**
+   * One pane's screen, and a use that counts as recent.
+   *
+   * The delete-then-set is the whole of the LRU: `Map` iterates in insertion
+   * order and eviction takes the front of it, so a read that did not reorder
+   * would make this a FIFO — and a FIFO evicts the pane the user keeps coming
+   * back to. It is on the read rather than only on the write because a reveal
+   * reads this entry and does not necessarily write one.
+   */
   get(paneId: string): CachedTerminalState | undefined {
     const value = this.#states.get(paneId);
     if (!value) return undefined;
@@ -112,6 +144,7 @@ export class TerminalStateCache {
       screenSeeded: history?.screenSeeded ?? false,
       historyExhausted: history?.historyExhausted ?? false,
       historyPagesLoaded: history?.historyPagesLoaded ?? 0,
+      historyNextPageLines: history?.historyNextPageLines ?? 0,
     });
     this.#retainedBytes += byteLength;
     while (this.#states.size > this.capacity || this.#retainedBytes > this.maxTotalBytes) {
