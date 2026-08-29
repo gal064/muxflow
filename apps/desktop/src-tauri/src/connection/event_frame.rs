@@ -17,7 +17,10 @@ pub(super) enum TerminalEvent {
         name: String,
     },
     Snapshot {
-        snapshot: tmux_control::TmuxSnapshot,
+        /// Absent on a reconciliation acknowledgement: the host found the
+        /// world exactly as the desktop already holds it and sent the
+        /// generation alone rather than the tree again.
+        snapshot: Option<tmux_control::TmuxSnapshot>,
         sequence: u64,
         generation: u64,
         server_identity: String,
