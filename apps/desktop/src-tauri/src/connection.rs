@@ -1110,14 +1110,20 @@ pub async fn request_terminal_seed(
 /// Kept separate from `request_terminal_seed` rather than folded into it with a
 /// flag: a seed request is also a claim that the pane is visible and settles the
 /// pane's seed debt, and neither is true of a photograph of the scrollback.
+///
+/// `skip_lines` is the scrollback the renderer is already holding. tmux
+/// measures its capture from the pane's current display, so a pane that has
+/// printed since it was seeded would otherwise be handed the rows that scrolled
+/// off in the meantime a second time.
 #[tauri::command]
 pub async fn request_terminal_history(
     client_id: String,
     pane_id: String,
     lines: u32,
+    skip_lines: u32,
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
-    let request = terminal_history_request(pane_id, lines)?;
+    let request = terminal_history_request(pane_id, lines, skip_lines)?;
     let client = get_client(&clients, &client_id)?;
     tauri::async_runtime::spawn_blocking(move || client.request(request))
         .await
@@ -1125,7 +1131,11 @@ pub async fn request_terminal_history(
     Ok(())
 }
 
-fn terminal_history_request(pane_id: String, lines: u32) -> Result<v1::Request, String> {
+fn terminal_history_request(
+    pane_id: String,
+    lines: u32,
+    skip_lines: u32,
+) -> Result<v1::Request, String> {
     validate_tmux_id(&pane_id, '%')?;
     if lines == 0 {
         return Err("terminal history request must ask for at least one line".into());
@@ -1134,6 +1144,7 @@ fn terminal_history_request(pane_id: String, lines: u32) -> Result<v1::Request, 
         operation: v1::Operation::RequestTerminalHistory.into(),
         scope: pane_id,
         terminal_history_lines: lines,
+        terminal_history_skip_lines: skip_lines,
         ..Default::default()
     })
 }

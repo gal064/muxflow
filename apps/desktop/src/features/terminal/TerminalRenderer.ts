@@ -122,13 +122,21 @@ export interface TerminalRenderer {
    * replace. That makes it refusable rather than partial — `"superseded"` means
    * the stream moved and nothing was touched, and the caller may ask again.
    */
-  prependHistory(history: OwnedTerminalBytes, throughGeneration: number): "applied" | "superseded";
+  prependHistory(history: OwnedTerminalBytes, throughGeneration: number): Promise<"applied" | "superseded">;
   /**
    * The highest generation this terminal has been handed. It is the number a
    * caller asking the host a question about the screen must quote back, so the
    * answer can be refused if the stream moved while it was in flight.
    */
   readonly enqueuedGeneration: number;
+  /**
+   * How many rows of scrollback sit above this terminal's screen.
+   *
+   * The number the host needs to answer a history request without repeating
+   * itself: tmux measures its capture from the current display, so everything
+   * that scrolled off since the seed is above it and already here.
+   */
+  readonly scrollbackRows: number;
   /**
    * Fires when the user asks to see above the top of what this pane holds:
    * either scrolling up onto row 0, or scrolling up again once already there.
@@ -480,10 +488,20 @@ export class XtermRenderer implements TerminalRenderer {
     return queued;
   }
 
-  prependHistory(history: OwnedTerminalBytes, throughGeneration: number): "applied" | "superseded" {
+  /**
+   * Answers when the splice has happened, not when it was attempted.
+   *
+   * The rewrite waits on a barrier — xterm has to finish with everything it was
+   * already given before its buffer can be serialized — and it can still be
+   * refused there, by a write that landed in the meantime or by a disposal. The
+   * caller latches "this pane is holding its scrollback" on this answer, and
+   * latching it on the attempt is how a pane stops asking for history it never
+   * received.
+   */
+  prependHistory(history: OwnedTerminalBytes, throughGeneration: number): Promise<"applied" | "superseded"> {
     // A TUI's alternate screen has no scrollback to prepend to, and rewriting
     // the buffer under it would destroy the frame the program is drawing.
-    if (this.#disposed || this.isAlternateScreenActive()) return "superseded";
+    if (this.#disposed || this.isAlternateScreenActive()) return Promise.resolve("superseded");
     const enqueuedGeneration = this.#generations.enqueuedGeneration;
     // The same rule a stale restore obeys, for the same reason plus one: output
     // printed since this history was photographed has scrolled the screen, so
@@ -496,48 +514,60 @@ export class XtermRenderer implements TerminalRenderer {
         throughGeneration,
         lastEnqueuedGeneration: enqueuedGeneration,
       });
-      return "superseded";
+      return Promise.resolve("superseded");
     }
     const previousLength = this.#terminal.buffer.normal.length;
     const writesBefore = this.#writesEnqueued;
-    // A zero-byte barrier, so the serialization below reads a buffer xterm has
-    // finished with rather than one with bytes still inside its async parser —
-    // those bytes would be serialized as absent and then dropped by `replace`.
-    const queued = this.#scheduler.enqueue(new Uint8Array(), () => {
-      if (this.#disposed) return;
-      // Anything handed to xterm after the barrier is queued *behind* it and
-      // has not been applied, so it is neither in the serialization nor safe
-      // from `replace`, which drops the queue. Refuse rather than lose it.
-      if (this.#writesEnqueued !== writesBefore) {
-        recordIncident("pane.historySuperseded", {
-          paneId: this.#options.paneId,
-          throughGeneration,
-          lastEnqueuedGeneration: this.#generations.enqueuedGeneration,
-        });
-        return;
-      }
-      const screen = new TextEncoder().encode(sanitizeSerializedScreen(this.serialize()));
-      const spliced = new Uint8Array(history.byteLength + HISTORY_SEPARATOR.byteLength + screen.byteLength);
-      spliced.set(history);
-      spliced.set(HISTORY_SEPARATOR, history.byteLength);
-      spliced.set(screen, history.byteLength + HISTORY_SEPARATOR.byteLength);
-      this.#notePositionReset();
-      this.#scheduler.replace(
-        spliced,
-        false,
-        () => {
-          // Keep the user on the rows they were reading: everything the splice
-          // added sits above them.
-          const grown = this.#terminal.buffer.normal.length - previousLength;
-          if (grown > 0) this.#terminal.scrollToLine(grown);
-        },
-      );
+    return new Promise((resolve) => {
+      // A zero-byte barrier, so the serialization below reads a buffer xterm
+      // has finished with rather than one with bytes still inside its async
+      // parser — those bytes would be serialized as absent and then dropped by
+      // `replace`.
+      const queued = this.#scheduler.enqueue(new Uint8Array(), () => {
+        if (this.#disposed) return resolve("superseded");
+        // Anything handed to xterm after the barrier is queued *behind* it and
+        // has not been applied, so it is neither in the serialization nor safe
+        // from `replace`, which drops the queue. Refuse rather than lose it.
+        if (this.#writesEnqueued !== writesBefore) {
+          recordIncident("pane.historySuperseded", {
+            paneId: this.#options.paneId,
+            throughGeneration,
+            lastEnqueuedGeneration: this.#generations.enqueuedGeneration,
+          });
+          return resolve("superseded");
+        }
+        const screen = new TextEncoder().encode(sanitizeSerializedScreen(this.serialize()));
+        const spliced = new Uint8Array(history.byteLength + HISTORY_SEPARATOR.byteLength + screen.byteLength);
+        spliced.set(history);
+        spliced.set(HISTORY_SEPARATOR, history.byteLength);
+        spliced.set(screen, history.byteLength + HISTORY_SEPARATOR.byteLength);
+        this.#notePositionReset();
+        const replaced = this.#scheduler.replace(
+          spliced,
+          false,
+          () => {
+            // Keep the user on the rows they were reading: everything the
+            // splice added sits above them.
+            const grown = this.#terminal.buffer.normal.length - previousLength;
+            if (grown > 0) this.#terminal.scrollToLine(grown);
+          },
+        );
+        resolve(replaced ? "applied" : "superseded");
+      });
+      if (!queued) resolve("superseded");
     });
-    return queued ? "applied" : "superseded";
   }
 
   get enqueuedGeneration(): number {
     return this.#generations.enqueuedGeneration;
+  }
+
+  get scrollbackRows(): number {
+    // The normal buffer, never the active one: on the alternate screen
+    // `buffer.active.length` is the frame the program is drawing, and none of
+    // it is scrollback. `length` counts the screen's own rows too, so the rows
+    // above it are what is left after the grid is taken off.
+    return Math.max(0, this.#terminal.buffer.normal.length - this.#terminal.rows);
   }
 
   onScrollbackTopReached(listener: () => void): () => void {

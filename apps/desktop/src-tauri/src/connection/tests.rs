@@ -483,19 +483,22 @@ fn terminal_seed_command_builds_a_scoped_validated_request() {
 
 #[test]
 fn terminal_history_command_builds_a_scoped_request_with_a_real_line_count() {
-    let request = terminal_history_request("%12".into(), 2000).unwrap();
+    let request = terminal_history_request("%12".into(), 2000, 37).unwrap();
     assert_eq!(
         v1::Operation::try_from(request.operation).unwrap(),
         v1::Operation::RequestTerminalHistory
     );
     assert_eq!(request.scope, "%12");
     assert_eq!(request.terminal_history_lines, 2000);
+    // What this renderer already holds, so the host's capture starts above it
+    // instead of handing back rows that scrolled off since the seed.
+    assert_eq!(request.terminal_history_skip_lines, 37);
     // It photographs and nothing else: no visibility claim rides along with it.
     assert!(!request.visible);
     assert_eq!(request.terminal_epoch, 0);
-    assert!(terminal_history_request("%12; kill-server".into(), 2000).is_err());
+    assert!(terminal_history_request("%12; kill-server".into(), 2000, 0).is_err());
     // Zero lines would ask tmux for a range it reads as the whole history.
-    assert!(terminal_history_request("%12".into(), 0).is_err());
+    assert!(terminal_history_request("%12".into(), 0, 0).is_err());
 }
 
 /// A history frame is its own kind, so nothing downstream can read the

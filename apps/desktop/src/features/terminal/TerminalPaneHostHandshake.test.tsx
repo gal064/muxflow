@@ -147,7 +147,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     onSelectionChange(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
     onScrollbackTopReached(): () => void { return () => undefined; }
-    prependHistory(): "applied" | "superseded" { return "applied"; }
+    async prependHistory(): Promise<"applied" | "superseded"> { return "applied"; }
     get enqueuedGeneration(): number { return this.#generations.enqueuedGeneration; }
     focus(): void {}
     blur(): void {}

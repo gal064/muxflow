@@ -879,9 +879,19 @@ export function encodeTerminalVisibilityFrame(
  * Separate from `requestTerminalSeed` because it asks a different question: a
  * seed request also asserts that this pane is visible and settles its seed
  * debt, and a photograph of the scrollback does neither.
+ *
+ * `skipLines` is the scrollback this renderer is already holding. tmux measures
+ * its capture from the pane's current display, so a pane that has printed since
+ * it was seeded would be handed the rows that scrolled off in the meantime a
+ * second time, and the splice would show them twice.
  */
-export function requestTerminalHistory(clientId: string, paneId: string, lines: number): Promise<void> {
-  const boundary = { clientId, paneId, lines };
+export function requestTerminalHistory(
+  clientId: string,
+  paneId: string,
+  lines: number,
+  skipLines: number,
+): Promise<void> {
+  const boundary = { clientId, paneId, lines, skipLines };
   return measurePerfRequest(
     "invoke.request_terminal_history", "terminal", boundary, (request) => invoke("request_terminal_history", request),
   );

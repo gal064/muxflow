@@ -641,6 +641,11 @@ export function TerminalPane({
           terminalEpoch: cachedEpoch,
           serialized: currentCached.serialized,
         };
+        // Carried, because it is a fact about these bytes rather than about the
+        // terminal that produced them. A screen this pane was seeded with has
+        // nothing above it, and putting it back on a fresh xterm does not give
+        // it a history: reaching the top still has something to ask for.
+        screenSeeded = currentCached.screenSeeded;
       } else terminalStateCache.delete(pane.id);
     } else if (cached) {
       terminalStateCache.delete(pane.id);
@@ -715,7 +720,11 @@ export function TerminalPane({
       if (!currentClientId) return;
       historyRequested = true;
       historyAnchorGeneration = renderer.enqueuedGeneration;
-      void requestTerminalHistory(currentClientId, pane.id, TERMINAL_HISTORY_LINES).catch((error) => {
+      // Everything above the screen that this terminal already holds. Asked for
+      // at the moment of the request, alongside the generation it is anchored
+      // to, because both describe the same buffer.
+      const held = renderer.scrollbackRows;
+      void requestTerminalHistory(currentClientId, pane.id, TERMINAL_HISTORY_LINES, held).catch((error) => {
         // The latch reopens, so the next time the user reaches the top they ask
         // again. Journalled rather than spoken: nothing on screen is wrong, and
         // the pane is showing everything it has.
@@ -730,23 +739,33 @@ export function TerminalPane({
     const unsubscribeViewport = renderer.onViewportChange(setViewport);
     const unsubscribeEvents = hub.subscribePane(pane.id, (event) => {
       if (event.kind === "terminalHistory") {
-        historyRequested = false;
         // The screen this scrollback belongs above is gone — the pane is
         // waiting for a seed, or has been given a host-owned one. Splicing
         // history onto whatever is there now would put the user's earlier
         // output above a screen it never sat above.
-        if (!screenSeeded) return;
+        if (!screenSeeded) {
+          historyRequested = false;
+          return;
+        }
         // An empty answer is the host saying there is nothing above this
         // screen. Latched as loaded: a splice of zero rows still costs a whole
         // buffer rewrite, and asking again would get the same nothing.
         if (event.data.byteLength === 0) {
+          historyRequested = false;
           historyLoaded = true;
           return;
         }
-        // A refusal leaves the latch open on purpose — the stream moved under
-        // the answer, and the next time the user reaches the top the question
-        // is asked against the screen they are actually looking at.
-        historyLoaded = renderer.prependHistory(event.data, historyAnchorGeneration) === "applied";
+        // Latched on what happened, never on the attempt. The splice waits for
+        // xterm to finish with what it is already holding and can still be
+        // refused there; the ask stays outstanding until it answers, so
+        // reaching the top meanwhile does not queue a second one. A refusal
+        // leaves the latch open on purpose — the stream moved under the answer,
+        // and the next time the user reaches the top the question is asked
+        // against the screen they are actually looking at.
+        void renderer.prependHistory(event.data, historyAnchorGeneration).then((outcome) => {
+          historyLoaded = outcome === "applied";
+          historyRequested = false;
+        });
         return;
       }
       const transition = reducePaneReveal(revealStateRef.current, event);
@@ -1103,8 +1122,12 @@ export function TerminalPane({
           // at and one bit saying it was kept — the host answers the next
           // reveal with the output since that checkpoint, and the 180-390 KB it
           // used to hand back was this renderer's own screen returning to it.
-          if (snapshotMatchesEpoch) terminalStateCache.set(pane.id, drained.serialized, checkpoint);
-          else terminalStateCache.delete(pane.id);
+          // A spliced history is part of the buffer this serializes, so the
+          // screen is no longer a bare photograph and the restore it feeds must
+          // not ask again — that would prepend the same rows a second time.
+          if (snapshotMatchesEpoch) {
+            terminalStateCache.set(pane.id, drained.serialized, checkpoint, screenSeeded && !historyLoaded);
+          } else terminalStateCache.delete(pane.id);
           // A cache that declined the screen (too large for its budget) leaves
           // nothing to resume from, and saying so is what makes the reveal ask
           // for a seed instead of a tail.

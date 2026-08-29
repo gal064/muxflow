@@ -298,9 +298,12 @@ fn losing_a_pane_forgets_that_it_was_paused() {
         harness.runtime(),
     );
     assert!(harness.flow.resume_before_capture("%1"));
-    state.apply_control(StreamControl::Membership {
-        pane_ids: Vec::new(),
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: Vec::new(),
+        },
+        &harness.capture_in_flight,
+    );
     assert!(!harness.flow.resume_before_capture("%1"));
 }
 
@@ -345,9 +348,12 @@ fn pane_close_prunes_capture_state_without_disturbing_sibling() {
         saved_normal_lines: Vec::new(),
         visible_boundary: 1,
     });
-    state.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%2".into()],
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &Mutex::new(HashSet::new()),
+    );
     assert!(!state.pane_states.contains_key("%1"));
     assert!(state.pane_states.contains_key("%2"));
     assert!(matches!(state.command_block, CommandBlock::Draining { .. }));
@@ -400,9 +406,12 @@ fn pane_close_drains_every_in_flight_block_until_its_tmux_fence() {
     for block in blocks {
         let mut state = StreamState::new(&["%1".into()], Arc::new(FlowControl::default()));
         state.command_block = block;
-        state.apply_control(StreamControl::Membership {
-            pane_ids: Vec::new(),
-        });
+        state.apply_control(
+            StreamControl::Membership {
+                pane_ids: Vec::new(),
+            },
+            &Mutex::new(HashSet::new()),
+        );
         assert!(state.active_tag_matches(tag));
         assert!(matches!(state.command_block, CommandBlock::Draining { .. }));
         assert!(!state.pane_states.contains_key("%1"));
@@ -419,9 +428,12 @@ fn pane_close_during_capture_keeps_parser_and_stream_correlation_aligned() {
     parser.push(b"%begin 1 2 1\n");
     state.handle(parser.next_record().unwrap().unwrap(), harness.runtime());
 
-    state.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%2".into()],
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &Mutex::new(HashSet::new()),
+    );
     parser.push(b"captured row\n%end 1 2 1\n");
     while let Some(record) = parser.next_record() {
         state.handle(record.unwrap(), harness.runtime());
@@ -448,9 +460,12 @@ fn pane_close_during_rejected_command_drains_the_stale_error() {
         pane_id: "%1".into(),
         lines: vec![b"pane disappeared".to_vec()],
     };
-    state.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%2".into()],
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &Mutex::new(HashSet::new()),
+    );
     state.handle(
         ControlRecord::Error {
             tag,
@@ -479,12 +494,18 @@ fn pane_remove_and_readd_before_fence_cannot_publish_the_old_capture() {
         lines: vec![b"1,1,0,0,0,0,0,0,0,0,0".to_vec()],
     };
 
-    state.apply_control(StreamControl::Membership {
-        pane_ids: Vec::new(),
-    });
-    state.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%1".into()],
-    });
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: Vec::new(),
+        },
+        &harness.capture_in_flight,
+    );
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%1".into()],
+        },
+        &harness.capture_in_flight,
+    );
     state.handle(
         ControlRecord::End {
             tag,
@@ -511,7 +532,7 @@ fn parser_error_inside_capture_drains_rows_until_the_matching_fence() {
     while let Some(record) = parser.next_record() {
         match record {
             Ok(record) => state.handle(record, harness.runtime()),
-            Err(_) => state.resnapshot_all(&harness.writer),
+            Err(_) => state.resnapshot_all(&harness.writer, &harness.resources, &harness.stopped),
         }
     }
 
@@ -522,6 +543,101 @@ fn parser_error_inside_capture_drains_rows_until_the_matching_fence() {
         state.pane_states.get("%1"),
         Some(PaneSeedState::Pending { .. })
     ));
+}
+
+/// A pane's capture leaves membership with the pane.
+///
+/// Only the metadata block clears a ledger entry, and a capture whose marker is
+/// filtered away for leaving membership never reaches one. Left behind, that
+/// entry outlives the pane: the id is re-added later, every seed it asks for is
+/// coalesced against a photograph nobody is taking, and the pane stays blank
+/// for as long as the control client lives.
+#[test]
+fn a_pane_leaving_membership_takes_its_capture_out_of_the_ledger() {
+    let (mut state, _harness) = Harness::new(&["%1".into(), "%2".into()]);
+    let ledger = Mutex::new(HashSet::from(["%1".to_owned(), "%2".to_owned()]));
+
+    state.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &ledger,
+    );
+
+    assert_eq!(
+        ledger.lock().unwrap().iter().cloned().collect::<Vec<_>>(),
+        vec!["%2".to_owned()]
+    );
+}
+
+/// Every exit from a command block frees the capture ledger, the drained one
+/// included.
+///
+/// A block is drained because the capture inside it was abandoned — a
+/// membership change, a resnapshot — so nothing is going to answer it. The
+/// ledger's one job is to suppress a second photograph while one is coming, and
+/// an entry nobody will ever clear suppresses every seed this pane asks for for
+/// as long as the client lives.
+#[test]
+fn a_drained_block_that_errors_frees_the_capture_ledger() {
+    let (mut state, harness) = Harness::new(&["%1".into()]);
+    let tag = CommandTag {
+        timestamp: 1,
+        number: 1,
+        flags: 1,
+    };
+    state.command_block = CommandBlock::Draining { tag };
+    harness
+        .capture_in_flight
+        .lock()
+        .unwrap()
+        .insert("%1".into());
+
+    state.handle(
+        ControlRecord::Error {
+            tag,
+            arguments: "1 2 1".into(),
+        },
+        harness.runtime(),
+    );
+
+    assert!(
+        harness.capture_in_flight.lock().unwrap().is_empty(),
+        "a drained capture stayed in the ledger and would silence the seed that replaces it"
+    );
+    assert!(matches!(state.command_block, CommandBlock::None));
+}
+
+/// A resnapshot photographs the panes somebody is looking at.
+///
+/// A hidden pane's screen is discarded on the way out — only a visible pane's
+/// seed is emitted — so capturing it is work tmux does for nobody, and its
+/// reveal takes a fresh photograph regardless. What it must not do is answer
+/// that reveal with the tail it was holding when the stream lost bytes, so the
+/// pane is marked as owing a seed here instead of being captured.
+#[test]
+fn a_resnapshot_photographs_the_visible_panes_and_indebts_the_hidden_ones() {
+    let (mut state, harness) = Harness::new(&["%1".into(), "%2".into()]);
+    {
+        let mut resources = harness.resources.lock().unwrap();
+        resources.set_visible("%1", true, 1);
+        resources.set_visible("%2", false, 1);
+    }
+
+    state.resnapshot_all(&harness.writer, &harness.resources, &harness.stopped);
+
+    assert_eq!(harness.writes(), vec![("%1".into(), false)]);
+    assert!(matches!(
+        state.pane_states.get("%1"),
+        Some(PaneSeedState::Pending { .. })
+    ));
+    assert!(matches!(
+        state.pane_states.get("%2"),
+        Some(PaneSeedState::Live)
+    ));
+    let resources = harness.resources.lock().unwrap();
+    assert!(resources.get("%2").unwrap().requires_seed);
+    assert!(!resources.get("%1").unwrap().requires_seed);
 }
 
 #[test]

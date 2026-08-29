@@ -1,9 +1,18 @@
-use std::{collections::HashSet, sync::mpsc};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex, atomic::AtomicBool, mpsc},
+};
 
-use super::{CommandBlock, PaneSeedState, StreamControl, StreamState};
+use tmux_control::PaneResourceStore;
+
+use super::{CommandBlock, PaneSeedState, StreamControl, StreamState, with_active_resources};
 
 impl StreamState {
-    pub(in crate::service::terminal) fn apply_control(&mut self, control: StreamControl) {
+    pub(in crate::service::terminal) fn apply_control(
+        &mut self,
+        control: StreamControl,
+        capture_in_flight: &Mutex<HashSet<String>>,
+    ) {
         match control {
             StreamControl::Membership { pane_ids } => {
                 let desired: HashSet<_> = pane_ids.iter().map(String::as_str).collect();
@@ -25,6 +34,13 @@ impl StreamState {
                     // resume, and leaving it here would make the *next* pane to
                     // take its id inherit a pause that was never its own.
                     self.flow.cleared(&pane_id);
+                    // Its capture, likewise. Only the metadata block clears a
+                    // ledger entry, and a capture whose marker is filtered away
+                    // for leaving membership never reaches one — so a pane id
+                    // that is later re-added would inherit an entry nothing can
+                    // clear, and every seed it asked for would be coalesced
+                    // against a photograph nobody is taking.
+                    capture_in_flight.lock().unwrap().remove(&pane_id);
                     if self
                         .pending_alternate
                         .as_ref()
@@ -64,7 +80,12 @@ impl StreamState {
         }
     }
 
-    pub(super) fn resnapshot_all(&mut self, writer: &mpsc::Sender<super::super::ControlWrite>) {
+    pub(super) fn resnapshot_all(
+        &mut self,
+        writer: &mpsc::Sender<super::super::ControlWrite>,
+        resources: &Arc<Mutex<PaneResourceStore>>,
+        stopped: &AtomicBool,
+    ) {
         self.expected_capture = None;
         self.expected_resume = None;
         self.pending_alternate = None;
@@ -75,7 +96,49 @@ impl StreamState {
             // state must do the same while discarding the damaged payload.
             self.command_block = CommandBlock::Draining { tag };
         }
+        // A pane the renderer is not showing is not photographed here. Its
+        // screen would be discarded on the way out — only a visible pane's seed
+        // is emitted — and its reveal takes a fresh photograph anyway, so the
+        // capture is work tmux does for nobody. What the pane does get is the
+        // seed debt, because this recovery began with bytes the stream lost:
+        // its reveal must not be answered with a tail that is missing the
+        // middle of itself.
+        //
+        // A pane tmux has paused is captured regardless of who is showing it.
+        // The resume rides on the capture, and losing one leaves tmux holding
+        // that pane's output forever.
+        let unphotographed: HashSet<String> = with_active_resources(resources, stopped, |store| {
+            let hidden: HashSet<String> = self
+                .pane_states
+                .keys()
+                .filter(|pane_id| {
+                    // A pane the store has never heard of is not "hidden", it
+                    // is unaccounted for, and the safe answer to that is the
+                    // photograph.
+                    store.get(pane_id).is_some()
+                        && store.is_hidden(pane_id)
+                        && !self.flow.resume_before_capture(pane_id)
+                })
+                .cloned()
+                .collect();
+            for pane_id in &hidden {
+                store.require_seed(
+                    pane_id,
+                    "the control stream was resnapshotted while this pane was hidden",
+                );
+            }
+            hidden
+        })
+        .unwrap_or_default();
         for (pane_id, state) in &mut self.pane_states {
+            if unphotographed.contains(pane_id) {
+                // Nothing is coming to seed this pane, so it must not sit
+                // Pending accumulating output nobody will replay. Live is what
+                // a hidden pane's steady state already is: the store takes what
+                // arrives, and a released resource drops it.
+                *state = PaneSeedState::Live;
+                continue;
+            }
             *state = PaneSeedState::Pending {
                 buffered: Vec::new(),
                 buffered_bytes: 0,

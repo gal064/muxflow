@@ -771,6 +771,132 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
     }
 }
 
+/// The ledger records a capture tmux received, not one this process wrote.
+///
+/// It is read to *suppress* seeds, so an entry standing for a capture that
+/// never left this process silences the request that would replace it, and the
+/// pane waits for a photograph nobody is taking. Recording after the flush
+/// risks one redundant photograph; recording before it risks none at all.
+#[test]
+fn a_capture_whose_flush_failed_is_not_recorded_as_in_flight() {
+    struct UnflushableStdin;
+    impl Write for UnflushableStdin {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("tmux control stdin is gone"))
+        }
+    }
+
+    let stdin = Arc::new(Mutex::new(UnflushableStdin));
+    let ledger = capture_ledger();
+    assert!(write_capture_request_resuming(&stdin, &ledger, "%1", false).is_err());
+    assert!(
+        ledger.lock().unwrap().is_empty(),
+        "a capture tmux never received would coalesce away the seed that replaces it"
+    );
+}
+
+/// A pane's tail crosses the wire once, on the reveal that draws it.
+///
+/// The hide is an acknowledgement, not a delivery: the renderer is on its way
+/// out of that workspace and ignores a `hiddenBuffered` echo, so bytes sent
+/// here are paid for ahead of the switch the user is waiting for and then paid
+/// for again when the reveal hands back the same tail. The store keeps them —
+/// that is the point — and only the answer is empty.
+#[test]
+fn a_hide_answers_with_no_bytes_and_the_reveal_carries_the_whole_tail() {
+    let output_credit = Arc::new(OutputCredit::negotiated(true));
+    let mut clients =
+        TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
+    let (events, mut receiver) = mpsc::channel(8);
+    let attachment = start_long_lived_attachment(
+        events.clone(),
+        Arc::clone(&clients.resources),
+        Arc::clone(&clients.generation),
+        Arc::clone(&output_credit),
+        Arc::clone(&clients.emission_order),
+    )
+    .unwrap();
+    clients.clients.insert("$1".into(), attachment);
+    clients.generation.store(2, Ordering::Release);
+    {
+        let mut resources = clients.resources.lock().unwrap();
+        resources.set_visible("%1", true, 1);
+        resources.record_output("%1", b"printed-while-visible", 2);
+    }
+    let checkpoint = VisibilityCheckpoint {
+        epoch: 1,
+        generation: 1,
+    };
+
+    clients
+        .set_visibility(
+            "%1",
+            VisibilityChange {
+                visible: false,
+                renderer_holds_snapshot: true,
+                checkpoint,
+            },
+            visibility_permit(&events),
+            &events,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+    let hide = ordered_event_within(
+        &mut receiver,
+        Duration::from_secs(5),
+        "hide did not emit its recovery event",
+    );
+    let hidden = hide.pane_resource.as_ref().unwrap();
+    assert!(
+        hidden.raw_tail.is_empty(),
+        "the hide answer carried {} bytes",
+        hidden.raw_tail.len()
+    );
+    assert_eq!(hide.terminal_delivery_bytes, 0);
+    assert_eq!(
+        clients
+            .resources
+            .lock()
+            .unwrap()
+            .get("%1")
+            .unwrap()
+            .raw_tail,
+        b"printed-while-visible",
+        "the host stopped holding the tail it must hand back on the reveal"
+    );
+
+    clients
+        .set_visibility(
+            "%1",
+            VisibilityChange {
+                visible: true,
+                renderer_holds_snapshot: true,
+                checkpoint,
+            },
+            visibility_permit(&events),
+            &events,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let reveal = ordered_event_within(
+        &mut receiver,
+        Duration::from_secs(5),
+        "reveal did not emit its recovery event",
+    );
+    let revealed = reveal.pane_resource.as_ref().unwrap();
+    assert!(revealed.resume_from_renderer);
+    assert_eq!(revealed.raw_tail, b"printed-while-visible");
+    assert_eq!(
+        reveal.terminal_delivery_bytes as usize,
+        revealed.raw_tail.len()
+    );
+    clients.stop();
+}
+
 #[test]
 fn fresh_server_has_a_vacuous_input_fence_for_create_session_bootstrap() {
     let mut clients = TerminalClients::new(
@@ -1022,7 +1148,7 @@ fn failed_membership_batch_remains_retryable() {
         &["%1".into()],
         Arc::new(crate::service::terminal::FlowControl::default()),
     );
-    stream.apply_control(stream_rx.recv().unwrap());
+    stream.apply_control(stream_rx.recv().unwrap(), &capture_ledger());
     assert_eq!(
         stream.pane_states.keys().cloned().collect::<HashSet<_>>(),
         HashSet::from(["%2".into()])
@@ -1030,16 +1156,19 @@ fn failed_membership_batch_remains_retryable() {
     if let PaneSeedState::Pending { buffered, .. } = stream.pane_states.get_mut("%2").unwrap() {
         buffered.push((7, b"preserve-me".to_vec()));
     }
-    stream.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%2".into()],
-    });
+    stream.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &capture_ledger(),
+    );
     assert!(matches!(
         stream.pane_states.get("%2"),
         Some(PaneSeedState::Pending { buffered, .. })
             if buffered == &[(7, b"preserve-me".to_vec())]
     ));
 
-    stream.apply_control(stream_rx.recv().unwrap());
+    stream.apply_control(stream_rx.recv().unwrap(), &capture_ledger());
     assert_eq!(
         stream.pane_states.keys().cloned().collect::<HashSet<_>>(),
         HashSet::from(["%1".into()]),
@@ -1059,7 +1188,7 @@ fn failed_membership_batch_remains_retryable() {
         vec!["%1".to_owned()]
     );
     assert_eq!(current, next_desired);
-    stream.apply_control(stream_rx.recv().unwrap());
+    stream.apply_control(stream_rx.recv().unwrap(), &capture_ledger());
     assert_eq!(
         stream.pane_states.keys().cloned().collect::<HashSet<_>>(),
         HashSet::from(["%3".into()]),
@@ -1275,7 +1404,7 @@ fn a_capture_already_in_flight_is_not_queued_twice() {
 ///
 #[test]
 fn a_history_request_captures_only_the_scrollback_range() {
-    let command = capture_history_command("%1", 2000);
+    let command = capture_history_command("%1", 2000, 0);
     assert!(command.contains("__ADE_HISTORY__:2000"));
     // `-E -1` stops at the line above the screen: the history and the seed
     // meet exactly once, with no row in both and none missing between them.
@@ -1284,6 +1413,27 @@ fn a_history_request_captures_only_the_scrollback_range() {
     // be mistaken for a seed the reader has to store.
     assert!(!command.contains("__ADE_META__"));
     assert!(!capture_command("%1").contains("-S "));
+}
+
+/// A pane that printed after it was seeded is not handed those rows twice.
+///
+/// tmux measures both bounds from the *current* display, so everything that
+/// scrolled off since the seed is above it — rows the renderer already has in
+/// its own scrollback. The renderer counts them and says so, and the range
+/// starts above them: `-S -(skip+lines) -E -(skip+1)`, which is contiguous with
+/// what the renderer is holding and overlaps none of it.
+#[test]
+fn a_history_request_starts_above_the_scrollback_the_renderer_already_holds() {
+    let command = capture_history_command("%1", 2000, 40);
+    assert!(command.contains("-S -2040 -E -41"));
+    // Still the range the user asked for, not a shorter one.
+    assert!(command.contains("__ADE_HISTORY__:2000"));
+
+    // A skip no buffer could justify is clamped rather than obeyed: both bounds
+    // past the top of tmux's history answer with nothing, and a pane told there
+    // is nothing above it stops asking.
+    let clamped = capture_history_command("%1", 10, u32::MAX);
+    assert!(clamped.contains("-S -10010 -E -10001"), "{clamped}");
 }
 
 #[test]
