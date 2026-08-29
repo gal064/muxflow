@@ -8,9 +8,11 @@
 //
 // A history splice is here for the same reason and not a second subject: xterm
 // has no prepend, so putting scrollback above row 0 is a rewrite of the whole
-// buffer — a restore in disguise, refused on this same generation rule, and
-// journalled rather than spoken when it is. The rows it counts and the order it
-// splices them in are what that refusal is protecting.
+// buffer — a restore in disguise, and journalled rather than spoken on the rare
+// occasions it cannot be done. It refuses on far less than a restore does,
+// because a pane that never stops printing is a pane whose user could otherwise
+// never scroll up: what the request anchors on is the rows this side holds, not
+// the generation the stream is on.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { recordIncident } from "../../diagnostics/incidents";
 import { XtermRenderer } from "./TerminalRenderer";
@@ -70,32 +72,67 @@ describe("stale cached restore", () => {
     renderer.dispose();
   });
 
-  // Loading earlier output is a re-seed in disguise: xterm has no prepend, so
-  // the only way to put scrollback above row 0 is to rewrite the buffer with
-  // the history and the current screen together. If live output landed while
-  // the history was in flight, that rewrite would drop it — so the splice is
-  // refused on the same rule a stale restore is, and like it, journals instead
-  // of speaking. Nothing is lost: the scrollback is still in tmux, and the next
-  // time the user reaches the top the question is asked again.
-  it("refuses a history splice when the stream moved under it", async () => {
+  /**
+   * Loading earlier output is a re-seed in disguise: xterm has no prepend, so
+   * the only way to put scrollback above row 0 is to rewrite the buffer with
+   * the history and the current screen together.
+   *
+   * The one thing that can break is eviction. The request said how many rows
+   * this pane already held and tmux captured the range ending exactly there, so
+   * rows printed since are *below* the captured range and arrive inside the
+   * serialization — but once the scrollback is full, xterm drops rows off the
+   * top to make room, and then the captured range no longer reaches what this
+   * buffer begins with. Splicing the two together would leave a hole in the
+   * middle of the user's output, so it is refused, and like a stale restore it
+   * journals instead of speaking. Nothing is lost: the rows are still in tmux,
+   * and the next time the user reaches the top the question is asked again.
+   */
+  it("refuses a history splice when the scrollback hit its cap since the request", async () => {
     const diagnostics: Array<string | undefined> = [];
     const renderer = new XtermRenderer({
       paneId: "%9",
       onDiagnostic: (message) => diagnostics.push(message),
     });
     renderer.open(document.createElement("div"));
-    renderer.write(ownTerminalBytes(new TextEncoder().encode("live")), undefined, 5);
+    renderer.setGrid({ columns: 20, rows: 5 });
+    // Past the ceiling xterm enforces, so the top of this buffer is rows it
+    // evicted rather than the rows the capture was measured from.
+    const flood = Array.from(
+      { length: renderer.scrollbackLimit + 50 },
+      (_, index) => `row-${index}`,
+    ).join("\r\n");
+    renderer.write(ownTerminalBytes(new TextEncoder().encode(flood)), undefined, 5);
+    // Polled on the row count rather than on a serialization: this buffer is
+    // ten thousand rows deep and serializing it on every tick is the test.
+    await waitFor(
+      () => renderer.scrollbackRows >= renderer.scrollbackLimit,
+      "the scrollback to reach its cap",
+    );
     diagnostics.length = 0;
 
     const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
-    await expect(renderer.prependHistory(history, 4)).resolves.toBe("superseded");
+    await expect(renderer.prependHistory(history)).resolves.toBe("superseded");
 
     expect(recordIncident).toHaveBeenCalledWith("pane.historySuperseded", {
       paneId: "%9",
-      throughGeneration: 4,
-      lastEnqueuedGeneration: 5,
+      reason: "scrollbackCapped",
+      scrollbackRows: renderer.scrollbackLimit,
+      scrollbackLimit: renderer.scrollbackLimit,
     });
     expect(diagnostics).toEqual([]);
+
+    renderer.dispose();
+  });
+
+  /** A TUI's frame is not scrollback, and the rewrite would destroy it. */
+  it("refuses a history splice while the alternate screen is up", async () => {
+    const renderer = new XtermRenderer({ paneId: "%14" });
+    renderer.open(document.createElement("div"));
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("\u001b[?1049h")), undefined, 5);
+    await waitFor(() => renderer.isAlternateScreenActive(), "the alternate screen to come up");
+
+    const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
+    await expect(renderer.prependHistory(history)).resolves.toBe("superseded");
 
     renderer.dispose();
   });
@@ -116,7 +153,7 @@ describe("stale cached restore", () => {
     await waitFor(() => renderer.serialize().includes("the screen"), "the screen to be applied");
 
     const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
-    await expect(renderer.prependHistory(history, 5)).resolves.toBe("applied");
+    await expect(renderer.prependHistory(history)).resolves.toBe("applied");
 
     await waitFor(() => renderer.serialize().includes("earlier output"), "the history to be spliced");
     const spliced = renderer.serialize();
@@ -151,35 +188,44 @@ describe("stale cached restore", () => {
   });
 
   /**
-   * The refusal that only the barrier can see.
+   * The pane that never stops printing — a Codex agent working — and the reason
+   * this stopped being a refusal.
    *
-   * The splice is decided twice: once when it is asked for, and again when
-   * xterm has finished with everything it was already holding — because output
-   * that lands in between is queued *behind* the barrier, so it is neither in
-   * the serialization the rewrite is built from nor safe from the rewrite,
-   * which drops the queue. Answering "applied" at the first check would let the
-   * pane latch "I have my scrollback" on a splice that never happened, and it
-   * would then never ask again.
+   * Output that lands while the page is on the wire is queued *behind* the
+   * barrier, so it is neither in the serialization the rewrite is built from nor
+   * in the buffer the rewrite replaces. Refusing on it made every page a
+   * `pane.historySuperseded` — twenty-seven in one minute on one pane — and the
+   * user could never scroll up. The writes are kept instead and re-queued behind
+   * the rewrite, which is where they would have run anyway.
    */
-  it("answers a splice the barrier refused, so the caller cannot latch on it", async () => {
+  it("splices onto a pane that never stopped printing, keeping the writes behind the barrier", async () => {
     const renderer = new XtermRenderer({ paneId: "%11" });
     renderer.open(document.createElement("div"));
-    renderer.write(ownTerminalBytes(new TextEncoder().encode("the screen")), undefined, 5);
+    renderer.setGrid({ columns: 20, rows: 5 });
+    // Not awaited: this write is still in flight, so the barrier queues behind
+    // it rather than being delivered inline.
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("live-1\r\nlive-2")), undefined, 5);
 
-    // Asked against the stream as it stands, so the first gate lets it through.
     const outcome = renderer.prependHistory(
-      ownTerminalBytes(new TextEncoder().encode("earlier output")),
-      5,
+      ownTerminalBytes(new TextEncoder().encode("older-1\r\nolder-2")),
     );
-    // And then live output, behind the barrier and ahead of its callback.
-    renderer.write(ownTerminalBytes(new TextEncoder().encode("|LIVE")), undefined, 6);
+    // And the pane keeps printing while the splice waits for its barrier.
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("\r\nlive-3")), undefined, 6);
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("\r\nlive-4")), undefined, 7);
 
-    await expect(outcome).resolves.toBe("superseded");
-    // Nothing was rewritten: both the screen and the bytes that arrived are
-    // still there, and the scrollback is still something to ask for.
-    await waitFor(() => renderer.serialize().includes("|LIVE"), "the live output to be applied");
-    expect(renderer.serialize()).toContain("the screen");
-    expect(renderer.serialize()).not.toContain("earlier output");
+    await expect(outcome).resolves.toBe("applied");
+    await waitFor(
+      () => renderer.serialize().includes("live-4"),
+      "the output queued behind the barrier to be applied",
+    );
+
+    const spliced = renderer.serialize();
+    const rows = ["older-1", "older-2", "live-1", "live-2", "live-3", "live-4"];
+    // Nothing duplicated by the rewrite and nothing dropped with the queue…
+    for (const row of rows) expect(spliced.split(row), row).toHaveLength(2);
+    // …and every row where the user reads it, the history above the screen.
+    const positions = rows.map((row) => spliced.indexOf(row));
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
 
     renderer.dispose();
   });

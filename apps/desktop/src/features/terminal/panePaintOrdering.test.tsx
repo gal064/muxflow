@@ -35,7 +35,6 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
   /** Only what `TerminalPane` actually touches; the paint is the point here. */
   class FakeRenderer {
     #rendered: Array<() => void> = [];
-    enqueuedGeneration = 0;
     scrollbackRows = 0;
     scrollbackLimit = 10_000;
     open(): void {}
@@ -61,8 +60,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     async drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number }> {
       return { serialized: "", outputGeneration: 0 };
     }
-    seed(_bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
-      this.enqueuedGeneration = generation;
+    seed(_bytes: Uint8Array, onRendered?: () => void): void {
       if (onRendered) this.#rendered.push(onRendered);
     }
     restore(_serialized: string, onRendered?: () => void): boolean {

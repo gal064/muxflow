@@ -49,8 +49,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     #topListeners = new Set<() => void>();
     /** What every splice this pane attempts is answered with. */
     historyOutcome: "applied" | "superseded" = "applied";
-    historySplices: Array<{ bytes: number; throughGeneration: number }> = [];
-    enqueuedGeneration = 0;
+    historySplices: Array<{ bytes: number }> = [];
     /** Rows above the screen, as the real renderer counts them. */
     scrollbackRows = 0;
     /** The ceiling `scrollbackRows` walks up to, as xterm's `scrollback` sets it. */
@@ -88,8 +87,8 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     reachTop(): void {
       for (const listener of this.#topListeners) listener();
     }
-    async prependHistory(history: Uint8Array, throughGeneration: number): Promise<"applied" | "superseded"> {
-      this.historySplices.push({ bytes: history.byteLength, throughGeneration });
+    async prependHistory(history: Uint8Array): Promise<"applied" | "superseded"> {
+      this.historySplices.push({ bytes: history.byteLength });
       return this.historyOutcome;
     }
     focus(): void { this.focusCalls += 1; }
@@ -106,9 +105,8 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       if (config.wedgeDrain) return new Promise<never>(() => undefined);
       return { serialized: "cached-screen", outputGeneration: 3 };
     }
-    seed(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
+    seed(bytes: Uint8Array, onRendered?: () => void): void {
       this.writes.push(`seed:${bytes.byteLength}`);
-      this.enqueuedGeneration = generation;
       if (onRendered) this.#pendingRendered.push(onRendered);
     }
     restore(serialized: string, onRendered?: () => void): boolean {
@@ -116,9 +114,8 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       if (onRendered) this.#pendingRendered.push(onRendered);
       return true;
     }
-    write(bytes: Uint8Array, onRendered?: () => void, generation = 0): boolean {
+    write(bytes: Uint8Array, onRendered?: () => void): boolean {
       this.writes.push(`write:${bytes.byteLength}`);
-      if (generation > this.enqueuedGeneration) this.enqueuedGeneration = generation;
       if (onRendered) this.#pendingRendered.push(onRendered);
       return true;
     }
@@ -839,8 +836,7 @@ describe("lazy scrollback", () => {
     expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
 
     await act(async () => { hub.deliver(historyEvent("%h1", "earlier output", 2_000)); });
-    // Quoted back so the renderer can refuse a splice onto a stream that moved.
-    expect(renderer.historySplices).toEqual([{ bytes: 14, throughGeneration: 4 }]);
+    expect(renderer.historySplices).toEqual([{ bytes: 14 }]);
     await act(async () => { mounted.unmount(); });
   });
 
@@ -1159,11 +1155,11 @@ describe("lazy scrollback", () => {
     const renderer = renderers.created[0];
     await act(async () => { hub.deliver(seedEvent("%r1", 4)); });
     await act(async () => { renderer.flushRendered(); });
-    // Request A, anchored to the screen the seed at generation 4 laid down.
+    // Request A, asked against the screen the seed at generation 4 laid down.
     expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%r1", 300, 0]]);
 
     // The screen A was asked against is replaced, and the new one prefetches
-    // its own first page: request B, anchored to generation 9.
+    // its own first page: request B.
     await act(async () => { hub.deliver(seedEvent("%r1", 9)); });
     await act(async () => { renderer.flushRendered(); });
     expect(api.requestTerminalHistory.mock.calls).toEqual([
@@ -1171,9 +1167,9 @@ describe("lazy scrollback", () => {
       ["client-a", "%r1", 300, 0],
     ]);
 
-    // A's answer, late. Its anchor and its skip describe the screen that is
-    // gone; splicing it now would put the user's earlier output above a screen
-    // it never sat above, using numbers B overwrote.
+    // A's answer, late. Its skip describes the screen that is gone; splicing it
+    // now would put the user's earlier output above a screen it never sat
+    // above, using a number B overwrote.
     await act(async () => { hub.deliver(historyEvent("%r1", historyPage(300), 2_000)); });
     expect(renderer.historySplices, "a superseded page was spliced above the new screen").toEqual([]);
 
@@ -1183,10 +1179,10 @@ describe("lazy scrollback", () => {
     await act(async () => { renderer.reachTop(); renderer.reachTop(); });
     expect(api.requestTerminalHistory).toHaveBeenCalledTimes(2);
 
-    // B's own answer, spliced against B's anchor.
+    // B's own answer, spliced above the screen B was asked against.
     await act(async () => { hub.deliver(historyEvent("%r1", historyPage(300), 2_000)); });
     expect(renderer.historySplices).toEqual([
-      { bytes: historyPage(300).length, throughGeneration: 9 },
+      { bytes: historyPage(300).length },
     ]);
     await act(async () => { mounted.unmount(); });
   });

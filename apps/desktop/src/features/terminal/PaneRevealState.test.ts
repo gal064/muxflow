@@ -122,17 +122,46 @@ describe("mounted pane reveal ordering", () => {
   });
 
   // Every hide is acknowledged with an empty `hiddenBuffered` answer, which the
-  // hub buffers and replays into the pane's next mount. The pane reading it is
-  // showing its own cached screen and waiting for the answer to the reveal it
-  // has already sent; treating the echo as a dead end spends one capture per
-  // switch on a pane that is not blank.
+  // hub buffers and replays into the pane's next mount. `reveal` stamps
+  // `Visible` on every path it can return by, so this shape is only ever this
+  // side's own hide coming back and is never the authority on a mounted pane.
+  // The pane reading it is waiting for the answer to the reveal it has already
+  // sent; treating the echo as a dead end spends one capture per switch and
+  // blanks a pane that had a screen.
+  const hideEcho = () => hiddenResource({
+    serializedSnapshot: copyTerminalBytes(new Uint8Array()),
+    rawTail: copyTerminalBytes(new Uint8Array()),
+  });
+
   it("ignores the hide echo replayed into a pane that is showing its cached screen", () => {
     const state: PaneRevealState = { ready: false, hasLocalState: true };
-    const echo = reducePaneReveal(state, hiddenResource({
-      serializedSnapshot: copyTerminalBytes(new Uint8Array()),
-      rawTail: copyTerminalBytes(new Uint8Array()),
-    }));
-    expect(echo.effect).toEqual({ kind: "none" });
+    const echo = reducePaneReveal(state, hideEcho());
+    expect(echo.effect).toEqual({ kind: "awaitAnswer", showingScreen: true });
+    expect(echo.state).toEqual(state);
+  });
+
+  // The case that reached the journal as `pane.revealDeadEnd` on a busy pane
+  // during ordinary Wi-Fi use: the same echo, at a mount whose cached screen was
+  // missing — the biggest pane in the session is the one whose serialization the
+  // cache drops. It used to blank the terminal and buy a second seed. It is
+  // ignored now, and what is owed instead is a bound on the wait, because this
+  // pane really is showing nothing until the reveal is answered.
+  it("bounds the wait instead of blanking a pane that has no screen to show", () => {
+    const state: PaneRevealState = { ready: false, hasLocalState: false };
+    const echo = reducePaneReveal(state, hideEcho());
+    expect(echo.effect).toEqual({ kind: "awaitAnswer", showingScreen: false });
+    expect(echo.state).toEqual(state);
+  });
+
+  // The destructive variant, and the reason the rule is not narrowed to a pane
+  // that is still waiting: a hide processed after the reveal it raced arrives at
+  // a pane that is already drawing the right screen, and acting on it wipes
+  // that screen. Ignored too — but recorded, because unlike the others this one
+  // means a hide and a reveal crossed.
+  it("ignores the hide echo at a pane that is already drawing, and says so", () => {
+    const state: PaneRevealState = { ready: true, hasLocalState: true };
+    const echo = reducePaneReveal(state, hideEcho());
+    expect(echo.effect).toEqual({ kind: "hideEchoAfterReady" });
     expect(echo.state).toEqual(state);
   });
 

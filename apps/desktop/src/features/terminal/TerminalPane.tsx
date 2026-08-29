@@ -968,6 +968,21 @@ export function TerminalPane({
           watchdog.noteHealthy();
           setRendererDiagnostic(undefined);
         }
+      } else if (effect.kind === "hideEchoAfterReady") {
+        // This pane's own hide, acknowledged after it had already come back and
+        // started drawing. Ignored — the screen on the glass is the right one
+        // and the echo carries nothing to replace it with — but recorded,
+        // because a hide landing behind a reveal is the shape that used to take
+        // a pane the user was looking at and blank it.
+        recordIncident("pane.hideEchoAfterReady", { paneId: pane.id });
+      } else if (effect.kind === "awaitAnswer") {
+        // The same echo, at a pane whose reveal is still outstanding. Nothing to
+        // draw and nothing to ask for: that reveal's answer is the authoritative
+        // one and it is still coming. A pane showing the screen it kept can wait
+        // for it silently; a pane showing nothing gets the bound the dead end
+        // used to arm on its way past, so a reveal that is never answered still
+        // degrades visibly rather than sitting blank for the rest of its life.
+        if (!effect.showingScreen) watchdog.note("paneAwaitingSeed");
       } else if (effect.kind === "diagnostic") {
         // Seed diagnostics describe fidelity limitations in this pane only.
         // They do not invalidate recovery or escalate to connection status.

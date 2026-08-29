@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   HISTORY_MAX_AWAITING,
+  HISTORY_PAGE_LINES,
   PaneHistoryPager,
   type PagerRenderer,
 } from "./PaneHistoryPager";
@@ -8,16 +9,15 @@ import { ownTerminalBytes } from "./TerminalBytes";
 import type { TerminalEvent } from "./api";
 
 /**
- * The five renderer members the pager reads, and nothing else — no xterm, no
+ * The four renderer members the pager reads, and nothing else — no xterm, no
  * DOM, no React. What the pager decides is arithmetic over the rows a terminal
  * reports holding, and this is the whole of what it needs to do it.
  */
 class FakeRenderer implements PagerRenderer {
   scrollbackRows = 0;
   scrollbackLimit = 10_000;
-  enqueuedGeneration = 4;
   alternateScreen = false;
-  readonly splices: Array<{ bytes: number; throughGeneration: number }> = [];
+  readonly splices: Array<{ bytes: number }> = [];
   #outcome: "applied" | "superseded" = "applied";
   #pending: Array<() => void> = [];
 
@@ -25,8 +25,8 @@ class FakeRenderer implements PagerRenderer {
     return this.alternateScreen;
   }
 
-  prependHistory(history: Uint8Array, throughGeneration: number): Promise<"applied" | "superseded"> {
-    this.splices.push({ bytes: history.byteLength, throughGeneration });
+  prependHistory(history: Uint8Array): Promise<"applied" | "superseded"> {
+    this.splices.push({ bytes: history.byteLength });
     const outcome = this.#outcome;
     return new Promise((resolve) => this.#pending.push(() => resolve(outcome)));
   }
@@ -152,6 +152,33 @@ describe("PaneHistoryPager", () => {
     ]);
     // Six pages, and the sixth reaches past the 10,000 rows this side can hold.
     expect(9_300 + 4_800).toBeGreaterThanOrEqual(10_000);
+  });
+
+  /**
+   * A refusal is not an answer.
+   *
+   * The splice can still be refused at its barrier — the scrollback filled up
+   * while the page crossed the link — and the pager has to be able to ask again
+   * rather than latch "this pane is holding its scrollback" on a page that
+   * never landed.
+   */
+  it("reopens its latch when the splice is refused, so reaching the top asks again", async () => {
+    const renderer = new FakeRenderer();
+    const { pager, request } = pagerFor(renderer);
+    pager.noteScreenSeeded();
+    pager.requestPage("prefetch");
+    expect(request).toHaveBeenCalledTimes(1);
+
+    renderer.refuseSplices();
+    await deliverPage(pager, renderer, 0, 50_000);
+
+    // Nothing was spliced, so nothing above this screen was accounted for: the
+    // walk has not ended and the next page is still the first size.
+    expect(pager.snapshot().historyExhausted).toBe(false);
+    expect(pager.snapshot().historyNextPageLines).toBe(HISTORY_PAGE_LINES);
+
+    pager.requestPage("scrolledToTop");
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   /**
