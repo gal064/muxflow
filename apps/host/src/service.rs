@@ -686,6 +686,11 @@ async fn serve_connection(
                 }
             }
             Some(Payload::Request(request)) => {
+                // H1 of the switch timeline: the request frame is decoded and
+                // this is the first instant the daemon could act on it. Inert
+                // for every operation but a tmux action, and compiled out of a
+                // plain release build — see `diagnostics::switch_timing`.
+                crate::diagnostics::note_request_read(frame.request_id, request.operation);
                 if frame.request_id == 0 {
                     send_response(
                         &control_tx,

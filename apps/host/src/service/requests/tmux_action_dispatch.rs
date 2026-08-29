@@ -36,8 +36,10 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 pending.lock().unwrap().remove(&request_id);
                 return;
             };
-            // Switch-timing instrumentation; delete with `timing.log`.
+            // Switch-timing instrumentation (compiled out of a plain release
+            // helper; see `diagnostics::switch_timing`). H2 of the timeline.
             let started = std::time::Instant::now();
+            let handler_entry_unix_millis = crate::diagnostics::handler_entry_stamp();
             let (_topology_guard, mut known_generation) =
                 lock_topology_generation(topology_lock, generation).await;
             let cached_baseline = topology_baseline.lock().unwrap().clone();
@@ -63,6 +65,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                     &timing_kind,
                     &timing_session_id,
                     &timing_window_id,
+                    handler_entry_unix_millis,
                     flush_discover,
                     execute,
                     barrier,

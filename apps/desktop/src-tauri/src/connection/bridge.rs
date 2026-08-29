@@ -18,9 +18,9 @@ use super::transport::{
     with_bridge_diagnostic,
 };
 use super::{
-    ConnectionSpec, InitialHostState, REQUEST_TIMEOUT, TerminalClient, TerminalEvent,
-    TerminalEventChannel, mark_input_reconnected, send_event, snapshot_from_proto,
-    validate_tmux_id, writer::ControlWriterHandle,
+    ConnectionSpec, CountingReader, InitialHostState, PendingAnswer, REQUEST_TIMEOUT,
+    TerminalClient, TerminalEvent, TerminalEventChannel, mark_input_reconnected, send_event,
+    snapshot_from_proto, validate_tmux_id, writer::ControlWriterHandle,
 };
 
 /// A teardown this side ordered reaches the supervisor as the reader's
@@ -357,8 +357,11 @@ fn run_bridge_once(
     }
     super::flush_delivery_ack(client)?;
     *connected_at = Some(Instant::now());
+    // From here on the frame parser reads through a counter, so a late answer
+    // can name the bytes that were ahead of it on the wire. Free in a build
+    // without the measurement compiled in.
     read_protocol_stream(
-        reader,
+        CountingReader::new(reader, &client.link_counters),
         sequence,
         &hello.server_identity,
         channel,
@@ -538,10 +541,15 @@ fn read_protocol_stream(
     // will never deliver: see the quarantine below.
     let mut quarantined_charge = super::HostCharge::default();
     loop {
+        // Read before the frame, because the counting reader has already added
+        // this frame's own bytes by the time the envelope exists — and this
+        // answer's own bytes were never ahead of it.
+        let bytes_before = client.link_counters.bytes_read();
         let frame = read_frame_sync(&mut reader)
             .map_err(|error| error.to_string())?
             .ok_or("host bridge closed")?;
         client.note_host_frame();
+        let answer_mark = client.link_counters.note_frame_read(&frame, bytes_before);
         let mut frame = frame;
         if matches!(frame.payload, Some(Payload::Response(_))) {
             let Some(Payload::Response(response)) = frame.payload.take() else {
@@ -596,7 +604,10 @@ fn read_protocol_stream(
                 continue;
             }
             if let Some(waiter) = client.pending.lock().unwrap().remove(&frame.request_id) {
-                let _ = waiter.send(Ok(response));
+                let _ = waiter.send(Ok(PendingAnswer {
+                    response,
+                    mark: answer_mark,
+                }));
             }
             continue;
         }
