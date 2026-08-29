@@ -38,7 +38,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
             };
             // Switch-timing instrumentation; delete with `timing.log`.
             let started = std::time::Instant::now();
-            let (_topology_guard, known_generation) =
+            let (_topology_guard, mut known_generation) =
                 lock_topology_generation(topology_lock, generation).await;
             let cached_baseline = topology_baseline.lock().unwrap().clone();
             // Resolving the baseline has to know the action kind: creating the
@@ -50,6 +50,9 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
             let timing_kind = format!("{action_kind:?}");
             let timing_session_id = action.session_id.clone();
             let timing_window_id = action.window_id.clone();
+            // Set only when the precheck found the topology moved, so every
+            // other line keeps the shape it had.
+            let timing_topology_diff = Mutex::new(None::<&'static str>);
             let log_timing = |flush_discover: Duration,
                               execute: Duration,
                               barrier: Option<(Duration, bool)>,
@@ -66,6 +69,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                     started.elapsed(),
                     queue_depth,
                     outcome,
+                    *timing_topology_diff.lock().unwrap(),
                 );
             };
             let discover_started = std::time::Instant::now();
@@ -146,39 +150,52 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 .as_ref()
                 .is_some_and(|(snapshot, _)| same_action_topology(snapshot, &fresh_snapshot));
             if !same_identity || !same_topology {
-                let next_generation = generation.fetch_add(1, Ordering::AcqRel) + 1;
-                *topology_baseline.lock().unwrap() =
-                    Some((fresh_snapshot.clone(), fresh_identity.clone()));
-                reconcile_terminal_clients(terminal, &fresh_snapshot, event_tx, overflowed);
-                let snapshot =
-                    snapshot_from_identity(fresh_snapshot, next_generation, fresh_identity);
-                let _ = event_tx
-                    .send(SequencerControl::OrderedEvent(v1::HostEvent {
-                        kind: v1::EventKind::TopologySnapshot.into(),
-                        scope: "topology".into(),
-                        snapshot: Some(snapshot),
-                        detail: "external topology mutation observed before action".into(),
-                        ..Default::default()
-                    }))
-                    .await;
-                let depth = send_timed_response(
-                    control_tx,
-                    request_id,
-                    response_error(
-                        "stale_topology",
-                        "stale topology: external tmux structural mutation was reconciled before action",
-                    ),
+                *timing_topology_diff.lock().unwrap() = Some(action_topology_diff(
+                    cached_baseline.as_ref(),
+                    &fresh_snapshot,
+                    &fresh_identity,
+                ));
+                known_generation = publish_refreshed_baseline(
+                    &fresh_snapshot,
+                    &fresh_identity,
+                    generation,
+                    topology_baseline,
+                    terminal,
+                    event_tx,
+                    overflowed,
                 )
                 .await;
-                log_timing(
-                    flush_discover,
-                    Duration::ZERO,
-                    None,
-                    depth,
-                    "stale_topology",
-                );
-                pending.lock().unwrap().remove(&request_id);
-                return;
+                // A selection carries on against the topology just published.
+                // Refusing it was the loop this fix exists to break: on a slow
+                // link the resize each switch performs bumps the generation,
+                // and the switch that would have fixed the screen was refused
+                // for arriving before its own snapshot did. `execute` still
+                // validates the target against this fresh snapshot, so a
+                // selection of something that is gone fails as it always did.
+                //
+                // A *different server* is not that: nothing the caller named
+                // exists on it, so it keeps refusing every kind, exactly as the
+                // identity guard inside `execute` does.
+                if !same_identity || !tmux_actions::selection_only(action_kind) {
+                    let depth = send_timed_response(
+                        control_tx,
+                        request_id,
+                        response_error(
+                            "stale_topology",
+                            "stale topology: external tmux structural mutation was reconciled before action",
+                        ),
+                    )
+                    .await;
+                    log_timing(
+                        flush_discover,
+                        Duration::ZERO,
+                        None,
+                        depth,
+                        "stale_topology",
+                    );
+                    pending.lock().unwrap().remove(&request_id);
+                    return;
+                }
             }
             let barrier_sender = event_tx.clone();
             // Switch-timing instrumentation; delete with `timing.log`. The
@@ -300,6 +317,40 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
         }
         _ => unreachable!(),
     }
+}
+
+/// Adopts a topology that moved under the app as the new baseline: bumps the
+/// generation, reconciles the control clients, and puts the authoritative
+/// snapshot on the ordered sequencer. Returns the generation it published,
+/// which is the one any action that continues from here runs against.
+#[allow(clippy::too_many_arguments)]
+async fn publish_refreshed_baseline(
+    fresh_snapshot: &tmux_control::TmuxSnapshot,
+    fresh_identity: &str,
+    generation: &Arc<AtomicU64>,
+    topology_baseline: &Arc<Mutex<Option<(tmux_control::TmuxSnapshot, String)>>>,
+    terminal: &Arc<Mutex<TerminalClients>>,
+    event_tx: &mpsc::Sender<SequencerControl>,
+    overflowed: &Arc<AtomicBool>,
+) -> u64 {
+    let next_generation = generation.fetch_add(1, Ordering::AcqRel) + 1;
+    *topology_baseline.lock().unwrap() = Some((fresh_snapshot.clone(), fresh_identity.to_owned()));
+    reconcile_terminal_clients(terminal, fresh_snapshot, event_tx, overflowed);
+    let snapshot = snapshot_from_identity(
+        fresh_snapshot.clone(),
+        next_generation,
+        fresh_identity.to_owned(),
+    );
+    let _ = event_tx
+        .send(SequencerControl::OrderedEvent(v1::HostEvent {
+            kind: v1::EventKind::TopologySnapshot.into(),
+            scope: "topology".into(),
+            snapshot: Some(snapshot),
+            detail: "external topology mutation observed before action".into(),
+            ..Default::default()
+        }))
+        .await;
+    next_generation
 }
 
 /// Switch-timing instrumentation; delete with `timing.log`.
@@ -428,6 +479,73 @@ mod tests {
         assert!(action_selects_session(v1::TmuxActionKind::CreateSession));
         assert!(action_selects_session(v1::TmuxActionKind::CreateWindow));
         assert!(!action_selects_session(v1::TmuxActionKind::SelectWindow));
+    }
+
+    /// The precheck's two halves are separable on purpose: a topology that moved
+    /// is always adopted and always announced, and only the refusal that used to
+    /// follow it is now limited to the kinds a stale generation says something
+    /// about. A selection continues into `execute` against the snapshot this
+    /// just published, which is also the generation it is measured against.
+    #[tokio::test]
+    async fn a_refreshed_baseline_is_announced_then_only_non_selections_are_refused() {
+        let (event_tx, mut events) = mpsc::channel(4);
+        let generation = Arc::new(AtomicU64::new(7));
+        let baseline = Arc::new(Mutex::new(Some((
+            tmux_control::TmuxSnapshot::default(),
+            "tmux:live".to_owned(),
+        ))));
+        let terminal = Arc::new(Mutex::new(TerminalClients::new(
+            Arc::new(OutputCredit::negotiated(false)),
+            crate::service::topology_output_trigger::TopologyOutputTrigger::default(),
+        )));
+        let overflowed = Arc::new(AtomicBool::new(false));
+        // Sessions without panes: the reconciliation has nothing to attach, so
+        // the test never forks a tmux control client.
+        let fresh = tmux_control::TmuxSnapshot {
+            sessions: vec![tmux_control::Session {
+                id: "$1".into(),
+                name: "moved".into(),
+                window_count: 1,
+                attached_clients: 0,
+                order: 0,
+                pinned: false,
+            }],
+            ..Default::default()
+        };
+
+        let published = publish_refreshed_baseline(
+            &fresh,
+            "tmux:live",
+            &generation,
+            &baseline,
+            &terminal,
+            &event_tx,
+            &overflowed,
+        )
+        .await;
+
+        assert_eq!(published, 8);
+        assert_eq!(generation.load(Ordering::Acquire), 8);
+        assert_eq!(
+            *baseline.lock().unwrap(),
+            Some((fresh.clone(), "tmux:live".to_owned()))
+        );
+        let Some(SequencerControl::OrderedEvent(event)) = events.recv().await else {
+            panic!("the refreshed topology was not announced");
+        };
+        assert_eq!(event.kind, i32::from(v1::EventKind::TopologySnapshot));
+        assert_eq!(
+            event.detail,
+            "external topology mutation observed before action"
+        );
+        assert_eq!(event.snapshot.as_ref().unwrap().generation, 8);
+
+        assert!(tmux_actions::selection_only(
+            v1::TmuxActionKind::SelectSession
+        ));
+        assert!(!tmux_actions::selection_only(
+            v1::TmuxActionKind::CloseSession
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

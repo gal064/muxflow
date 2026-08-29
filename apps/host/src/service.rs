@@ -490,6 +490,21 @@ async fn serve_connection(
                 _ => (None, "event"),
             };
             let frame = sequencer.frame(message);
+            // Which event, and whose pane, so a slow write names the frame that
+            // blocked the writer rather than only its size. Read off the framed
+            // envelope, which borrows: no allocation on the output fast path.
+            let (frame_event_kind, frame_pane_id) = match &frame.payload {
+                Some(tmux_agent_protocol::v1::envelope::Payload::Event(event)) => (
+                    v1::EventKind::try_from(event.kind)
+                        .ok()
+                        .map(|kind| kind.as_str_name()),
+                    event
+                        .terminal
+                        .as_ref()
+                        .map(|terminal| terminal.pane_id.as_str()),
+                ),
+                _ => (None, None),
+            };
             let write_started = Instant::now();
             match timeout(PROTOCOL_WRITE_TIMEOUT, write_frame(&mut writer, &frame)).await {
                 Ok(Ok(())) => {
@@ -504,6 +519,8 @@ async fn serve_connection(
                     }
                     crate::diagnostics::record_frame_write(
                         frame_kind,
+                        frame_event_kind,
+                        frame_pane_id,
                         || prost::Message::encoded_len(&frame),
                         write_elapsed,
                     );
@@ -1005,6 +1022,63 @@ fn same_action_topology(
         serde_json::to_vec(&cached).expect("tmux snapshot serialization is infallible");
     let fresh_json = serde_json::to_vec(&fresh).expect("tmux snapshot serialization is infallible");
     cached_json == fresh_json
+}
+
+/// Switch-timing instrumentation; delete with `timing.log`.
+///
+/// Names the first structural section where the cached baseline and a fresh
+/// discovery disagree, so a refusal in the log says *what* moved rather than
+/// only that something did. Coarse on purpose: it runs once per action, only
+/// on the path that already re-serializes both snapshots.
+fn action_topology_diff(
+    cached: Option<&(tmux_control::TmuxSnapshot, String)>,
+    fresh: &tmux_control::TmuxSnapshot,
+    fresh_identity: &str,
+) -> &'static str {
+    let Some((cached, identity)) = cached else {
+        return "baseline:absent";
+    };
+    if identity != fresh_identity {
+        return "identity";
+    }
+    let cached = normalize_action_topology(cached.clone());
+    let fresh = normalize_action_topology(fresh.clone());
+    if cached.sessions != fresh.sessions {
+        return "sessions";
+    }
+    if cached.windows != fresh.windows {
+        return "windows";
+    }
+    let membership = |snapshot: &tmux_control::TmuxSnapshot| {
+        snapshot
+            .panes
+            .iter()
+            .map(|pane| {
+                (
+                    pane.id.clone(),
+                    pane.session_id.clone(),
+                    pane.window_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    if membership(&cached) != membership(&fresh) {
+        return "panes:membership";
+    }
+    let geometry = |snapshot: &tmux_control::TmuxSnapshot| {
+        snapshot
+            .panes
+            .iter()
+            .map(|pane| (pane.width, pane.height, pane.left, pane.top))
+            .collect::<Vec<_>>()
+    };
+    if geometry(&cached) != geometry(&fresh) {
+        return "panes:geometry";
+    }
+    if cached.panes != fresh.panes {
+        return "panes:other";
+    }
+    "none"
 }
 
 fn normalize_action_topology(

@@ -825,6 +825,7 @@ pub(crate) fn write_tmux_action_timing_log(
     total_to_enqueue: Duration,
     queue_depth_at_enqueue: usize,
     outcome: &str,
+    topology_diff: Option<&str>,
 ) {
     append_timing_line(&serde_json::json!({
         "atUnixMillis": now_epoch_millis(),
@@ -841,6 +842,9 @@ pub(crate) fn write_tmux_action_timing_log(
         "totalToEnqueueMs": whole_millis(total_to_enqueue),
         "queueDepthAtEnqueue": queue_depth_at_enqueue,
         "outcome": outcome,
+        // Which section of the topology moved under the action, when the
+        // precheck found one had; absent on every line that did not refresh.
+        "topologyDiff": topology_diff,
     }));
 }
 
@@ -869,7 +873,17 @@ const SLOW_FRAME_WRITE_THRESHOLD: Duration = Duration::from_millis(250);
 ///
 /// The frame size is a closure because measuring it means walking the encoded
 /// message, and a write this fast path performs normally must not pay for it.
-pub(crate) fn record_frame_write(kind: &str, frame_bytes: impl FnOnce() -> usize, write: Duration) {
+///
+/// `event_kind`/`pane_id` name which ordered event blocked the writer: a stalled
+/// link is nearly always one pane's seed or output, and "event" alone did not
+/// say which.
+pub(crate) fn record_frame_write(
+    kind: &str,
+    event_kind: Option<&str>,
+    pane_id: Option<&str>,
+    frame_bytes: impl FnOnce() -> usize,
+    write: Duration,
+) {
     if write < SLOW_FRAME_WRITE_THRESHOLD {
         return;
     }
@@ -880,6 +894,8 @@ pub(crate) fn record_frame_write(kind: &str, frame_bytes: impl FnOnce() -> usize
         "frameBytes": frame_bytes(),
         "writeMs": whole_millis(write),
         "kind": kind,
+        "eventKind": event_kind,
+        "paneId": pane_id,
     }));
 }
 
