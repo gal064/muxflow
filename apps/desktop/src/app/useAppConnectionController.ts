@@ -176,7 +176,14 @@ export function useAppConnectionController({
    * reconnect notices the user is already ignoring.
    */
   const linkQuality = useMemo(() => createLinkQualityMonitor(), []);
-  const [linkQualityMessage, setLinkQualityMessage] = useState("");
+  // The standing verdict, while an episode lasts. It is spoken once, as a
+  // notice (dismissible, and out of the way of the tabs, the host row and
+  // the tmux status line — every fixed row a standing strip was found to
+  // cover), and it stands in for the raw bridge failure in the reconnecting
+  // strip's detail line for as long as the episode lasts.
+  const [linkQualityVerdict, setLinkQualityVerdict] = useState("");
+  const linkQualityVerdictRef = useRef("");
+  linkQualityVerdictRef.current = linkQualityVerdict;
   // Empty for a local connection: there is no network to blame there, and the
   // monitor is not fed at all.
   const linkQualityHostRef = useRef("");
@@ -189,12 +196,16 @@ export function useAppConnectionController({
         losses: change.losses,
         lagEvents: change.lagEvents,
       });
-      setLinkQualityMessage(describeLinkQuality(change.state, linkQualityHostRef.current));
+      const verdict = describeLinkQuality(change.state, linkQualityHostRef.current);
+      linkQualityVerdictRef.current = verdict;
+      setLinkQualityVerdict(verdict);
+      setStatus(verdict);
     } else {
       recordIncident("link.quality", { state: "ok", afterMs: change.afterMs });
-      setLinkQualityMessage("");
+      linkQualityVerdictRef.current = "";
+      setLinkQualityVerdict("");
     }
-  }, []);
+  }, [setStatus]);
   /**
    * The journal's record of typing lag, which nothing else can report.
    *
@@ -373,15 +384,16 @@ export function useAppConnectionController({
 
   /** Only time ends an episode, and only an episode pays for the timer. */
   useEffect(() => {
-    if (!linkQualityMessage) return;
+    if (!linkQualityVerdict) return;
     const timer = setInterval(() => applyLinkQuality(linkQuality.poll(Date.now())), LINK_QUALITY_POLL_MS);
     return () => clearInterval(timer);
-  }, [applyLinkQuality, linkQuality, linkQualityMessage]);
+  }, [applyLinkQuality, linkQuality, linkQualityVerdict]);
 
   /** A different machine's link is a different link; nothing carries over. */
   useEffect(() => {
     linkQuality.reset();
-    setLinkQualityMessage("");
+    linkQualityVerdictRef.current = "";
+    setLinkQualityVerdict("");
   }, [currentHostProfileId, linkQuality]);
 
   useEffect(() => {
@@ -522,7 +534,11 @@ export function useAppConnectionController({
           if (event.kind === "error" && hostPhaseRef.current === "connected" && linkQualityHostRef.current) {
             applyLinkQuality(linkQuality.noteLinkLost(Date.now()));
           }
-          setConnectionDetail(shown);
+          // Under a link that keeps dropping the reconnecting strip is on
+          // screen most of the time, and its detail line is where the verdict
+          // is worth more than the reader's symptom. Only a bridge failure is
+          // replaced: helper guidance and the rest keep their own words.
+          setConnectionDetail(linkQualityVerdictRef.current || shown);
           // Every attempt is journalled and every attempt stands in the strip;
           // only a failure the user has not already been told about is worth a
           // notice. While the link is up this is the first failure of an
@@ -617,7 +633,6 @@ export function useAppConnectionController({
     activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
     currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, inputLatencyReporter,
-    linkQualityMessage,
     profileRecovery,
     optimisticWindow,
     profiles, profilesHydrated, selectedProfileId, setActiveSessionId, setActiveWindowId,

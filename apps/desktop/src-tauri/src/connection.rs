@@ -3,7 +3,7 @@ use std::{
     process::Child,
     sync::{
         Arc, LazyLock, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -49,6 +49,10 @@ use git_content::GitContentReads;
 pub(crate) mod tmux_action;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeouts in a row before the lane is judged stalled rather than slow.
+/// Three is fifteen seconds without an answer of any kind, which is the
+/// stalled-lane incident caught early rather than a slow link punished.
+const STALLED_LANE_UNANSWERED_REQUESTS: u32 = 3;
 const GIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -106,6 +110,11 @@ pub(crate) struct TerminalClient {
     /// order one are indistinguishable — which is what left the 2026-08-28
     /// throttled-link reconnect storm without a cause.
     teardown_reason: Mutex<Option<&'static str>>,
+    /// Requests that timed out since the host last answered one. One late
+    /// answer is a slow link; a run of them with nothing answered in between
+    /// is a stalled ordered lane. Git requests share the count on their own,
+    /// sixty-times-longer deadline: a five-minute silence is a strike too.
+    unanswered_requests: AtomicU32,
     stop_signal: StopSignal,
     ready: AtomicBool,
     read_only: AtomicBool,
@@ -164,6 +173,7 @@ impl TerminalClient {
             writer: Mutex::new(None),
             child: Mutex::new(None),
             teardown_reason: Mutex::new(None),
+            unanswered_requests: AtomicU32::new(0),
             stop_signal: StopSignal::default(),
             ready: AtomicBool::new(false),
             read_only: AtomicBool::new(false),
@@ -270,6 +280,8 @@ impl TerminalClient {
         if child.is_some() {
             *self.teardown_reason.lock().unwrap() = Some(reason);
         }
+        // The count belongs to the lane being torn down, not its successor.
+        self.unanswered_requests.store(0, Ordering::Release);
         files::invalidate_bulk_scope(
             self.bulk_scope,
             "bulk transfer control connection is reconnecting",
@@ -505,8 +517,12 @@ impl TerminalClient {
         {
             self.cancel_request(request_id);
         }
-        let result = match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        {
+        let received = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        // Any answer at all proves the lane still answers.
+        if received.is_ok() {
+            self.unanswered_requests.store(0, Ordering::Release);
+        }
+        let result = match received {
             Ok(Ok(response)) if response.ok => Ok(response),
             Ok(Ok(response)) => Err(format!(
                 "{}: {}",
@@ -517,18 +533,35 @@ impl TerminalClient {
                 self.cancel_request(request_id);
                 self.pending.lock().unwrap().remove(&request_id);
                 // The host may still complete a mutation after our deadline,
-                // so it is not safe to replay the request. It is equally unsafe
-                // to keep using the same ordered lane: production showed one
-                // timed-out selection leaving later selections and terminal
+                // so it is not safe to replay the request. Whether the lane is
+                // safe to keep is a separate question. Production once showed
+                // one timed-out selection leaving later selections and terminal
                 // input several minutes behind it while fresh connections to
-                // the same daemon stayed healthy. Tear down only this bridge;
-                // the existing supervisor reconnects and reconciles from an
-                // authoritative snapshot without replaying the request.
-                self.reconnect_transport("a request went unanswered past its deadline");
-                Err(
-                    "host request timed out; reconnecting because commit outcome is unknown and the request will not be replayed"
-                        .into(),
-                )
+                // the same daemon stayed healthy — a stalled lane, and tearing
+                // the bridge down is the right answer to it. But a link that is
+                // merely slow answers late too, and tearing it down for that
+                // starts a loop: every reconnect re-sends every pane's screen,
+                // which is exactly the traffic that made the reply late
+                // (2026-08-28, shaped to 150 ms / 2 Mbit/s: six drops in two
+                // minutes, every one ordered here). So one late answer keeps
+                // the lane, and only a run of them with nothing answered in
+                // between is torn down for the supervisor to rebuild from an
+                // authoritative snapshot. Pane output is deliberately not
+                // consulted: an idle workspace produces none, and the rule has
+                // to hold the same there.
+                let unanswered = self.unanswered_requests.fetch_add(1, Ordering::AcqRel) + 1;
+                if unanswered < STALLED_LANE_UNANSWERED_REQUESTS {
+                    Err(
+                        "host request timed out; the link was kept, but commit outcome is unknown and the request will not be replayed"
+                            .into(),
+                    )
+                } else {
+                    self.reconnect_transport("a request went unanswered past its deadline");
+                    Err(
+                        "host request timed out; reconnecting because commit outcome is unknown and the request will not be replayed"
+                            .into(),
+                    )
+                }
             }
         };
         if let Some(claim) = &operation {
