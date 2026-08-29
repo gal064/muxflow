@@ -186,6 +186,12 @@ message Request {
   // no other operation, and clamped by the host: the number decides the size of
   // a capture the user is waiting on.
   uint32 terminal_history_lines = 17;
+  // How many lines above the screen the renderer is already holding, so
+  // REQUEST_TERMINAL_HISTORY answers with the lines above *those*. tmux
+  // captures everything above the current display, which after a screen-only
+  // seed includes every row that has scrolled off since — rows the renderer
+  // has, and would be given a second copy of. Read by no other operation.
+  uint32 terminal_history_skip_lines = 18;
 }
 
 message Response {

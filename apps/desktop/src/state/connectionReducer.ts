@@ -113,7 +113,19 @@ function replaceSnapshot(
   // are that same world, so the frame spends its sequence and changes nothing
   // else. `resyncRequested` is deliberately untouched: a rebuild this process
   // asked for is answered by a world, never by word that none was needed.
-  if (!action.snapshot) return { ...state, lastSequence: action.sequence };
+  //
+  // The generation is the one thing the acknowledgement does carry, and it is
+  // adopted: every action this side sends is stamped against it, and holding a
+  // stale number is how a switch is refused for describing a world the host has
+  // already left. Forward only — `precedesLiveGeneration` has refused a stale
+  // frame before this, and a frame with no world in it is never the baseline
+  // that may walk the generation back.
+  if (!action.snapshot) {
+    const generation = action.generation !== undefined && action.generation > state.generation
+      ? action.generation
+      : state.generation;
+    return { ...state, generation, lastSequence: action.sequence };
+  }
   return {
     ...state,
     serverIdentity: action.serverIdentity,

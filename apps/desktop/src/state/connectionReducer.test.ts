@@ -159,6 +159,31 @@ describe("connectionReducer", () => {
     expect(stillResyncing.resyncRequested).toBe(true);
   });
 
+  it("takes the generation a reconciliation acknowledgement carries, forwards only", () => {
+    // The generation is the whole content of the acknowledgement, and every
+    // action this side sends is stamped against it: holding a stale number is
+    // how a switch is refused for describing a world the host has already left.
+    const live = connectionReducer(initialHostState, {
+      type: "snapshot", snapshot: populated, sequence: 7, generation: 4, serverIdentity: "server-a",
+    });
+    const advanced = connectionReducer(live, {
+      type: "snapshot", sequence: 8, generation: 9, serverIdentity: "server-a",
+    });
+    expect(advanced.generation).toBe(9);
+    expect(advanced.panes).toEqual(live.panes);
+
+    // Never backwards. After a reconnect the stale-generation guard stands down
+    // — a restarted host counts from zero, and the next *world* is the new
+    // baseline — but a frame carrying no world is not that baseline, and the
+    // generation this side stamps its actions with must not drop under it.
+    const reconnected = connectionReducer(advanced, { type: "connection", phase: "connected" });
+    const late = connectionReducer(reconnected, {
+      type: "snapshot", sequence: 10, generation: 5, serverIdentity: "server-a",
+    });
+    expect(late.generation).toBe(9);
+    expect(late.lastSequence).toBe(10);
+  });
+
   it("accepts a lower sequence authoritative reconnect snapshot for the same server", () => {
     const state = connectionReducer(initialHostState, {
       type: "snapshot", snapshot: populated, sequence: 42, serverIdentity: "same-server",

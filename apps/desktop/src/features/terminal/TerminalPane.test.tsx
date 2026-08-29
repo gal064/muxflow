@@ -51,6 +51,8 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     historyOutcome: "applied" | "superseded" = "applied";
     historySplices: Array<{ bytes: number; throughGeneration: number }> = [];
     enqueuedGeneration = 0;
+    /** Rows above the screen, as the real renderer counts them. */
+    scrollbackRows = 0;
 
     open(): void {}
     measure(): Size | undefined { return this.measured; }
@@ -81,7 +83,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     reachTop(): void {
       for (const listener of this.#topListeners) listener();
     }
-    prependHistory(history: Uint8Array, throughGeneration: number): "applied" | "superseded" {
+    async prependHistory(history: Uint8Array, throughGeneration: number): Promise<"applied" | "superseded"> {
       this.historySplices.push({ bytes: history.byteLength, throughGeneration });
       return this.historyOutcome;
     }
@@ -809,7 +811,7 @@ describe("lazy scrollback", () => {
     await act(async () => { hub.deliver(seedEvent("%h1", 4)); });
 
     await act(async () => { renderer.reachTop(); });
-    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h1", 2000]]);
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h1", 2000, 0]]);
 
     // The answer has not arrived, so the second and third gestures are the same
     // question and cost nothing.
@@ -823,6 +825,23 @@ describe("lazy scrollback", () => {
     // Loaded is loaded: this pane's scrollback is now on the terminal.
     await act(async () => { renderer.reachTop(); });
     expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("says how much scrollback it already holds, so the answer starts above it", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h7"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h7", 4)); });
+    // A seeded pane that has since printed: those rows scrolled off the screen
+    // and are in this terminal's own scrollback. tmux measures its capture from
+    // the *current* display, so without this number the answer would hand them
+    // back a second time and the splice would show them twice.
+    renderer.scrollbackRows = 37;
+
+    await act(async () => { renderer.reachTop(); });
+
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h7", 2000, 37]]);
     await act(async () => { mounted.unmount(); });
   });
 
@@ -859,6 +878,45 @@ describe("lazy scrollback", () => {
     await act(async () => { renderer.reachTop(); });
     expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
     await act(async () => { mounted.unmount(); });
+  });
+
+  it("still asks when the cached screen was itself a photograph", async () => {
+    const hub = new FakeHub();
+    const first = await mountPane(fixturePane("%h5"), hub);
+    await act(async () => { hub.deliver(seedEvent("%h5", 4)); });
+    await act(async () => { renderers.created[0].flushRendered(); });
+    // The hide keeps that screen here and tells the host it did.
+    await act(async () => { first.unmount(); });
+    expect(terminalStateCache.get("%h5")?.screenSeeded).toBe(true);
+
+    const remounted = await mountPane(fixturePane("%h5"), hub);
+    const renderer = renderers.created[1];
+    expect(renderer.restoredSerialized).toBe("cached-screen");
+
+    // Putting a photograph back on a fresh terminal does not give it a
+    // scrollback: what is above this screen is still only in tmux.
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { remounted.unmount(); });
+  });
+
+  it("stops asking once the loaded history is part of the cached screen", async () => {
+    const hub = new FakeHub();
+    const first = await mountPane(fixturePane("%h6"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h6", 4)); });
+    await act(async () => { renderer.flushRendered(); });
+    await act(async () => { renderer.reachTop(); });
+    await act(async () => { hub.deliver(historyEvent("%h6", "earlier output")); });
+    await act(async () => { first.unmount(); });
+    expect(terminalStateCache.get("%h6")?.screenSeeded).toBe(false);
+
+    const remounted = await mountPane(fixturePane("%h6"), hub);
+    // The splice is in the buffer this screen was serialized from, so asking
+    // again would prepend the same rows a second time.
+    await act(async () => { renderers.created[1].reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { remounted.unmount(); });
   });
 
   it("never asks for a pane that came up from its own cached screen", async () => {

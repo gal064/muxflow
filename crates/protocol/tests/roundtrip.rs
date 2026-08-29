@@ -808,6 +808,7 @@ fn terminal_history_request_and_answer_round_trip_at_their_own_numbers() {
         operation: v1::Operation::RequestTerminalHistory.into(),
         scope: "%3".into(),
         terminal_history_lines: 2000,
+        terminal_history_skip_lines: 40,
         ..Default::default()
     };
     let bytes = request.encode_to_vec();
@@ -818,6 +819,11 @@ fn terminal_history_request_and_answer_round_trip_at_their_own_numbers() {
             .windows(4)
             .any(|window| window == [0x88, 0x01, 0xd0, 0x0f]),
         "terminal_history_lines moved off field 17"
+    );
+    // Field 18, varint: tag 0x90 0x01, then 40.
+    assert!(
+        bytes.windows(3).any(|window| window == [0x90, 0x01, 0x28]),
+        "terminal_history_skip_lines moved off field 18"
     );
     // It asks for a photograph and nothing else: no visibility claim, no
     // checkpoint, no payload. A history request that carried one of those would

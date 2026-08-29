@@ -116,10 +116,17 @@ impl TerminalAttachment {
                 if reports_terminal_colors {
                     write_terminal_color_reports(&mut *writer, pane_id)?;
                 }
-                queue_capture(&mut *writer, &capture_in_flight, pane_id)?;
+                queue_capture(&mut *writer, pane_id)?;
             }
             writer.flush()?;
         }
+        // After the flush, for the reason on `queue_capture`: a ledger entry
+        // for a capture that never left this process silences the seed that
+        // would replace it.
+        capture_in_flight
+            .lock()
+            .unwrap()
+            .extend(pane_ids.iter().cloned());
 
         let (stream_tx, stream_rx) = std_mpsc::channel();
         let reader_stopped = Arc::clone(&stopped);

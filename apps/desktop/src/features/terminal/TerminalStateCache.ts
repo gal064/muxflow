@@ -6,6 +6,17 @@ export interface CachedTerminalState {
   byteLength: number;
   terminalEpoch?: number;
   outputGeneration: number;
+  /**
+   * Whether this screen is a photograph of the visible grid with nothing above
+   * it — a host seed that no history has been spliced onto yet.
+   *
+   * It has to be kept here because it is a property of *these bytes*, not of
+   * the terminal that produced them. A pane seeded screen-only, hidden, and
+   * then restored from this entry is showing scrollback it does not have; its
+   * next mount is a fresh closure, and without this it never asks for the
+   * history it is missing.
+   */
+  screenSeeded: boolean;
 }
 
 export class TerminalStateCache {
@@ -40,6 +51,7 @@ export class TerminalStateCache {
     paneId: string,
     serialized: string,
     checkpoint?: { terminalEpoch: number; outputGeneration: number },
+    screenSeeded = false,
   ): void {
     const byteLength = serialized ? encoder.encode(serialized).byteLength : 0;
     if (!serialized || byteLength > this.maxSerializedBytes || byteLength > this.maxTotalBytes) {
@@ -53,6 +65,7 @@ export class TerminalStateCache {
       byteLength,
       terminalEpoch: checkpoint?.terminalEpoch,
       outputGeneration: checkpoint?.outputGeneration ?? 0,
+      screenSeeded,
     });
     this.#retainedBytes += byteLength;
     while (this.#states.size > this.capacity || this.#retainedBytes > this.maxTotalBytes) {

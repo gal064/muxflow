@@ -139,7 +139,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                 // per 64 KiB rather than one per record.
                 let read_started = Instant::now();
                 while let Ok(control) = controls.try_recv() {
-                    state.apply_control(control);
+                    state.apply_control(control, &capture_in_flight);
                 }
                 parser.push(&buffer[..length]);
                 while let Some(record) = parser.next_record() {
@@ -163,7 +163,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                             // Every pane is about to be captured again, so no
                             // pane's abandoned capture may coalesce that away.
                             capture_in_flight.lock().unwrap().clear();
-                            state.resnapshot_all(&writer);
+                            state.resnapshot_all(&writer, &resources, &stopped);
                         }
                     }
                 }
@@ -503,6 +503,13 @@ impl StreamState {
                     );
                 }
                 if matches!(self.command_block, CommandBlock::Draining { .. }) {
+                    // The ledger is one of the slots this releases, exactly as
+                    // the ordinary error path below does. A block is drained
+                    // because the capture inside it was abandoned — a
+                    // membership change, a resnapshot — and leaving the pane
+                    // recorded here would coalesce away the photograph that
+                    // replaces it, for as long as the client lives.
+                    capture_in_flight.lock().unwrap().clear();
                     self.command_block = CommandBlock::None;
                     self.expected_capture = None;
                     self.expected_resume = None;
@@ -648,6 +655,21 @@ impl StreamState {
                     notification_pane(&arguments).filter(|id| self.pane_states.contains_key(id))
                 {
                     self.flow.paused(&pane_id);
+                    // tmux drops a paused pane's output rather than replaying
+                    // it, so whatever tail this store is holding for a hidden
+                    // pane now has a hole in it. Said while the pane is still
+                    // hidden, so its reveal is answered with a photograph
+                    // instead of with a tail missing its middle. A visible pane
+                    // needs no such note: the capture written below is its
+                    // seed, and it is delivered.
+                    with_active_resources(resources, stopped, |store| {
+                        if store.is_hidden(&pane_id) {
+                            store.require_seed(
+                                &pane_id,
+                                "tmux paused this pane's output while it was hidden",
+                            );
+                        }
+                    });
                     emit_event(
                         sender,
                         overflowed,
@@ -738,6 +760,9 @@ impl StreamState {
                             Some(pane_id).filter(|pane_id| self.pane_states.contains_key(pane_id));
                     }
                     MarkerBlock::Capture(pane_id) => {
+                        // A capture for a pane that left membership is
+                        // addressed to nobody. Its ledger entry left with it —
+                        // see `apply_control` — so nothing here has to.
                         self.expected_capture =
                             pane_id.filter(|pane_id| self.pane_states.contains_key(pane_id));
                     }
