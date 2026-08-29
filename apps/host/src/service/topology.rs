@@ -207,18 +207,23 @@ impl TopologyActor {
                             // authoritative baseline. Close the frontend's
                             // reconciliation state even when no generation
                             // change is needed.
+                            //
+                            // Nothing moved, so nothing is described: the
+                            // acknowledgement carries the generation it
+                            // reconciled and no snapshot at all. It used to
+                            // resend the whole server to say "unchanged",
+                            // which on a busy tree is 7–39 KB ahead of the
+                            // switch the same notification burst belongs to —
+                            // paid several times per switch, for a payload the
+                            // desktop already holds byte for byte.
                             let generation = self.generation.load(Ordering::Acquire);
                             let _ = self
                                 .sender
                                 .send(SequencerControl::OrderedEvent(v1::HostEvent {
                                     kind: v1::EventKind::TopologySnapshot.into(),
                                     scope: "topology".into(),
-                                    snapshot: Some(snapshot_from_identity(
-                                        current.clone(),
-                                        generation,
-                                        identity.clone(),
-                                    )),
                                     detail: "topology reconciliation completed".into(),
+                                    topology_generation: generation,
                                     ..Default::default()
                                 }))
                                 .await;
@@ -525,5 +530,101 @@ mod tests {
         let last_reconciled_epoch = observed_epoch;
 
         assert_ne!(signal.current_epoch(), last_reconciled_epoch);
+    }
+
+    /// A server whose every discovery pass answers with the same tree, so the
+    /// pass after the first is the unchanged-but-notified one.
+    fn one_session_server() -> tmux_control::TmuxSnapshot {
+        tmux_control::TmuxSnapshot {
+            sessions: vec![tmux_control::Session {
+                id: "$1".into(),
+                name: "work".into(),
+                window_count: 1,
+                attached_clients: 1,
+                order: 0,
+                pinned: false,
+            }],
+            windows: Vec::new(),
+            panes: Vec::new(),
+        }
+    }
+
+    async fn next_topology_snapshot_event(
+        events: &mut mpsc::Receiver<SequencerControl>,
+    ) -> v1::HostEvent {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let control = tokio::time::timeout(remaining, events.recv())
+                .await
+                .expect("a topology event must arrive")
+                .expect("the actor must keep its sender");
+            if let SequencerControl::OrderedEvent(event) = control
+                && event.kind == i32::from(v1::EventKind::TopologySnapshot)
+            {
+                return event;
+            }
+        }
+    }
+
+    /// A notified pass that finds the world unchanged says so with the
+    /// generation it reconciled and nothing else.
+    ///
+    /// It used to answer with the whole server — a second copy of a tree the
+    /// desktop already holds byte for byte, 7–39 KB of it on a busy one, sent
+    /// several times per window switch because a switch is several
+    /// notifications. The desktop only ever used this event to close its
+    /// reconciliation state, which the generation alone does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unchanged_notified_pass_acknowledges_the_generation_and_sends_no_server() {
+        let signal = TopologySignal::default();
+        let closed = Arc::new(AtomicBool::new(false));
+        let (sender, mut events) = mpsc::channel(64);
+        let actor = TopologyActor {
+            closed: Arc::clone(&closed),
+            subscribed: Arc::new(AtomicBool::new(true)),
+            generation: Arc::new(AtomicU64::new(0)),
+            overflowed: Arc::new(AtomicBool::new(false)),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            baseline: Arc::new(Mutex::new(None)),
+            terminal: Arc::new(Mutex::new(TerminalClients::new(
+                Arc::new(OutputCredit::negotiated(false)),
+                TopologyOutputTrigger::default(),
+            ))),
+            sender,
+            signal: signal.clone(),
+        };
+        let running =
+            tokio::spawn(actor.run(|| async { Ok((one_session_server(), "tmux:stable".into())) }));
+
+        // The first pass has no baseline to compare against, so it changed.
+        signal.mark_dirty();
+        let described = next_topology_snapshot_event(&mut events).await;
+        let snapshot = described
+            .snapshot
+            .expect("the pass that changed the world must describe it");
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.generation, 1);
+        assert_eq!(snapshot.server_identity, "tmux:stable");
+
+        // The second finds the same tree behind the same identity.
+        signal.mark_dirty();
+        let acknowledged = next_topology_snapshot_event(&mut events).await;
+        assert!(
+            acknowledged.snapshot.is_none(),
+            "an unchanged pass resent the whole server to say nothing moved"
+        );
+        assert_eq!(acknowledged.detail, "topology reconciliation completed");
+        assert_eq!(
+            acknowledged.topology_generation, 1,
+            "the acknowledgement must carry the generation it reconciled"
+        );
+
+        closed.store(true, Ordering::Release);
+        signal.wake();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("the actor must observe its closed flag")
+            .unwrap();
     }
 }

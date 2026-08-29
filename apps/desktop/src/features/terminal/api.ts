@@ -49,7 +49,12 @@ export type TerminalEvent = SequencedTerminalEvent & (
       serializedSnapshot: OwnedTerminalBytes;
       rawTail: OwnedTerminalBytes;
     }
-  | { kind: "snapshot"; snapshot: TmuxSnapshot; generation: number; serverIdentity: string; authoritative: boolean }
+  /**
+   * A topology answer. `snapshot` is absent on a reconciliation
+   * acknowledgement — a notified host pass that found the world unchanged and
+   * sent the generation alone rather than a tree this process already holds.
+   */
+  | { kind: "snapshot"; snapshot?: TmuxSnapshot; generation: number; serverIdentity: string; authoritative: boolean }
   | { kind: "fileService"; scope: string; event: WireFileEvent }
   | { kind: "gitService"; scope: string; event: WireGitEvent }
   | { kind: "agentService"; scope: string; event?: WireAgentEvent; snapshot?: WireAgentSnapshot }
@@ -116,12 +121,19 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
       if (!Number.isSafeInteger(parsed.sequence) || parsed.sequence < 0) throw new Error("invalid snapshot sequence");
       if (parsed.sequence !== sequence) throw new Error("snapshot sequence conflicts with its common frame header");
       if (!Number.isSafeInteger(parsed.generation) || parsed.generation < 0) throw new Error("invalid snapshot generation");
-      if (typeof parsed.serverIdentity !== "string" || typeof parsed.authoritative !== "boolean" || !parsed.snapshot) {
+      if (typeof parsed.serverIdentity !== "string" || typeof parsed.authoritative !== "boolean") {
+        throw new Error("invalid topology snapshot metadata");
+      }
+      // No tree at all is the reconciliation acknowledgement: a notified host
+      // pass found the world exactly as this process already holds it and sent
+      // the generation alone. It closes the reconciliation state and nothing
+      // else — see the reducer's snapshot arm.
+      if (parsed.snapshot !== undefined && parsed.snapshot !== null && typeof parsed.snapshot !== "object") {
         throw new Error("invalid topology snapshot metadata");
       }
       if (!parsed.authoritative) requireHostSequence(sequence, "ordered topology snapshot");
-      const { sequence: _embeddedSequence, ...snapshot } = parsed;
-      return { kind: "snapshot", sequence, ...snapshot };
+      const { sequence: _embeddedSequence, snapshot, ...metadata } = parsed;
+      return { kind: "snapshot", sequence, snapshot: snapshot ?? undefined, ...metadata };
     }
     case 8:
       requireHostSequence(sequence, "protocol progress");

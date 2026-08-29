@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { keyForScope, sameRoot } from "./api";
 import { createPaintTicket } from "../../perf/paintTicket";
+import { awaitPanePaint } from "../terminal/panePaintGate";
 import { useCommittedRef } from "../../commands/useCommittedRef";
 import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope } from "./types";
 
@@ -143,7 +144,16 @@ export function useActiveRoot(options: Options): {
       }
     };
 
-    void resolve();
+    // Behind the pane's own screen, not ahead of it. This effect fires on the
+    // *optimistic* switch — before the tmux action is even acked — and the
+    // root it produces cascades into a directory listing and a Git lease, all
+    // of it on the link the reveal is being answered over. The gate is a
+    // timeout and never a barrier: a pane that never paints costs this probe
+    // 600 ms and nothing more, and the backstop below plus the
+    // `activePaneCurrentPath` effect are unchanged, so the root still arrives
+    // on every signal it ever did.
+    const painting = latest.current.scope()?.paneId;
+    void (painting === undefined ? Promise.resolve() : awaitPanePaint(painting)).then(resolve);
     // A foreground backstop, not a pipeline. Pane and window changes rebuild
     // this scope and re-resolve immediately, so the only thing left for a timer
     // to catch is `cd` inside the pane the user is already in — for which tmux
