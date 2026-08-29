@@ -74,6 +74,15 @@ pub(super) enum TerminalEvent {
     ClipboardWrite {
         data: Vec<u8>,
     },
+    /// The scrollback above a pane's screen, answering one history request.
+    ///
+    /// Deliberately not a `Seed`: it carries no generation because it claims no
+    /// place in the output ordering, and the renderer splices it above what it
+    /// is already showing rather than replacing it.
+    History {
+        pane_id: String,
+        data: Vec<u8>,
+    },
     FileService {
         scope: String,
         payload: Vec<u8>,
@@ -191,6 +200,7 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
         TerminalEvent::ClipboardWrite { data } => {
             encode_bytes(17, "terminal-clipboard".into(), sequence, data)
         }
+        TerminalEvent::History { pane_id, data } => encode_bytes(18, pane_id, sequence, data),
         TerminalEvent::FileService { scope, payload } => encode_bytes(12, scope, sequence, payload),
         TerminalEvent::GitService { scope, payload } => encode_bytes(13, scope, sequence, payload),
         TerminalEvent::AgentService { scope, payload } => {

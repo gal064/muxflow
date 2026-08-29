@@ -19,6 +19,13 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "seed"; paneId: string; generation: number; data: OwnedTerminalBytes }
   | { kind: "output"; paneId: string; generation: number; data: OwnedTerminalBytes }
   | { kind: "seedDiagnostic"; paneId: string; message: string }
+  /**
+   * The scrollback above a pane's screen, answering one
+   * `requestTerminalHistory`. Deliberately not a seed: it carries no
+   * generation, because it claims no place in the output ordering — the
+   * renderer splices it above what it is already showing, or discards it.
+   */
+  | { kind: "terminalHistory"; paneId: string; data: OwnedTerminalBytes }
   | { kind: "flowStalled"; paneId: string; message: string }
   | { kind: "flowPaused"; paneId: string; message: string }
   | { kind: "clipboardWrite"; text: string }
@@ -214,6 +221,10 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
       } catch {
         throw new Error("terminal clipboard write payload is not valid UTF-8");
       }
+    case 18:
+      requireHostSequence(sequence, "terminal history");
+      requirePaneId(label, "terminal history");
+      return { kind: "terminalHistory", paneId: label, data: copyTerminalBytes(data), sequence };
     default: throw new Error(`unknown terminal frame kind ${frame[0]}`);
   }
 }
@@ -860,6 +871,20 @@ export function encodeTerminalVisibilityFrame(
   view.setBigUint64(scalarsOffset + 2, BigInt(checkpoint.terminalEpoch), false);
   view.setBigUint64(scalarsOffset + 10, BigInt(checkpoint.outputGeneration), false);
   return frame;
+}
+
+/**
+ * Asks the host for the scrollback above a pane's screen.
+ *
+ * Separate from `requestTerminalSeed` because it asks a different question: a
+ * seed request also asserts that this pane is visible and settles its seed
+ * debt, and a photograph of the scrollback does neither.
+ */
+export function requestTerminalHistory(clientId: string, paneId: string, lines: number): Promise<void> {
+  const boundary = { clientId, paneId, lines };
+  return measurePerfRequest(
+    "invoke.request_terminal_history", "terminal", boundary, (request) => invoke("request_terminal_history", request),
+  );
 }
 
 export function requestTerminalSeed(clientId: string, paneId: string): Promise<void> {

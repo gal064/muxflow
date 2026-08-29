@@ -1105,6 +1105,39 @@ pub async fn request_terminal_seed(
     Ok(())
 }
 
+/// Asks the host for the scrollback above one pane's screen.
+///
+/// Kept separate from `request_terminal_seed` rather than folded into it with a
+/// flag: a seed request is also a claim that the pane is visible and settles the
+/// pane's seed debt, and neither is true of a photograph of the scrollback.
+#[tauri::command]
+pub async fn request_terminal_history(
+    client_id: String,
+    pane_id: String,
+    lines: u32,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    let request = terminal_history_request(pane_id, lines)?;
+    let client = get_client(&clients, &client_id)?;
+    tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("terminal history task failed: {error}"))??;
+    Ok(())
+}
+
+fn terminal_history_request(pane_id: String, lines: u32) -> Result<v1::Request, String> {
+    validate_tmux_id(&pane_id, '%')?;
+    if lines == 0 {
+        return Err("terminal history request must ask for at least one line".into());
+    }
+    Ok(v1::Request {
+        operation: v1::Operation::RequestTerminalHistory.into(),
+        scope: pane_id,
+        terminal_history_lines: lines,
+        ..Default::default()
+    })
+}
+
 fn terminal_seed_request(pane_id: String) -> Result<v1::Request, String> {
     validate_tmux_id(&pane_id, '%')?;
     Ok(v1::Request {

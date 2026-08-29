@@ -103,6 +103,23 @@ describe("binary terminal IPC", () => {
     expect(empty.data.buffer.byteLength).toBe(0);
   });
 
+  /**
+   * A history answer carries no generation, which is the whole difference
+   * between it and a seed: it claims no place in the output ordering. Decoding
+   * it as a seed would take its first eight bytes of scrollback for one.
+   */
+  it("decodes a history answer as its own kind, with no generation prefix", () => {
+    expect(decodeTerminalEvent(frame(18, "%4", 12, textEncoder.encode("older\r\nnewer")))).toEqual({
+      kind: "terminalHistory", paneId: "%4", sequence: 12, data: textEncoder.encode("older\r\nnewer"),
+    });
+    // Nothing above the screen is a real answer, not a malformed frame.
+    expect(decodeTerminalEvent(frame(18, "%4", 13))).toEqual({
+      kind: "terminalHistory", paneId: "%4", sequence: 13, data: new Uint8Array(),
+    });
+    expect(() => decodeTerminalEvent(frame(18, "%4", 0))).toThrow("nonzero");
+    expect(() => decodeTerminalEvent(frame(18, "pane", 12))).toThrow("invalid pane label");
+  });
+
   it("rejects frames truncated before the label, sequence, or terminal generation", () => {
     expect(() => decodeTerminalEvent(Uint8Array.from([1, 0, 4, 37]).buffer)).toThrow("common header");
     expect(() => decodeTerminalEvent(Uint8Array.from([1, 0, 4, 37, 49, 50, 51, ...u64(1).slice(0, 7)]).buffer)).toThrow("truncated");

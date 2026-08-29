@@ -150,6 +150,11 @@ enum Operation {
   // credentials this host deliberately cannot supply interactively, and its
   // outcome is therefore never inferable from the local repository alone.
   OPERATION_GIT_PUSH = 47;
+  // Photographs the scrollback above a pane's screen, which a screen-only seed
+  // deliberately does not carry. It answers a question the user asked by
+  // scrolling to the top of a pane, so it is not part of the output stream:
+  // the answer is one TERMINAL_HISTORY event and it moves no generation.
+  OPERATION_REQUEST_TERMINAL_HISTORY = 48;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -177,6 +182,10 @@ message Request {
   // this is answered with a seed, which is what makes the flag — not the
   // payload — the thing the resume path turns on.
   bool terminal_renderer_holds_snapshot = 16;
+  // How many lines above the screen REQUEST_TERMINAL_HISTORY asks for. Read by
+  // no other operation, and clamped by the host: the number decides the size of
+  // a capture the user is waiting on.
+  uint32 terminal_history_lines = 17;
 }
 
 message Response {
@@ -245,6 +254,11 @@ enum EventKind {
   // paste buffer. The desktop may write `detail` to the system clipboard and
   // must never answer with clipboard contents.
   EVENT_KIND_TERMINAL_CLIPBOARD_WRITE = 18;
+  // The scrollback above a pane's screen, in `terminal.data`, answering one
+  // REQUEST_TERMINAL_HISTORY. Deliberately not a seed: it carries no
+  // generation, replaces no screen, and repairs no seed debt — the renderer
+  // splices it above what it is already showing, or discards it.
+  EVENT_KIND_TERMINAL_HISTORY = 19;
 }
 
 message HostEvent {

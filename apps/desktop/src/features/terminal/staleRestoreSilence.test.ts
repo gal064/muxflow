@@ -12,6 +12,15 @@ import { ownTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
 
 vi.mock("../../diagnostics/incidents", () => ({ recordIncident: vi.fn() }));
 
+/** Bounded polling: the splice completes on a frame or on a fallback timer. */
+async function waitFor(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
 describe("stale cached restore", () => {
   beforeAll(() => {
     if (!window.matchMedia) {
@@ -60,10 +69,9 @@ describe("stale cached restore", () => {
   // the history and the current screen together. If live output landed while
   // the history was in flight, that rewrite would drop it — so the splice is
   // refused on the same rule a stale restore is, and like it, journals instead
-  // of speaking. The affordance stays available; nothing is lost.
-  //
-  // Lands with step 5 (§4.4), which adds `XtermRenderer.prependHistory`.
-  it.skip("refuses a history splice when the stream moved under it", () => {
+  // of speaking. Nothing is lost: the scrollback is still in tmux, and the next
+  // time the user reaches the top the question is asked again.
+  it("refuses a history splice when the stream moved under it", () => {
     type HistorySplice = {
       prependHistory(history: OwnedTerminalBytes, throughGeneration: number): "applied" | "superseded";
     };
@@ -86,6 +94,35 @@ describe("stale cached restore", () => {
       lastEnqueuedGeneration: 5,
     });
     expect(diagnostics).toEqual([]);
+
+    renderer.dispose();
+  });
+
+  /**
+   * The other half of the splice: when nothing moved, the scrollback really
+   * does end up above the screen, and the screen is still there under it.
+   *
+   * Polled rather than awaited on a promise, because the splice deliberately
+   * waits for xterm to finish with everything it was already given — that
+   * barrier is what keeps the rewrite from dropping bytes still inside the
+   * parser, and it lands on a frame or on the scheduler's fallback timer.
+   */
+  it("puts earlier output above the screen when the stream held still", async () => {
+    const renderer = new XtermRenderer({ paneId: "%10" });
+    renderer.open(document.createElement("div"));
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("the screen")), undefined, 5);
+    await waitFor(() => renderer.serialize().includes("the screen"), "the screen to be applied");
+
+    const splice = renderer as unknown as {
+      prependHistory(history: OwnedTerminalBytes, throughGeneration: number): "applied" | "superseded";
+    };
+    const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
+    expect(splice.prependHistory(history, 5)).toBe("applied");
+
+    await waitFor(() => renderer.serialize().includes("earlier output"), "the history to be spliced");
+    const spliced = renderer.serialize();
+    // Both halves, in the order the user reads them.
+    expect(spliced.indexOf("earlier output")).toBeLessThan(spliced.indexOf("the screen"));
 
     renderer.dispose();
   });

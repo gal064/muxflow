@@ -227,6 +227,7 @@ pub fn run() {
             connection::select_terminal_session,
             connection::set_terminal_visibility,
             connection::request_terminal_seed,
+            connection::request_terminal_history,
             connection::terminal_link_stats,
             connection::input_latency_stats,
             connection::tmux_action::tmux_action,

@@ -32,6 +32,11 @@ const resource = (
   };
 };
 
+/** The scrollback above a pane's screen, answering a question the user asked. */
+const history = (sequence: number, paneId = "%1", data = Uint8Array.of(7)): TerminalEvent => ({
+  kind: "terminalHistory", paneId, data: copyTerminalBytes(data), sequence,
+});
+
 /**
  * The host's answer to a reveal it could verify: no screen, the output since
  * the checkpoint, and the flag that says so.
@@ -689,6 +694,47 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     // whole recovery: the renderer already holds the screen they continue.
     hub.publish(resumeAnswer(3, 3));
     expect(hub.paneHealth("%1").awaitingSeed).toBe(false);
+  });
+
+  /**
+   * A history answer is the one pane event that is not part of the output
+   * stream. Putting it through the ladder every other pane event goes through
+   * would let a photograph of the scrollback advance the generation watermark
+   * — silently discarding the output that follows it — or settle a seed debt
+   * with something that is not a screen.
+   */
+  it("delivers a history answer beside the output stream rather than inside it", () => {
+    const hub = new TerminalEventHub();
+    const received: TerminalEvent[] = [];
+    hub.subscribePane("%1", (event) => received.push(event));
+    hub.publish(seed(1, 5));
+    received.length = 0;
+
+    hub.publish(history(2));
+    expect(received.map((event) => event.kind)).toEqual(["terminalHistory"]);
+    // The watermark did not move, so output the host already sent is still
+    // ahead of it and is still delivered.
+    hub.publish(output(3, 6));
+    expect(received.map((event) => event.kind)).toEqual(["terminalHistory", "output"]);
+
+    // And it settles no debt: a pane owed a screen is still owed one.
+    hub.publish(resource(4, 7, { requiresSeed: true, recoveryReason: "host recovery pending" }));
+    expect(hub.paneHealth("%1").awaitingSeed).toBe(true);
+    hub.publish(history(5));
+    expect(hub.paneHealth("%1").awaitingSeed).toBe(true);
+  });
+
+  it("drops a history answer for a pane nothing is rendering", () => {
+    const hub = new TerminalEventHub();
+    const received: TerminalEvent[] = [];
+    const unsubscribe = hub.subscribePane("%1", (event) => received.push(event));
+    unsubscribe();
+    // Nothing buffers it: the renderer that asked the question is gone, and its
+    // successor asks again if the user asks again.
+    hub.publish(history(1));
+    hub.subscribePane("%1", (event) => received.push(event));
+    hub.publish(output(2, 1));
+    expect(received.map((event) => event.kind)).toEqual(["output"]);
   });
 
   it("contains a failing pane health observer like every other observer", () => {

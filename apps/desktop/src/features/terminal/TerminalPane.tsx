@@ -19,7 +19,7 @@ import { readAtlasInvalidationCount } from "./atlasStaleProbe";
 import { notePaint, startLongTaskTracker } from "./paintTailProbe";
 import { createGridMismatchProbe, type GridMismatchProbe } from "./gridMismatchProbe";
 import { outputAfterRecovery, reducePaneReveal, type PaneRevealState } from "./PaneRevealState";
-import { requestTerminalSeed, setTerminalVisibility } from "./api";
+import { requestTerminalHistory, requestTerminalSeed, setTerminalVisibility } from "./api";
 import { ownTerminalBytes } from "./TerminalBytes";
 import { DeferredTerminalOutputQueue } from "./DeferredTerminalOutputQueue";
 import { describePaneDegradation, PaneDegradedWatchdog } from "./PaneDegradedWatchdog";
@@ -53,6 +53,17 @@ let nextTransferRenderLifetime = 0;
  * proceeding after the bound is safe.
  */
 const PANE_HANDOFF_TIMEOUT_MS = 2_000;
+
+/**
+ * How much scrollback one reach-the-top fetches.
+ *
+ * tmux's own default `history-limit` is 2,000 lines, so this asks for
+ * everything an unconfigured server keeps and nothing it would have to
+ * fabricate. It is also what the seed used to carry on every single reveal —
+ * the point of the change is that it is now fetched once, when the user goes
+ * looking for it, instead of on every switch whether they do or not.
+ */
+const TERMINAL_HISTORY_LINES = 2_000;
 
 /**
  * How often one pane may contribute a render-cost sample.
@@ -597,6 +608,21 @@ export function TerminalPane({
     // (both in crates/tmux-control/src/replay.rs). A skip decided on the
     // generation alone keeps a screen the host is trying to replace.
     let screenOnDisplay: { generation: number; terminalEpoch: number | undefined; serialized: string } | undefined;
+    // Whether what this terminal shows arrived as a seed, which is a photograph
+    // of the visible grid and nothing above it. Such a pane has no scrollback
+    // until it is asked for; a pane restored from this side's own cache, or
+    // resumed onto the screen it kept, is showing a buffer that already carries
+    // whatever history it had.
+    //
+    // Per pane and per epoch by construction: only a seed sets it, and an epoch
+    // change is answered with a fresh one.
+    let screenSeeded = false;
+    let historyLoaded = false;
+    let historyRequested = false;
+    // What this terminal had been handed when the history was asked for. The
+    // renderer refuses a splice onto a stream that has moved past it, because
+    // output printed since scrolls the screen and moves the rows above it.
+    let historyAnchorGeneration = 0;
     const cached = terminalStateCache.get(pane.id);
     const currentCached = cached?.terminalEpoch !== undefined && cached.terminalEpoch === hub.generationEpoch
       ? cached
@@ -679,9 +705,50 @@ export function TerminalPane({
     });
     watchdogRef.current = watchdog;
 
+    // Automatic, and deliberately not a button: the user reaching the top of a
+    // pane *is* the request, and a row of chrome that appears there to be
+    // clicked is one more thing between them and their scrollback. The cost of
+    // being wrong is one capture the user never looks at.
+    const unsubscribeTopReached = renderer.onScrollbackTopReached(() => {
+      if (!screenSeeded || historyLoaded || historyRequested) return;
+      const currentClientId = clientIdRef.current;
+      if (!currentClientId) return;
+      historyRequested = true;
+      historyAnchorGeneration = renderer.enqueuedGeneration;
+      void requestTerminalHistory(currentClientId, pane.id, TERMINAL_HISTORY_LINES).catch((error) => {
+        // The latch reopens, so the next time the user reaches the top they ask
+        // again. Journalled rather than spoken: nothing on screen is wrong, and
+        // the pane is showing everything it has.
+        historyRequested = false;
+        recordIncident("pane.historyRequestFailed", {
+          paneId: pane.id,
+          error: String(error).slice(0, 200),
+        });
+      });
+    });
     const unsubscribeInput = renderer.onInput((input) => inputRef.current(pane.id, input));
     const unsubscribeViewport = renderer.onViewportChange(setViewport);
     const unsubscribeEvents = hub.subscribePane(pane.id, (event) => {
+      if (event.kind === "terminalHistory") {
+        historyRequested = false;
+        // The screen this scrollback belongs above is gone — the pane is
+        // waiting for a seed, or has been given a host-owned one. Splicing
+        // history onto whatever is there now would put the user's earlier
+        // output above a screen it never sat above.
+        if (!screenSeeded) return;
+        // An empty answer is the host saying there is nothing above this
+        // screen. Latched as loaded: a splice of zero rows still costs a whole
+        // buffer rewrite, and asking again would get the same nothing.
+        if (event.data.byteLength === 0) {
+          historyLoaded = true;
+          return;
+        }
+        // A refusal leaves the latch open on purpose — the stream moved under
+        // the answer, and the next time the user reaches the top the question
+        // is asked against the screen they are actually looking at.
+        historyLoaded = renderer.prependHistory(event.data, historyAnchorGeneration) === "applied";
+        return;
+      }
       const transition = reducePaneReveal(revealStateRef.current, event);
       revealStateRef.current = transition.state;
       const effect = transition.effect;
@@ -703,6 +770,12 @@ export function TerminalPane({
       if (effect.kind === "seed") {
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
+        // A seed is the visible grid and nothing above it, so this pane's
+        // scrollback is once again something to fetch rather than something it
+        // holds — including after a reconnect, which is where the whole
+        // scrollback of every pane used to arrive unasked for.
+        screenSeeded = true;
+        historyLoaded = false;
         // A seed replaces the screen wholesale, so whatever was up is not what
         // this terminal shows any more.
         screenOnDisplay = undefined;
@@ -776,6 +849,9 @@ export function TerminalPane({
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
         screenOnDisplay = undefined;
+        // Nothing is on the terminal to splice above; the seed this is waiting
+        // for is what makes the scrollback askable again.
+        screenSeeded = false;
         // A handshake answer this reducer has no rule for used to fall through
         // to nothing at all. It recovers like any other seed debt now; what it
         // still owes is a record, because the shape itself is the finding.
@@ -903,6 +979,9 @@ export function TerminalPane({
           screenOnDisplay = effect.rawTail.byteLength === 0
             ? { generation: effect.tailThroughGeneration, terminalEpoch: eventEpoch, serialized: effect.serialized }
             : undefined;
+          // A host-owned screen is a serialization, scrollback and all, not a
+          // photograph of the grid.
+          screenSeeded = false;
           flushDeferredOutput(effect.tailThroughGeneration);
           // Recovery material laid a real screen down; the pane is whole again.
           watchdog.noteHealthy();
@@ -1003,6 +1082,7 @@ export function TerminalPane({
       unsubscribeMeasurements();
       unsubscribeEvents();
       unsubscribeViewport();
+      unsubscribeTopReached();
       unsubscribeInput();
       terminalContainer.removeEventListener("paste", interceptPaste, true);
       terminalContainer.removeEventListener("keydown", handleTerminalKeyDown, true);

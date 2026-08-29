@@ -228,6 +228,34 @@ impl TerminalAttachment {
         )
     }
 
+    /// Asks tmux for the scrollback above one pane's screen.
+    ///
+    /// Deliberately not coalesced against `capture_in_flight`. That ledger
+    /// means "a seed is already coming for this pane", and it is read to
+    /// *suppress* seeds: a history entry in it would silence the photograph a
+    /// reveal needs, which is the blank pane the ledger exists to avoid. The
+    /// two captures cannot collide either — tmux answers commands in order and
+    /// the reader correlates a block by the marker before it, so a history
+    /// block and a seed block are strictly sequential however they were
+    /// interleaved at the writer.
+    ///
+    /// The whole command is one line, so the marker and the capture reach tmux
+    /// adjacent by construction rather than by holding the lock across two
+    /// writes.
+    pub(super) fn request_history(&mut self, pane_id: &str, lines: u32) -> anyhow::Result<()> {
+        validate_tmux_id(pane_id, '%')?;
+        if !self.contains_pane(pane_id) {
+            bail!("pane is not owned by this session control client");
+        }
+        let mut stdin = self
+            .stdin
+            .lock()
+            .map_err(|_| anyhow::anyhow!("tmux control stdin is poisoned"))?;
+        writeln!(stdin, "{}", capture_history_command(pane_id, lines))?;
+        stdin.flush()?;
+        Ok(())
+    }
+
     /// Takes back the hidden per-window pointer tmux actually sizes from, and
     /// says whether it did.
     ///
@@ -841,6 +869,14 @@ impl TerminalClients {
             .request_seed(pane_id)
     }
 
+    pub(super) fn request_history(&mut self, pane_id: &str, lines: u32) -> anyhow::Result<()> {
+        self.clients
+            .values_mut()
+            .find(|client| client.contains_pane(pane_id))
+            .context("pane has no attached session control client")?
+            .request_history(pane_id, lines)
+    }
+
     /// Seeds a pane because the renderer explicitly asked for its screen.
     ///
     /// The request is itself the statement of visibility — the desktop asks
@@ -1221,6 +1257,33 @@ pub(super) fn queue_input(input_id: u64, pane_id: &str) -> String {
 fn capture_command(pane_id: &str) -> String {
     format!(
         "capture-pane -p -e -J -t {pane_id} ; capture-pane -p -e -J -a -q -t {pane_id} ; display-message -p -t {pane_id} '__ADE_META__:#{{pane_id}}:#{{cursor_x}}:#{{cursor_y}}:#{{alternate_on}}:#{{bracket_paste_flag}}:#{{mouse_standard_flag}}:#{{mouse_button_flag}}:#{{mouse_any_flag}}:#{{mouse_sgr_flag}}:#{{mouse_utf8_flag}}:#{{cursor_flag}}:#{{keypad_cursor_flag}}:#{{keypad_flag}}:#{{wrap_flag}}:#{{pane_width}}:#{{focus_flag}}'"
+    )
+}
+
+/// The most scrollback one request may photograph.
+///
+/// The renderer's own serialization keeps 10,000 lines, so anything above this
+/// could not be spliced in anyway, and the number bounds a capture the user is
+/// waiting on: it is written straight onto the control lane ahead of their next
+/// keystroke.
+const MAX_HISTORY_LINES: u32 = 10_000;
+
+/// Photographs the scrollback *above* one pane's screen.
+///
+/// The counterpart to [`capture_command`], which takes the screen and nothing
+/// above it. `-E -1` stops at the line immediately above the display, so the
+/// history and the screen meet exactly once: no row appears in both and none is
+/// missing between them.
+///
+/// The marker carries the line count as well as the pane, so the request is
+/// legible in a tmux log beside the answer it produced; the reader needs only
+/// the pane. There is no `__ADE_META__` leg — this is not a screen, and nothing
+/// in the answer may be mistaken for a seed the reader has to store.
+fn capture_history_command(pane_id: &str, lines: u32) -> String {
+    let lines = lines.clamp(1, MAX_HISTORY_LINES);
+    let digits = pane_id.strip_prefix('%').unwrap_or(pane_id);
+    format!(
+        "display-message -p '__ADE_HISTORY__:{lines}:{digits}' ; capture-pane -p -e -J -S -{lines} -E -1 -t {pane_id}"
     )
 }
 

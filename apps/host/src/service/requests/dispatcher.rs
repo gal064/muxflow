@@ -411,6 +411,24 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
+        (Handler::Terminal, Some(v1::Operation::RequestTerminalHistory)) => {
+            // Nothing about the pane's state changes here, so — unlike a seed
+            // request — this makes no claim of visibility and settles no debt.
+            // It writes one capture and the answer arrives as its own event.
+            let result = terminal
+                .lock()
+                .unwrap()
+                .request_history(&request.scope, request.terminal_history_lines);
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_history_rejected", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
         (Handler::Test, Some(v1::Operation::TestDelay)) if testing_enabled() => {
             let sender = control_tx.clone();
             let pending = Arc::clone(pending);

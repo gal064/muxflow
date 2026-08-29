@@ -113,6 +113,28 @@ export interface TerminalRenderer {
    * answer; the renderer asks for its own seed on the overflow case.
    */
   write(bytes: OwnedTerminalBytes, onRendered?: () => void, generation?: number): boolean;
+  /**
+   * Puts scrollback above what this terminal is showing, keeping the user's
+   * viewport on the rows they were reading.
+   *
+   * xterm has no prepend, so this is a re-seed in disguise: the history and a
+   * serialization of the current buffer are written together as one atomic
+   * replace. That makes it refusable rather than partial — `"superseded"` means
+   * the stream moved and nothing was touched, and the caller may ask again.
+   */
+  prependHistory(history: OwnedTerminalBytes, throughGeneration: number): "applied" | "superseded";
+  /**
+   * The highest generation this terminal has been handed. It is the number a
+   * caller asking the host a question about the screen must quote back, so the
+   * answer can be refused if the stream moved while it was in flight.
+   */
+  readonly enqueuedGeneration: number;
+  /**
+   * Fires when the user asks to see above the top of what this pane holds:
+   * either scrolling up onto row 0, or scrolling up again once already there.
+   * Silent on the alternate screen, which has no scrollback.
+   */
+  onScrollbackTopReached(listener: () => void): () => void;
   /** Measures the CSS box in cells. Does not resize the terminal. */
   measure(): TerminalSize | undefined;
   /**
@@ -159,6 +181,15 @@ export interface TerminalRenderer {
  * smoothness. Zero means each tick lands on the frame it arrives in.
  */
 const SMOOTH_SCROLL_DURATION_MS = 0;
+
+/**
+ * What sits between spliced history and the screen below it.
+ *
+ * The reset is not cosmetic: `capture-pane -e` ends on whatever attributes the
+ * last history row left active, and without clearing them the screen below
+ * would inherit that pen.
+ */
+const HISTORY_SEPARATOR = new TextEncoder().encode("\u001b[m\r\n");
 
 /**
  * Closes a background bleed in xterm's serialize addon before it can paint.
@@ -241,6 +272,7 @@ export class XtermRenderer implements TerminalRenderer {
   readonly #serialize = new SerializeAddon();
   readonly #search = new SearchAddon({ highlightLimit: 1_000 });
   readonly #viewportListeners = new Set<(state: TerminalViewportState) => void>();
+  readonly #topListeners = new Set<() => void>();
   readonly #disposables: IDisposable[] = [];
   /**
    * Everything that only makes sense while the GPU renderer is mounted: the
@@ -254,11 +286,22 @@ export class XtermRenderer implements TerminalRenderer {
   readonly #options: TerminalRendererOptions;
   #webgl?: WebglAddon;
   #newOutput = false;
+  #lastViewportY = 0;
   #lastViewport?: TerminalViewportState;
   #seedRequested = false;
   #drainPromise?: Promise<DrainedTerminalSnapshot>;
   #drainAbandoned = false;
   #disposed = false;
+  /**
+   * How many writes this terminal has been handed, of any kind.
+   *
+   * Counted rather than compared by generation because not every write carries
+   * one: a locally written empty seed and a cached restore both reach xterm
+   * without moving the generation watermark, and a history splice that ran
+   * across either of them would drop it. This is the only number that answers
+   * "has anything at all been queued since I looked".
+   */
+  #writesEnqueued = 0;
 
   constructor(options: TerminalRendererOptions = {}) {
     this.#options = options;
@@ -331,8 +374,13 @@ export class XtermRenderer implements TerminalRenderer {
         `Terminal renderer queue exceeded its bound (${pending} bytes${records === undefined ? "" : `, ${records} records`}); requesting a fresh seed.`,
       ),
     );
-    this.#disposables.push(this.#terminal.onScroll(() => {
+    this.#disposables.push(this.#terminal.onScroll((viewportY) => {
       if (this.#atBottom()) this.#newOutput = false;
+      // The transition, not the state: a pane seeded with one screen sits at
+      // row 0 from the moment it opens, and treating that as a request would
+      // fetch scrollback nobody asked for on every reveal.
+      if (viewportY === 0 && this.#lastViewportY > 0) this.#noteTopReached();
+      this.#lastViewportY = viewportY;
       this.#emitViewport();
     }));
     this.#disposables.push(this.#terminal.registerLinkProvider({
@@ -342,6 +390,16 @@ export class XtermRenderer implements TerminalRenderer {
 
   open(element: HTMLElement): void {
     this.#terminal.open(element);
+    // The other half of "the user asked for more". A pane holding exactly one
+    // screen cannot scroll, so xterm emits no scroll event and the transition
+    // above never happens — but pushing the wheel up against a top that will
+    // not move is the same request, and for a screen-only seed it is the
+    // ordinary one.
+    const wheel = (event: WheelEvent) => {
+      if (event.deltaY < 0 && this.#terminal.buffer.active.viewportY === 0) this.#noteTopReached();
+    };
+    element.addEventListener("wheel", wheel, { passive: true });
+    this.#disposables.push({ dispose: () => element.removeEventListener("wheel", wheel) });
     this.#applyDeviceSafeCell();
     const core = (this.#terminal as MeasurableTerminal)._core;
     const charSize = core?._charSizeService;
@@ -368,6 +426,7 @@ export class XtermRenderer implements TerminalRenderer {
     // is allowed to ask again.
     this.#seedRequested = false;
     this.#scheduler.replace(bytes, true, this.#enqueued(generation, onRendered));
+    this.#notePositionReset();
     this.#emitViewport();
   }
 
@@ -403,6 +462,7 @@ export class XtermRenderer implements TerminalRenderer {
       false,
       this.#enqueued(generation, onRendered),
     );
+    this.#notePositionReset();
     this.#emitViewport();
     return true;
   }
@@ -418,6 +478,71 @@ export class XtermRenderer implements TerminalRenderer {
     }
     this.#emitViewport();
     return queued;
+  }
+
+  prependHistory(history: OwnedTerminalBytes, throughGeneration: number): "applied" | "superseded" {
+    // A TUI's alternate screen has no scrollback to prepend to, and rewriting
+    // the buffer under it would destroy the frame the program is drawing.
+    if (this.#disposed || this.isAlternateScreenActive()) return "superseded";
+    const enqueuedGeneration = this.#generations.enqueuedGeneration;
+    // The same rule a stale restore obeys, for the same reason plus one: output
+    // printed since this history was photographed has scrolled the screen, so
+    // the rows above it have moved and a splice would duplicate or drop some of
+    // them. Journalled, never spoken — the pane keeps the screen it has, and
+    // the next time the user reaches the top the question is asked again.
+    if (throughGeneration < enqueuedGeneration || this.#scheduler.overflowed) {
+      recordIncident("pane.historySuperseded", {
+        paneId: this.#options.paneId,
+        throughGeneration,
+        lastEnqueuedGeneration: enqueuedGeneration,
+      });
+      return "superseded";
+    }
+    const previousLength = this.#terminal.buffer.normal.length;
+    const writesBefore = this.#writesEnqueued;
+    // A zero-byte barrier, so the serialization below reads a buffer xterm has
+    // finished with rather than one with bytes still inside its async parser —
+    // those bytes would be serialized as absent and then dropped by `replace`.
+    const queued = this.#scheduler.enqueue(new Uint8Array(), () => {
+      if (this.#disposed) return;
+      // Anything handed to xterm after the barrier is queued *behind* it and
+      // has not been applied, so it is neither in the serialization nor safe
+      // from `replace`, which drops the queue. Refuse rather than lose it.
+      if (this.#writesEnqueued !== writesBefore) {
+        recordIncident("pane.historySuperseded", {
+          paneId: this.#options.paneId,
+          throughGeneration,
+          lastEnqueuedGeneration: this.#generations.enqueuedGeneration,
+        });
+        return;
+      }
+      const screen = new TextEncoder().encode(sanitizeSerializedScreen(this.serialize()));
+      const spliced = new Uint8Array(history.byteLength + HISTORY_SEPARATOR.byteLength + screen.byteLength);
+      spliced.set(history);
+      spliced.set(HISTORY_SEPARATOR, history.byteLength);
+      spliced.set(screen, history.byteLength + HISTORY_SEPARATOR.byteLength);
+      this.#notePositionReset();
+      this.#scheduler.replace(
+        spliced,
+        false,
+        () => {
+          // Keep the user on the rows they were reading: everything the splice
+          // added sits above them.
+          const grown = this.#terminal.buffer.normal.length - previousLength;
+          if (grown > 0) this.#terminal.scrollToLine(grown);
+        },
+      );
+    });
+    return queued ? "applied" : "superseded";
+  }
+
+  get enqueuedGeneration(): number {
+    return this.#generations.enqueuedGeneration;
+  }
+
+  onScrollbackTopReached(listener: () => void): () => void {
+    this.#topListeners.add(listener);
+    return () => this.#topListeners.delete(listener);
   }
 
   /**
@@ -647,6 +772,23 @@ export class XtermRenderer implements TerminalRenderer {
     this.#terminal.dispose();
   }
 
+  /**
+   * Forgets where the viewport was, because the buffer under it is being
+   * replaced.
+   *
+   * Without this, the scroll xterm reports as it resets to row 0 reads as the
+   * user arriving at the top from wherever they had been — and a seed would
+   * fetch the scrollback it just deliberately left behind, unasked.
+   */
+  #notePositionReset(): void {
+    this.#lastViewportY = 0;
+  }
+
+  #noteTopReached(): void {
+    if (this.#disposed || this.isAlternateScreenActive()) return;
+    for (const listener of this.#topListeners) listener();
+  }
+
   #atBottom(): boolean {
     const buffer = this.#terminal.buffer.active;
     return buffer.viewportY >= buffer.baseY;
@@ -655,6 +797,7 @@ export class XtermRenderer implements TerminalRenderer {
   /// Records what the terminal was handed, and returns the completion that
   /// records what it applied.
   #enqueued(generation: number, onRendered?: () => void): () => void {
+    this.#writesEnqueued += 1;
     const applied = this.#generations.enqueued(generation, onRendered);
     return () => {
       // The hide checkpoint has already been published from an abandoned drain.

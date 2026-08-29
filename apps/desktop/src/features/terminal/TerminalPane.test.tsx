@@ -20,11 +20,13 @@ import {
 const api = vi.hoisted(() => ({
   setTerminalVisibility: vi.fn(async (..._args: unknown[]) => undefined),
   requestTerminalSeed: vi.fn(async (..._args: unknown[]) => undefined),
+  requestTerminalHistory: vi.fn(async (..._args: unknown[]) => undefined),
 }));
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
   setTerminalVisibility: api.setTerminalVisibility,
   requestTerminalSeed: api.requestTerminalSeed,
+  requestTerminalHistory: api.requestTerminalHistory,
 }));
 
 const { FakeRenderer, renderers } = vi.hoisted(() => {
@@ -44,6 +46,11 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     fontSizes: number[] = [];
     #pendingRendered: Array<() => void> = [];
     #measurementListeners = new Set<() => void>();
+    #topListeners = new Set<() => void>();
+    /** What every splice this pane attempts is answered with. */
+    historyOutcome: "applied" | "superseded" = "applied";
+    historySplices: Array<{ bytes: number; throughGeneration: number }> = [];
+    enqueuedGeneration = 0;
 
     open(): void {}
     measure(): Size | undefined { return this.measured; }
@@ -66,6 +73,18 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     onInput(): () => void { return () => undefined; }
     onSelectionChange(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
+    onScrollbackTopReached(listener: () => void): () => void {
+      this.#topListeners.add(listener);
+      return () => { this.#topListeners.delete(listener); };
+    }
+    /** The user scrolling up against the top of this pane. */
+    reachTop(): void {
+      for (const listener of this.#topListeners) listener();
+    }
+    prependHistory(history: Uint8Array, throughGeneration: number): "applied" | "superseded" {
+      this.historySplices.push({ bytes: history.byteLength, throughGeneration });
+      return this.historyOutcome;
+    }
     focus(): void { this.focusCalls += 1; }
     hasSelection(): boolean { return false; }
     getSelection(): string { return ""; }
@@ -80,8 +99,9 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       if (config.wedgeDrain) return new Promise<never>(() => undefined);
       return { serialized: "cached-screen", outputGeneration: 3 };
     }
-    seed(bytes: Uint8Array, onRendered?: () => void): void {
+    seed(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
       this.writes.push(`seed:${bytes.byteLength}`);
+      this.enqueuedGeneration = generation;
       if (onRendered) this.#pendingRendered.push(onRendered);
     }
     restore(serialized: string, onRendered?: () => void): boolean {
@@ -89,8 +109,9 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       if (onRendered) this.#pendingRendered.push(onRendered);
       return true;
     }
-    write(bytes: Uint8Array, onRendered?: () => void): boolean {
+    write(bytes: Uint8Array, onRendered?: () => void, generation = 0): boolean {
       this.writes.push(`write:${bytes.byteLength}`);
+      if (generation > this.enqueuedGeneration) this.enqueuedGeneration = generation;
       if (onRendered) this.#pendingRendered.push(onRendered);
       return true;
     }
@@ -120,7 +141,7 @@ import { terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
 import type { PaneHealth, TerminalEventHub } from "./TerminalEventHub";
 
-type PaneEvent = Extract<TerminalEvent, { kind: "seed" | "output" | "paneResource" | "seedDiagnostic" }>;
+type PaneEvent = Extract<TerminalEvent, { kind: "seed" | "output" | "paneResource" | "seedDiagnostic" | "terminalHistory" }>;
 
 class FakeHub {
   generationEpoch: number | undefined = 7;
@@ -300,6 +321,7 @@ beforeEach(() => {
   // the next one, and a failing assertion skips any cleanup the test itself does.
   api.setTerminalVisibility.mockReset();
   api.requestTerminalSeed.mockReset();
+  api.requestTerminalHistory.mockReset();
   Object.assign(globalThis, {
     IS_REACT_ACT_ENVIRONMENT: true,
     ResizeObserver: class {
@@ -763,5 +785,93 @@ describe("TerminalPane degraded-state watchdog", () => {
 
     vi.useRealTimers();
     await act(async () => mounted.unmount());
+  });
+});
+
+/**
+ * A seed is the visible grid and nothing above it, so the scrollback the user
+ * scrolls up looking for is still in tmux. Reaching the top is the request for
+ * it — there is no button, because the gesture already says what a button
+ * would.
+ */
+describe("lazy scrollback", () => {
+  function historyEvent(paneId: string, text: string): PaneEvent {
+    return {
+      kind: "terminalHistory", paneId, sequence: 2,
+      data: ownTerminalBytes(new TextEncoder().encode(text)),
+    };
+  }
+
+  it("asks once when a screen-seeded pane is scrolled to the top, and not again while the ask is outstanding", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h1"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h1", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h1", 2000]]);
+
+    // The answer has not arrived, so the second and third gestures are the same
+    // question and cost nothing.
+    await act(async () => { renderer.reachTop(); renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+
+    await act(async () => { hub.deliver(historyEvent("%h1", "earlier output")); });
+    // Quoted back so the renderer can refuse a splice onto a stream that moved.
+    expect(renderer.historySplices).toEqual([{ bytes: 14, throughGeneration: 4 }]);
+
+    // Loaded is loaded: this pane's scrollback is now on the terminal.
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("asks again after a splice the stream moved out from under", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h2"), hub);
+    const renderer = renderers.created[0];
+    renderer.historyOutcome = "superseded";
+    await act(async () => { hub.deliver(seedEvent("%h2", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    await act(async () => { hub.deliver(historyEvent("%h2", "earlier output")); });
+    expect(renderer.historySplices).toHaveLength(1);
+
+    // Nothing was applied, so the question is still open and the next gesture
+    // asks it again — against the screen the user is now looking at.
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(2);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("takes an empty answer as the whole answer", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h3"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h3", 4)); });
+
+    await act(async () => { renderer.reachTop(); });
+    await act(async () => { hub.deliver(historyEvent("%h3", "")); });
+
+    // There is nothing above this screen, so nothing is spliced and nothing is
+    // asked for again.
+    expect(renderer.historySplices).toEqual([]);
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("never asks for a pane that came up from its own cached screen", async () => {
+    terminalStateCache.set("%h4", "warm-screen", { terminalEpoch: 7, outputGeneration: 3 });
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%h4"), hub);
+    const renderer = renderers.created[0];
+    expect(renderer.restoredSerialized).toBe("warm-screen");
+
+    // That screen is a serialization of this pane's own buffer, scrollback
+    // included: there is nothing above it the host is holding.
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
+    await act(async () => { mounted.unmount(); });
   });
 });

@@ -917,6 +917,23 @@ fn process_event(
             };
             send_charged_protocol_event(channel, event_sequence, value, delivery_charge)?;
         }
+        v1::EventKind::TerminalHistory => {
+            let terminal = event
+                .terminal
+                .ok_or("terminal history event omitted bytes")?;
+            // Charged like a seed — it is the same kind of bulk answer and
+            // shares the same delivery window — but delivered as its own frame
+            // so nothing downstream can mistake it for the pane's screen.
+            send_charged_protocol_event(
+                channel,
+                event_sequence,
+                TerminalEvent::History {
+                    pane_id: terminal.pane_id,
+                    data: terminal.data,
+                },
+                delivery_charge,
+            )?;
+        }
         v1::EventKind::TerminalExit => send_protocol_event(
             channel,
             event_sequence,

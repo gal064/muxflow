@@ -713,3 +713,102 @@ fn dropping_the_sequencer_receiver_releases_a_parked_terminal_emitter() {
     emitted.join().unwrap();
     assert!(overflowed.load(Ordering::Acquire));
 }
+
+/// The scrollback a screen-only seed leaves behind, fetched on demand.
+///
+/// The whole point of the block is what it does *not* do: the pane stays
+/// exactly as pending or as live as it was, the generation counter does not
+/// move, and no seed is built. It is an answer to a question, delivered beside
+/// the output stream rather than inside it.
+#[test]
+fn a_history_block_answers_with_the_scrollback_and_moves_nothing_else() {
+    let (mut state, mut harness) = Harness::new(&["%1".into()]);
+    let generation_before = harness.generation.load(Ordering::Acquire);
+
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"__ADE_HISTORY__:2000:1".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    assert_eq!(state.expected_history.as_deref(), Some("%1"));
+
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    for line in [b"older".to_vec(), b"newer".to_vec()] {
+        state.handle(ControlRecord::CommandOutput(line), harness.runtime());
+    }
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+
+    let events = harness.events();
+    assert_eq!(
+        kinds(&events),
+        vec![(v1::EventKind::TerminalHistory, String::new())]
+    );
+    let terminal = events[0].terminal.as_ref().expect("history carries bytes");
+    assert_eq!(terminal.pane_id, "%1");
+    assert_eq!(terminal.data, b"older\r\nnewer");
+    // Not part of the output stream: it claims no place in the generation
+    // ordering, so a renderer's monotonic gate can never discard output because
+    // a history answer went past it.
+    assert_eq!(terminal.generation, 0);
+    assert_eq!(
+        harness.generation.load(Ordering::Acquire),
+        generation_before
+    );
+    assert!(matches!(
+        state.pane_states.get("%1"),
+        Some(PaneSeedState::Pending { .. })
+    ));
+    assert!(state.expected_history.is_none());
+    assert!(harness.writes().is_empty());
+}
+
+/// A history marker for a pane this client does not own is addressed to
+/// nobody, and the block after it must not be read as one.
+#[test]
+fn a_history_marker_for_an_unowned_pane_correlates_to_nothing() {
+    let (mut state, harness) = Harness::new(&["%1".into()]);
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(b"__ADE_HISTORY__:2000:9".to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    assert!(state.expected_history.is_none());
+}
