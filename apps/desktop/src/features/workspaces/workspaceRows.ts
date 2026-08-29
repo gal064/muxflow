@@ -110,11 +110,10 @@ export function workspaceRows(inputs: WorkspaceRowInputs): WorkspaceRowModel[] {
 /**
  * The agents a workspace row inherits its state from, loudest first.
  *
- * `compareAgents` and nothing else. It is the same ranking the agents list
- * below the sidebar sorts by, and a second copy of it here would mean two
- * agents with the same state and the same update time appearing in one order
- * on the workspace row and another in the list directly beneath it — same
- * data, two answers, adjacent on screen.
+ * `compareAgents` and nothing else. Workspace summaries answer "what is
+ * loudest here?", like the bell and jump target; the priority list separately
+ * answers "what changed most recently in this status?" and therefore uses the
+ * lifecycle-change clock instead of hook-update recency.
  */
 function topAgentsBySession(
   agents: readonly AgentRecord[],

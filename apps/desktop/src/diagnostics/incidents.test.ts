@@ -17,6 +17,29 @@ describe("recordIncident", () => {
     expect(Number.isNaN(Date.parse(record.t))).toBe(false);
   });
 
+  /**
+   * A caller journalling a tmux event or an action passes the thing's own
+   * `kind` along, and the spread used to overwrite the label with it — the
+   * record then said `"error"` where it should have said `"link.bridgeDown"`,
+   * which is exactly the field the journal is grepped by.
+   */
+  it("keeps the label it was given when the detail carries its own kind", () => {
+    recordIncident("link.bridgeDown", { kind: "error", detail: "host bridge closed" });
+    const line = vi.mocked(invoke).mock.calls[0]?.[1] as { line: string };
+    const record = JSON.parse(line.line);
+    expect(record.kind).toBe("link.bridgeDown");
+    expect(record.detail).toBe("host bridge closed");
+  });
+
+  it("keeps the frame it writes when the detail carries a t or a launch", () => {
+    recordIncident("link.degraded", { t: "not a time", launch: "hijacked", phase: "resyncing" });
+    const line = vi.mocked(invoke).mock.calls[0]?.[1] as { line: string };
+    const record = JSON.parse(line.line);
+    expect(Number.isNaN(Date.parse(record.t))).toBe(false);
+    expect(record.launch).toHaveLength(8);
+    expect(record.phase).toBe("resyncing");
+  });
+
   it("stays silent when the journal cannot be written", () => {
     vi.mocked(invoke).mockRejectedValueOnce(new Error("no runtime"));
     expect(() => recordIncident("link.degraded", { phase: "resyncing" })).not.toThrow();

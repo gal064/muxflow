@@ -23,6 +23,7 @@ import { recordIncident } from "../diagnostics/incidents";
 import type { TmuxAction } from "../features/tmux/actions";
 import { TauriAgentClient } from "../features/agents/api";
 import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
+import { useRecentIdleClock } from "../features/agents/useRecentIdleClock";
 import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
 import { emitTestNotification, notificationPermissionStatus } from "../features/agents/notifications";
 import { TauriFileWorkspaceClient } from "../features/files/api";
@@ -479,6 +480,10 @@ export function App() {
     terminalEpoch,
     topologyGeneration: hostState.generation,
   });
+  const recentIdleClock = useRecentIdleClock(
+    agentRuntime.agents,
+    appState.shell.agentSort === "status",
+  );
 
   const home = useMemo(() => inferHome(snapshot.panes.map((pane) => pane.currentPath)), [snapshot.panes]);
   // Every workspace on this server, pinned first. ⌘P reads this whole; the
@@ -517,8 +522,9 @@ export function App() {
       }),
       (record) => Boolean(record.paneId) && paneIds.has(record.paneId),
       appState.shell.agentSort,
+      Date.now(),
     );
-  }, [agentRuntime.agents, appState.shell.agentSort, hostLabel, sidebarRows, snapshot.panes, snapshot.sessions, snapshot.windows]);
+  }, [agentRuntime.agents, appState.shell.agentSort, hostLabel, recentIdleClock, sidebarRows, snapshot.panes, snapshot.sessions, snapshot.windows]);
   // What the agents section lists, which under the filter is not everything
   // the shell knows about. Only the section is narrowed: the bell, its count
   // and ⌘⇧U keep reading the whole list, because "who needs me" is a question

@@ -402,6 +402,7 @@ fn action_postcondition(
             };
             source_before.window_id == source_after.window_id
                 && created.window_id == source_before.window_id
+                && created.active
                 && if kind == v1::TmuxActionKind::SplitPaneRight {
                     created.left > source_after.left
                 } else {

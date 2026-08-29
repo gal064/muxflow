@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useReducer, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { TauriAgentClient } from "../features/agents/api";
 import type { TauriFileWorkspaceClient } from "../features/files/api";
 import type { TauriGitWorkspaceClient } from "../features/git/api";
@@ -26,6 +26,14 @@ import {
 } from "../features/terminal/api";
 import { terminalStateCache } from "../features/terminal/TerminalStateCache";
 import { connectionReducer, denormalizeSnapshot, initialHostState } from "../state/connectionReducer";
+import { userFacingBridgeFailure } from "./bridgeFailureText";
+import {
+  createLinkQualityMonitor,
+  describeLinkQuality,
+  LINK_QUALITY_POLL_MS,
+  LINK_STATS_POLL_MS,
+  type LinkQualityChange,
+} from "./linkQuality";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
 import { resolveActiveWindowId, type OptimisticWindowSwitch } from "./windowSelection";
 import { resolveSelectedSession } from "../features/shell/model";
@@ -86,6 +94,19 @@ export function useAppConnectionController({
   activeSessionIdRef.current = activeSessionId;
   const hostPhaseRef = useRef(hostState.phase);
   hostPhaseRef.current = hostState.phase;
+  /**
+   * The last bridge failure already shown as a notice, for as long as the link
+   * stays down.
+   *
+   * The supervisor reports every failed reconnect attempt, so one overnight
+   * outage is seven or eight copies of the same sentence climbing the backoff
+   * ladder, and a connection problem is a notice the shell never auto-dismisses
+   * — the user wakes to a stack of identical errors. The disconnected strip
+   * carries the standing state; the notice only has to say what changed.
+   * Cleared when the transport reports itself connected again, and when a new
+   * bridge starts, so the next outage announces itself.
+   */
+  const lastBridgeFailureRef = useRef<string | undefined>(undefined);
   const [activeWindowId, setActiveWindowId] = useState<string>();
   const [clientId, setClientId] = useState<string>();
   /**
@@ -146,6 +167,49 @@ export function useAppConnectionController({
   const hostScopeRef = useRef(currentHostScope);
   hostScopeRef.current = currentHostScope;
   /**
+   * The one thing six drops in two minutes never told the user: it is the
+   * network.
+   *
+   * The signals it tallies already exist here — a bridge error arriving while
+   * the link was up, the echo probe's outliers, and the native late-request
+   * counter — so this is glue around `linkQuality`, not a new measurement.
+   */
+  const linkQuality = useMemo(() => createLinkQualityMonitor(), []);
+  // The standing verdict, while an episode lasts. It is spoken once, as a
+  // notice (dismissible, and out of the way of the tabs, the host row and
+  // the tmux status line — every fixed row a standing strip was found to
+  // cover), and it stands in for the raw bridge failure in the reconnecting
+  // strip's detail line for as long as the episode lasts.
+  const [linkQualityVerdict, setLinkQualityVerdict] = useState("");
+  const linkQualityVerdictRef = useRef("");
+  linkQualityVerdictRef.current = linkQualityVerdict;
+  // Empty for a local connection: there is no network to blame there, and the
+  // monitor is not fed at all.
+  const linkQualityHostRef = useRef("");
+  linkQualityHostRef.current = connection.mode === "local" ? "" : connection.target;
+  /** Returns whether a verdict was just spoken, so the caller can hold its own notice. */
+  const applyLinkQuality = useCallback((change: LinkQualityChange | undefined): boolean => {
+    if (!change) return false;
+    if (change.kind === "degraded") {
+      recordIncident("link.quality", {
+        state: change.state,
+        losses: change.losses,
+        lagEvents: change.lagEvents,
+        lateRequests: change.lateRequests,
+      });
+      const verdict = describeLinkQuality(change.state, linkQualityHostRef.current);
+      linkQualityVerdictRef.current = verdict;
+      setLinkQualityVerdict(verdict);
+      setStatus(verdict);
+      return true;
+    } else {
+      recordIncident("link.quality", { state: "ok", afterMs: change.afterMs });
+      linkQualityVerdictRef.current = "";
+      setLinkQualityVerdict("");
+    }
+    return false;
+  }, [setStatus]);
+  /**
    * The journal's record of typing lag, which nothing else can report.
    *
    * One probe for the app: input is dispatched from a single callback and the
@@ -173,6 +237,12 @@ export function useAppConnectionController({
   const echoLagProbe = useMemo(() => createEchoLagProbe({
     onSample: (_paneId, lagMs) => inputLatencyReporter.sample("endToEnd", lagMs),
     onIncident: ({ kind, ...detail }) => {
+      // The probe has already applied its own threshold and its own per-pane
+      // dedupe, so an outlier here is exactly one occasion of "the host
+      // answered late" — no second measurement and no timer of our own.
+      if (kind === "input.echoLag" && "lagMs" in detail && linkQualityHostRef.current) {
+        applyLinkQuality(linkQuality.noteEchoLag(Date.now(), detail.lagMs));
+      }
       const currentClientId = clientIdRef.current;
       if (!currentClientId) {
         recordIncident(kind, detail);
@@ -181,7 +251,7 @@ export function useAppConnectionController({
       void fetchLinkStats(currentClientId)
         .then((stats) => recordIncident(kind, stats ? { ...detail, ...stats } : detail));
     },
-  }), [inputLatencyReporter]);
+  }), [applyLinkQuality, inputLatencyReporter, linkQuality]);
   useEffect(() => () => echoLagProbe.dispose(), [echoLagProbe]);
   const hub = useMemo(() => new TerminalEventHub(
     (paneId, reason) => {
@@ -315,6 +385,41 @@ export function useAppConnectionController({
     }
   }, [hostState.phase]);
 
+  /**
+   * Late requests are the slow link itself — a host answer that missed its
+   * deadline — and the native side counts them (it cannot send an event from
+   * a request thread: the delivery ledger belongs to the bridge thread). Read
+   * on a slow cadence while the link is up; each increment is one late request.
+   */
+  useEffect(() => {
+    if (hostState.phase !== "connected" || !clientId || !linkQualityHostRef.current) return;
+    let seen: number | undefined;
+    const timer = setInterval(() => {
+      void fetchLinkStats(clientId).then((stats) => {
+        if (!stats) return;
+        if (seen !== undefined && stats.lateRequestsTotal > seen) {
+          applyLinkQuality(linkQuality.noteLateRequest(Date.now()));
+        }
+        seen = stats.lateRequestsTotal;
+      });
+    }, LINK_STATS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [applyLinkQuality, clientId, hostState.phase, linkQuality]);
+
+  /** Only time ends an episode, and only an episode pays for the timer. */
+  useEffect(() => {
+    if (!linkQualityVerdict) return;
+    const timer = setInterval(() => applyLinkQuality(linkQuality.poll(Date.now())), LINK_QUALITY_POLL_MS);
+    return () => clearInterval(timer);
+  }, [applyLinkQuality, linkQuality, linkQualityVerdict]);
+
+  /** A different machine's link is a different link; nothing carries over. */
+  useEffect(() => {
+    linkQuality.reset();
+    linkQualityVerdictRef.current = "";
+    setLinkQualityVerdict("");
+  }, [currentHostProfileId, linkQuality]);
+
   useEffect(() => {
     void invoke<PersistedProfiles>("list_host_profiles").then((saved) => {
       setProfiles(saved.profiles);
@@ -372,6 +477,11 @@ export function useAppConnectionController({
     let disposed = false;
     let startedClient: string | undefined;
     let recoveringFlowStall = false;
+    // A new bridge is a new outage, whatever the last one ended up saying. The
+    // Reconnect button restarts this effect without ever passing through
+    // `connected`, and a deliberate press that fails the same way still owes
+    // the user an answer.
+    lastBridgeFailureRef.current = undefined;
     // The design says dirty→snapshot is instant: the daemon's topology actor
     // wakes on the notification and pushes as soon as tmux answers. The user
     // measures ~5s from `cd` to the Explorer moving, and the tab name — pure
@@ -436,9 +546,30 @@ export function useAppConnectionController({
           });
         } else if (event.kind === "error" || event.kind === "exit") {
           const detail = event.kind === "error" ? event.message : `Detached: ${event.reason}`;
-          recordIncident("link.bridgeDown", { kind: event.kind, detail });
-          setConnectionDetail(detail);
-          setStatus(detail);
+          recordIncident("link.bridgeDown", { event: event.kind, detail });
+          const shown = userFacingBridgeFailure(detail);
+          // An error while the link is up is the link dropping under the app —
+          // exactly one per outage, whatever the backoff ladder reports after
+          // it, and none for the restarts the app orders itself (a resume, a
+          // flow-stall recovery, a host switch), which arrive without one.
+          // A verdict spoken here is the notice for this drop; the raw failure
+          // would only be a second line saying less.
+          const verdictSpoken = event.kind === "error"
+            && hostPhaseRef.current === "connected"
+            && Boolean(linkQualityHostRef.current)
+            && applyLinkQuality(linkQuality.noteLinkLost(Date.now()));
+          // Under a link that keeps dropping the reconnecting strip is on
+          // screen most of the time, and its detail line is where the verdict
+          // is worth more than the reader's symptom. Only a bridge failure is
+          // replaced: helper guidance and the rest keep their own words.
+          setConnectionDetail(linkQualityVerdictRef.current || shown);
+          // Every attempt is journalled and every attempt stands in the strip;
+          // only a failure the user has not already been told about is worth a
+          // notice. While the link is up this is the first failure of an
+          // outage, which always speaks.
+          const repeated = hostPhaseRef.current !== "connected" && shown === lastBridgeFailureRef.current;
+          lastBridgeFailureRef.current = shown;
+          if (!repeated && !verdictSpoken) setStatus(shown);
           // The message is the only thing that separates "this host has no
           // helper" from "this host cannot be reached": both arrive as a dead
           // bridge, and only the first one has a fix the app can offer. The
@@ -454,7 +585,10 @@ export function useAppConnectionController({
           // questions on that first settled render without delaying the bridge.
           connectionStateChangedRef.current?.(connection, event.state);
           dispatchHost({ type: "connection", phase: event.state });
-          if (event.state === "connected") setConnectionDetail("");
+          if (event.state === "connected") {
+            setConnectionDetail("");
+            lastBridgeFailureRef.current = undefined;
+          }
           setStatus(event.state === "connected" ? "Live" : `Connection ${event.state}…`);
         } else if (event.kind === "snapshot") {
           if (topologyDirtyAt !== undefined) {

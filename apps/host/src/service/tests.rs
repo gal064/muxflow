@@ -103,6 +103,45 @@ async fn bulk_handshake_rejects_stale_server_identity_and_echoes_epoch() {
     task.await.unwrap().unwrap();
 }
 
+/// Every connection leaves one line behind saying how it ended, and the
+/// ordinary end — a desktop that closed its side — is the baseline the
+/// abnormal ones are read against. Pin it here rather than letting a later
+/// exit quietly claim it.
+#[tokio::test]
+async fn a_desktop_that_closes_its_side_ends_the_connection_as_a_client_eof() {
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let activity = Arc::new(FrameActivity::started_now());
+    let served = tokio::spawn({
+        let activity = Arc::clone(&activity);
+        async move { serve_connection(server, None, &activity).await }
+    });
+    write_frame(
+        &mut client,
+        &envelope(
+            1,
+            0,
+            Payload::ClientHello(v1::ClientHello {
+                desktop_version: "client-eof-test".into(),
+                requested_capabilities: HOST_CAPABILITIES,
+                expected_helper_version: HELPER_VERSION.into(),
+                connection_epoch: 5,
+                ..Default::default()
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    let _hello = read_frame(&mut client).await.unwrap().unwrap();
+    drop(client);
+    let (outcome, reason) = served.await.unwrap();
+    outcome.unwrap();
+    assert_eq!(reason, ConnectionEndReason::ClientEof);
+    // The handshake is a frame in each direction, so neither side is reported
+    // as never having spoken, and the client spoke first.
+    assert!(activity.since_last_client_frame() >= activity.since_last_host_frame());
+    assert!(activity.lifetime() >= activity.since_last_client_frame());
+}
+
 /// A stalled ordered operation used to own the frame reader itself. That made
 /// the acknowledgement below unreadable until the operation returned: every
 /// request, pane and workspace behind it appeared frozen. The ordered worker
