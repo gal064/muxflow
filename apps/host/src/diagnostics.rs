@@ -751,13 +751,15 @@ pub fn write_safe_log(class: SafeErrorClass) {
 }
 
 // ---------------------------------------------------------------------------
-// Switch-timing instrumentation.
+// `switch_timing`: the host half of the opt-in perf-log timeline.
 //
-// One JSON line per tmux action, per tmux-action response reaching the wire,
-// per unusually slow frame write, and per emitted seed, appended to
-// `timing.log` in the runtime directory (`/tmp/muxflow-<uid>/timing.log` where
-// that is the runtime directory). Nothing reads it but a human with `jq`, and
-// nothing in the daemon branches on it.
+// The desktop's `perf_log::switch_timing` measures a tmux action from the
+// renderer out and back; this measures the same action from inside the daemon,
+// and `requestId` joins the two halves. One JSON line per tmux action, per
+// tmux-action response reaching the wire, per frame big or slow enough to hold
+// a later answer up, and per emitted seed, appended to `timing.log` in the
+// runtime directory (`/tmp/muxflow-<uid>/timing.log`). Nothing reads it but a
+// human with `jq`, and nothing in the daemon branches on it.
 //
 // Compile-out scheme, mirroring `apps/desktop/src-tauri/src/perf_log.rs`: the
 // real implementation is compiled whenever `debug_assertions` is on (plain
@@ -765,14 +767,48 @@ pub fn write_safe_log(class: SafeErrorClass) {
 // enabled. A plain release build therefore carries only the inert stubs below,
 // so a shipped helper writes no timing log and pays nothing for the marks; a
 // measurement build re-enables it with
-// `cargo build --release -p muxflow-host --features perf-log`. Call sites stay
-// unconditional because the stub module keeps identical paths and signatures.
-// There is deliberately no second runtime switch: compiled in means writing.
+// `cargo build --locked --release -p muxflow-host --features perf-log`, which
+// is what `MUXFLOW_PERF_BUILD=1` passes for every packaged helper. Call sites
+// stay unconditional because the stub module keeps identical paths and
+// signatures. There is deliberately no second runtime switch: compiled in
+// means writing.
 //
 // The fields are request ids, tmux's own ordinals, wall-clock stamps, durations
 // and byte counts: no path, hostname, session name or terminal content, so this
 // stays inside the privacy declaration above.
 // ---------------------------------------------------------------------------
+
+/// One tmux action's host-side timeline, as the dispatcher measured it.
+///
+/// Declared outside the two twins below so both take the same record: a dozen
+/// positional arguments — three durations and four strings among them — is a
+/// signature the inert twin has to repeat exactly and the one call site has to
+/// be read against, and named fields are neither.
+///
+/// A build without the log reads none of these fields, which is what the
+/// exemption says; a measured build writes every one of them out.
+#[cfg_attr(not(any(debug_assertions, feature = "perf-log")), allow(dead_code))]
+pub(crate) struct TmuxActionTiming<'a> {
+    /// Joins this line to the desktop's `perf.timeline` record and to the
+    /// `responseWritten` line the writer task adds.
+    pub(crate) request_id: u64,
+    pub(crate) kind: &'a str,
+    pub(crate) session_id: &'a str,
+    pub(crate) window_id: &'a str,
+    /// H2, from `handler_entry_stamp`.
+    pub(crate) handler_entry_unix_millis: i64,
+    pub(crate) flush_discover: Duration,
+    pub(crate) execute: Duration,
+    /// How long the topology epoch barrier waited, and whether it ended without
+    /// covering a dirty epoch. `None` for an action that never reached it.
+    pub(crate) barrier: Option<(Duration, bool)>,
+    pub(crate) total_to_enqueue: Duration,
+    pub(crate) queue_depth_at_enqueue: usize,
+    pub(crate) outcome: &'a str,
+    /// Which section of the topology moved under the action, when the precheck
+    /// found one had; `None` on every line that did not refresh.
+    pub(crate) topology_diff: Option<&'static str>,
+}
 
 #[cfg(any(debug_assertions, feature = "perf-log"))]
 mod switch_timing {
@@ -785,7 +821,7 @@ mod switch_timing {
         time::{Duration, Instant},
     };
 
-    use super::{now_epoch_millis, whole_millis};
+    use super::{TmuxActionTiming, now_epoch_millis, whole_millis};
     use crate::paths;
 
     /// Past this the timing log starts over. It is a debugging artefact, not
@@ -852,9 +888,12 @@ mod switch_timing {
         REQUEST_OPERATION.get_or_init(Default::default)
     }
 
-    /// Stamps a tmux-action request frame the moment the reader decoded it.
-    /// Every other operation is ignored, so the map only ever holds requests a
-    /// `tmuxAction` line will come back for.
+    /// Stamps a tmux-action request frame the moment the reader decoded it
+    /// (H1). Only a tmux action is stamped, because only a tmux action has a
+    /// `tmuxAction` line coming back to join the stamp.
+    ///
+    /// The operation itself is remembered for every request: it is what lets a
+    /// `bigFrame` line say which question an oversized answer was answering.
     pub(crate) fn note_request_read(request_id: u64, operation: i32) {
         {
             let mut operations = request_operation().lock().unwrap();
@@ -887,47 +926,31 @@ mod switch_timing {
     /// One line per tmux action, written where its response is handed to the
     /// sequencer. The two writer-side numbers are a separate `responseWritten`
     /// line, joined to this one by `requestId`.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn write_tmux_action_timing_log(
-        request_id: u64,
-        kind: &str,
-        session_id: &str,
-        window_id: &str,
-        handler_entry_unix_millis: i64,
-        flush_discover: Duration,
-        execute: Duration,
-        barrier: Option<(Duration, bool)>,
-        total_to_enqueue: Duration,
-        queue_depth_at_enqueue: usize,
-        outcome: &str,
-        topology_diff: Option<&str>,
-    ) {
-        let read_at = request_read_at().lock().unwrap().remove(&request_id);
+    pub(crate) fn write_tmux_action_timing_log(timing: TmuxActionTiming<'_>) {
+        let read_at = request_read_at().lock().unwrap().remove(&timing.request_id);
         append_timing_line(&serde_json::json!({
             "atUnixMillis": now_epoch_millis(),
             "subsystem": "host_daemon",
             "event": "tmuxAction",
-            "requestId": request_id,
-            "kind": kind,
-            "sessionId": (!session_id.is_empty()).then_some(session_id),
-            "windowId": (!window_id.is_empty()).then_some(window_id),
+            "requestId": timing.request_id,
+            "kind": timing.kind,
+            "sessionId": (!timing.session_id.is_empty()).then_some(timing.session_id),
+            "windowId": (!timing.window_id.is_empty()).then_some(timing.window_id),
             // H1: the request frame was decoded off the socket. Absent when the
             // reader never saw it as a tmux action (a duplicate id, or a helper
             // that started after the request).
             "readAtUnixMillis": read_at,
             // H2: this handler began. H1 to here is the wait inside the daemon
             // before any tmux work started.
-            "handlerEntryUnixMillis": handler_entry_unix_millis,
-            "flushDiscoverMs": whole_millis(flush_discover),
-            "executeMs": whole_millis(execute),
-            "barrierWaitMs": barrier.map(|(wait, _)| whole_millis(wait)),
-            "barrierTimedOut": barrier.map(|(_, timed_out)| timed_out),
-            "totalToEnqueueMs": whole_millis(total_to_enqueue),
-            "queueDepthAtEnqueue": queue_depth_at_enqueue,
-            "outcome": outcome,
-            // Which section of the topology moved under the action, when the
-            // precheck found one had; absent on every line that did not refresh.
-            "topologyDiff": topology_diff,
+            "handlerEntryUnixMillis": timing.handler_entry_unix_millis,
+            "flushDiscoverMs": whole_millis(timing.flush_discover),
+            "executeMs": whole_millis(timing.execute),
+            "barrierWaitMs": timing.barrier.map(|(wait, _)| whole_millis(wait)),
+            "barrierTimedOut": timing.barrier.map(|(_, timed_out)| timed_out),
+            "totalToEnqueueMs": whole_millis(timing.total_to_enqueue),
+            "queueDepthAtEnqueue": timing.queue_depth_at_enqueue,
+            "outcome": timing.outcome,
+            "topologyDiff": timing.topology_diff,
         }));
     }
 
@@ -957,23 +980,25 @@ mod switch_timing {
         }));
     }
 
-    /// How slow one frame write has to be before it is worth a line of its own.
-    /// Frames at least this large are named in the log: on a slow link they
-    /// are what a later answer waits behind.
+    /// How big one frame has to be before it is named in the log. A frame this
+    /// size is what a later answer waits behind on a slow link, however quickly
+    /// the write itself returned into the kernel's buffer.
     const BIG_FRAME_THRESHOLD: usize = 32 * 1024;
+    /// How slow one frame write has to be before it is worth a line of its own:
+    /// the one ordered writer was blocked for a quarter of a second, which is
+    /// the shape a stalled link takes from inside the daemon.
     const SLOW_FRAME_WRITE_THRESHOLD: Duration = Duration::from_millis(250);
 
-    /// Names a single frame write that blocked the one ordered writer for a
-    /// quarter of a second — the shape a stalled link takes from inside the
-    /// daemon.
+    /// Names a frame big enough to hold up whatever followed it, slow enough to
+    /// have blocked the one ordered writer, or both.
     ///
     /// The frame size is a closure because measuring it means walking the
-    /// encoded message, and a write this fast path performs normally must not
-    /// pay for it.
+    /// encoded message: the inert twin never calls it, so a build without the
+    /// log pays nothing per frame.
     ///
-    /// `event_kind`/`pane_id` name which ordered event blocked the writer: a
-    /// stalled link is nearly always one pane's seed or output, and "event"
-    /// alone did not say which.
+    /// `event_kind`/`pane_id` name which ordered event blocked the writer,
+    /// because "event" alone did not say which — and which one it is is the
+    /// whole question a stalled link asks.
     pub(crate) fn record_frame_write(
         kind: &str,
         event_kind: Option<&str>,
@@ -1047,23 +1072,8 @@ mod switch_timing {
     #[inline(always)]
     pub(crate) fn note_response_enqueued(_request_id: u64) {}
 
-    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
-    pub(crate) fn write_tmux_action_timing_log(
-        _request_id: u64,
-        _kind: &str,
-        _session_id: &str,
-        _window_id: &str,
-        _handler_entry_unix_millis: i64,
-        _flush_discover: Duration,
-        _execute: Duration,
-        _barrier: Option<(Duration, bool)>,
-        _total_to_enqueue: Duration,
-        _queue_depth_at_enqueue: usize,
-        _outcome: &str,
-        _topology_diff: Option<&str>,
-    ) {
-    }
+    pub(crate) fn write_tmux_action_timing_log(_timing: super::TmuxActionTiming<'_>) {}
 
     #[inline(always)]
     pub(crate) fn record_response_written(

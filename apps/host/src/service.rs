@@ -483,7 +483,8 @@ async fn serve_connection(
             }
             writer_topology_signal.observe_event(&message);
             let injected_gap = gap_fault.after(&message);
-            // Switch-timing instrumentation; delete with `timing.log`.
+            // The perf-log timeline's H3: which frame this is, so the writer
+            // can name what it just spent its time on.
             let (timed_response, frame_kind) = match &message {
                 SequencerControl::Response { request_id, .. } => (Some(*request_id), "response"),
                 SequencerControl::FileStream { .. } => (None, "fileStream"),
@@ -1030,12 +1031,10 @@ fn same_action_topology(
     cached_json == fresh_json
 }
 
-/// Switch-timing instrumentation; delete with `timing.log`.
-///
 /// Names the first structural section where the cached baseline and a fresh
-/// discovery disagree, so a refusal in the log says *what* moved rather than
-/// only that something did. Coarse on purpose: it runs once per action, only
-/// on the path that already re-serializes both snapshots.
+/// discovery disagree, so a `topologyDiff` in the timing log says *what* moved
+/// rather than only that something did. Coarse on purpose: it runs once per
+/// action, only on the path that already re-serializes both snapshots.
 fn action_topology_diff(
     cached: Option<&(tmux_control::TmuxSnapshot, String)>,
     fresh: &tmux_control::TmuxSnapshot,

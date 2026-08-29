@@ -36,8 +36,8 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 pending.lock().unwrap().remove(&request_id);
                 return;
             };
-            // Switch-timing instrumentation (compiled out of a plain release
-            // helper; see `diagnostics::switch_timing`). H2 of the timeline.
+            // H2 of the perf-log timeline, compiled out of a plain release
+            // helper; see `diagnostics::switch_timing`.
             let started = std::time::Instant::now();
             let handler_entry_unix_millis = crate::diagnostics::handler_entry_stamp();
             let (_topology_guard, mut known_generation) =
@@ -47,8 +47,8 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
             // first session is allowed to run with no tmux server, and every
             // other action is not (M10-E060).
             let action_kind = v1::TmuxActionKind::try_from(action.kind).unwrap_or_default();
-            // Switch-timing instrumentation; delete with `timing.log`. Held
-            // apart from `action` because `execute` takes it by value.
+            // The three fields the timing line names, held apart from `action`
+            // because `execute` takes it by value.
             let timing_kind = format!("{action_kind:?}");
             let timing_session_id = action.session_id.clone();
             let timing_window_id = action.window_id.clone();
@@ -61,18 +61,20 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                               queue_depth: usize,
                               outcome: &str| {
                 crate::diagnostics::write_tmux_action_timing_log(
-                    request_id,
-                    &timing_kind,
-                    &timing_session_id,
-                    &timing_window_id,
-                    handler_entry_unix_millis,
-                    flush_discover,
-                    execute,
-                    barrier,
-                    started.elapsed(),
-                    queue_depth,
-                    outcome,
-                    *timing_topology_diff.lock().unwrap(),
+                    crate::diagnostics::TmuxActionTiming {
+                        request_id,
+                        kind: &timing_kind,
+                        session_id: &timing_session_id,
+                        window_id: &timing_window_id,
+                        handler_entry_unix_millis,
+                        flush_discover,
+                        execute,
+                        barrier,
+                        total_to_enqueue: started.elapsed(),
+                        queue_depth_at_enqueue: queue_depth,
+                        outcome,
+                        topology_diff: *timing_topology_diff.lock().unwrap(),
+                    },
                 );
             };
             let discover_started = std::time::Instant::now();
@@ -201,9 +203,8 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 }
             }
             let barrier_sender = event_tx.clone();
-            // Switch-timing instrumentation; delete with `timing.log`. The
-            // barrier runs on the blocking pool inside `execute`, so its wait
-            // is reported back rather than measured here.
+            // The barrier runs on the blocking pool inside `execute`, so its
+            // wait is reported back rather than measured here.
             let barrier_report = Arc::new(Mutex::new(None::<(Duration, bool)>));
             let barrier_timing = Arc::clone(&barrier_report);
             let selection_terminal = Arc::clone(terminal);
@@ -326,7 +327,6 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
 /// generation, reconciles the control clients, and puts the authoritative
 /// snapshot on the ordered sequencer. Returns the generation it published,
 /// which is the one any action that continues from here runs against.
-#[allow(clippy::too_many_arguments)]
 async fn publish_refreshed_baseline(
     fresh_snapshot: &tmux_control::TmuxSnapshot,
     fresh_identity: &str,
@@ -356,10 +356,9 @@ async fn publish_refreshed_baseline(
     next_generation
 }
 
-/// Switch-timing instrumentation; delete with `timing.log`.
-///
-/// Notes the enqueue instant for the writer task to join against, and returns
-/// the sequencer queue depth this response was put behind. Ordinary
+/// `send_response`, timed: notes the enqueue instant for the writer task to
+/// join against, and returns the sequencer queue depth this response was put
+/// behind. Only the tmux action path measures itself, so ordinary
 /// `send_response` in every other dispatcher stays untimed.
 async fn send_timed_response(
     control_tx: &mpsc::Sender<SequencerControl>,

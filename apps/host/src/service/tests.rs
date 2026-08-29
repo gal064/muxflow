@@ -538,7 +538,8 @@ fn external_mutation_before_poll_invalidates_cached_action_baseline() {
     assert!(baseline_changed(Some(&cached), &cached.0, "tmux:restarted"));
 }
 
-/// Switch-timing instrumentation; delete with `timing.log`.
+/// Each section is reported in order, so the coarsest true statement is the
+/// one the timing log carries.
 #[test]
 fn a_refreshed_baseline_names_what_moved() {
     let pane = |width: u16, window_id: &str| tmux_control::Pane {

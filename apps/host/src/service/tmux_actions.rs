@@ -250,7 +250,7 @@ pub(super) fn execute(
 /// Everything else is excluded on purpose. Create/close/kill/rename/reorder act
 /// on a topology the caller reasoned about (an index, a neighbour, the one they
 /// meant), split and resize change geometry, zoom flips a window's layout, and
-/// a pin writes host state - for those a generation guard is the caller's
+/// a pin writes host state — for those a generation guard is the caller's
 /// consent stamp and must keep refusing.
 pub(super) fn selection_only(kind: v1::TmuxActionKind) -> bool {
     matches!(
@@ -267,7 +267,7 @@ pub(super) fn selection_only(kind: v1::TmuxActionKind) -> bool {
 /// exists on it. A newer *generation* is not, for a selection: on a slow link
 /// every switch resizes the visible session, which bumps the generation, and
 /// the snapshot carrying it is still crossing the wire when the user's next
-/// switch is sent - so the switch that would fix the screen was the one being
+/// switch is sent — so the switch that would fix the screen was the one being
 /// refused. `validate_targets` still runs, so a selection naming something that
 /// has gone away fails as cleanly as before.
 fn staleness_refusal(
