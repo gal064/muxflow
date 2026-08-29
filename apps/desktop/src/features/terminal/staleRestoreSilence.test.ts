@@ -111,7 +111,7 @@ describe("stale cached restore", () => {
     diagnostics.length = 0;
 
     const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
-    await expect(renderer.prependHistory(history)).resolves.toBe("superseded");
+    await expect(renderer.prependHistory(history, 0)).resolves.toBe("superseded");
 
     expect(recordIncident).toHaveBeenCalledWith("pane.historySuperseded", {
       paneId: "%9",
@@ -132,7 +132,94 @@ describe("stale cached restore", () => {
     await waitFor(() => renderer.isAlternateScreenActive(), "the alternate screen to come up");
 
     const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
-    await expect(renderer.prependHistory(history)).resolves.toBe("superseded");
+    await expect(renderer.prependHistory(history, 0)).resolves.toBe("superseded");
+
+    // Every refusal says which one it was. A splice that is turned away in
+    // silence is a pane that quietly stops holding its scrollback.
+    expect(recordIncident).toHaveBeenCalledWith(
+      "pane.historySuperseded",
+      expect.objectContaining({ paneId: "%14", reason: "alternateScreen" }),
+    );
+
+    renderer.dispose();
+  });
+
+  /**
+   * The page tmux answers with is not the page that was asked for.
+   *
+   * `-S`/`-E` are evaluated against the pane's display at the moment tmux
+   * *runs* the capture. A pane that printed three rows between the request
+   * leaving and the capture running has moved its display down by three, so the
+   * page comes back ending three rows too low — and those three rows are rows
+   * this buffer already holds. Spliced in whole they appear twice, and the next
+   * page inherits the error through the skip it is asked with.
+   *
+   * The stream is ordered, so those rows reached this terminal before the
+   * answer did: the overlap is exactly what this buffer has gained since it
+   * quoted its skip, and it comes off the foot of the page.
+   */
+  it("trims the rows a busy pane printed over before splicing the page", async () => {
+    const renderer = new XtermRenderer({ paneId: "%13" });
+    renderer.open(document.createElement("div"));
+    renderer.setGrid({ columns: 20, rows: 5 });
+    // Fixed-width names, so no row's name is a prefix of another's and counting
+    // occurrences means what it says.
+    const rows = (from: number, to: number) => Array.from(
+      { length: to - from + 1 },
+      (_, index) => `row-${String(from + index).padStart(2, "0")}`,
+    );
+    renderer.write(ownTerminalBytes(new TextEncoder().encode(rows(1, 12).join("\r\n"))), undefined, 1);
+    await waitFor(() => renderer.scrollbackRows === 7, "the first twelve rows to land");
+
+    // What the request quotes: twelve rows into a five-row grid.
+    const skip = renderer.scrollbackRows;
+
+    // And then three more rows, printed before tmux got round to the capture.
+    renderer.write(ownTerminalBytes(new TextEncoder().encode(`\r\n${rows(13, 15).join("\r\n")}`)), undefined, 2);
+    await waitFor(() => renderer.scrollbackRows === 10, "the three later rows to land");
+
+    // tmux's answer, measured three rows too low: two rows this pane has never
+    // seen, and then the three oldest rows it is already holding.
+    const page = ["top-1", "top-2", ...rows(1, 3)].join("\r\n");
+    await expect(
+      renderer.prependHistory(ownTerminalBytes(new TextEncoder().encode(page)), skip),
+    ).resolves.toBe("applied");
+    await waitFor(() => renderer.serialize().includes("top-1"), "the page to be spliced");
+
+    const spliced = renderer.serialize();
+    const everyRow = ["top-1", "top-2", ...rows(1, 15)];
+    for (const row of everyRow) expect(spliced.split(row), row).toHaveLength(2);
+    const positions = everyRow.map((row) => spliced.indexOf(row));
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
+
+    renderer.dispose();
+  });
+
+  /**
+   * The whole page turned out to be rows this buffer already held — a pane that
+   * printed at least a page's worth while the page crossed the link. There is
+   * nothing left to splice, so nothing is latched: the next reach-the-top asks
+   * from where this buffer begins now, which is above everything that page held.
+   */
+  it("refuses a page a busy pane printed straight past", async () => {
+    const renderer = new XtermRenderer({ paneId: "%15" });
+    renderer.open(document.createElement("div"));
+    renderer.setGrid({ columns: 20, rows: 5 });
+    renderer.write(
+      ownTerminalBytes(new TextEncoder().encode(Array.from({ length: 12 }, (_, i) => `row-${i}`).join("\r\n"))),
+      undefined,
+      1,
+    );
+    await waitFor(() => renderer.scrollbackRows === 7, "the rows to land");
+
+    // Asked for when this buffer held nothing above its screen, answered when it
+    // holds seven — more rows than the two the page carries.
+    const history = ownTerminalBytes(new TextEncoder().encode("a\r\nb"));
+    await expect(renderer.prependHistory(history, 0)).resolves.toBe("superseded");
+    expect(recordIncident).toHaveBeenCalledWith(
+      "pane.historySuperseded",
+      expect.objectContaining({ paneId: "%15", reason: "overlapExceedsPage" }),
+    );
 
     renderer.dispose();
   });
@@ -153,7 +240,7 @@ describe("stale cached restore", () => {
     await waitFor(() => renderer.serialize().includes("the screen"), "the screen to be applied");
 
     const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
-    await expect(renderer.prependHistory(history)).resolves.toBe("applied");
+    await expect(renderer.prependHistory(history, 0)).resolves.toBe("applied");
 
     await waitFor(() => renderer.serialize().includes("earlier output"), "the history to be spliced");
     const spliced = renderer.serialize();
@@ -208,6 +295,7 @@ describe("stale cached restore", () => {
 
     const outcome = renderer.prependHistory(
       ownTerminalBytes(new TextEncoder().encode("older-1\r\nolder-2")),
+      0,
     );
     // And the pane keeps printing while the splice waits for its barrier.
     renderer.write(ownTerminalBytes(new TextEncoder().encode("\r\nlive-3")), undefined, 6);

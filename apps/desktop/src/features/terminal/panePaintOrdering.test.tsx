@@ -43,6 +43,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     onMeasurementsChange(): () => void { return () => undefined; }
     setFontSize(): void {}
     setGrid(): { kind: "unchanged" } { return { kind: "unchanged" }; }
+    onGridApplied(): () => void { return () => undefined; }
     isAlternateScreenActive(): boolean { return false; }
     onInput(): () => void { return () => undefined; }
     onSelectionChange(): () => void { return () => undefined; }

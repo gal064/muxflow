@@ -114,6 +114,14 @@ export class TerminalWriteScheduler {
    * and re-queued behind the rewrite, which is exactly where they would have
    * run: their callbacks travel with them, so nothing hanging off a write is
    * resolved early, resolved twice, or lost.
+   *
+   * And re-queued only once the rewrite itself is on the terminal, so the
+   * rewrite gets a frame of its own. A flush coalesces up to a frame budget, so
+   * committing them straight away puts the reset, the payload and the retained
+   * records into one xterm write — and `onRendered` then fires on a buffer that
+   * already holds the retained rows. The caller measuring what the rewrite
+   * added would count those rows too and scroll the user past the lines they
+   * were reading by exactly that much.
    */
   replace(bytes: Uint8Array, recoverOverflow = true, onRendered?: () => void, keepQueued = false): boolean {
     if (this.#disposed || (this.#overflowed && !recoverOverflow)) return false;
@@ -122,21 +130,40 @@ export class TerminalWriteScheduler {
     this.#dropQueued();
     this.#overflowed = false;
     const length = bytes.byteLength + 2;
-    // A rewrite too large for the bound latches overflow and drops what was
-    // retained with it. That is the overflow path doing its job — the owner is
-    // told and asks the host for a seed — and it takes a single payload past
-    // `maxPendingBytes` to reach.
-    if (!this.#admit(length)) return false;
+    if (!this.#admit(length)) {
+      // `#admit` refuses two ways. Past the bound it has already latched
+      // overflow and told the owner, and what was retained goes with the queue
+      // that overflowed — that is the overflow path doing its job, and it takes
+      // a single payload past `maxPendingBytes` to reach. Sealed for a hide
+      // drain it refuses silently, and dropping accepted output on the way to a
+      // refusal nobody hears is how a pane loses bytes with nothing said.
+      if (!this.#overflowed) this.#requeue(retained);
+      return false;
+    }
     const resetAndBytes = new Uint8Array(length);
     resetAndBytes.set([0x1b, 0x63]);
     resetAndBytes.set(bytes, 2);
     this.measurements?.add("terminal.scheduler.copiedBytes", bytes.byteLength);
-    this.#commit(resetAndBytes, onRendered);
-    // Re-queued rather than re-admitted: these records were admitted once
-    // already, and the bound governs new output rather than bytes being put
-    // back where they were.
-    for (const record of retained) this.#commit(record.bytes, record.onRendered);
+    this.#commit(
+      resetAndBytes,
+      retained.length === 0 ? onRendered : () => {
+        // The caller's callback first, while this buffer holds the rewrite and
+        // nothing else, and the retained records after it.
+        onRendered?.();
+        this.#requeue(retained);
+      },
+    );
     return true;
+  }
+
+  /**
+   * Puts records back on the queue without re-admitting them.
+   *
+   * They were admitted once already, and the bound governs new output rather
+   * than bytes being returned to where they were.
+   */
+  #requeue(records: readonly QueuedWrite[]): void {
+    for (const record of records) this.#commit(record.bytes, record.onRendered);
   }
 
   /**

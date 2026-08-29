@@ -153,6 +153,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     get scrollbackRows(): number { return 0; }
     get scrollbackLimit(): number { return 10_000; }
     async prependHistory(): Promise<"applied" | "superseded"> { return "applied"; }
+    onGridApplied(): () => void { return () => undefined; }
     focus(): void {}
     blur(): void {}
     hasSelection(): boolean { return false; }
@@ -719,9 +720,34 @@ describe("reveal answers the reducer has no rule for", () => {
 
   // Ignoring it is not the same as forgetting the pane. A mount whose reveal is
   // never answered has nothing on it, and the echo is the only event it will
-  // ever see — so the bound the dead end used to arm on its way past is kept.
-  it("still bounds the wait for a blank pane whose reveal is never answered", async () => {
+  // ever see — so what the dead end got right is kept: the seed is asked for on
+  // the spot, because two seconds of blank terminal is the cost of waiting to
+  // find out whether the reveal is coming.
+  it("asks for a seed on the spot when the echo reaches a pane with nothing on it", async () => {
     api.setTerminalVisibility.mockImplementation(async () => { await Promise.resolve(); });
+    host.announceEpoch();
+    host.output("%1", "TMUX HAS THIS");
+    const mounted = await mountPane(fixturePane("%1"));
+    api.requestTerminalSeed.mockClear();
+    journal.recordIncident.mockClear();
+
+    await act(async () => { host.publishUnusableResource("%1", "hiddenBuffered"); pumpAll(); });
+    await settle();
+
+    expect(api.requestTerminalSeed).toHaveBeenCalled();
+    // And it lands: the pane is showing what tmux has, not a blank screen and a
+    // banner, and it never had to wait out the watchdog to get there.
+    expect(renderer().screen).toBe("TMUX HAS THIS");
+    expect(journal.recordIncident).not.toHaveBeenCalledWith("pane.degraded", expect.anything());
+    await unmountPane(mounted);
+  });
+
+  // And the bound underneath it, for the case where the seed does not come
+  // either. The banner is the watchdog's to raise: until it fires there is
+  // nothing to tell the user that they could act on.
+  it("still bounds the wait when neither the reveal nor the seed is answered", async () => {
+    api.setTerminalVisibility.mockImplementation(async () => { await Promise.resolve(); });
+    api.requestTerminalSeed.mockImplementation(async () => { await Promise.resolve(); });
     host.announceEpoch();
     const mounted = await mountPane(fixturePane("%1"));
     journal.recordIncident.mockClear();
