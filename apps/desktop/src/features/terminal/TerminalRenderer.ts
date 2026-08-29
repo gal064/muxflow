@@ -120,15 +120,15 @@ export interface TerminalRenderer {
    * xterm has no prepend, so this is a re-seed in disguise: the history and a
    * serialization of the current buffer are written together as one atomic
    * replace. That makes it refusable rather than partial — `"superseded"` means
-   * the stream moved and nothing was touched, and the caller may ask again.
+   * nothing was touched and the caller may ask again.
+   *
+   * Output printed while the page was on the wire is not a reason to refuse.
+   * The host captured the rows ending exactly where this terminal's scrollback
+   * began, so whatever arrived since is *inside* the serialization and the two
+   * halves still meet. Only a scrollback that filled up in the meantime breaks
+   * that, and that is what the refusal is for.
    */
-  prependHistory(history: OwnedTerminalBytes, throughGeneration: number): Promise<"applied" | "superseded">;
-  /**
-   * The highest generation this terminal has been handed. It is the number a
-   * caller asking the host a question about the screen must quote back, so the
-   * answer can be refused if the stream moved while it was in flight.
-   */
-  readonly enqueuedGeneration: number;
+  prependHistory(history: OwnedTerminalBytes): Promise<"applied" | "superseded">;
   /**
    * How many rows of scrollback sit above this terminal's screen.
    *
@@ -322,16 +322,6 @@ export class XtermRenderer implements TerminalRenderer {
   #drainPromise?: Promise<DrainedTerminalSnapshot>;
   #drainAbandoned = false;
   #disposed = false;
-  /**
-   * How many writes this terminal has been handed, of any kind.
-   *
-   * Counted rather than compared by generation because not every write carries
-   * one: a locally written empty seed and a cached restore both reach xterm
-   * without moving the generation watermark, and a history splice that ran
-   * across either of them would drop it. This is the only number that answers
-   * "has anything at all been queued since I looked".
-   */
-  #writesEnqueued = 0;
 
   constructor(options: TerminalRendererOptions = {}) {
     this.#options = options;
@@ -515,49 +505,49 @@ export class XtermRenderer implements TerminalRenderer {
    *
    * The rewrite waits on a barrier — xterm has to finish with everything it was
    * already given before its buffer can be serialized — and it can still be
-   * refused there, by a write that landed in the meantime or by a disposal. The
-   * caller latches "this pane is holding its scrollback" on this answer, and
-   * latching it on the attempt is how a pane stops asking for history it never
-   * received.
+   * refused there, by a disposal or by a scrollback that filled up. The caller
+   * latches "this pane is holding its scrollback" on this answer, and latching
+   * it on the attempt is how a pane stops asking for history it never received.
+   *
+   * A pane printing continuously is the ordinary case, not a refusal. The
+   * request carried the rows this terminal already held, and tmux captured the
+   * range ending exactly there, so rows printed since the request are below the
+   * captured range and inside the serialization built here — history and screen
+   * still meet however much arrived in between.
    */
-  prependHistory(history: OwnedTerminalBytes, throughGeneration: number): Promise<"applied" | "superseded"> {
+  prependHistory(history: OwnedTerminalBytes): Promise<"applied" | "superseded"> {
     // A TUI's alternate screen has no scrollback to prepend to, and rewriting
     // the buffer under it would destroy the frame the program is drawing.
     if (this.#disposed || this.isAlternateScreenActive()) return Promise.resolve("superseded");
-    const enqueuedGeneration = this.#generations.enqueuedGeneration;
-    // The same rule a stale restore obeys, for the same reason plus one: output
-    // printed since this history was photographed has scrolled the screen, so
-    // the rows above it have moved and a splice would duplicate or drop some of
-    // them. Journalled, never spoken — the pane keeps the screen it has, and
-    // the next time the user reaches the top the question is asked again.
-    if (throughGeneration < enqueuedGeneration || this.#scheduler.overflowed) {
-      recordIncident("pane.historySuperseded", {
-        paneId: this.#options.paneId,
-        throughGeneration,
-        lastEnqueuedGeneration: enqueuedGeneration,
-      });
+    // The pane owes the host a scoped seed, and a splice is not that seed.
+    if (this.#scheduler.overflowed) {
+      this.#noteHistorySuperseded("overflowed");
       return Promise.resolve("superseded");
     }
-    const previousLength = this.#terminal.buffer.normal.length;
-    const writesBefore = this.#writesEnqueued;
     return new Promise((resolve) => {
       // A zero-byte barrier, so the serialization below reads a buffer xterm
       // has finished with rather than one with bytes still inside its async
-      // parser — those bytes would be serialized as absent and then dropped by
-      // `replace`.
+      // parser — those bytes would be serialized as absent, and the writes
+      // behind the barrier are only replayable because they have *not* been
+      // applied yet.
       const queued = this.#scheduler.enqueue(new Uint8Array(), () => {
-        if (this.#disposed) return resolve("superseded");
-        // Anything handed to xterm after the barrier is queued *behind* it and
-        // has not been applied, so it is neither in the serialization nor safe
-        // from `replace`, which drops the queue. Refuse rather than lose it.
-        if (this.#writesEnqueued !== writesBefore) {
-          recordIncident("pane.historySuperseded", {
-            paneId: this.#options.paneId,
-            throughGeneration,
-            lastEnqueuedGeneration: this.#generations.enqueuedGeneration,
-          });
+        if (this.#disposed || this.isAlternateScreenActive()) return resolve("superseded");
+        // The one thing continuous output can break. Every row printed since
+        // the request pushed one into this scrollback, and once it is full
+        // xterm drops rows off the top to make room — so the captured range no
+        // longer reaches what this buffer now starts with, and splicing the two
+        // together would leave a hole in the middle of the user's output.
+        // Journalled, never spoken: the pane keeps the screen it has.
+        if (this.scrollbackRows >= this.scrollbackLimit) {
+          this.#noteHistorySuperseded("scrollbackCapped");
           return resolve("superseded");
         }
+        // Read here rather than at the request, because the rewrite is measured
+        // against the buffer it actually replaces: output that landed in
+        // between grew this buffer too, and counting from the older length
+        // would scroll the user past the rows they were reading by exactly that
+        // much.
+        const previousLength = this.#terminal.buffer.normal.length;
         const screen = new TextEncoder().encode(sanitizeSerializedScreen(this.serialize()));
         const spliced = new Uint8Array(history.byteLength + HISTORY_SEPARATOR.byteLength + screen.byteLength);
         spliced.set(history);
@@ -573,6 +563,10 @@ export class XtermRenderer implements TerminalRenderer {
             const grown = this.#terminal.buffer.normal.length - previousLength;
             if (grown > 0) this.#terminal.scrollToLine(grown);
           },
+          // Writes queued behind the barrier are not in the serialization and
+          // have not been applied. They would have run after the barrier, so
+          // running them after the splice is where they belong.
+          true,
         );
         resolve(replaced ? "applied" : "superseded");
       });
@@ -580,8 +574,21 @@ export class XtermRenderer implements TerminalRenderer {
     });
   }
 
-  get enqueuedGeneration(): number {
-    return this.#generations.enqueuedGeneration;
+  /**
+   * A page of scrollback that could not be put above this screen.
+   *
+   * Journalled, never spoken. Nothing on screen is wrong — the pane is showing
+   * everything it has, the rows are still in tmux — and the next time the user
+   * reaches the top the question is asked again against the screen they are
+   * actually looking at.
+   */
+  #noteHistorySuperseded(reason: "overflowed" | "scrollbackCapped"): void {
+    recordIncident("pane.historySuperseded", {
+      paneId: this.#options.paneId,
+      reason,
+      scrollbackRows: this.scrollbackRows,
+      scrollbackLimit: this.scrollbackLimit,
+    });
   }
 
   get scrollbackRows(): number {
@@ -855,7 +862,6 @@ export class XtermRenderer implements TerminalRenderer {
   /// Records what the terminal was handed, and returns the completion that
   /// records what it applied.
   #enqueued(generation: number, onRendered?: () => void): () => void {
-    this.#writesEnqueued += 1;
     const applied = this.#generations.enqueued(generation, onRendered);
     return () => {
       // The hide checkpoint has already been published from an abandoned drain.

@@ -65,8 +65,9 @@ export const HISTORY_MAX_SKIP_LINES = 10_000;
  * that dropped under it) would otherwise sit at the head of that queue forever
  * and misattribute every answer after it. The bound is what makes that failure
  * finite: the oldest expectation is dropped, and the worst that costs is one
- * page of scrollback attributed to the request before it, which is refused at
- * the splice because its anchor is stale.
+ * page of scrollback attributed to the request before it — a page whose skip
+ * belongs to a different question, so it may repeat rows this buffer already
+ * holds. One page, once, on a link that lost eight answers in a row.
  */
 export const HISTORY_MAX_AWAITING = 8;
 
@@ -74,13 +75,13 @@ export const HISTORY_MAX_AWAITING = 8;
 export type HistoryPageTrigger = "prefetch" | "scrolledToTop";
 
 /**
- * What the pager needs of the terminal it pages: five members, all of them on
+ * What the pager needs of the terminal it pages: four members, all of them on
  * the `TerminalRenderer` interface. No xterm and no DOM — the pager is
  * arithmetic over the rows a terminal reports holding.
  */
 export type PagerRenderer = Pick<
   TerminalRenderer,
-  "scrollbackRows" | "scrollbackLimit" | "enqueuedGeneration" | "isAlternateScreenActive" | "prependHistory"
+  "scrollbackRows" | "scrollbackLimit" | "isAlternateScreenActive" | "prependHistory"
 >;
 
 export interface PaneHistoryPagerOptions {
@@ -96,12 +97,6 @@ export interface PaneHistoryPagerOptions {
 /** One expectation: the request that is outstanding, and the buffer it describes. */
 interface HistoryRequest {
   serial: number;
-  /**
-   * What this terminal had been handed when the page was asked for. The
-   * renderer refuses a splice onto a stream that has moved past it, because
-   * output printed since scrolls the screen and moves the rows above it.
-   */
-  anchorGeneration: number;
   /**
    * How much scrollback the pane held at the request. Kept because the answer
    * is read against it: the rows requested are this plus the page, and tmux's
@@ -166,10 +161,10 @@ export class PaneHistoryPager {
    * host's own `emit_resnapshot` after it rejected a block, replaces the screen
    * while the answer is still on the wire. That answer still arrives (the hub
    * delivers history outside its seed-debt ladder), and before this queue
-   * existed it was spliced above the *new* screen using an anchor and a skip the
-   * post-reseed prefetch had already overwritten, and then cleared the newer
-   * request's latch — so a third request fetched rows the buffer already held
-   * and showed them twice.
+   * existed it was spliced above the *new* screen using a skip the post-reseed
+   * prefetch had already overwritten, and then cleared the newer request's
+   * latch — so a third request fetched rows the buffer already held and showed
+   * them twice.
    *
    * Answers arrive in the order the requests went out, so the head of this queue
    * is whose answer this is. A request the screen outlived is marked
@@ -279,8 +274,10 @@ export class PaneHistoryPager {
     if (!clientId) return;
     // Everything above the screen that this terminal already holds — the pages
     // already spliced in included, because they are part of this buffer now.
-    // Read at the moment of the request, alongside the generation it is
-    // anchored to, because both describe the same buffer.
+    // This is what anchors the answer: tmux measures its capture from the
+    // pane's current display, so the rows it returns end exactly where this
+    // buffer begins, and output printed while the page is on the wire lands
+    // below them rather than between them.
     const skip = this.#renderer.scrollbackRows;
     // The end of what this protocol can reach, which is not the same as the top
     // of tmux's history and is the only thing that ends paging when the two
@@ -299,7 +296,6 @@ export class PaneHistoryPager {
     const lines = this.#nextPageLines;
     const request: HistoryRequest = {
       serial: (this.#serial += 1),
-      anchorGeneration: this.#renderer.enqueuedGeneration,
       skip,
       lines,
       current: true,
@@ -345,11 +341,11 @@ export class PaneHistoryPager {
     // The screen this scrollback belongs above is gone — a reseed replaced it
     // while the page was on the wire, or the pane is waiting for a seed.
     // Splicing it onto whatever is there now would put the user's earlier output
-    // above a screen it never sat above, using an anchor and a skip that
-    // describe a buffer nothing is holding any more. Deliberately touching no
-    // latch: whatever asked for the *current* screen's page is still waiting for
-    // its own answer, and clearing its latch here is what let a third request
-    // duplicate rows.
+    // above a screen it never sat above, using a skip that describes a buffer
+    // nothing is holding any more. Deliberately touching no latch: whatever
+    // asked for the *current* screen's page is still waiting for its own
+    // answer, and clearing its latch here is what let a third request duplicate
+    // rows.
     if (!request.current || !this.#screenSeeded) {
       this.#journal("pane.historySupersededByReseed", { paneId: this.#paneId, serial: request.serial });
       return;
@@ -384,9 +380,9 @@ export class PaneHistoryPager {
     // to finish with what it is already holding and can still be refused there;
     // the ask stays outstanding until it answers, so reaching the top meanwhile
     // does not queue a second one. A refusal leaves the latch open on purpose —
-    // the stream moved under the answer, and the next time the user reaches the
-    // top the question is asked against the screen they are actually looking at.
-    void this.#renderer.prependHistory(event.data, request.anchorGeneration).then((outcome) => {
+    // the buffer could not take these rows, and the next time the user reaches
+    // the top the question is asked against the screen they are looking at.
+    void this.#renderer.prependHistory(event.data).then((outcome) => {
       // A reseed during the splice orphans this request as surely as one during
       // the wire time: it is the new screen that owns the latch and the paging
       // state now.

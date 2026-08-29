@@ -7,6 +7,16 @@ interface QueuedWrite {
   bytes: Uint8Array;
   backingByteLength: number;
   onRendered?: () => void;
+  /**
+   * Whether a prefix of this record has already reached xterm, leaving `bytes`
+   * holding only the remainder.
+   *
+   * Such a record cannot be replayed after a reset: its first half is on the
+   * terminal and the reset would erase it, so writing the second half alone is
+   * a half-parsed escape sequence. `replace` refuses to keep one — see
+   * `#queuedRecords`.
+   */
+  partialled?: boolean;
 }
 
 /**
@@ -94,19 +104,60 @@ export class TerminalWriteScheduler {
     return true;
   }
 
-  /** Returns whether the rewrite was committed, on the same rule as `enqueue`. */
-  replace(bytes: Uint8Array, recoverOverflow = true, onRendered?: () => void): boolean {
+  /**
+   * Returns whether the rewrite was committed, on the same rule as `enqueue`.
+   *
+   * `keepQueued` is for a rewrite composed at a barrier — a history splice.
+   * The writes sitting behind that barrier have not been applied, so they are
+   * not in the serialization the rewrite carries, and dropping them with the
+   * rest of the queue would lose output this scheduler accepted. Kept in order
+   * and re-queued behind the rewrite, which is exactly where they would have
+   * run: their callbacks travel with them, so nothing hanging off a write is
+   * resolved early, resolved twice, or lost.
+   */
+  replace(bytes: Uint8Array, recoverOverflow = true, onRendered?: () => void, keepQueued = false): boolean {
     if (this.#disposed || (this.#overflowed && !recoverOverflow)) return false;
+    const retained = keepQueued ? this.#queuedRecords() : [];
+    if (!retained) return false;
     this.#dropQueued();
     this.#overflowed = false;
     const length = bytes.byteLength + 2;
+    // A rewrite too large for the bound latches overflow and drops what was
+    // retained with it. That is the overflow path doing its job — the owner is
+    // told and asks the host for a seed — and it takes a single payload past
+    // `maxPendingBytes` to reach.
     if (!this.#admit(length)) return false;
     const resetAndBytes = new Uint8Array(length);
     resetAndBytes.set([0x1b, 0x63]);
     resetAndBytes.set(bytes, 2);
     this.measurements?.add("terminal.scheduler.copiedBytes", bytes.byteLength);
     this.#commit(resetAndBytes, onRendered);
+    // Re-queued rather than re-admitted: these records were admitted once
+    // already, and the bound governs new output rather than bytes being put
+    // back where they were.
+    for (const record of retained) this.#commit(record.bytes, record.onRendered);
     return true;
+  }
+
+  /**
+   * The records still waiting, oldest first, or `undefined` when one of them
+   * cannot survive a reset.
+   *
+   * In practice the refusal never fires from the one caller that asks: `#flush`
+   * only ever splits the *first* record of a batch and that split ends the
+   * batch, so a barrier is never consumed while a partialled record sits ahead
+   * of it, and by the time a barrier's callback runs nothing is in flight. The
+   * check is here so that the guarantee is the queue's rather than the caller's.
+   */
+  #queuedRecords(): QueuedWrite[] | undefined {
+    const records: QueuedWrite[] = [];
+    for (let index = this.#queueHead; index < this.#queue.length; index += 1) {
+      const record = this.#queue[index];
+      if (!record) continue;
+      if (record.partialled) return undefined;
+      records.push(record);
+    }
+    return records;
   }
 
   clear(): void {
@@ -334,6 +385,7 @@ export class TerminalWriteScheduler {
         if (first.onRendered) rendered.push(first.onRendered);
       } else {
         first.bytes = first.bytes.subarray(take);
+        first.partialled = true;
         partialRecord = true;
       }
     }
