@@ -875,6 +875,153 @@ mod tests {
         assert!(store.reveal("%1", 16).unwrap().raw_tail.is_empty());
     }
 
+    /// The rule the switch-payload work turns around: the host stops holding a
+    /// copy of the renderer's screen, so a hide that carries no bytes is the
+    /// *ordinary* hide rather than a broken one. What the host keeps is the
+    /// output the renderer had not yet seen, and the renderer's own cache is
+    /// the base that output is written on top of.
+    ///
+    /// Red until step 3 (§3.2): today an empty payload releases the pane, which
+    /// is what `empty_or_omitted_renderer_handoff_requires_seed_before_later_output`
+    /// states and what this replaces. When `hide_with_checkpoint` loses its
+    /// `snapshot` parameter the `Vec::new()` below goes with it.
+    #[test]
+    #[ignore = "lands with step 3: hide stores no bytes"]
+    fn a_hide_without_a_snapshot_buffers_the_tail_instead_of_releasing() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
+        store.ensure("%1", true, 1);
+        assert_eq!(
+            store.record_output("%1", b"before", 10),
+            OutputDisposition::Visible
+        );
+        assert_eq!(
+            store.record_output("%1", b"after", 11),
+            OutputDisposition::Visible
+        );
+        let hidden = store
+            .hide_with_checkpoint(
+                "%1",
+                Vec::new(),
+                VisibilityCheckpoint {
+                    epoch: 7,
+                    generation: 10,
+                },
+                12,
+            )
+            .unwrap();
+        assert_eq!(hidden.state, PaneResourceState::HiddenBuffered);
+        assert!(!hidden.requires_seed);
+        // Exactly the output the renderer had not drawn when it let go, and
+        // nothing it had.
+        assert_eq!(hidden.raw_tail, b"after");
+        assert_eq!(hidden.snapshot_generation, 10);
+    }
+
+    /// The tail is the whole answer a reveal carries, so it has to be exact in
+    /// both directions: every byte after the checkpoint, and each of them once.
+    ///
+    /// Live today with a snapshot argument; step 3 deletes that argument and
+    /// leaves this test saying the same thing about the same bytes.
+    #[test]
+    fn a_reveal_answers_the_exact_output_after_the_checkpoint_exactly_once() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
+        store.ensure("%1", true, 1);
+        for (generation, bytes) in [
+            (30, b"one".as_slice()),
+            (31, b"two".as_slice()),
+            (32, b"three".as_slice()),
+        ] {
+            assert_eq!(
+                store.record_output("%1", bytes, generation),
+                OutputDisposition::Visible
+            );
+        }
+        let checkpoint = VisibilityCheckpoint {
+            epoch: 4,
+            generation: 29,
+        };
+        store
+            .hide_with_checkpoint("%1", b"screen@29".to_vec(), checkpoint, 33)
+            .unwrap();
+        let revealed = store.reveal("%1", 34).unwrap();
+        assert_eq!(revealed.raw_tail, b"onetwothree");
+        assert_eq!(revealed.snapshot_generation, checkpoint.generation);
+        assert_eq!(revealed.tail_through_generation, 32);
+        // A second reveal is the same reveal arriving twice — a retry, a
+        // remount — and replaying the tail again would double every byte.
+        let repeated = store.reveal("%1", 35).unwrap();
+        assert!(repeated.raw_tail.is_empty());
+    }
+
+    /// Past the bound the tail is no longer the cheaper answer, and a truncated
+    /// one is worse than none: it splices bytes onto a screen with a hole in the
+    /// middle that nothing later repairs. The pane is released instead and the
+    /// reveal asks for a fresh photograph.
+    ///
+    /// The store's per-resource bound is what step 3 sets to `REVEAL_TAIL_BOUND`
+    /// (16 KiB); a small one here keeps the test about the boundary rather than
+    /// about allocating.
+    #[test]
+    fn a_tail_past_the_reveal_bound_requires_a_seed_and_never_a_partial_tail() {
+        let mut store = PaneResourceStore::with_total_limit(32, 64, 4096);
+        store.ensure("%1", true, 1);
+        store
+            .hide_with_checkpoint(
+                "%1",
+                b"screen".to_vec(),
+                VisibilityCheckpoint {
+                    epoch: 2,
+                    generation: 1,
+                },
+                2,
+            )
+            .unwrap();
+        store.append("%1", &[b'x'; 32], 3);
+        store.append("%1", &[b'y'; 64], 4);
+        let revealed = store.reveal("%1", 5).unwrap();
+        assert_eq!(revealed.state, PaneResourceState::Released);
+        assert!(revealed.requires_seed);
+        assert!(
+            revealed.raw_tail.is_empty(),
+            "a tail past the bound must be dropped whole, never truncated"
+        );
+    }
+
+    /// The invariant that replaces the uploaded snapshot as the authority.
+    ///
+    /// Once the host holds no copy of the screen, the only thing that makes a
+    /// tail safe to apply is agreement about *which* screen it applies to. The
+    /// recorded handoff checkpoint is that agreement, and anything else — an
+    /// epoch change, an eviction, a `require_seed`, a reveal for a handoff this
+    /// host never saw — is answered with a seed rather than with bytes.
+    ///
+    /// Red until step 3 (§3.3), where `reveal` becomes
+    /// `store.reveal("%1", 13, VisibilityCheckpoint { epoch: 8, generation: 10 })`
+    /// and the mismatch below is the argument rather than a comment.
+    #[test]
+    #[ignore = "lands with step 3: reveal takes the renderer's checkpoint"]
+    fn a_reveal_whose_checkpoint_the_host_did_not_record_requires_a_seed() {
+        let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);
+        store.ensure("%1", true, 1);
+        assert_eq!(
+            store.record_output("%1", b"tail", 10),
+            OutputDisposition::Visible
+        );
+        let recorded = VisibilityCheckpoint {
+            epoch: 7,
+            generation: 9,
+        };
+        store
+            .hide_with_checkpoint("%1", b"screen".to_vec(), recorded, 11)
+            .unwrap();
+        assert_eq!(store.handoff_checkpoints.get("%1"), Some(&recorded));
+        // The renderer comes back on a new epoch, so the screen it is holding
+        // is not the one this tail continues.
+        let revealed = store.reveal("%1", 13).unwrap();
+        assert!(revealed.requires_seed);
+        assert!(revealed.raw_tail.is_empty());
+    }
+
     #[test]
     fn empty_or_omitted_renderer_handoff_requires_seed_before_later_output() {
         let mut store = PaneResourceStore::with_total_limit(32, 1024, 4096);

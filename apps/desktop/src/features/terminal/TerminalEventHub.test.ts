@@ -32,6 +32,22 @@ const resource = (
   };
 };
 
+/**
+ * The host's answer to a reveal it could verify: no screen, the output since
+ * the checkpoint, and the flag that says so. `resumeFromRenderer` lands with
+ * the proto change in step 3 (§2).
+ */
+const resumeAnswer = (sequence: number, generation: number): TerminalEvent => {
+  const answer: Resource & { resumeFromRenderer: boolean } = {
+    ...(resource(sequence, generation, {
+      serializedSnapshot: new Uint8Array(),
+      rawTail: new Uint8Array(),
+    }) as Resource),
+    resumeFromRenderer: true,
+  };
+  return answer;
+};
+
 describe("TerminalEventHub hidden-pane buffering", () => {
   it("replays byte-exact hidden output when a pane becomes visible", () => {
     const hub = new TerminalEventHub();
@@ -652,6 +668,34 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.retryPaneSeed("%1");
     hub.retryPaneSeed("%unknown");
     expect(requests).toEqual(["%1", "%1"]);
+  });
+
+  // The ladder that decides whether a pane is still owed a seed reads a byte
+  // count today, and a verified resume answer carries no bytes. Reading the
+  // count instead of the flag leaves the pane waiting for a seed nobody owes
+  // it — the single most likely way to ship a permanently blank pane.
+  //
+  // Lands with steps 3 and 4 (§4.3).
+  it.skip("clears seed debt for a zero-byte answer only when it carries the resume flag", () => {
+    const hub = new TerminalEventHub();
+    hub.subscribePane("%1", () => undefined);
+    hub.publish(resource(1, 1, {
+      requiresSeed: true,
+      recoveryReason: "host recovery pending",
+      serializedSnapshot: new Uint8Array(),
+      rawTail: new Uint8Array(),
+    }));
+    expect(hub.paneHealth("%1").awaitingSeed).toBe(true);
+
+    // An empty answer that is not a resume repairs nothing, and must not
+    // cancel the seed this pane is owed.
+    hub.publish(resource(2, 2, { serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array() }));
+    expect(hub.paneHealth("%1").awaitingSeed).toBe(true);
+
+    // The same zero bytes, carrying the host's verified checkpoint, are the
+    // whole recovery: the renderer already holds the screen they continue.
+    hub.publish(resumeAnswer(3, 3));
+    expect(hub.paneHealth("%1").awaitingSeed).toBe(false);
   });
 
   it("contains a failing pane health observer like every other observer", () => {

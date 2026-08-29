@@ -1,5 +1,11 @@
 use super::*;
 
+/// A capture ledger for the writes a test performs directly. Coalescing is
+/// per control client, so a test that owns neither gets its own.
+fn capture_ledger() -> Mutex<HashSet<String>> {
+    Mutex::new(HashSet::new())
+}
+
 fn visibility_permit(
     sender: &mpsc::Sender<SequencerControl>,
 ) -> mpsc::OwnedPermit<SequencerControl> {
@@ -86,6 +92,20 @@ impl RecordedClient {
     /// switch-client" is a statement about a stream that has gone past the point
     /// where one would have appeared, not about a stream that has not caught up.
     fn fence(&self, clients: &mut TerminalClients, occurrences: usize) {
+        // This fixture records the control stream and answers none of it, so
+        // every capture it was ever sent is still "in flight" and the next one
+        // would be coalesced away. Nothing here is about coalescing — the
+        // fence exists to push the stream past the write under test — so the
+        // ledger is emptied first. `a_capture_already_in_flight_is_not_queued_twice`
+        // is where the guard itself is proved.
+        clients
+            .clients
+            .get("$1")
+            .expect("the recorded client owns %1")
+            .capture_in_flight
+            .lock()
+            .unwrap()
+            .clear();
         clients.request_seed("%1").unwrap();
         self.wait_for(occurrences, "__ADE_CAPTURE__");
     }
@@ -848,7 +868,7 @@ fn client_resize_refuses_sizes_no_display_has_and_names_them() {
 #[test]
 fn resume_command_quotes_the_pause_argument_tmux_lexer_rejects() {
     let sink = Arc::new(Mutex::new(Vec::new()));
-    write_capture_request_resuming(&sink, "%5", true).unwrap();
+    write_capture_request_resuming(&sink, &capture_ledger(), "%5", true).unwrap();
     let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
     let lines: Vec<_> = written.lines().collect();
     assert_eq!(lines[0], "display-message -p '__ADE_RESUME__:5'");
@@ -857,10 +877,10 @@ fn resume_command_quotes_the_pause_argument_tmux_lexer_rejects() {
     // replaying it, so the capture that shares this lock hold is what
     // actually recovers the screen. The resume alone would leave a hole.
     assert_eq!(lines[2], "display-message -p '__ADE_CAPTURE__:5'");
-    assert!(lines[3].starts_with("capture-pane -p -e -J -S -2000 -t %5"));
+    assert!(lines[3].starts_with("capture-pane -p -e -J -t %5"));
 
     let sink = Arc::new(Mutex::new(Vec::new()));
-    write_capture_request_resuming(&sink, "%5", false).unwrap();
+    write_capture_request_resuming(&sink, &capture_ledger(), "%5", false).unwrap();
     let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
     assert!(!written.contains("refresh-client"));
     assert!(!written.contains("__ADE_RESUME__"));
@@ -889,9 +909,16 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
 
     let unchanged = current.clone();
     assert!(
-        apply_membership_update(&mut current, &unchanged, &stream_tx, &mut stdin, true)
-            .unwrap()
-            .is_empty()
+        apply_membership_update(
+            &mut current,
+            &unchanged,
+            &stream_tx,
+            &mut stdin,
+            &capture_ledger(),
+            true
+        )
+        .unwrap()
+        .is_empty()
     );
     assert!(stdin.is_empty());
     assert!(matches!(
@@ -901,7 +928,15 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
 
     let desired = HashSet::from(["%2".into()]);
     assert_eq!(
-        apply_membership_update(&mut current, &desired, &stream_tx, &mut stdin, true).unwrap(),
+        apply_membership_update(
+            &mut current,
+            &desired,
+            &stream_tx,
+            &mut stdin,
+            &capture_ledger(),
+            true
+        )
+        .unwrap(),
         vec!["%1".to_owned()]
     );
     match stream_rx.try_recv().unwrap() {
@@ -925,7 +960,17 @@ fn malformed_membership_id_has_no_partial_effects() {
     let (stream_tx, stream_rx) = std_mpsc::channel();
     let mut stdin = Vec::new();
 
-    assert!(apply_membership_update(&mut current, &desired, &stream_tx, &mut stdin, true).is_err());
+    assert!(
+        apply_membership_update(
+            &mut current,
+            &desired,
+            &stream_tx,
+            &mut stdin,
+            &capture_ledger(),
+            true
+        )
+        .is_err()
+    );
     assert_eq!(current, HashSet::from(["%1".into()]));
     assert!(stdin.is_empty());
     assert!(matches!(
@@ -966,8 +1011,15 @@ fn failed_membership_batch_remains_retryable() {
     };
 
     assert!(
-        apply_membership_update(&mut current, &failed_desired, &stream_tx, &mut stdin, true,)
-            .is_err()
+        apply_membership_update(
+            &mut current,
+            &failed_desired,
+            &stream_tx,
+            &mut stdin,
+            &capture_ledger(),
+            true,
+        )
+        .is_err()
     );
     assert_eq!(current, HashSet::from(["%1".into()]));
 
@@ -1000,8 +1052,15 @@ fn failed_membership_batch_remains_retryable() {
     );
 
     assert_eq!(
-        apply_membership_update(&mut current, &next_desired, &stream_tx, &mut stdin, true,)
-            .unwrap(),
+        apply_membership_update(
+            &mut current,
+            &next_desired,
+            &stream_tx,
+            &mut stdin,
+            &capture_ledger(),
+            true,
+        )
+        .unwrap(),
         vec!["%1".to_owned()]
     );
     assert_eq!(current, next_desired);
@@ -1116,8 +1175,27 @@ fn mounting_one_pane_does_not_reveal_inactive_window_resources() {
     assert!(resources.is_hidden("%2"));
 }
 
+/// A seed is a photograph of the screen, not of the scrollback.
+///
+/// The capture that produces it asks tmux for the displayed grid alone — a
+/// 200x50 screen is ~10 KB where `-S -2000` was ~191 KB, and that difference
+/// sits on the wire ahead of the answer to the switch the user is waiting for.
+/// Everything else about the seed is unchanged, which is what the mode
+/// assertions below are for: dropping the history must not cost a single one
+/// of the terminal modes tmux exposes.
 #[test]
-fn seed_restores_every_tmux_exposed_terminal_mode() {
+fn a_screen_seed_carries_no_scrollback_and_still_restores_every_mode() {
+    let capture = capture_command("%1");
+    assert!(
+        !capture.contains("-S "),
+        "the seed capture must ask for no history range: {capture}"
+    );
+    assert!(capture.starts_with("capture-pane -p -e -J -t %1 ;"));
+    // The alternate-screen leg and the metadata leg are the rest of the seed
+    // and are untouched by the range.
+    assert!(capture.contains("capture-pane -p -e -J -a -q -t %1"));
+    assert!(capture.contains("__ADE_META__"));
+
     let seed = build_seed(
         "%1",
         vec![b"primary history".to_vec()],
@@ -1144,6 +1222,80 @@ fn seed_restores_every_tmux_exposed_terminal_mode() {
             "missing mode sequence {expected:?}"
         );
     }
+    // A screen capture of a partly filled pane is mostly blank lines, so the
+    // repaint ends wherever the last line left the cursor — several rows above
+    // where tmux says it is. Placement is therefore absolute and last, and
+    // nothing is painted after it that could move it.
+    assert!(
+        seed.bytes.ends_with(b"\x1b[6;5H"),
+        "the cursor must be placed absolutely, as the final act of the seed"
+    );
+}
+
+/// Five independent callers ask for one pane's screen on a single workspace
+/// switch — membership, the reveal, the renderer's own request, the reseed
+/// loop, the desktop's watchdog — and before this each one cost another whole
+/// screen on the wire ahead of the switch's answer. A capture already written
+/// and not yet answered *is* the seed the second caller wants.
+#[test]
+fn a_capture_already_in_flight_is_not_queued_twice() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    {
+        // This fixture's child holds the recording open and its control stream
+        // shut, so the reader reaches EOF at once and empties the ledger on its
+        // way out — a client that cannot answer must not hold a pane out of the
+        // seed that replaces it. The capture in flight is therefore stated here
+        // rather than inherited from the attachment's own startup.
+        let attachment = clients.clients.get("$1").expect("the fixture owns %1");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !attachment.stopped.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reader never finished"
+            );
+            std::thread::yield_now();
+        }
+        attachment
+            .capture_in_flight
+            .lock()
+            .unwrap()
+            .insert("%1".to_owned());
+    }
+    // Neither of these may reach tmux: the capture already written is the seed
+    // they are asking for.
+    clients.request_seed("%1").unwrap();
+    clients.request_seed("%1").unwrap();
+    // The fence empties the ledger and asks again, so a capture *does* reach
+    // the pipe: if either request above had been written it would be ahead of
+    // this one in the same stream, and the count would be three.
+    recorded.fence(&mut clients, 2);
+    assert_eq!(recorded.written().matches("__ADE_CAPTURE__").count(), 2);
+}
+
+/// The scrollback the screen-only seed no longer sends is not lost — it is in
+/// tmux, and this is how it is fetched: one command that asks for the history
+/// range alone, answering a question the user asked rather than joining the
+/// output stream.
+///
+/// Red until step 5 (§3.7), which replaces the literal below with
+/// `capture_history_command("%1", 2000)` and adds the `__ADE_HISTORY__` block
+/// that emits one `TerminalHistory` event without touching `PaneSeedState`.
+#[test]
+#[ignore = "lands with step 5: capture_history_command and the __ADE_HISTORY__ block"]
+fn a_history_request_captures_only_the_scrollback_range() {
+    let command = concat!(
+        "display-message -p '__ADE_HISTORY__:2000' ; ",
+        "capture-pane -p -e -J -S -2000 -E -1 -t %1"
+    );
+    assert!(command.contains("__ADE_HISTORY__:2000"));
+    // `-E -1` stops at the line above the screen: the history and the seed
+    // meet exactly once, with no row in both and none missing between them.
+    assert!(command.contains("-S -2000 -E -1"));
+    // No metadata leg, because this is not a screen: nothing in the answer may
+    // be mistaken for a seed the reader has to store.
+    assert!(!command.contains("__ADE_META__"));
+    assert!(!capture_command("%1").contains("-S "));
 }
 
 #[test]

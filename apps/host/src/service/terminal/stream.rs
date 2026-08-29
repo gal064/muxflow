@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{BufReader, Read},
     process::ChildStdout,
     sync::{
@@ -75,6 +75,10 @@ pub(super) struct ControlStreamReader {
     pub(super) stopped: Arc<AtomicBool>,
     pub(super) controls: std_mpsc::Receiver<StreamControl>,
     pub(super) flow: Arc<super::FlowControl>,
+    /// Panes whose capture this client has written and tmux has not answered.
+    /// The service thread coalesces a seed request against it; this reader is
+    /// the only thing that can see a capture finish, so it owns the clearing.
+    pub(super) capture_in_flight: Arc<Mutex<HashSet<String>>>,
     pub(super) output_credit: Arc<OutputCredit>,
     pub(super) emission_order: Arc<Mutex<()>>,
     pub(super) topology_trigger: TopologyOutputTrigger,
@@ -101,6 +105,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         stopped,
         controls,
         flow,
+        capture_in_flight,
         output_credit,
         emission_order,
         topology_trigger,
@@ -117,6 +122,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
         resources: &resources,
         terminal_generation: &terminal_generation,
         stopped: &stopped,
+        capture_in_flight: &capture_in_flight,
         output_credit: &output_credit,
         emission_order: &emission_order,
         topology_trigger: &topology_trigger,
@@ -154,6 +160,9 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
                                 state.handle(output, runtime(read_started));
                             }
                             emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
+                            // Every pane is about to be captured again, so no
+                            // pane's abandoned capture may coalesce that away.
+                            capture_in_flight.lock().unwrap().clear();
                             state.resnapshot_all(&writer);
                         }
                     }
@@ -169,6 +178,10 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
             Err(_) => break,
         }
     }
+    // This client is finished, so every capture it wrote is unanswerable. The
+    // ledger has to go with it: a pane still recorded here would have its next
+    // seed request coalesced against a capture nobody is going to complete.
+    capture_in_flight.lock().unwrap().clear();
     parser.finish();
     while let Some(Err(error)) = parser.next_record() {
         emit_resnapshot(&event_tx, &overflowed, "terminal", error.to_string());
@@ -316,6 +329,7 @@ struct StreamRuntime<'a> {
     resources: &'a Arc<Mutex<PaneResourceStore>>,
     terminal_generation: &'a Arc<AtomicU64>,
     stopped: &'a AtomicBool,
+    capture_in_flight: &'a Mutex<HashSet<String>>,
     output_credit: &'a OutputCredit,
     emission_order: &'a Arc<Mutex<()>>,
     topology_trigger: &'a TopologyOutputTrigger,
@@ -359,6 +373,7 @@ impl StreamState {
             resources,
             terminal_generation,
             stopped,
+            capture_in_flight,
             output_credit,
             emission_order,
             topology_trigger,
@@ -406,6 +421,9 @@ impl StreamState {
             ControlRecord::Begin { tag, .. } => {
                 if !matches!(self.command_block, CommandBlock::None) {
                     let scope = self.active_scope();
+                    // The abandoned block may be the capture a pane's seed is
+                    // waiting on, and nothing will answer it now.
+                    capture_in_flight.lock().unwrap().clear();
                     emit_resnapshot(
                         sender,
                         overflowed,
@@ -455,6 +473,7 @@ impl StreamState {
                     resources,
                     terminal_generation,
                     stopped,
+                    capture_in_flight,
                     output_credit,
                     emission_order,
                     topology_trigger,
@@ -509,7 +528,9 @@ impl StreamState {
                 // An error abandons whatever multi-block sequence was running,
                 // so every correlation slot has to be released too — otherwise
                 // the next unrelated block is mistaken for the missing half of
-                // this one.
+                // this one. The capture ledger is one of those slots: a pane
+                // whose capture died here must be free to be photographed again.
+                capture_in_flight.lock().unwrap().clear();
                 self.command_block = CommandBlock::None;
                 self.expected_capture = None;
                 self.expected_resume = None;
@@ -659,6 +680,7 @@ impl StreamState {
             resources,
             terminal_generation,
             stopped,
+            capture_in_flight,
             output_credit,
             emission_order,
             // Seed and replay emission below is a reconnect artefact, not fresh
@@ -680,6 +702,7 @@ impl StreamState {
                 &scope,
                 format!("mismatched end command tag {}", end_tag.number),
             );
+            capture_in_flight.lock().unwrap().clear();
             self.command_block = CommandBlock::None;
             return;
         }
@@ -737,6 +760,10 @@ impl StreamState {
                 lines,
                 ..
             } => {
+                // The capture is answered, whatever it answered with. Cleared
+                // before the retry below so the replacement it asks for is
+                // written rather than coalesced against the capture it replaces.
+                capture_in_flight.lock().unwrap().remove(&pane_id);
                 let mut retry = false;
                 if let Some(state) = self.pane_states.get_mut(&pane_id) {
                     if let PaneSeedState::Pending {

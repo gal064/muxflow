@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io::Write,
     process::{ChildStdin, Command, Stdio},
     sync::{
@@ -106,13 +107,16 @@ impl TerminalAttachment {
             .take()
             .context("tmux control stdin unavailable")?;
         let stdin = Arc::new(Mutex::new(stdin));
+        // Created here rather than handed in, for the same reason `flow` is:
+        // it belongs to one control client and it dies with it.
+        let capture_in_flight = Arc::new(Mutex::new(HashSet::new()));
         {
             let mut writer = stdin.lock().unwrap();
             for pane_id in pane_ids {
                 if reports_terminal_colors {
                     write_terminal_color_reports(&mut *writer, pane_id)?;
                 }
-                queue_capture(&mut *writer, pane_id)?;
+                queue_capture(&mut *writer, &capture_in_flight, pane_id)?;
             }
             writer.flush()?;
         }
@@ -125,7 +129,13 @@ impl TerminalAttachment {
         let reader_flow = Arc::clone(&flow);
         let reader_output_credit = Arc::clone(&output_credit);
         let reader_emission_order = Arc::clone(&emission_order);
-        let reader_writer = spawn_control_writer(session_id, Arc::clone(&stdin), &mut startup)?;
+        let reader_capture_in_flight = Arc::clone(&capture_in_flight);
+        let reader_writer = spawn_control_writer(
+            session_id,
+            Arc::clone(&stdin),
+            Arc::clone(&capture_in_flight),
+            &mut startup,
+        )?;
         startup.spawn(
             2,
             std::thread::Builder::new().name(format!("host-tmux-control-{session_id}")),
@@ -141,6 +151,7 @@ impl TerminalAttachment {
                     stopped: reader_stop_signal,
                     controls: stream_rx,
                     flow: reader_flow,
+                    capture_in_flight: reader_capture_in_flight,
                     output_credit: reader_output_credit,
                     emission_order: reader_emission_order,
                     topology_trigger,
@@ -156,6 +167,7 @@ impl TerminalAttachment {
             stopped,
             stream_tx,
             flow,
+            capture_in_flight,
             output_credit,
             workers,
             last_size: None,
@@ -188,6 +200,7 @@ pub(super) fn tmux_supports_control_color_reports(output: &[u8]) -> bool {
 fn spawn_control_writer(
     session_id: &str,
     stdin: Arc<Mutex<ChildStdin>>,
+    capture_in_flight: Arc<Mutex<HashSet<String>>>,
     startup: &mut ProcessStartup,
 ) -> anyhow::Result<std_mpsc::Sender<ControlWrite>> {
     let (sender, receiver) = std_mpsc::channel::<ControlWrite>();
@@ -199,7 +212,12 @@ fn spawn_control_writer(
                 if let Some(delay) = write.delay {
                     std::thread::sleep(delay);
                 }
-                let _ = write_capture_request_resuming(&stdin, &write.pane_id, write.resume_first);
+                let _ = write_capture_request_resuming(
+                    &stdin,
+                    &capture_in_flight,
+                    &write.pane_id,
+                    write.resume_first,
+                );
             }
         },
     )?;
