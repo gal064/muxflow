@@ -19,7 +19,8 @@ describe("isTransientRevealError", () => {
     expect(isTransientRevealError(new Error("host bridge is disconnected"))).toBe(true);
     expect(isTransientRevealError("terminal client is no longer attached")).toBe(true);
     expect(isTransientRevealError("connection_unavailable: host connection is disconnected or reconciling")).toBe(true);
-    expect(TRANSIENT_REVEAL_ERRORS).toHaveLength(3);
+    expect(isTransientRevealError("host request timed out; the link was kept, but commit outcome is unknown and the request will not be replayed")).toBe(true);
+    expect(TRANSIENT_REVEAL_ERRORS).toHaveLength(4);
   });
 
   it("treats anything else as a real failure", () => {

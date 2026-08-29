@@ -38,10 +38,11 @@ fn a_timed_out_host_response_reconnects_instead_of_reusing_the_ordered_lane() {
     *client.writer.lock().unwrap() =
         Some(ControlWriterHandle::start_with(write_end, "response-timeout-reconnect").unwrap());
     // Two late answers are a slow link, not a stalled lane; only the third
-    // in a row proves the lane has stopped answering.
+    // in a row, after a full silence, proves the lane has stopped answering.
     client
         .unanswered_requests
         .store(STALLED_LANE_UNANSWERED_REQUESTS - 1, Ordering::Release);
+    client.last_answer_at.store(0, Ordering::Release);
 
     let error = client
         .request_with_timeout(
@@ -105,6 +106,15 @@ fn a_late_answer_keeps_the_bridge_and_a_run_of_them_does_not() {
         assert!(client.pending.lock().unwrap().is_empty());
     }
 
+    // A third miss inside the silence window is still a burst, not a stall:
+    // parallel requests time out together.
+    let error = late();
+    assert!(error.contains("was kept"), "{error}");
+    assert!(client.ready.load(Ordering::Acquire));
+    client
+        .unanswered_requests
+        .store(STALLED_LANE_UNANSWERED_REQUESTS, Ordering::Release);
+    client.last_answer_at.store(0, Ordering::Release);
     let error = late();
     assert!(error.contains("reconnecting"), "{error}");
     assert!(!client.ready.load(Ordering::Acquire));

@@ -16,8 +16,12 @@
 
 export type LinkQualityState = "unstable" | "slow";
 
-/** Two drops this close together are a link that cannot hold, not an outage. */
-export const UNSTABLE_WINDOW_MS = 90_000;
+/**
+ * Two drops this close together are a link that cannot hold, not an outage.
+ * Five minutes: the shaped-link run of 2026-08-29 dropped every ~2.5 minutes
+ * and was, by any standard, unstable.
+ */
+export const UNSTABLE_WINDOW_MS = 300_000;
 export const UNSTABLE_LOSS_COUNT = 2;
 /**
  * Echo lag is already thresholded by `echoLagProbe` (and deduped per pane to
@@ -32,6 +36,8 @@ export const SLOW_LAG_COUNT = 2;
  * Calling the network slow needs an echo that is late by a network's worth.
  */
 export const SLOW_LAG_MIN_MS = 750;
+/** An echo this late needs no second opinion. */
+export const SLOW_LAG_ALONE_MS = 1_500;
 /** Quiet for this long and the episode is over. */
 export const LINK_QUALITY_CLEAR_MS = 120_000;
 /** How often the owner should ask whether the quiet window has elapsed. */
@@ -60,6 +66,12 @@ export interface LinkQualityMonitor {
    * `SLOW_LAG_MIN_MS` count.
    */
   noteEchoLag(at: number, lagMs: number): LinkQualityChange | undefined;
+  /**
+   * A host request the native side gave up waiting on (`requestLate`) and
+   * kept the link through. Five seconds without an answer is the slow link
+   * itself, not a symptom of it, so one is enough.
+   */
+  noteLateRequest(at: number): LinkQualityChange | undefined;
   /** Time passing is the only thing that ends an episode; call it on a bound. */
   poll(at: number): LinkQualityChange | undefined;
   /** A different host is a different connection; nothing carries over. */
@@ -75,6 +87,8 @@ export function createLinkQualityMonitor(): LinkQualityMonitor {
   const losses: number[] = [];
   const lags: number[] = [];
   let state: LinkQualityState | undefined;
+  /** Set by a signal that means "slow" on its own; consumed by `evaluate`. */
+  let slowAlone = false;
   let episodeStartedAt = 0;
   let lastTriggerAt: number | undefined;
 
@@ -83,7 +97,8 @@ export function createLinkQualityMonitor(): LinkQualityMonitor {
     prune(lags, at, SLOW_WINDOW_MS);
     const next = losses.length >= UNSTABLE_LOSS_COUNT
       ? "unstable"
-      : lags.length >= SLOW_LAG_COUNT ? "slow" : undefined;
+      : lags.length >= SLOW_LAG_COUNT || slowAlone ? "slow" : undefined;
+    slowAlone = false;
     if (next === undefined || next === state) return undefined;
     // A link that keeps dropping is also a link that echoes late, so an
     // episode may climb from slow to unstable — but never back down inside
@@ -102,6 +117,13 @@ export function createLinkQualityMonitor(): LinkQualityMonitor {
     },
     noteEchoLag(at, lagMs) {
       if (lagMs < SLOW_LAG_MIN_MS) return undefined;
+      if (lagMs >= SLOW_LAG_ALONE_MS) slowAlone = true;
+      lags.push(at);
+      lastTriggerAt = at;
+      return evaluate(at);
+    },
+    noteLateRequest(at) {
+      slowAlone = true;
       lags.push(at);
       lastTriggerAt = at;
       return evaluate(at);
