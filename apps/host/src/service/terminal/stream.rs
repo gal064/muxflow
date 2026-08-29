@@ -376,6 +376,43 @@ impl StreamState {
         }
     }
 
+    /// Release every slot that ties a marker block to the block tmux sends
+    /// next — optionally narrowing to the one pane that owns them, for a reset
+    /// that is about that pane alone.
+    ///
+    /// These slots are one unit. `start_block` reads them in a fixed order, so
+    /// a reset that releases some and keeps others does not leave a harmless
+    /// remnant: it leaves the next block to be answered as the missing half of
+    /// a sequence that was abandoned. Keeping `expected_history` across a
+    /// resnapshot spent the recovery's own capture block as a history answer —
+    /// its marker line published as scrollback, its seed dropped as Unknown,
+    /// and the pane Pending forever.
+    pub(in crate::service::terminal) fn release_correlation(&mut self, only: Option<&str>) {
+        let owned_by_scope = |pane_id: Option<&str>| match only {
+            Some(scope) => pane_id == Some(scope),
+            None => true,
+        };
+        if owned_by_scope(self.expected_capture.as_deref()) {
+            self.expected_capture = None;
+        }
+        if owned_by_scope(self.expected_resume.as_deref()) {
+            self.expected_resume = None;
+        }
+        if owned_by_scope(self.expected_history.as_deref()) {
+            self.expected_history = None;
+        }
+        if owned_by_scope(self.pending_alternate.as_ref().map(|pending| &*pending.0)) {
+            self.pending_alternate = None;
+        }
+        if owned_by_scope(
+            self.pending_metadata
+                .as_ref()
+                .map(|pending| &*pending.pane_id),
+        ) {
+            self.pending_metadata = None;
+        }
+    }
+
     fn handle(&mut self, record: ControlRecord, runtime: StreamRuntime<'_>) {
         let StreamRuntime {
             writer,
@@ -511,11 +548,7 @@ impl StreamState {
                     // replaces it, for as long as the client lives.
                     capture_in_flight.lock().unwrap().clear();
                     self.command_block = CommandBlock::None;
-                    self.expected_capture = None;
-                    self.expected_resume = None;
-                    self.expected_history = None;
-                    self.pending_alternate = None;
-                    self.pending_metadata = None;
+                    self.release_correlation(None);
                     return;
                 }
                 let scope = self.active_scope();
@@ -552,11 +585,7 @@ impl StreamState {
                 // whose capture died here must be free to be photographed again.
                 capture_in_flight.lock().unwrap().clear();
                 self.command_block = CommandBlock::None;
-                self.expected_capture = None;
-                self.expected_resume = None;
-                self.expected_history = None;
-                self.pending_alternate = None;
-                self.pending_metadata = None;
+                self.release_correlation(None);
                 // Exactly one event per rejection, and for a rejected resume
                 // which one it is depends on what this thread is about to do.
                 //

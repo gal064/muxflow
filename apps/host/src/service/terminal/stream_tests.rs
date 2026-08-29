@@ -928,3 +928,61 @@ fn a_history_marker_for_an_unowned_pane_correlates_to_nothing() {
     );
     assert!(state.expected_history.is_none());
 }
+
+/// Drives one untargeted marker block — the shape every correlation starts as.
+fn marker_block(state: &mut StreamState, harness: &Harness, marker: &[u8]) {
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::CommandOutput(marker.to_vec()),
+        harness.runtime(),
+    );
+    state.handle(
+        ControlRecord::End {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+}
+
+/// A recovery releases *every* correlation slot, not the two it happens to
+/// name.
+///
+/// `start_block` reads `expected_history` before `expected_capture`, so a
+/// history slot outliving a resnapshot is spent on the recovery's own capture:
+/// the marker line goes out to the desktop as scrollback, the screen behind it
+/// falls through as an unrecognised block, and the pane sits Pending with
+/// nothing left coming to seed it.
+#[test]
+fn a_resnapshot_releases_a_pending_history_so_its_own_capture_is_read_as_one() {
+    let (mut state, mut harness) = Harness::new(&["%1".into()]);
+    marker_block(&mut state, &harness, b"__ADE_HISTORY__:2000:1");
+    assert_eq!(state.expected_history.as_deref(), Some("%1"));
+
+    state.resnapshot_all(&harness.writer, &harness.resources, &harness.stopped);
+    assert!(state.expected_history.is_none());
+    assert_eq!(harness.writes(), vec![("%1".to_owned(), false)]);
+
+    marker_block(&mut state, &harness, b"__ADE_CAPTURE__:1");
+    assert_eq!(state.expected_capture.as_deref(), Some("%1"));
+    assert!(state.expected_history.is_none());
+    state.handle(
+        ControlRecord::Begin {
+            tag: TAG,
+            arguments: String::new(),
+        },
+        harness.runtime(),
+    );
+    assert!(matches!(
+        state.command_block,
+        CommandBlock::CapturePrimary { .. }
+    ));
+    // Nothing was published as the answer to a question nobody asked.
+    assert_eq!(harness.events(), Vec::new());
+}

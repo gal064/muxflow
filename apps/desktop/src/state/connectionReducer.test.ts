@@ -122,11 +122,36 @@ describe("connectionReducer", () => {
     });
     expect(otherServer.generation).toBe(1);
     const reconnected = connectionReducer(
-      connectionReducer(live, { type: "connection", phase: "connected" }),
+      connectionReducer(
+        // The link has to actually leave `connected` for the guard to stand
+        // down: that transition is what says the host process may have
+        // restarted. Becoming connected says nothing of the kind.
+        connectionReducer(live, { type: "connection", phase: "reconnecting" }),
+        { type: "connection", phase: "connected" },
+      ),
       { type: "snapshot", snapshot: empty, sequence: 0, generation: 1, serverIdentity: "server-a" },
     );
     expect(reconnected.generation).toBe(1);
     expect(reconnected.panes).toEqual({});
+  });
+
+  it("keeps the baseline the authoritative snapshot set when the link then reports connected", () => {
+    // The order the bridge actually produces: the epoch, then the
+    // authoritative snapshot, and only then `connected`. Becoming connected
+    // used to clear the baseline, which disarmed the guard on the very
+    // snapshot that had just armed it — a frame overtaken in flight then
+    // walked the generation backwards and every action stamped against it was
+    // refused as stale.
+    const baselined = connectionReducer(initialHostState, {
+      type: "snapshot", snapshot: populated, sequence: 7, generation: 12, serverIdentity: "server-a",
+    });
+    const connected = connectionReducer(baselined, { type: "connection", phase: "connected" });
+    expect(connected.canMutate).toBe(true);
+    const late = connectionReducer(connected, {
+      type: "snapshot", snapshot: empty, sequence: 8, generation: 11, serverIdentity: "server-a",
+    });
+    expect(late).toBe(connected);
+    expect(late.generation).toBe(12);
   });
 
   it("keeps the world a reconciliation acknowledgement did not describe", () => {
@@ -176,7 +201,10 @@ describe("connectionReducer", () => {
     // — a restarted host counts from zero, and the next *world* is the new
     // baseline — but a frame carrying no world is not that baseline, and the
     // generation this side stamps its actions with must not drop under it.
-    const reconnected = connectionReducer(advanced, { type: "connection", phase: "connected" });
+    const reconnected = connectionReducer(
+      connectionReducer(advanced, { type: "connection", phase: "reconnecting" }),
+      { type: "connection", phase: "connected" },
+    );
     const late = connectionReducer(reconnected, {
       type: "snapshot", sequence: 10, generation: 5, serverIdentity: "server-a",
     });

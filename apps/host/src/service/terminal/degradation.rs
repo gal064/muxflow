@@ -96,7 +96,10 @@ pub(super) fn emit_pane_degradations(
             degradation.cause == PaneDegradationCause::GlobalBudget,
             degradation.state == PaneResourceState::Released,
         );
-        if degradation.cause == PaneDegradationCause::HiddenTailOverflow {
+        // The store's own record honours this predicate too: a cause nobody
+        // speaks never displaces one that is spoken, so nothing that reaches
+        // here was overwritten by something this loop then drops.
+        if !degradation.cause.reportable() {
             continue;
         }
         emit_event(

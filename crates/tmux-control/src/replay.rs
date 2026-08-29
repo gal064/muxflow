@@ -128,6 +128,21 @@ pub enum PaneDegradationCause {
     HiddenTailOverflow,
 }
 
+impl PaneDegradationCause {
+    /// Whether the owner of this store tells the desktop about this discard or
+    /// only counts it.
+    ///
+    /// A hidden pane outgrowing its tail bound is what a busy background pane
+    /// does, not a fault — its reveal is answered with a photograph — so the
+    /// service suppresses it. An eviction is the opposite: nobody asked for it
+    /// and nothing else will mention it. The predicate lives here so that the
+    /// service's filter and [`PaneResourceStore::record_degradation`]'s
+    /// latest-wins rule cannot disagree about which is which.
+    pub fn reportable(self) -> bool {
+        matches!(self, Self::GlobalBudget)
+    }
+}
+
 /// One pane whose recovery material this store discarded on its own.
 ///
 /// The store cannot emit protocol events — it is a pure data structure below
@@ -392,15 +407,17 @@ impl PaneResourceStore {
                 }
             }
         }
-        let exceeds_resource = tail.len() > self.max_resource_bytes;
+        // No bound is checked on `tail`: it cannot exceed one. Every
+        // `record_output` trims this pane's journal back under
+        // `max_resource_bytes` before returning, and the tail is a suffix of
+        // that journal — so the hide has nothing left to reject, and the
+        // release it used to perform here was unreachable.
         let resource = self.resources.get_mut(pane_id).expect("resource ensured");
         resource.generation = tail_through_generation.max(generation);
         resource.snapshot_generation = checkpoint.generation;
         resource.tail_through_generation = tail_through_generation;
         if resource.requires_seed || trimmed_past_cutoff {
             release(resource, "visible output handoff journal was not retained");
-        } else if exceeds_resource {
-            release(resource, "renderer handoff exceeded the hidden-pane budget");
         } else {
             resource.state = PaneResourceState::HiddenBuffered;
             resource.raw_tail = tail;
@@ -437,8 +454,15 @@ impl PaneResourceStore {
         holding: Option<VisibilityCheckpoint>,
     ) -> Option<PaneResource> {
         let before = self.accounted_state(pane_id);
+        // A renderer that kept nothing is not a disagreement: it is a cache
+        // miss, the ordinary way a pane comes back after its state was dropped,
+        // and the pane simply seeds. Only a renderer naming a checkpoint this
+        // host did not record is the mismatch worth telling the user about —
+        // the desktop puts this string on screen as a banner.
+        let mismatched =
+            holding.is_some() && self.handoff_checkpoints.get(pane_id).copied() != holding;
         let resumes = holding.is_some()
-            && self.handoff_checkpoints.get(pane_id).copied() == holding
+            && !mismatched
             && self.resources.get(pane_id).is_some_and(|resource| {
                 resource.state == PaneResourceState::HiddenBuffered && !resource.requires_seed
             });
@@ -484,10 +508,12 @@ impl PaneResourceStore {
                 tail_through_generation: generation,
                 requires_seed: true,
                 resume_from_renderer: false,
-                recovery_reason: if resource.recovery_reason.is_empty() {
+                recovery_reason: if !resource.recovery_reason.is_empty() {
+                    resource.recovery_reason.clone()
+                } else if mismatched {
                     UNVERIFIED_REVEAL_REASON.to_owned()
                 } else {
-                    resource.recovery_reason.clone()
+                    String::new()
                 },
             }
         };
@@ -916,13 +942,22 @@ impl PaneResourceStore {
     /// Latest-wins per pane because the signal is idempotent — "this pane needs
     /// an authoritative seed" does not become truer by being recorded twice —
     /// and because that is what bounds this list without a drain.
+    ///
+    /// With one exception: a discard the owner does not report must never
+    /// displace one it does. A hidden pane that overflows its tail bound after
+    /// an eviction would otherwise swallow the eviction's entry on its way out,
+    /// and the drain would then have nothing to say about a pane whose recovery
+    /// material this store threw away unasked — the silence the record exists
+    /// to end.
     fn record_degradation(&mut self, degradation: PaneDegradation) {
         if let Some(existing) = self
             .degradations
             .iter_mut()
             .find(|existing| existing.pane_id == degradation.pane_id)
         {
-            *existing = degradation;
+            if degradation.cause.reportable() || !existing.cause.reportable() {
+                *existing = degradation;
+            }
             return;
         }
         if self.degradations.len() >= MAX_RECORDED_PANE_DEGRADATIONS {
@@ -1291,6 +1326,9 @@ mod tests {
         assert!(revealed.requires_seed);
         assert!(!revealed.resume_from_renderer);
         assert!(revealed.raw_tail.is_empty());
+        // Naming a screen this host did not record is a real disagreement, and
+        // the desktop puts this reason on screen.
+        assert_eq!(revealed.recovery_reason, UNVERIFIED_REVEAL_REASON);
 
         // And the renderer that kept no screen at all — an oversized
         // serialization its cache declined, a mount with nothing cached — is
@@ -1313,6 +1351,15 @@ mod tests {
         let revealed = store.reveal("%2", 16, None).unwrap();
         assert!(revealed.requires_seed);
         assert!(revealed.raw_tail.is_empty());
+        // Same answer, but not the same accusation: a renderer holding nothing
+        // contradicts nothing this host recorded. Reporting a handoff mismatch
+        // for an ordinary cache miss put that sentence in front of the user on
+        // a switch that was working exactly as designed.
+        assert!(
+            revealed.recovery_reason.is_empty(),
+            "a renderer that kept nothing is a cache miss, not a mismatch: {}",
+            revealed.recovery_reason
+        );
     }
 
     #[test]
@@ -1414,6 +1461,40 @@ mod tests {
         }
         // Draining is what bounds the list; a second drain reports nothing new.
         assert!(store.take_degradations().is_empty());
+    }
+
+    /// The per-pane record is latest-wins, but only among discards that are
+    /// spoken.
+    ///
+    /// A hidden pane's tail overflow is suppressed on the way out, so letting
+    /// it take the entry an eviction had already claimed does not merely
+    /// reorder the report — it deletes it. The eviction is the only account
+    /// anyone gets of recovery material this store threw away unasked.
+    #[test]
+    fn a_suppressed_overflow_never_displaces_a_reportable_eviction() {
+        let mut store = PaneResourceStore::with_total_limit(32, 64, 32);
+        store.ensure("%1", true, 1);
+        // Retained bytes past the global budget: the pane is evicted, and that
+        // is the entry that must survive.
+        store.record_output("%1", &[b'x'; 48], 2);
+        assert!(store.get("%1").unwrap().requires_seed);
+
+        // The desktop reseeds it and hides it again, and it then prints more
+        // than its own tail bound while hidden.
+        store.set_visible("%1", false, 3);
+        store.seeded("%1", 4);
+        store.append("%1", &[b'x'; 128], 5);
+        assert_eq!(store.get("%1").unwrap().state, PaneResourceState::Released);
+
+        let degradations = store.take_degradations();
+        assert_eq!(degradations.len(), 1);
+        assert_eq!(
+            degradations[0].cause,
+            PaneDegradationCause::GlobalBudget,
+            "the overflow is never reported, so taking the entry would report nothing at all"
+        );
+        assert!(PaneDegradationCause::GlobalBudget.reportable());
+        assert!(!PaneDegradationCause::HiddenTailOverflow.reportable());
     }
 
     /// Recorded by the store, and — since the tail bound became the ordinary

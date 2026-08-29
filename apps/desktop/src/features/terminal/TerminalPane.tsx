@@ -884,7 +884,7 @@ export function TerminalPane({
         // the `requestSeed` branch below.
         watchdog.note("paneAwaitingSeed");
         renderer.seed(ownTerminalBytes(new Uint8Array()));
-        setRendererDiagnostic(`${effect.reason}; waiting for a fresh terminal seed…`);
+        if (effect.reason) setRendererDiagnostic(`${effect.reason}; waiting for a fresh terminal seed…`);
         // Deliberately not revealed. This branch's blank RIS is seed debt, not
         // content, and showing it is a whole extra visible repaint on the way to
         // the screen the arriving seed paints (which reveals for itself). The

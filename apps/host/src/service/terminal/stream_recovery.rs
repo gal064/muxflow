@@ -24,12 +24,7 @@ impl StreamState {
                     .collect();
                 for pane_id in removed {
                     self.pane_states.remove(&pane_id);
-                    if self.expected_capture.as_deref() == Some(&pane_id) {
-                        self.expected_capture = None;
-                    }
-                    if self.expected_resume.as_deref() == Some(&pane_id) {
-                        self.expected_resume = None;
-                    }
+                    self.release_correlation(Some(&pane_id));
                     // A pane this client no longer owns is not one it can
                     // resume, and leaving it here would make the *next* pane to
                     // take its id inherit a pause that was never its own.
@@ -41,20 +36,6 @@ impl StreamState {
                     // clear, and every seed it asked for would be coalesced
                     // against a photograph nobody is taking.
                     capture_in_flight.lock().unwrap().remove(&pane_id);
-                    if self
-                        .pending_alternate
-                        .as_ref()
-                        .is_some_and(|pending| pending.0 == pane_id)
-                    {
-                        self.pending_alternate = None;
-                    }
-                    if self
-                        .pending_metadata
-                        .as_ref()
-                        .is_some_and(|pending| pending.pane_id == pane_id)
-                    {
-                        self.pending_metadata = None;
-                    }
                     // The parser still considers an in-flight tmux command
                     // open until its matching `%end` or `%error`. Drain that
                     // fence without retaining or publishing stale capture
@@ -86,10 +67,7 @@ impl StreamState {
         resources: &Arc<Mutex<PaneResourceStore>>,
         stopped: &AtomicBool,
     ) {
-        self.expected_capture = None;
-        self.expected_resume = None;
-        self.pending_alternate = None;
-        self.pending_metadata = None;
+        self.release_correlation(None);
         if let Some(tag) = self.active_tag() {
             // A parser error can occur inside an open command block. The
             // parser retains that tag until the real fence, so the stream
