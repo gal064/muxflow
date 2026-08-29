@@ -1411,14 +1411,20 @@ fn a_history_request_captures_only_the_scrollback_range() {
     // No `__ADE_META__` leg, because this is not a screen: nothing in the answer
     // may be mistaken for a seed the reader has to store.
     assert!(!command.contains("__ADE_META__:"));
-    // Wrapped lines are joined, exactly as the screen capture joins them: rows
-    // spliced in without `-J` are hard-broken at the width they were captured
-    // at and never reflow.
-    assert!(command.contains(" -J "), "{command}");
-    // Which is why the size probe exists — a joined answer's line count says
-    // nothing about how many rows it covers. Targeted, because
-    // `#{history_size}` is pane-scoped, and last, because the leading marker
-    // has to stay untargeted so that it always succeeds.
+    // No `-J`, unlike the screen capture. Joined lines make the answer's line
+    // count say nothing about how many rows it covers, and every other number
+    // in this protocol — `-S`/`-E`, the renderer's skip, `history_size` — is a
+    // row. One physical row per line is what lets them be compared at all. The
+    // reflow and copy that `-J` used to buy are bought instead by the way the
+    // desktop composes the page: a row that fills the grid is written without a
+    // line break, and xterm wraps it itself.
+    assert!(!command.contains(" -J "), "{command}");
+    // And the size probe stays, for the reason that outlived the join: tmux
+    // clamps a range running past the top of its history and answers one
+    // entirely above it with a single row, so the rows themselves cannot say
+    // the top was reached. Targeted, because `#{history_size}` is pane-scoped,
+    // and last, because the leading marker has to stay untargeted so that it
+    // always succeeds.
     assert!(
         command.ends_with("; display-message -p -t %1 '__ADE_HISTORY_META__:#{history_size}'"),
         "{command}"

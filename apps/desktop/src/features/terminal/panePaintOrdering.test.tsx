@@ -37,6 +37,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     #rendered: Array<() => void> = [];
     scrollbackRows = 0;
     scrollbackLimit = 10_000;
+    grid = { columns: 80, rows: 24 };
     open(): void {}
     measure(): undefined { return undefined; }
     measurements(): undefined { return undefined; }
