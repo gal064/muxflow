@@ -88,6 +88,12 @@ is present, preventing silently broken agent configuration.
 
 Hooks submit compact state JSON through the private daemon socket and never send
 prompt text, terminal output, tool input, file contents, or credentials. The
+hook process accepts a bounded vendor envelope up to 64 MiB because tool-complete
+events can include the full result, including base64 image data. It parses that
+envelope as a stream and retains only the lifecycle allowlist, so large tool
+results do not become large daemon messages or durable mailbox entries.
+Retained lifecycle strings are individually limited to 16 KiB and the compact
+daemon payload remains limited to 256 KiB. The
 normalized Codex `PreToolUse` payload retains only the tool name needed to
 distinguish a question from ordinary work. The normalized turn-start payload
 retains only its opaque turn ID and reviewer; later permission events retain
