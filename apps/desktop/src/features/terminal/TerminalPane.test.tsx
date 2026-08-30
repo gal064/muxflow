@@ -278,7 +278,6 @@ function awaitSeedResource(paneId: string, hostOwnsTheRequest: boolean): PaneEve
     resumeFromRenderer: false,
     recoveryReason: "Host recovery pending", generation: 4, snapshotGeneration: 4,
     tailThroughGeneration: 4, sequence: 1,
-    serializedSnapshot: ownTerminalBytes(new Uint8Array()),
     rawTail: ownTerminalBytes(new Uint8Array()),
   };
 }
@@ -437,7 +436,6 @@ describe("TerminalPane pane-paint span lifecycle", () => {
         resumeFromRenderer: false,
         recoveryReason: "Renderer state was released", generation: 4, snapshotGeneration: 4,
         tailThroughGeneration: 4, sequence: 1,
-        serializedSnapshot: ownTerminalBytes(new Uint8Array()),
         rawTail: ownTerminalBytes(new Uint8Array()),
       });
     });

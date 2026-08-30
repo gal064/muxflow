@@ -58,8 +58,6 @@ export type TerminalEvent = SequencedTerminalEvent & (
       generation: number;
       snapshotGeneration: number;
       tailThroughGeneration: number;
-      /** Legacy/degradation shape only; no host path writes it. */
-      serializedSnapshot: OwnedTerminalBytes;
       rawTail: OwnedTerminalBytes;
     }
   /**
@@ -77,7 +75,7 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 const encoder = new TextEncoder();
 export const MAX_HOST_TERMINAL_INPUT_BYTES = 1024 * 1024;
 const COMMON_HEADER_BYTES = 11;
-const PANE_RESOURCE_HEADER_BYTES = 38;
+const PANE_RESOURCE_HEADER_BYTES = 34;
 /** One presence byte and the big-endian `history_size` that follows it. */
 const TERMINAL_HISTORY_HEADER_BYTES = 5;
 
@@ -544,21 +542,18 @@ function decodePaneResource(
     throw new Error("pane resource generation metadata is inconsistent");
   }
   const reasonLength = view.getUint32(26, false);
-  const snapshotLength = view.getUint32(30, false);
-  const tailLength = view.getUint32(34, false);
-  const expectedLength = PANE_RESOURCE_HEADER_BYTES + reasonLength + snapshotLength + tailLength;
+  const tailLength = view.getUint32(30, false);
+  const expectedLength = PANE_RESOURCE_HEADER_BYTES + reasonLength + tailLength;
   if (expectedLength !== payload.byteLength) throw new Error("pane resource length fields do not match its payload");
   const reasonEnd = PANE_RESOURCE_HEADER_BYTES + reasonLength;
-  const snapshotEnd = reasonEnd + snapshotLength;
   let recoveryReason: string;
   try {
     recoveryReason = decoder.decode(payload.subarray(PANE_RESOURCE_HEADER_BYTES, reasonEnd));
   } catch {
     throw new Error("pane resource recovery reason is not valid UTF-8");
   }
-  const serializedSnapshot = copyTerminalBytes(payload.subarray(reasonEnd, snapshotEnd));
-  const rawTail = copyTerminalBytes(payload.subarray(snapshotEnd));
-  measurements?.add("terminal.decoder.copiedBytes", serializedSnapshot.byteLength + rawTail.byteLength);
+  const rawTail = copyTerminalBytes(payload.subarray(reasonEnd));
+  measurements?.add("terminal.decoder.copiedBytes", rawTail.byteLength);
   return {
     kind: "paneResource",
     paneId,
@@ -569,7 +564,6 @@ function decodePaneResource(
     generation,
     snapshotGeneration,
     tailThroughGeneration,
-    serializedSnapshot,
     rawTail,
     sequence,
   };

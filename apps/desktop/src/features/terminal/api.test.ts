@@ -58,17 +58,15 @@ function paneResourcePayload(options: {
   snapshotGeneration?: number;
   tailThroughGeneration?: number;
   reason?: Uint8Array<ArrayBufferLike>;
-  snapshot?: Uint8Array<ArrayBufferLike>;
   tail?: Uint8Array<ArrayBufferLike>;
 } = {}): Uint8Array {
   const reason = options.reason ?? new Uint8Array();
-  const snapshot = options.snapshot ?? new Uint8Array();
   const tail = options.tail ?? new Uint8Array();
   return Uint8Array.from([
     options.state ?? 2, options.flags ?? 0, ...u64(options.generation ?? 19),
     ...u64(options.snapshotGeneration ?? 17), ...u64(options.tailThroughGeneration ?? 19),
-    ...u32(reason.byteLength), ...u32(snapshot.byteLength), ...u32(tail.byteLength),
-    ...reason, ...snapshot, ...tail,
+    ...u32(reason.byteLength), ...u32(tail.byteLength),
+    ...reason, ...tail,
   ]);
 }
 
@@ -222,17 +220,15 @@ describe("binary terminal IPC", () => {
     const payload = paneResourcePayload({
       flags: 1,
       reason: textEncoder.encode("overflow λ"),
-      snapshot: Uint8Array.from([27, 91, 109]),
       tail: Uint8Array.from([255, 0]),
     });
     expect(decodeTerminalEvent(frame(9, "%7", 20, payload))).toEqual({
       kind: "paneResource", paneId: "%7", state: "hiddenBuffered", requiresSeed: true,
       resumeFromRenderer: false,
       recoveryReason: "overflow λ", generation: 19, snapshotGeneration: 17, tailThroughGeneration: 19,
-      serializedSnapshot: Uint8Array.from([27, 91, 109]),
       rawTail: Uint8Array.from([255, 0]), sequence: 20,
     });
-    expect(payload.byteLength).toBe(54);
+    expect(payload.byteLength).toBe(47);
   });
 
   // One flags byte, two exclusive answers: bit 0 is the seed the host owes,
@@ -246,25 +242,23 @@ describe("binary terminal IPC", () => {
 
   it("owns compact recovery segments without retaining their full transport frame", () => {
     const wire = frame(9, "%7", 20, paneResourcePayload({
-      reason: textEncoder.encode("overflow"), snapshot: Uint8Array.of(1, 2, 3), tail: Uint8Array.of(4, 5),
+      reason: textEncoder.encode("overflow"), tail: Uint8Array.of(1, 2, 3, 4, 5),
     }));
     const event = decodeTerminalEvent(wire);
     expect(event.kind).toBe("paneResource");
     if (event.kind !== "paneResource") throw new Error("expected pane resource fixture");
-    expect(event.serializedSnapshot.buffer.byteLength).toBe(3);
-    expect(event.rawTail.buffer.byteLength).toBe(2);
-    expect(event.serializedSnapshot.buffer).not.toBe(wire);
+    expect(event.rawTail.buffer.byteLength).toBe(5);
     expect(event.rawTail.buffer).not.toBe(wire);
     new Uint8Array(wire).fill(9);
-    expect([...event.serializedSnapshot, ...event.rawTail]).toEqual([1, 2, 3, 4, 5]);
+    expect([...event.rawTail]).toEqual([1, 2, 3, 4, 5]);
   });
 
   it("rejects compact pane recovery truncation, unknown flags, invalid state, and malformed UTF-8", () => {
-    expect(() => decodeTerminalEvent(frame(9, "%7", 1, new Uint8Array(37)))).toThrow("truncated");
+    expect(() => decodeTerminalEvent(frame(9, "%7", 1, new Uint8Array(33)))).toThrow("truncated");
     expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({ flags: 4 })))).toThrow("flags");
     expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({ state: 4 })))).toThrow("state");
     expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({ reason: Uint8Array.of(0xff) })))).toThrow("UTF-8");
-    const lengthMismatch = paneResourcePayload({ snapshot: Uint8Array.of(1) }).slice(0, -1);
+    const lengthMismatch = paneResourcePayload({ tail: Uint8Array.of(1) }).slice(0, -1);
     expect(() => decodeTerminalEvent(frame(9, "%7", 1, lengthMismatch))).toThrow("length fields");
     expect(() => decodeTerminalEvent(frame(9, "%7", 1, paneResourcePayload({
       snapshotGeneration: 20, tailThroughGeneration: 19,

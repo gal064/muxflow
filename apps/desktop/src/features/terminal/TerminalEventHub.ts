@@ -247,7 +247,7 @@ export class TerminalEventHub {
       // it weighs.
       const cannotRepairDebt = event.kind === "output"
         || (event.kind === "paneResource" && !event.requiresSeed && !event.resumeFromRenderer
-          && event.serializedSnapshot.byteLength + event.rawTail.byteLength === 0);
+          && event.rawTail.byteLength === 0);
       if (cannotRepairDebt) {
         if (requiresConservativeSeed && !hadEvictedSeedDebt && !alreadyAwaiting) {
           this.#requestSeed(event.paneId, "frontend pane recovery debt outlived the metadata LRU");
@@ -287,8 +287,7 @@ export class TerminalEventHub {
         // evicted backlog. An empty reveal does not cancel a pending seed —
         // unless it is a resume, whose emptiness means "nothing printed while
         // you were away", not "nothing to give you".
-        if (event.resumeFromRenderer
-          || event.serializedSnapshot.byteLength + event.rawTail.byteLength > 0) {
+        if (event.resumeFromRenderer || event.rawTail.byteLength > 0) {
           pane.awaitingSeed = false;
           pane.conflictReseedRequested = false;
         } else if (pane.awaitingSeed) {
@@ -524,7 +523,7 @@ export class TerminalEventHub {
     if (event.kind === "seed") {
       this.#replaceBacklog(current, event, event.data.byteLength);
     } else if (event.kind === "paneResource") {
-      const resourceBytes = event.serializedSnapshot.byteLength + event.rawTail.byteLength;
+      const resourceBytes = event.rawTail.byteLength;
       const reasonBytes = diagnosticEncoder.encode(event.recoveryReason).byteLength;
       if (resourceBytes > 0) {
         this.#replaceBacklog(current, event, resourceBytes + reasonBytes);
@@ -792,7 +791,7 @@ function samePaneResource(
   right: Extract<PaneEvent, { kind: "paneResource" }>,
 ): boolean {
   const identityBytes = diagnosticEncoder.encode(right.recoveryReason).byteLength
-    + right.serializedSnapshot.byteLength + right.rawTail.byteLength;
+    + right.rawTail.byteLength;
   if (identityBytes > MAX_EXACT_RESOURCE_IDENTITY_BYTES) return false;
   return left.state === right.state
     && left.requiresSeed === right.requiresSeed
@@ -801,7 +800,6 @@ function samePaneResource(
     && left.snapshotGeneration === right.snapshotGeneration
     && left.tailThroughGeneration === right.tailThroughGeneration
     && left.recoveryReason === right.recoveryReason
-    && sameBytes(left.serializedSnapshot, right.serializedSnapshot)
     && sameBytes(left.rawTail, right.rawTail);
 }
 

@@ -969,7 +969,6 @@ fn process_event(
                     generation: resource.generation,
                     snapshot_generation: resource.snapshot_generation,
                     tail_through_generation: resource.tail_through_generation,
-                    serialized_snapshot: resource.serialized_snapshot,
                     raw_tail: resource.raw_tail,
                 },
                 delivery_charge,

@@ -233,8 +233,6 @@ type PaneResourceState = "visible" | "hiddenBuffered" | "released" | "unspecifie
 
 interface HostResource {
   state: PaneResourceState;
-  /** Legacy/degradation shape only; no path in this host writes it. */
-  serializedSnapshot: string;
   rawTail: string;
   generation: number;
   snapshotGeneration: number;
@@ -280,7 +278,7 @@ class FakeHost {
     if (existing) return existing;
     const resource: HostResource = {
       state: visible ? "visible" : "hiddenBuffered",
-      serializedSnapshot: "", rawTail: "",
+      rawTail: "",
       generation, snapshotGeneration: generation, tailThroughGeneration: generation,
       requiresSeed: false, resumeFromRenderer: false, recoveryReason: "",
     };
@@ -355,7 +353,6 @@ class FakeHost {
     // visibility, so the resource is forced visible before the capture.
     if (resource) {
       resource.state = "visible";
-      resource.serializedSnapshot = "";
       resource.rawTail = "";
       resource.requiresSeed = false;
       resource.resumeFromRenderer = false;
@@ -390,17 +387,16 @@ class FakeHost {
       && !resource.requiresSeed;
     const recovery: HostResource = resumes
       ? {
-        ...resource, state: "visible", serializedSnapshot: "", generation,
+        ...resource, state: "visible", generation,
         requiresSeed: false, resumeFromRenderer: true, recoveryReason: "",
       }
       : {
-        state: "visible", serializedSnapshot: "", rawTail: "",
+        state: "visible", rawTail: "",
         generation, snapshotGeneration: generation, tailThroughGeneration: generation,
         requiresSeed: true, resumeFromRenderer: false,
         recoveryReason: "the reveal did not match the renderer handoff this host recorded",
       };
     resource.state = "visible";
-    resource.serializedSnapshot = "";
     resource.rawTail = "";
     resource.generation = generation;
     resource.snapshotGeneration = generation;
@@ -457,29 +453,12 @@ class FakeHost {
     this.#publishResource(paneId, { ...resource });
   }
 
-  /**
-   * The legacy shape, which no path in this host writes any more: a snapshot
-   * handed back under a generation the desktop recognises as its own
-   * checkpoint, carrying bytes the cache disagrees with. It stays on the wire
-   * for one release, so the renderer still has to prefer the host's bytes over
-   * the ones it is showing.
-   */
-  publishForgedSnapshot(paneId: string, bytes: string, snapshotGeneration: number): void {
-    const generation = this.#nextGeneration();
-    this.emitted.push(`forgedSnapshot(${snapshotGeneration})`);
-    this.#publishResource(paneId, {
-      state: "hiddenBuffered", serializedSnapshot: bytes, rawTail: "",
-      generation, snapshotGeneration, tailThroughGeneration: snapshotGeneration,
-      requiresSeed: false, resumeFromRenderer: false, recoveryReason: "",
-    });
-  }
-
   /** A resource event in a state this desktop build has no rule for. */
   publishUnusableResource(paneId: string, state: PaneResourceState): void {
     const generation = this.#nextGeneration();
     this.emitted.push(`unusable(${state})`);
     this.#publishResource(paneId, {
-      state, serializedSnapshot: "", rawTail: "",
+      state, rawTail: "",
       generation, snapshotGeneration: generation, tailThroughGeneration: generation,
       requiresSeed: false, resumeFromRenderer: false, recoveryReason: "",
     });
@@ -493,7 +472,6 @@ class FakeHost {
       snapshotGeneration: resource.snapshotGeneration,
       tailThroughGeneration: resource.tailThroughGeneration,
       sequence: this.#nextSequence(),
-      serializedSnapshot: ownTerminalBytes(encoder.encode(resource.serializedSnapshot)),
       rawTail: ownTerminalBytes(encoder.encode(resource.rawTail)),
     });
   }
@@ -821,22 +799,6 @@ describe("the redundant restore a tab switch used to repaint", () => {
     // costs neither a screen on the wire nor a capture on the host.
     expect(host.emitted).toContain("reveal(resume=true,bytes=0)");
     expect(host.emitted.filter((line) => line.startsWith("seed@"))).toHaveLength(seedsBefore);
-    await unmountPane(mounted);
-  });
-
-  it("restores when the host's bytes differ from the cache under the same generation", async () => {
-    await warmPane("%1", "WARM SCREEN");
-    const cached = terminalStateCache.get("%1");
-    // The `set_visible(true)` / idempotent-hide hazard: same generation, other
-    // bytes. A skip decided on the generation alone keeps the stale screen and
-    // never shows what the host is trying to hand over.
-    host.publishForgedSnapshot("%1", "HOST SCREEN", cached!.outputGeneration);
-
-    const mounted = await mountPane(fixturePane("%1"));
-
-    expect(renderer().log.filter((entry) => entry.startsWith("restore("))).toHaveLength(2);
-    expect(renderer().screen).toBe("HOST SCREEN");
-    expect(painted()).toBe(true);
     await unmountPane(mounted);
   });
 
