@@ -6,7 +6,7 @@ import {
   type PagerRenderer,
 } from "./PaneHistoryPager";
 import { ownTerminalBytes } from "./TerminalBytes";
-import type { HistoryPageAnchor } from "./TerminalRenderer";
+import type { HistorySpliceOutcome, HistoryPageAnchor } from "./TerminalRenderer";
 import type { TerminalEvent } from "./api";
 
 /**
@@ -20,21 +20,21 @@ class FakeRenderer implements PagerRenderer {
   grid = { columns: 80, rows: 24 };
   alternateScreen = false;
   readonly splices: Array<{ bytes: number } & HistoryPageAnchor> = [];
-  #outcome: "applied" | "superseded" = "applied";
+  #outcome: HistorySpliceOutcome = "applied";
   #pending: Array<() => void> = [];
 
   isAlternateScreenActive(): boolean {
     return this.alternateScreen;
   }
 
-  prependHistory(history: Uint8Array, anchor: HistoryPageAnchor): Promise<"applied" | "superseded"> {
+  prependHistory(history: Uint8Array, anchor: HistoryPageAnchor): Promise<HistorySpliceOutcome> {
     this.splices.push({ bytes: history.byteLength, ...anchor });
     const outcome = this.#outcome;
     return new Promise((resolve) => this.#pending.push(() => resolve(outcome)));
   }
 
-  refuseSplices(): void {
-    this.#outcome = "superseded";
+  refuseSplices(outcome: HistorySpliceOutcome = "superseded"): void {
+    this.#outcome = outcome;
   }
 
   /** Settles every splice this renderer was handed, as xterm eventually does. */
@@ -181,6 +181,27 @@ describe("PaneHistoryPager", () => {
 
     pager.requestPage("scrolledToTop");
     expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * A pane printing a page's worth per round trip answers every page with rows
+   * it has already printed. Asking again unchanged asks the identical question;
+   * the page has to outgrow the printing.
+   */
+  it("grows the page when every row of it had already been printed, so the ask outruns the pane", async () => {
+    const renderer = new FakeRenderer();
+    const { pager, request } = pagerFor(renderer);
+    pager.noteScreenSeeded();
+    pager.requestPage("prefetch");
+
+    renderer.refuseSplices("overlapExceedsPage");
+    await deliverPage(pager, renderer, 0, 50_000);
+
+    expect(pager.snapshot().historyExhausted).toBe(false);
+    expect(pager.snapshot().historyNextPageLines).toBe(HISTORY_PAGE_LINES * 2);
+    pager.requestPage("scrolledToTop");
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[1][2]).toBe(HISTORY_PAGE_LINES * 2);
   });
 
   /**

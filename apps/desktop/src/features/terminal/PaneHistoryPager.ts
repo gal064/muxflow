@@ -71,6 +71,18 @@ export const HISTORY_MAX_SKIP_LINES = 10_000;
  */
 export const HISTORY_MAX_AWAITING = 8;
 
+/**
+ * How large the page after this one should be.
+ *
+ * Every page is applied by rewriting the whole buffer, so N fixed-size pages
+ * cost O(N^2) bytes through xterm. Doubling makes a full scrollback six
+ * rewrites instead of thirty-four, and the ceiling keeps the largest single
+ * answer inside what a slow link carries in a frame.
+ */
+function grownPage(lines: number): number {
+  return Math.min(lines * 2, HISTORY_MAX_PAGE_LINES);
+}
+
 /** Why a page was asked for. Journalled, never branched on. */
 export type HistoryPageTrigger = "prefetch" | "scrolledToTop";
 
@@ -462,7 +474,15 @@ export class PaneHistoryPager {
         this.#exhausted = lastPage;
         // The next page pays for rewriting a buffer this one just grew, so it
         // fetches proportionally more of what it is paying for.
-        this.#nextPageLines = Math.min(request.lines * 2, HISTORY_MAX_PAGE_LINES);
+        this.#nextPageLines = grownPage(request.lines);
+      } else if (outcome === "overlapExceedsPage") {
+        // Every row of this page had already been printed onto the pane by the
+        // time it arrived — a pane producing a page's worth per round trip, and
+        // the one case where asking again unchanged asks the identical question
+        // and gets the identical answer forever. Grown on the same ladder an
+        // applied page grows on, so the ask outruns the printing rather than
+        // chasing it. Nothing is latched: the page said nothing about the top.
+        this.#nextPageLines = grownPage(request.lines);
       }
       this.#busy = false;
     });

@@ -56,6 +56,15 @@ describe("splitting a captured page", () => {
 });
 
 describe("measuring a captured row", () => {
+  // The measure must never exceed the true cell count: an over-count joins a
+  // row that never filled the grid to the row below and loses a line break.
+  it("counts grapheme clusters, so combining sequences and wide glyphs never measure long", () => {
+    expect(visibleWidth(encoder.encode("e\u0301".repeat(6)))).toBe(6);
+    expect(visibleWidth(encoder.encode("\u{1F469}\u200D\u{1F4BB}"))).toBe(1);
+    expect(visibleWidth(encoder.encode("\u6F22".repeat(4)))).toBe(4);
+    expect(composeHistoryPage(rowsOf("e\u0301".repeat(5), "next"), 8).includes(13)).toBe(true);
+  });
+
   it("counts cells, not the SGR that colours them", () => {
     expect(visibleWidth(encoder.encode("plain"))).toBe(5);
     expect(visibleWidth(encoder.encode("\u001b[1;31mred\u001b[0m"))).toBe(3);
@@ -78,6 +87,13 @@ describe("composing a page for xterm", () => {
   it("never joins a row into a blank one", () => {
     const composed = composeHistoryPage(rowsOf("x".repeat(8), "", "after"), 8);
     expect(decoder.decode(composed)).toBe(`${"x".repeat(8)}\r\n\r\nafter`);
+  });
+
+  // `capture-pane -e` writes a blank row that carries a background as its SGR
+  // alone: bytes, no cells. It is still a row the user printed.
+  it("treats an escapes-only row as blank, not as a continuation", () => {
+    const composed = composeHistoryPage(rowsOf("x".repeat(8), "\u001b[41m", "after"), 8);
+    expect(decoder.decode(composed)).toBe(`${"x".repeat(8)}\r\n\u001b[41m\r\nafter`);
   });
 
   /**

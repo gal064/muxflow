@@ -69,33 +69,55 @@ function afterEscape(text: string, escape: number): number {
   return escape + 2;
 }
 
-/**
- * How many cells a captured row occupies, as nearly as this side can tell.
- *
- * `capture-pane -e` emits SGR sequences, which take no cells, and the row is
- * otherwise text. Deliberately an approximation in one direction: a double-width
- * character counts as one cell rather than two, so a row of CJK that filled the
- * grid measures short and is treated as unwrapped. That costs a hard break in a
- * place a resize would have reflowed — the same thing the whole page used to do
- * — and never a joined row that should have stayed two.
- */
-export function visibleWidth(row: Uint8Array): number {
+/** Grapheme clusters, not code points: one cluster is what occupies one cell. */
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** The row with its escape sequences and control bytes taken out. */
+function plainText(row: Uint8Array): string {
   const text = decoder.decode(row);
-  let width = 0;
+  let plain = "";
   let index = 0;
+  let kept = 0;
   while (index < text.length) {
-    const code = text.codePointAt(index) ?? 0;
+    const code = text.charCodeAt(index);
     if (code === 0x1b) {
+      plain += text.slice(kept, index);
       index = afterEscape(text, index);
+      kept = index;
       continue;
     }
     if (code < 0x20 || code === 0x7f) {
+      plain += text.slice(kept, index);
       index += 1;
+      kept = index;
       continue;
     }
-    width += 1;
-    index += code > 0xffff ? 2 : 1;
+    index += 1;
   }
+  return plain + text.slice(kept);
+}
+
+/**
+ * How many cells a captured row occupies, at most.
+ *
+ * `capture-pane -e` emits SGR sequences, which take no cells; what is left is
+ * counted in grapheme clusters, because a cell holds a cluster. Counting code
+ * points instead over-counts every combining sequence — an NFD "é" is two code
+ * points in one cell, so six of them measured twelve — and an over-count is the
+ * dangerous direction: it makes a row that never filled the grid look as though
+ * it did, and [`composeHistoryPage`] then joins it to the row below and loses a
+ * line break the user printed.
+ *
+ * So the measure is deliberately a lower bound on the true cell count, never an
+ * upper one. A cluster that occupies two cells — CJK, an emoji, anything wide —
+ * counts as one, so a row of them measures short and is treated as unwrapped.
+ * That costs a hard break where a resize would have reflowed, which is what the
+ * whole page did before any of this, and never a join that should not have
+ * happened.
+ */
+export function visibleWidth(row: Uint8Array): number {
+  let width = 0;
+  for (const _ of graphemes.segment(plainText(row))) width += 1;
   return width;
 }
 
@@ -116,9 +138,16 @@ export function visibleWidth(row: Uint8Array): number {
  * blank row is real output and the `\r` that would carry the join cancels the
  * pending wrap and swallows it.
  *
+ * Blank means no cells, not no bytes. `capture-pane -e` writes a blank row that
+ * carries a background as its SGR alone, so a row with five bytes and nothing to
+ * show is exactly the row that must not be joined away.
+ *
  * No trailing break: the caller separates the page from the screen below it.
  */
 export function composeHistoryPage(rows: readonly Uint8Array[], columns: number): Uint8Array {
+  // Measured once each: every row is asked about twice, as itself and as the
+  // one after.
+  const widths = rows.map((row) => visibleWidth(row));
   const pieces: Uint8Array[] = [];
   let length = 0;
   const push = (piece: Uint8Array) => {
@@ -128,9 +157,7 @@ export function composeHistoryPage(rows: readonly Uint8Array[], columns: number)
   for (let index = 0; index < rows.length; index += 1) {
     push(rows[index]);
     if (index === rows.length - 1) break;
-    const wrapsIntoTheNext = columns > 0
-      && rows[index + 1].byteLength > 0
-      && visibleWidth(rows[index]) >= columns;
+    const wrapsIntoTheNext = columns > 0 && widths[index] >= columns && widths[index + 1] > 0;
     if (!wrapsIntoTheNext) push(ROW_SEPARATOR);
   }
   const composed = new Uint8Array(length);
