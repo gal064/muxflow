@@ -87,6 +87,50 @@ describe("agentReducer", () => {
     expect(acknowledgeSeen(current, "agent-1", agentGeneration(8)).byId["agent-1"].seenGeneration).toBe("8");
   });
 
+  it("merges an overtaken acknowledgement timestamp without lowering the event barrier", () => {
+    const completed = agent({
+      lifecycle: "idle",
+      attentionKind: "completed",
+      attentionGeneration: 8,
+      seenGeneration: 3,
+      lifecycleChangedAt: 100,
+    });
+    const initial = agentReducer(initialAgentState, {
+      type: "wire", event: { kind: "snapshot", snapshot: snapshot([completed], 4) },
+    });
+    const overtaken = agentReducer(initial, { type: "wire", event: {
+      kind: "upsert",
+      hostProfileId: "local",
+      serverIdentity: "server-a",
+      connectionEpoch: 1,
+      sequence: agentGeneration(6),
+      record: agent({ id: "other", lifecycleGeneration: 6 }),
+    } });
+    const acknowledged = agentReducer(overtaken, {
+      type: "seenAck",
+      agentId: completed.id,
+      attentionGeneration: completed.attentionGeneration,
+      attentionSeenAt: 5_000,
+      hostProfileId: "local",
+      serverIdentity: "server-a",
+      connectionEpoch: 1,
+    });
+    expect(acknowledged.eventSequence).toBe(agentGeneration(6));
+    expect(acknowledged.byId[completed.id]).toMatchObject({
+      seenGeneration: agentGeneration(8),
+      attentionSeenAt: 5_000,
+    });
+    expect(agentReducer(overtaken, {
+      type: "seenAck",
+      agentId: completed.id,
+      attentionGeneration: completed.attentionGeneration,
+      attentionSeenAt: 5_000,
+      hostProfileId: "local",
+      serverIdentity: "server-a",
+      connectionEpoch: 2,
+    })).toBe(overtaken);
+  });
+
   it("rejects a snapshot whose accepted barrier is behind an already applied live event", () => {
     const initial = agentReducer(initialAgentState, { type: "wire", event: { kind: "snapshot", snapshot: snapshot([agent()], 5) } });
     const renamed = agent({ displayName: "Live rename" });

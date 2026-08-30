@@ -55,4 +55,31 @@ describe("Recent idle deadline clock", () => {
     expect(revision).toBe(0);
     await act(async () => renderer!.unmount());
   });
+
+  it("ignores unread completions and schedules four hours from acknowledgement", async () => {
+    const now = Date.now();
+    const unread = agent({
+      lifecycle: "idle",
+      attentionKind: "completed",
+      attentionGeneration: 4,
+      seenGeneration: 1,
+      lifecycleChangedAt: now - 12 * RECENT_IDLE_WINDOW_MILLIS,
+    });
+    let renderer: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness agents={[unread]} />); });
+    await act(async () => { vi.advanceTimersByTime(RECENT_IDLE_WINDOW_MILLIS); });
+    expect(revision).toBe(0);
+
+    const seenAt = Date.now();
+    await act(async () => { renderer!.update(<Harness agents={[{
+      ...unread,
+      seenGeneration: unread.attentionGeneration,
+      attentionSeenAt: seenAt,
+    }]} />); });
+    await act(async () => { vi.advanceTimersByTime(RECENT_IDLE_WINDOW_MILLIS - 1); });
+    expect(revision).toBe(0);
+    await act(async () => { vi.advanceTimersByTime(1); });
+    expect(revision).toBe(1);
+    await act(async () => renderer!.unmount());
+  });
 });

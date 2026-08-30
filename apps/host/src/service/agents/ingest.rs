@@ -287,13 +287,18 @@ impl AgentRuntime {
                 record.attention_kind == "blocked"
                     && record.seen_generation >= record.attention_generation
             });
+        let superseded_seen_completion = lifecycle == v1::AgentLifecycleState::Working
+            && previous.as_ref().is_some_and(|record| {
+                record.attention_kind == "completed"
+                    && record.seen_generation >= record.attention_generation
+            });
         let attention_kind = if attention_transition {
             if lifecycle == v1::AgentLifecycleState::Blocked {
                 "blocked".into()
             } else {
                 "completed".into()
             }
-        } else if resolved_seen_block {
+        } else if resolved_seen_block || superseded_seen_completion {
             String::new()
         } else {
             previous
@@ -336,6 +341,13 @@ impl AgentRuntime {
             attention_generation,
             attention_kind,
             seen_generation: previous.as_ref().map_or(0, |record| record.seen_generation),
+            attention_seen_at_unix_millis: if attention_transition || superseded_seen_completion {
+                0
+            } else {
+                previous
+                    .as_ref()
+                    .map_or(0, |record| record.attention_seen_at_unix_millis)
+            },
             updated_at_unix_millis: occurred_at,
             hook_authority_expires_at_unix_millis: observed_now
                 .saturating_add(parsed.authority_millis),
