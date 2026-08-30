@@ -240,18 +240,16 @@ impl Observations {
             && resource.state == v1::PaneResourceState::Visible as i32
         {
             self.visible_resources.insert(resource.pane_id.clone());
-            if !resource.serialized_snapshot.is_empty() {
+            if resource.resume_from_renderer {
                 self.paintable_panes.insert(resource.pane_id.clone());
                 if self.full_log_panes.contains(&resource.pane_id) {
-                    // The desktop's reveal path is `restore(snapshot)` then the
-                    // raw tail, and `restore` is `replace(bytes, reset = false)`
-                    // — it does not reset the terminal — so these bytes extend
-                    // the pane's history instead of replacing it.
+                    // A verified resume keeps the screen the renderer already
+                    // holds and writes the raw tail on top of it, so these
+                    // bytes extend the pane's history instead of replacing it.
                     let log = self
                         .pane_full_logs
                         .entry(resource.pane_id.clone())
                         .or_default();
-                    log.extend_from_slice(&resource.serialized_snapshot);
                     log.extend_from_slice(&resource.raw_tail);
                 }
             }

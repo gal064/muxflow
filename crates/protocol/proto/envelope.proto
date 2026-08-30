@@ -166,12 +166,7 @@ message Request {
   string session_id = 3;
   repeated string pane_ids = 4;
   // The operation's payload — terminal input, a file body, and so on.
-  //
-  // On SET_TERMINAL_VISIBILITY it is reserved, not free: a hide used to carry
-  // the renderer's serialized screen here and a desktop from before
-  // `terminal_renderer_holds_snapshot` still sends one. This host ignores those
-  // bytes, and the number stays spoken for so that nothing else claims it while
-  // such a desktop can still connect.
+  // SET_TERMINAL_VISIBILITY carries none: the renderer owns its screen.
   bytes data = 5;
   uint32 columns = 6;
   uint32 rows = 7;
@@ -438,10 +433,10 @@ enum PaneResourceState {
 message PaneResource {
   string pane_id = 1;
   PaneResourceState state = 2;
-  // Kept on the wire for one release so a desktop that still reads it finds a
-  // field rather than a gap. Nothing writes it: the renderer owns its screen,
-  // and this host answers a reveal with a verified tail or with a seed.
-  bytes serialized_snapshot = 3;
+  // The renderer owns its screen: this host answers a reveal with a verified
+  // tail or with a seed, and never with a stored copy of that screen.
+  reserved 3;
+  reserved "serialized_snapshot";
   bytes raw_tail = 4;
   uint64 generation = 5;
   bool requires_seed = 6;
