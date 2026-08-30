@@ -229,7 +229,6 @@ export function interceptTerminalPlainTextPaste(
 
 export interface TerminalPaneController {
   focus(): void;
-  prepareForLayoutResize(): void;
   copy(): Promise<boolean>;
   paste(): Promise<boolean>;
   showSearch(): void;
@@ -990,7 +989,6 @@ export function TerminalPane({
 
     const controller: TerminalPaneController = {
       focus: () => renderer.focus(),
-      prepareForLayoutResize: () => renderer.prepareForLayoutResize(),
       copy: () => copyCompletedTerminalSelection(
         renderer,
         true,

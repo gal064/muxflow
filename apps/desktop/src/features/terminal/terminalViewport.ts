@@ -25,13 +25,6 @@ type ViewportTerminal = {
   scrollToLine(line: number): void;
 };
 
-type ViewportMarker = { line: number; dispose(): void };
-
-export interface TerminalViewportBookmark {
-  atBottom: boolean;
-  marker?: ViewportMarker;
-}
-
 export function captureTerminalViewport(terminal: ViewportTerminal): TerminalViewportAnchor {
   const buffer = terminal.buffer.active;
   return {
@@ -41,55 +34,22 @@ export function captureTerminalViewport(terminal: ViewportTerminal): TerminalVie
   };
 }
 
-/** Captures a logical line before CSS is allowed to disturb xterm's viewport. */
-export function bookmarkTerminalViewport(terminal: ViewportTerminal): TerminalViewportBookmark {
-  const buffer = terminal.buffer.active;
-  const atBottom = buffer.viewportY >= buffer.baseY;
-  return {
-    atBottom,
-    marker: !atBottom && buffer.type === "normal"
-      ? terminal.registerMarker(buffer.viewportY - (buffer.baseY + buffer.cursorY))
-      : undefined,
-  };
-}
-
-function restoreTerminalViewportBookmark(terminal: ViewportTerminal, bookmark: TerminalViewportBookmark): void {
-  const buffer = terminal.buffer.active;
-  const line = bookmark.marker?.line;
-  if (bookmark.atBottom) terminal.scrollToBottom();
-  else if (typeof line === "number" && Number.isInteger(line) && line >= 0 && line <= buffer.baseY) {
-    terminal.scrollToLine(line);
-  }
-  else terminal.scrollToBottom();
-}
-
-export function disposeTerminalViewportBookmark(bookmark: TerminalViewportBookmark): void {
-  bookmark.marker?.dispose();
-}
-
 /** Resizes while keeping the logical row at the top, even when wrapping moves it. */
-export function resizeTerminalPreservingViewport(
-  terminal: ViewportTerminal,
-  size: TerminalSize,
-  prepared = bookmarkTerminalViewport(terminal),
-): void {
+export function resizeTerminalPreservingViewport(terminal: ViewportTerminal, size: TerminalSize): void {
+  const buffer = terminal.buffer.active;
+  const wasAtBottom = buffer.viewportY >= buffer.baseY;
+  const marker = !wasAtBottom && buffer.type === "normal"
+    ? terminal.registerMarker(buffer.viewportY - (buffer.baseY + buffer.cursorY))
+    : undefined;
   try {
     terminal.resize(size.columns, size.rows);
-    restoreTerminalViewportBookmark(terminal, prepared);
+    const resized = terminal.buffer.active;
+    if (wasAtBottom) terminal.scrollToBottom();
+    else if (marker && Number.isInteger(marker.line) && marker.line >= 0 && marker.line <= resized.baseY) {
+      terminal.scrollToLine(marker.line);
+    } else terminal.scrollToBottom();
   } finally {
-    disposeTerminalViewportBookmark(prepared);
-  }
-}
-
-/** Restores a prepared marker without requiring a cell-grid change. */
-export function restoreBookmarkedTerminalViewport(
-  terminal: ViewportTerminal,
-  prepared: TerminalViewportBookmark,
-): void {
-  try {
-    restoreTerminalViewportBookmark(terminal, prepared);
-  } finally {
-    disposeTerminalViewportBookmark(prepared);
+    marker?.dispose();
   }
 }
 
