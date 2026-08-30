@@ -231,7 +231,18 @@ impl AgentRuntime {
             && previous
                 .as_ref()
                 .is_some_and(|record| record.codex_auto_review_turn_id == approval_turn_id);
-        let parsed_lifecycle = if cached_auto_review {
+        let previous_claude_has_running_subagent = previous
+            .as_ref()
+            .is_some_and(|record| record.claude_has_running_subagent);
+        let claude_idle_prompt_during_subagent = adapter.id() == "claude-code"
+            && previous_claude_has_running_subagent
+            && previous_lifecycle != v1::AgentLifecycleState::Blocked
+            && parsed.event_name == "Notification"
+            && payload
+                .get("notification_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("idle_prompt");
+        let parsed_lifecycle = if cached_auto_review || claude_idle_prompt_during_subagent {
             v1::AgentLifecycleState::Working
         } else {
             parsed.lifecycle
@@ -323,6 +334,22 @@ impl AgentRuntime {
                 .map(|record| record.codex_auto_review_turn_id.clone())
                 .unwrap_or_default()
         };
+        let claude_has_running_subagent = if adapter.id() != "claude-code" {
+            false
+        } else if parsed.event_name == "Stop" {
+            if terminal_late {
+                previous_claude_has_running_subagent
+            } else {
+                payload
+                    .get(adapters::CLAUDE_HAS_RUNNING_SUBAGENT_FIELD)
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            }
+        } else if matches!(parsed.event_name.as_str(), "SessionStart" | "StopFailure") {
+            false
+        } else {
+            previous_claude_has_running_subagent
+        };
         let record = StoredAgent {
             agent_id: agent_id.clone(),
             adapter: adapter.legacy_kind() as i32,
@@ -355,6 +382,7 @@ impl AgentRuntime {
             latest_source_generation,
             present: true,
             hook_terminal,
+            claude_has_running_subagent,
             codex_auto_review_turn_id,
             lifecycle_observed_at_unix_millis: observed_now,
             lifecycle_changed_at_unix_millis: lifecycle_changed_at,

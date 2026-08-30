@@ -351,6 +351,7 @@ fn build_event(
     let codex_permission =
         adapter == v1::AgentAdapterKind::Codex && event_name == "PermissionRequest";
     let codex_pre_tool = adapter == v1::AgentAdapterKind::Codex && event_name == "PreToolUse";
+    let claude_stop = adapter == v1::AgentAdapterKind::ClaudeCode && event_name == "Stop";
     let notification_type = string_field(&value, &["notification_type", "notificationType"]);
     let mut normalized = serde_json::Map::new();
     normalized.insert("hook_event_name".into(), event_name.into());
@@ -359,6 +360,21 @@ fn build_event(
     }
     if !notification_type.is_empty() {
         normalized.insert("notification_type".into(), notification_type.into());
+    }
+    if claude_stop {
+        let has_running_subagent = value
+            .get("background_tasks")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tasks| {
+                tasks.iter().any(|task| {
+                    task.get("type").and_then(serde_json::Value::as_str) == Some("subagent")
+                        && task.get("status").and_then(serde_json::Value::as_str) == Some("running")
+                })
+            });
+        normalized.insert(
+            crate::service::agents::adapters::CLAUDE_HAS_RUNNING_SUBAGENT_FIELD.into(),
+            has_running_subagent.into(),
+        );
     }
     if codex_pre_tool {
         let tool_name = string_field(&value, &["tool_name", "toolName"]);
@@ -814,20 +830,55 @@ mod tests {
     fn fallback_envelope_contains_only_normalized_lifecycle_fields() {
         let event = build_event(
             v1::AgentAdapterKind::ClaudeCode,
-            br#"{"hook_event_name":"Stop","session_id":"s","prompt":"private prompt","api_token":"secret","background_tasks":[{"command":"private"}]}"#.to_vec(),
+            br#"{"hook_event_name":"Stop","session_id":"s","prompt":"private prompt","api_token":"secret","background_tasks":[{"id":"agent-private","type":"subagent","status":"running","command":"private command","description":"private task"}]}"#.to_vec(),
             "%12",
             "tmux:server-a",
             7,
             None,
         )
         .unwrap();
-        let payload = String::from_utf8(event.payload_json).unwrap();
-        // Only the fields lifecycle is decided from survive. Background work
-        // is not one of them: a Stop ends the turn whatever is still running.
-        assert!(!payload.contains("background_tasks"));
-        assert!(!payload.contains("private"));
-        assert!(!payload.contains("secret"));
-        assert!(!payload.contains("prompt"));
+        let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "session_id": "s",
+                "has_running_subagent": true,
+            })
+        );
+        let serialized = payload.to_string();
+        for private in [
+            "background_tasks",
+            "agent-private",
+            "private command",
+            "private task",
+            "secret",
+            "prompt",
+        ] {
+            assert!(!serialized.contains(private));
+        }
+    }
+
+    #[test]
+    fn claude_stop_ignores_non_subagent_background_work() {
+        let event = build_event(
+            v1::AgentAdapterKind::ClaudeCode,
+            br#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[{"id":"shell-private","type":"local_bash","status":"running","command":"sleep 300"}],"session_crons":[{"prompt":"private cron"}]}"#.to_vec(),
+            "%12",
+            "tmux:server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "session_id": "s",
+                "has_running_subagent": false,
+            })
+        );
     }
 
     #[test]

@@ -59,6 +59,11 @@ pub(super) struct StoredAgent {
     pub present: bool,
     #[serde(default)]
     pub hook_terminal: bool,
+    /// Claude's parent has stopped while at least one background subagent is
+    /// still running. Retained across daemon restarts so Claude's routine idle
+    /// notification cannot turn that live work into a false blocked state.
+    #[serde(default)]
+    pub claude_has_running_subagent: bool,
     /// The exact Codex turn whose start identified native auto-review. A
     /// permission request may reuse this only when its turn ID matches.
     #[serde(default)]
@@ -135,10 +140,11 @@ pub(super) fn load(path: &Path) -> StoredState {
         // combination observed in a live schema-2 store (`hook_terminal: true`
         // with `lifecycle: working`) so the next daemon snapshot repairs the
         // UI immediately instead of waiting up to the stale-working TTL.
-        if record.hook_terminal
-            && record.lifecycle != tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32
-        {
-            record.lifecycle = tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32;
+        if record.hook_terminal {
+            record.claude_has_running_subagent = false;
+            if record.lifecycle != tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32 {
+                record.lifecycle = tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32;
+            }
         }
     }
     state
@@ -241,6 +247,7 @@ mod tests {
         // is what the staleness sweep reads as "fall back to `updated_at`".
         assert_eq!(record.lifecycle_observed_at_unix_millis, 0);
         assert_eq!(record.lifecycle_changed_at_unix_millis, 1786000000000);
+        assert!(!record.claude_has_running_subagent);
         fs::remove_file(path).unwrap();
     }
 
@@ -404,6 +411,7 @@ mod tests {
                 latest_source_generation: 0,
                 present: true,
                 hook_terminal: true,
+                claude_has_running_subagent: false,
                 codex_auto_review_turn_id: String::new(),
                 lifecycle_observed_at_unix_millis: 1,
                 lifecycle_changed_at_unix_millis: 1,

@@ -686,6 +686,129 @@ fn a_failed_turn_ends_the_turn_and_asks_for_a_human() {
         runtime.snapshot_for("server-a").agents[0].lifecycle,
         v1::AgentLifecycleState::Idle as i32
     );
+    claude_hook(
+        &runtime,
+        &topology,
+        "late-intermediate-stop",
+        serde_json::json!({
+            "hook_event_name": "Stop",
+            "has_running_subagent": true
+        }),
+    );
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert!(record.hook_terminal);
+    assert!(!record.claude_has_running_subagent);
+}
+
+#[test]
+fn an_active_subagent_never_hides_a_real_permission_block() {
+    let runtime = runtime("subagent-permission");
+    let topology = topology("claude");
+    claude_hook(
+        &runtime,
+        &topology,
+        "prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    claude_hook(
+        &runtime,
+        &topology,
+        "parent-stop",
+        serde_json::json!({
+            "hook_event_name": "Stop",
+            "has_running_subagent": true
+        }),
+    );
+    let blocked = claude_hook(
+        &runtime,
+        &topology,
+        "permission",
+        serde_json::json!({"hook_event_name": "PermissionRequest"}),
+    );
+    assert!(blocked.notify);
+    let blocked = blocked.agent.unwrap();
+    assert_eq!(blocked.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+
+    let repeated = claude_hook(
+        &runtime,
+        &topology,
+        "idle-notification",
+        serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "idle_prompt"
+        }),
+    );
+    assert!(
+        !repeated.notify,
+        "the same block must not earn attention twice"
+    );
+    let repeated = repeated.agent.unwrap();
+    assert_eq!(repeated.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+    assert_eq!(repeated.attention_generation, blocked.attention_generation);
+
+    let resumed = claude_hook(
+        &runtime,
+        &topology,
+        "permission-resolved",
+        serde_json::json!({"hook_event_name": "PostToolUse"}),
+    )
+    .agent
+    .unwrap();
+    assert_eq!(resumed.lifecycle, v1::AgentLifecycleState::Working as i32);
+}
+
+#[test]
+fn the_active_subagent_idle_guard_survives_a_daemon_restart() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("claude-subagent-restart-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let topology = topology("claude");
+    {
+        let runtime = AgentRuntime::isolated(path.clone());
+        claude_hook(
+            &runtime,
+            &topology,
+            "prompt",
+            serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+        );
+        claude_hook(
+            &runtime,
+            &topology,
+            "parent-stop",
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "has_running_subagent": true
+            }),
+        );
+    }
+
+    let restarted = AgentRuntime::isolated(path);
+    let idle = claude_hook(
+        &restarted,
+        &topology,
+        "idle-after-restart",
+        serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "idle_prompt"
+        }),
+    );
+    assert!(!idle.notify);
+    let idle = idle.agent.unwrap();
+    assert_eq!(idle.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert!(
+        restarted
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .get(&idle.agent_id)
+            .unwrap()
+            .claude_has_running_subagent
+    );
 }
 
 /// Ingests one Claude Code hook with a payload written out in full, which is
@@ -756,6 +879,149 @@ fn background_work_neither_extends_the_turn_nor_disarms_the_notification_guard()
         runtime.snapshot_for("server-a").agents[0].lifecycle,
         v1::AgentLifecycleState::Idle as i32,
         "the idle nag after a finished turn is not a blocked agent"
+    );
+}
+
+/// Claude's parent emits intermediate Stops while background subagents are
+/// running. Those Stops and each subagent completion remain within one working
+/// turn. Only the parent's final empty Stop completes it and arms the terminal
+/// notification guard.
+#[test]
+fn running_subagents_keep_the_parent_working_until_its_final_stop() {
+    let runtime = runtime("running-subagents");
+    let topology = topology("claude");
+    let prompt = claude_hook(
+        &runtime,
+        &topology,
+        "prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+    )
+    .agent
+    .unwrap();
+    let attention_before = prompt.attention_generation;
+
+    for (id, payload) in [
+        (
+            "parent-stop-three",
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "has_running_subagent": true
+            }),
+        ),
+        (
+            "idle-notification-during-subagents",
+            serde_json::json!({
+                "hook_event_name": "Notification",
+                "notification_type": "idle_prompt"
+            }),
+        ),
+        (
+            "short-stop",
+            serde_json::json!({"hook_event_name": "SubagentStop"}),
+        ),
+        (
+            "parent-stop-two",
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "has_running_subagent": true
+            }),
+        ),
+        (
+            "medium-stop",
+            serde_json::json!({"hook_event_name": "SubagentStop"}),
+        ),
+        (
+            "parent-stop-one",
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "has_running_subagent": true
+            }),
+        ),
+        (
+            "long-stop",
+            serde_json::json!({"hook_event_name": "SubagentStop"}),
+        ),
+    ] {
+        let event = claude_hook(&runtime, &topology, id, payload);
+        assert!(!event.notify, "{id} must not report completion");
+        let record = event.agent.unwrap();
+        assert_eq!(
+            record.lifecycle,
+            v1::AgentLifecycleState::Working as i32,
+            "{id} must keep the parent working"
+        );
+        assert_eq!(record.attention_generation, attention_before);
+        assert!(
+            !runtime
+                .state
+                .lock()
+                .unwrap()
+                .agents
+                .get(&record.agent_id)
+                .unwrap()
+                .hook_terminal,
+            "{id} must not close the turn"
+        );
+        assert!(
+            runtime
+                .state
+                .lock()
+                .unwrap()
+                .agents
+                .get(&record.agent_id)
+                .unwrap()
+                .claude_has_running_subagent,
+            "{id} must retain the active-subagent guard"
+        );
+    }
+
+    let finished = claude_hook(
+        &runtime,
+        &topology,
+        "final-stop",
+        serde_json::json!({
+            "hook_event_name": "Stop",
+            "has_running_subagent": false
+        }),
+    );
+    assert!(finished.notify);
+    let finished = finished.agent.unwrap();
+    assert_eq!(finished.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(finished.attention_generation, attention_before + 1);
+    assert_eq!(finished.attention_kind, "completed");
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .get(&finished.agent_id)
+            .unwrap()
+            .hook_terminal
+    );
+    assert!(
+        !runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .get(&finished.agent_id)
+            .unwrap()
+            .claude_has_running_subagent
+    );
+
+    claude_hook(
+        &runtime,
+        &topology,
+        "idle-notification",
+        serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "idle_prompt"
+        }),
+    );
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Idle as i32
     );
 }
 
