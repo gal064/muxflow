@@ -996,7 +996,6 @@ fn run_matrix(transport: Transport, primary_name: &str, ordinary_client: &str) -
         v1::Request {
             scope: original_pane.id.clone(),
             visible: false,
-            data: b"phase2-renderer-snapshot".to_vec(),
             terminal_epoch: visibility_epoch,
             terminal_generation_cutoff: hide_cutoff,
             ..Default::default()
@@ -1019,10 +1018,6 @@ fn run_matrix(transport: Transport, primary_name: &str, ordinary_client: &str) -
     ensure!(
         !hidden.requires_seed && hidden.recovery_reason.is_empty(),
         "healthy hidden pane incorrectly required seed recovery"
-    );
-    ensure!(
-        hidden.serialized_snapshot == b"phase2-renderer-snapshot",
-        "hidden snapshot mismatch"
     );
     ensure!(
         hidden.snapshot_generation == hide_cutoff

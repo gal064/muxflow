@@ -759,7 +759,7 @@ describe("reveal answers the reducer has no rule for", () => {
   });
 });
 
-describe("the redundant restore a tab switch used to repaint", () => {
+describe("a verified resume onto the screen the renderer already holds", () => {
   /** Mounts, lets the host seed the pane, then hides it so a cache exists. */
   async function warmPane(paneId: string, screen: string): Promise<void> {
     host.announceEpoch();
@@ -783,7 +783,7 @@ describe("the redundant restore a tab switch used to repaint", () => {
     await unmountPane(mounted);
   });
 
-  it("still acknowledges and reveals when the skipped restore has no tail", async () => {
+  it("still acknowledges and reveals when the resume has no tail", async () => {
     await warmPane("%1", "WARM SCREEN");
     const seedsBefore = host.emitted.filter((line) => line.startsWith("seed@")).length;
 
@@ -791,7 +791,7 @@ describe("the redundant restore a tab switch used to repaint", () => {
 
     expect(renderer().log.filter((entry) => entry.startsWith("restore("))).toHaveLength(1);
     // The empty tail rides the scheduler's ordered barrier, which is what
-    // carries the acknowledgement and the reveal the skipped restore would have.
+    // carries the acknowledgement and the reveal the resume would have.
     expect(renderer().log.some((entry) => entry.startsWith("write:0@"))).toBe(true);
     expect(renderer().screen).toBe("WARM SCREEN");
     expect(painted()).toBe(true);
@@ -806,7 +806,7 @@ describe("the redundant restore a tab switch used to repaint", () => {
     await warmPane("%1", "WARM SCREEN");
     api.requestTerminalSeed.mockClear();
     // A sealed or overflowed scheduler drops the record and the callback with
-    // it, so the acknowledgement and the reveal the skipped restore delegated
+    // it, so the acknowledgement and the reveal the resume delegated
     // to that empty write are simply lost. Losing them quietly is what this
     // pane must never do.
     renderers.refuseNewWrites = true;
