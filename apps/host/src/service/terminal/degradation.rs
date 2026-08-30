@@ -40,11 +40,6 @@ pub(super) fn pane_resource_event(
         pane_resource: Some(v1::PaneResource {
             pane_id: pane_id.into(),
             state: protocol_state(resource.state),
-            // Kept on the wire for one release so a desktop that still reads it
-            // finds a field rather than a gap. Nothing writes it: the renderer
-            // owns its screen, and this host answers with a verified tail or
-            // with a seed.
-            serialized_snapshot: Vec::new(),
             raw_tail: resource.raw_tail,
             generation: resource.generation,
             snapshot_generation: resource.snapshot_generation,

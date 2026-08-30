@@ -15,8 +15,7 @@ const seed = (sequence: number, generation: number, paneId = "%1", data = Uint8A
   kind: "seed", paneId, generation, data: copyTerminalBytes(data), sequence,
 });
 type Resource = Extract<TerminalEvent, { kind: "paneResource" }>;
-type ResourceOverrides = Partial<Omit<Resource, "serializedSnapshot" | "rawTail">> & {
-  serializedSnapshot?: Uint8Array;
+type ResourceOverrides = Partial<Omit<Resource, "rawTail">> & {
   rawTail?: Uint8Array;
 };
 const resource = (
@@ -24,11 +23,11 @@ const resource = (
   generation: number,
   overrides: ResourceOverrides = {},
 ): TerminalEvent => {
-  const { serializedSnapshot = Uint8Array.of(generation), rawTail = Uint8Array.of(generation + 10), ...metadata } = overrides;
+  const { rawTail = Uint8Array.of(generation + 10), ...metadata } = overrides;
   return {
     kind: "paneResource", paneId: "%1", state: "hiddenBuffered", requiresSeed: false,
     resumeFromRenderer: false, recoveryReason: "", generation, snapshotGeneration: Math.max(0, generation - 1), tailThroughGeneration: generation,
-    serializedSnapshot: copyTerminalBytes(serializedSnapshot), rawTail: copyTerminalBytes(rawTail), sequence, ...metadata,
+    rawTail: copyTerminalBytes(rawTail), sequence, ...metadata,
   };
 };
 
@@ -44,7 +43,6 @@ const history = (sequence: number, paneId = "%1", data = Uint8Array.of(7)): Term
 const resumeAnswer = (sequence: number, generation: number): TerminalEvent =>
   resource(sequence, generation, {
     resumeFromRenderer: true,
-    serializedSnapshot: new Uint8Array(),
     rawTail: new Uint8Array(),
   });
 
@@ -159,7 +157,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.publish(output(2, 5, "%1", Uint8Array.of(9)));
     hub.publish(resource(3, 6, {
       state: "released", requiresSeed: true, recoveryReason: "overflow",
-      serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array(),
+      rawTail: new Uint8Array(),
     }));
     hub.publish(output(4, 7));
     hub.publish(seed(5, 8));
@@ -202,7 +200,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     const requests: string[] = [];
     const hub = new TerminalEventHub((paneId) => requests.push(paneId), { maxPaneBytes: 4 });
     hub.publish(resource(1, 1, {
-      recoveryReason: "12345", serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array(),
+      recoveryReason: "12345", rawTail: new Uint8Array(),
     }));
     expect(requests).toEqual(["%1"]);
     expect(hub.retainedByteLength).toBe(0);
@@ -231,15 +229,15 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     const hub = new TerminalEventHub();
     hub.publish(output(1, 1, "%1", Uint8Array.of(1, 2, 3)));
     hub.publish({ kind: "seedDiagnostic", paneId: "%1", message: "old", sequence: 2 });
-    hub.publish(resource(3, 2, { serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array() }));
+    hub.publish(resource(3, 2, { rawTail: new Uint8Array() }));
     hub.publish({ kind: "seedDiagnostic", paneId: "%1", message: "λ", sequence: 4 });
     expect(hub.retainedByteLength).toBe(5);
-    hub.publish(resource(5, 3, { recoveryReason: "λ", serializedSnapshot: Uint8Array.of(7), rawTail: Uint8Array.of(8, 9) }));
+    hub.publish(resource(5, 3, { recoveryReason: "λ", rawTail: Uint8Array.of(7, 8, 9) }));
     expect(hub.retainedByteLength).toBe(5);
     const received: TerminalEvent[] = [];
     hub.subscribePane("%1", (event) => received.push(event));
     expect(received).toEqual([
-      resource(5, 3, { recoveryReason: "λ", serializedSnapshot: Uint8Array.of(7), rawTail: Uint8Array.of(8, 9) }),
+      resource(5, 3, { recoveryReason: "λ", rawTail: Uint8Array.of(7, 8, 9) }),
     ]);
     expect(hub.retainedByteLength).toBe(0);
   });
@@ -388,7 +386,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.publish(resource(1, 2));
     // The replay event is also the exact duplicate-comparison identity: no
     // detached second allocation is retained beside it.
-    expect(hub.retainedByteLength).toBe(2);
+    expect(hub.retainedByteLength).toBe(1);
     expect(hub.retainedPaneCount).toBe(1);
     hub.subscribePane("%1", () => undefined);
     expect(hub.retainedByteLength).toBe(0);
@@ -441,7 +439,6 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.subscribePane("%1", () => undefined);
     const checkpoint = resource(1, 2, {
       rawTail: new Uint8Array(256 * 1024 + 1),
-      serializedSnapshot: new Uint8Array(),
     });
     hub.publish(checkpoint);
     hub.publish({ ...checkpoint, sequence: 2 });
@@ -458,7 +455,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(hub.retainedByteLength).toBe(0);
     const delivered = consumed[0];
     if (delivered.kind !== "paneResource") throw new Error("expected resource fixture");
-    delivered.serializedSnapshot[0] = 99;
+    delivered.rawTail[0] = 99;
     hub.publish({ ...delivered, sequence: 2 });
     expect(requests).toEqual(["%1"]);
   });
@@ -616,7 +613,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
 
     hub.publish(resource(1, 1, {
       state: "released", requiresSeed: true, recoveryReason: "host recovery pending",
-      serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array(),
+      rawTail: new Uint8Array(),
     }));
     expect(hub.paneHealth("%1")).toEqual({ awaitingSeed: true, conflictReseedRequested: false });
     expect(health.at(-1)).toEqual({ awaitingSeed: true, conflictReseedRequested: false });
@@ -635,7 +632,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     const hub = new TerminalEventHub();
     hub.publish(resource(1, 1, {
       state: "released", requiresSeed: true, recoveryReason: "host recovery pending",
-      serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array(),
+      rawTail: new Uint8Array(),
     }));
     const health: Array<{ awaitingSeed: boolean }> = [];
     hub.subscribePane("%1", () => undefined, (value) => health.push(value));
@@ -680,14 +677,13 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     hub.publish(resource(1, 1, {
       requiresSeed: true,
       recoveryReason: "host recovery pending",
-      serializedSnapshot: new Uint8Array(),
       rawTail: new Uint8Array(),
     }));
     expect(hub.paneHealth("%1").awaitingSeed).toBe(true);
 
     // An empty answer that is not a resume repairs nothing, and must not
     // cancel the seed this pane is owed.
-    hub.publish(resource(2, 2, { serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array() }));
+    hub.publish(resource(2, 2, { rawTail: new Uint8Array() }));
     expect(hub.paneHealth("%1").awaitingSeed).toBe(true);
 
     // The same zero bytes, carrying the host's verified checkpoint, are the
@@ -754,7 +750,7 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     ["recovery material", resource(4, 3, { paneId: "%1" })],
     ["host-owned seed request", resource(4, 3, {
       paneId: "%1", requiresSeed: true, recoveryReason: "host recovery pending",
-      serializedSnapshot: new Uint8Array(), rawTail: new Uint8Array(),
+      rawTail: new Uint8Array(),
     })],
     ["diagnostic preceding a seed", { kind: "seedDiagnostic", paneId: "%1", message: "partial metadata", sequence: 4 } as TerminalEvent],
   ])("does not issue a redundant conservative request for an untracked %s", (_name, repairEvent) => {

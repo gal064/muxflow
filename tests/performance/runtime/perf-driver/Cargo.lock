@@ -169,6 +169,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "performance-test-driver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tmux-agent-protocol",
+ "vt100",
+]
+
+[[package]]
 name = "petgraph"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -177,16 +187,6 @@ dependencies = [
  "fixedbitset",
  "hashbrown 0.15.5",
  "indexmap",
-]
-
-[[package]]
-name = "performance-test-driver"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde_json",
- "tmux-agent-protocol",
- "vt100",
 ]
 
 [[package]]

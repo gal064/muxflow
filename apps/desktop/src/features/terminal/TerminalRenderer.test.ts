@@ -854,7 +854,6 @@ describe("pane resource recovery", () => {
     kind: "paneResource", paneId: "%1", state: "hiddenBuffered", requiresSeed: false,
     resumeFromRenderer: false,
     recoveryReason: "", generation: 2, snapshotGeneration: 1, tailThroughGeneration: 2,
-    serializedSnapshot: copyTerminalBytes(new TextEncoder().encode("screen λ")),
     rawTail: copyTerminalBytes(Uint8Array.of(27, 91, 109)),
     sequence: 2,
   } as const;
@@ -864,24 +863,22 @@ describe("pane resource recovery", () => {
     // all and is still the whole recovery.
     expect(paneRecoveryPlan({
       ...resource, resumeFromRenderer: true,
-      serializedSnapshot: copyTerminalBytes(new Uint8Array()),
       rawTail: copyTerminalBytes(new Uint8Array()),
     })).toEqual({
       kind: "resume", rawTail: new Uint8Array(), snapshotGeneration: 1, tailThroughGeneration: 2,
     });
   });
 
-  it("restores a valid serialized snapshot before its byte-exact raw tail", () => {
-    expect(paneRecoveryPlan(resource)).toEqual({
-      kind: "restore", serialized: "screen λ", rawTail: Uint8Array.of(27, 91, 109),
-      snapshotGeneration: 1, tailThroughGeneration: 2,
-    });
+  // Without the flag there is nothing to recover from: the host holds no copy
+  // of this pane's screen, so an answer that is not a resume and not a seed
+  // debt carries no plan at all.
+  it("plans nothing for an answer that neither resumes nor owes a seed", () => {
+    expect(paneRecoveryPlan(resource)).toEqual({ kind: "none" });
   });
 
-  it("awaits a seed for released or malformed recovery state", () => {
+  it("awaits a seed for a released resource", () => {
     expect(paneRecoveryPlan({ ...resource, state: "released", requiresSeed: true, recoveryReason: "evicted" }))
       .toEqual({ kind: "awaitSeed", reason: "evicted" });
-    expect(paneRecoveryPlan({ ...resource, serializedSnapshot: copyTerminalBytes(Uint8Array.of(0xff)) }).kind).toBe("awaitSeed");
   });
 });
 
