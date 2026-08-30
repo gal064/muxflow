@@ -80,6 +80,12 @@ pub(super) struct StoredAgent {
     /// have, then every real lifecycle transition advances it exactly once.
     #[serde(default)]
     pub lifecycle_changed_at_unix_millis: i64,
+    /// When the current seen attention generation was first acknowledged.
+    ///
+    /// Repeated acknowledgements do not move this clock. It is the stable
+    /// origin for a completed agent's post-read Recent window.
+    #[serde(default)]
+    pub attention_seen_at_unix_millis: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +120,16 @@ pub(super) fn load(path: &Path) -> StoredState {
                 } else {
                     record.updated_at_unix_millis
                 };
+        }
+        // Stores written before this field existed cannot recover the actual
+        // acknowledgement time. Preserve their previous Recent/Idle behavior
+        // by using the completion transition as the one-time repair baseline.
+        if record.attention_seen_at_unix_millis == 0
+            && record.attention_kind == "completed"
+            && record.attention_generation > 0
+            && record.seen_generation >= record.attention_generation
+        {
+            record.attention_seen_at_unix_millis = record.lifecycle_changed_at_unix_millis;
         }
         // A terminal hook is proof that the turn ended. Normalize the invalid
         // combination observed in a live schema-2 store (`hook_terminal: true`
@@ -321,7 +337,7 @@ mod tests {
                   "state_generation": 9,
                   "attention_generation": 2,
                   "attention_kind": "completed",
-                  "seen_generation": 1,
+                  "seen_generation": 2,
                   "updated_at_unix_millis": 1786000000000,
                   "hook_authority_expires_at_unix_millis": 0,
                   "detected_manually": false,
@@ -339,7 +355,11 @@ mod tests {
             .expect("the record survived the removed field");
         assert_eq!(record.lifecycle, 3);
         assert_eq!(record.attention_kind, "completed");
-        assert_eq!(record.seen_generation, 1);
+        assert_eq!(record.seen_generation, 2);
+        assert_eq!(
+            record.attention_seen_at_unix_millis, record.lifecycle_changed_at_unix_millis,
+            "an already-seen completion uses its transition as the migration baseline"
+        );
         assert_eq!(record.route.pane_id, "%1");
         assert!(record.codex_auto_review_turn_id.is_empty());
         fs::remove_file(path).unwrap();
@@ -376,6 +396,7 @@ mod tests {
                 attention_generation: 1,
                 attention_kind: "completed".into(),
                 seen_generation: 1,
+                attention_seen_at_unix_millis: 1,
                 updated_at_unix_millis: 1,
                 hook_authority_expires_at_unix_millis: 1,
                 detected_manually: false,
