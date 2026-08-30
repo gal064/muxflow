@@ -281,6 +281,10 @@ export function useShellCommands(options: ShellCommandOptions): {
       case "view.togglePanel":
       case "view.showFiles":
       case "view.showGit":
+        // The panel/sidebar DOM changes the terminal's CSS box before its
+        // ResizeObserver can react. Preserve the logical top line now, while
+        // xterm still reports the viewport the user is actually reading.
+        for (const controller of options.controllers.current.values()) controller.prepareForLayoutResize();
         options.setAppState((current) => ({
           ...current,
           shell: shellAfterSidebarCommand(current.shell, commandId),

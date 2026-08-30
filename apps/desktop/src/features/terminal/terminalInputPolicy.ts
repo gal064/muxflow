@@ -1,5 +1,6 @@
 import { keyboardEventIsComposing, type Platform } from "../../commands/registry";
 import type { TerminalRenderer } from "./TerminalRenderer";
+import { cleanWrappedCommandSelection } from "./terminalSelection";
 
 type TerminalKeyEvent = Pick<KeyboardEvent,
   "altKey" | "code" | "ctrlKey" | "isComposing" | "key" | "keyCode" | "metaKey" | "shiftKey"
@@ -51,20 +52,26 @@ export function translateTerminalKey(event: TerminalKeyEvent, context: TerminalK
 
 /** Copies one finalized selection without allowing an empty click to clear the clipboard. */
 export async function copyCompletedTerminalSelection(
-  renderer: Pick<TerminalRenderer, "getSelection" | "hasSelection">,
+  renderer: Pick<TerminalRenderer, "getSelection" | "getSelectionSnapshot" | "hasSelection">,
   enabled: boolean,
   write: (text: string) => void | Promise<void>,
+  cleanWrappedCommands = false,
 ): Promise<boolean> {
   if (!enabled || !renderer.hasSelection()) return false;
-  const selection = renderer.getSelection();
+  // Capture the text and its row evidence before `write` crosses an async
+  // native-clipboard boundary. A renderer without rich evidence is a test,
+  // plugin, or future fallback and retains verbatim copy behavior.
+  const snapshot = renderer.getSelectionSnapshot?.();
+  const selection = snapshot?.text ?? renderer.getSelection();
   if (!selection) return false;
-  await write(selection);
+  await write(cleanWrappedCommands && snapshot ? cleanWrappedCommandSelection(snapshot) : selection);
   return true;
 }
 
 interface CopyOnSelectOptions {
-  renderer: Pick<TerminalRenderer, "getSelection" | "hasSelection" | "onSelectionChange">;
+  renderer: Pick<TerminalRenderer, "getSelection" | "getSelectionSnapshot" | "hasSelection" | "onSelectionChange">;
   enabled: () => boolean;
+  cleanWrappedCommands?: () => boolean;
   write: (text: string) => void | Promise<void>;
   onError: (error: unknown) => void;
 }
@@ -77,10 +84,11 @@ interface CopyOnSelectOptions {
 export function installTerminalCopyOnSelect({
   renderer,
   enabled,
+  cleanWrappedCommands,
   write,
   onError,
 }: CopyOnSelectOptions): () => void {
   return renderer.onSelectionChange(() => {
-    void copyCompletedTerminalSelection(renderer, enabled(), write).catch(onError);
+    void copyCompletedTerminalSelection(renderer, enabled(), write, cleanWrappedCommands?.() ?? false).catch(onError);
   });
 }

@@ -1178,6 +1178,7 @@ export function App() {
               beginDividerDrag={beginDividerDrag}
               clientId={clientId}
               copyOnSelect={appState.shell.copyOnSelect}
+              cleanWrappedCommands={appState.shell.cleanWrappedCommands}
               terminalApplicationClipboard={appState.shell.terminalApplicationClipboard}
               terminalFontSize={appState.shell.terminalFontSize}
               controllers={controllers}

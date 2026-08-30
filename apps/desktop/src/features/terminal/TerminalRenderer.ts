@@ -25,10 +25,14 @@ import { recordIncident } from "../../diagnostics/incidents";
 import { isTerminalFileLinkActivation, terminalFileLinkCellRange, terminalFileLinks } from "./terminalFilePaths";
 import type { Platform } from "../../commands/registry";
 import { installOsc52ClipboardWrite } from "./osc52Clipboard";
+import { captureTerminalSelection, type TerminalSelectionSnapshot } from "./terminalSelection";
 import {
+  bookmarkTerminalViewport,
   captureTerminalViewport,
   resizeTerminalPreservingViewport,
+  restoreBookmarkedTerminalViewport,
   restoreTerminalViewport,
+  type TerminalViewportBookmark,
   type TerminalViewportAnchor,
 } from "./terminalViewport";
 
@@ -181,6 +185,8 @@ export interface TerminalRenderer {
   setFontSize(fontSize: number): void;
   /** Forces the grid tmux says this pane has, whatever the CSS box measured. */
   setGrid(size: TerminalSize): GridOutcome;
+  /** Captures the viewport before a React layout change can disturb xterm's DOM. */
+  prepareForLayoutResize(): void;
   /** Restores a cached viewport when its serialized buffer used the same grid. */
   restoreViewport(anchor: TerminalViewportAnchor): void;
   /**
@@ -204,6 +210,8 @@ export interface TerminalRenderer {
   onViewportChange(listener: (state: TerminalViewportState) => void): () => void;
   getSelection(): string;
   hasSelection(): boolean;
+  /** Snapshot text and immutable buffer evidence before asynchronous clipboard I/O. */
+  getSelectionSnapshot?(): TerminalSelectionSnapshot;
   onSelectionChange(listener: () => void): () => void;
   isAlternateScreenActive(): boolean;
   /** DECCKM: whether cursor keys must be sent as SS3 rather than CSI. */
@@ -386,6 +394,8 @@ export class XtermRenderer implements TerminalRenderer {
   #lastViewportY = 0;
   #lastViewport?: TerminalViewportState;
   #programmaticViewportMutation = false;
+  #preparedLayoutViewport?: TerminalViewportBookmark;
+  #preparedLayoutViewportGeneration = 0;
   #seedRequested = false;
   #drainPromise?: Promise<DrainedTerminalSnapshot>;
   #drainAbandoned = false;
@@ -823,10 +833,28 @@ export class XtermRenderer implements TerminalRenderer {
     if (!Number.isInteger(columns) || !Number.isInteger(rows) || columns < 2 || rows < 2) {
       return { kind: "rejected", reason: `${columns}x${rows} is not a usable terminal grid` };
     }
-    if (this.#terminal.cols === columns && this.#terminal.rows === rows) return { kind: "unchanged" };
-    this.#mutateViewport(() => resizeTerminalPreservingViewport(this.#terminal, { columns, rows }));
+    const prepared = this.#takePreparedLayoutViewport();
+    if (this.#terminal.cols === columns && this.#terminal.rows === rows) {
+      if (prepared) this.#mutateViewport(() => restoreBookmarkedTerminalViewport(this.#terminal, prepared));
+      return { kind: "unchanged" };
+    }
+    this.#mutateViewport(() => resizeTerminalPreservingViewport(this.#terminal, { columns, rows }, prepared));
     for (const listener of this.#gridListeners) listener();
     return { kind: "applied", size: { columns, rows } };
+  }
+
+  prepareForLayoutResize(): void {
+    this.#preparedLayoutViewport?.marker?.dispose();
+    const generation = ++this.#preparedLayoutViewportGeneration;
+    this.#preparedLayoutViewport = bookmarkTerminalViewport(this.#terminal);
+    // ResizeObserver runs before the next paint. If no grid reconciliation
+    // consumes this marker by then, the command did not change terminal
+    // geometry and it must not leak into some unrelated future resize.
+    window.requestAnimationFrame(() => {
+      if (generation !== this.#preparedLayoutViewportGeneration) return;
+      this.#preparedLayoutViewport?.marker?.dispose();
+      this.#preparedLayoutViewport = undefined;
+    });
   }
 
   restoreViewport(anchor: TerminalViewportAnchor): void {
@@ -865,6 +893,10 @@ export class XtermRenderer implements TerminalRenderer {
 
   getSelection(): string {
     return this.#terminal.getSelection();
+  }
+
+  getSelectionSnapshot(): TerminalSelectionSnapshot {
+    return captureTerminalSelection(this.#terminal);
   }
 
   hasSelection(): boolean {
@@ -954,6 +986,8 @@ export class XtermRenderer implements TerminalRenderer {
     if (this.#disposed) return;
     this.#disposed = true;
     this.#scheduler.dispose();
+    this.#preparedLayoutViewport?.marker?.dispose();
+    this.#preparedLayoutViewport = undefined;
     this.disposeGpuRenderer();
     for (const disposable of this.#disposables) disposable.dispose();
     this.#terminal.dispose();
@@ -1001,6 +1035,13 @@ export class XtermRenderer implements TerminalRenderer {
         this.#emitViewport();
       }
     }
+  }
+
+  #takePreparedLayoutViewport(): TerminalViewportBookmark | undefined {
+    const prepared = this.#preparedLayoutViewport;
+    this.#preparedLayoutViewport = undefined;
+    this.#preparedLayoutViewportGeneration += 1;
+    return prepared;
   }
 
   /// Records what the terminal was handed, and returns the completion that
