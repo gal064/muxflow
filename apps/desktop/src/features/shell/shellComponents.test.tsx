@@ -236,7 +236,7 @@ describe("application shell accessibility contracts", () => {
     expect(html).not.toContain("~/dev/muxflow");
     // The one control in the agents header names both its state and its effect.
     // The persisted mode is still `status`; the word on the button is what the
-    // mode does — blocked first, then working, then done, then idle.
+    // mode does — blocked first, then working, then recent, then idle.
     expect(html).toContain("Agent ordering: workspace. Switch to priority.");
     // The only resting connection indicator, and it is the way into settings.
     expect(html).toContain("Host remote-linux over ssh, connected. Open connection settings.");
@@ -387,13 +387,11 @@ describe("application shell accessibility contracts", () => {
     expect(html.indexOf('data-agent-index="0"')).toBeLessThan(html.indexOf('data-agent-index="1"'));
     expect(html).toContain('data-agent-icon="codex"');
     expect(html).toContain('data-agent-icon="claude"');
-    expect(html).toContain('<span class="agent-session-label">Plan rollout</span></span><span class="agent-detail">');
+    expect(html).toContain('<span class="agent-session-label">Plan rollout</span></span><span class="agent-detail">api</span>');
+    expect(html).toContain('<span class="agent-session-label">Fix tests</span></span><span class="agent-detail">web</span>');
   });
 
-  /**
-   * The four populated buckets, including both Done and Working. Recent is
-   * covered with an explicit clock in the agents-list tests.
-   */
+  /** The four populated buckets, with completion attention inside Recent. */
   const priorityAgents = () => buildAgentRows([
     agent({ id: "b", windowName: "Fix the build", sessionId: "$1", sessionName: "api", lifecycle: "blocked", updatedAt: 5, lifecycleChangedAt: 5 }),
     agent({ id: "w", windowName: "Run the suite", sessionId: "$2", sessionName: "web", lifecycle: "working", updatedAt: 4, lifecycleChangedAt: 4 }),
@@ -408,17 +406,19 @@ describe("application shell accessibility contracts", () => {
     // workspace mode uses, keyed on what the agent is doing.
     const html = sidebar({ agentSort: "status", agents: priorityAgents() });
     expect(html).toContain(">priority</button>");
-    for (const label of ["Blocked", "Working", "Done", "Idle"]) expect(html, label).toContain(`<span>${label}</span>`);
-    // Blocked, working, done, idle — both the reading and flat keyboard order.
+    for (const label of ["Blocked", "Working", "Recent", "Idle"]) expect(html, label).toContain(`<span>${label}</span>`);
+    expect(html).not.toContain("agent-status-done");
+    // Blocked, working, recent completion, idle — both the reading and flat keyboard order.
     expect(html.indexOf(">Blocked<")).toBeLessThan(html.indexOf(">Working<"));
-    expect(html.indexOf(">Working<")).toBeLessThan(html.indexOf(">Done<"));
-    expect(html.indexOf(">Done<")).toBeLessThan(html.indexOf(">Idle<"));
+    expect(html.indexOf(">Working<")).toBeLessThan(html.indexOf(">Recent<"));
+    expect(html.indexOf(">Recent<")).toBeLessThan(html.indexOf(">Idle<"));
     // Unknown shares Idle's group rather than earning a fifth heading, so that
     // group counts two.
     expect(html).toContain('<span>Idle</span><span aria-hidden="true" class="agent-group-count">2</span>');
-    // The workspace is in each row's detail, because the grouping no longer
-    // says it.
-    expect(html).toContain("web · working");
+    // The right detail is only the workspace. Status and tab remain in the
+    // accessible label, where they add context without visual churn.
+    expect(html).toContain('<span class="agent-detail">web</span>');
+    expect(html).not.toContain('<span class="agent-detail">web · working</span>');
     // One flat index across every group — a per-group index would restart the
     // roving walk at every heading.
     expect([...html.matchAll(/data-agent-index="(\d+)"/g)].map((match) => match[1])).toEqual(["0", "1", "2", "3", "4"]);
@@ -439,11 +439,11 @@ describe("application shell accessibility contracts", () => {
   it("walks every priority row exactly once with the arrow keys, across the group seams", async () => {
     // `focusRelative` used to step the flat `data-agent-index` and then take
     // the query result at that position: two different orders walked at once.
-    // With a done and a working agent both present, going down skipped the Done
-    // row and stuck at the bottom, and coming back up skipped the Working one.
+    // With a completed and a working agent both present, going down used to
+    // skip the completed row at the group seam.
     const host = await mountSidebar({ agentSort: "status", agents: priorityAgents() });
     expect([...host.querySelectorAll<HTMLElement>(".agent-workspace-heading")].map((node) => node.id))
-      .toEqual(["agent-status-blocked", "agent-status-working", "agent-status-done", "agent-status-idle"]);
+      .toEqual(["agent-status-blocked", "agent-status-working", "agent-status-recent", "agent-status-idle"]);
 
     const walkRows = [...host.querySelectorAll<HTMLElement>("[data-agent-index]")];
     expect(walkRows.map((row) => row.querySelector(".agent-session-label")?.textContent))

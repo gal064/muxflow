@@ -273,6 +273,7 @@ impl AgentRuntime {
         if attention_generation != current.attention_generation {
             bail!("attention generation is stale");
         }
+        let first_seen = current.seen_generation < attention_generation;
         state.generation = state.generation.saturating_add(1);
         let generation = state.generation;
         let record = state
@@ -280,6 +281,9 @@ impl AgentRuntime {
             .get_mut(agent_id)
             .context("agent no longer exists")?;
         record.seen_generation = record.seen_generation.max(attention_generation);
+        if first_seen {
+            record.attention_seen_at_unix_millis = now_millis();
+        }
         record.state_generation = generation;
         let result = snapshot::record(record);
         if let Err(error) = self.persist_locked(&state) {

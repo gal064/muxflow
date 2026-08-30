@@ -160,11 +160,24 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     const scope = options.scope;
     if (!scope || !options.focus.appFocused || !options.focus.terminalVisible || !options.focus.automaticSeen) return;
     for (const current of agentsMatchingFocusedPane(agents, options.focus.paneId)) {
-      const key = `${current.agentId}\0${current.attentionGeneration}`;
+      const key = [
+        scope.hostProfileId,
+        scope.serverIdentity,
+        scope.connectionEpoch,
+        current.agentId,
+        current.attentionGeneration,
+      ].join("\0");
       if (pendingSeen.current.has(key)) continue;
       pendingSeen.current.add(key);
-      void options.client.markSeen(scope, current.agentId, current.attentionGeneration).then(() => {
-        dispatch({ type: "seenAck", ...current });
+      void options.client.markSeen(scope, current.agentId, current.attentionGeneration).then((accepted) => {
+        dispatch({
+          type: "seenAck",
+          ...current,
+          attentionSeenAt: accepted?.attentionSeenAt ?? Date.now(),
+          hostProfileId: scope.hostProfileId,
+          serverIdentity: scope.serverIdentity,
+          connectionEpoch: scope.connectionEpoch,
+        });
       }).catch((error) => options.onStatus(`Could not mark agent attention seen: ${String(error)}`)).finally(() => {
         pendingSeen.current.delete(key);
       });

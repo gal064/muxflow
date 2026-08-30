@@ -107,6 +107,7 @@ pub(super) fn topology(
                 attention_generation: 0,
                 attention_kind: String::new(),
                 seen_generation: 0,
+                attention_seen_at_unix_millis: 0,
                 updated_at_unix_millis: now,
                 hook_authority_expires_at_unix_millis: 0,
                 detected_manually: true,

@@ -7,7 +7,7 @@ import type { AgentDisplayState, AgentRecord } from "./types";
  *
  * `workspace` follows the workspace list above it, so the two halves of the
  * sidebar read as one thing. `status` is the visual queue: blocked, working,
- * done, recently idle, then older idle. Rows inside each state follow their
+ * recent, then older idle. Rows inside each state follow their
  * last real lifecycle transition rather than every hook update.
  *
  * The two modes were called `grouped` and `priority`, which named neither the
@@ -21,7 +21,7 @@ export type AgentSortMode = "status" | "workspace";
 /** How long an acknowledged completed agent stays near the active work. */
 export const RECENT_IDLE_WINDOW_MILLIS = 4 * 60 * 60 * 1_000;
 
-export type AgentPriorityBucket = "blocked" | "working" | "done" | "recent" | "idle";
+export type AgentPriorityBucket = "blocked" | "working" | "recent" | "idle";
 
 export function isAgentSortMode(value: unknown): value is AgentSortMode {
   return value === "status" || value === "workspace";
@@ -37,7 +37,7 @@ export function nextSortMode(mode: AgentSortMode): AgentSortMode {
  * The persisted value stays `status` — it is in the app-state contract and two
  * migrations already point at it — but "status" names the field the rows are
  * keyed on rather than what the mode does for you, and the mode draws headings
- * now: Blocked, Working, Done, Recent, Idle, in the order you should deal with them.
+ * now: Blocked, Working, Recent, Idle, in the order you should deal with them.
  * That is a priority, so the button says priority.
  */
 export function sortModeLabel(mode: AgentSortMode): string {
@@ -113,7 +113,7 @@ export function groupAgentRows(rows: readonly AgentListRow[]): AgentWorkspaceGro
 }
 
 /**
- * The five buckets the priority order draws, in the order they are worth your
+ * The four buckets the priority order draws, in the order they are worth your
  * attention.
  *
  * `unknown` shares Idle's bucket rather than getting a fifth heading: it means
@@ -124,7 +124,6 @@ export function groupAgentRows(rows: readonly AgentListRow[]): AgentWorkspaceGro
 export const AGENT_STATUS_GROUPS = [
   { key: "blocked", label: "Blocked", state: "blocked" },
   { key: "working", label: "Working", state: "working" },
-  { key: "done", label: "Done", state: "done" },
   { key: "recent", label: "Recent", state: "idle" },
   { key: "idle", label: "Idle", state: "idle" },
 ] as const satisfies readonly { key: AgentPriorityBucket; label: string; state: AgentDisplayState }[];
@@ -180,7 +179,7 @@ export function buildAgentRows(
     return {
       agent,
       state,
-      priorityBucket: priorityBucket(state, agent.lifecycleChangedAt, now),
+      priorityBucket: priorityBucket(agent, state, now),
       location,
       routable: routable(agent),
       pinned: Boolean(location.tabPinned),
@@ -201,13 +200,30 @@ function byStatus(left: AgentListRow, right: AgentListRow): number {
 }
 
 function priorityBucket(
+  agent: AgentRecord,
   state: AgentDisplayState,
-  lifecycleChangedAt: number,
   now: number,
 ): AgentPriorityBucket {
-  if (state === "blocked" || state === "working" || state === "done") return state;
-  if (state === "idle" && now - lifecycleChangedAt < RECENT_IDLE_WINDOW_MILLIS) return "recent";
+  if (state === "blocked" || state === "working") return state;
+  // Completion attention changes only the row's dot and badge. Keeping its
+  // bucket independent from acknowledgement is what lets a click clear those
+  // visuals without moving the row out from under the pointer.
+  if (state === "done") return "recent";
+  const expiration = recentAgentExpiration(agent);
+  if (state === "idle" && expiration !== undefined && now < expiration) return "recent";
   return "idle";
+}
+
+/** The one deadline at which an idle Recent row becomes old. */
+export function recentAgentExpiration(agent: AgentRecord): number | undefined {
+  const state = displayState(agent);
+  // Unread completions remain Recent until acknowledgement supplies a clock.
+  if (state === "done") return undefined;
+  if (state !== "idle") return undefined;
+  const recentSince = agent.attentionKind === "completed" && agent.attentionSeenAt > 0
+    ? agent.attentionSeenAt
+    : agent.lifecycleChangedAt;
+  return recentSince + RECENT_IDLE_WINDOW_MILLIS;
 }
 
 function byWorkspace(left: AgentListRow, right: AgentListRow): number {
