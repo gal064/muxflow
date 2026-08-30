@@ -679,8 +679,9 @@ message FileServiceEvent {
   string watch_id = 12;
 }
 
-// Git paths are opaque host byte strings. display_path is lossy presentation
-// only and must never be sent back as an operation target.
+// Git paths are opaque host byte strings. A lossy display string, where one
+// is carried (GitDiff.display_path) or derived, is presentation only and must
+// never be sent back as an operation target.
 enum GitChangeKind {
   GIT_CHANGE_KIND_UNSPECIFIED = 0;
   GIT_CHANGE_KIND_MODIFIED = 1;
@@ -723,9 +724,7 @@ message GitRepository {
 
 message GitStatusEntry {
   bytes path = 1;
-  string display_path = 2;
   bytes original_path = 3;
-  string display_original_path = 4;
   GitChangeKind index_kind = 5;
   GitChangeKind worktree_kind = 6;
   string index_status = 7;
@@ -733,8 +732,6 @@ message GitStatusEntry {
   uint32 head_mode = 9;
   uint32 index_mode = 10;
   uint32 worktree_mode = 11;
-  string head_oid = 12;
-  string index_oid = 13;
   bool untracked = 14;
   bool ignored = 15;
   bool conflicted = 16;
@@ -750,6 +747,10 @@ message GitStatusEntry {
   // entry once exceeded. The client joins the two.
   reserved 23;
   reserved "absolute_path";
+  // Display paths are rendered by the desktop from `path`; the per-entry oids
+  // were never read on either side.
+  reserved 2, 4, 12, 13;
+  reserved "display_path", "display_original_path", "head_oid", "index_oid";
 }
 
 message GitStatusSnapshot {
