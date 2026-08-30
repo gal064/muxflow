@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{BufReader, Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -8,6 +8,10 @@ use std::{
 
 use anyhow::{Context, bail};
 use prost::Message;
+use serde::{
+    Deserialize, Deserializer,
+    de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
+};
 use tmux_agent_protocol::{envelope, read_frame, v1, write_frame};
 use tokio::{
     net::UnixStream,
@@ -16,23 +20,543 @@ use tokio::{
 
 mod codex_transcript;
 
-const MAX_HOOK_BYTES: usize = 256 * 1024;
+/// Vendor hook input can contain the complete tool result. In particular,
+/// Claude's `PostToolUse(Read)` embeds image data in `tool_response`, so the
+/// raw envelope can legitimately be much larger than the compact event sent
+/// to the daemon. The parser below streams past fields Muxflow does not use;
+/// this bound limits CPU/input consumption rather than retained payload size.
+const MAX_VENDOR_HOOK_BYTES: usize = 64 * 1024 * 1024;
+const MAX_LIFECYCLE_FIELD_BYTES: usize = 16 * 1024;
+const MAX_NORMALIZED_HOOK_BYTES: usize = 256 * 1024;
+
+#[derive(Debug)]
+struct VendorHookPayload {
+    session_id: Option<String>,
+    event_id: Option<String>,
+    hook_event_name: Option<String>,
+    notification_type: Option<String>,
+    tool_name: Option<String>,
+    turn_id: Option<String>,
+    transcript_path: Option<String>,
+    has_running_subagent: bool,
+}
+
+#[derive(Clone, Copy)]
+enum HookField {
+    SessionId,
+    SessionIdCamel,
+    EventId,
+    EventIdCamel,
+    HookEventId,
+    HookEventName,
+    HookEventNameCamel,
+    Event,
+    NotificationType,
+    NotificationTypeCamel,
+    ToolName,
+    ToolNameCamel,
+    TurnId,
+    TurnIdCamel,
+    TranscriptPath,
+    TranscriptPathCamel,
+    BackgroundTasks,
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for HookField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_identifier(HookFieldVisitor)
+    }
+}
+
+struct HookFieldVisitor;
+
+impl Visitor<'_> for HookFieldVisitor {
+    type Value = HookField;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a hook payload field")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(match value {
+            "session_id" => HookField::SessionId,
+            "sessionId" => HookField::SessionIdCamel,
+            "event_id" => HookField::EventId,
+            "eventId" => HookField::EventIdCamel,
+            "hook_event_id" => HookField::HookEventId,
+            "hook_event_name" => HookField::HookEventName,
+            "hookEventName" => HookField::HookEventNameCamel,
+            "event" => HookField::Event,
+            "notification_type" => HookField::NotificationType,
+            "notificationType" => HookField::NotificationTypeCamel,
+            "tool_name" => HookField::ToolName,
+            "toolName" => HookField::ToolNameCamel,
+            "turn_id" => HookField::TurnId,
+            "turnId" => HookField::TurnIdCamel,
+            "transcript_path" => HookField::TranscriptPath,
+            "transcriptPath" => HookField::TranscriptPathCamel,
+            "background_tasks" => HookField::BackgroundTasks,
+            _ => HookField::Unknown,
+        })
+    }
+}
+
+struct BoundedString(Option<String>);
+
+impl<'de> Deserialize<'de> for BoundedString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(BoundedStringVisitor)
+    }
+}
+
+struct BoundedStringVisitor;
+
+impl<'de> Visitor<'de> for BoundedStringVisitor {
+    type Value = BoundedString;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a bounded lifecycle string or an ignored malformed value")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        if value.len() > MAX_LIFECYCLE_FIELD_BYTES {
+            return Err(E::custom(format_args!(
+                "hook lifecycle field exceeds the {MAX_LIFECYCLE_FIELD_BYTES}-byte limit"
+            )));
+        }
+        Ok(BoundedString(Some(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        if value.len() > MAX_LIFECYCLE_FIELD_BYTES {
+            return Err(E::custom(format_args!(
+                "hook lifecycle field exceeds the {MAX_LIFECYCLE_FIELD_BYTES}-byte limit"
+            )));
+        }
+        Ok(BoundedString(Some(value)))
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(BoundedString(None))
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(BoundedString(None))
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(BoundedString(None))
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(BoundedString(None))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(BoundedString(None))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(BoundedString(None))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(BoundedString(None))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(BoundedString(None))
+    }
+}
+
+impl<'de> Deserialize<'de> for VendorHookPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(VendorHookPayloadVisitor)
+    }
+}
+
+struct VendorHookPayloadVisitor;
+
+impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
+    type Value = VendorHookPayload;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a hook payload JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut session_id = None;
+        let mut session_id_camel = None;
+        let mut event_id = None;
+        let mut event_id_camel = None;
+        let mut hook_event_id = None;
+        let mut hook_event_name = None;
+        let mut hook_event_name_camel = None;
+        let mut event = None;
+        let mut notification_type = None;
+        let mut notification_type_camel = None;
+        let mut tool_name = None;
+        let mut tool_name_camel = None;
+        let mut turn_id = None;
+        let mut turn_id_camel = None;
+        let mut transcript_path = None;
+        let mut transcript_path_camel = None;
+        let mut has_running_subagent = false;
+
+        while let Some(field) = map.next_key::<HookField>()? {
+            match field {
+                HookField::SessionId => session_id = map.next_value::<BoundedString>()?.0,
+                HookField::SessionIdCamel => {
+                    session_id_camel = map.next_value::<BoundedString>()?.0
+                }
+                HookField::EventId => event_id = map.next_value::<BoundedString>()?.0,
+                HookField::EventIdCamel => event_id_camel = map.next_value::<BoundedString>()?.0,
+                HookField::HookEventId => hook_event_id = map.next_value::<BoundedString>()?.0,
+                HookField::HookEventName => hook_event_name = map.next_value::<BoundedString>()?.0,
+                HookField::HookEventNameCamel => {
+                    hook_event_name_camel = map.next_value::<BoundedString>()?.0
+                }
+                HookField::Event => event = map.next_value::<BoundedString>()?.0,
+                HookField::NotificationType => {
+                    notification_type = map.next_value::<BoundedString>()?.0
+                }
+                HookField::NotificationTypeCamel => {
+                    notification_type_camel = map.next_value::<BoundedString>()?.0
+                }
+                HookField::ToolName => tool_name = map.next_value::<BoundedString>()?.0,
+                HookField::ToolNameCamel => tool_name_camel = map.next_value::<BoundedString>()?.0,
+                HookField::TurnId => turn_id = map.next_value::<BoundedString>()?.0,
+                HookField::TurnIdCamel => turn_id_camel = map.next_value::<BoundedString>()?.0,
+                HookField::TranscriptPath => transcript_path = map.next_value::<BoundedString>()?.0,
+                HookField::TranscriptPathCamel => {
+                    transcript_path_camel = map.next_value::<BoundedString>()?.0
+                }
+                HookField::BackgroundTasks => {
+                    has_running_subagent = map.next_value::<RunningSubagent>()?.0
+                }
+                HookField::Unknown => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        Ok(VendorHookPayload {
+            session_id: session_id.or(session_id_camel),
+            event_id: event_id.or(event_id_camel).or(hook_event_id),
+            hook_event_name: hook_event_name.or(hook_event_name_camel).or(event),
+            notification_type: notification_type.or(notification_type_camel),
+            tool_name: tool_name.or(tool_name_camel),
+            turn_id: turn_id.or(turn_id_camel),
+            transcript_path: transcript_path.or(transcript_path_camel),
+            has_running_subagent,
+        })
+    }
+}
+
+struct RunningSubagent(bool);
+
+impl<'de> Deserialize<'de> for RunningSubagent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(RunningSubagentVisitor)
+    }
+}
+
+struct RunningSubagentVisitor;
+
+impl<'de> Visitor<'de> for RunningSubagentVisitor {
+    type Value = RunningSubagent;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a background task list or an ignored malformed value")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut running = false;
+        while let Some(task) = sequence.next_element::<BackgroundTaskMatch>()? {
+            running |= task.0;
+        }
+        Ok(RunningSubagent(running))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(RunningSubagent(false))
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(RunningSubagent(false))
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(RunningSubagent(false))
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(RunningSubagent(false))
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(RunningSubagent(false))
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(RunningSubagent(false))
+    }
+
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+        Ok(RunningSubagent(false))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(RunningSubagent(false))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(RunningSubagent(false))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TaskField {
+    Type,
+    Status,
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for TaskField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_identifier(TaskFieldVisitor)
+    }
+}
+
+struct TaskFieldVisitor;
+
+impl Visitor<'_> for TaskFieldVisitor {
+    type Value = TaskField;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a background task field")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(match value {
+            "type" => TaskField::Type,
+            "status" => TaskField::Status,
+            _ => TaskField::Unknown,
+        })
+    }
+}
+
+struct BackgroundTaskMatch(bool);
+
+impl<'de> Deserialize<'de> for BackgroundTaskMatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(BackgroundTaskMatchVisitor)
+    }
+}
+
+struct BackgroundTaskMatchVisitor;
+
+impl<'de> Visitor<'de> for BackgroundTaskMatchVisitor {
+    type Value = BackgroundTaskMatch;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a background task object or an ignored malformed value")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut task_type = TaskToken::Other;
+        let mut status = TaskToken::Other;
+        while let Some(field) = map.next_key::<TaskField>()? {
+            match field {
+                TaskField::Type => task_type = map.next_value()?,
+                TaskField::Status => status = map.next_value()?,
+                TaskField::Unknown => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(BackgroundTaskMatch(
+            task_type == TaskToken::Subagent && status == TaskToken::Running,
+        ))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(BackgroundTaskMatch(false))
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(BackgroundTaskMatch(false))
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(BackgroundTaskMatch(false))
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(BackgroundTaskMatch(false))
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(BackgroundTaskMatch(false))
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(BackgroundTaskMatch(false))
+    }
+
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+        Ok(BackgroundTaskMatch(false))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(BackgroundTaskMatch(false))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(BackgroundTaskMatch(false))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskToken {
+    Subagent,
+    Running,
+    Other,
+}
+
+impl<'de> Deserialize<'de> for TaskToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(TaskTokenVisitor)
+    }
+}
+
+struct TaskTokenVisitor;
+
+impl<'de> Visitor<'de> for TaskTokenVisitor {
+    type Value = TaskToken;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a background task discriminator")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(match value {
+            "subagent" => TaskToken::Subagent,
+            "running" => TaskToken::Running,
+            _ => TaskToken::Other,
+        })
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str(&value)
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(TaskToken::Other)
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(TaskToken::Other)
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(TaskToken::Other)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(TaskToken::Other)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(TaskToken::Other)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(TaskToken::Other)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(TaskToken::Other)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(TaskToken::Other)
+    }
+}
 
 pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
     let adapter = parse_adapter(&arguments)?;
-    let mut payload = Vec::new();
-    std::io::stdin()
-        .take((MAX_HOOK_BYTES + 1) as u64)
-        .read_to_end(&mut payload)?;
-    if payload.len() > MAX_HOOK_BYTES {
-        bail!("hook payload exceeds the {MAX_HOOK_BYTES}-byte limit");
-    }
-    // Validate before writing a fallback mailbox. Vendor payload stays private
-    // to the host and never traverses a desktop/public listener as raw JSON.
-    let value: serde_json::Value = serde_json::from_slice(&payload).context("parse hook JSON")?;
-    if !value.is_object() {
-        bail!("hook payload must be a JSON object");
-    }
+    // Parse before writing a fallback mailbox. Only the allowlisted lifecycle
+    // fields are retained; raw vendor data never traverses a desktop/public
+    // listener or reaches durable storage.
+    let payload = read_vendor_hook(std::io::stdin().lock())?;
     let Some(pane_id) = pane_for_hook(std::env::var_os("TMUX_PANE"))? else {
         return Ok(());
     };
@@ -40,15 +564,31 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
         crate::service::snapshot::inherited_server_identity().unwrap_or_default();
     let now = now_millis();
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let event = build_event(
+    let event = build_event_from_payload(
         adapter,
-        payload,
+        &payload,
         &pane_id,
         &origin_server_identity,
         now,
         home.as_deref(),
     )?;
     deliver(&crate::paths::runtime_dir_candidates(), &event).await
+}
+
+fn read_vendor_hook(reader: impl Read) -> anyhow::Result<VendorHookPayload> {
+    read_vendor_hook_bounded(reader, MAX_VENDOR_HOOK_BYTES)
+}
+
+fn read_vendor_hook_bounded(
+    reader: impl Read,
+    max_bytes: usize,
+) -> anyhow::Result<VendorHookPayload> {
+    let mut limited = reader.take((max_bytes + 1) as u64);
+    let parsed = serde_json::from_reader(BufReader::new(&mut limited));
+    if limited.limit() == 0 {
+        bail!("hook payload exceeds the {max_bytes}-byte limit");
+    }
+    parsed.context("parse hook JSON")
 }
 
 /// Hand the event to whichever daemon is actually running.
@@ -326,33 +866,32 @@ impl Options {
     }
 }
 
-fn build_event(
+fn build_event_from_payload(
     adapter: v1::AgentAdapterKind,
-    payload: Vec<u8>,
+    payload: &VendorHookPayload,
     pane_id: &str,
     origin_server_identity: &str,
     now: i64,
     home: Option<&Path>,
 ) -> anyhow::Result<v1::AgentHookEvent> {
-    let value: serde_json::Value = serde_json::from_slice(&payload).context("parse hook JSON")?;
-    let native_session_id = string_field(&value, &["session_id", "sessionId"]);
+    let native_session_id = payload.session_id.clone().unwrap_or_default();
     // Neither currently supported adapter documents a stable hook sequence.
     // Wall time and incidental "generation" fields are not causal ordering.
     let source_generation = 0;
-    let source_event_id = string_field(&value, &["event_id", "eventId", "hook_event_id"]);
+    let source_event_id = payload.event_id.clone().unwrap_or_default();
     let source_event_id = if source_event_id.is_empty() {
         uuid::Uuid::new_v4().to_string()
     } else {
         source_event_id
     };
-    let event_name = string_field(&value, &["hook_event_name", "hookEventName", "event"]);
+    let event_name = payload.hook_event_name.clone().unwrap_or_default();
     let codex_turn_start =
         adapter == v1::AgentAdapterKind::Codex && event_name == "UserPromptSubmit";
     let codex_permission =
         adapter == v1::AgentAdapterKind::Codex && event_name == "PermissionRequest";
     let codex_pre_tool = adapter == v1::AgentAdapterKind::Codex && event_name == "PreToolUse";
     let claude_stop = adapter == v1::AgentAdapterKind::ClaudeCode && event_name == "Stop";
-    let notification_type = string_field(&value, &["notification_type", "notificationType"]);
+    let notification_type = payload.notification_type.clone().unwrap_or_default();
     let mut normalized = serde_json::Map::new();
     normalized.insert("hook_event_name".into(), event_name.into());
     if !native_session_id.is_empty() {
@@ -362,28 +901,19 @@ fn build_event(
         normalized.insert("notification_type".into(), notification_type.into());
     }
     if claude_stop {
-        let has_running_subagent = value
-            .get("background_tasks")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|tasks| {
-                tasks.iter().any(|task| {
-                    task.get("type").and_then(serde_json::Value::as_str) == Some("subagent")
-                        && task.get("status").and_then(serde_json::Value::as_str) == Some("running")
-                })
-            });
         normalized.insert(
             crate::service::agents::adapters::CLAUDE_HAS_RUNNING_SUBAGENT_FIELD.into(),
-            has_running_subagent.into(),
+            payload.has_running_subagent.into(),
         );
     }
     if codex_pre_tool {
-        let tool_name = string_field(&value, &["tool_name", "toolName"]);
+        let tool_name = payload.tool_name.clone().unwrap_or_default();
         if !tool_name.is_empty() {
             normalized.insert("tool_name".into(), tool_name.into());
         }
     }
     if codex_turn_start || codex_permission {
-        let turn_id = string_field(&value, &["turn_id", "turnId"]);
+        let turn_id = payload.turn_id.clone().unwrap_or_default();
         if !turn_id.is_empty() {
             normalized.insert(
                 crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD.into(),
@@ -392,13 +922,22 @@ fn build_event(
         }
     }
     if codex_turn_start
-        && let Some(reviewer) =
-            home.and_then(|home| codex_transcript::approval_reviewer(&value, home))
+        && let Some(reviewer) = home.and_then(|home| {
+            let transcript_payload = serde_json::json!({
+                "turn_id": payload.turn_id.as_deref(),
+                "transcript_path": payload.transcript_path.as_deref(),
+            });
+            codex_transcript::approval_reviewer(&transcript_payload, home)
+        })
     {
         normalized.insert(
             crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD.into(),
             reviewer.as_str().into(),
         );
+    }
+    let payload_json = serde_json::to_vec(&normalized)?;
+    if payload_json.len() > MAX_NORMALIZED_HOOK_BYTES {
+        bail!("normalized hook payload exceeds the {MAX_NORMALIZED_HOOK_BYTES}-byte limit");
     }
     Ok(v1::AgentHookEvent {
         adapter: adapter.into(),
@@ -409,11 +948,31 @@ fn build_event(
         source_generation,
         native_session_id,
         pane_id: pane_id.into(),
-        payload_json: serde_json::to_vec(&normalized)?,
+        payload_json,
         occurred_at_unix_millis: now,
         source_sequence_authoritative: false,
         origin_server_identity: origin_server_identity.into(),
     })
+}
+
+#[cfg(test)]
+fn build_event(
+    adapter: v1::AgentAdapterKind,
+    payload: Vec<u8>,
+    pane_id: &str,
+    origin_server_identity: &str,
+    now: i64,
+    home: Option<&Path>,
+) -> anyhow::Result<v1::AgentHookEvent> {
+    let payload = read_vendor_hook(payload.as_slice())?;
+    build_event_from_payload(
+        adapter,
+        &payload,
+        pane_id,
+        origin_server_identity,
+        now,
+        home,
+    )
 }
 
 async fn send(
@@ -643,14 +1202,6 @@ fn validate_pane_id(value: &str) -> anyhow::Result<()> {
     }
 }
 
-fn string_field(value: &serde_json::Value, names: &[&str]) -> String {
-    names
-        .iter()
-        .find_map(|name| value.get(name).and_then(serde_json::Value::as_str))
-        .unwrap_or_default()
-        .to_owned()
-}
-
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -807,6 +1358,125 @@ mod tests {
             );
         }
         assert!(pane_for_hook(Some(OsString::from_vec(vec![0xff, 0xfe]))).is_err());
+    }
+
+    #[test]
+    fn vendor_payload_bound_accepts_its_boundary_and_rejects_the_next_byte() {
+        let payload = br#"{"hook_event_name":"Stop"}"#;
+        assert!(read_vendor_hook_bounded(payload.as_slice(), payload.len()).is_ok());
+
+        let mut oversized = payload.to_vec();
+        oversized.push(b' ');
+        let error = read_vendor_hook_bounded(oversized.as_slice(), payload.len()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("hook payload exceeds the {}-byte limit", payload.len())
+        );
+    }
+
+    #[test]
+    fn large_tool_results_are_discarded_before_claude_or_codex_delivery() {
+        let private_image = "private-image-data".repeat(32 * 1024);
+        for adapter in [
+            v1::AgentAdapterKind::ClaudeCode,
+            v1::AgentAdapterKind::Codex,
+        ] {
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "session-1",
+                "tool_name": "Read",
+                "tool_response": {
+                    "content": [{
+                        "type": "image",
+                        "source": {"type": "base64", "data": private_image},
+                    }],
+                },
+            }))
+            .unwrap();
+            assert!(raw.len() > 256 * 1024);
+
+            let event = build_event(adapter, raw, "%12", "tmux:server-a", 7, None).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&event.payload_json).unwrap(),
+                serde_json::json!({
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "session-1",
+                })
+            );
+            assert!(event.payload_json.len() < 256 * 1024);
+            assert!(!String::from_utf8_lossy(&event.payload_json).contains("private-image-data"));
+        }
+    }
+
+    #[test]
+    fn oversized_retained_fields_are_rejected_before_event_delivery() {
+        for field in ["session_id", "event_id"] {
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": "Stop",
+                (field): "x".repeat(MAX_LIFECYCLE_FIELD_BYTES + 1),
+            }))
+            .unwrap();
+            let error = read_vendor_hook(raw.as_slice()).unwrap_err();
+            let detail = format!("{error:#}");
+            assert!(
+                detail.contains(&format!(
+                    "hook lifecycle field exceeds the {MAX_LIFECYCLE_FIELD_BYTES}-byte limit"
+                )),
+                "unexpected {field} error: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_and_duplicate_fields_keep_the_previous_tolerant_semantics() {
+        let raw = br#"{
+            "hook_event_name": 7,
+            "hookEventName": "Stop",
+            "session_id": "replaced",
+            "session_id": null,
+            "sessionId": "session-from-alias",
+            "background_tasks": [
+                null,
+                7,
+                ["not", "a", "task"],
+                {"type": 7, "status": "running"},
+                {"type": "subagent", "status": "running", "command": "private"}
+            ]
+        }"#;
+        let event = build_event(
+            v1::AgentAdapterKind::ClaudeCode,
+            raw.to_vec(),
+            "%12",
+            "tmux:server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&event.payload_json).unwrap(),
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "session_id": "session-from-alias",
+                "has_running_subagent": true,
+            })
+        );
+
+        let null_tasks = build_event(
+            v1::AgentAdapterKind::ClaudeCode,
+            br#"{"hook_event_name":"Stop","background_tasks":null}"#.to_vec(),
+            "%12",
+            "tmux:server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&null_tasks.payload_json).unwrap(),
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "has_running_subagent": false,
+            })
+        );
     }
 
     #[test]

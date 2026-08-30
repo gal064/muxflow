@@ -56,6 +56,65 @@ fn cli_persists_an_exact_unsequenced_hook_envelope() {
     fs::remove_dir_all(runtime).unwrap();
 }
 
+#[test]
+fn cli_discards_large_tool_results_for_claude_and_codex() {
+    let runtime_root = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::current_dir().unwrap().join("tmp")
+    };
+    let private_image = "private-image-data".repeat(32 * 1024);
+
+    for adapter in ["claude-code", "codex"] {
+        let runtime = runtime_root.join(format!("large-hook-{adapter}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&runtime).unwrap();
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "session-1",
+            "tool_name": "Read",
+            "tool_response": {
+                "content": [{
+                    "type": "image",
+                    "source": {"type": "base64", "data": private_image},
+                }],
+            },
+        }))
+        .unwrap();
+        assert!(payload.len() > 256 * 1024);
+
+        let mut child = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
+            .args(["hook", "ingest", "--adapter", adapter])
+            .env("ADE_HOST_RUNTIME_DIR", &runtime)
+            .env("TMUX_PANE", "%77")
+            .env_remove("TMUX")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&payload).unwrap();
+        assert!(
+            child.wait().unwrap().success(),
+            "{adapter} rejected a valid large vendor hook"
+        );
+
+        let mailbox = fs::read_dir(&runtime)
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.path().extension().is_some_and(|value| value == "pb"))
+            .expect("large hook was not delivered to the fallback mailbox");
+        let event =
+            v1::AgentHookEvent::decode(fs::read(mailbox.path()).unwrap().as_slice()).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&event.payload_json).unwrap(),
+            serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "session-1",
+            })
+        );
+        assert!(!String::from_utf8_lossy(&event.payload_json).contains("private-image-data"));
+        fs::remove_dir_all(runtime).unwrap();
+    }
+}
+
 /// The agent's configuration follows the user out of tmux; the hook must not
 /// complain when it gets there.
 ///
