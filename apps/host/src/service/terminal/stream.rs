@@ -1081,9 +1081,13 @@ impl StreamState {
                 // Held here rather than emitted: the size probe in the block
                 // after this one is what says whether the page reached the top
                 // of tmux's history, and the renderer gets one answer carrying
-                // both. It cannot work that out from the rows themselves —
-                // `-J` joins wrapped ones, so a full page routinely answers
-                // with fewer lines than it covers rows.
+                // both. The rows cannot say it themselves. They are physical
+                // rows — the history capture runs without `-J` so that they are
+                // countable against the skip and the size — but tmux clamps a
+                // range that runs past the top of its history and answers one
+                // entirely above it with a single row, so a short page is not
+                // the end of the history and a full one is not proof there is
+                // more.
                 self.pending_history_meta = Some(PendingHistoryMeta {
                     pane_id,
                     history: lines.join(&b"\r\n"[..]),

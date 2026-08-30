@@ -178,6 +178,155 @@ describe("TerminalWriteScheduler", () => {
     expect(h.scheduler.pendingBytes).toBe(0);
   });
 
+  /**
+   * What a history splice does, and why it stopped being a refusal.
+   *
+   * The rewrite is composed inside a barrier's callback, from a serialization of
+   * what xterm has finished with. The records behind that barrier are not in it
+   * and have not been applied, so dropping them with the rest of the queue would
+   * lose output — which is what made every page for a pane that never stops
+   * printing a refusal instead. Kept and re-queued behind the rewrite.
+   */
+  it("keeps the records queued behind a barrier when a replace rewrites the buffer", () => {
+    const h = harness();
+    const order: string[] = [];
+    expect(h.scheduler.enqueue(Uint8Array.of(1), () => order.push("first"))).toBe(true);
+    expect(h.scheduler.enqueue(new Uint8Array(), () => {
+      order.push("barrier");
+      expect(h.scheduler.replace(Uint8Array.of(7), false, () => order.push("rewrite"), true)).toBe(true);
+    })).toBe(true);
+    expect(h.scheduler.enqueue(Uint8Array.of(2), () => order.push("behind-a"))).toBe(true);
+    expect(h.scheduler.enqueue(Uint8Array.of(3), () => order.push("behind-b"))).toBe(true);
+    // The first record is in flight, so the barrier is still queued behind it
+    // along with the two writes that arrived after it.
+    expect(h.written).toEqual([[1]]);
+
+    h.completions.shift()!();
+    expect(order).toEqual(["first", "barrier"]);
+    drain(h);
+
+    // The reset and its payload in a write of their own, and then the retained
+    // records after them — never their bytes twice, and never a byte short.
+    expect(h.written[1]).toEqual([0x1b, 0x63, 7]);
+    expect(h.written.flat()).toEqual([1, 0x1b, 0x63, 7, 2, 3]);
+    expect(order).toEqual(["first", "barrier", "rewrite", "behind-a", "behind-b"]);
+    expect(h.scheduler.pendingBytes).toBe(0);
+  });
+
+  /**
+   * And the rewrite gets that write to itself, which is the whole point of
+   * committing the retained records from inside its callback rather than beside
+   * it.
+   *
+   * A flush coalesces up to a frame budget, so a rewrite committed alongside the
+   * records it is putting back reaches xterm in one write — and `onRendered`
+   * then fires on a buffer that already holds those records' rows. Committing
+   * them from the callback answers that; the record's fence answers the other
+   * half, which is anything the owner queues after `replace` returns.
+   */
+  it("gives the rewrite a write of its own, so its callback sees only the rewrite", () => {
+    const h = harness();
+    const writesWhenRewriteRendered: number[] = [];
+    expect(h.scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+    expect(h.scheduler.enqueue(new Uint8Array(), () => {
+      h.scheduler.replace(Uint8Array.of(7), false, () => {
+        writesWhenRewriteRendered.push(h.written.length);
+      }, true);
+    })).toBe(true);
+    expect(h.scheduler.enqueue(Uint8Array.of(2))).toBe(true);
+    expect(h.scheduler.enqueue(Uint8Array.of(3))).toBe(true);
+
+    h.completions.shift()!();
+    drain(h);
+
+    // Two writes had reached xterm when the rewrite reported itself rendered:
+    // the record that was in flight, and the rewrite. The retained records had
+    // not been handed over at all yet, so nothing they carry is on the terminal
+    // when the rewrite's caller measures what the rewrite added.
+    expect(writesWhenRewriteRendered).toEqual([2]);
+    expect(h.written[1]).toEqual([0x1b, 0x63, 7]);
+    expect(h.written.flat()).toEqual([1, 0x1b, 0x63, 7, 2, 3]);
+  });
+
+  /**
+   * And they go back at the *head*.
+   *
+   * The re-queue runs from inside the rewrite's callback, which is a whole xterm
+   * write after `replace` returned — long enough for the owner to have queued
+   * more output on top. Appending would replay the splice's own backlog after
+   * output that arrived later than all of it, which is the one thing an ordered
+   * queue exists to prevent.
+   */
+  it("puts the retained records ahead of anything queued after the rewrite", () => {
+    const h = harness();
+    const order: string[] = [];
+    expect(h.scheduler.enqueue(Uint8Array.of(1), () => order.push("A"))).toBe(true);
+    expect(h.scheduler.enqueue(new Uint8Array(), () => {
+      h.scheduler.replace(Uint8Array.of(7), false, () => order.push("rewrite"), true);
+      // The owner carries on the moment `replace` returns, long before the
+      // retained records are put back.
+      h.scheduler.enqueue(Uint8Array.of(4), () => order.push("D"));
+    })).toBe(true);
+    expect(h.scheduler.enqueue(Uint8Array.of(2), () => order.push("B"))).toBe(true);
+    expect(h.scheduler.enqueue(Uint8Array.of(3), () => order.push("C"))).toBe(true);
+
+    h.completions.shift()!();
+    drain(h);
+
+    expect(h.written.flat()).toEqual([1, 0x1b, 0x63, 7, 2, 3, 4]);
+    expect(order).toEqual(["A", "rewrite", "B", "C", "D"]);
+    expect(h.scheduler.pendingBytes).toBe(0);
+  });
+
+  /**
+   * `#admit` refuses two ways, and only one of them is loud.
+   *
+   * Past the bound it latches overflow and tells the owner, who asks the host
+   * for a seed — the retained records go with the queue that overflowed, and
+   * that is the overflow path working. Sealed for a hide drain it refuses in
+   * silence, and dropping records the scheduler had already accepted on the way
+   * to a refusal nobody hears is how a pane loses output with nothing said.
+   */
+  it("puts the records back when a sealed scheduler refuses the rewrite", () => {
+    const h = harness();
+    const order: string[] = [];
+    expect(h.scheduler.enqueue(Uint8Array.of(1), () => order.push("first"))).toBe(true);
+    expect(h.scheduler.enqueue(Uint8Array.of(2), () => order.push("behind"))).toBe(true);
+    // The hide drain: no new records, but everything queued must still land.
+    void h.scheduler.sealAndDrain();
+
+    expect(h.scheduler.replace(Uint8Array.of(7), true, undefined, true)).toBe(false);
+    expect(h.overflow, "a sealed refusal is not an overflow").toEqual([]);
+
+    h.completions.shift()!();
+    drain(h);
+    expect(h.written).toEqual([[1], [2]]);
+    expect(order).toEqual(["first", "behind"]);
+    expect(h.scheduler.pendingBytes).toBe(0);
+  });
+
+  /**
+   * The one record that cannot be put back. Its first half is already on the
+   * terminal, the reset would erase it, and the second half alone is a
+   * half-parsed sequence — so the rewrite is refused and the queue is left
+   * exactly as it was. `#flush` never splits a record ahead of a barrier, so
+   * this is the queue keeping its own guarantee rather than a case a caller
+   * reaches.
+   */
+  it("refuses to keep a record xterm has already half-written", () => {
+    const h = harness({ maxBytesPerFrame: 2 });
+    const order: string[] = [];
+    expect(h.scheduler.enqueue(Uint8Array.of(1, 2, 3, 4), () => order.push("split"))).toBe(true);
+    expect(h.written).toEqual([[1, 2]]);
+
+    expect(h.scheduler.replace(Uint8Array.of(7), true, undefined, true)).toBe(false);
+
+    h.completions.shift()!();
+    drain(h);
+    expect(h.written).toEqual([[1, 2], [3, 4]]);
+    expect(order).toEqual(["split"]);
+  });
+
   it("keeps pending bytes equal to enqueued minus acknowledged under interleaving", () => {
     const h = harness({ maxBytesPerFrame: 4 });
     const input: number[] = [];

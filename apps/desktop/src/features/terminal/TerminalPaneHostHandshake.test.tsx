@@ -153,7 +153,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     get scrollbackRows(): number { return 0; }
     get scrollbackLimit(): number { return 10_000; }
     async prependHistory(): Promise<"applied" | "superseded"> { return "applied"; }
-    get enqueuedGeneration(): number { return this.#generations.enqueuedGeneration; }
+    onGridApplied(): () => void { return () => undefined; }
     focus(): void {}
     blur(): void {}
     hasSelection(): boolean { return false; }
@@ -220,6 +220,7 @@ import { ownTerminalBytes } from "./TerminalBytes";
 import { resetPerfProbe } from "../../perf/probe";
 import { REVEAL_RETRY_DELAY_MS, STALE_REVEAL_EPOCH_CODE } from "./revealRetry";
 import { GRID_MISMATCH_SUSTAIN_MS } from "./gridMismatchProbe";
+import { PANE_WATCHDOG_BASE_DELAY_MS } from "./PaneDegradedWatchdog";
 import type { TerminalEvent } from "./api";
 
 const encoder = new TextEncoder();
@@ -672,23 +673,95 @@ describe("reveal answers the reducer has no rule for", () => {
   // life, deferring every later output instead of writing it, and said nothing
   // to the watchdog, the diagnostic banner or the journal. An unset or newer
   // `PaneResourceState` decodes as `unspecified` and lands here.
-  for (const state of ["unspecified", "hiddenBuffered"] as const) {
-    it(`asks for a seed when the host answers with ${state} and no material`, async () => {
-      host.announceEpoch();
-      host.output("%1", "TMUX HAS THIS");
-      const mounted = await mountPane(fixturePane("%1"));
-      api.requestTerminalSeed.mockClear();
+  it("asks for a seed when the host answers with unspecified and no material", async () => {
+    host.announceEpoch();
+    host.output("%1", "TMUX HAS THIS");
+    const mounted = await mountPane(fixturePane("%1"));
+    api.requestTerminalSeed.mockClear();
 
-      await act(async () => { host.publishUnusableResource("%1", state); pumpAll(); });
-      await settle();
+    await act(async () => { host.publishUnusableResource("%1", "unspecified"); pumpAll(); });
+    await settle();
 
-      expect(api.requestTerminalSeed).toHaveBeenCalled();
-      expect(journal.recordIncident).toHaveBeenCalledWith("pane.revealDeadEnd", { paneId: "%1", state });
-      // And the recovery actually lands: the pane is not merely noisy about it.
-      expect(renderer().screen).toBe("TMUX HAS THIS");
-      await unmountPane(mounted);
-    });
-  }
+    expect(api.requestTerminalSeed).toHaveBeenCalled();
+    expect(journal.recordIncident).toHaveBeenCalledWith(
+      "pane.revealDeadEnd", { paneId: "%1", state: "unspecified" },
+    );
+    // And the recovery actually lands: the pane is not merely noisy about it.
+    expect(renderer().screen).toBe("TMUX HAS THIS");
+    await unmountPane(mounted);
+  });
+
+  // `hiddenBuffered` used to be read the same way and is not the same thing.
+  // `PaneResourceStore::reveal` stamps `Visible` on every path it can return by,
+  // so a `hiddenBuffered` resource arriving at a mounted pane is always this
+  // side's own hide echoed back — replayed out of the hub's dormant backlog into
+  // the next mount, because the hide is sent after this pane unsubscribes. Read
+  // as a dead end it blanked a pane the user was looking at and bought a seed
+  // nobody needed: `pane.revealDeadEnd {paneId:"%194", state:"hiddenBuffered"}`,
+  // on a busy pane, on ordinary Wi-Fi.
+  it("ignores its own hide echoed back rather than blanking the pane", async () => {
+    host.announceEpoch();
+    host.output("%1", "TMUX HAS THIS");
+    const mounted = await mountPane(fixturePane("%1"));
+    await settle();
+    const showing = renderer().screen;
+    api.requestTerminalSeed.mockClear();
+    journal.recordIncident.mockClear();
+
+    await act(async () => { host.publishUnusableResource("%1", "hiddenBuffered"); pumpAll(); });
+    await settle();
+
+    expect(journal.recordIncident).not.toHaveBeenCalledWith("pane.revealDeadEnd", expect.anything());
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+    // The whole point: the screen the user is looking at is still on the glass.
+    expect(renderer().screen).toBe(showing);
+    await unmountPane(mounted);
+  });
+
+  // Ignoring it is not the same as forgetting the pane. A mount whose reveal is
+  // never answered has nothing on it, and the echo is the only event it will
+  // ever see — so what the dead end got right is kept: the seed is asked for on
+  // the spot, because two seconds of blank terminal is the cost of waiting to
+  // find out whether the reveal is coming.
+  it("asks for a seed on the spot when the echo reaches a pane with nothing on it", async () => {
+    api.setTerminalVisibility.mockImplementation(async () => { await Promise.resolve(); });
+    host.announceEpoch();
+    host.output("%1", "TMUX HAS THIS");
+    const mounted = await mountPane(fixturePane("%1"));
+    api.requestTerminalSeed.mockClear();
+    journal.recordIncident.mockClear();
+
+    await act(async () => { host.publishUnusableResource("%1", "hiddenBuffered"); pumpAll(); });
+    await settle();
+
+    expect(api.requestTerminalSeed).toHaveBeenCalled();
+    // And it lands: the pane is showing what tmux has, not a blank screen and a
+    // banner, and it never had to wait out the watchdog to get there.
+    expect(renderer().screen).toBe("TMUX HAS THIS");
+    expect(journal.recordIncident).not.toHaveBeenCalledWith("pane.degraded", expect.anything());
+    await unmountPane(mounted);
+  });
+
+  // And the bound underneath it, for the case where the seed does not come
+  // either. The banner is the watchdog's to raise: until it fires there is
+  // nothing to tell the user that they could act on.
+  it("still bounds the wait when neither the reveal nor the seed is answered", async () => {
+    api.setTerminalVisibility.mockImplementation(async () => { await Promise.resolve(); });
+    api.requestTerminalSeed.mockImplementation(async () => { await Promise.resolve(); });
+    host.announceEpoch();
+    const mounted = await mountPane(fixturePane("%1"));
+    journal.recordIncident.mockClear();
+
+    await act(async () => { host.publishUnusableResource("%1", "hiddenBuffered"); pumpAll(); });
+    await settle();
+    expect(journal.recordIncident).not.toHaveBeenCalledWith("pane.degraded", expect.anything());
+
+    await settle(PANE_WATCHDOG_BASE_DELAY_MS);
+    expect(journal.recordIncident).toHaveBeenCalledWith(
+      "pane.degraded", { paneId: "%1", reason: "paneAwaitingSeed", attempt: 0 },
+    );
+    await unmountPane(mounted);
+  });
 
   // A companion invariant rather than a second regression test: the recovery
   // above is what fails without the fix, and this pins that recovering from it

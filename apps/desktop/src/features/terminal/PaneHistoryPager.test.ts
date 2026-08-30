@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   HISTORY_MAX_AWAITING,
+  HISTORY_PAGE_LINES,
   PaneHistoryPager,
   type PagerRenderer,
 } from "./PaneHistoryPager";
 import { ownTerminalBytes } from "./TerminalBytes";
+import type { HistorySpliceOutcome, HistoryPageAnchor } from "./TerminalRenderer";
 import type { TerminalEvent } from "./api";
 
 /**
@@ -15,24 +17,24 @@ import type { TerminalEvent } from "./api";
 class FakeRenderer implements PagerRenderer {
   scrollbackRows = 0;
   scrollbackLimit = 10_000;
-  enqueuedGeneration = 4;
+  grid = { columns: 80, rows: 24 };
   alternateScreen = false;
-  readonly splices: Array<{ bytes: number; throughGeneration: number }> = [];
-  #outcome: "applied" | "superseded" = "applied";
+  readonly splices: Array<{ bytes: number } & HistoryPageAnchor> = [];
+  #outcome: HistorySpliceOutcome = "applied";
   #pending: Array<() => void> = [];
 
   isAlternateScreenActive(): boolean {
     return this.alternateScreen;
   }
 
-  prependHistory(history: Uint8Array, throughGeneration: number): Promise<"applied" | "superseded"> {
-    this.splices.push({ bytes: history.byteLength, throughGeneration });
+  prependHistory(history: Uint8Array, anchor: HistoryPageAnchor): Promise<HistorySpliceOutcome> {
+    this.splices.push({ bytes: history.byteLength, ...anchor });
     const outcome = this.#outcome;
     return new Promise((resolve) => this.#pending.push(() => resolve(outcome)));
   }
 
-  refuseSplices(): void {
-    this.#outcome = "superseded";
+  refuseSplices(outcome: HistorySpliceOutcome = "superseded"): void {
+    this.#outcome = outcome;
   }
 
   /** Settles every splice this renderer was handed, as xterm eventually does. */
@@ -155,6 +157,99 @@ describe("PaneHistoryPager", () => {
   });
 
   /**
+   * A refusal is not an answer.
+   *
+   * The splice can still be refused at its barrier — the scrollback filled up
+   * while the page crossed the link — and the pager has to be able to ask again
+   * rather than latch "this pane is holding its scrollback" on a page that
+   * never landed.
+   */
+  it("reopens its latch when the splice is refused, so reaching the top asks again", async () => {
+    const renderer = new FakeRenderer();
+    const { pager, request } = pagerFor(renderer);
+    pager.noteScreenSeeded();
+    pager.requestPage("prefetch");
+    expect(request).toHaveBeenCalledTimes(1);
+
+    renderer.refuseSplices();
+    await deliverPage(pager, renderer, 0, 50_000);
+
+    // Nothing was spliced, so nothing above this screen was accounted for: the
+    // walk has not ended and the next page is still the first size.
+    expect(pager.snapshot().historyExhausted).toBe(false);
+    expect(pager.snapshot().historyNextPageLines).toBe(HISTORY_PAGE_LINES);
+
+    pager.requestPage("scrolledToTop");
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * A pane printing a page's worth per round trip answers every page with rows
+   * it has already printed. Asking again unchanged asks the identical question;
+   * the page has to outgrow the printing.
+   */
+  it("grows the page when every row of it had already been printed, so the ask outruns the pane", async () => {
+    const renderer = new FakeRenderer();
+    const { pager, request } = pagerFor(renderer);
+    pager.noteScreenSeeded();
+    pager.requestPage("prefetch");
+
+    renderer.refuseSplices("overlapExceedsPage");
+    await deliverPage(pager, renderer, 0, 50_000);
+
+    expect(pager.snapshot().historyExhausted).toBe(false);
+    expect(pager.snapshot().historyNextPageLines).toBe(HISTORY_PAGE_LINES * 2);
+    pager.requestPage("scrolledToTop");
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[1][2]).toBe(HISTORY_PAGE_LINES * 2);
+  });
+
+  /**
+   * The latch is held through the splice, not just through the wire.
+   *
+   * `prependHistory` waits on a barrier, so the rewrite outlives the call: from
+   * the answer until the promise settles this buffer is about to be replaced,
+   * and a page asked for meanwhile would quote a skip the rewrite is about to
+   * invalidate. A reflow orphans the page in flight without releasing that.
+   */
+  it("holds its latch through the splice, so a reflow cannot start a page mid-rewrite", async () => {
+    const renderer = new FakeRenderer();
+    const { pager, request } = pagerFor(renderer);
+    pager.noteScreenSeeded();
+    pager.requestPage("prefetch");
+    expect(request).toHaveBeenCalledTimes(1);
+
+    // The answer lands and the splice starts; this renderer holds it open.
+    pager.receive(historyEvent(historyPage(10), 2_000));
+    pager.noteGridChanged();
+
+    pager.requestPage("scrolledToTop");
+    expect(request, "a page was asked for while the rewrite was still landing").toHaveBeenCalledTimes(1);
+
+    await renderer.settleSplices();
+    pager.requestPage("scrolledToTop");
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * Except for the one thing that takes the rewrite away with it. A seed drops
+   * everything queued for the terminal, the splice's barrier included, so that
+   * splice will never answer — and a latch waiting on an answer that cannot come
+   * is a pane that never pages again.
+   */
+  it("releases it at once for a reseed, whose barrier went with the queue", () => {
+    const renderer = new FakeRenderer();
+    const { pager, request } = pagerFor(renderer);
+    pager.noteScreenSeeded();
+    pager.requestPage("prefetch");
+    pager.receive(historyEvent(historyPage(10), 2_000));
+
+    pager.noteScreenSeeded();
+    pager.requestPage("prefetch");
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  /**
    * A request the host never answers — a link that dropped under it — would
    * otherwise sit at the head of the expectation queue forever and misattribute
    * every answer after it. Unreachable through the component, because getting
@@ -183,7 +278,66 @@ describe("PaneHistoryPager", () => {
     expect(renderer.splices).toEqual([]);
     expect(journal.mock.calls.at(-1)).toEqual([
       "pane.historySupersededByReseed",
-      { paneId: "%1", serial: 2 },
+      { paneId: "%1", serial: 2, reason: "reseed" },
+    ]);
+  });
+
+  /**
+   * A reflow is not a reseed and not a new screen — it is the same screen,
+   * rewrapped — but it moves rows across the boundary between what tmux keeps
+   * in its history and what it shows on its display. The `skip` a page in
+   * flight quoted no longer names where this buffer begins, and unlike ordinary
+   * output the difference is not rows this side gained, so the overlap the
+   * splice trims cannot repair it. The page is dropped and the question is
+   * asked again against the buffer the user is now looking at.
+   */
+  it("drops a page the terminal reflowed under, and asks again", async () => {
+    const renderer = new FakeRenderer();
+    const { pager, request, journal } = pagerFor(renderer);
+    pager.noteScreenSeeded();
+    renderer.scrollbackRows = 40;
+    pager.requestPage("scrolledToTop");
+    expect(request.mock.calls).toEqual([["client-a", "%1", HISTORY_PAGE_LINES, 40]]);
+
+    // The resize lands while the page is still on the wire, and rewrapping the
+    // same rows at a new width leaves the pane holding a different number of
+    // them.
+    pager.noteGridChanged();
+    renderer.scrollbackRows = 33;
+
+    pager.receive(historyEvent(historyPage(10), 2_000));
+    await renderer.settleSplices();
+    expect(renderer.splices, "a page from before the reflow was spliced").toEqual([]);
+    expect(journal.mock.calls.at(-1)).toEqual([
+      "pane.historySupersededByReseed",
+      { paneId: "%1", serial: 1, reason: "gridChanged" },
+    ]);
+
+    // The latch is open, and the next ask quotes what the pane holds now.
+    pager.requestPage("scrolledToTop");
+    expect(request.mock.calls.at(-1)).toEqual(["client-a", "%1", HISTORY_PAGE_LINES, 33]);
+  });
+
+  /**
+   * The splice needs the skip as much as the request does: tmux measured its
+   * capture from its display at the moment it ran, so the answer can overlap
+   * rows this pane printed in the meantime, and the skip is the only number
+   * that says by how much.
+   */
+  it("hands the splice the skip the page was asked with, not the one it holds now", async () => {
+    const renderer = new FakeRenderer();
+    const { pager } = pagerFor(renderer);
+    pager.noteScreenSeeded();
+    renderer.scrollbackRows = 12;
+    pager.requestPage("prefetch");
+
+    // The pane printed while the page crossed the link.
+    renderer.scrollbackRows = 19;
+    pager.receive(historyEvent(historyPage(10), 2_000));
+    await renderer.settleSplices();
+
+    expect(renderer.splices).toEqual([
+      { bytes: historyPage(10).length, skip: 12, columns: 80, rows: 24 },
     ]);
   });
 

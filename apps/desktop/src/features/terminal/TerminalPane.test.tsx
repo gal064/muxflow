@@ -47,10 +47,10 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     #pendingRendered: Array<() => void> = [];
     #measurementListeners = new Set<() => void>();
     #topListeners = new Set<() => void>();
+    #gridListeners = new Set<() => void>();
     /** What every splice this pane attempts is answered with. */
     historyOutcome: "applied" | "superseded" = "applied";
-    historySplices: Array<{ bytes: number; throughGeneration: number }> = [];
-    enqueuedGeneration = 0;
+    historySplices: Array<{ bytes: number; skip: number; columns: number; rows: number }> = [];
     /** Rows above the screen, as the real renderer counts them. */
     scrollbackRows = 0;
     /** The ceiling `scrollbackRows` walks up to, as xterm's `scrollback` sets it. */
@@ -74,7 +74,12 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       if (this.grid.columns === size.columns && this.grid.rows === size.rows) return { kind: "unchanged" };
       this.grid = size;
       this.resizes.push(size);
+      for (const listener of this.#gridListeners) listener();
       return { kind: "applied", size };
+    }
+    onGridApplied(listener: () => void): () => void {
+      this.#gridListeners.add(listener);
+      return () => { this.#gridListeners.delete(listener); };
     }
     isAlternateScreenActive(): boolean { return this.alternateScreen; }
     onInput(): () => void { return () => undefined; }
@@ -88,8 +93,11 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     reachTop(): void {
       for (const listener of this.#topListeners) listener();
     }
-    async prependHistory(history: Uint8Array, throughGeneration: number): Promise<"applied" | "superseded"> {
-      this.historySplices.push({ bytes: history.byteLength, throughGeneration });
+    async prependHistory(
+      history: Uint8Array,
+      anchor: { skip: number; columns: number; rows: number },
+    ): Promise<"applied" | "superseded"> {
+      this.historySplices.push({ bytes: history.byteLength, ...anchor });
       return this.historyOutcome;
     }
     focus(): void { this.focusCalls += 1; }
@@ -106,9 +114,8 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       if (config.wedgeDrain) return new Promise<never>(() => undefined);
       return { serialized: "cached-screen", outputGeneration: 3 };
     }
-    seed(bytes: Uint8Array, onRendered?: () => void, generation = 0): void {
+    seed(bytes: Uint8Array, onRendered?: () => void): void {
       this.writes.push(`seed:${bytes.byteLength}`);
-      this.enqueuedGeneration = generation;
       if (onRendered) this.#pendingRendered.push(onRendered);
     }
     restore(serialized: string, onRendered?: () => void): boolean {
@@ -116,9 +123,8 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       if (onRendered) this.#pendingRendered.push(onRendered);
       return true;
     }
-    write(bytes: Uint8Array, onRendered?: () => void, generation = 0): boolean {
+    write(bytes: Uint8Array, onRendered?: () => void): boolean {
       this.writes.push(`write:${bytes.byteLength}`);
-      if (generation > this.enqueuedGeneration) this.enqueuedGeneration = generation;
       if (onRendered) this.#pendingRendered.push(onRendered);
       return true;
     }
@@ -839,8 +845,7 @@ describe("lazy scrollback", () => {
     expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
 
     await act(async () => { hub.deliver(historyEvent("%h1", "earlier output", 2_000)); });
-    // Quoted back so the renderer can refuse a splice onto a stream that moved.
-    expect(renderer.historySplices).toEqual([{ bytes: 14, throughGeneration: 4 }]);
+    expect(renderer.historySplices).toEqual([{ bytes: 14, skip: 0, columns: 80, rows: 24 }]);
     await act(async () => { mounted.unmount(); });
   });
 
@@ -858,6 +863,43 @@ describe("lazy scrollback", () => {
     await act(async () => { renderer.reachTop(); });
 
     expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h7", 300, 37]]);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  /**
+   * A resize is not a reseed, but it is just as fatal to a page in flight.
+   *
+   * Rewrapping moves rows across the boundary between what tmux keeps in its
+   * history and what it shows on its display, so the skip the page quoted stops
+   * naming where this buffer begins — and unlike ordinary output, the
+   * difference is not rows this side gained, so the overlap the splice trims
+   * cannot repair it. tmux resizes a pane whenever the window is split, closed
+   * or dragged, so this is an ordinary thing to happen mid-page.
+   */
+  it("pages: drops the page in flight when tmux resizes the pane under it", async () => {
+    const hub = new FakeHub();
+    const pane = fixturePane("%h9");
+    const mounted = await mountPane(pane, hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%h9", 4)); });
+
+    renderer.scrollbackRows = 40;
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%h9", 300, 40]]);
+
+    // tmux resizes the pane while the answer is still on the wire, and the same
+    // rows rewrapped at a new width are a different number of rows.
+    await updatePane(mounted, { ...pane, width: 100, height: 30 }, hub);
+    expect(renderer.resizes).toEqual([{ columns: 100, rows: 30 }]);
+    renderer.scrollbackRows = 33;
+
+    await act(async () => { hub.deliver(historyEvent("%h9", historyPage(300), 2_000)); });
+    expect(renderer.historySplices, "a page from before the resize was spliced").toEqual([]);
+
+    // And the latch is open, so the gesture that reaches the top again asks
+    // with the numbers that describe the buffer the user is looking at now.
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory.mock.calls.at(-1)).toEqual(["client-a", "%h9", 300, 33]);
     await act(async () => { mounted.unmount(); });
   });
 
@@ -896,9 +938,8 @@ describe("lazy scrollback", () => {
     await act(async () => { renderer.reachTop(); });
     // The rows asked for were 0 held + 300, and tmux holds 120: this page is
     // the whole of it. Decided on that number and never on the answer's own
-    // rows — `-J` joins wrapped lines, so a full page routinely carries fewer
-    // lines than it covers rows, and tmux answers a range past the top with one
-    // clamped row rather than with nothing.
+    // rows, because tmux answers a range past the top with one clamped row
+    // rather than with nothing.
     await act(async () => { hub.deliver(historyEvent("%h9", historyPage(120), 120)); });
     expect(renderer.historySplices).toHaveLength(1);
     renderer.scrollbackRows = 120;
@@ -1159,11 +1200,11 @@ describe("lazy scrollback", () => {
     const renderer = renderers.created[0];
     await act(async () => { hub.deliver(seedEvent("%r1", 4)); });
     await act(async () => { renderer.flushRendered(); });
-    // Request A, anchored to the screen the seed at generation 4 laid down.
+    // Request A, asked against the screen the seed at generation 4 laid down.
     expect(api.requestTerminalHistory.mock.calls).toEqual([["client-a", "%r1", 300, 0]]);
 
     // The screen A was asked against is replaced, and the new one prefetches
-    // its own first page: request B, anchored to generation 9.
+    // its own first page: request B.
     await act(async () => { hub.deliver(seedEvent("%r1", 9)); });
     await act(async () => { renderer.flushRendered(); });
     expect(api.requestTerminalHistory.mock.calls).toEqual([
@@ -1171,9 +1212,9 @@ describe("lazy scrollback", () => {
       ["client-a", "%r1", 300, 0],
     ]);
 
-    // A's answer, late. Its anchor and its skip describe the screen that is
-    // gone; splicing it now would put the user's earlier output above a screen
-    // it never sat above, using numbers B overwrote.
+    // A's answer, late. Its skip describes the screen that is gone; splicing it
+    // now would put the user's earlier output above a screen it never sat
+    // above, using a number B overwrote.
     await act(async () => { hub.deliver(historyEvent("%r1", historyPage(300), 2_000)); });
     expect(renderer.historySplices, "a superseded page was spliced above the new screen").toEqual([]);
 
@@ -1183,10 +1224,10 @@ describe("lazy scrollback", () => {
     await act(async () => { renderer.reachTop(); renderer.reachTop(); });
     expect(api.requestTerminalHistory).toHaveBeenCalledTimes(2);
 
-    // B's own answer, spliced against B's anchor.
+    // B's own answer, spliced above the screen B was asked against.
     await act(async () => { hub.deliver(historyEvent("%r1", historyPage(300), 2_000)); });
     expect(renderer.historySplices).toEqual([
-      { bytes: historyPage(300).length, throughGeneration: 9 },
+      { bytes: historyPage(300).length, skip: 0, columns: 80, rows: 24 },
     ]);
     await act(async () => { mounted.unmount(); });
   });
