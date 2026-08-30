@@ -1315,9 +1315,11 @@ fn a_screen_seed_carries_no_scrollback_and_still_restores_every_mode() {
         "the seed capture must ask for no history range: {capture}"
     );
     assert!(capture.starts_with("capture-pane -p -e -J -t %1 ;"));
-    // The alternate-screen leg and the metadata leg are the rest of the seed
-    // and are untouched by the range.
+    assert!(capture.contains("capture-pane -p -e -N -t %1"));
+    // The alternate-screen views and metadata leg are the rest of the seed;
+    // none may accidentally grow a history range.
     assert!(capture.contains("capture-pane -p -e -J -a -q -t %1"));
+    assert!(capture.contains("capture-pane -p -e -N -a -q -t %1"));
     assert!(capture.contains("__ADE_META__"));
 
     let seed = build_seed(
@@ -1538,30 +1540,57 @@ fn capture_and_metadata_are_correlated_across_distinct_tmux_command_blocks() {
         buffered.push((1, b"already captured".to_vec()));
         *buffered_bytes = b"already captured".len();
     }
-    state.pending_alternate = Some((pane_id, vec![b"visible screen".to_vec()], 1));
+    state.pending_visible_cells = Some((pane_id, vec![b"visible screen".to_vec()], 1));
     let PaneSeedState::Pending { buffered, .. } = state.pane_states.get("%1").unwrap() else {
         panic!("pane stopped awaiting its seed");
     };
     assert_eq!(buffered.len(), 1);
-    let CommandBlock::CaptureAlternate {
+    let CommandBlock::CaptureVisibleCells {
         pane_id,
         visible_lines,
         ..
     } = state.start_block(tag(3))
     else {
-        panic!("second capture block was not correlated with the first");
+        panic!("visible-cell capture was not correlated with the logical capture");
+    };
+    state.pending_alternate = Some(PendingAlternateCapture {
+        pane_id: pane_id.clone(),
+        visible_lines: visible_lines.clone(),
+        visible_cell_lines: vec![b"visible cell screen".to_vec()],
+        visible_boundary: 1,
+    });
+    let CommandBlock::CaptureAlternate {
+        visible_cell_lines, ..
+    } = state.start_block(tag(4))
+    else {
+        panic!("saved-normal capture was not correlated with the visible captures");
+    };
+    state.pending_saved_normal_cells = Some(PendingSavedNormalCells {
+        pane_id: pane_id.clone(),
+        visible_lines: visible_lines.clone(),
+        visible_cell_lines: visible_cell_lines.clone(),
+        saved_normal_lines: vec![b"saved normal screen".to_vec()],
+        visible_boundary: 1,
+    });
+    let CommandBlock::CaptureSavedNormalCells {
+        saved_normal_lines, ..
+    } = state.start_block(tag(5))
+    else {
+        panic!("saved-normal cell capture was not correlated with the logical capture");
     };
     state.pending_metadata = Some(PendingCaptureMetadata {
         pane_id: pane_id.clone(),
         visible_lines: visible_lines.clone(),
-        saved_normal_lines: vec![b"saved normal screen".to_vec()],
+        visible_cell_lines,
+        saved_normal_lines: saved_normal_lines.clone(),
+        saved_normal_cell_lines: vec![b"saved normal cell screen".to_vec()],
         visible_boundary: 1,
     });
     let CommandBlock::CaptureMetadata {
         saved_normal_lines, ..
-    } = state.start_block(tag(4))
+    } = state.start_block(tag(6))
     else {
-        panic!("metadata block was not correlated with both screen captures");
+        panic!("metadata block was not correlated with every screen capture");
     };
     let seed = build_seed(
         &pane_id,
@@ -1600,6 +1629,7 @@ fn capture_boundary_tracks_the_active_screen_without_duplicate_replay() {
 fn joined_capture_reconstructs_soft_wrap_at_authoritative_width() {
     let command = capture_command("%1");
     assert!(command.matches("capture-pane -p -e -J").count() == 2);
+    assert!(command.matches("capture-pane -p -e -N").count() == 2);
     assert!(command.contains("#{pane_width}"));
     let logical_line = vec![b'w'; 160];
     let seed = build_seed(
@@ -1625,6 +1655,70 @@ fn joined_capture_reconstructs_soft_wrap_at_authoritative_width() {
         .position(|window| window == logical_line)
         .unwrap();
     assert!(wrap_enable < line);
+}
+
+#[test]
+fn screen_seed_preserves_a_styled_erase_through_the_end_of_the_row() {
+    let background = b"\x1b[48;2;65;69;76m";
+    let mut logical_row = background.to_vec();
+    logical_row.extend_from_slice(b"Proposed Plan");
+    let mut captured_cell_row = logical_row.clone();
+    captured_cell_row.extend_from_slice(&[b' '; 67]);
+
+    let seed = build_seed_with_cell_captures(
+        "%1",
+        vec![logical_row],
+        vec![captured_cell_row],
+        vec![],
+        vec![],
+        &[b"__ADE_META__:%1:0:0:0:1:0:0:0:0:0:1:0:0:1:80:".to_vec()],
+    )
+    .unwrap();
+    let expected = [background.as_slice(), b"\x1b[1;14H\x1b[K".as_slice()].concat();
+    assert!(
+        seed.bytes
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "the plan background must be repainted through the right edge"
+    );
+    assert!(
+        !seed.bytes.windows(67).any(|window| window == [b' '; 67]),
+        "preserving trailing cells must not turn every capture into a full-width payload"
+    );
+}
+
+#[test]
+fn screen_seed_preserves_each_differently_styled_trailing_blank_span() {
+    let red = b"\x1b[41m";
+    let blue = b"\x1b[44m";
+    let mut captured_cell_row = red.to_vec();
+    captured_cell_row.push(b'A');
+    captured_cell_row.extend_from_slice(&[b' '; 9]);
+    captured_cell_row.extend_from_slice(blue);
+    captured_cell_row.extend_from_slice(&[b' '; 10]);
+
+    let seed = build_seed_with_cell_captures(
+        "%1",
+        vec![[red.as_slice(), b"A"].concat()],
+        vec![captured_cell_row],
+        vec![],
+        vec![],
+        &[b"__ADE_META__:%1:0:0:0:1:0:0:0:0:0:1:0:0:1:20:".to_vec()],
+    )
+    .unwrap();
+    let expected = [
+        red.as_slice(),
+        b"\x1b[1;2H\x1b[9X".as_slice(),
+        blue.as_slice(),
+        b"\x1b[1;11H\x1b[K".as_slice(),
+    ]
+    .concat();
+    assert!(
+        seed.bytes
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "each trailing blank span must retain its own background"
+    );
 }
 
 /// The pane that froze forever, in one test.
