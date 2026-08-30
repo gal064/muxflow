@@ -132,7 +132,7 @@ export interface TerminalRenderer {
    * meantime is unrepairable, and so is a grid that changed under the page: a
    * row is only the same thing on both sides at one width.
    */
-  prependHistory(history: OwnedTerminalBytes, anchor: HistoryPageAnchor): Promise<"applied" | "superseded">;
+  prependHistory(history: OwnedTerminalBytes, anchor: HistoryPageAnchor): Promise<HistorySpliceOutcome>;
   /**
    * How many rows of scrollback sit above this terminal's screen.
    *
@@ -275,6 +275,16 @@ export interface HistoryPageAnchor {
   columns: number;
   rows: number;
 }
+
+/**
+ * What became of a page of scrollback.
+ *
+ * `overlapExceedsPage` is its own answer rather than one more refusal, because
+ * it is the only one the caller can do something about: nothing was spliced,
+ * but the reason is that the pane printed a whole page's worth while this page
+ * crossed the link, and asking for the same size again asks the same question.
+ */
+export type HistorySpliceOutcome = "applied" | "superseded" | "overlapExceedsPage";
 
 /** Why a page of scrollback was not put above a screen. Journalled, never spoken. */
 type HistorySupersededReason =
@@ -565,7 +575,7 @@ export class XtermRenderer implements TerminalRenderer {
    * countable here rather than guessable, and it is trimmed off the end of the
    * page before the two halves are composed.
    */
-  prependHistory(history: OwnedTerminalBytes, anchor: HistoryPageAnchor): Promise<"applied" | "superseded"> {
+  prependHistory(history: OwnedTerminalBytes, anchor: HistoryPageAnchor): Promise<HistorySpliceOutcome> {
     // A TUI's alternate screen has no scrollback to prepend to, and rewriting
     // the buffer under it would destroy the frame the program is drawing.
     if (this.#disposed) return this.#supersede("disposed");
@@ -608,8 +618,11 @@ export class XtermRenderer implements TerminalRenderer {
         // The whole page was rows this buffer already held. Nothing to splice,
         // and nothing to latch: the next reach-the-top asks from where this
         // buffer actually begins now, which is above everything this page held.
+        // Answered in its own words, because the caller's remedy is to ask for
+        // more rows next time rather than to ask again for the same.
         if (overlap >= captured.length) {
-          return resolve(this.#noteHistorySuperseded("overlapExceedsPage"));
+          this.#noteHistorySuperseded("overlapExceedsPage");
+          return resolve("overlapExceedsPage");
         }
         const kept = overlap === 0 ? captured : captured.slice(0, captured.length - overlap);
         const page = composeHistoryPage(kept, anchor.columns);
@@ -643,7 +656,7 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   /** `#noteHistorySuperseded` for the paths that answer before the barrier. */
-  #supersede(reason: HistorySupersededReason): Promise<"superseded"> {
+  #supersede(reason: HistorySupersededReason): Promise<HistorySpliceOutcome> {
     return Promise.resolve(this.#noteHistorySuperseded(reason));
   }
 

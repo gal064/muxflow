@@ -298,7 +298,10 @@ describe("stale cached restore", () => {
     // Asked for when this buffer held nothing above its screen, answered when it
     // holds seven — more rows than the two the page carries.
     const history = ownTerminalBytes(new TextEncoder().encode("a\r\nb"));
-    await expect(renderer.prependHistory(history, anchoredAt(renderer, 0))).resolves.toBe("superseded");
+    // Answered in its own words, not as one more refusal: the caller's remedy
+    // is a larger page next time, not the same question again.
+    await expect(renderer.prependHistory(history, anchoredAt(renderer, 0)))
+      .resolves.toBe("overlapExceedsPage");
     expect(recordIncident).toHaveBeenCalledWith(
       "pane.historySuperseded",
       expect.objectContaining({ paneId: "%15", reason: "overlapExceedsPage" }),
