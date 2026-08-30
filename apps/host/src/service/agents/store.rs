@@ -59,8 +59,8 @@ pub(super) struct StoredAgent {
     pub present: bool,
     #[serde(default)]
     pub hook_terminal: bool,
-    /// The exact Codex turn whose transcript identified native auto-review.
-    /// A missing reviewer may reuse this only when its turn ID matches.
+    /// The exact Codex turn whose start identified native auto-review. A
+    /// permission request may reuse this only when its turn ID matches.
     #[serde(default)]
     pub codex_auto_review_turn_id: String,
     /// When something last said what this agent was *doing*.

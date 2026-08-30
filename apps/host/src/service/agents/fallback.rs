@@ -94,7 +94,7 @@ pub(super) fn consume(
         Err(error) => return Err(error.into()),
     };
     // Sorted, because these are a sequence and not a set. The writer names each
-    // file `hook-fallback-<adapter>-<pane>-<nanoseconds>-<random>.pb`, so
+    // file `hook-fallback-<adapter>-<pane>-<sequence>.pb`, so
     // sorting by name orders each *pane's* events the way they happened, which
     // is the ordering that matters: a turn belongs to one pane, and replaying
     // its `UserPromptSubmit` after its `PermissionRequest` would have the
