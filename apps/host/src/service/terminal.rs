@@ -37,7 +37,7 @@ pub(super) use output_credit::{
 };
 mod seed;
 #[cfg(test)]
-use seed::{build_seed, parse_capture_metadata};
+use seed::{build_seed, build_seed_with_cell_captures, parse_capture_metadata};
 use seed::{build_seed_with_metadata, capture_metadata};
 mod startup;
 use startup::{join_workers, stop_process};
@@ -1280,7 +1280,7 @@ pub(super) fn queue_input(input_id: u64, pane_id: &str) -> String {
 /// demand rather than pushed on every reveal.
 fn capture_command(pane_id: &str) -> String {
     format!(
-        "capture-pane -p -e -J -t {pane_id} ; capture-pane -p -e -J -a -q -t {pane_id} ; display-message -p -t {pane_id} '__ADE_META__:#{{pane_id}}:#{{cursor_x}}:#{{cursor_y}}:#{{alternate_on}}:#{{bracket_paste_flag}}:#{{mouse_standard_flag}}:#{{mouse_button_flag}}:#{{mouse_any_flag}}:#{{mouse_sgr_flag}}:#{{mouse_utf8_flag}}:#{{cursor_flag}}:#{{keypad_cursor_flag}}:#{{keypad_flag}}:#{{wrap_flag}}:#{{pane_width}}:#{{focus_flag}}'"
+        "capture-pane -p -e -J -t {pane_id} ; capture-pane -p -e -N -t {pane_id} ; capture-pane -p -e -J -a -q -t {pane_id} ; capture-pane -p -e -N -a -q -t {pane_id} ; display-message -p -t {pane_id} '__ADE_META__:#{{pane_id}}:#{{cursor_x}}:#{{cursor_y}}:#{{alternate_on}}:#{{bracket_paste_flag}}:#{{mouse_standard_flag}}:#{{mouse_button_flag}}:#{{mouse_any_flag}}:#{{mouse_sgr_flag}}:#{{mouse_utf8_flag}}:#{{cursor_flag}}:#{{keypad_cursor_flag}}:#{{keypad_flag}}:#{{wrap_flag}}:#{{pane_width}}:#{{focus_flag}}'"
     )
 }
 
@@ -1372,7 +1372,10 @@ mod stream;
 #[cfg(test)]
 use stream::TestOutputEmission;
 #[cfg(test)]
-use stream::{CommandBlock, PaneSeedState, PendingCaptureMetadata, StreamState};
+use stream::{
+    CommandBlock, PaneSeedState, PendingAlternateCapture, PendingCaptureMetadata,
+    PendingSavedNormalCells, StreamState,
+};
 use stream::{ControlStreamReader, StreamControl, read_control_stream};
 
 pub(super) fn validate_tmux_id(value: &str, prefix: char) -> anyhow::Result<()> {
