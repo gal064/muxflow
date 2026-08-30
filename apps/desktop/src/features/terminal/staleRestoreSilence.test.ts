@@ -284,6 +284,43 @@ describe("stale cached restore", () => {
    * nothing left to splice, so nothing is latched: the next reach-the-top asks
    * from where this buffer begins now, which is above everything that page held.
    */
+  /**
+   * The serialize addon trims the blank rows under a short screen and restores
+   * the cursor relatively. Spliced behind a page, that shortfall let the page's
+   * last rows into the viewport and moved the whole screen down by the same
+   * count — the ghost rows a TUI then painted around until its next full redraw.
+   */
+  it("keeps a short screen at its height and cursor when a page goes above it", async () => {
+    const renderer = new XtermRenderer({ paneId: "%15" });
+    renderer.open(document.createElement("div"));
+    renderer.setGrid({ columns: 20, rows: 8 });
+    // Three rows on an eight-row screen, bracketed paste on as any shell leaves
+    // it, and the cursor parked on the first row as a TUI parks it in its
+    // input line: the serialization then ends in relative cursor moves *and* a
+    // mode string, which is what a real pane's does.
+    renderer.write(
+      ownTerminalBytes(new TextEncoder().encode("one\r\ntwo\r\nthree\u001b[?2004h\u001b[1;1H")),
+      undefined,
+      1,
+    );
+    await waitFor(() => renderer.serialize().includes("three"), "the rows to land");
+    const before = renderer.screenText();
+    expect(before.cursor).toEqual([0, 0]);
+
+    const page = ["h-1", "h-2", "h-3", "h-4"].join("\r\n");
+    await expect(
+      renderer.prependHistory(ownTerminalBytes(new TextEncoder().encode(page)), anchoredAt(renderer, 0)),
+    ).resolves.toBe("applied");
+    await waitFor(() => renderer.serialize().includes("h-1"), "the page to be spliced");
+
+    const after = renderer.screenText();
+    expect(after.rows).toEqual(before.rows);
+    expect(after.cursor).toEqual(before.cursor);
+    expect(renderer.scrollbackRows).toBe(4);
+    expect(renderer.serialize().endsWith("\u001b[?2004h")).toBe(true);
+    renderer.dispose();
+  });
+
   it("refuses a page a busy pane printed straight past", async () => {
     const renderer = new XtermRenderer({ paneId: "%15" });
     renderer.open(document.createElement("div"));

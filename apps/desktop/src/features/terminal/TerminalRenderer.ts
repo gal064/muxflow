@@ -191,6 +191,8 @@ export interface TerminalRenderer {
    * terminal's rows only while the two agree on how wide a row is.
    */
   readonly grid: TerminalSize;
+  /** The visible rows as text and the cursor, as a test reads the screen. */
+  screenText(): { rows: string[]; cursor: [number, number] };
   /**
    * Fires when a `setGrid` actually reflowed the buffer.
    *
@@ -644,7 +646,7 @@ export class XtermRenderer implements TerminalRenderer {
         }
         const kept = overlap === 0 ? captured : captured.slice(0, captured.length - overlap);
         const page = composeHistoryPage(kept, anchor.columns);
-        const screen = new TextEncoder().encode(sanitizeSerializedScreen(this.serialize()));
+        const screen = new TextEncoder().encode(this.#serializedScreenAtFullHeight());
         const spliced = new Uint8Array(page.byteLength + HISTORY_SEPARATOR.byteLength + screen.byteLength);
         spliced.set(page);
         spliced.set(HISTORY_SEPARATOR, page.byteLength);
@@ -671,6 +673,61 @@ export class XtermRenderer implements TerminalRenderer {
       });
       if (!queued) resolve(this.#noteHistorySuperseded("barrierRefused"));
     });
+  }
+
+  /**
+   * The screen serialized so that it re-renders at exactly its own height.
+   *
+   * The serialize addon trims the blank rows below the last content of a buffer
+   * that holds no scrollback, and puts the cursor back with moves relative to
+   * where its output ends. That is only right when nothing is written after it.
+   * Behind a page of history the trimmed rows are missing: the page's last rows
+   * slide into the top of the viewport, everything the screen showed sits that
+   * many rows too low, and the cursor is moved to match — so a program that
+   * addresses rows absolutely, a TUI repainting its footer, paints over the
+   * wrong rows from then until its next full redraw. The trimmed rows go back
+   * here, and the cursor is placed absolutely.
+   */
+  #serializedScreenAtFullHeight(): string {
+    const serialized = sanitizeSerializedScreen(this.serialize());
+    // With scrollback above it the addon emits every row, screen included.
+    if (this.scrollbackRows > 0) return serialized;
+    const missing = this.#terminal.rows - this.#serializedRows();
+    if (missing <= 0) return serialized;
+    const buffer = this.#terminal.buffer.active;
+    // The addon ends with relative cursor moves, the live pen, and then the
+    // modes it restores (`CSI ? n h`, `CSI n h`, `CSI ? 7 l`); the last two
+    // are kept and re-emitted after the absolute cursor.
+    const tail = /(\u001b\[\d+[AB])?(\u001b\[\d+[CD])?(\u001b\[[0-9;]*m)?((?:\u001b\[\??\d+[hl])*)$/;
+    const [, , , pen = "", modes = ""] = serialized.match(tail) ?? [];
+    const content = serialized.replace(tail, "");
+    const cursor = `\u001b[${buffer.cursorY + 1};${buffer.cursorX + 1}H`;
+    return `${content}\u001b[m${"\r\n".repeat(missing)}${cursor}${pen}${modes}`;
+  }
+
+  /**
+   * How many rows the serialize addon emits for this scrollback-free screen:
+   * through the last row holding a character, or a blank cell whose background
+   * differs from the pen at that point — the addon's own rule for "content".
+   */
+  #serializedRows(): number {
+    const buffer = this.#terminal.buffer.active;
+    const pen = buffer.getNullCell();
+    let last = 0;
+    for (let y = 0; y < this.#terminal.rows; y += 1) {
+      const line = buffer.getLine(y);
+      if (!line) break;
+      for (let x = 0; x < this.#terminal.cols; x += 1) {
+        const cell = line.getCell(x);
+        if (!cell) break;
+        const sameBackground = cell.getBgColorMode() === pen.getBgColorMode()
+          && cell.getBgColor() === pen.getBgColor();
+        if (cell.getChars() === "" && sameBackground) continue;
+        last = y;
+        line.getCell(x, pen);
+      }
+    }
+    return last + 1;
   }
 
   /** `#noteHistorySuperseded` for the paths that answer before the barrier. */
@@ -700,6 +757,15 @@ export class XtermRenderer implements TerminalRenderer {
 
   get grid(): TerminalSize {
     return { columns: this.#terminal.cols, rows: this.#terminal.rows };
+  }
+
+  screenText(): { rows: string[]; cursor: [number, number] } {
+    const buffer = this.#terminal.buffer.active;
+    const rows: string[] = [];
+    for (let y = 0; y < this.#terminal.rows; y += 1) {
+      rows.push(buffer.getLine(buffer.baseY + y)?.translateToString(true) ?? "");
+    }
+    return { rows, cursor: [buffer.cursorX, buffer.cursorY] };
   }
 
   get scrollbackRows(): number {
