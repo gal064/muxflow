@@ -222,8 +222,7 @@ fn status_entry_json(value: &v1::GitStatusEntry) -> Value {
         "displayOriginalPath": String::from_utf8_lossy(&value.original_path),
         "indexKind": change_kind_name(value.index_kind),
         "worktreeKind": change_kind_name(value.worktree_kind), "indexStatus": value.index_status,
-        "worktreeStatus": value.worktree_status, "headMode": value.head_mode, "indexMode": value.index_mode,
-        "worktreeMode": value.worktree_mode,
+        "worktreeStatus": value.worktree_status,
         "untracked": value.untracked, "ignored": value.ignored, "conflicted": value.conflicted,
         "conflictCode": value.conflict_code, "submodule": value.submodule, "submoduleState": value.submodule_state,
         "symlink": value.symlink, "binary": value.binary, "renameScore": value.rename_score })
