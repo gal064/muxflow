@@ -5,6 +5,7 @@ use tmux_agent_protocol::v1;
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
 pub(crate) const CODEX_APPROVAL_REVIEWER_FIELD: &str = "approval_reviewer";
 pub(crate) const CODEX_APPROVAL_TURN_ID_FIELD: &str = "approval_turn_id";
+pub(crate) const CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: &str = "has_running_subagent";
 pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed *event set* changes, not only the command
 /// string: an install from an older version covers fewer events, and reporting
@@ -261,6 +262,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
             };
             return Ok(parsed(payload, lifecycle));
         }
+        let stop_lifecycle = if payload
+            .get(CLAUDE_HAS_RUNNING_SUBAGENT_FIELD)
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            v1::AgentLifecycleState::Working
+        } else {
+            v1::AgentLifecycleState::Idle
+        };
         parse_common_hook(
             payload,
             &[
@@ -269,15 +279,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 ("PreToolUse", v1::AgentLifecycleState::Working),
                 ("PostToolUse", v1::AgentLifecycleState::Working),
                 ("SubagentStop", v1::AgentLifecycleState::Working),
-                // A `Stop` is a finished turn, unconditionally — including one
-                // that leaves background tasks or session crons running behind
-                // it. Background work is not foreground attention, and reading
-                // it as `Working` left every such pane working forever; worse,
-                // it withheld the terminal flag `ingest` sets on an idle Stop,
-                // which is exactly what stops Claude Code's routine idle
-                // notification (~60s after any idle turn) from reading as
-                // Blocked.
-                ("Stop", v1::AgentLifecycleState::Idle),
+                // Claude's parent emits `Stop` while background subagents are
+                // still running. The hook CLI reduces the raw task list to one
+                // privacy-safe boolean. Only this kind of background work
+                // extends the user's turn; commands and session crons do not.
+                ("Stop", stop_lifecycle),
                 // A failed turn is over. It is the case most worth surfacing
                 // and the one that used to leave the row working forever.
                 ("StopFailure", v1::AgentLifecycleState::Idle),
@@ -533,18 +539,31 @@ mod tests {
         );
     }
 
-    /// Background work outlives the turn that started it; the turn is still
-    /// over. Reading these payloads as `Working` is what pinned a pane to
-    /// "working" for the rest of the session.
+    /// Only a running subagent extends the user's turn. Ordinary background
+    /// work and session crons still end at `Stop`.
     #[test]
-    fn claude_stop_with_live_background_work_still_ends_the_turn() {
+    fn claude_stop_distinguishes_a_running_subagent_from_other_background_work() {
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
-        for field in ["background_tasks", "session_crons"] {
-            let payload = serde_json::json!({
+        let running_subagent = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "claude-session",
+            CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: true
+        });
+        assert_eq!(
+            claude.parse_hook(&running_subagent).unwrap().lifecycle,
+            v1::AgentLifecycleState::Working
+        );
+        for payload in [
+            serde_json::json!({
                 "hook_event_name": "Stop",
                 "session_id": "claude-session",
-                field: [{"command": "sleep 300", "status": "running"}]
-            });
+                CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: false
+            }),
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "session_id": "claude-session"
+            }),
+        ] {
             assert_eq!(
                 claude.parse_hook(&payload).unwrap().lifecycle,
                 v1::AgentLifecycleState::Idle

@@ -91,9 +91,14 @@ prompt text, terminal output, tool input, file contents, or credentials. The
 normalized Codex `PreToolUse` payload retains only the tool name needed to
 distinguish a question from ordinary work. The normalized turn-start payload
 retains only its opaque turn ID and reviewer; later permission events retain
-the turn ID but never reread the transcript. Malformed or stale events are
-rejected; a temporarily unavailable daemon retains only bounded, atomic hook
-state.
+the turn ID but never reread the transcript. A Claude `Stop` retains only a
+boolean saying whether a subagent is still running; task descriptions, commands,
+IDs, and the rest of Claude's background-task payload are discarded. Malformed
+or stale events are rejected. The daemon retains that boolean until the final
+`Stop`, including across restarts, so Claude's routine idle notification cannot
+misreport a long-running subagent as blocked. A real permission request remains
+blocked even if an idle notification follows it. A temporarily unavailable
+daemon retains only bounded, atomic hook state.
 
 For validation, use installed `codex --version` / `codex --help` and
 `claude --version` / `claude --help` only. Release QA must not send prompts or
