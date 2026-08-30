@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAgentRows, groupAgentRows, groupAgentRowsByStatus, jumpTarget, needsAttention, nextSortMode,
-  RECENT_IDLE_WINDOW_MILLIS, sortModeLabel, unreadCount, type AgentLocation,
+  RECENT_IDLE_WINDOW_MILLIS, selectedAgentIdForPane, sortModeLabel, unreadCount, type AgentLocation,
 } from "./agentsList";
 import { agent } from "./testFixtures";
 import type { AgentRecord } from "./types";
@@ -294,5 +294,38 @@ describe("the bell and ⌘⇧U ignore pins", () => {
     const rows = buildAgentRows([pinnedDone, blockedElsewhere], place, () => true, "status");
     expect(rows[0].agent.id).toBe("blocked-away");
     expect(jumpTarget(rows)?.agent.id).toBe("blocked-away");
+  });
+});
+
+describe("active pane agent selection", () => {
+  const rowsForSelection = (agents: readonly AgentRecord[], routable = () => true) =>
+    buildAgentRows(agents, locate, routable, "status");
+
+  it("selects the routable agent whose exact pane is active, including idle agents", () => {
+    const activeIdle = agent({ id: "active-idle", paneId: "%7", lifecycle: "idle" });
+    const elsewhere = agent({ id: "elsewhere", paneId: "%8", lifecycle: "working" });
+    const rows = rowsForSelection([elsewhere, activeIdle]);
+    expect(selectedAgentIdForPane(rows, "%7")).toBe("active-idle");
+    expect(selectedAgentIdForPane(rows, "%missing")).toBeUndefined();
+    expect(selectedAgentIdForPane(rows, undefined)).toBeUndefined();
+    expect(selectedAgentIdForPane(rowsForSelection([activeIdle], () => false), "%7")).toBeUndefined();
+  });
+
+  it("resolves a defensive duplicate to native, then newest, then stable id", () => {
+    const manual = agent({
+      id: "manual", paneId: "%7", detectedManually: true, nativeSessionId: "", updatedAt: 999,
+    });
+    const nativeOld = agent({
+      id: "native-old", paneId: "%7", detectedManually: false, nativeSessionId: "session-old", updatedAt: 10,
+    });
+    const nativeNewB = agent({
+      id: "native-b", paneId: "%7", detectedManually: false, nativeSessionId: "session-b", updatedAt: 20,
+    });
+    const nativeNewA = agent({
+      id: "native-a", paneId: "%7", detectedManually: false, nativeSessionId: "session-a", updatedAt: 20,
+    });
+    expect(selectedAgentIdForPane(rowsForSelection([manual, nativeOld]), "%7")).toBe("native-old");
+    expect(selectedAgentIdForPane(rowsForSelection([nativeOld, nativeNewB]), "%7")).toBe("native-b");
+    expect(selectedAgentIdForPane(rowsForSelection([nativeNewB, nativeNewA]), "%7")).toBe("native-a");
   });
 });

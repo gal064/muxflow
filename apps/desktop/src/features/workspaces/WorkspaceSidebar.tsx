@@ -6,7 +6,7 @@ import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor
 import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
 import { Icon } from "../../ui/Icon";
 import {
-  groupAgentRows, groupAgentRowsByStatus, needsAttention, nextSortMode, sortModeLabel,
+  groupAgentRows, groupAgentRowsByStatus, needsAttention, nextSortMode, selectedAgentIdForPane, sortModeLabel,
   type AgentListRow, type AgentSortMode, type AgentWorkspaceGroup,
 } from "../agents/agentsList";
 import { AgentMark } from "../agents/AgentIdentity";
@@ -23,6 +23,8 @@ export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.
 interface WorkspaceSidebarProps {
   rows: readonly WorkspaceRowModel[];
   agents: readonly AgentListRow[];
+  /** Agent selection is derived from the shell's authoritative terminal pane. */
+  activePaneId?: string;
   adapters: readonly AgentAdapterDescriptor[];
   agentSort: AgentSortMode;
   /** Omits the per-agent detail lines inside each workspace summary. */
@@ -130,6 +132,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   // arrow keys walk `[data-agent-index]` in document order, and a per-group
   // index would restart the walk at every heading.
   const agentIndexes = new Map(props.agents.map((row, index) => [row, index]));
+  const selectedAgentId = selectedAgentIdForPane(props.agents, props.activePaneId);
 
   // Resolved against the live list every render: an agent whose pane closed
   // drops out of `props.agents`, and the palette must stop offering to focus it
@@ -194,6 +197,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   };
 
   const renderAgentRow = (row: AgentListRow, index: number, key = row.agent.id) => {
+    const selected = row.agent.id === selectedAgentId;
     const sessionLabel = agentSessionLabel(row.agent, props.adapters);
     const detail = [
       props.agentSort === "workspace" ? undefined : row.location.workspaceName,
@@ -212,7 +216,8 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           row.location.tabIndex === undefined ? undefined : `tab ${row.location.tabIndex}`,
           row.routable ? undefined : "unmapped, navigation unavailable",
         ].filter(Boolean).join(", ")}
-        className="agent-button"
+        aria-current={selected ? "true" : undefined}
+        className={selected ? "agent-button selected" : "agent-button"}
         data-agent-index={index}
         aria-disabled={!row.routable}
         data-unavailable={row.routable ? undefined : "true"}

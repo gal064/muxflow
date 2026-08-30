@@ -25,9 +25,16 @@ import { recordIncident } from "../../diagnostics/incidents";
 import { isTerminalFileLinkActivation, terminalFileLinkCellRange, terminalFileLinks } from "./terminalFilePaths";
 import type { Platform } from "../../commands/registry";
 import { installOsc52ClipboardWrite } from "./osc52Clipboard";
+import {
+  captureTerminalViewport,
+  resizeTerminalPreservingViewport,
+  restoreTerminalViewport,
+  type TerminalViewportAnchor,
+} from "./terminalViewport";
 
 // Re-exported so the renderer stays the one import site for a pane's metrics.
 export type { PixelBox, TerminalBoxChrome, TerminalMeasurements, TerminalSize } from "./cellMetrics";
+export type { TerminalViewportAnchor } from "./terminalViewport";
 export { cellsForBox, deviceSafeCellSpacing, deviceSafeLineHeight, terminalMeasurements } from "./cellMetrics";
 
 export type TerminalInput =
@@ -42,6 +49,7 @@ export interface TerminalViewportState {
 export interface DrainedTerminalSnapshot {
   serialized: string;
   outputGeneration: number;
+  viewport: TerminalViewportAnchor;
 }
 
 export interface TerminalRendererOptions {
@@ -173,6 +181,8 @@ export interface TerminalRenderer {
   setFontSize(fontSize: number): void;
   /** Forces the grid tmux says this pane has, whatever the CSS box measured. */
   setGrid(size: TerminalSize): GridOutcome;
+  /** Restores a cached viewport when its serialized buffer used the same grid. */
+  restoreViewport(anchor: TerminalViewportAnchor): void;
   /**
    * The cols and rows this terminal is rendering at.
    *
@@ -375,6 +385,7 @@ export class XtermRenderer implements TerminalRenderer {
   #newOutput = false;
   #lastViewportY = 0;
   #lastViewport?: TerminalViewportState;
+  #programmaticViewportMutation = false;
   #seedRequested = false;
   #drainPromise?: Promise<DrainedTerminalSnapshot>;
   #drainAbandoned = false;
@@ -452,6 +463,10 @@ export class XtermRenderer implements TerminalRenderer {
       ),
     );
     this.#disposables.push(this.#terminal.onScroll((viewportY) => {
+      // xterm can emit several scroll positions while resize reflows wrapped
+      // rows. None is the user's position until the marker has been restored,
+      // and treating an intermediate zero as user intent starts history paging.
+      if (this.#programmaticViewportMutation) return;
       if (this.#atBottom()) this.#newOutput = false;
       // The transition, not the state: a pane seeded with one screen sits at
       // row 0 from the moment it opens, and treating that as a request would
@@ -809,9 +824,13 @@ export class XtermRenderer implements TerminalRenderer {
       return { kind: "rejected", reason: `${columns}x${rows} is not a usable terminal grid` };
     }
     if (this.#terminal.cols === columns && this.#terminal.rows === rows) return { kind: "unchanged" };
-    this.#terminal.resize(columns, rows);
+    this.#mutateViewport(() => resizeTerminalPreservingViewport(this.#terminal, { columns, rows }));
     for (const listener of this.#gridListeners) listener();
     return { kind: "applied", size: { columns, rows } };
+  }
+
+  restoreViewport(anchor: TerminalViewportAnchor): void {
+    this.#mutateViewport(() => restoreTerminalViewport(this.#terminal, anchor));
   }
 
   onGridApplied(listener: () => void): () => void {
@@ -903,7 +922,11 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   #snapshot(): DrainedTerminalSnapshot {
-    return { serialized: this.serialize(), outputGeneration: this.#generations.appliedGeneration };
+    return {
+      serialized: this.serialize(),
+      outputGeneration: this.#generations.appliedGeneration,
+      viewport: captureTerminalViewport(this.#terminal),
+    };
   }
 
   disposeGpuRenderer(): void {
@@ -956,6 +979,28 @@ export class XtermRenderer implements TerminalRenderer {
   #atBottom(): boolean {
     const buffer = this.#terminal.buffer.active;
     return buffer.viewportY >= buffer.baseY;
+  }
+
+  /**
+   * Makes one renderer-owned viewport mutation atomic to listeners.
+   *
+   * The xterm operations are synchronous, but resize and scroll both emit
+   * synchronous scroll events. The guard hides their intermediate positions,
+   * then publishes the one position the user can actually see.
+   */
+  #mutateViewport(mutate: () => void): void {
+    const alreadyMutating = this.#programmaticViewportMutation;
+    this.#programmaticViewportMutation = true;
+    try {
+      mutate();
+    } finally {
+      this.#programmaticViewportMutation = alreadyMutating;
+      if (!alreadyMutating) {
+        this.#lastViewportY = this.#terminal.buffer.active.viewportY;
+        if (this.#atBottom()) this.#newOutput = false;
+        this.#emitViewport();
+      }
+    }
   }
 
   /// Records what the terminal was handed, and returns the completion that

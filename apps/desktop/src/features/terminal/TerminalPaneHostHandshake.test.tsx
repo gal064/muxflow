@@ -145,6 +145,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
       this.grid = size;
       return { kind: "applied", size };
     }
+    restoreViewport(): void {}
     onInput(): () => void { return () => undefined; }
     onSelectionChange(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
@@ -166,12 +167,13 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     disposeGpuRenderer(): void {}
     dispose(): void { this.#scheduler.dispose(); }
 
-    drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number }> {
+    drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number; viewport: { atBottom: boolean; viewportLine: number; grid: Size } }> {
       const drained = this.#scheduler.sealAndDrain();
       this.pump();
       return drained.then(() => ({
         serialized: this.screen,
         outputGeneration: this.#generations.appliedGeneration,
+        viewport: { atBottom: true, viewportLine: 0, grid: this.grid },
       }));
     }
 

@@ -602,6 +602,7 @@ export function TerminalPane({
     if (currentCached) {
       const cachedEpoch = currentCached.terminalEpoch;
       const restored = renderer.restore(currentCached.serialized, () => {
+        renderer.restoreViewport(currentCached.viewport);
         publishInitialPaint(currentCached.outputGeneration, cachedEpoch, true);
       }, currentCached.outputGeneration);
       // A fresh terminal cannot refuse a restore today, but a caller that
@@ -1049,7 +1050,11 @@ export function TerminalPane({
           // does — and a pane that already reached the top of tmux's history
           // must not go asking for it again.
           if (snapshotMatchesEpoch) {
-            terminalStateCache.set(pane.id, drained.serialized, checkpoint, historyPager.snapshot());
+            terminalStateCache.set(pane.id, drained.serialized, {
+              checkpoint,
+              history: historyPager.snapshot(),
+              viewport: drained.viewport,
+            });
           } else terminalStateCache.delete(pane.id);
           // A cache that declined the screen (too large for its budget) leaves
           // nothing to resume from, and saying so is what makes the reveal ask
