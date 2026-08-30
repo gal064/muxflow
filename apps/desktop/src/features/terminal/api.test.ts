@@ -191,8 +191,8 @@ describe("binary terminal IPC", () => {
     expect(() => decodeTerminalEvent(frame(12, "x", 1, Uint8Array.of(0xff)))).toThrow("UTF-8 JSON");
   });
 
-  it("decodes ordered Git-service status while retaining raw path byte arrays", () => {
-    const event = { watchId: "watch", rootToken: "root", status: { generation: "18446744073709551615", entries: [{ path: [45, 45, 0, 10] }] }, error: "" };
+  it("decodes ordered Git-service status as opaque JSON", () => {
+    const event = { watchId: "watch", rootToken: "root", status: { generation: "18446744073709551615", entries: [{ path: "LS0ACg==" }] }, error: "" };
     expect(decodeTerminalEvent(frame(13, "/repo", 18, textEncoder.encode(JSON.stringify(event))))).toEqual({
       kind: "gitService", scope: "/repo", sequence: 18, event,
     });
