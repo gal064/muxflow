@@ -245,3 +245,28 @@ export function jumpTarget(rows: readonly AgentListRow[]): AgentListRow | undefi
 export function unreadCount(rows: readonly AgentListRow[]): number {
   return rows.filter((row) => needsAttention(row.state)).length;
 }
+
+/**
+ * The one agent row represented by the active terminal pane.
+ *
+ * A pane ordinarily has one record. The ordering below is only a defensive
+ * answer for the short interval where process detection and a native hook can
+ * both describe it: the native identity wins, then the freshest observation,
+ * then an immutable id so changing the list's display sort cannot move the
+ * highlight.
+ */
+export function selectedAgentIdForPane(
+  rows: readonly AgentListRow[],
+  activePaneId: string | undefined,
+): string | undefined {
+  if (!activePaneId) return undefined;
+  return rows
+    .filter((row) => row.routable && row.agent.paneId === activePaneId)
+    .sort((left, right) => {
+      const leftNative = !left.agent.detectedManually && left.agent.nativeSessionId.trim() !== "";
+      const rightNative = !right.agent.detectedManually && right.agent.nativeSessionId.trim() !== "";
+      return Number(rightNative) - Number(leftNative)
+        || right.agent.updatedAt - left.agent.updatedAt
+        || left.agent.id.localeCompare(right.agent.id);
+    })[0]?.agent.id;
+}

@@ -44,6 +44,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     onMeasurementsChange(): () => void { return () => undefined; }
     setFontSize(): void {}
     setGrid(): { kind: "unchanged" } { return { kind: "unchanged" }; }
+    restoreViewport(): void {}
     onGridApplied(): () => void { return () => undefined; }
     isAlternateScreenActive(): boolean { return false; }
     onInput(): () => void { return () => undefined; }
@@ -59,8 +60,12 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     scrollToBottom(): void {}
     disposeGpuRenderer(): void {}
     dispose(): void {}
-    async drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number }> {
-      return { serialized: "", outputGeneration: 0 };
+    async drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number; viewport: { atBottom: boolean; viewportLine: number; grid: { columns: number; rows: number } } }> {
+      return {
+        serialized: "",
+        outputGeneration: 0,
+        viewport: { atBottom: true, viewportLine: 0, grid: this.grid },
+      };
     }
     seed(_bytes: Uint8Array, onRendered?: () => void): void {
       if (onRendered) this.#rendered.push(onRendered);

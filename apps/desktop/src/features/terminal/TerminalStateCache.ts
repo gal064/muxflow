@@ -1,3 +1,5 @@
+import type { TerminalViewportAnchor } from "./TerminalRenderer";
+
 const encoder = new TextEncoder();
 
 export interface CachedTerminalState {
@@ -6,6 +8,7 @@ export interface CachedTerminalState {
   byteLength: number;
   terminalEpoch?: number;
   outputGeneration: number;
+  viewport: TerminalViewportAnchor;
   /**
    * Whether this screen is a photograph of the visible grid with nothing above
    * it — a host seed that no history has been spliced onto yet.
@@ -116,8 +119,11 @@ export class TerminalStateCache {
   set(
     paneId: string,
     serialized: string,
-    checkpoint?: { terminalEpoch: number; outputGeneration: number },
-    history?: CachedHistoryState,
+    options: {
+      checkpoint?: { terminalEpoch: number; outputGeneration: number };
+      history?: CachedHistoryState;
+      viewport: TerminalViewportAnchor;
+    },
   ): void {
     const byteLength = serialized ? encoder.encode(serialized).byteLength : 0;
     if (!serialized || byteLength > this.maxSerializedBytes || byteLength > this.maxTotalBytes) {
@@ -129,11 +135,12 @@ export class TerminalStateCache {
       serialized,
       savedAt: Date.now(),
       byteLength,
-      terminalEpoch: checkpoint?.terminalEpoch,
-      outputGeneration: checkpoint?.outputGeneration ?? 0,
-      screenSeeded: history?.screenSeeded ?? false,
-      historyExhausted: history?.historyExhausted ?? false,
-      historyNextPageLines: history?.historyNextPageLines ?? 0,
+      terminalEpoch: options.checkpoint?.terminalEpoch,
+      outputGeneration: options.checkpoint?.outputGeneration ?? 0,
+      viewport: options.viewport,
+      screenSeeded: options.history?.screenSeeded ?? false,
+      historyExhausted: options.history?.historyExhausted ?? false,
+      historyNextPageLines: options.history?.historyNextPageLines ?? 0,
     });
     this.#retainedBytes += byteLength;
     while (this.#states.size > this.capacity || this.#retainedBytes > this.maxTotalBytes) {

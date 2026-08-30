@@ -39,6 +39,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     disposed = false;
     focusCalls = 0;
     restoredSerialized: string | undefined;
+    restoredViewport: { atBottom: boolean; viewportLine: number; grid: Size } | undefined;
     measured = config.measured;
     /** Mirrors the real renderer: `setGrid` is the only writer of cols/rows. */
     grid: Size = { columns: 80, rows: 24 };
@@ -77,6 +78,9 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       for (const listener of this.#gridListeners) listener();
       return { kind: "applied", size };
     }
+    restoreViewport(viewport: { atBottom: boolean; viewportLine: number; grid: Size }): void {
+      this.restoredViewport = viewport;
+    }
     onGridApplied(listener: () => void): () => void {
       this.#gridListeners.add(listener);
       return () => { this.#gridListeners.delete(listener); };
@@ -108,11 +112,15 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     scrollToBottom(): void {}
     disposeGpuRenderer(): void {}
     dispose(): void { this.disposed = true; }
-    async drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number }> {
+    async drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number; viewport: { atBottom: boolean; viewportLine: number; grid: Size } }> {
       // A wedged xterm write completion is what leaves the real renderer's
       // memoized drain pending forever, and the pane's next reveal waits on it.
       if (config.wedgeDrain) return new Promise<never>(() => undefined);
-      return { serialized: "cached-screen", outputGeneration: 3 };
+      return {
+        serialized: "cached-screen",
+        outputGeneration: 3,
+        viewport: { atBottom: false, viewportLine: 4, grid: this.grid },
+      };
     }
     seed(bytes: Uint8Array, onRendered?: () => void): void {
       this.writes.push(`seed:${bytes.byteLength}`);
@@ -402,7 +410,10 @@ describe("TerminalPane pane-paint span lifecycle", () => {
   });
 
   it("closes a switch span when the pane restores from the local cache", async () => {
-    terminalStateCache.set("%5", "warm-screen", { terminalEpoch: 7, outputGeneration: 3 });
+    terminalStateCache.set("%5", "warm-screen", {
+      checkpoint: { terminalEpoch: 7, outputGeneration: 3 },
+      viewport: { atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 } },
+    });
     const token = openPanePaintSpan("window.switch", "client-a");
     targetPanePaintSpan(token, "%5");
 
@@ -413,7 +424,11 @@ describe("TerminalPane pane-paint span lifecycle", () => {
     // with a cursor in it. The gate hides the terminal for exactly that gap,
     // and the restore's rendered callback is what ends it.
     expect(paneNode().getAttribute("data-painted")).toBe("false");
+    expect(renderers.created[0].restoredViewport).toBeUndefined();
     await act(async () => { renderers.created[0].flushRendered(); });
+    expect(renderers.created[0].restoredViewport).toEqual({
+      atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 },
+    });
     expect(paneNode().getAttribute("data-painted")).toBe("true");
     await awaitPaint();
 
@@ -1097,7 +1112,10 @@ describe("lazy scrollback", () => {
   });
 
   it("never prefetches for a pane that came up from its own cached screen", async () => {
-    terminalStateCache.set("%p4", "warm-screen", { terminalEpoch: 7, outputGeneration: 3 });
+    terminalStateCache.set("%p4", "warm-screen", {
+      checkpoint: { terminalEpoch: 7, outputGeneration: 3 },
+      viewport: { atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 } },
+    });
     const hub = new FakeHub();
     const mounted = await mountPane(fixturePane("%p4"), hub);
     const renderer = renderers.created[0];

@@ -1059,6 +1059,7 @@ export function App() {
         phase={hostState.phase}
       />
       {sidebarOpen && <WorkspaceSidebar
+        activePaneId={activePane?.id}
         adapters={agentRuntime.adapters}
         agents={visibleAgentRows}
         agentSort={appState.shell.agentSort}
