@@ -284,10 +284,27 @@ pub(super) enum CommandBlock {
         pane_id: String,
         lines: Vec<Vec<u8>>,
     },
+    CaptureVisibleCells {
+        tag: CommandTag,
+        pane_id: String,
+        visible_lines: Vec<Vec<u8>>,
+        visible_boundary: u64,
+        lines: Vec<Vec<u8>>,
+    },
     CaptureAlternate {
         tag: CommandTag,
         pane_id: String,
         visible_lines: Vec<Vec<u8>>,
+        visible_cell_lines: Vec<Vec<u8>>,
+        visible_boundary: u64,
+        lines: Vec<Vec<u8>>,
+    },
+    CaptureSavedNormalCells {
+        tag: CommandTag,
+        pane_id: String,
+        visible_lines: Vec<Vec<u8>>,
+        visible_cell_lines: Vec<Vec<u8>>,
+        saved_normal_lines: Vec<Vec<u8>>,
         visible_boundary: u64,
         lines: Vec<Vec<u8>>,
     },
@@ -295,7 +312,9 @@ pub(super) enum CommandBlock {
         tag: CommandTag,
         pane_id: String,
         visible_lines: Vec<Vec<u8>>,
+        visible_cell_lines: Vec<Vec<u8>>,
         saved_normal_lines: Vec<Vec<u8>>,
+        saved_normal_cell_lines: Vec<Vec<u8>>,
         visible_boundary: u64,
         lines: Vec<Vec<u8>>,
     },
@@ -330,7 +349,9 @@ pub(super) struct StreamState {
     pub(super) expected_capture: Option<String>,
     pub(super) expected_resume: Option<String>,
     pub(super) expected_history: Option<String>,
-    pub(super) pending_alternate: Option<(String, Vec<Vec<u8>>, u64)>,
+    pub(super) pending_visible_cells: Option<(String, Vec<Vec<u8>>, u64)>,
+    pub(super) pending_alternate: Option<PendingAlternateCapture>,
+    pub(super) pending_saved_normal_cells: Option<PendingSavedNormalCells>,
     pub(super) pending_metadata: Option<PendingCaptureMetadata>,
     pub(super) pending_history_meta: Option<PendingHistoryMeta>,
     command_block: CommandBlock,
@@ -353,7 +374,24 @@ pub(super) struct PendingHistoryMeta {
 pub(super) struct PendingCaptureMetadata {
     pub(super) pane_id: String,
     pub(super) visible_lines: Vec<Vec<u8>>,
+    pub(super) visible_cell_lines: Vec<Vec<u8>>,
     pub(super) saved_normal_lines: Vec<Vec<u8>>,
+    pub(super) saved_normal_cell_lines: Vec<Vec<u8>>,
+    pub(super) visible_boundary: u64,
+}
+
+pub(super) struct PendingSavedNormalCells {
+    pub(super) pane_id: String,
+    pub(super) visible_lines: Vec<Vec<u8>>,
+    pub(super) visible_cell_lines: Vec<Vec<u8>>,
+    pub(super) saved_normal_lines: Vec<Vec<u8>>,
+    pub(super) visible_boundary: u64,
+}
+
+pub(super) struct PendingAlternateCapture {
+    pub(super) pane_id: String,
+    pub(super) visible_lines: Vec<Vec<u8>>,
+    pub(super) visible_cell_lines: Vec<Vec<u8>>,
     pub(super) visible_boundary: u64,
 }
 
@@ -394,7 +432,9 @@ impl StreamState {
             expected_capture: None,
             expected_resume: None,
             expected_history: None,
+            pending_visible_cells: None,
             pending_alternate: None,
+            pending_saved_normal_cells: None,
             pending_metadata: None,
             pending_history_meta: None,
             command_block: CommandBlock::None,
@@ -434,8 +474,26 @@ impl StreamState {
         ) {
             self.pending_history_meta = None;
         }
-        if owned_by_scope(self.pending_alternate.as_ref().map(|pending| &*pending.0)) {
+        if owned_by_scope(
+            self.pending_visible_cells
+                .as_ref()
+                .map(|pending| &*pending.0),
+        ) {
+            self.pending_visible_cells = None;
+        }
+        if owned_by_scope(
+            self.pending_alternate
+                .as_ref()
+                .map(|pending| &*pending.pane_id),
+        ) {
             self.pending_alternate = None;
+        }
+        if owned_by_scope(
+            self.pending_saved_normal_cells
+                .as_ref()
+                .map(|pending| &*pending.pane_id),
+        ) {
+            self.pending_saved_normal_cells = None;
         }
         if owned_by_scope(
             self.pending_metadata
@@ -536,7 +594,9 @@ impl StreamState {
                     }
                 }
                 CommandBlock::CapturePrimary { lines, .. }
+                | CommandBlock::CaptureVisibleCells { lines, .. }
                 | CommandBlock::CaptureAlternate { lines, .. }
+                | CommandBlock::CaptureSavedNormalCells { lines, .. }
                 | CommandBlock::CaptureMetadata { lines, .. }
                 | CommandBlock::CaptureHistory { lines, .. }
                 | CommandBlock::CaptureHistoryMeta { lines, .. } => lines.push(line),
@@ -866,31 +926,67 @@ impl StreamState {
             CommandBlock::Resume { .. } => {}
             CommandBlock::CapturePrimary { pane_id, lines, .. } => {
                 // tmux emits one %begin/%end block per command separated by
-                // `;`: capture-pane and its following display-message metadata
-                // are distinct correlated blocks.
+                // `;`: every capture view and the following display-message
+                // metadata are distinct correlated blocks.
                 let visible_boundary = terminal_generation.load(Ordering::Acquire);
-                self.pending_alternate = Some((pane_id, lines, visible_boundary));
+                self.pending_visible_cells = Some((pane_id, lines, visible_boundary));
             }
-            CommandBlock::CaptureAlternate {
+            CommandBlock::CaptureVisibleCells {
                 pane_id,
                 visible_lines,
                 visible_boundary,
                 lines,
                 ..
             } => {
-                // This is the precise output boundary represented by both
-                // screen captures. Later terminal output is replayed once.
+                self.pending_alternate = Some(PendingAlternateCapture {
+                    pane_id,
+                    visible_lines,
+                    visible_cell_lines: lines,
+                    visible_boundary,
+                });
+            }
+            CommandBlock::CaptureAlternate {
+                pane_id,
+                visible_lines,
+                visible_cell_lines,
+                visible_boundary,
+                lines,
+                ..
+            } => {
+                // Keep the first logical capture's boundary: later terminal
+                // output is replayed once after every seed view is assembled.
+                self.pending_saved_normal_cells = Some(PendingSavedNormalCells {
+                    pane_id,
+                    visible_lines,
+                    visible_cell_lines,
+                    saved_normal_lines: lines,
+                    visible_boundary,
+                });
+            }
+            CommandBlock::CaptureSavedNormalCells {
+                pane_id,
+                visible_lines,
+                visible_cell_lines,
+                saved_normal_lines,
+                visible_boundary,
+                lines,
+                ..
+            } => {
                 self.pending_metadata = Some(PendingCaptureMetadata {
                     pane_id,
                     visible_lines,
-                    saved_normal_lines: lines,
+                    visible_cell_lines,
+                    saved_normal_lines,
+                    saved_normal_cell_lines: lines,
                     visible_boundary,
                 });
             }
             CommandBlock::CaptureMetadata {
                 pane_id,
                 visible_lines,
+                visible_cell_lines,
                 saved_normal_lines,
+                saved_normal_cell_lines,
                 visible_boundary,
                 lines,
                 ..
@@ -911,15 +1007,18 @@ impl StreamState {
                         if !retry {
                             if let Some(metadata) = capture_metadata(&lines, &pane_id) {
                                 // The screen the user sees always comes from
-                                // the first capture — plain `capture-pane`
+                                // the first logical capture — plain `capture-pane`
                                 // returns the displayed grid in both screen
                                 // modes — so that is the point this seed is
                                 // current through. Output that landed between
-                                // the two captures is replayed after it.
+                                // that view and the rest of the capture sequence
+                                // is replayed after it.
                                 let capture_boundary = visible_boundary;
                                 let seed_build = build_seed_with_metadata(
                                     visible_lines,
+                                    visible_cell_lines,
                                     saved_normal_lines,
+                                    saved_normal_cell_lines,
                                     metadata,
                                 );
                                 let mut seeder = ScreenSeeder::default();
@@ -1138,7 +1237,9 @@ impl StreamState {
             | CommandBlock::Unknown { tag: active, .. }
             | CommandBlock::Resume { tag: active, .. }
             | CommandBlock::CapturePrimary { tag: active, .. }
+            | CommandBlock::CaptureVisibleCells { tag: active, .. }
             | CommandBlock::CaptureAlternate { tag: active, .. }
+            | CommandBlock::CaptureSavedNormalCells { tag: active, .. }
             | CommandBlock::CaptureMetadata { tag: active, .. }
             | CommandBlock::CaptureHistory { tag: active, .. }
             | CommandBlock::CaptureHistoryMeta { tag: active, .. } => *active == tag,
@@ -1154,7 +1255,9 @@ impl StreamState {
             }
             | CommandBlock::Resume { pane_id, .. }
             | CommandBlock::CapturePrimary { pane_id, .. }
+            | CommandBlock::CaptureVisibleCells { pane_id, .. }
             | CommandBlock::CaptureAlternate { pane_id, .. }
+            | CommandBlock::CaptureSavedNormalCells { pane_id, .. }
             | CommandBlock::CaptureMetadata { pane_id, .. }
             | CommandBlock::CaptureHistory { pane_id, .. }
             | CommandBlock::CaptureHistoryMeta { pane_id, .. } => pane_id.clone(),
@@ -1168,7 +1271,9 @@ impl StreamState {
             | CommandBlock::Unknown { tag, .. }
             | CommandBlock::Resume { tag, .. }
             | CommandBlock::CapturePrimary { tag, .. }
+            | CommandBlock::CaptureVisibleCells { tag, .. }
             | CommandBlock::CaptureAlternate { tag, .. }
+            | CommandBlock::CaptureSavedNormalCells { tag, .. }
             | CommandBlock::CaptureMetadata { tag, .. }
             | CommandBlock::CaptureHistory { tag, .. }
             | CommandBlock::CaptureHistoryMeta { tag, .. } => Some(*tag),
@@ -1206,13 +1311,32 @@ impl StreamState {
                 lines: Vec::new(),
             }
         } else if let Some((pane_id, visible_lines, visible_boundary)) =
-            self.pending_alternate.take()
+            self.pending_visible_cells.take()
         {
-            CommandBlock::CaptureAlternate {
+            CommandBlock::CaptureVisibleCells {
                 tag,
                 pane_id,
                 visible_lines,
                 visible_boundary,
+                lines: Vec::new(),
+            }
+        } else if let Some(pending) = self.pending_alternate.take() {
+            CommandBlock::CaptureAlternate {
+                tag,
+                pane_id: pending.pane_id,
+                visible_lines: pending.visible_lines,
+                visible_cell_lines: pending.visible_cell_lines,
+                visible_boundary: pending.visible_boundary,
+                lines: Vec::new(),
+            }
+        } else if let Some(pending) = self.pending_saved_normal_cells.take() {
+            CommandBlock::CaptureSavedNormalCells {
+                tag,
+                pane_id: pending.pane_id,
+                visible_lines: pending.visible_lines,
+                visible_cell_lines: pending.visible_cell_lines,
+                saved_normal_lines: pending.saved_normal_lines,
+                visible_boundary: pending.visible_boundary,
                 lines: Vec::new(),
             }
         } else if let Some(pending) = self.pending_history_meta.take() {
@@ -1227,7 +1351,9 @@ impl StreamState {
                 tag,
                 pane_id: pending.pane_id,
                 visible_lines: pending.visible_lines,
+                visible_cell_lines: pending.visible_cell_lines,
                 saved_normal_lines: pending.saved_normal_lines,
+                saved_normal_cell_lines: pending.saved_normal_cell_lines,
                 visible_boundary: pending.visible_boundary,
                 lines: Vec::new(),
             }

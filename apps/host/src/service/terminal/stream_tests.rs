@@ -341,11 +341,26 @@ fn pane_close_prunes_capture_state_without_disturbing_sibling() {
     };
     state.expected_capture = Some("%1".into());
     state.expected_resume = Some("%1".into());
-    state.pending_alternate = Some(("%1".into(), Vec::new(), 1));
+    state.pending_visible_cells = Some(("%1".into(), Vec::new(), 1));
+    state.pending_alternate = Some(PendingAlternateCapture {
+        pane_id: "%1".into(),
+        visible_lines: Vec::new(),
+        visible_cell_lines: Vec::new(),
+        visible_boundary: 1,
+    });
+    state.pending_saved_normal_cells = Some(PendingSavedNormalCells {
+        pane_id: "%1".into(),
+        visible_lines: Vec::new(),
+        visible_cell_lines: Vec::new(),
+        saved_normal_lines: Vec::new(),
+        visible_boundary: 1,
+    });
     state.pending_metadata = Some(PendingCaptureMetadata {
         pane_id: "%1".into(),
         visible_lines: Vec::new(),
+        visible_cell_lines: Vec::new(),
         saved_normal_lines: Vec::new(),
+        saved_normal_cell_lines: Vec::new(),
         visible_boundary: 1,
     });
     state.apply_control(
@@ -359,7 +374,9 @@ fn pane_close_prunes_capture_state_without_disturbing_sibling() {
     assert!(matches!(state.command_block, CommandBlock::Draining { .. }));
     assert!(state.expected_capture.is_none());
     assert!(state.expected_resume.is_none());
+    assert!(state.pending_visible_cells.is_none());
     assert!(state.pending_alternate.is_none());
+    assert!(state.pending_saved_normal_cells.is_none());
     assert!(state.pending_metadata.is_none());
 }
 
@@ -386,10 +403,27 @@ fn pane_close_drains_every_in_flight_block_until_its_tmux_fence() {
             pane_id: "%1".into(),
             lines: Vec::new(),
         },
+        CommandBlock::CaptureVisibleCells {
+            tag,
+            pane_id: "%1".into(),
+            visible_lines: Vec::new(),
+            visible_boundary: 1,
+            lines: Vec::new(),
+        },
         CommandBlock::CaptureAlternate {
             tag,
             pane_id: "%1".into(),
             visible_lines: Vec::new(),
+            visible_cell_lines: Vec::new(),
+            visible_boundary: 1,
+            lines: Vec::new(),
+        },
+        CommandBlock::CaptureSavedNormalCells {
+            tag,
+            pane_id: "%1".into(),
+            visible_lines: Vec::new(),
+            visible_cell_lines: Vec::new(),
+            saved_normal_lines: Vec::new(),
             visible_boundary: 1,
             lines: Vec::new(),
         },
@@ -397,7 +431,9 @@ fn pane_close_drains_every_in_flight_block_until_its_tmux_fence() {
             tag,
             pane_id: "%1".into(),
             visible_lines: Vec::new(),
+            visible_cell_lines: Vec::new(),
             saved_normal_lines: Vec::new(),
+            saved_normal_cell_lines: Vec::new(),
             visible_boundary: 1,
             lines: Vec::new(),
         },
@@ -489,7 +525,9 @@ fn pane_remove_and_readd_before_fence_cannot_publish_the_old_capture() {
         tag,
         pane_id: "%1".into(),
         visible_lines: vec![b"obsolete".to_vec()],
+        visible_cell_lines: Vec::new(),
         saved_normal_lines: Vec::new(),
+        saved_normal_cell_lines: Vec::new(),
         visible_boundary: 0,
         lines: vec![b"1,1,0,0,0,0,0,0,0,0,0".to_vec()],
     };
