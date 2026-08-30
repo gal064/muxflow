@@ -1,8 +1,10 @@
 import { Terminal } from "@xterm/headless";
 import { describe, expect, it } from "vitest";
 import {
+  bookmarkTerminalViewport,
   captureTerminalViewport,
   resizeTerminalPreservingViewport,
+  restoreBookmarkedTerminalViewport,
   restoreTerminalViewport,
   type TerminalViewportAnchor,
 } from "./terminalViewport";
@@ -56,6 +58,30 @@ describe("terminal viewport preservation", () => {
       atBottom: true,
       grid: { columns: 20, rows: 8 },
     });
+    terminal.dispose();
+  });
+
+  it("uses a pre-layout bookmark after the browser has already reset the viewport", async () => {
+    const terminal = new Terminal({ allowProposedApi: true, cols: 40, rows: 5, scrollback: 1_000 });
+    await writeLines(terminal);
+    restoreTerminalViewport(terminal, { atBottom: false, viewportLine: 15, grid: { columns: 40, rows: 5 } });
+    const prepared = bookmarkTerminalViewport(terminal);
+
+    // The right-panel DOM lands before ResizeObserver. This is the failure the
+    // ordinary resize capture cannot recover from: xterm already says zero by
+    // the time setGrid is entered, while the marker still names row 15.
+    terminal.scrollToLine(0);
+    resizeTerminalPreservingViewport(terminal, { columns: 20, rows: 5 }, prepared);
+    const resized = captureTerminalViewport(terminal);
+    expect(resized.atBottom).toBe(false);
+    expect(terminal.buffer.active.getLine(resized.viewportLine)?.translateToString(true)).toMatch(/^row-15/);
+
+    // A CSS-box change smaller than one cell still needs restoration even
+    // though setGrid reports the same rows and columns.
+    const sameGrid = bookmarkTerminalViewport(terminal);
+    terminal.scrollToLine(0);
+    restoreBookmarkedTerminalViewport(terminal, sameGrid);
+    expect(terminal.buffer.active.getLine(terminal.buffer.active.viewportY)?.translateToString(true)).toMatch(/^row-15/);
     terminal.dispose();
   });
 

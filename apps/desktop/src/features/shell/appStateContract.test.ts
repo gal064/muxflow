@@ -220,10 +220,13 @@ describe("reading state the previous build wrote", () => {
     expect(saved({}).shell.compactWorkspaces).toBe(false);
   });
 
-  it("persists copy-on-select and leaves legacy saves explicitly disabled", () => {
+  it("persists terminal copy preferences and enables safe command cleanup for legacy saves", () => {
     expect(saved({ copyOnSelect: true }).shell.copyOnSelect).toBe(true);
     expect(saved({ copyOnSelect: false }).shell.copyOnSelect).toBe(false);
     expect(saved({}).shell.copyOnSelect).toBe(false);
+    expect(saved({ cleanWrappedCommands: true }).shell.cleanWrappedCommands).toBe(true);
+    expect(saved({ cleanWrappedCommands: false }).shell.cleanWrappedCommands).toBe(false);
+    expect(saved({}).shell.cleanWrappedCommands).toBe(true);
     expect(saved({ terminalApplicationClipboard: true }).shell.terminalApplicationClipboard).toBe(true);
     expect(saved({}).shell.terminalApplicationClipboard).toBe(false);
   });

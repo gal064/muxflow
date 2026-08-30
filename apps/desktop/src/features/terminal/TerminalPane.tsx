@@ -229,6 +229,7 @@ export function interceptTerminalPlainTextPaste(
 
 export interface TerminalPaneController {
   focus(): void;
+  prepareForLayoutResize(): void;
   copy(): Promise<boolean>;
   paste(): Promise<boolean>;
   showSearch(): void;
@@ -268,6 +269,7 @@ interface Props {
   onDiagnostic?: (message: string) => void;
   onOpenFilePath?: (paneId: string, path: string) => void;
   copyOnSelect?: boolean;
+  cleanWrappedCommands?: boolean;
   terminalApplicationClipboard?: boolean;
   terminalFontSize?: number;
   platform?: Platform;
@@ -290,6 +292,7 @@ export function TerminalPane({
   onDiagnostic,
   onOpenFilePath,
   copyOnSelect = false,
+  cleanWrappedCommands = true,
   terminalApplicationClipboard = false,
   terminalFontSize = 13,
   platform = "linux",
@@ -326,6 +329,7 @@ export function TerminalPane({
   const clientIdRef = useRef(clientId);
   const appFocusedRef = useRef(appFocused);
   const copyOnSelectRef = useRef(copyOnSelect);
+  const cleanWrappedCommandsRef = useRef(cleanWrappedCommands);
   const terminalApplicationClipboardRef = useRef(terminalApplicationClipboard);
   const platformRef = useRef(platform);
   const rendererEpochRef = useRef<number | undefined>(undefined);
@@ -376,6 +380,7 @@ export function TerminalPane({
   openFilePathRef.current = onOpenFilePath;
   clientIdRef.current = clientId;
   copyOnSelectRef.current = copyOnSelect;
+  cleanWrappedCommandsRef.current = cleanWrappedCommands;
   terminalApplicationClipboardRef.current = terminalApplicationClipboard;
   platformRef.current = platform;
   const paneTransferScope: TerminalTransferScope | undefined = transferScope ? {
@@ -571,6 +576,7 @@ export function TerminalPane({
     const disposeCopyOnSelect = installTerminalCopyOnSelect({
       renderer,
       enabled: () => copyOnSelectRef.current,
+      cleanWrappedCommands: () => cleanWrappedCommandsRef.current,
       write: writeNativeTerminalClipboard,
       onError: (error) => {
         diagnosticRef.current?.(`Could not copy the terminal selection: ${String(error)}`);
@@ -984,11 +990,13 @@ export function TerminalPane({
 
     const controller: TerminalPaneController = {
       focus: () => renderer.focus(),
-      copy: async () => {
-        if (!renderer.hasSelection()) return false;
-        await writeNativeTerminalClipboard(renderer.getSelection());
-        return true;
-      },
+      prepareForLayoutResize: () => renderer.prepareForLayoutResize(),
+      copy: () => copyCompletedTerminalSelection(
+        renderer,
+        true,
+        writeNativeTerminalClipboard,
+        cleanWrappedCommandsRef.current,
+      ),
       paste: async () => {
         if (await transferControllerRef.current?.pasteClipboard()) return true;
         inputRef.current(pane.id, { kind: "text", data: await navigator.clipboard.readText() });

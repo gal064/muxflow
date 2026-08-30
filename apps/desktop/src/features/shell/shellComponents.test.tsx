@@ -1382,6 +1382,21 @@ describe("saved host picker", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("exposes high-confidence wrapped-command cleanup as a live Terminal preference", async () => {
+    const onShell = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(settings({ onShell, shell: { ...defaultShellState, cleanWrappedCommands: true } })); });
+    const terminalTab = renderer.root.findAllByType("button").find((node) => node.props.children === "Terminal")!;
+    await act(async () => { terminalTab.props.onClick(); });
+    const label = renderer.root.findAllByType("label").find((node) =>
+      node.children.some((child) => child === "Clean wrapped commands when copying"))!;
+    const toggle = label.findByType("input");
+    expect(toggle.props.checked).toBe(true);
+    await act(async () => { toggle.props.onChange({ target: { checked: false } }); });
+    expect(onShell).toHaveBeenCalledWith({ cleanWrappedCommands: false });
+    await act(async () => renderer.unmount());
+  });
+
   it("picks the mode new Markdown tabs start in without touching the ones already open", async () => {
     const onShell = vi.fn();
     let renderer!: ReturnType<typeof create>;

@@ -124,6 +124,26 @@ async function run(
 }
 
 describe("shell commands", () => {
+  it("bookmarks mounted pane viewports before a rail command changes layout", async () => {
+    for (const commandId of ["view.togglePanel", "view.showFiles", "view.showGit", "view.toggleSidebar"] as const) {
+      const prepareForLayoutResize = vi.fn();
+      const controller: TerminalPaneController = {
+        focus: vi.fn(),
+        prepareForLayoutResize,
+        copy: vi.fn(async () => false),
+        paste: vi.fn(async () => false),
+        showSearch: vi.fn(),
+        scrollToBottom: vi.fn(),
+      };
+      const result = await run(commandId, {
+        controllers: { current: new Map([[pane.id, controller]]) },
+      });
+      expect(prepareForLayoutResize).toHaveBeenCalledOnce();
+      expect(prepareForLayoutResize.mock.invocationCallOrder[0])
+        .toBeLessThan(result.setAppState.mock.invocationCallOrder[0]);
+    }
+  });
+
   it("creates and commits a workspace with one tmux request", async () => {
     const result = await run("session.new");
     const prompt = result.setTextPrompt.mock.calls[0]?.[0];
