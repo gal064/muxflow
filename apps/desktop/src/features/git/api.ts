@@ -316,8 +316,8 @@ function mapStatus(value: WireStatus): GitStatusSnapshot {
 }
 
 function mapEntry(value: WireStatusEntry): GitStatusEntry {
-  requireBase64Path(value.path);
-  requireBase64Path(value.originalPath);
+  requireBase64Path(value.path, "Git status path");
+  requireBase64Path(value.originalPath, "Git original path");
   return {
     path: value.path, displayPath: value.displayPath, ...(value.originalPath ? { originalPath: value.originalPath } : {}),
     ...(value.displayOriginalPath ? { displayOriginalPath: value.displayOriginalPath } : {}),
@@ -552,8 +552,8 @@ function requireBytes(value: number[], label: string): void {
  * through `fromBase64` to address a file. The shape check is a regexp rather
  * than a decode because a snapshot carries thousands of these.
  */
-function requireBase64Path(value: string): void {
+function requireBase64Path(value: string, label: string): void {
   if (typeof value !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-    throw new Error("Host returned malformed Git status.");
+    throw new Error(`Host returned malformed Git status: ${label}.`);
   }
 }

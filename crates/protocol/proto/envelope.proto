@@ -679,8 +679,9 @@ message FileServiceEvent {
   string watch_id = 12;
 }
 
-// Git paths are opaque host byte strings. display_path is lossy presentation
-// only and must never be sent back as an operation target.
+// Git paths are opaque host byte strings. A lossy display string, where one
+// is carried (GitDiff.display_path) or derived, is presentation only and must
+// never be sent back as an operation target.
 enum GitChangeKind {
   GIT_CHANGE_KIND_UNSPECIFIED = 0;
   GIT_CHANGE_KIND_MODIFIED = 1;
