@@ -120,11 +120,13 @@ impl AgentAdapter for CodexAdapter {
     /// Two events Claude Code has are absent from that surface and are
     /// therefore gaps rather than omissions: there is no `StopFailure`, so a
     /// turn that ends in failure is indistinguishable from one that succeeds,
-    /// and there is no `Notification`. A `PermissionRequest` classified by its
-    /// normalized reviewer and `PreToolUse(request_user_input)` are the two
+    /// and there is no `Notification`. `UserPromptSubmit` captures the turn's
+    /// normalized reviewer before work starts; an unclassified or mismatched
+    /// `PermissionRequest` and `PreToolUse(request_user_input)` are the two
     /// observed signals that a Codex agent is blocked. `SubagentStart` is
-    /// deliberately not taken: it says nothing `PreToolUse` has not already
-    /// said, and every hook costs a daemon connection.
+    /// deliberately not taken: it
+    /// says nothing `PreToolUse` has not already said, and every hook costs a
+    /// daemon connection.
     fn hook_events(&self) -> &'static [&'static str] {
         &[
             "SessionStart",
@@ -161,26 +163,12 @@ impl AgentAdapter for CodexAdapter {
             } else {
                 v1::AgentLifecycleState::Working
             };
-        let permission_lifecycle = if payload
-            .get(CODEX_APPROVAL_REVIEWER_FIELD)
-            .and_then(Value::as_str)
-            == Some("auto_review")
-            && payload
-                .get(CODEX_APPROVAL_TURN_ID_FIELD)
-                .and_then(Value::as_str)
-                .is_some_and(|turn_id| !turn_id.is_empty())
-        {
-            v1::AgentLifecycleState::Working
-        } else {
-            // Missing, unreadable and future reviewer values all preserve
-            // the safe behavior: a request that might need the user is
-            // blocked until another hook resolves it.
-            v1::AgentLifecycleState::Blocked
-        };
         parse_common_hook(
             payload,
             &[
-                ("PermissionRequest", permission_lifecycle),
+                // Ingest may promote this to Working only when the request's
+                // turn matches the reviewer captured at UserPromptSubmit.
+                ("PermissionRequest", v1::AgentLifecycleState::Blocked),
                 ("UserPromptSubmit", v1::AgentLifecycleState::Working),
                 ("PreToolUse", pre_tool_lifecycle),
                 ("PostToolUse", v1::AgentLifecycleState::Working),
@@ -453,14 +441,9 @@ mod tests {
     }
 
     #[test]
-    fn codex_permission_is_working_only_for_an_explicit_auto_reviewer() {
+    fn codex_permission_requires_ingest_to_match_the_turn_cache() {
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
-        for (reviewer, expected) in [
-            (Some("auto_review"), v1::AgentLifecycleState::Working),
-            (Some("user"), v1::AgentLifecycleState::Blocked),
-            (Some("future_reviewer"), v1::AgentLifecycleState::Blocked),
-            (None, v1::AgentLifecycleState::Blocked),
-        ] {
+        for reviewer in [Some("auto_review"), Some("user"), None] {
             let mut payload = serde_json::json!({
                 "hook_event_name": "PermissionRequest",
                 "session_id": "codex-session",
@@ -469,25 +452,11 @@ mod tests {
             if let Some(reviewer) = reviewer {
                 payload[CODEX_APPROVAL_REVIEWER_FIELD] = reviewer.into();
             }
-            assert_eq!(codex.parse_hook(&payload).unwrap().lifecycle, expected);
+            assert_eq!(
+                codex.parse_hook(&payload).unwrap().lifecycle,
+                v1::AgentLifecycleState::Blocked
+            );
         }
-        let missing_turn = serde_json::json!({
-            "hook_event_name": "PermissionRequest",
-            CODEX_APPROVAL_REVIEWER_FIELD: "auto_review",
-        });
-        assert_eq!(
-            codex.parse_hook(&missing_turn).unwrap().lifecycle,
-            v1::AgentLifecycleState::Blocked
-        );
-        let malformed_reviewer = serde_json::json!({
-            "hook_event_name": "PermissionRequest",
-            CODEX_APPROVAL_TURN_ID_FIELD: "turn-1",
-            CODEX_APPROVAL_REVIEWER_FIELD: {},
-        });
-        assert_eq!(
-            codex.parse_hook(&malformed_reviewer).unwrap().lifecycle,
-            v1::AgentLifecycleState::Blocked
-        );
     }
 
     #[test]

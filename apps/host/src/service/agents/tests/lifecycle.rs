@@ -1,21 +1,24 @@
 use super::*;
 
-fn auto_review_permission(id: &str) -> v1::AgentHookEvent {
-    let mut permission = event(id, 0, "PermissionRequest");
-    let mut payload = serde_json::json!({"hook_event_name": "PermissionRequest"});
-    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "auto_review".into();
-    payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = "turn-1".into();
-    permission.payload_json = serde_json::to_vec(&payload).unwrap();
-    permission
+fn prompt_for_turn(
+    id: &str,
+    turn_id: &str,
+    reviewer: Option<serde_json::Value>,
+) -> v1::AgentHookEvent {
+    let mut prompt = event(id, 0, "UserPromptSubmit");
+    let mut payload = serde_json::json!({"hook_event_name": "UserPromptSubmit"});
+    payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = turn_id.into();
+    if let Some(reviewer) = reviewer {
+        payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = reviewer;
+    }
+    prompt.payload_json = serde_json::to_vec(&payload).unwrap();
+    prompt
 }
 
-fn permission_for_turn(id: &str, turn_id: &str, reviewer: Option<&str>) -> v1::AgentHookEvent {
+fn permission_for_turn(id: &str, turn_id: &str) -> v1::AgentHookEvent {
     let mut permission = event(id, 0, "PermissionRequest");
     let mut payload = serde_json::json!({"hook_event_name": "PermissionRequest"});
     payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = turn_id.into();
-    if let Some(reviewer) = reviewer {
-        payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = reviewer.into();
-    }
     permission.payload_json = serde_json::to_vec(&payload).unwrap();
     permission
 }
@@ -42,7 +45,7 @@ fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
         let runtime = AgentRuntime::isolated(path.clone());
         let confirmed = runtime
             .ingest_hook_with_context(
-                &permission_for_turn("confirmed", "turn-1", Some("auto_review")),
+                &prompt_for_turn("confirmed", "turn-1", Some("auto_review".into())),
                 "server-a",
                 Some(&topology),
             )
@@ -55,7 +58,7 @@ fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
 
         let cached = runtime
             .ingest_hook_with_context(
-                &permission_for_turn("cached", "turn-1", None),
+                &permission_for_turn("cached", "turn-1"),
                 "server-a",
                 Some(&topology),
             )
@@ -70,7 +73,7 @@ fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
     let restarted = AgentRuntime::isolated(path);
     let cached = restarted
         .ingest_hook_with_context(
-            &permission_for_turn("cached-after-restart", "turn-1", None),
+            &permission_for_turn("cached-after-restart", "turn-1"),
             "server-a",
             Some(&topology),
         )
@@ -83,7 +86,7 @@ fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
 
     let cold_turn = restarted
         .ingest_hook_with_context(
-            &permission_for_turn("different-turn", "turn-2", None),
+            &permission_for_turn("different-turn", "turn-2"),
             "server-a",
             Some(&topology),
         )
@@ -96,28 +99,28 @@ fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
 }
 
 #[test]
-fn explicit_non_auto_reviewer_overrides_the_same_turn_cache() {
+fn explicit_non_auto_turn_start_clears_the_same_turn_cache() {
     for reviewer in ["user", "future_reviewer"] {
         let runtime = runtime(&format!("auto-review-override-{reviewer}"));
         let topology = topology("codex");
         runtime
             .ingest_hook_with_context(
-                &permission_for_turn("confirmed", "turn-1", Some("auto_review")),
+                &prompt_for_turn("confirmed", "turn-1", Some("auto_review".into())),
                 "server-a",
                 Some(&topology),
             )
             .unwrap();
-        let overridden = runtime
+        let prompt = runtime
             .ingest_hook_with_context(
-                &permission_for_turn("overridden", "turn-1", Some(reviewer)),
+                &prompt_for_turn("overridden", "turn-1", Some(reviewer.into())),
                 "server-a",
                 Some(&topology),
             )
             .unwrap();
-        assert!(overridden.notify);
+        assert!(!prompt.notify);
         assert_eq!(
-            overridden.agent.unwrap().lifecycle,
-            v1::AgentLifecycleState::Blocked as i32
+            prompt.agent.unwrap().lifecycle,
+            v1::AgentLifecycleState::Working as i32
         );
         assert!(
             runtime
@@ -128,6 +131,18 @@ fn explicit_non_auto_reviewer_overrides_the_same_turn_cache() {
                 .values()
                 .all(|record| record.codex_auto_review_turn_id.is_empty())
         );
+        let permission = runtime
+            .ingest_hook_with_context(
+                &permission_for_turn("permission", "turn-1"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        assert!(permission.notify);
+        assert_eq!(
+            permission.agent.unwrap().lifecycle,
+            v1::AgentLifecycleState::Blocked as i32
+        );
     }
 }
 
@@ -137,24 +152,20 @@ fn malformed_reviewer_cannot_reuse_the_same_turn_cache() {
     let topology = topology("codex");
     runtime
         .ingest_hook_with_context(
-            &permission_for_turn("confirmed", "turn-1", Some("auto_review")),
+            &prompt_for_turn("confirmed", "turn-1", Some("auto_review".into())),
             "server-a",
             Some(&topology),
         )
         .unwrap();
 
-    let mut malformed = permission_for_turn("malformed", "turn-1", None);
-    let mut payload: serde_json::Value = serde_json::from_slice(&malformed.payload_json).unwrap();
-    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = serde_json::json!({});
-    malformed.payload_json = serde_json::to_vec(&payload).unwrap();
-    let blocked = runtime
+    let malformed = prompt_for_turn("malformed", "turn-1", Some(serde_json::json!({})));
+    let prompt = runtime
         .ingest_hook_with_context(&malformed, "server-a", Some(&topology))
         .unwrap();
-
-    assert!(blocked.notify);
+    assert!(!prompt.notify);
     assert_eq!(
-        blocked.agent.unwrap().lifecycle,
-        v1::AgentLifecycleState::Blocked as i32
+        prompt.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
     );
     assert!(
         runtime
@@ -165,23 +176,45 @@ fn malformed_reviewer_cannot_reuse_the_same_turn_cache() {
             .values()
             .all(|record| record.codex_auto_review_turn_id.is_empty())
     );
+    let blocked = runtime
+        .ingest_hook_with_context(
+            &permission_for_turn("permission", "turn-1"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(blocked.notify);
+    assert_eq!(
+        blocked.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
 }
 
 #[test]
-fn missing_or_different_turn_id_cannot_reuse_the_cache() {
-    for (turn_id, reviewer) in [("", None), ("turn-2", None), ("", Some("auto_review"))] {
-        let runtime = runtime(&format!("auto-review-cache-miss-{turn_id}-{reviewer:?}"));
+fn incomplete_turn_start_cannot_reuse_the_cache() {
+    for (turn_id, reviewer) in [
+        ("turn-1", None),
+        ("", Some(serde_json::json!("auto_review"))),
+    ] {
+        let runtime = runtime(&format!("auto-review-cache-miss-{turn_id}"));
         let topology = topology("codex");
         runtime
             .ingest_hook_with_context(
-                &permission_for_turn("confirmed", "turn-1", Some("auto_review")),
+                &prompt_for_turn("confirmed", "turn-1", Some("auto_review".into())),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        runtime
+            .ingest_hook_with_context(
+                &prompt_for_turn("incomplete", turn_id, reviewer),
                 "server-a",
                 Some(&topology),
             )
             .unwrap();
         let missed = runtime
             .ingest_hook_with_context(
-                &permission_for_turn("missed", turn_id, reviewer),
+                &permission_for_turn("missed", "turn-1"),
                 "server-a",
                 Some(&topology),
             )
@@ -198,16 +231,23 @@ fn missing_or_different_turn_id_cannot_reuse_the_cache() {
 fn auto_review_approval_stays_working_and_only_stop_requests_attention() {
     let runtime = runtime("auto-review-approved");
     let topology = topology("codex");
-    for (id, name) in [("prompt", "UserPromptSubmit"), ("pre", "PreToolUse")] {
-        let transition = runtime
-            .ingest_hook_with_context(&event(id, 0, name), "server-a", Some(&topology))
-            .unwrap();
-        assert!(!transition.notify);
-    }
+    let prompt = prompt_for_turn("prompt", "turn-1", Some("auto_review".into()));
+    assert!(
+        !runtime
+            .ingest_hook_with_context(&prompt, "server-a", Some(&topology))
+            .unwrap()
+            .notify
+    );
+    assert!(
+        !runtime
+            .ingest_hook_with_context(&event("pre", 0, "PreToolUse"), "server-a", Some(&topology),)
+            .unwrap()
+            .notify
+    );
 
     let permission = runtime
         .ingest_hook_with_context(
-            &auto_review_permission("permission"),
+            &permission_for_turn("permission", "turn-1"),
             "server-a",
             Some(&topology),
         )
@@ -243,7 +283,7 @@ fn codex_question_blocks_once_and_resumes_after_its_tool_returns() {
     let topology = topology("codex");
     let prompt = runtime
         .ingest_hook_with_context(
-            &event("prompt", 0, "UserPromptSubmit"),
+            &prompt_for_turn("prompt", "turn-1", Some("auto_review".into())),
             "server-a",
             Some(&topology),
         )
@@ -315,14 +355,14 @@ fn auto_review_denial_stays_working_until_stop_completes_the_turn() {
     let topology = topology("codex");
     runtime
         .ingest_hook_with_context(
-            &event("prompt", 0, "UserPromptSubmit"),
+            &prompt_for_turn("prompt", "turn-1", Some("auto_review".into())),
             "server-a",
             Some(&topology),
         )
         .unwrap();
     let permission = runtime
         .ingest_hook_with_context(
-            &auto_review_permission("permission"),
+            &permission_for_turn("permission", "turn-1"),
             "server-a",
             Some(&topology),
         )

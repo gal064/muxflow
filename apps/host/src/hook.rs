@@ -346,6 +346,8 @@ fn build_event(
         source_event_id
     };
     let event_name = string_field(&value, &["hook_event_name", "hookEventName", "event"]);
+    let codex_turn_start =
+        adapter == v1::AgentAdapterKind::Codex && event_name == "UserPromptSubmit";
     let codex_permission =
         adapter == v1::AgentAdapterKind::Codex && event_name == "PermissionRequest";
     let codex_pre_tool = adapter == v1::AgentAdapterKind::Codex && event_name == "PreToolUse";
@@ -364,7 +366,7 @@ fn build_event(
             normalized.insert("tool_name".into(), tool_name.into());
         }
     }
-    if codex_permission {
+    if codex_turn_start || codex_permission {
         let turn_id = string_field(&value, &["turn_id", "turnId"]);
         if !turn_id.is_empty() {
             normalized.insert(
@@ -372,14 +374,15 @@ fn build_event(
                 turn_id.into(),
             );
         }
-        if let Some(reviewer) =
+    }
+    if codex_turn_start
+        && let Some(reviewer) =
             home.and_then(|home| codex_transcript::approval_reviewer(&value, home))
-        {
-            normalized.insert(
-                crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD.into(),
-                reviewer.as_str().into(),
-            );
-        }
+    {
+        normalized.insert(
+            crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD.into(),
+            reviewer.as_str().into(),
+        );
     }
     Ok(v1::AgentHookEvent {
         adapter: adapter.into(),
@@ -507,18 +510,11 @@ fn persist_latest_fallback(runtime: &Path, event: &v1::AgentHookEvent) -> anyhow
     .id();
     let prefix = format!("hook-fallback-{adapter}-{pane}-");
     prune_fallbacks(runtime, &prefix);
-    // Fixed-width nanoseconds first, so the file name sorts chronologically and
-    // the daemon can replay the sequence without opening anything; the random
-    // suffix separates two hooks that fired in the same nanosecond, which are
-    // concurrent and have no order to preserve anyway.
-    let path = runtime.join(format!(
-        "{prefix}{:020}-{}.pb",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-        uuid::Uuid::new_v4().simple()
-    ));
+    // The mailbox lock serializes hook writers. Derive the next fixed-width
+    // sequence from the pending files instead of wall time, which can move
+    // backward and would then replay a permission before its turn start.
+    let sequence = next_fallback_sequence(runtime, &prefix)?;
+    let path = runtime.join(format!("{prefix}{sequence:020}.pb"));
     let temporary = runtime.join(format!(".hook-fallback-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> anyhow::Result<()> {
         let mut file = OpenOptions::new()
@@ -536,6 +532,27 @@ fn persist_latest_fallback(runtime: &Path, event: &v1::AgentHookEvent) -> anyhow
         let _ = fs::remove_file(temporary);
     }
     result
+}
+
+fn next_fallback_sequence(runtime: &Path, prefix: &str) -> anyhow::Result<u128> {
+    let mut latest = None;
+    for entry in fs::read_dir(runtime)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(sequence) = name
+            .strip_prefix(prefix)
+            .and_then(|suffix| suffix.strip_suffix(".pb"))
+            .and_then(|sequence| sequence.parse::<u128>().ok())
+        else {
+            continue;
+        };
+        latest = Some(latest.map_or(sequence, |latest: u128| latest.max(sequence)));
+    }
+    latest
+        .map_or(Some(0), |latest| latest.checked_add(1))
+        .context("hook fallback sequence exhausted")
 }
 
 /// Drop the oldest waiting events for this pane once the mailbox is full.
@@ -690,6 +707,62 @@ mod tests {
     }
 
     #[test]
+    fn fallback_writers_assign_a_monotonic_sequence_under_the_mailbox_lock() {
+        let runtime = tempfile::tempdir().unwrap();
+        let prompt = build_event(
+            v1::AgentAdapterKind::Codex,
+            br#"{"hook_event_name":"UserPromptSubmit","turn_id":"turn-1"}"#.to_vec(),
+            "%7",
+            "server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        let permission = build_event(
+            v1::AgentAdapterKind::Codex,
+            br#"{"hook_event_name":"PermissionRequest","turn_id":"turn-1"}"#.to_vec(),
+            "%7",
+            "server-a",
+            7,
+            None,
+        )
+        .unwrap();
+
+        persist_latest_fallback(runtime.path(), &prompt).unwrap();
+        persist_latest_fallback(runtime.path(), &permission).unwrap();
+
+        let mut paths: Vec<_> = fs::read_dir(runtime.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "pb"))
+            .collect();
+        paths.sort();
+        assert_eq!(
+            paths
+                .iter()
+                .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            [
+                "hook-fallback-codex-7-00000000000000000000.pb",
+                "hook-fallback-codex-7-00000000000000000001.pb",
+            ]
+        );
+        let event_names: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let event = v1::AgentHookEvent::decode(fs::read(path).unwrap().as_slice()).unwrap();
+                serde_json::from_slice::<serde_json::Value>(&event.payload_json)
+                    .unwrap()["hook_event_name"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(event_names, ["UserPromptSubmit", "PermissionRequest"]);
+    }
+
+    #[test]
     fn adapters_and_pane_identity_are_strict() {
         assert_eq!(
             parse_adapter(&["--adapter".into(), "codex".into()]).unwrap(),
@@ -780,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_reviewer_is_normalized_without_transcript_metadata() {
+    fn codex_turn_start_normalizes_reviewer_and_permission_does_not_reread_it() {
         let home = tempfile::tempdir().unwrap();
         let sessions = home.path().join(".codex/sessions/2026/08/22");
         fs::create_dir_all(&sessions).unwrap();
@@ -800,10 +873,10 @@ mod tests {
         )
         .unwrap();
         let raw = serde_json::to_vec(&serde_json::json!({
-            "hook_event_name": "PermissionRequest",
+            "hook_event_name": "UserPromptSubmit",
             "session_id": "session-1",
             "turn_id": "turn-1",
-            "transcript_path": transcript,
+            "transcript_path": &transcript,
             "prompt": "private prompt",
             "api_token": "secret"
         }))
@@ -831,6 +904,31 @@ mod tests {
             assert!(!serialized.contains(private));
         }
         assert!(payload.get("turn_id").is_none());
+
+        let permission = build_event(
+            v1::AgentAdapterKind::Codex,
+            serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "session_id": "session-1",
+                "turn_id": "turn-1",
+                "transcript_path": &transcript,
+            }))
+            .unwrap(),
+            "%12",
+            "tmux:server-a",
+            8,
+            Some(home.path()),
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&permission.payload_json).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "session_id": "session-1",
+                crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-1",
+            })
+        );
     }
 
     #[tokio::test]
