@@ -163,6 +163,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     search(): boolean { return false; }
     clearSearch(): void {}
     scrollToBottom(): void {}
+    noteUnrenderedOutput(): void {}
     serialize(): string { return this.screen; }
     disposeGpuRenderer(): void {}
     dispose(): void { this.#scheduler.dispose(); }

@@ -217,6 +217,8 @@ export interface TerminalRenderer {
   search(query: string, direction?: "next" | "previous"): boolean;
   clearSearch(): void;
   scrollToBottom(): void;
+  /** Shows that live bytes exist without applying them to a historical view. */
+  noteUnrenderedOutput(): void;
   serialize(): string;
   drainAndSerialize(): Promise<DrainedTerminalSnapshot>;
   disposeGpuRenderer(): void;
@@ -961,6 +963,12 @@ export class XtermRenderer implements TerminalRenderer {
   scrollToBottom(): void {
     this.#terminal.scrollToBottom();
     this.#newOutput = false;
+    this.#emitViewport();
+  }
+
+  noteUnrenderedOutput(): void {
+    if (this.#disposed) return;
+    this.#newOutput = true;
     this.#emitViewport();
   }
 

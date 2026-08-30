@@ -23,6 +23,15 @@ import { PaneHistoryPager } from "./PaneHistoryPager";
 import { requestTerminalSeed, setTerminalVisibility } from "./api";
 import { ownTerminalBytes } from "./TerminalBytes";
 import { DeferredTerminalOutputQueue } from "./DeferredTerminalOutputQueue";
+import {
+  readingMayPageHistory,
+  readingScreenIsCurrent,
+  readingStateForAuthoritativeScreen,
+  readingStateForOutput,
+  readingStateForViewport,
+  returnToLive,
+  type TerminalReadingState,
+} from "./TerminalReadingState";
 import { describePaneDegradation, PaneDegradedWatchdog } from "./PaneDegradedWatchdog";
 import { awaitWithin } from "./timeBound";
 import { isQuietRevealError, REVEAL_RETRY_DELAY_MS, revealFailureAction } from "./revealRetry";
@@ -360,6 +369,8 @@ export function TerminalPane({
   const watchdogRef = useRef<PaneDegradedWatchdog | undefined>(undefined);
   const revealStateRef = useRef<PaneRevealState>({ ready: false, hasLocalState: false });
   const deferredOutputRef = useRef(new DeferredTerminalOutputQueue());
+  const returnToLiveRef = useRef<(() => void) | undefined>(undefined);
+  const sendTerminalInputRef = useRef<((input: TerminalInput) => void) | undefined>(undefined);
   const seedDiagnosticForNextSeedRef = useRef(false);
   const [rendererDiagnostic, setRendererDiagnostic] = useState<string>();
   const [seedDiagnostic, setSeedDiagnostic] = useState<string>();
@@ -436,6 +447,8 @@ export function TerminalPane({
     const initialPaint = createPaintTicket([], lifecycle);
     let rendererActive = true;
     let rendererEpoch: number | undefined;
+    let readingState: TerminalReadingState = "live";
+    let authoritativeScreenPending = false;
     const renderer = new XtermRenderer({
       fontSize: terminalFontSize,
       paneId: pane.id,
@@ -477,6 +490,41 @@ export function TerminalPane({
         }
       },
     });
+    const requestFreshSeed = (reason: string) => {
+      const currentClientId = clientIdRef.current;
+      if (currentClientId) void requestTerminalSeed(currentClientId, pane.id).catch((error) => {
+        recordIncident("pane.reseedFailed", { paneId: pane.id, error: String(error).slice(0, 200) });
+        // Same rule as the reveal path: a transport still coming up is journal
+        // material, not a toast — the watchdog re-arms and asks again.
+        if (!isQuietRevealError(error)) {
+          diagnosticRef.current?.(`${reason}; fresh seed request failed: ${String(error)}`);
+        }
+      });
+    };
+    const resumeLive = (reason: string) => {
+      const decision = returnToLive(readingState);
+      readingState = decision.state;
+      if (decision.scrollLocally) {
+        renderer.scrollToBottom();
+        return;
+      }
+      if (!decision.requestSeed) return;
+      // Keep the historical pixels up while the authoritative replacement is
+      // on the wire. Output arriving before it is handled by the pane's
+      // existing bounded recovery queue rather than written onto a stale base.
+      revealStateRef.current = { ready: false, hasLocalState: false };
+      deferredOutputRef.current.reset();
+      terminalStateCache.delete(pane.id);
+      watchdogRef.current?.note("rendererReseed");
+      requestFreshSeed(reason);
+    };
+    const sendTerminalInput = (input: TerminalInput) => {
+      resumeLive("Returning from terminal history requires a current screen");
+      inputRef.current(pane.id, input);
+    };
+    const returnToLiveFromUi = () => resumeLive("Returning to live terminal output requires a current screen");
+    returnToLiveRef.current = returnToLiveFromUi;
+    sendTerminalInputRef.current = sendTerminalInput;
     const commitRendered = (generation: number, terminalEpoch: number | undefined, establishesEpoch = false): boolean => {
       if (establishesEpoch && hub.generationEpoch === terminalEpoch) {
         rendererEpoch = terminalEpoch;
@@ -544,7 +592,7 @@ export function TerminalPane({
       // textarea. Own plain text in capture phase so xterm cannot wrap it in a
       // bracketed-paste envelope on its way through.
       interceptTerminalPlainTextPaste(event, (text) => {
-        inputRef.current(pane.id, { kind: "text", data: text });
+        sendTerminalInput({ kind: "text", data: text });
       });
     };
     terminalContainer.addEventListener("paste", interceptPaste, true);
@@ -569,7 +617,7 @@ export function TerminalPane({
       if (translated === undefined) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      inputRef.current(pane.id, { kind: "text", data: translated });
+      sendTerminalInput({ kind: "text", data: translated });
     };
     terminalContainer.addEventListener("keydown", handleTerminalKeyDown, true);
     const disposeCopyOnSelect = installTerminalCopyOnSelect({
@@ -600,6 +648,19 @@ export function TerminalPane({
       clientId: () => clientIdRef.current,
       journal: recordIncident,
     });
+    const skipOutputForHistoricalScreen = (): boolean => {
+      if (readingState !== "reading" && readingState !== "outdated") return false;
+      const reading = readingStateForOutput(readingState);
+      readingState = reading.state;
+      if (reading.becameOutdated) {
+        renderer.noteUnrenderedOutput();
+        // A page already on the wire was captured against tmux's newer live
+        // display, not the frozen xterm it would rewrite. Orphan it alongside
+        // the first skipped bytes; the authoritative seed starts paging over.
+        historyPager.noteScreenGone();
+      }
+      return true;
+    };
     const cached = terminalStateCache.get(pane.id);
     const currentCached = cached?.terminalEpoch !== undefined && cached.terminalEpoch === hub.generationEpoch
       ? cached
@@ -632,6 +693,8 @@ export function TerminalPane({
     };
     const flushDeferredOutput = (afterGeneration = -1) => {
       const deferred = outputAfterRecovery(deferredOutputRef.current.drain(), afterGeneration);
+      if (deferred.some((output) => output.data.byteLength > 0)
+        && skipOutputForHistoricalScreen()) return;
       // These bytes land on top of whatever screen is up, so it is no longer
       // the bare snapshot the handshake could be asked to skip.
       if (deferred.length) screenOnDisplay = undefined;
@@ -648,18 +711,6 @@ export function TerminalPane({
         );
       }
     };
-    const requestFreshSeed = (reason: string) => {
-      const currentClientId = clientIdRef.current;
-      if (currentClientId) void requestTerminalSeed(currentClientId, pane.id).catch((error) => {
-        recordIncident("pane.reseedFailed", { paneId: pane.id, error: String(error).slice(0, 200) });
-        // Same rule as the reveal path: a transport still coming up is journal
-        // material, not a toast — the watchdog re-arms and asks again.
-        if (!isQuietRevealError(error)) {
-          diagnosticRef.current?.(`${reason}; fresh seed request failed: ${String(error)}`);
-        }
-      });
-    };
-
     // The time bound on every one-shot recovery latch this pane can be caught
     // in. It arms only while the pane is degraded, so a pane that is working
     // runs no timers at all.
@@ -689,7 +740,7 @@ export function TerminalPane({
     // clicked is one more thing between them and their scrollback. The cost of
     // being wrong is one page the user never looks at.
     const unsubscribeTopReached = renderer.onScrollbackTopReached(() => {
-      historyPager.requestPage("scrolledToTop");
+      if (readingMayPageHistory(readingState)) historyPager.requestPage("scrolledToTop");
     });
     // A reflow moves rows between what tmux keeps in its history and what it
     // shows on its display, so a page already on the wire was asked against a
@@ -697,11 +748,35 @@ export function TerminalPane({
     // the three places a grid is applied, because what matters is that the grid
     // changed and not who asked for it.
     const unsubscribeGrid = renderer.onGridApplied(() => historyPager.noteGridChanged());
-    const unsubscribeInput = renderer.onInput((input) => inputRef.current(pane.id, input));
-    const unsubscribeViewport = renderer.onViewportChange(setViewport);
+    const unsubscribeInput = renderer.onInput(sendTerminalInput);
+    const unsubscribeViewport = renderer.onViewportChange((next) => {
+      if (authoritativeScreenPending) {
+        setViewport(next);
+        return;
+      }
+      readingState = readingStateForViewport(readingState, next.atBottom);
+      if (readingState === "reading" && deferredOutputRef.current.byteLength > 0) {
+        // Output can already be waiting behind a reveal response when the user
+        // leaves the bottom. It becomes skipped output at that moment, not
+        // something a later readiness answer may flush into this view.
+        skipOutputForHistoricalScreen();
+        clearDeferredOutput();
+      }
+      setViewport(next);
+      if (next.atBottom && (readingState === "reading" || readingState === "outdated")) {
+        resumeLive("Returning to the bottom requires a current terminal screen");
+      }
+    });
     const unsubscribeEvents = hub.subscribePane(pane.id, (event) => {
       if (event.kind === "terminalHistory") {
         historyPager.receive(event);
+        return;
+      }
+      if (readingState === "refreshing" && event.kind === "paneResource") {
+        // Returning live superseded the reveal this resource answers. The one
+        // authoritative seed already requested owns recovery now; acting on a
+        // late resume/seed-debt answer would blank the historical pixels and
+        // ask a second time.
         return;
       }
       const transition = reducePaneReveal(revealStateRef.current, event);
@@ -745,6 +820,8 @@ export function TerminalPane({
         cancelRevealVoidWatch(revealVoidTimerRef);
       }
       if (effect.kind === "seed") {
+        readingState = readingStateForAuthoritativeScreen();
+        authoritativeScreenPending = true;
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
         // A seed is the visible grid and nothing above it, so this pane's
@@ -760,6 +837,7 @@ export function TerminalPane({
         // shortest retry delay rather than inheriting this episode's backoff.
         watchdog.noteHealthy();
         renderer.seed(effect.data, () => {
+          authoritativeScreenPending = false;
           publishInitialPaint(generation, eventEpoch, true);
           // The first page, fetched once the pane's own screen is on the glass
           // and never before it: a seeded pane has no scrollback at all, and a
@@ -778,8 +856,11 @@ export function TerminalPane({
         if (seedDiagnosticForNextSeedRef.current) seedDiagnosticForNextSeedRef.current = false;
         else setSeedDiagnostic(undefined);
       } else if (effect.kind === "output") {
-        // Output reaching the renderer is proof the pane is not frozen.
+        // Output reaching this pane is proof the host is not frozen. While the
+        // user reads history it deliberately does not reach xterm: tmux keeps
+        // its copy-mode view separate from the live pane for the same reason.
         watchdog.noteHealthy();
+        if (skipOutputForHistoricalScreen()) return;
         screenOnDisplay = undefined;
         // Decided before the write and charged at the decision, so a burst of
         // chunks inside one interval yields exactly one sample rather than one
@@ -821,6 +902,10 @@ export function TerminalPane({
           commitRendered(generation, eventEpoch);
         }, generation);
       } else if (effect.kind === "deferOutput") {
+        // A reveal answer may still be in flight when the user starts reading.
+        // Such output is stale in exactly the same way as ordinary live output;
+        // it must not sit in the recovery queue and later repaint the history.
+        if (skipOutputForHistoricalScreen()) return;
         const admission = deferredOutputRef.current.enqueue({
           data: effect.data,
           generation,
@@ -834,6 +919,7 @@ export function TerminalPane({
           requestFreshSeed("Output arrived before pane recovery exceeded its byte or record budget");
         }
       } else if (effect.kind === "awaitSeed") {
+        readingState = readingStateForAuthoritativeScreen();
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
         screenOnDisplay = undefined;
@@ -871,6 +957,7 @@ export function TerminalPane({
           && screenOnDisplay.terminalEpoch === eventEpoch
           && screenOnDisplay.generation === effect.snapshotGeneration;
         if (!holdingTheVerifiedScreen) {
+          readingState = readingStateForAuthoritativeScreen();
           revealStateRef.current = { ready: false, hasLocalState: false };
           terminalStateCache.delete(pane.id);
           clearDeferredOutput();
@@ -885,6 +972,17 @@ export function TerminalPane({
           setRendererDiagnostic(`${reason}; waiting for a fresh terminal seed…`);
           requestFreshSeed(reason);
         } else {
+          const resumeHasOutput = effect.rawTail.byteLength > 0
+            || deferredOutputRef.current.byteLength > 0;
+          if (resumeHasOutput && skipOutputForHistoricalScreen()) {
+            // The cached base is still the exact view being read. The tail and
+            // any output that raced the reveal are represented by the one seed
+            // requested when the user returns live, so retain neither here.
+            clearDeferredOutput();
+            watchdog.noteHealthy();
+            setRendererDiagnostic(undefined);
+            return;
+          }
           // Written even when it is empty: the scheduler queues a zero-byte
           // record as an ordered barrier, and that barrier is what carries the
           // acknowledgement and the reveal for an idle pane — the whole answer
@@ -997,11 +1095,11 @@ export function TerminalPane({
       ),
       paste: async () => {
         if (await transferControllerRef.current?.pasteClipboard()) return true;
-        inputRef.current(pane.id, { kind: "text", data: await navigator.clipboard.readText() });
+        sendTerminalInput({ kind: "text", data: await navigator.clipboard.readText() });
         return true;
       },
       showSearch: () => setSearching(true),
-      scrollToBottom: () => renderer.scrollToBottom(),
+      scrollToBottom: () => resumeLive("Returning to live terminal output requires a current screen"),
     };
     controllerRef.current(pane.id, controller);
     reportMeasurements();
@@ -1034,6 +1132,8 @@ export function TerminalPane({
       terminalContainer.removeEventListener("keydown", handleTerminalKeyDown, true);
       disposeCopyOnSelect();
       controllerRef.current(pane.id, undefined);
+      if (returnToLiveRef.current === returnToLiveFromUi) returnToLiveRef.current = undefined;
+      if (sendTerminalInputRef.current === sendTerminalInput) sendTerminalInputRef.current = undefined;
       const currentClientId = clientIdRef.current;
       const handoff = (async () => {
         try {
@@ -1042,6 +1142,7 @@ export function TerminalPane({
           const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
           if (!currentCheckpoint) return;
           const snapshotMatchesEpoch = rendererEpoch === currentCheckpoint.terminalEpoch;
+          const snapshotIsCurrent = readingScreenIsCurrent(readingState);
           const checkpoint = snapshotMatchesEpoch
             ? { ...currentCheckpoint, outputGeneration: drained.outputGeneration }
             : { ...currentCheckpoint, outputGeneration: 0 };
@@ -1055,7 +1156,7 @@ export function TerminalPane({
           // second time — which is what the row count it reports as `skip`
           // does — and a pane that already reached the top of tmux's history
           // must not go asking for it again.
-          if (snapshotMatchesEpoch) {
+          if (snapshotMatchesEpoch && snapshotIsCurrent) {
             terminalStateCache.set(pane.id, drained.serialized, {
               checkpoint,
               history: historyPager.snapshot(),
@@ -1066,6 +1167,7 @@ export function TerminalPane({
           // nothing to resume from, and saying so is what makes the reveal ask
           // for a seed instead of a tail.
           const rendererHoldsSnapshot = snapshotMatchesEpoch
+            && snapshotIsCurrent
             && terminalStateCache.get(pane.id) !== undefined;
           if (!currentClientId || clientIdRef.current !== currentClientId) return;
           try {
@@ -1462,7 +1564,7 @@ export function TerminalPane({
       // what the program receives. `xterm.paste` would wrap it in a second
       // envelope, which is how markers used to get doubled across the tmux
       // boundary.
-      onPaste={(value) => inputRef.current(pane.id, { kind: "text", data: value })}
+      onPaste={(value) => sendTerminalInputRef.current?.({ kind: "text", data: value })}
       registry={transferRegistry}
       scope={paneTransferScope}
       target={container}
@@ -1485,7 +1587,7 @@ export function TerminalPane({
     </form>}
     {viewport.newOutput && !viewport.atBottom && <button
       className="new-output"
-      onClick={() => rendererRef.current?.scrollToBottom()}
+      onClick={() => returnToLiveRef.current?.()}
       type="button"
     >New output ↓</button>}
     {(visibleSeedDiagnostic(seedDiagnostic) || rendererDiagnostic) && <div className="renderer-diagnostic" role="status">
