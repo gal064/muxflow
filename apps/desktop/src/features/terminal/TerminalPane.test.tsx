@@ -49,6 +49,11 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     #measurementListeners = new Set<() => void>();
     #topListeners = new Set<() => void>();
     #gridListeners = new Set<() => void>();
+    #inputListeners = new Set<(input: { kind: "text"; data: string }) => void>();
+    #viewportListeners = new Set<(state: { atBottom: boolean; newOutput: boolean }) => void>();
+    viewport = { atBottom: true, newOutput: false };
+    unrenderedOutput = 0;
+    scrollBottomCalls = 0;
     /** What every splice this pane attempts is answered with. */
     historyOutcome: "applied" | "superseded" = "applied";
     historySplices: Array<{ bytes: number; skip: number; columns: number; rows: number }> = [];
@@ -86,9 +91,23 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       return () => { this.#gridListeners.delete(listener); };
     }
     isAlternateScreenActive(): boolean { return this.alternateScreen; }
-    onInput(): () => void { return () => undefined; }
+    onInput(listener: (input: { kind: "text"; data: string }) => void): () => void {
+      this.#inputListeners.add(listener);
+      return () => { this.#inputListeners.delete(listener); };
+    }
+    emitInput(data: string): void {
+      for (const listener of this.#inputListeners) listener({ kind: "text", data });
+    }
     onSelectionChange(): () => void { return () => undefined; }
-    onViewportChange(): () => void { return () => undefined; }
+    onViewportChange(listener: (state: { atBottom: boolean; newOutput: boolean }) => void): () => void {
+      this.#viewportListeners.add(listener);
+      listener(this.viewport);
+      return () => { this.#viewportListeners.delete(listener); };
+    }
+    emitViewport(atBottom: boolean, newOutput = this.viewport.newOutput): void {
+      this.viewport = { atBottom, newOutput };
+      for (const listener of this.#viewportListeners) listener(this.viewport);
+    }
     onScrollbackTopReached(listener: () => void): () => void {
       this.#topListeners.add(listener);
       return () => { this.#topListeners.delete(listener); };
@@ -109,7 +128,14 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     getSelection(): string { return ""; }
     search(): boolean { return false; }
     clearSearch(): void {}
-    scrollToBottom(): void {}
+    scrollToBottom(): void {
+      this.scrollBottomCalls += 1;
+      this.emitViewport(true, false);
+    }
+    noteUnrenderedOutput(): void {
+      this.unrenderedOutput += 1;
+      this.emitViewport(false, true);
+    }
     disposeGpuRenderer(): void {}
     dispose(): void { this.disposed = true; }
     async drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number; viewport: { atBottom: boolean; viewportLine: number; grid: Size } }> {
@@ -249,6 +275,27 @@ function seedEvent(paneId: string, generation = 1): PaneEvent {
   };
 }
 
+function outputEvent(paneId: string, generation: number, value = "output"): PaneEvent {
+  return {
+    kind: "output", paneId, generation, sequence: generation,
+    data: ownTerminalBytes(new TextEncoder().encode(value)),
+  };
+}
+
+function resumeEvent(
+  paneId: string,
+  snapshotGeneration: number,
+  tailThroughGeneration: number,
+  tail: string,
+): PaneEvent {
+  return {
+    kind: "paneResource", paneId, state: "visible", requiresSeed: false,
+    resumeFromRenderer: true, recoveryReason: "", generation: tailThroughGeneration,
+    snapshotGeneration, tailThroughGeneration, sequence: tailThroughGeneration,
+    rawTail: ownTerminalBytes(new TextEncoder().encode(tail)),
+  };
+}
+
 async function awaitPaint(): Promise<void> {
   // Matches afterNextPaint's two-frame convention, plus a settle for timers.
   await act(async () => {
@@ -290,13 +337,20 @@ function awaitSeedResource(paneId: string, hostOwnsTheRequest: boolean): PaneEve
   };
 }
 
-function paneElement(pane: Pane, hub: FakeHub, clientId: string, appFocused: boolean, terminalFontSize = 13) {
+function paneElement(
+  pane: Pane,
+  hub: FakeHub,
+  clientId: string,
+  appFocused: boolean,
+  terminalFontSize = 13,
+  onInput: (paneId: string, input: { kind: "text"; data: string } | { kind: "binary"; data: Uint8Array }) => void = () => undefined,
+) {
   return <TerminalPane
     appFocused={appFocused}
     clientId={clientId}
     pane={pane}
     hub={hub.asHub()}
-    onInput={() => undefined}
+    onInput={onInput}
     onFocus={() => undefined}
     onMeasurements={() => undefined}
     onController={() => undefined}
@@ -309,10 +363,11 @@ async function mountPane(
   hub: FakeHub,
   clientId = "client-a",
   appFocused = true,
+  onInput?: (paneId: string, input: { kind: "text"; data: string } | { kind: "binary"; data: Uint8Array }) => void,
 ): Promise<ReactTestRenderer> {
   let renderer!: ReactTestRenderer;
   await act(async () => {
-    renderer = create(paneElement(pane, hub, clientId, appFocused), {
+    renderer = create(paneElement(pane, hub, clientId, appFocused, 13, onInput), {
       createNodeMock: (element) => {
         const node = document.createElement("div");
         if ((element.props as Record<string, unknown>)["data-terminal-surface"]) paneNodes.push(node);
@@ -822,6 +877,182 @@ describe("TerminalPane degraded-state watchdog", () => {
  * button would — and the first page is fetched behind the pane's first paint so
  * a wheel a moment after a switch finds something already there.
  */
+describe("tmux-style terminal reading", () => {
+  it("keeps live output out of the historical xterm and refreshes once at the bottom", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%read1"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%read1", 1)); renderer.flushRendered(); });
+    api.requestTerminalHistory.mockClear();
+
+    await act(async () => { renderer.emitViewport(false); });
+    await act(async () => {
+      hub.deliver(outputEvent("%read1", 2, "first"));
+      hub.deliver(outputEvent("%read1", 3, "second"));
+    });
+
+    expect(renderer.writes.filter((write) => write.startsWith("write:"))).toEqual([]);
+    expect(renderer.unrenderedOutput).toBe(1);
+    expect(hub.rendered.map((entry) => entry.generation)).not.toContain(2);
+    await act(async () => { renderer.reachTop(); });
+    expect(api.requestTerminalHistory).not.toHaveBeenCalled();
+
+    await act(async () => { renderer.emitViewport(true); });
+    expect(api.requestTerminalSeed.mock.calls).toEqual([["client-a", "%read1"]]);
+    expect(renderer.scrollBottomCalls).toBe(0);
+
+    // Output racing the seed uses the existing bounded recovery queue rather
+    // than touching the historical screen.
+    await act(async () => { hub.deliver(outputEvent("%read1", 4, "deferred")); });
+    expect(renderer.writes.filter((write) => write.startsWith("write:"))).toEqual([]);
+
+    await act(async () => { hub.deliver(seedEvent("%read1", 5)); renderer.flushRendered(); });
+    await act(async () => { hub.deliver(outputEvent("%read1", 6, "live")); renderer.flushRendered(); });
+    expect(renderer.writes).toContain("write:4");
+    expect(hub.rendered.map((entry) => entry.generation)).toContain(6);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("returns immediately when clean and sends input once while a stale screen refreshes", async () => {
+    const inputs = vi.fn();
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%read2"), hub, "client-a", true, inputs);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%read2", 1)); renderer.flushRendered(); });
+
+    await act(async () => { renderer.emitViewport(false); renderer.emitInput("a"); });
+    expect(renderer.scrollBottomCalls).toBe(1);
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+    expect(inputs.mock.calls).toEqual([["%read2", { kind: "text", data: "a" }]]);
+
+    await act(async () => { renderer.emitViewport(false); });
+    await act(async () => { hub.deliver(outputEvent("%read2", 2)); });
+    await act(async () => { renderer.emitInput("b"); renderer.emitInput("c"); });
+
+    expect(api.requestTerminalSeed.mock.calls).toEqual([["client-a", "%read2"]]);
+    expect(inputs.mock.calls.slice(1)).toEqual([
+      ["%read2", { kind: "text", data: "b" }],
+      ["%read2", { kind: "text", data: "c" }],
+    ]);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("never caches or claims an outdated reading screen during hide", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%read3"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%read3", 1)); renderer.flushRendered(); });
+    await act(async () => { renderer.emitViewport(false); hub.deliver(outputEvent("%read3", 2)); });
+
+    await act(async () => { mounted.unmount(); await Promise.resolve(); });
+
+    expect(terminalStateCache.get("%read3")).toBeUndefined();
+    const hide = api.setTerminalVisibility.mock.calls.find((call) => call[2] === false);
+    expect(hide?.[3]).toBe(false);
+  });
+
+  it("leaves the ordinary live-output path unchanged at the bottom", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%read4"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%read4", 1)); renderer.flushRendered(); });
+
+    await act(async () => { hub.deliver(outputEvent("%read4", 2, "live")); renderer.flushRendered(); });
+
+    expect(renderer.writes).toContain("write:4");
+    expect(renderer.unrenderedOutput).toBe(0);
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("does not let a late cached-resume tail repaint a restored reading viewport", async () => {
+    terminalStateCache.set("%read5", "warm-screen", {
+      checkpoint: { terminalEpoch: 7, outputGeneration: 3 },
+      viewport: { atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 } },
+    });
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%read5"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { renderer.flushRendered(); renderer.emitViewport(false); });
+
+    // This output races the reveal and would normally wait in the bounded
+    // recovery queue; the reveal's own tail covers another hidden-time write.
+    await act(async () => { hub.deliver(outputEvent("%read5", 4, "deferred")); });
+    await act(async () => { hub.deliver(resumeEvent("%read5", 3, 5, "tail")); });
+
+    expect(renderer.writes.filter((write) => write.startsWith("write:"))).toEqual([]);
+    expect(renderer.unrenderedOutput).toBe(1);
+    await act(async () => { renderer.emitInput("x"); });
+    expect(api.requestTerminalSeed.mock.calls).toEqual([["client-a", "%read5"]]);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("keeps one seed and the old pixels when return-live outruns a cached-resume answer", async () => {
+    terminalStateCache.set("%read7", "warm-screen", {
+      checkpoint: { terminalEpoch: 7, outputGeneration: 3 },
+      viewport: { atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 } },
+    });
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%read7"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { renderer.flushRendered(); renderer.emitViewport(false); });
+    await act(async () => { hub.deliver(outputEvent("%read7", 4, "deferred")); });
+    await act(async () => { renderer.emitInput("x"); });
+    await act(async () => { hub.deliver(resumeEvent("%read7", 3, 5, "late-tail")); });
+
+    expect(api.requestTerminalSeed.mock.calls).toEqual([["client-a", "%read7"]]);
+    expect(renderer.writes.filter((write) => write.startsWith("seed:") || write.startsWith("write:"))).toEqual([]);
+
+    await act(async () => { hub.deliver(seedEvent("%read7", 6)); renderer.flushRendered(); });
+    expect(renderer.writes).toContain("seed:6");
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("does not flush queued reveal output through a non-resume readiness answer", async () => {
+    terminalStateCache.set("%read8", "warm-screen", {
+      checkpoint: { terminalEpoch: 7, outputGeneration: 3 },
+      viewport: { atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 } },
+    });
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%read8"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { renderer.flushRendered(); });
+    await act(async () => { hub.deliver(outputEvent("%read8", 4, "queued")); });
+    await act(async () => { renderer.emitViewport(false); });
+    await act(async () => {
+      hub.deliver({
+        kind: "paneResource", paneId: "%read8", state: "visible", requiresSeed: false,
+        resumeFromRenderer: false, recoveryReason: "", generation: 4,
+        snapshotGeneration: 3, tailThroughGeneration: 4, sequence: 5,
+        rawTail: ownTerminalBytes(new Uint8Array()),
+      });
+    });
+
+    expect(renderer.writes.filter((write) => write.startsWith("write:"))).toEqual([]);
+    expect(renderer.unrenderedOutput).toBe(1);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("drops a history page already in flight when live output makes the view outdated", async () => {
+    const hub = new FakeHub();
+    const mounted = await mountPane(fixturePane("%read6"), hub);
+    const renderer = renderers.created[0];
+    await act(async () => { hub.deliver(seedEvent("%read6", 1)); renderer.flushRendered(); });
+    expect(api.requestTerminalHistory).toHaveBeenCalledTimes(1);
+
+    await act(async () => { renderer.emitViewport(false); hub.deliver(outputEvent("%read6", 2)); });
+    await act(async () => {
+      hub.deliver({
+        kind: "terminalHistory", paneId: "%read6", sequence: 3, historySize: 2_000,
+        data: ownTerminalBytes(new TextEncoder().encode("earlier output")),
+      });
+    });
+
+    expect(renderer.historySplices).toEqual([]);
+    await act(async () => { mounted.unmount(); });
+  });
+});
+
 describe("lazy scrollback", () => {
   /** One line per captured row, joined the way the host joins them. */
   function historyPage(rows: number): string {

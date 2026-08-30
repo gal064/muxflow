@@ -58,6 +58,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     search(): boolean { return false; }
     clearSearch(): void {}
     scrollToBottom(): void {}
+    noteUnrenderedOutput(): void {}
     disposeGpuRenderer(): void {}
     dispose(): void {}
     async drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number; viewport: { atBottom: boolean; viewportLine: number; grid: { columns: number; rows: number } } }> {
