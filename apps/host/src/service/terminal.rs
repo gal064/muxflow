@@ -1322,16 +1322,33 @@ const MAX_HISTORY_SKIP_LINES: u32 = MAX_HISTORY_LINES;
 /// the pane. There is no `__ADE_META__` leg — this is not a screen, and nothing
 /// in the answer may be mistaken for a seed the reader has to store.
 ///
+/// No `-J`, and that is the whole reason this command is not the seed's.
+///
+/// `-J` joins each wrapped line back into one output line, which makes the
+/// answer's line count say nothing about how many *rows* it covers — a measured
+/// 60 rows of wrapped output came back as 20 lines. Every other number in this
+/// protocol is a row: `-S`/`-E` count rows, `skip` is the rows the renderer
+/// holds, `#{history_size}` is rows. A page whose own unit is lines cannot be
+/// lined up against any of them, and the renderer trimming a row-sized overlap
+/// off a line-sized page removes up to three times too much.
+///
+/// Without `-J` every captured line is one physical row at the width the pane
+/// had, which is the width the renderer had too — so the page, the skip and the
+/// size are all in the same unit and the arithmetic closes.
+///
+/// The old objection to dropping it was that scrollback spliced in hard-broken
+/// never reflows and copies back as separate lines. That is answered on the
+/// desktop rather than here: it composes the page so that a row filling the
+/// grid is written *without* a line break, xterm auto-wraps it, and the
+/// continuation carries xterm's own `isWrapped` — the same reflow and the same
+/// copy as a line the pane printed live. See `composeHistoryPage`.
+///
 /// The trailing `__ADE_HISTORY_META__` leg is how the answer says whether it
-/// reached the top. The renderer cannot tell from the rows: `-J` joins wrapped
-/// lines — kept, because scrollback spliced in without it is hard-broken at the
-/// width it was captured at and never reflows — so a full page of wrapped
-/// output answers with far fewer lines than it covers rows (measured: 60 rows,
-/// 20 lines). And an emptier answer is not the signal either, because tmux
-/// clamps a range that runs past the top of its history and answers one
-/// entirely above it with a single row rather than with nothing. `#{history_size}`
-/// is the fact itself, and the renderer compares it against the rows it asked
-/// for.
+/// reached the top. The rows it carries cannot say: tmux clamps a range that
+/// runs past the top of its history and answers one entirely above it with a
+/// single row rather than with nothing, so an emptier answer is not the signal.
+/// `#{history_size}` is the fact itself, and the renderer compares it against
+/// the rows it asked for.
 ///
 /// It is a third command, and targeted, for the same reason the seed's
 /// `__ADE_META__` leg is: a pane-scoped format can only be expanded by a
@@ -1346,7 +1363,7 @@ fn capture_history_command(pane_id: &str, lines: u32, skip: u32) -> String {
     let end = skip.saturating_add(1);
     let digits = pane_id.strip_prefix('%').unwrap_or(pane_id);
     format!(
-        "display-message -p '__ADE_HISTORY__:{lines}:{digits}' ; capture-pane -p -e -J -S -{start} -E -{end} -t {pane_id} ; display-message -p -t {pane_id} '__ADE_HISTORY_META__:#{{history_size}}'"
+        "display-message -p '__ADE_HISTORY__:{lines}:{digits}' ; capture-pane -p -e -S -{start} -E -{end} -t {pane_id} ; display-message -p -t {pane_id} '__ADE_HISTORY_META__:#{{history_size}}'"
     )
 }
 

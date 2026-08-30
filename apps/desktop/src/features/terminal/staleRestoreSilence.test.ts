@@ -8,15 +8,25 @@
 //
 // A history splice is here for the same reason and not a second subject: xterm
 // has no prepend, so putting scrollback above row 0 is a rewrite of the whole
-// buffer — a restore in disguise, refused on this same generation rule, and
-// journalled rather than spoken when it is. The rows it counts and the order it
-// splices them in are what that refusal is protecting.
+// buffer — a restore in disguise, and journalled rather than spoken on the rare
+// occasions it cannot be done. It refuses on far less than a restore does,
+// because a pane that never stops printing is a pane whose user could otherwise
+// never scroll up: what the request anchors on is the rows this side holds, not
+// the generation the stream is on.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { recordIncident } from "../../diagnostics/incidents";
 import { XtermRenderer } from "./TerminalRenderer";
 import { ownTerminalBytes } from "./TerminalBytes";
 
 vi.mock("../../diagnostics/incidents", () => ({ recordIncident: vi.fn() }));
+
+/**
+ * What a page is asked against: the rows this terminal held, at the grid it
+ * held them at. A test that has not resized reads the grid off the terminal.
+ */
+function anchoredAt(renderer: XtermRenderer, skip: number) {
+  return { skip, ...renderer.grid };
+}
 
 /** Bounded polling: the splice completes on a frame or on a fallback timer. */
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
@@ -70,32 +80,232 @@ describe("stale cached restore", () => {
     renderer.dispose();
   });
 
-  // Loading earlier output is a re-seed in disguise: xterm has no prepend, so
-  // the only way to put scrollback above row 0 is to rewrite the buffer with
-  // the history and the current screen together. If live output landed while
-  // the history was in flight, that rewrite would drop it — so the splice is
-  // refused on the same rule a stale restore is, and like it, journals instead
-  // of speaking. Nothing is lost: the scrollback is still in tmux, and the next
-  // time the user reaches the top the question is asked again.
-  it("refuses a history splice when the stream moved under it", async () => {
+  /**
+   * Loading earlier output is a re-seed in disguise: xterm has no prepend, so
+   * the only way to put scrollback above row 0 is to rewrite the buffer with
+   * the history and the current screen together.
+   *
+   * The one thing that can break is eviction. The request said how many rows
+   * this pane already held and tmux captured the range ending exactly there, so
+   * rows printed since are *below* the captured range and arrive inside the
+   * serialization — but once the scrollback is full, xterm drops rows off the
+   * top to make room, and then the captured range no longer reaches what this
+   * buffer begins with. Splicing the two together would leave a hole in the
+   * middle of the user's output, so it is refused, and like a stale restore it
+   * journals instead of speaking. Nothing is lost: the rows are still in tmux,
+   * and the next time the user reaches the top the question is asked again.
+   */
+  it("refuses a history splice when the scrollback hit its cap since the request", async () => {
     const diagnostics: Array<string | undefined> = [];
     const renderer = new XtermRenderer({
       paneId: "%9",
       onDiagnostic: (message) => diagnostics.push(message),
     });
     renderer.open(document.createElement("div"));
-    renderer.write(ownTerminalBytes(new TextEncoder().encode("live")), undefined, 5);
+    renderer.setGrid({ columns: 20, rows: 5 });
+    // Past the ceiling xterm enforces, so the top of this buffer is rows it
+    // evicted rather than the rows the capture was measured from.
+    const flood = Array.from(
+      { length: renderer.scrollbackLimit + 50 },
+      (_, index) => `row-${index}`,
+    ).join("\r\n");
+    renderer.write(ownTerminalBytes(new TextEncoder().encode(flood)), undefined, 5);
+    // Polled on the row count rather than on a serialization: this buffer is
+    // ten thousand rows deep and serializing it on every tick is the test.
+    await waitFor(
+      () => renderer.scrollbackRows >= renderer.scrollbackLimit,
+      "the scrollback to reach its cap",
+    );
     diagnostics.length = 0;
 
     const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
-    await expect(renderer.prependHistory(history, 4)).resolves.toBe("superseded");
+    await expect(renderer.prependHistory(history, anchoredAt(renderer, 0))).resolves.toBe("superseded");
 
     expect(recordIncident).toHaveBeenCalledWith("pane.historySuperseded", {
       paneId: "%9",
-      throughGeneration: 4,
-      lastEnqueuedGeneration: 5,
+      reason: "scrollbackCapped",
+      scrollbackRows: renderer.scrollbackLimit,
+      scrollbackLimit: renderer.scrollbackLimit,
     });
     expect(diagnostics).toEqual([]);
+
+    renderer.dispose();
+  });
+
+  /** A TUI's frame is not scrollback, and the rewrite would destroy it. */
+  it("refuses a history splice while the alternate screen is up", async () => {
+    const renderer = new XtermRenderer({ paneId: "%14" });
+    renderer.open(document.createElement("div"));
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("\u001b[?1049h")), undefined, 5);
+    await waitFor(() => renderer.isAlternateScreenActive(), "the alternate screen to come up");
+
+    const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
+    await expect(renderer.prependHistory(history, anchoredAt(renderer, 0))).resolves.toBe("superseded");
+
+    // Every refusal says which one it was. A splice that is turned away in
+    // silence is a pane that quietly stops holding its scrollback.
+    expect(recordIncident).toHaveBeenCalledWith(
+      "pane.historySuperseded",
+      expect.objectContaining({ paneId: "%14", reason: "alternateScreen" }),
+    );
+
+    renderer.dispose();
+  });
+
+  /**
+   * The page tmux answers with is not the page that was asked for.
+   *
+   * `-S`/`-E` are evaluated against the pane's display at the moment tmux
+   * *runs* the capture. A pane that printed three rows between the request
+   * leaving and the capture running has moved its display down by three, so the
+   * page comes back ending three rows too low — and those three rows are rows
+   * this buffer already holds. Spliced in whole they appear twice, and the next
+   * page inherits the error through the skip it is asked with.
+   *
+   * The stream is ordered, so those rows reached this terminal before the
+   * answer did: the overlap is exactly what this buffer has gained since it
+   * quoted its skip, and it comes off the foot of the page.
+   */
+  it("trims the rows a busy pane printed over before splicing the page", async () => {
+    const renderer = new XtermRenderer({ paneId: "%13" });
+    renderer.open(document.createElement("div"));
+    renderer.setGrid({ columns: 20, rows: 5 });
+    // Fixed-width names, so no row's name is a prefix of another's and counting
+    // occurrences means what it says.
+    const rows = (from: number, to: number) => Array.from(
+      { length: to - from + 1 },
+      (_, index) => `row-${String(from + index).padStart(2, "0")}`,
+    );
+    renderer.write(ownTerminalBytes(new TextEncoder().encode(rows(1, 12).join("\r\n"))), undefined, 1);
+    await waitFor(() => renderer.scrollbackRows === 7, "the first twelve rows to land");
+
+    // What the request quotes: twelve rows into a five-row grid.
+    const skip = renderer.scrollbackRows;
+
+    // And then three more rows, printed before tmux got round to the capture.
+    renderer.write(ownTerminalBytes(new TextEncoder().encode(`\r\n${rows(13, 15).join("\r\n")}`)), undefined, 2);
+    await waitFor(() => renderer.scrollbackRows === 10, "the three later rows to land");
+
+    // tmux's answer, measured three rows too low: two rows this pane has never
+    // seen, and then the three oldest rows it is already holding.
+    const page = ["top-1", "top-2", ...rows(1, 3)].join("\r\n");
+    await expect(
+      renderer.prependHistory(ownTerminalBytes(new TextEncoder().encode(page)), anchoredAt(renderer, skip)),
+    ).resolves.toBe("applied");
+    await waitFor(() => renderer.serialize().includes("top-1"), "the page to be spliced");
+
+    const spliced = renderer.serialize();
+    const everyRow = ["top-1", "top-2", ...rows(1, 15)];
+    for (const row of everyRow) expect(spliced.split(row), row).toHaveLength(2);
+    const positions = everyRow.map((row) => spliced.indexOf(row));
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
+
+    renderer.dispose();
+  });
+
+  /**
+   * The same trim, on the output this actually happens to: wrapped.
+   *
+   * The history capture runs without `-J`, so every captured line is one
+   * physical row and the overlap — a row count — can be taken off the page a row
+   * at a time. Under `-J` the page was *lines*, and trimming three rows off a
+   * page of joined lines removed however many rows those three lines covered.
+   *
+   * And the rows that survive still wrap: a captured row that fills the grid is
+   * written with no break after it, so xterm wraps it itself rather than this
+   * side hard-breaking scrollback that then reflows differently from the output
+   * printed live beside it.
+   */
+  it("trims wrapped rows by the row, and leaves the wrap to xterm", async () => {
+    const renderer = new XtermRenderer({ paneId: "%16" });
+    renderer.open(document.createElement("div"));
+    renderer.setGrid({ columns: 20, rows: 5 });
+    const rows = (from: number, to: number) => Array.from(
+      { length: to - from + 1 },
+      (_, index) => `row-${String(from + index).padStart(2, "0")}`,
+    );
+    renderer.write(ownTerminalBytes(new TextEncoder().encode(rows(1, 12).join("\r\n"))), undefined, 1);
+    await waitFor(() => renderer.scrollbackRows === 7, "the first twelve rows to land");
+    const skip = renderer.scrollbackRows;
+
+    // Three more rows before tmux got round to the capture.
+    renderer.write(ownTerminalBytes(new TextEncoder().encode(`\r\n${rows(13, 15).join("\r\n")}`)), undefined, 2);
+    await waitFor(() => renderer.scrollbackRows === 10, "the three later rows to land");
+
+    // The answer: one row filling the twenty-column grid and its continuation,
+    // one short row, and then the three rows this pane printed over.
+    const head = `wrap-head${"x".repeat(11)}`;
+    const page = [head, "wrap-tail", "top-3", ...rows(1, 3)].join("\r\n");
+    await expect(
+      renderer.prependHistory(ownTerminalBytes(new TextEncoder().encode(page)), anchoredAt(renderer, skip)),
+    ).resolves.toBe("applied");
+    await waitFor(() => renderer.serialize().includes("wrap-head"), "the page to be spliced");
+
+    const spliced = renderer.serialize();
+    for (const row of ["wrap-head", "wrap-tail", "top-3", ...rows(1, 15)]) {
+      expect(spliced.split(row), row).toHaveLength(2);
+    }
+    // The full-width row and its continuation are one line again, with no break
+    // between them: xterm wrapped it, so it reflows and copies as one.
+    expect(spliced).toContain(`${head}wrap-tail`);
+
+    renderer.dispose();
+  });
+
+  /**
+   * A row is the same thing on both sides of the splice only at one width.
+   *
+   * A reflow moves rows across the boundary between what tmux keeps in its
+   * history and what it shows, and rewraps this buffer besides — so the page's
+   * rows are neither this buffer's rows nor countable against the skip it
+   * quoted. The pager orphans pages on a reflow it hears about; this is the
+   * window where one lands between the answer and the barrier.
+   */
+  it("refuses a page whose grid changed under it", async () => {
+    const renderer = new XtermRenderer({ paneId: "%17" });
+    renderer.open(document.createElement("div"));
+    renderer.setGrid({ columns: 20, rows: 5 });
+    const asked = anchoredAt(renderer, 0);
+
+    renderer.setGrid({ columns: 40, rows: 5 });
+    const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
+    await expect(renderer.prependHistory(history, asked)).resolves.toBe("superseded");
+    expect(recordIncident).toHaveBeenCalledWith(
+      "pane.historySuperseded",
+      expect.objectContaining({ paneId: "%17", reason: "gridChanged" }),
+    );
+
+    renderer.dispose();
+  });
+
+  /**
+   * The whole page turned out to be rows this buffer already held — a pane that
+   * printed at least a page's worth while the page crossed the link. There is
+   * nothing left to splice, so nothing is latched: the next reach-the-top asks
+   * from where this buffer begins now, which is above everything that page held.
+   */
+  it("refuses a page a busy pane printed straight past", async () => {
+    const renderer = new XtermRenderer({ paneId: "%15" });
+    renderer.open(document.createElement("div"));
+    renderer.setGrid({ columns: 20, rows: 5 });
+    renderer.write(
+      ownTerminalBytes(new TextEncoder().encode(Array.from({ length: 12 }, (_, i) => `row-${i}`).join("\r\n"))),
+      undefined,
+      1,
+    );
+    await waitFor(() => renderer.scrollbackRows === 7, "the rows to land");
+
+    // Asked for when this buffer held nothing above its screen, answered when it
+    // holds seven — more rows than the two the page carries.
+    const history = ownTerminalBytes(new TextEncoder().encode("a\r\nb"));
+    // Answered in its own words, not as one more refusal: the caller's remedy
+    // is a larger page next time, not the same question again.
+    await expect(renderer.prependHistory(history, anchoredAt(renderer, 0)))
+      .resolves.toBe("overlapExceedsPage");
+    expect(recordIncident).toHaveBeenCalledWith(
+      "pane.historySuperseded",
+      expect.objectContaining({ paneId: "%15", reason: "overlapExceedsPage" }),
+    );
 
     renderer.dispose();
   });
@@ -116,7 +326,7 @@ describe("stale cached restore", () => {
     await waitFor(() => renderer.serialize().includes("the screen"), "the screen to be applied");
 
     const history = ownTerminalBytes(new TextEncoder().encode("earlier output"));
-    await expect(renderer.prependHistory(history, 5)).resolves.toBe("applied");
+    await expect(renderer.prependHistory(history, anchoredAt(renderer, 0))).resolves.toBe("applied");
 
     await waitFor(() => renderer.serialize().includes("earlier output"), "the history to be spliced");
     const spliced = renderer.serialize();
@@ -151,35 +361,45 @@ describe("stale cached restore", () => {
   });
 
   /**
-   * The refusal that only the barrier can see.
+   * The pane that never stops printing — a Codex agent working — and the reason
+   * this stopped being a refusal.
    *
-   * The splice is decided twice: once when it is asked for, and again when
-   * xterm has finished with everything it was already holding — because output
-   * that lands in between is queued *behind* the barrier, so it is neither in
-   * the serialization the rewrite is built from nor safe from the rewrite,
-   * which drops the queue. Answering "applied" at the first check would let the
-   * pane latch "I have my scrollback" on a splice that never happened, and it
-   * would then never ask again.
+   * Output that lands while the page is on the wire is queued *behind* the
+   * barrier, so it is neither in the serialization the rewrite is built from nor
+   * in the buffer the rewrite replaces. Refusing on it made every page a
+   * `pane.historySuperseded` — twenty-seven in one minute on one pane — and the
+   * user could never scroll up. The writes are kept instead and re-queued behind
+   * the rewrite, which is where they would have run anyway.
    */
-  it("answers a splice the barrier refused, so the caller cannot latch on it", async () => {
+  it("splices onto a pane that never stopped printing, keeping the writes behind the barrier", async () => {
     const renderer = new XtermRenderer({ paneId: "%11" });
     renderer.open(document.createElement("div"));
-    renderer.write(ownTerminalBytes(new TextEncoder().encode("the screen")), undefined, 5);
+    renderer.setGrid({ columns: 20, rows: 5 });
+    // Not awaited: this write is still in flight, so the barrier queues behind
+    // it rather than being delivered inline.
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("live-1\r\nlive-2")), undefined, 5);
 
-    // Asked against the stream as it stands, so the first gate lets it through.
     const outcome = renderer.prependHistory(
-      ownTerminalBytes(new TextEncoder().encode("earlier output")),
-      5,
+      ownTerminalBytes(new TextEncoder().encode("older-1\r\nolder-2")),
+      anchoredAt(renderer, 0),
     );
-    // And then live output, behind the barrier and ahead of its callback.
-    renderer.write(ownTerminalBytes(new TextEncoder().encode("|LIVE")), undefined, 6);
+    // And the pane keeps printing while the splice waits for its barrier.
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("\r\nlive-3")), undefined, 6);
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("\r\nlive-4")), undefined, 7);
 
-    await expect(outcome).resolves.toBe("superseded");
-    // Nothing was rewritten: both the screen and the bytes that arrived are
-    // still there, and the scrollback is still something to ask for.
-    await waitFor(() => renderer.serialize().includes("|LIVE"), "the live output to be applied");
-    expect(renderer.serialize()).toContain("the screen");
-    expect(renderer.serialize()).not.toContain("earlier output");
+    await expect(outcome).resolves.toBe("applied");
+    await waitFor(
+      () => renderer.serialize().includes("live-4"),
+      "the output queued behind the barrier to be applied",
+    );
+
+    const spliced = renderer.serialize();
+    const rows = ["older-1", "older-2", "live-1", "live-2", "live-3", "live-4"];
+    // Nothing duplicated by the rewrite and nothing dropped with the queue…
+    for (const row of rows) expect(spliced.split(row), row).toHaveLength(2);
+    // …and every row where the user reads it, the history above the screen.
+    const positions = rows.map((row) => spliced.indexOf(row));
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
 
     renderer.dispose();
   });

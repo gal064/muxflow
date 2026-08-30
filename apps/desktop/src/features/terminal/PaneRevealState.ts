@@ -48,6 +48,24 @@ export type PaneRevealEffect =
        */
       unusableState?: string;
     }
+  | {
+      /**
+       * This pane's own hide, echoed back into a mount that is still waiting for
+       * the answer to the reveal it sent. Nothing to draw and nothing to ask
+       * for — that answer is the authoritative one — but a pane with nothing on
+       * it still needs a bound on how long it waits.
+       */
+      kind: "awaitAnswer";
+      /** Whether this terminal has a screen up while the answer is outstanding. */
+      showingScreen: boolean;
+    }
+  | {
+      /**
+       * The same echo, arriving at a pane that is already drawing. Ignored, and
+       * recorded: acting on it wiped a correct screen.
+       */
+      kind: "hideEchoAfterReady";
+    }
   | { kind: "diagnostic"; message: string };
 
 export function reducePaneReveal(
@@ -117,27 +135,32 @@ export function reducePaneReveal(
       effect: { kind: "awaitSeed", reason: "No recoverable renderer state was available", requestSeed: true },
     };
   }
-  // The echo of this pane's own hide, replayed into its next mount: the host
-  // acknowledged the handoff with an empty `hiddenBuffered` answer, and the
-  // renderer reading it is showing the screen it kept and is still waiting for
-  // the answer to the reveal it has sent. That answer is the authoritative one
-  // — a resume or a seed — so asking for a capture on the echo is one wasted
-  // seed per switch for a pane that is not even blank. Narrow deliberately: a
-  // pane that is already `ready` has no reveal outstanding, so the same shape
-  // arriving there is the host parking a pane this side believes it is
-  // drawing, which is the dead end below.
-  if (!state.ready && state.hasLocalState && event.state === "hiddenBuffered") {
-    return { state, effect: { kind: "none" } };
+  // The echo of this pane's own hide, replayed into its next mount.
+  //
+  // Never authoritative, whatever this pane's state: `hiddenBuffered` is only
+  // ever produced by a hide, because every path `reveal` can return by stamps
+  // `Visible`. It reaches a mounted pane at all because the hide is sent after
+  // this pane's own events are unsubscribed, so its acknowledgement lands in the
+  // hub's dormant backlog and is replayed into the next mount.
+  if (event.state === "hiddenBuffered") {
+    // Already drawing. The dead end below would blank a screen that is correct
+    // — a pane the user is looking at, going dark on the acknowledgement of a
+    // hide it has already come back from. Ignored, and recorded by the owner,
+    // because a hide landing behind a reveal is worth being able to see.
+    if (state.ready) return { state, effect: { kind: "hideEchoAfterReady" } };
+    // Still waiting for the reveal's own answer — a resume or a seed. Asking for
+    // a capture here is one wasted seed per switch, and blanking on it is a
+    // visible blink for a pane that had a perfectly good screen. What is owed is
+    // a bound on the wait, and only for a pane that has nothing up meanwhile.
+    return { state, effect: { kind: "awaitAnswer", showingScreen: state.hasLocalState } };
   }
-  // Everything left is an answer this pane cannot act on: a state this build
-  // has no rule for (an unset or newer `PaneResourceState` decodes as
-  // `unspecified`), or one that says the host is holding this pane while
-  // handing back nothing to hold it with — and nothing on this side to show
-  // meanwhile. Returning `none` here left the pane `ready: false` for the rest
-  // of its life — every later output deferred and never written, no watchdog
-  // reason, no diagnostic, nothing in the journal — which is the quietest way
-  // a pane can stay blank. It is seed debt, and the host plainly does not
-  // believe it owes one, so this side asks.
+  // Everything left is an answer this pane cannot act on: a state this build has
+  // no rule for, which is what an unset or newer `PaneResourceState` decodes as
+  // (`unspecified`). Returning `none` here left the pane `ready: false` for the
+  // rest of its life — every later output deferred and never written, no
+  // watchdog reason, no diagnostic, nothing in the journal — which is the
+  // quietest way a pane can stay blank. It is seed debt, and the host plainly
+  // does not believe it owes one, so this side asks.
   return {
     state: { ready: false, hasLocalState: false },
     effect: {

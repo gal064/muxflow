@@ -1,5 +1,5 @@
 import { requestTerminalHistory, type TerminalEvent } from "./api";
-import type { TerminalRenderer } from "./TerminalRenderer";
+import type { HistoryPageAnchor, TerminalRenderer } from "./TerminalRenderer";
 import type { CachedHistoryState } from "./TerminalStateCache";
 
 /**
@@ -65,10 +65,23 @@ export const HISTORY_MAX_SKIP_LINES = 10_000;
  * that dropped under it) would otherwise sit at the head of that queue forever
  * and misattribute every answer after it. The bound is what makes that failure
  * finite: the oldest expectation is dropped, and the worst that costs is one
- * page of scrollback attributed to the request before it, which is refused at
- * the splice because its anchor is stale.
+ * page of scrollback attributed to the request before it — a page whose skip
+ * belongs to a different question, so it may repeat rows this buffer already
+ * holds. One page, once, on a link that lost eight answers in a row.
  */
 export const HISTORY_MAX_AWAITING = 8;
+
+/**
+ * How large the page after this one should be.
+ *
+ * Every page is applied by rewriting the whole buffer, so N fixed-size pages
+ * cost O(N^2) bytes through xterm. Doubling makes a full scrollback six
+ * rewrites instead of thirty-four, and the ceiling keeps the largest single
+ * answer inside what a slow link carries in a frame.
+ */
+function grownPage(lines: number): number {
+  return Math.min(lines * 2, HISTORY_MAX_PAGE_LINES);
+}
 
 /** Why a page was asked for. Journalled, never branched on. */
 export type HistoryPageTrigger = "prefetch" | "scrolledToTop";
@@ -80,7 +93,7 @@ export type HistoryPageTrigger = "prefetch" | "scrolledToTop";
  */
 export type PagerRenderer = Pick<
   TerminalRenderer,
-  "scrollbackRows" | "scrollbackLimit" | "enqueuedGeneration" | "isAlternateScreenActive" | "prependHistory"
+  "scrollbackRows" | "scrollbackLimit" | "grid" | "isAlternateScreenActive" | "prependHistory"
 >;
 
 export interface PaneHistoryPagerOptions {
@@ -97,21 +110,32 @@ export interface PaneHistoryPagerOptions {
 interface HistoryRequest {
   serial: number;
   /**
-   * What this terminal had been handed when the page was asked for. The
-   * renderer refuses a splice onto a stream that has moved past it, because
-   * output printed since scrolls the screen and moves the rows above it.
+   * The buffer this page was asked for: how much scrollback the pane held, and
+   * the grid a row was measured at.
+   *
+   * Read at the request and quoted back at the splice, because the answer is
+   * read against it twice. The rows requested are the skip plus the page, and
+   * tmux's own history size says whether that reached the top; and the skip is
+   * what tells the splice how much of the page the pane printed over while it
+   * was on the wire, because tmux measures its capture from the display at the
+   * moment it runs rather than at the moment it was asked.
    */
-  anchorGeneration: number;
-  /**
-   * How much scrollback the pane held at the request. Kept because the answer
-   * is read against it: the rows requested are this plus the page, and tmux's
-   * own history size says whether that reached the top.
-   */
-  skip: number;
+  anchor: HistoryPageAnchor;
   lines: number;
   /** Cleared when the screen this page was asked against is replaced. */
   current: boolean;
+  /** What replaced it, once it has been. Journalled when the answer arrives. */
+  orphanedBy?: OrphanReason;
 }
+
+/** Why a page in flight stopped describing the buffer it was asked against. */
+type OrphanReason =
+  /** A seed replaced the screen. */
+  | "reseed"
+  /** The screen went away without one: a blank pane, or a host-owned restore. */
+  | "screenGone"
+  /** The terminal reflowed, moving rows across tmux's history boundary. */
+  | "gridChanged";
 
 /**
  * One pane's walk up its own scrollback.
@@ -166,10 +190,10 @@ export class PaneHistoryPager {
    * host's own `emit_resnapshot` after it rejected a block, replaces the screen
    * while the answer is still on the wire. That answer still arrives (the hub
    * delivers history outside its seed-debt ladder), and before this queue
-   * existed it was spliced above the *new* screen using an anchor and a skip the
-   * post-reseed prefetch had already overwritten, and then cleared the newer
-   * request's latch — so a third request fetched rows the buffer already held
-   * and showed them twice.
+   * existed it was spliced above the *new* screen using a skip the post-reseed
+   * prefetch had already overwritten, and then cleared the newer request's
+   * latch — so a third request fetched rows the buffer already held and showed
+   * them twice.
    *
    * Answers arrive in the order the requests went out, so the head of this queue
    * is whose answer this is. A request the screen outlived is marked
@@ -182,6 +206,16 @@ export class PaneHistoryPager {
    * during the prefetch, or three of them in a row, is the same question.
    */
   #busy = false;
+  /**
+   * Whether a splice is between its request and its answer.
+   *
+   * The renderer's rewrite waits on a barrier, so `prependHistory` outlives the
+   * call: until it settles this buffer is about to be replaced, and `#busy` must
+   * not be cleared under it. The two paths that *do* clear it say so explicitly,
+   * because they are the ones that take the barrier away with the queue it was
+   * sitting in — and a splice whose barrier was dropped never answers.
+   */
+  #splicing = false;
   #disposed = false;
 
   constructor(options: PaneHistoryPagerOptions) {
@@ -232,7 +266,11 @@ export class PaneHistoryPager {
     this.#screenSeeded = true;
     this.#exhausted = false;
     this.#nextPageLines = HISTORY_PAGE_LINES;
-    this.#orphan();
+    // The seed dropped everything queued for this terminal, the splice barrier
+    // included, so a splice in flight will never answer and must not hold the
+    // latch shut waiting for it.
+    this.#splicing = false;
+    this.#orphan("reseed");
   }
 
   /**
@@ -245,7 +283,27 @@ export class PaneHistoryPager {
    */
   noteScreenGone(): void {
     this.#screenSeeded = false;
-    this.#orphan();
+    // Same as a reseed: whatever replaced this screen dropped the queue and the
+    // barrier with it.
+    this.#splicing = false;
+    this.#orphan("screenGone");
+  }
+
+  /**
+   * The terminal reflowed.
+   *
+   * A resize moves rows across the boundary between what tmux keeps in its
+   * history and what it shows on its display, so the `skip` a page in flight
+   * was asked with no longer names where this buffer begins — and unlike
+   * ordinary output, the difference is not rows this side has gained, so the
+   * overlap the splice trims cannot repair it. The page is orphaned, the latch
+   * reopens, and the next reach-the-top asks with numbers that describe the
+   * buffer the user is now looking at. The screen itself is untouched: it is
+   * the same screen, rewrapped, and everything already spliced into it is still
+   * above it.
+   */
+  noteGridChanged(): void {
+    this.#orphan("gridChanged");
   }
 
   /**
@@ -254,9 +312,15 @@ export class PaneHistoryPager {
    * The orphaned requests stay in `#awaiting` because the host will still answer
    * them and the queue is how the answers are told apart.
    */
-  #orphan(): void {
-    for (const request of this.#awaiting) request.current = false;
-    this.#busy = false;
+  #orphan(reason: OrphanReason): void {
+    for (const request of this.#awaiting) {
+      request.current = false;
+      request.orphanedBy = reason;
+    }
+    // Never under a splice. The rewrite is still going to land, and a page asked
+    // for against the buffer as it stands now would quote a skip the rewrite is
+    // about to invalidate. The splice's own answer releases it.
+    if (!this.#splicing) this.#busy = false;
   }
 
   /**
@@ -279,8 +343,10 @@ export class PaneHistoryPager {
     if (!clientId) return;
     // Everything above the screen that this terminal already holds — the pages
     // already spliced in included, because they are part of this buffer now.
-    // Read at the moment of the request, alongside the generation it is
-    // anchored to, because both describe the same buffer.
+    // This is what anchors the answer: tmux measures its capture from the
+    // pane's current display, so the rows it returns end exactly where this
+    // buffer begins, and output printed while the page is on the wire lands
+    // below them rather than between them.
     const skip = this.#renderer.scrollbackRows;
     // The end of what this protocol can reach, which is not the same as the top
     // of tmux's history and is the only thing that ends paging when the two
@@ -297,10 +363,10 @@ export class PaneHistoryPager {
       return;
     }
     const lines = this.#nextPageLines;
+    const grid = this.#renderer.grid;
     const request: HistoryRequest = {
       serial: (this.#serial += 1),
-      anchorGeneration: this.#renderer.enqueuedGeneration,
-      skip,
+      anchor: { skip, columns: grid.columns, rows: grid.rows },
       lines,
       current: true,
     };
@@ -343,15 +409,20 @@ export class PaneHistoryPager {
       return;
     }
     // The screen this scrollback belongs above is gone — a reseed replaced it
-    // while the page was on the wire, or the pane is waiting for a seed.
+    // while the page was on the wire, the pane is waiting for a seed, or the
+    // terminal reflowed under it.
     // Splicing it onto whatever is there now would put the user's earlier output
-    // above a screen it never sat above, using an anchor and a skip that
-    // describe a buffer nothing is holding any more. Deliberately touching no
-    // latch: whatever asked for the *current* screen's page is still waiting for
-    // its own answer, and clearing its latch here is what let a third request
-    // duplicate rows.
+    // above a screen it never sat above, using a skip that describes a buffer
+    // nothing is holding any more. Deliberately touching no latch: whatever
+    // asked for the *current* screen's page is still waiting for its own
+    // answer, and clearing its latch here is what let a third request duplicate
+    // rows.
     if (!request.current || !this.#screenSeeded) {
-      this.#journal("pane.historySupersededByReseed", { paneId: this.#paneId, serial: request.serial });
+      this.#journal("pane.historySupersededByReseed", {
+        paneId: this.#paneId,
+        serial: request.serial,
+        reason: request.orphanedBy ?? "screenGone",
+      });
       return;
     }
     // Whether this page reached the top of tmux's history. The rows asked for
@@ -360,18 +431,17 @@ export class PaneHistoryPager {
     // come from the request rather than from the pager's current state, because
     // the page size grows and the skip has moved on.
     //
-    // Never inferred from the answer's own rows. `-J` joins wrapped lines —
-    // kept, because scrollback spliced in without it is hard-broken at the width
-    // it was captured at and never reflows — so a full page routinely carries
-    // far fewer lines than it covers rows; and an emptier answer says nothing
-    // either, because tmux clamps a range that runs past the top and answers one
-    // entirely above it with a single row.
+    // Never inferred from the answer's own rows. The capture runs without `-J`,
+    // so those rows do count in the same unit as everything else here — but an
+    // emptier answer still says nothing, because tmux clamps a range that runs
+    // past the top of its history and answers one entirely above it with a
+    // single row rather than with nothing.
     //
     // An absent size is the host's probe going unanswered, which leaves the
     // question open rather than closing it: this page is spliced like any other
     // and the next reach-the-top asks again.
     const lastPage = event.historySize !== undefined
-      && request.skip + request.lines >= event.historySize;
+      && request.anchor.skip + request.lines >= event.historySize;
     // Nothing above this screen after all. Nothing to splice — a rewrite of the
     // whole buffer to add no rows is a frame the user pays for and does not see
     // — but the size still decides whether to ask again.
@@ -384,18 +454,35 @@ export class PaneHistoryPager {
     // to finish with what it is already holding and can still be refused there;
     // the ask stays outstanding until it answers, so reaching the top meanwhile
     // does not queue a second one. A refusal leaves the latch open on purpose —
-    // the stream moved under the answer, and the next time the user reaches the
-    // top the question is asked against the screen they are actually looking at.
-    void this.#renderer.prependHistory(event.data, request.anchorGeneration).then((outcome) => {
-      // A reseed during the splice orphans this request as surely as one during
-      // the wire time: it is the new screen that owns the latch and the paging
-      // state now.
-      if (!request.current) return;
+    // the buffer could not take these rows, and the next time the user reaches
+    // the top the question is asked against the screen they are looking at.
+    // Held across the splice as well as across the wire. A rewrite of this
+    // buffer is under way from here until the promise settles, and a page asked
+    // for meanwhile would quote a skip that is about to be wrong.
+    this.#splicing = true;
+    void this.#renderer.prependHistory(event.data, request.anchor).then((outcome) => {
+      this.#splicing = false;
+      // A reseed or a reflow during the splice orphans this request as surely
+      // as one during the wire time: it is the new screen that owns the paging
+      // state now. The latch it was not allowed to clear mid-splice is released
+      // here instead, now that nothing is touching the buffer.
+      if (!request.current) {
+        this.#busy = false;
+        return;
+      }
       if (outcome === "applied") {
         this.#exhausted = lastPage;
         // The next page pays for rewriting a buffer this one just grew, so it
         // fetches proportionally more of what it is paying for.
-        this.#nextPageLines = Math.min(request.lines * 2, HISTORY_MAX_PAGE_LINES);
+        this.#nextPageLines = grownPage(request.lines);
+      } else if (outcome === "overlapExceedsPage") {
+        // Every row of this page had already been printed onto the pane by the
+        // time it arrived — a pane producing a page's worth per round trip, and
+        // the one case where asking again unchanged asks the identical question
+        // and gets the identical answer forever. Grown on the same ladder an
+        // applied page grows on, so the ask outruns the printing rather than
+        // chasing it. Nothing is latched: the page said nothing about the top.
+        this.#nextPageLines = grownPage(request.lines);
       }
       this.#busy = false;
     });
