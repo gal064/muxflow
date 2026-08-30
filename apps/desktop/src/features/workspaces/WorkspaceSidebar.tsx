@@ -199,12 +199,6 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const renderAgentRow = (row: AgentListRow, index: number, key = row.agent.id) => {
     const selected = row.agent.id === selectedAgentId;
     const sessionLabel = agentSessionLabel(row.agent, props.adapters);
-    const detail = [
-      props.agentSort === "workspace" ? undefined : row.location.workspaceName,
-      row.location.tabIndex === undefined ? undefined : `tab ${row.location.tabIndex}`,
-      row.state,
-      row.routable ? undefined : "unmapped",
-    ].filter(Boolean).join(" · ");
     return <div className="agent-row" key={key} role="listitem">
       <button
         aria-label={[
@@ -256,7 +250,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             {row.location.tabPinned
               && <span aria-hidden="true" className="agent-pin"><Icon name="pin" size={11} /></span>}
           </span>
-          <span className="agent-detail">{detail}</span>
+          <span className="agent-detail">{row.location.workspaceName}</span>
         </span>
       </button>
       {needsAttention(row.state) && <span aria-hidden="true" className="badge badge-row">1</span>}

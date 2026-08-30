@@ -11,14 +11,32 @@ export const initialAgentState: AgentStoreState = {
 
 export type AgentAction =
   | { type: "wire"; event: AgentWireEvent }
-  | { type: "seenAck"; agentId: string; attentionGeneration: AgentGeneration }
+  | {
+    type: "seenAck";
+    agentId: string;
+    attentionGeneration: AgentGeneration;
+    attentionSeenAt: number;
+    hostProfileId: string;
+    serverIdentity: string;
+    connectionEpoch: number;
+  }
   | { type: "disconnect" }
   | { type: "reset" };
 
 export function agentReducer(state: AgentStoreState, action: AgentAction): AgentStoreState {
   if (action.type === "reset") return initialAgentState;
   if (action.type === "disconnect") return state.authoritative ? { ...state, authoritative: false } : state;
-  if (action.type === "seenAck") return acknowledgeSeen(state, action.agentId, action.attentionGeneration);
+  if (action.type === "seenAck") {
+    if (state.hostProfileId !== action.hostProfileId
+      || state.serverIdentity !== action.serverIdentity
+      || state.connectionEpoch !== action.connectionEpoch) return state;
+    return acknowledgeSeen(
+      state,
+      action.agentId,
+      action.attentionGeneration,
+      action.attentionSeenAt,
+    );
+  }
   const event = action.event;
   if (event.kind === "snapshot") {
     const snapshot = event.snapshot;
@@ -93,15 +111,22 @@ export function acknowledgeSeen(
   state: AgentStoreState,
   agentId: string,
   attentionGeneration: AgentGeneration,
+  attentionSeenAt = Date.now(),
 ): AgentStoreState {
   const record = state.byId[agentId];
-  if (!record || record.attentionGeneration !== attentionGeneration
-    || generationAtLeast(record.seenGeneration, attentionGeneration)) return state;
+  if (!record || record.attentionGeneration !== attentionGeneration) return state;
+  const advances = !generationAtLeast(record.seenGeneration, attentionGeneration);
+  const suppliesMissingTimestamp = attentionSeenAt > 0 && record.attentionSeenAt <= 0;
+  if (!advances && !suppliesMissingTimestamp) return state;
   return {
     ...state,
     byId: {
       ...state.byId,
-      [agentId]: { ...record, seenGeneration: attentionGeneration },
+      [agentId]: {
+        ...record,
+        seenGeneration: advances ? attentionGeneration : record.seenGeneration,
+        attentionSeenAt: suppliesMissingTimestamp ? attentionSeenAt : record.attentionSeenAt,
+      },
     },
   };
 }

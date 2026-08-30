@@ -1024,6 +1024,9 @@ message AgentRecord {
   // repeated hooks that report the same lifecycle and pure route changes do
   // not move this clock.
   int64 lifecycle_changed_at_unix_millis = 17;
+  // Host-observed time when the current attention generation was first seen.
+  // Zero while that generation is still unread or when there is no attention.
+  int64 attention_seen_at_unix_millis = 18;
 }
 
 message AgentSnapshot {

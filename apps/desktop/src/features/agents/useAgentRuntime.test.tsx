@@ -111,6 +111,32 @@ describe("useAgentRuntime focus semantics", () => {
     await act(async () => renderer!.unmount());
   });
 
+  it("does not let an in-flight seen request suppress the replacement connection", async () => {
+    const first: AgentSnapshot = {
+      hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1,
+      revision: agentGeneration(9), eventSequence: agentGeneration(9), acceptedGeneration: agentGeneration(9),
+      notificationWatermark: agentGeneration(9), authoritative: true, adapters: [],
+      agents: [agent({ lifecycle: "idle", attentionGeneration: 8, seenGeneration: 1 })],
+    };
+    const replacement = { ...first, connectionEpoch: 2 };
+    let resolveFirstSeen!: () => void;
+    const firstSeen = new Promise<void>((resolve) => { resolveFirstSeen = resolve; });
+    const client = clientFor(first);
+    vi.mocked(client.snapshot).mockResolvedValueOnce(first).mockResolvedValue(replacement);
+    vi.mocked(client.markSeen).mockImplementationOnce(() => firstSeen).mockResolvedValue(undefined);
+    let renderer: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness client={client} connectionEpoch={1} />); });
+    expect(client.markSeen).toHaveBeenCalledTimes(1);
+
+    await act(async () => renderer!.update(<Harness client={client} connectionEpoch={2} />));
+    expect(client.markSeen).toHaveBeenCalledTimes(2);
+    expect(client.markSeen).toHaveBeenLastCalledWith(
+      { ...scope, connectionEpoch: 2 }, "agent-1", "8",
+    );
+    await act(async () => resolveFirstSeen());
+    await act(async () => renderer!.unmount());
+  });
+
   it("does not claim a new topology is covered until its refresh snapshot is accepted", async () => {
     const first: AgentSnapshot = {
       hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1,

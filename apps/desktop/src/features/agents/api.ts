@@ -43,7 +43,8 @@ interface WireRecord {
   attentionKind?: string;
   seenGeneration: string | number;
   updatedAtUnixMillis: string | number;
-  lifecycleChangedAtUnixMillis?: string | number;
+  lifecycleChangedAtUnixMillis: string | number;
+  attentionSeenAtUnixMillis: string | number;
   detectedManually: boolean;
   present: boolean;
 }
@@ -112,7 +113,7 @@ export interface AgentClient {
   launch(scope: AgentRequestScope, request: AgentLaunchRequest): Promise<void>;
   resume(scope: AgentRequestScope, agentId: string, nativeSessionId: string, request: AgentLaunchRequest): Promise<void>;
   rename(scope: AgentRequestScope, agentId: string, displayName: string): Promise<void>;
-  markSeen(scope: AgentRequestScope, agentId: string, attentionGeneration: AgentGeneration): Promise<void>;
+  markSeen(scope: AgentRequestScope, agentId: string, attentionGeneration: AgentGeneration): Promise<void | AgentRecord>;
   reviewHooks(scope: AgentRequestScope, adapter: AgentAdapterId, action?: "install" | "uninstall"): Promise<AgentHookReview>;
   applyHooks(scope: AgentRequestScope, review: AgentHookReview): Promise<void>;
   applyHostNaming(scope: AgentRequestScope, action?: "install" | "uninstall"): Promise<AgentHostNamingOutcome>;
@@ -164,9 +165,17 @@ export class TauriAgentClient implements AgentClient {
     });
   }
 
-  async markSeen(scope: AgentRequestScope, agentId: string, attentionGeneration: AgentGeneration): Promise<void> {
+  async markSeen(scope: AgentRequestScope, agentId: string, attentionGeneration: AgentGeneration): Promise<void | AgentRecord> {
     if (attentionGeneration === zeroGeneration) return;
-    await this.#request(scope, { operation: "markSeen", agentId, attentionGeneration });
+    const response = await this.#request(scope, { operation: "markSeen", agentId, attentionGeneration });
+    if (!response.agent || response.acceptedGeneration === undefined) throw new Error("Host omitted the accepted seen mutation.");
+    const record = mapRecord(scope, response.agent);
+    this.#publish({
+      kind: "upsert", hostProfileId: scope.hostProfileId, serverIdentity: scope.serverIdentity, connectionEpoch: scope.connectionEpoch,
+      sequence: agentGeneration(response.acceptedGeneration, "agent response accepted generation"),
+      record, replayed: false,
+    });
+    return record;
   }
 
   async reviewHooks(scope: AgentRequestScope, adapter: AgentAdapterId, action: "install" | "uninstall" = "install"): Promise<AgentHookReview> {
@@ -316,9 +325,8 @@ function mapRecord(scope: AgentRequestScope, value: WireRecord): AgentRecord {
     throw new Error("Agent route generation conflicts with its record.");
   }
   const updatedAt = safeNumber(value.updatedAtUnixMillis, "agent update time");
-  const mappedLifecycleChangedAt = value.lifecycleChangedAtUnixMillis === undefined
-    ? 0
-    : safeNumber(value.lifecycleChangedAtUnixMillis, "agent lifecycle change time");
+  const lifecycleChangedAt = safeNumber(value.lifecycleChangedAtUnixMillis, "agent lifecycle change time");
+  const attentionSeenAt = safeNumber(value.attentionSeenAtUnixMillis, "agent attention seen time");
   return {
     id: value.agentId,
     adapterId: canonicalAdapterId(value.adapterId, value.adapter),
@@ -337,10 +345,8 @@ function mapRecord(scope: AgentRequestScope, value: WireRecord): AgentRecord {
     ...mapAttentionKind(value.attentionKind),
     seenGeneration: agentGeneration(value.seenGeneration, "agent seen generation"),
     updatedAt,
-    // An old remote helper decodes the additive protobuf field as zero, while
-    // an old native bridge omits the JSON key. Both are the same compatibility
-    // case and use the only timestamp those hosts can supply.
-    lifecycleChangedAt: mappedLifecycleChangedAt > 0 ? mappedLifecycleChangedAt : updatedAt,
+    lifecycleChangedAt,
+    attentionSeenAt,
     detectedManually: Boolean(value.detectedManually),
     present: Boolean(value.present),
   };
