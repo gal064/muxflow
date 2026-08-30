@@ -736,7 +736,6 @@ fn renderer_holds_snapshot_and_resume_from_renderer_round_trip_at_their_own_numb
     // and add this", a seed says "throw it away". A message carrying both would
     // be read differently by the two sides of the same reveal.
     assert!(!answer.requires_seed);
-    assert!(answer.serialized_snapshot.is_empty());
 }
 
 /// Both skew directions degrade to screen-first seeding, which is slower than

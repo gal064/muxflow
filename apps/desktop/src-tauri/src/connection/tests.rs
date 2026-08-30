@@ -335,7 +335,6 @@ fn pane_resource_frame_is_compact_and_sequence_atomic() {
             generation: 9,
             snapshot_generation: 7,
             tail_through_generation: 9,
-            serialized_snapshot: vec![1, 2],
             raw_tail: vec![3, 4, 5],
         },
         77,
@@ -366,7 +365,7 @@ fn oversized_pane_resource_crosses_native_delivery_and_releases_exact_credit() {
         Ok(())
     });
     let channel = TerminalEventChannel::new(Uuid::new_v4(), channel, shared_window);
-    let snapshot_bytes = delivery_window::NATIVE_DELIVERY_WINDOW_BYTES as usize + 1_024;
+    let tail_bytes = delivery_window::NATIVE_DELIVERY_WINDOW_BYTES as usize + 1_024;
     let event = TerminalEvent::PaneResource {
         pane_id: "%1".into(),
         state: "hiddenBuffered".into(),
@@ -376,13 +375,12 @@ fn oversized_pane_resource_crosses_native_delivery_and_releases_exact_credit() {
         generation: 9,
         snapshot_generation: 8,
         tail_through_generation: 9,
-        serialized_snapshot: vec![0x5a; snapshot_bytes],
-        raw_tail: vec![0xa5; 1_024],
+        raw_tail: vec![0xa5; tail_bytes],
     };
     let frame = event_frame::encode_event_with_sequence(event, 41);
     assert!(frame.len() as u64 > delivery_window::NATIVE_DELIVERY_WINDOW_BYTES);
     let host = HostCharge {
-        bytes: (snapshot_bytes + 1_024) as u64,
+        bytes: tail_bytes as u64,
         records: 1,
     };
     channel.send_charged(frame.clone(), host).unwrap();

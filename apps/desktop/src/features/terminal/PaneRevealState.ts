@@ -31,13 +31,6 @@ export type PaneRevealEffect =
       tailThroughGeneration: number;
     }
   | {
-      kind: "restore";
-      serialized: string;
-      rawTail: OwnedTerminalBytes;
-      snapshotGeneration: number;
-      tailThroughGeneration: number;
-    }
-  | {
       kind: "awaitSeed";
       reason: string;
       requestSeed: boolean;
@@ -102,18 +95,6 @@ export function reducePaneReveal(
       state: { ready: true, hasLocalState: true },
       effect: {
         kind: "resume",
-        rawTail: recovery.rawTail,
-        snapshotGeneration: recovery.snapshotGeneration,
-        tailThroughGeneration: recovery.tailThroughGeneration,
-      },
-    };
-  }
-  if (recovery.kind === "restore") {
-    return {
-      state: { ready: true, hasLocalState: true },
-      effect: {
-        kind: "restore",
-        serialized: recovery.serialized,
         rawTail: recovery.rawTail,
         snapshotGeneration: recovery.snapshotGeneration,
         tailThroughGeneration: recovery.tailThroughGeneration,

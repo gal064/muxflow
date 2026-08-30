@@ -45,7 +45,6 @@ pub(super) enum TerminalEvent {
         generation: u64,
         snapshot_generation: u64,
         tail_through_generation: u64,
-        serialized_snapshot: Vec<u8>,
         raw_tail: Vec<u8>,
     },
     SeedDiagnostic {
@@ -166,7 +165,6 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
             generation,
             snapshot_generation,
             tail_through_generation,
-            serialized_snapshot,
             raw_tail,
         } => {
             let state = match state.as_str() {
@@ -175,8 +173,7 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
                 "released" => 3,
                 _ => 0,
             };
-            let payload_len =
-                38 + recovery_reason.len() + serialized_snapshot.len() + raw_tail.len();
+            let payload_len = 34 + recovery_reason.len() + raw_tail.len();
             encode_parts(9, &pane_id, sequence, payload_len, |frame| {
                 frame.push(state);
                 // One flags byte, not one byte per flag: bit 0 is the seed the
@@ -188,10 +185,8 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
                 frame.extend_from_slice(&snapshot_generation.to_be_bytes());
                 frame.extend_from_slice(&tail_through_generation.to_be_bytes());
                 frame.extend_from_slice(&(recovery_reason.len() as u32).to_be_bytes());
-                frame.extend_from_slice(&(serialized_snapshot.len() as u32).to_be_bytes());
                 frame.extend_from_slice(&(raw_tail.len() as u32).to_be_bytes());
                 frame.extend_from_slice(recovery_reason.as_bytes());
-                frame.extend_from_slice(&serialized_snapshot);
                 frame.extend_from_slice(&raw_tail);
             })
         }

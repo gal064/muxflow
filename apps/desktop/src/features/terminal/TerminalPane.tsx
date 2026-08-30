@@ -578,25 +578,13 @@ export function TerminalPane({
     });
     // What this terminal is known to be showing, while that is exactly one
     // serialized screen with nothing written after it — the mount-time cache
-    // restore, or a handshake restore that arrived without a tail. Any byte
-    // written on top of it clears this.
+    // restore. Any byte written on top of it clears this.
     //
-    // It exists because a remount is answered with that same screen more than
-    // once: the host emits a pane-resource event for the hide, which the hub
-    // buffers and replays into the next mount, and then another for the reveal.
-    // Both carry this pane's own hide snapshot, and restoring a screen that is
-    // already on the terminal is an ESC c and a byte-identical rewrite — a
-    // blank frame followed by the text that was already there, which is the
-    // flicker a tab switch used to show two or three times.
-    //
-    // The serialized screen is kept, not just its generation: the generation is
-    // the host's claim about which bytes these are, and it is not always a true
-    // one. `set_visible(true)` restamps `snapshot_generation` without replacing
-    // the snapshot, and the idempotent path in `hide_with_checkpoint` returns
-    // the stored snapshot under a checkpoint this side has since re-serialized
-    // (both in crates/tmux-control/src/replay.rs). A skip decided on the
-    // generation alone keeps a screen the host is trying to replace.
-    let screenOnDisplay: { generation: number; terminalEpoch: number | undefined; serialized: string } | undefined;
+    // It is what a verified resume is checked against: the host verified its
+    // own record of the handoff, and only this side can say whether the screen
+    // actually on the terminal is the one that record names. A tail spliced
+    // onto the wrong screen is a hole nothing later repairs.
+    let screenOnDisplay: { generation: number; terminalEpoch: number | undefined } | undefined;
     // This pane's walk up its own scrollback: what is on the wire, what has
     // been spliced, how large the next page is, and when to stop. The reveal
     // arms below tell it when the screen underneath it changed; everything else
@@ -620,11 +608,7 @@ export function TerminalPane({
       // ignores the answer is how the tail-splice bug happened; if it ever
       // does refuse, the cache is not what this pane should show.
       if (restored) {
-        screenOnDisplay = {
-          generation: currentCached.outputGeneration,
-          terminalEpoch: cachedEpoch,
-          serialized: currentCached.serialized,
-        };
+        screenOnDisplay = { generation: currentCached.outputGeneration, terminalEpoch: cachedEpoch };
         // Carried, because it is a fact about these bytes rather than about the
         // terminal that produced them: a screen this pane was seeded with has
         // nothing above it, and putting it back on a fresh xterm does not give
@@ -720,7 +704,7 @@ export function TerminalPane({
       const generation = "generation" in event ? event.generation : 0;
       const eventEpoch = hub.generationEpoch;
       /**
-       * What both recovery arms hang on their screen landing: the pane painted,
+       * What the recovery arm hangs on its screen landing: the pane painted,
        * through the generation the host says that material carries.
        */
       const markRecoveryRendered = (throughGeneration: number) => () => {
@@ -730,17 +714,15 @@ export function TerminalPane({
        * A recovery screen did not land, so this pane is holding nothing and
        * waits for a seed.
        *
-       * `askBecause` is the sentence to ask with, and it is optional because
-       * only one of the two failures is silent: a refused *restore* has already
-       * asked the host for a seed, while a refused *tail* has not — the
-       * scheduler drops the record and the callback with it, so the pane just
-       * lost its acknowledgement and its reveal with nothing said.
+       * `askBecause` is the sentence to ask with, and it is always needed: a
+       * refused tail is silent — the scheduler drops the record and the
+       * callback with it, so the pane just lost its acknowledgement and its
+       * reveal with nothing said.
        */
-      const recoveryScreenLost = (askBecause?: string) => {
+      const recoveryScreenLost = (askBecause: string) => {
         clearDeferredOutput();
         screenOnDisplay = undefined;
         revealStateRef.current = { ready: false, hasLocalState: false };
-        if (askBecause === undefined) return;
         watchdog.note("rendererReseed");
         requestFreshSeed(askBecause);
       };
@@ -752,8 +734,7 @@ export function TerminalPane({
       // extended to `deferOutput` or `awaitSeed`, which are output this pane
       // cannot show yet and seed debt respectively — neither is a screen, and
       // both leave the recovery worth asking for.
-      if (effect.kind === "seed" || effect.kind === "output" || effect.kind === "restore"
-        || effect.kind === "resume") {
+      if (effect.kind === "seed" || effect.kind === "output" || effect.kind === "resume") {
         contentArrivalsRef.current += 1;
         cancelRevealVoidWatch(revealVoidTimerRef);
       }
@@ -917,62 +898,6 @@ export function TerminalPane({
             watchdog.noteHealthy();
             setRendererDiagnostic(undefined);
           }
-        }
-      } else if (effect.kind === "restore") {
-        const recoveryRendered = markRecoveryRendered(effect.tailThroughGeneration);
-        // When the host is handing back exactly the screen the cache already
-        // painted, restoring it again is an ESC c and a byte-identical rewrite
-        // — a blank frame followed by the text that was already there. Only the
-        // raw tail is new information then. The generation and epoch have to
-        // agree *and* the bytes have to match: the generation is the host's
-        // claim about which screen this is, and it is not always a true one
-        // (see `screenOnDisplay`). The byte comparison runs only after the two
-        // cheap checks have passed, and length settles almost every mismatch
-        // before a character is read.
-        const skipRedundantRestore = screenOnDisplay !== undefined
-          && screenOnDisplay.terminalEpoch === eventEpoch
-          && screenOnDisplay.generation === effect.snapshotGeneration
-          && screenOnDisplay.serialized.length === effect.serialized.length
-          && screenOnDisplay.serialized === effect.serialized;
-        // The snapshot and its raw tail are one screen in two pieces. If the
-        // snapshot was refused, the tail must not be written onto whatever the
-        // terminal happens to be showing, and nothing may be reported as
-        // rendered: the renderer has already asked the host for a seed, and
-        // this pane waits for it.
-        const restored = skipRedundantRestore || renderer.restore(
-          effect.serialized,
-          effect.rawTail.byteLength ? undefined : recoveryRendered,
-          effect.rawTail.byteLength ? effect.snapshotGeneration : effect.tailThroughGeneration,
-          effect.tailThroughGeneration,
-        );
-        // Only once the snapshot is down, and never after a refusal. An empty
-        // tail is still written on the skipped path: the scheduler queues it as
-        // an ordered barrier, and that barrier is what carries the
-        // acknowledgement and the reveal the skipped restore would otherwise
-        // have carried.
-        const writesTail = restored && (skipRedundantRestore || effect.rawTail.byteLength > 0);
-        const tailQueued = writesTail
-          ? renderer.write(effect.rawTail, recoveryRendered, effect.tailThroughGeneration)
-          : true;
-        if (!restored || !tailQueued) {
-          recoveryScreenLost(
-            restored ? `Pane ${pane.id} could not queue the tail of its recovery screen` : undefined,
-          );
-        } else {
-          // A tail-less answer leaves the terminal showing exactly this
-          // snapshot, which is what lets the *second* copy of it — the reveal's,
-          // after the hide's — be skipped as well.
-          screenOnDisplay = effect.rawTail.byteLength === 0
-            ? { generation: effect.tailThroughGeneration, terminalEpoch: eventEpoch, serialized: effect.serialized }
-            : undefined;
-          // A host-owned screen is a serialization, scrollback and all, not a
-          // photograph of the grid — and it replaces whatever the page in
-          // flight was asked against.
-          historyPager.noteScreenGone();
-          flushDeferredOutput(effect.tailThroughGeneration);
-          // Recovery material laid a real screen down; the pane is whole again.
-          watchdog.noteHealthy();
-          setRendererDiagnostic(undefined);
         }
       } else if (effect.kind === "hideEchoAfterReady") {
         // This pane's own hide, acknowledged after it had already come back and

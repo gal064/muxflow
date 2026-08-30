@@ -12,61 +12,50 @@ const hiddenResource = (overrides = {}) => ({
   generation: 1,
   snapshotGeneration: 0,
   tailThroughGeneration: 1,
-  serializedSnapshot: copyTerminalBytes(new TextEncoder().encode("screen")),
   rawTail: copyTerminalBytes(Uint8Array.of(2)),
   sequence: 1,
   ...overrides,
 });
 
 /**
- * A reveal the host answered from its record of the handoff rather than from a
- * screen it stored: no snapshot, and here an idle pane's empty tail.
+ * A reveal the host answered from its record of the handoff: no screen at all,
+ * and here an idle pane's empty tail.
  */
 const resumeAnswer = () => hiddenResource({
   state: "visible",
   generation: 21,
   snapshotGeneration: 20,
   tailThroughGeneration: 20,
-  serializedSnapshot: copyTerminalBytes(new Uint8Array()),
   rawTail: copyTerminalBytes(new Uint8Array()),
   resumeFromRenderer: true,
 });
 
 describe("mounted pane reveal ordering", () => {
   it("defers output until the visibility response supplies PaneResource recovery", () => {
-    let state: PaneRevealState = { ready: false, hasLocalState: false };
+    let state: PaneRevealState = { ready: false, hasLocalState: true };
     const early = reducePaneReveal(state, { kind: "output", paneId: "%1", generation: 1, data: copyTerminalBytes(Uint8Array.of(1)), sequence: 1 });
     expect(early.effect.kind).toBe("deferOutput");
     state = early.state;
-    const recovery = reducePaneReveal(state, hiddenResource());
-    expect(recovery.effect).toMatchObject({ kind: "restore", serialized: "screen" });
-    expect(recovery.state.ready).toBe(true);
-  });
-
-  it("restores recovery bytes from the host's visible PaneResource response", () => {
-    const recovery = reducePaneReveal(
-      { ready: false, hasLocalState: false },
-      hiddenResource({ state: "visible" }),
-    );
-    expect(recovery.effect).toMatchObject({ kind: "restore", serialized: "screen" });
+    const recovery = reducePaneReveal(state, resumeAnswer());
+    expect(recovery.effect).toMatchObject({ kind: "resume" });
     expect(recovery.state.ready).toBe(true);
   });
 
   it("drops output already represented by the raw tail and keeps only later generations", () => {
     const tail = copyTerminalBytes(Uint8Array.from([66, 67, 68]));
     const recovery = reducePaneReveal(
-      { ready: false, hasLocalState: false },
+      { ready: false, hasLocalState: true },
       hiddenResource({
         state: "visible",
+        resumeFromRenderer: true,
         generation: 24,
         snapshotGeneration: 20,
         tailThroughGeneration: 23,
-        serializedSnapshot: copyTerminalBytes(new TextEncoder().encode("A")),
         rawTail: tail,
       }),
     );
     expect(recovery.effect).toMatchObject({
-      kind: "restore", snapshotGeneration: 20, tailThroughGeneration: 23, rawTail: tail,
+      kind: "resume", snapshotGeneration: 20, tailThroughGeneration: 23, rawTail: tail,
     });
     const deferred = [
       { generation: 21, data: Uint8Array.of(66) },
@@ -75,11 +64,10 @@ describe("mounted pane reveal ordering", () => {
       { generation: 25, data: Uint8Array.of(69) },
     ];
     const combined = Uint8Array.from([
-      ...new TextEncoder().encode("A"),
       ...tail,
       ...outputAfterRecovery(deferred, 23).flatMap((item) => Array.from(item.data)),
     ]);
-    expect(new TextDecoder().decode(combined)).toBe("ABCDE");
+    expect(new TextDecoder().decode(combined)).toBe("BCDE");
   });
 
   it("waits for the host-triggered reseed after a released resource", () => {
@@ -87,7 +75,6 @@ describe("mounted pane reveal ordering", () => {
       state: "released",
       requiresSeed: true,
       recoveryReason: "host LRU eviction",
-      serializedSnapshot: copyTerminalBytes(new Uint8Array()),
       rawTail: copyTerminalBytes(new Uint8Array()),
     }));
     expect(result).toEqual({
@@ -129,7 +116,6 @@ describe("mounted pane reveal ordering", () => {
   // sent; treating the echo as a dead end spends one capture per switch and
   // blanks a pane that had a screen.
   const hideEcho = () => hiddenResource({
-    serializedSnapshot: copyTerminalBytes(new Uint8Array()),
     rawTail: copyTerminalBytes(new Uint8Array()),
   });
 

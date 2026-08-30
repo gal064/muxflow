@@ -438,10 +438,9 @@ enum PaneResourceState {
 message PaneResource {
   string pane_id = 1;
   PaneResourceState state = 2;
-  // Kept on the wire for one release so a desktop that still reads it finds a
-  // field rather than a gap. Nothing writes it: the renderer owns its screen,
-  // and this host answers a reveal with a verified tail or with a seed.
-  bytes serialized_snapshot = 3;
+  // The renderer owns its screen: this host answers a reveal with a verified
+  // tail or with a seed, and never with a stored copy of that screen.
+  reserved 3;
   bytes raw_tail = 4;
   uint64 generation = 5;
   bool requires_seed = 6;

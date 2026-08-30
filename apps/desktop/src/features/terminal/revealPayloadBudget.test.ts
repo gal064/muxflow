@@ -92,7 +92,6 @@ class FakeHost {
       generation: this.#generation,
       snapshotGeneration: this.#checkpoint,
       tailThroughGeneration: this.#generation,
-      serializedSnapshot: copyTerminalBytes(new Uint8Array()),
       rawTail: copyTerminalBytes(encoder.encode(resumable ? this.#tail : "")),
       sequence: (this.#sequence += 1),
       resumeFromRenderer: resumable,
@@ -111,9 +110,7 @@ class FakeHost {
 function payloadBytes(events: readonly TerminalEvent[]): number {
   return events.reduce(
     (total, event) =>
-      event.kind === "paneResource"
-        ? total + event.serializedSnapshot.byteLength + event.rawTail.byteLength
-        : total,
+      event.kind === "paneResource" ? total + event.rawTail.byteLength : total,
     0,
   );
 }
