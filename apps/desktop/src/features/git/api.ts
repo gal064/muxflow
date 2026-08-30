@@ -20,7 +20,9 @@ import type {
 
 interface WireRepository { repositoryId: string; worktreeRoot: string; initial: boolean; detachedHead: boolean; headName: string; headOid: string }
 interface WireStatusEntry {
-  path: number[]; displayPath: string; originalPath: number[]; displayOriginalPath: string;
+  // Paths arrive base64-encoded: it is the shape this module hands to the rest
+  // of the feature, and a status snapshot carries thousands of them.
+  path: string; displayPath: string; originalPath: string; displayOriginalPath: string;
   indexKind: string; worktreeKind: string; indexStatus: string; worktreeStatus: string;
   conflicted: boolean; conflictCode: string; untracked: boolean; ignored: boolean; submodule: boolean;
   submoduleState: string; symlink: boolean; binary: boolean; renameScore: string;
@@ -314,10 +316,10 @@ function mapStatus(value: WireStatus): GitStatusSnapshot {
 }
 
 function mapEntry(value: WireStatusEntry): GitStatusEntry {
-  requireBytes(value.path, "Git status path");
-  requireBytes(value.originalPath, "Git original path");
+  requireBase64Path(value.path);
+  requireBase64Path(value.originalPath);
   return {
-    path: toBase64(value.path), displayPath: value.displayPath, ...(value.originalPath.length ? { originalPath: toBase64(value.originalPath) } : {}),
+    path: value.path, displayPath: value.displayPath, ...(value.originalPath ? { originalPath: value.originalPath } : {}),
     ...(value.displayOriginalPath ? { displayOriginalPath: value.displayOriginalPath } : {}),
     indexKind: mapChange(value.indexKind), worktreeKind: mapChange(value.worktreeKind), indexStatus: value.indexStatus,
     worktreeStatus: value.worktreeStatus, conflicted: Boolean(value.conflicted), ...(value.conflictCode ? { conflictCode: value.conflictCode } : {}),
@@ -543,4 +545,15 @@ function requireDecimalU64(value: string, label: string): void {
 
 function requireBytes(value: number[], label: string): void {
   if (!Array.isArray(value) || value.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)) throw new Error(`${label} is not a byte array.`);
+}
+
+/**
+ * A status path is base64 and nothing else — every consumer round-trips it back
+ * through `fromBase64` to address a file. The shape check is a regexp rather
+ * than a decode because a snapshot carries thousands of these.
+ */
+function requireBase64Path(value: string): void {
+  if (typeof value !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw new Error("Host returned malformed Git status.");
+  }
 }
