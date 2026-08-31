@@ -61,7 +61,7 @@ impl PersistentInputClient {
         event_tx: mpsc::Sender<SequencerControl>,
         overflowed: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
-        Self::start_with_command(session_id, event_tx, overflowed, tmux_command())
+        Self::start_with_command(session_id, event_tx, overflowed, tmux_command()?)
     }
 
     fn start_with_command(

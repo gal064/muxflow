@@ -60,7 +60,7 @@ pub(super) fn execute(
     let postcondition_before = before.clone();
 
     let mut result = v1::TmuxActionResult::default();
-    let mut command = tmux_command();
+    let mut command = tmux_command()?;
     match kind {
         v1::TmuxActionKind::CreateSession => {
             configure_new_session(&mut command, &action)?;
@@ -523,6 +523,7 @@ pub(super) fn discover_before_action() -> anyhow::Result<(tmux_control::TmuxSnap
 pub(super) fn discover_for_action(
     kind: v1::TmuxActionKind,
 ) -> anyhow::Result<(tmux_control::TmuxSnapshot, String)> {
+    tmux_control::tmux_executable().context("locate tmux executable")?;
     normalize_pre_action_discovery(kind, discover_consistent(), server_identity)
 }
 
@@ -690,13 +691,16 @@ fn reorder_window(
             .collect()
     };
     if !adjacent_ids.is_empty() {
-        run(window_reorder_command(window_id, &adjacent_ids))?;
+        run(window_reorder_command(window_id, &adjacent_ids)?)?;
     }
     Ok(())
 }
 
-fn window_reorder_command(window_id: &str, adjacent_ids: &[&str]) -> std::process::Command {
-    let mut command = tmux_command();
+fn window_reorder_command(
+    window_id: &str,
+    adjacent_ids: &[&str],
+) -> anyhow::Result<std::process::Command> {
+    let mut command = tmux_command()?;
     if let Some((first, rest)) = adjacent_ids.split_first() {
         command.args(["swap-window", "-d", "-s", window_id, "-t", first]);
         for adjacent in rest {
@@ -704,7 +708,7 @@ fn window_reorder_command(window_id: &str, adjacent_ids: &[&str]) -> std::proces
             command.args(["swap-window", "-d", "-s", window_id, "-t", adjacent]);
         }
     }
-    command
+    Ok(command)
 }
 
 fn window_reorder_postcondition(

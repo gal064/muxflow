@@ -648,10 +648,12 @@ fn terminal_file_resolution_round_trips_its_exact_pane_route() {
 fn operation_additions_are_required_capabilities() {
     use tmux_agent_protocol::{
         CAP_FILE_STREAM, CAP_TERMINAL_FILE_RESOLUTION, CAP_TERMINAL_OUTPUT_CREDIT,
-        HOST_CAPABILITIES, capability_names, missing_host_capabilities,
+        CAP_TMUX_EXECUTABLE_RESOLUTION, HOST_CAPABILITIES, capability_names,
+        missing_host_capabilities,
     };
     assert_eq!(CAP_FILE_STREAM, 1 << 15);
     assert_eq!(CAP_TERMINAL_FILE_RESOLUTION, 1 << 16);
+    assert_eq!(CAP_TMUX_EXECUTABLE_RESOLUTION, 1 << 17);
     // Append-only: every previously assigned bit keeps its position.
     assert_eq!(CAP_TERMINAL_OUTPUT_CREDIT, 1 << 14);
 
@@ -680,6 +682,16 @@ fn operation_additions_are_required_capabilities() {
     assert_eq!(
         capability_names(missing_host_capabilities(pre_terminal_file_helper)),
         vec!["terminalFileResolution"]
+    );
+    let pre_resolver_helper = HOST_CAPABILITIES & !CAP_TMUX_EXECUTABLE_RESOLUTION;
+    assert_eq!(
+        missing_host_capabilities(pre_resolver_helper),
+        CAP_TMUX_EXECUTABLE_RESOLUTION,
+        "a helper that cannot find installer-provided tmux must be refused"
+    );
+    assert_eq!(
+        capability_names(missing_host_capabilities(pre_resolver_helper)),
+        vec!["tmuxExecutableResolution"]
     );
     // Every required bit has a name, so no refusal can be unexplainable.
     assert!(!capability_names(HOST_CAPABILITIES).contains(&"unknown"));

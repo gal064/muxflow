@@ -1310,8 +1310,8 @@ async fn send_handshake_error(
     Ok(())
 }
 
-fn command_version(program: &str, argument: &str) -> String {
-    Command::new(program)
+fn command_version(mut command: Command, argument: &str) -> String {
+    command
         .arg(argument)
         .output()
         .ok()
@@ -1329,9 +1329,15 @@ fn daemon_command_version(version: CommandVersion) -> String {
     static TMUX: OnceLock<String> = OnceLock::new();
     static GIT: OnceLock<String> = OnceLock::new();
     match version {
-        CommandVersion::Tmux => TMUX.get_or_init(|| command_version("tmux", "-V")).clone(),
+        CommandVersion::Tmux => TMUX
+            .get_or_init(|| {
+                tmux_control::tmux_command()
+                    .map(|command| command_version(command, "-V"))
+                    .unwrap_or_default()
+            })
+            .clone(),
         CommandVersion::Git => GIT
-            .get_or_init(|| command_version("git", "--version"))
+            .get_or_init(|| command_version(Command::new("git"), "--version"))
             .clone(),
     }
 }

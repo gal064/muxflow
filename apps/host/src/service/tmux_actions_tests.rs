@@ -483,7 +483,7 @@ fn external_interleave_fails_reorder_postcondition() {
         "@3",
         v1::WindowRelativePosition::Before,
     ));
-    let command = window_reorder_command("@2", &["@3", "@4"]);
+    let command = window_reorder_command("@2", &["@3", "@4"]).unwrap();
     let arguments: Vec<_> = command
         .get_args()
         .map(|argument| argument.to_string_lossy().into_owned())

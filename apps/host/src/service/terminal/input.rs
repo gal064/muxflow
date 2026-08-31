@@ -230,7 +230,7 @@ fn queue_input_marker(line: &mut String, input_id: u64, pane_id: &str) {
 
 fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
     validate_tmux_id(pane_id, '%').map_err(|error| error.to_string())?;
-    let mut validate = tmux_command();
+    let mut validate = tmux_command().map_err(|error| error.to_string())?;
     let output = validate
         .args(["display-message", "-p", "-t", pane_id, "#{pane_id}"])
         .output()
@@ -243,7 +243,7 @@ fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
     // partially commit a request. Loading through stdin keeps the request out
     // of ARG_MAX; the single paste-buffer command is the terminal commit point.
     let buffer_name = format!("ade-input-{}", Uuid::new_v4().simple());
-    let mut load = tmux_command();
+    let mut load = tmux_command().map_err(|error| error.to_string())?;
     load.args(["load-buffer", "-b", &buffer_name, "-"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped());
@@ -271,7 +271,7 @@ fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let mut paste = tmux_command();
+    let mut paste = tmux_command().map_err(|error| error.to_string())?;
     paste.args(["paste-buffer", "-d"]);
     // tmux 3.7 sanitizes control bytes with vis(3) unless -S is present.
     // Earlier supported releases do not expose -S and preserve them by
@@ -314,9 +314,9 @@ fn paste_buffer_supports_unsanitized_flag(output: &[u8]) -> bool {
 }
 
 fn cleanup_buffer(buffer_name: &str) {
-    let _ = tmux_command()
-        .args(["delete-buffer", "-b", buffer_name])
-        .status();
+    if let Ok(mut command) = tmux_command() {
+        let _ = command.args(["delete-buffer", "-b", buffer_name]).status();
+    }
 }
 
 #[cfg(test)]
