@@ -130,7 +130,7 @@ pub(crate) fn apply_recommended_naming() -> anyhow::Result<NamingOutcome> {
     if existing.is_empty() && syncs_titles_by_format()? {
         return Ok(NamingOutcome::UserConfigured);
     }
-    let output = tmux_command()
+    let output = tmux_command()?
         .args(["set-hook", "-g", PANE_TITLE_HOOK, &command])
         .output()
         .context("apply the recommended tmux window naming")?;
@@ -169,7 +169,7 @@ pub(crate) fn remove_recommended_naming() -> anyhow::Result<NamingOutcome> {
     {
         return Ok(NamingOutcome::UserConfigured);
     }
-    let output = tmux_command()
+    let output = tmux_command()?
         .args(["set-hook", "-gu", PANE_TITLE_HOOK])
         .output()
         .context("remove the recommended tmux window naming")?;
@@ -200,7 +200,7 @@ fn syncs_titles_by_format() -> anyhow::Result<bool> {
 /// and `<name>[0] <value>` for each bound value, so an empty result is the
 /// precise, positive test for "the user has not configured this".
 fn setting(name: &str) -> anyhow::Result<Vec<String>> {
-    let output = tmux_command()
+    let output = tmux_command()?
         .args(["show-options", "-g", name])
         .output()
         .with_context(|| format!("read the tmux {name} setting"))?;

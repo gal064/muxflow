@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs::{self, OpenOptions},
     io::{Read, Write},
     os::fd::AsRawFd,
@@ -1240,7 +1241,7 @@ fn build_report() -> DiagnosticsReport {
             ),
         },
         dependencies: DependenciesReport {
-            tmux: dependency_version("tmux", "-V"),
+            tmux: tmux_dependency_version(),
             git: dependency_version("git", "--version"),
             ssh: dependency_version("ssh", "-V"),
         },
@@ -1295,7 +1296,26 @@ fn print_human_report(report: &DiagnosticsReport) {
 }
 
 fn dependency_version(program: &str, version_argument: &str) -> DependencyReport {
-    let output = bounded_dependency_probe(program, version_argument, DEPENDENCY_PROBE_TIMEOUT);
+    dependency_version_at(program, OsStr::new(program), version_argument)
+}
+
+fn tmux_dependency_version() -> DependencyReport {
+    let Ok(executable) = tmux_control::tmux_executable() else {
+        return DependencyReport {
+            available: false,
+            version: None,
+            probe: "unavailable_or_timeout",
+        };
+    };
+    dependency_version_at("tmux", executable.as_os_str(), "-V")
+}
+
+fn dependency_version_at(
+    program: &str,
+    executable: &OsStr,
+    version_argument: &str,
+) -> DependencyReport {
+    let output = bounded_dependency_probe(executable, version_argument, DEPENDENCY_PROBE_TIMEOUT);
     let Ok((status, stdout, stderr)) = output else {
         return DependencyReport {
             available: false,
@@ -1319,7 +1339,7 @@ fn dependency_version(program: &str, version_argument: &str) -> DependencyReport
 }
 
 fn bounded_dependency_probe(
-    program: &str,
+    program: &OsStr,
     version_argument: &str,
     timeout: Duration,
 ) -> std::io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
@@ -1805,11 +1825,8 @@ mod tests {
         fs::write(&script, b"#!/bin/sh\nsleep 10\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
         let started = Instant::now();
-        let result = bounded_dependency_probe(
-            script.to_str().unwrap(),
-            "--version",
-            Duration::from_millis(75),
-        );
+        let result =
+            bounded_dependency_probe(script.as_os_str(), "--version", Duration::from_millis(75));
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
         fs::remove_dir_all(root).unwrap();
@@ -1825,12 +1842,9 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-        let (_, stdout, stderr) = bounded_dependency_probe(
-            script.to_str().unwrap(),
-            "--version",
-            Duration::from_secs(2),
-        )
-        .unwrap();
+        let (_, stdout, stderr) =
+            bounded_dependency_probe(script.as_os_str(), "--version", Duration::from_secs(2))
+                .unwrap();
         assert!(stdout.len() <= DEPENDENCY_OUTPUT_LIMIT);
         assert!(stderr.len() <= DEPENDENCY_OUTPUT_LIMIT);
         fs::remove_dir_all(root).unwrap();

@@ -44,7 +44,7 @@ impl TerminalAttachment {
             session_id,
             pane_ids,
             runtime,
-            tmux_command(),
+            tmux_command()?,
             reports_terminal_colors,
         )
     }

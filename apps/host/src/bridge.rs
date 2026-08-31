@@ -389,7 +389,7 @@ mod tests {
                 Payload::ServerHello(v1::ServerHello {
                     helper_version: HELPER_VERSION.into(),
                     capabilities: HOST_CAPABILITIES
-                        & !tmux_agent_protocol::CAP_TERMINAL_FILE_RESOLUTION,
+                        & !tmux_agent_protocol::CAP_TMUX_EXECUTABLE_RESOLUTION,
                     ..Default::default()
                 }),
             );

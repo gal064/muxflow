@@ -146,7 +146,7 @@ pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
     // same socket through different prefixes on macOS — comparing the strings
     // reports a server restart on every single discovery.
     let before = socket_identity_key(&tmux_socket_path(""));
-    let output = tmux_command()
+    let output = tmux_command()?
         .args(tmux_control::batched_discovery_args())
         .output()
         .context("run batched tmux discovery")?;
@@ -171,6 +171,7 @@ pub(super) fn discover_consistent() -> anyhow::Result<(TmuxSnapshot, String)> {
 }
 
 pub(super) fn discover_authoritative() -> anyhow::Result<(TmuxSnapshot, String)> {
+    tmux_control::tmux_executable().context("locate tmux executable")?;
     normalize_authoritative_discovery(discover_consistent(), server_identity)
 }
 
@@ -480,7 +481,9 @@ fn save_sidecar<T: serde::Serialize>(
 }
 
 pub(super) fn server_identity() -> String {
-    server_identity_from_command(tmux_command())
+    tmux_command()
+        .map(server_identity_from_command)
+        .unwrap_or_else(|_| "tmux:none".into())
 }
 
 /// Resolves the tmux server inherited by the calling process. Unlike the
@@ -488,7 +491,7 @@ pub(super) fn server_identity() -> String {
 /// are meaningful only within that exact server.
 pub(crate) fn inherited_server_identity() -> Option<String> {
     std::env::var_os("TMUX")?;
-    let identity = server_identity_from_command(tmux_client());
+    let identity = server_identity_from_command(tmux_client().ok()?);
     (identity != "tmux:none").then_some(identity)
 }
 
@@ -567,18 +570,18 @@ fn socket_server_identity(socket: &Path) -> anyhow::Result<String> {
 /// UTF-8, and the clients we spawn inherit no `LANG`/`LC_*` at all (a
 /// Dock-launched bundle, a non-interactive SSH exec session). `-u` is a global
 /// flag, so it must stay ahead of the subcommand callers append.
-fn tmux_client() -> Command {
-    let mut command = Command::new("tmux");
+fn tmux_client() -> anyhow::Result<Command> {
+    let mut command = tmux_control::tmux_command().context("locate tmux executable")?;
     command.arg("-u");
-    command
+    Ok(command)
 }
 
-pub(super) fn tmux_command() -> Command {
-    let mut command = tmux_client();
+pub(super) fn tmux_command() -> anyhow::Result<Command> {
+    let mut command = tmux_client()?;
     if let Some(name) = std::env::var_os("ADE_TMUX_SOCKET_NAME") {
         command.env_remove("TMUX").arg("-L").arg(name);
     }
-    command
+    Ok(command)
 }
 
 #[cfg(test)]
@@ -727,7 +730,7 @@ mod tests {
 
     #[test]
     fn spawned_tmux_clients_ask_for_utf8_before_their_subcommand() {
-        let mut command = tmux_command();
+        let mut command = tmux_command().unwrap();
         command.args(["list-windows", "-F", "#{window_name}"]);
         let args = command
             .get_args()
