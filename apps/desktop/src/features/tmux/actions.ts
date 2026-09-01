@@ -27,7 +27,8 @@ export interface TmuxAction {
    * What `setPinned` writes for its session, or for `windowId` inside it when
    * that is given. A pin is host state rather than a tmux mutation, so it takes
    * this pipeline for the scope checks and the authoritative snapshot that
-   * follows, not because tmux is sent anything.
+   * follows, not because tmux is sent anything. `createSession` reads it too:
+   * true creates the workspace already pinned.
    */
   pinned?: boolean;
   confirmed?: boolean;
