@@ -214,7 +214,24 @@ pub(super) fn execute(
     // emitted by this command. The authoritative post-discovery that follows
     // therefore closes exactly those epochs; later dirtiness remains pending.
     let covered_dirty_epoch = before_post_discovery(kind, &result)?;
-    let (snapshot, server_identity) = finalize_action(kind, discover_consistent, server_identity)?;
+    let (mut snapshot, server_identity) =
+        finalize_action(kind, discover_consistent, server_identity)?;
+    if kind == v1::TmuxActionKind::CreateSession && action.pinned {
+        // A create issued while the app lists pinned workspaces only is born
+        // pinned, or it would drop out of the list on the first switch away.
+        // Written after the post-discovery on purpose: the pin names a session
+        // only the post-action snapshot contains, and on the bootstrap create
+        // the pre-action identity is "tmux:none" — the sidecar must be keyed
+        // by the identity of the server the create just started.
+        // A refusal-shaped error here would be a lie: the session exists.
+        set_pinned(&server_identity, &mut snapshot, &result.session_id, "", true).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "outcome unknown: tmux created the session but its pin could not be written: {error}"
+                )
+            },
+        )?;
+    }
     if result.pane_id.is_empty() {
         result.pane_id = interaction_pane_id(kind, &postcondition_action, &result, &snapshot)
             .unwrap_or_default();
@@ -387,8 +404,9 @@ fn action_postcondition(
     let window = |id: &str| after.windows.iter().find(|item| item.id == id);
     let pane = |id: &str| after.panes.iter().find(|item| item.id == id);
     match kind {
-        v1::TmuxActionKind::CreateSession => session(&result.session_id)
-            .is_some_and(|item| action.name.is_empty() || item.name == action.name),
+        v1::TmuxActionKind::CreateSession => session(&result.session_id).is_some_and(|item| {
+            (action.name.is_empty() || item.name == action.name) && (!action.pinned || item.pinned)
+        }),
         v1::TmuxActionKind::RenameSession => {
             session(&action.session_id).is_some_and(|item| item.name == action.name)
         }
