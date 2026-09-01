@@ -525,6 +525,39 @@ fn every_action_has_an_identity_relative_authoritative_postcondition() {
         },
         after,
     );
+    // A create that asked to be born pinned is judged on the read-back flag,
+    // through the same overlay the app draws from.
+    let pinned_create = v1::TmuxAction {
+        name: "new".into(),
+        pinned: true,
+        ..Default::default()
+    };
+    let pinned_result = v1::TmuxActionResult {
+        session_id: "$3".into(),
+        ..Default::default()
+    };
+    let mut after = before.clone();
+    let mut created = session("$3", "new", 2);
+    created.pinned = true;
+    after.sessions.push(created);
+    check(
+        v1::TmuxActionKind::CreateSession,
+        pinned_create.clone(),
+        pinned_result.clone(),
+        after,
+    );
+    let mut after = before.clone();
+    after.sessions.push(session("$3", "new", 2));
+    assert!(
+        !action_postcondition(
+            v1::TmuxActionKind::CreateSession,
+            &pinned_create,
+            &pinned_result,
+            &before,
+            &after,
+        ),
+        "a session read back unpinned must fail a pinned create"
+    );
     let mut after = before.clone();
     after.sessions[0].name = "renamed".into();
     check(
