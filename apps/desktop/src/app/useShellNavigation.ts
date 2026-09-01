@@ -65,6 +65,13 @@ export interface CreateSessionOptions {
   /** Where the first pane starts. The host resolves and validates it. */
   directory?: string;
   /**
+   * Create the workspace already pinned. Set when the workspace list is
+   * filtered to pinned only: a workspace born unpinned under that filter would
+   * vanish from the sidebar on the first switch away. The host writes the pin
+   * as part of the create, so the first authoritative snapshot lists it.
+   */
+  pinned?: boolean;
+  /**
    * Called once, with the ack's authoritative identity, after the ack has been
    * validated and before the shell commits the switch. The scope is the one
    * the request was issued in, so the caller can refuse to act on a workspace
@@ -650,7 +657,9 @@ export function useShellNavigation(options: ShellNavigationOptions) {
       request: async () => {
         try {
           created = await optionsRef.current.performAction({
-            kind: "createSession", name, ...(options?.directory ? { directory: options.directory } : {}),
+            kind: "createSession", name,
+            ...(options?.directory ? { directory: options.directory } : {}),
+            ...(options?.pinned ? { pinned: true } : {}),
           });
         } catch (error) {
           withdrawPendingTab(key);

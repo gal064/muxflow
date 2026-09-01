@@ -100,6 +100,29 @@ describe("creating a workspace with this host's defaults", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("creates the workspace born pinned while the list shows pinned only", async () => {
+    // Without this, the new workspace is listed only while it is active and
+    // drops out of the filtered sidebar on the first switch away.
+    const state = withDefaults("local", "/work");
+    const harness = mount({ ...state, shell: { ...state.shell, pinnedOnly: true } });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<harness.Harness />); });
+
+    act(() => harness.create("api"));
+    expect(harness.createSession).toHaveBeenCalledWith("api", expect.objectContaining({ pinned: true }));
+    await act(async () => renderer.unmount());
+  });
+
+  it("leaves the pin unset while the full list is shown", async () => {
+    const harness = mount(withDefaults("local", "/work"));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<harness.Harness />); });
+
+    act(() => harness.create("api"));
+    expect(harness.createSession.mock.calls[0][1]?.pinned).toBeUndefined();
+    await act(async () => renderer.unmount());
+  });
+
   it("reports a command that could not be delivered as its own failure", async () => {
     // The workspace exists. Saying "workspace creation failed" here would be a
     // lie the user would act on.
