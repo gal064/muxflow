@@ -262,7 +262,7 @@ impl VoiceService {
         }
         let service = Arc::clone(self);
         tokio::spawn(async move {
-            let _ = service.ensure_loaded(&AtomicBool::new(false)).await;
+            let _ = service.ensure_loaded(&AtomicBool::new(false), None).await;
             service.warming.store(false, Ordering::Release);
         });
     }
@@ -420,6 +420,8 @@ impl VoiceService {
             ));
         }
         let model = self.model();
+        // Filesystem first, lock second (see `status`).
+        let complete = model.complete();
         let already_complete = {
             let mut books = self.books.lock().unwrap();
             if books.provisioning.is_some() {
@@ -429,7 +431,7 @@ impl VoiceService {
                     true,
                 ));
             }
-            if model.complete() {
+            if complete {
                 true
             } else {
                 books.provisioning = Some(provision::progress(
@@ -446,7 +448,7 @@ impl VoiceService {
             // Not a plain no-op: verifying is what turns a model the sidecar
             // has rejected — corrupted on disk, or outgrown by a pin bump —
             // back into a fresh download on the next attempt.
-            return match self.ensure_loaded(cancel).await {
+            return match self.ensure_loaded(cancel, connection_closed).await {
                 Ok(()) => Ok(self.status()),
                 Err(error) if error.model_fault => {
                     model.remove();
@@ -527,8 +529,13 @@ impl VoiceService {
                 // Not about the download: the phone should show these as they are.
                 "cancelled" | "voice_busy" | "voice_uv_missing" | "voice_sidecar_timeout" => error,
                 // A refused, crashed or otherwise failed download or extraction
-                // (§4.6): retryable, and the sidecar's reason rides along.
-                _ => VoiceError::new("voice_provision_failed", error.message, true),
+                // (§4.6): retryable — a bad archive is fetched again — unless
+                // the sidecar itself has crashed out of its retry window.
+                _ => VoiceError::new(
+                    "voice_provision_failed",
+                    error.message,
+                    error.retryable || error.model_fault,
+                ),
             })?;
         if !model.complete() {
             // The sidecar said it finished, yet the layout is not there: the
@@ -542,7 +549,7 @@ impl VoiceService {
         }
         let verifying = provision::progress(operation_id, provision::PHASE_VERIFYING, 0, 0, "");
         self.emit_progress(&verifying, on_progress);
-        if let Err(error) = self.ensure_loaded(cancel).await {
+        if let Err(error) = self.ensure_loaded(cancel, connection_closed).await {
             if error.model_fault {
                 // The sidecar read the files and rejected them: a corrupt
                 // download, and the next provision must start from nothing
@@ -812,7 +819,11 @@ impl VoiceService {
 
     // --- sidecar --------------------------------------------------------
 
-    async fn ensure_loaded(self: &Arc<Self>, cancel: &AtomicBool) -> Result<(), VoiceError> {
+    async fn ensure_loaded(
+        self: &Arc<Self>,
+        cancel: &AtomicBool,
+        connection_closed: Option<&AtomicBool>,
+    ) -> Result<(), VoiceError> {
         let request = SidecarRequest {
             header: serde_json::Map::new(),
             body: Vec::new(),
@@ -821,7 +832,7 @@ impl VoiceService {
             cancellable: false,
             invalidates_model: false,
         };
-        self.sidecar_request(request, cancel, None, &mut |_| {})
+        self.sidecar_request(request, cancel, connection_closed, &mut |_| {})
             .await
             .map(|_| ())
     }
@@ -847,10 +858,18 @@ impl VoiceService {
             ));
         }
         let _waiting = WaiterGuard(&self.waiters);
+        // One notion of "cancelled" for every check below: a Cancel the phone
+        // sent, not the token the connection's own teardown raises. A request
+        // whose connection went away runs on (see `provision`); its answer has
+        // nowhere to go, and a provision must not be lost to a flapping link.
+        let cancelled = || {
+            cancel.load(Ordering::Acquire)
+                && !connection_closed.is_some_and(|closed| closed.load(Ordering::Acquire))
+        };
         let queued = Instant::now();
         let mut slot = self.slot.lock().await;
         crate::diagnostics::write_voice_timing_log("queue_wait", 0, None, queued.elapsed(), 0);
-        if cancel.load(Ordering::Acquire) {
+        if cancelled() {
             return Err(VoiceError::cancelled());
         }
         if slot.child.is_none() {
@@ -860,13 +879,18 @@ impl VoiceService {
             // (§4.3, 120 s) rather than charging it to the request's own bound
             // — or the request's bound when that is longer, so a provision's
             // `installing_runtime` phase has the same two hours as its download.
+            // An explicit Cancel during that wait is honoured for a
+            // cancellable op: uv never acknowledges it, so the grace expires
+            // and the half-started child is killed as the cancel's outcome.
             let child = slot.child.as_mut().expect("spawned above");
             if let Err(failure) = child
                 .request(
                     ping_header(),
                     &[],
                     LOAD_TIMEOUT.max(request.bound),
-                    None,
+                    request
+                        .cancellable
+                        .then_some(&cancelled as &(dyn Fn() -> bool + Sync)),
                     &mut |_| {},
                 )
                 .await
@@ -906,18 +930,12 @@ impl VoiceService {
                 body: Vec::new(),
             });
         }
-        if cancel.load(Ordering::Acquire) {
+        if cancelled() {
             // The load kept the sidecar hot for the next request; this one
             // was given up on while it waited.
             self.touch();
             return Err(VoiceError::cancelled());
         }
-        // Only a Cancel the phone sent reaches the sidecar; one raised by the
-        // connection's teardown lets the work run on (see `provision`).
-        let explicit_cancel = || {
-            cancel.load(Ordering::Acquire)
-                && !connection_closed.is_some_and(|closed| closed.load(Ordering::Acquire))
-        };
         let child = slot.child.as_mut().expect("spawned above");
         let outcome = child
             .request(
@@ -926,7 +944,7 @@ impl VoiceService {
                 request.bound,
                 request
                     .cancellable
-                    .then_some(&explicit_cancel as &(dyn Fn() -> bool + Sync)),
+                    .then_some(&cancelled as &(dyn Fn() -> bool + Sync)),
                 on_progress,
             )
             .await;

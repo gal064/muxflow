@@ -719,15 +719,14 @@ async fn a_dropped_connection_does_not_cancel_a_provision() {
         cancel.store(true, Ordering::Release);
     };
     let (outcome, ()) = tokio::join!(provision, teardown);
-    // The download finished; only the verification step, which checks the
-    // token itself, sees the cancel — and keeps the complete model.
-    let error = outcome.unwrap_err();
-    assert_eq!(error.code, "cancelled");
+    // The download finished and was verified; the teardown's token was never
+    // taken for a cancel anywhere along the way.
+    let status = outcome.unwrap();
+    assert_eq!(status.readiness, v1::VoiceReadiness::Ready as i32);
     assert!(
         service.model().complete(),
         "a dropped connection threw the download away"
     );
-    assert_eq!(service.status().readiness, v1::VoiceReadiness::Ready as i32);
 
     // An explicit Cancel on a live connection does stop it.
     service.model().remove();
@@ -791,6 +790,64 @@ async fn a_rejected_model_is_reported_missing_until_a_load_succeeds() {
     let status = service.status();
     assert_eq!(status.readiness, v1::VoiceReadiness::ModelMissing as i32);
     assert!(status.detail.contains("bad onnx"));
+}
+
+/// The teardown-raised token is ignored at every check a provision passes
+/// through — before the slot, after the ping, in verification — and an
+/// explicit Cancel while `uv run` is still starting is honoured by killing
+/// the half-started child.
+#[tokio::test]
+async fn provision_treats_teardown_and_explicit_cancel_differently_while_starting() {
+    let dir = tempfile::tempdir().unwrap();
+    // The ping takes 1 s: that is `installing_runtime`.
+    let slow_start = ECHO_SIDECAR
+        .replace("ping) printf", "ping) sleep 1; printf")
+        .replace("progress) printf", "provision) printf");
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, &slow_start);
+    service.model().remove();
+    let cancel = AtomicBool::new(true);
+    let closed = AtomicBool::new(true);
+    let mut record = |progress: &v1::VoiceProvisionProgress| {
+        if progress.phase == provision::PHASE_DOWNLOADING {
+            service.model().write_fake_complete();
+        }
+    };
+    // Raised by teardown before the request even reached the slot: it runs
+    // to completion and the model is ready for the reconnecting phone.
+    let status = service
+        .provision("op", true, &cancel, Some(&closed), &mut record)
+        .await
+        .unwrap();
+    assert_eq!(status.readiness, v1::VoiceReadiness::Ready as i32);
+    service.shutdown().await;
+
+    // An explicit Cancel while uv is still starting, and staying that way
+    // past the grace: the half-started child is killed as the cancel's
+    // outcome, nothing is counted as a crash, and provisioning is cleared so
+    // the phone is not stuck at PROVISIONING.
+    let stuck_start = ECHO_SIDECAR
+        .replace("ping) printf", "ping) sleep 8; printf")
+        .replace("progress) printf", "provision) printf");
+    let stuck = super::tests::service(dir.path(), DEFAULT_IDLE_AFTER, &stuck_start);
+    stuck.model().remove();
+    let cancel = AtomicBool::new(false);
+    let closed = AtomicBool::new(false);
+    let mut ignore = |_: &v1::VoiceProvisionProgress| {};
+    let provision = stuck.provision("op", true, &cancel, Some(&closed), &mut ignore);
+    let explicit = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancel.store(true, Ordering::Release);
+    };
+    let started = Instant::now();
+    let (outcome, ()) = tokio::join!(provision, explicit);
+    assert_eq!(outcome.unwrap_err().code, "cancelled");
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "the cancel waited for uv"
+    );
+    assert!(stuck.books.lock().unwrap().crashes.is_empty());
+    assert!(stuck.books.lock().unwrap().provisioning.is_none());
+    assert!(stuck.sidecar_pid().await.is_none());
 }
 
 #[test]
