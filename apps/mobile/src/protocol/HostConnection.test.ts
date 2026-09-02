@@ -11,12 +11,13 @@ import {
   TerminalBytesSchema,
   VoiceEventSchema,
   VoiceProvisionProgressSchema,
+  VoiceResponseSchema,
   VoiceSpeechSchema,
   type Envelope,
   type HostEvent,
 } from "./gen/envelope_pb";
 import { HostConnection, HostError, type HostConnectionOptions } from "./HostConnection";
-import { terminalInput } from "./requests";
+import { terminalInput, voiceTranscribe } from "./requests";
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "./testing/fakeTransport";
 import { createSessionStore, type SessionStore } from "../store/sessionStore";
 
@@ -296,6 +297,29 @@ describe("ordered events (§7.4)", () => {
     // Neither is a file or agent event, and neither is logged as ignored.
     expect(h.log.some((line) => line.startsWith("event.ignored"))).toBe(false);
     expect(h.store.getState().agents["a1"]).toBeUndefined();
+  });
+
+  it("carries Response.voice on a refused voice request, so the caller can read operationId and retryable", async () => {
+    const h = harness();
+    const transport = await connectHappily(h);
+    transport.drain();
+    const refused = h.connection.request(voiceTranscribe("utt-1", new Uint8Array([1, 2, 3]), "audio/mp4"));
+    const [sent] = transport.drain();
+    expect(sent?.requestId).toBe(3n);
+    transport.feed(hostEnvelope({
+      case: "response",
+      value: okResponse({
+        ok: false,
+        errorCode: "voice_model_missing",
+        displayMessage: "Voice is not set up on this host yet",
+        voice: create(VoiceResponseSchema, { operationId: "utt-1", retryable: false }),
+      }),
+    }, { requestId: 3n }));
+    const error = await refused.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(HostError);
+    expect((error as HostError).code).toBe("voice_model_missing");
+    expect((error as HostError).voice?.operationId).toBe("utt-1");
+    expect((error as HostError).voice?.retryable).toBe(false);
   });
 
   it("answers TERMINAL_RESNAPSHOT_REQUIRED with a scoped REQUEST_TERMINAL_SEED", async () => {

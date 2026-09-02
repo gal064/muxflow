@@ -1193,7 +1193,7 @@ message VoiceRequest {
   string text = 5;
   // SESSION: agent whose replies this connection wants spoken; "" clears.
   string agent_id = 6;
-  // 7 is unused.
+  reserved 7;
   // SPEAK: unspecified means EDGE_TTS.
   VoiceProvider provider = 8;
   // SPEAK: validated voice identifier; "" means the host default
