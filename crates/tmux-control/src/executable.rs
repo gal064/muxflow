@@ -361,11 +361,18 @@ mod tests {
     #[test]
     fn resolve_executable_honours_override_precedence_and_names_the_program() {
         let root = TestRoot::new();
-        let installed = root.executable("installer/uv");
+        // A name nothing on the developer's PATH answers to, so the installer
+        // candidate is what gets found.
+        let installed = root.executable("installer/muxflow-resolver-probe");
         let cache = Mutex::new(None);
         // No override: the installer candidate is found and cached.
         assert_eq!(
-            resolve_executable("MUXFLOW_TEST_UV_UNSET", "uv", [installed.clone()], &cache),
+            resolve_executable(
+                "MUXFLOW_TEST_UV_UNSET",
+                "muxflow-resolver-probe",
+                [installed.clone()],
+                &cache
+            ),
             Ok(installed.clone())
         );
         assert_eq!(*cache.lock().unwrap(), Some(installed));
