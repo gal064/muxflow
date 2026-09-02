@@ -118,6 +118,9 @@ struct Bookkeeping {
     last_error: String,
     provisioning: Option<v1::VoiceProvisionProgress>,
     idle_task_started: bool,
+    /// The sidecar refused to load the model on disk (`class: "model"`).
+    /// Cleared by a load that succeeds; until then STATUS says MODEL_MISSING.
+    model_rejected: bool,
 }
 
 type UvLookup = fn() -> Result<PathBuf, tmux_control::ExecutableError>;
@@ -212,9 +215,13 @@ impl VoiceService {
         // nothing blocking happens under that mutex.
         let uv = (self.uv_lookup)();
         let complete = model.complete();
-        let (last_error, provisioning) = {
+        let (last_error, provisioning, model_rejected) = {
             let books = self.books.lock().unwrap();
-            (books.last_error.clone(), books.provisioning.clone())
+            (
+                books.last_error.clone(),
+                books.provisioning.clone(),
+                books.model_rejected,
+            )
         };
         let mut status = v1::VoiceStatus {
             model_dir: model.dir().to_string_lossy().into_owned(),
@@ -234,7 +241,7 @@ impl VoiceService {
         if let Some(progress) = provisioning {
             status.readiness = v1::VoiceReadiness::Provisioning.into();
             status.provision = Some(progress);
-        } else if complete {
+        } else if complete && !model_rejected {
             status.readiness = v1::VoiceReadiness::Ready.into();
         } else {
             status.readiness = v1::VoiceReadiness::ModelMissing.into();
@@ -384,11 +391,18 @@ impl VoiceService {
 
     /// Downloads and verifies the model. Progress is broadcast as
     /// `EVENT_KIND_VOICE_PROVISION` and handed to `on_progress` (for the CLI).
+    /// `connection_closed` tells a Cancel raised by the connection's own
+    /// teardown apart from one the phone sent: the phone reconnects
+    /// constantly, and a dropped link must not throw away a half-fetched
+    /// model. Only an explicit Cancel reaches the sidecar; a download whose
+    /// connection went away runs on, and the reconnecting phone's STATUS
+    /// resumes the progress bar (§4.4).
     pub(crate) async fn provision(
         self: &Arc<Self>,
         operation_id: &str,
         confirmed: bool,
         cancel: &AtomicBool,
+        connection_closed: Option<&AtomicBool>,
         on_progress: &mut (dyn FnMut(&v1::VoiceProvisionProgress) + Send),
     ) -> Result<v1::VoiceStatus, VoiceError> {
         if !confirmed {
@@ -446,16 +460,18 @@ impl VoiceService {
             };
         }
         let outcome = self
-            .provision_inner(operation_id, &model, cancel, on_progress)
+            .provision_inner(operation_id, &model, cancel, connection_closed, on_progress)
             .await;
         let final_progress = match &outcome {
             Ok(()) => provision::progress(operation_id, provision::PHASE_READY, 0, 0, ""),
             Err(error) => {
                 // The sidecar removes its own partials when it gets to; a
-                // sidecar the host killed did not, so sweep here as well — but
-                // only when this provision reached a sidecar at all, so a
-                // refusal at the door never touches another process's download.
-                if !matches!(error.code, "voice_busy" | "voice_uv_missing") {
+                // sidecar the host killed did not, so sweep here as well. Not
+                // for the refusals answered before anything was attempted.
+                if !matches!(
+                    error.code,
+                    "voice_busy" | "voice_uv_missing" | "voice_provisioning"
+                ) {
                     model.sweep_partials();
                 }
                 provision::progress(operation_id, provision::PHASE_FAILED, 0, 0, &error.message)
@@ -471,6 +487,7 @@ impl VoiceService {
         operation_id: &str,
         model: &ModelLayout,
         cancel: &AtomicBool,
+        connection_closed: Option<&AtomicBool>,
         on_progress: &mut (dyn FnMut(&v1::VoiceProvisionProgress) + Send),
     ) -> Result<(), VoiceError> {
         let installing =
@@ -502,8 +519,9 @@ impl VoiceService {
             bound: PROVISION_TIMEOUT,
             needs_model: false,
             cancellable: true,
+            invalidates_model: true,
         };
-        self.sidecar_request(request, cancel, &mut forward)
+        self.sidecar_request(request, cancel, connection_closed, &mut forward)
             .await
             .map_err(|error| match error.code {
                 // Not about the download: the phone should show these as they are.
@@ -641,9 +659,12 @@ impl VoiceService {
             bound: Duration::from_secs(30) + Duration::from_millis(u64::from(audio_millis) * 2),
             needs_model: true,
             cancellable: false,
+            invalidates_model: false,
         };
         let sidecar_started = Instant::now();
-        let reply = self.sidecar_request(request, cancel, &mut |_| {}).await?;
+        let reply = self
+            .sidecar_request(request, cancel, None, &mut |_| {})
+            .await?;
         let text = text::transcript_line(
             reply
                 .header
@@ -745,9 +766,12 @@ impl VoiceService {
             // model is not "set up" for voice; §4.6 answers model_missing.
             needs_model: false,
             cancellable: false,
+            invalidates_model: false,
         };
         let started = Instant::now();
-        let reply = self.sidecar_request(request, cancel, &mut |_| {}).await?;
+        let reply = self
+            .sidecar_request(request, cancel, None, &mut |_| {})
+            .await?;
         crate::diagnostics::write_voice_timing_log("speak", 0, None, started.elapsed(), 0);
         if reply.body.is_empty() {
             return Err(VoiceError::new(
@@ -795,8 +819,9 @@ impl VoiceService {
             bound: Duration::ZERO,
             needs_model: true,
             cancellable: false,
+            invalidates_model: false,
         };
-        self.sidecar_request(request, cancel, &mut |_| {})
+        self.sidecar_request(request, cancel, None, &mut |_| {})
             .await
             .map(|_| ())
     }
@@ -808,6 +833,7 @@ impl VoiceService {
         self: &Arc<Self>,
         request: SidecarRequest,
         cancel: &AtomicBool,
+        connection_closed: Option<&AtomicBool>,
         on_progress: &mut (dyn FnMut(&serde_json::Value) + Send),
     ) -> Result<sidecar::Reply, VoiceError> {
         // The count includes the request in flight, so "more than
@@ -831,10 +857,18 @@ impl VoiceService {
             self.spawn_into(&mut slot)?;
             // The first frame after a spawn waits on `uv run` resolving the
             // interpreter and wheels: give that the cold-start allowance
-            // (§4.3, 120 s) rather than charging it to the request's own bound.
+            // (§4.3, 120 s) rather than charging it to the request's own bound
+            // — or the request's bound when that is longer, so a provision's
+            // `installing_runtime` phase has the same two hours as its download.
             let child = slot.child.as_mut().expect("spawned above");
             if let Err(failure) = child
-                .request(ping_header(), &[], LOAD_TIMEOUT, None, &mut |_| {})
+                .request(
+                    ping_header(),
+                    &[],
+                    LOAD_TIMEOUT.max(request.bound),
+                    None,
+                    &mut |_| {},
+                )
                 .await
             {
                 return Err(self.handle_failure(&mut slot, failure).await);
@@ -859,6 +893,7 @@ impl VoiceService {
                 Ok(_) => {
                     slot.loaded = true;
                     self.hot.store(true, Ordering::Release);
+                    self.books.lock().unwrap().model_rejected = false;
                 }
                 Err(failure) => return Err(self.handle_failure(&mut slot, failure).await),
             }
@@ -877,19 +912,35 @@ impl VoiceService {
             self.touch();
             return Err(VoiceError::cancelled());
         }
+        // Only a Cancel the phone sent reaches the sidecar; one raised by the
+        // connection's teardown lets the work run on (see `provision`).
+        let explicit_cancel = || {
+            cancel.load(Ordering::Acquire)
+                && !connection_closed.is_some_and(|closed| closed.load(Ordering::Acquire))
+        };
         let child = slot.child.as_mut().expect("spawned above");
         let outcome = child
             .request(
                 request.header,
                 &request.body,
                 request.bound,
-                request.cancellable.then_some(cancel),
+                request
+                    .cancellable
+                    .then_some(&explicit_cancel as &(dyn Fn() -> bool + Sync)),
                 on_progress,
             )
             .await;
         self.touch();
         match outcome {
-            Ok(reply) => Ok(reply),
+            Ok(reply) => {
+                if request.invalidates_model {
+                    // The files under the loaded model changed: the next
+                    // request loads them afresh rather than trusting memory.
+                    slot.loaded = false;
+                    self.hot.store(false, Ordering::Release);
+                }
+                Ok(reply)
+            }
             Err(failure) => Err(self.handle_failure(&mut slot, failure).await),
         }
     }
@@ -940,16 +991,27 @@ impl VoiceService {
     async fn handle_failure(&self, slot: &mut Slot, failure: SidecarFailure) -> VoiceError {
         match failure {
             SidecarFailure::Cancelled => VoiceError::cancelled(),
+            SidecarFailure::CancelUnacknowledged => {
+                // Stuck in work it cannot interrupt (bz2 extraction, a stalled
+                // read): killed at the cancel's request, not counted against it.
+                self.drop_child(slot).await;
+                VoiceError::cancelled()
+            }
             SidecarFailure::Refused { class, error } => {
                 let error = bounded_detail(&error);
                 self.books.lock().unwrap().last_error = error.clone();
                 match class.as_str() {
                     "network" => VoiceError::new("voice_network_unavailable", error, true),
                     "input" => VoiceError::invalid(error),
-                    "model" => VoiceError {
-                        model_fault: true,
-                        ..VoiceError::new("voice_sidecar_failed", error, false)
-                    },
+                    "model" => {
+                        // STATUS now reports MODEL_MISSING with this reason, so
+                        // the phone can offer the re-provision that repairs it.
+                        self.books.lock().unwrap().model_rejected = true;
+                        VoiceError {
+                            model_fault: true,
+                            ..VoiceError::new("voice_sidecar_failed", error, false)
+                        }
+                    }
                     _ => VoiceError::new("voice_sidecar_failed", error, true),
                 }
             }
@@ -1122,6 +1184,9 @@ struct SidecarRequest {
     /// provision can; sending `cancel` for anything else would only make the
     /// host give up on a healthy sidecar mid-load and pay a cold start.
     cancellable: bool,
+    /// The op rewrites the model files, so a model held in memory is stale
+    /// once it succeeds.
+    invalidates_model: bool,
 }
 
 struct WaiterGuard<'a>(&'a AtomicUsize);

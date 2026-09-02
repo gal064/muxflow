@@ -129,6 +129,7 @@ pub(crate) async fn handle_request(
                 control_tx,
                 connection_id,
                 &cancellation,
+                &closed,
             )
             .await;
             pending.lock().unwrap().remove(&request_id);

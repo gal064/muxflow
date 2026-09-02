@@ -211,11 +211,12 @@ class Provisioner:
         os.makedirs(extract)
         try:
             with tarfile.open(partial, "r:bz2") as archive:
-                archive.extractall(extract, filter="data")
+                for member in archive:
+                    if self.cancel.is_set():
+                        raise Refusal("cancelled", "provision cancelled")
+                    archive.extract(member, extract, filter="data")
         except (tarfile.TarError, OSError, ValueError) as error:
             raise Refusal("model", f"archive could not be extracted: {error}") from error
-        if self.cancel.is_set():
-            raise Refusal("cancelled", "provision cancelled")
         found = {}
         for root, _dirs, files in os.walk(extract):
             for name in files:

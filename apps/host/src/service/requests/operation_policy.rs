@@ -512,7 +512,7 @@ mod tests {
             Some(AdmissionError::ReadOnlyMutation)
         );
 
-        // A read-only host must not start a 640 MB download, but may still say
+        // A read-only host must not start a ~487 MB download, but may still say
         // whether voice is set up.
         let provision = OperationPolicy::for_raw(v1::Operation::VoiceProvision.into());
         assert_eq!(

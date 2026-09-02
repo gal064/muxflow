@@ -23,6 +23,7 @@ pub(super) async fn handle(
     control_tx: &tokio::sync::mpsc::Sender<SequencerControl>,
     connection_id: u64,
     cancellation: &AtomicBool,
+    connection_closed: &AtomicBool,
 ) {
     let response = match request.voice {
         None => voice_error(
@@ -31,7 +32,16 @@ pub(super) async fn handle(
             "a voice operation needs a voice payload",
             false,
         ),
-        Some(voice) => handle_inner(operation, voice, connection_id, cancellation).await,
+        Some(voice) => {
+            handle_inner(
+                operation,
+                voice,
+                connection_id,
+                cancellation,
+                connection_closed,
+            )
+            .await
+        }
     };
     send_response(control_tx, request_id, response).await;
 }
@@ -41,6 +51,7 @@ async fn handle_inner(
     request: v1::VoiceRequest,
     connection_id: u64,
     cancellation: &AtomicBool,
+    connection_closed: &AtomicBool,
 ) -> v1::Response {
     if cancellation.load(Ordering::Acquire) {
         return voice_error(
@@ -51,7 +62,14 @@ async fn handle_inner(
         );
     }
     let operation_id = request.operation_id.clone();
-    let outcome = dispatch(operation, request, connection_id, cancellation).await;
+    let outcome = dispatch(
+        operation,
+        request,
+        connection_id,
+        cancellation,
+        connection_closed,
+    )
+    .await;
     // The flag is checked again before answering: a Cancel that arrived while
     // the sidecar was working must not be answered with a stale success.
     if cancellation.load(Ordering::Acquire) {
@@ -77,6 +95,7 @@ async fn dispatch(
     request: v1::VoiceRequest,
     connection_id: u64,
     cancellation: &AtomicBool,
+    connection_closed: &AtomicBool,
 ) -> Result<v1::VoiceResponse, VoiceError> {
     let service: Arc<VoiceService> = VoiceService::global();
     match operation {
@@ -104,6 +123,7 @@ async fn dispatch(
                     &request.operation_id,
                     request.confirmed,
                     cancellation,
+                    Some(connection_closed),
                     &mut |_| {},
                 )
                 .await?;
@@ -167,6 +187,7 @@ mod tests {
             &control_tx,
             1,
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
         )
         .await;
         let Some(SequencerControl::Response {
@@ -194,6 +215,7 @@ mod tests {
             },
             1,
             &AtomicBool::new(true),
+            &AtomicBool::new(false),
         )
         .await;
         assert_eq!(response.error_code, "cancelled");
