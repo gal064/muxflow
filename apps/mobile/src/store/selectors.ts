@@ -36,15 +36,32 @@ function rank(agent: Agent, now: number): number {
       return 2;
     case "done":
       return 3;
-    case "idle": {
-      const recentSince = agent.attentionKind === "completed" && agent.attentionSeenAtMs > 0
-        ? agent.attentionSeenAtMs
-        : agent.lifecycleChangedAtMs;
-      return now - recentSince < RECENT_WINDOW_MS ? 3 : 4;
-    }
+    case "idle":
+      return isRecentIdle(agent, now) ? 3 : 4;
     default:
       return 5;
   }
+}
+
+/**
+ * The one deadline at which an idle agent stops being Recent, or undefined
+ * when the agent is not idle (an unread completion stays Recent until the
+ * acknowledgement supplies a clock). Ported from the desktop's
+ * `recentAgentExpiration` (`agentsList.ts`): counted from the acknowledgement
+ * for a seen completion and from the lifecycle change otherwise.
+ */
+export function recentExpirationMs(agent: Agent): number | undefined {
+  if (displayState(agent) !== "idle") return undefined;
+  const recentSince = agent.attentionKind === "completed" && agent.attentionSeenAtMs > 0
+    ? agent.attentionSeenAtMs
+    : agent.lifecycleChangedAtMs;
+  return recentSince + RECENT_WINDOW_MS;
+}
+
+/** Whether an idle agent is still inside its Recent window at `now`. */
+export function isRecentIdle(agent: Agent, now: number): boolean {
+  const expiration = recentExpirationMs(agent);
+  return expiration !== undefined && now < expiration;
 }
 
 export function compareAgents(left: Agent, right: Agent, now = Date.now()): number {
