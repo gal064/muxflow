@@ -84,15 +84,24 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     list.current?.scrollToEnd({ animated: true });
   }, [messages.length]);
 
-  const title = agent?.displayName || "this agent";
+  const title = agent?.displayName || "Agent";
   const gone = agent !== undefined && !agent.present;
+  // One phrase per condition, matching the readiness card above the mic.
   const hint = !connected
     ? "Not connected"
     : !agent || gone
       ? "This agent no longer exists"
-      : readiness !== "ready"
-        ? "Voice isn't set up on this host"
-          : "";
+      : readiness === "unknown"
+        ? "Checking voice on the host…"
+        : readiness === "uvMissing"
+          ? "Needs uv on the host"
+          : readiness === "provisioning"
+            ? "Setting up voice on the host…"
+            : readiness === "modelMissing"
+              ? "Voice isn't set up on this host"
+              : recorderError
+                ? "Microphone unavailable: allow the microphone permission for Muxflow"
+                : "";
   const micDisabled = hint !== "";
 
   const endSession = useCallback(() => {
@@ -108,7 +117,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={() => router.back()} style={styles.iconButton}>
           <Text style={styles.backGlyph}>←</Text>
         </Pressable>
-        <Text numberOfLines={1} style={styles.title}>{agent?.displayName || "Voice"}</Text>
+        <Text accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
         {agent ? <StatusPill state={agentPillState(agent)} /> : null}
         <Pressable accessibilityLabel="End session" accessibilityRole="button" onPress={() => setConfirmEnd(true)} style={styles.endButton}>
           <Text style={styles.endLabel}>End</Text>
@@ -159,10 +168,12 @@ const MessageBubble = memo(function MessageBubble({ message, controller }: { mes
         {/* The text is the tap target; the player below stays its own set of controls for a screen reader. */}
         <Pressable
           accessibilityHint={you ? undefined : expanded ? "Collapses the reply" : "Expands the reply"}
-          accessibilityLabel={`: `}
+          accessibilityLabel={`${you ? "You" : "Agent"}: ${message.text}`}
           accessibilityRole={you ? "text" : "button"}
           disabled={you}
+          hitSlop={you ? undefined : { top: 10, bottom: 10 }}
           onPress={() => setExpanded((value) => !value)}
+          style={you ? undefined : styles.expandTarget}
         >
           <Text numberOfLines={you || expanded ? undefined : 3} style={[styles.bubbleText, you && styles.bubbleTextYou]}>{message.text}</Text>
           {message.truncated && expanded ? <Text style={styles.truncatedNote}>Spoken reply shortened; the rest is in the terminal.</Text> : null}
@@ -192,13 +203,15 @@ const styles = StyleSheet.create({
   endButton: { alignItems: "center", height: 48, justifyContent: "center", paddingHorizontal: 12 },
   endLabel: { color: colors.dangerInk, fontSize: typeScale.body, fontWeight: "600" },
   list: { flex: 1 },
-  listContent: { gap: 8, paddingHorizontal: 12, paddingVertical: 12 },
+  listContent: { flexGrow: 1, gap: 8, paddingHorizontal: 12, paddingVertical: 12 },
   bubbleRow: { flexDirection: "row", justifyContent: "flex-start" },
   bubbleRowYou: { justifyContent: "flex-end" },
   bubble: { borderRadius: radii.card, borderWidth: metrics.hairlineWidth, gap: 4, maxWidth: "88%", paddingHorizontal: 14, paddingVertical: 10 },
   // `--chrome-raised` on `--chrome-bg` is a 1.07:1 step; the hairline is what separates a bubble from the page.
   bubbleAgent: { backgroundColor: colors.chromeRaised, borderColor: colors.chromeBorder },
-  bubbleYou: { backgroundColor: colors.accentWash, borderColor: colors.chromeBorder },
+  bubbleYou: { backgroundColor: colors.accentWash, borderColor: colors.accent },
+  // With the 10 dp slop this makes a one-line reply a 48 dp expand target.
+  expandTarget: { minHeight: 28 },
   bubbleText: { color: colors.chromeInk, fontSize: typeScale.body, lineHeight: 20 },
   bubbleTextYou: { color: colors.chromeInkStrong },
   truncatedNote: { color: colors.chromeDim, fontSize: typeScale.meta, fontStyle: "italic" },
