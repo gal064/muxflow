@@ -1217,6 +1217,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .palette-row.selected:not([data-unavailable]) { background: var(--accent); color: var(--accent-ink); }
 .palette-row.selected:not([data-unavailable]) kbd,
 .palette-row.selected:not([data-unavailable]) .palette-meta { color: color-mix(in srgb, var(--accent-ink) 80%, transparent); }
+/* The host letter flips with the row, as it does on the active workspace row. */
+.palette-row.selected:not([data-unavailable]) .host-letter { color: var(--accent-ink); }
 .palette-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-meta {
   margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
