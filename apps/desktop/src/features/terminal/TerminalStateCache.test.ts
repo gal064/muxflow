@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TerminalStateCache } from "./TerminalStateCache";
+import { TerminalStateCache, terminalCacheKey } from "./TerminalStateCache";
 
 const viewport = { atBottom: true, viewportLine: 0, grid: { columns: 80, rows: 24 } } as const;
 const options = (
@@ -104,5 +104,37 @@ describe("TerminalStateCache", () => {
     cache.set("%1", "a screen past the budget", options());
     expect(cache.get("%1")).toBeUndefined();
     expect(cache.retainedByteLength).toBe(0);
+  });
+
+  // Pane ids repeat across tmux servers, so the same `%0` on two hosts must be
+  // two entries, and a host whose bridge restarted must forget only its own.
+  it("keys the same pane on two hosts apart and clears one host at a time", () => {
+    const cache = new TerminalStateCache();
+    const local = terminalCacheKey("local", "%0");
+    const remote = terminalCacheKey("remote", "%0");
+    expect(local).not.toBe(remote);
+    cache.set(local, "local-screen", options());
+    cache.set(remote, "remote-screen", options());
+    cache.set(terminalCacheKey("remote", "%1"), "remote-other", options());
+    expect(cache.get(local)?.serialized).toBe("local-screen");
+    expect(cache.get(remote)?.serialized).toBe("remote-screen");
+
+    cache.clearScope("remote");
+    expect(cache.get(remote)).toBeUndefined();
+    expect(cache.get(terminalCacheKey("remote", "%1"))).toBeUndefined();
+    expect(cache.get(local)?.serialized).toBe("local-screen");
+    expect(cache.size).toBe(1);
+    expect(cache.retainedByteLength).toBe("local-screen".length);
+  });
+
+  // The prefix is the whole scope plus its separator: "remote" must not match
+  // "remote-2", and a scope that is a prefix of another must not clear both.
+  it("clears by exact scope, not by scope prefix", () => {
+    const cache = new TerminalStateCache();
+    cache.set(terminalCacheKey("host", "%0"), "one", options());
+    cache.set(terminalCacheKey("host-2", "%0"), "two", options());
+    cache.clearScope("host");
+    expect(cache.get(terminalCacheKey("host", "%0"))).toBeUndefined();
+    expect(cache.get(terminalCacheKey("host-2", "%0"))?.serialized).toBe("two");
   });
 });

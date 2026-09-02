@@ -24,7 +24,7 @@ import {
   terminalBridgeScope,
   type TerminalEvent,
 } from "../features/terminal/api";
-import { terminalStateCache } from "../features/terminal/TerminalStateCache";
+import { terminalCacheKey, terminalStateCache } from "../features/terminal/TerminalStateCache";
 import { connectionReducer, denormalizeSnapshot, initialHostState } from "../state/connectionReducer";
 import { userFacingBridgeFailure } from "./bridgeFailureText";
 import {
@@ -270,7 +270,8 @@ export function useAppConnectionController({
   useEffect(() => () => echoLagProbe.dispose(), [echoLagProbe]);
   const hub = useMemo(() => new TerminalEventHub(
     (paneId, reason) => {
-      terminalStateCache.delete(paneId);
+      // Through the ref: the hub outlives the connection it was built under.
+      terminalStateCache.delete(terminalCacheKey(hostScopeRef.current.hostProfileId, paneId));
       const currentClientId = clientIdRef.current;
       if (!currentClientId) return;
       void requestTerminalSeed(currentClientId, paneId).catch((error) => {
@@ -516,7 +517,7 @@ export function useAppConnectionController({
       if (disposed) return;
       hub.publish(event, () => {
         if (event.kind === "generationEpoch") {
-          terminalStateCache.clear();
+          terminalStateCache.clearScope(hostProfileId(connection));
           terminalEpochRef.current = event.epoch;
           setTerminalEpoch(event.epoch);
         } else if (event.kind === "topologyDirty") {
@@ -536,7 +537,7 @@ export function useAppConnectionController({
           // convicts (or clears) flow control for the typing-lag reports.
           recordIncident("flow.paused", { paneId: event.paneId });
         } else if (event.kind === "flowStalled") {
-          terminalStateCache.delete(event.paneId);
+          terminalStateCache.delete(terminalCacheKey(hostProfileId(connection), event.paneId));
           // The host already tried the only in-place tmux resume twice. Its
           // fallback seed can repaint the last screen, but cannot restart the
           // stream after that budget is exhausted — exactly the pane that
@@ -617,7 +618,7 @@ export function useAppConnectionController({
             topologyDirtyCount = 0;
           }
           if (serverIdentityRef.current !== undefined && serverIdentityRef.current !== event.serverIdentity) {
-            terminalStateCache.clear();
+            terminalStateCache.clearScope(hostProfileId(connection));
             hub.clearTerminalState();
           }
           serverIdentityRef.current = event.serverIdentity;

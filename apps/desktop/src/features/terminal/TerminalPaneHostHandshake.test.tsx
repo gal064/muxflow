@@ -218,7 +218,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
 
 import { REVEAL_VOID_MAX_ATTEMPTS, REVEAL_VOID_TIMEOUT_MS, TerminalPane } from "./TerminalPane";
 import { TerminalEventHub } from "./TerminalEventHub";
-import { terminalStateCache } from "./TerminalStateCache";
+import { terminalCacheKey, terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
 import { resetPerfProbe } from "../../perf/probe";
 import { REVEAL_RETRY_DELAY_MS, STALE_REVEAL_EPOCH_CODE } from "./revealRetry";
@@ -511,6 +511,7 @@ let hub: TerminalEventHub;
 function paneElement(pane: Pane, strict: boolean) {
   const element = <TerminalPane
     appFocused
+    cacheScope="local"
     clientId="client-a"
     pane={pane}
     hub={hub}
@@ -770,7 +771,7 @@ describe("a verified resume onto the screen the renderer already holds", () => {
     host.capture(paneId);
     const first = await mountPane(fixturePane(paneId));
     await unmountPane(first);
-    expect(terminalStateCache.get(paneId)?.serialized).toBe(screen);
+    expect(terminalStateCache.get(terminalCacheKey("local", paneId))?.serialized).toBe(screen);
   }
 
   it("writes only the tail when the host hands back the screen the cache painted", async () => {
