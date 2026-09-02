@@ -24,7 +24,7 @@ import {
   terminalBridgeScope,
   type TerminalEvent,
 } from "../features/terminal/api";
-import { terminalStateCache } from "../features/terminal/TerminalStateCache";
+import { terminalCacheKey, terminalStateCache } from "../features/terminal/TerminalStateCache";
 import { connectionReducer, denormalizeSnapshot, initialHostState } from "../state/connectionReducer";
 import { userFacingBridgeFailure } from "./bridgeFailureText";
 import {
@@ -166,6 +166,8 @@ export function useAppConnectionController({
   };
   const hostScopeRef = useRef(currentHostScope);
   hostScopeRef.current = currentHostScope;
+  const clientHostProfileIdRef = useRef(clientHostProfileId);
+  clientHostProfileIdRef.current = clientHostProfileId;
   /**
    * The one thing six drops in two minutes never told the user: it is the
    * network.
@@ -270,7 +272,17 @@ export function useAppConnectionController({
   useEffect(() => () => echoLagProbe.dispose(), [echoLagProbe]);
   const hub = useMemo(() => new TerminalEventHub(
     (paneId, reason) => {
-      terminalStateCache.delete(paneId);
+      // The hub outlives the connection it was built under, and a reseed is
+      // for the pane on the *live* client — whose host can differ from the
+      // pending connection's in the window between a switch and its bridge.
+      // The host is known one render later than the client id; a reseed in
+      // that gap has nothing to forget, because the new bridge's epoch event
+      // clears its host's scope, and the seed request must still go out —
+      // the hub asks once per pane and waits for the answer.
+      const liveHostProfileId = clientHostProfileIdRef.current;
+      if (liveHostProfileId !== undefined) {
+        terminalStateCache.delete(terminalCacheKey(liveHostProfileId, paneId));
+      }
       const currentClientId = clientIdRef.current;
       if (!currentClientId) return;
       void requestTerminalSeed(currentClientId, paneId).catch((error) => {
@@ -516,7 +528,7 @@ export function useAppConnectionController({
       if (disposed) return;
       hub.publish(event, () => {
         if (event.kind === "generationEpoch") {
-          terminalStateCache.clear();
+          terminalStateCache.clearScope(hostProfileId(connection));
           terminalEpochRef.current = event.epoch;
           setTerminalEpoch(event.epoch);
         } else if (event.kind === "topologyDirty") {
@@ -536,7 +548,7 @@ export function useAppConnectionController({
           // convicts (or clears) flow control for the typing-lag reports.
           recordIncident("flow.paused", { paneId: event.paneId });
         } else if (event.kind === "flowStalled") {
-          terminalStateCache.delete(event.paneId);
+          terminalStateCache.delete(terminalCacheKey(hostProfileId(connection), event.paneId));
           // The host already tried the only in-place tmux resume twice. Its
           // fallback seed can repaint the last screen, but cannot restart the
           // stream after that budget is exhausted — exactly the pane that
@@ -617,7 +629,7 @@ export function useAppConnectionController({
             topologyDirtyCount = 0;
           }
           if (serverIdentityRef.current !== undefined && serverIdentityRef.current !== event.serverIdentity) {
-            terminalStateCache.clear();
+            terminalStateCache.clearScope(hostProfileId(connection));
             hub.clearTerminalState();
           }
           serverIdentityRef.current = event.serverIdentity;
