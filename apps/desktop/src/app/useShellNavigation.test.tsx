@@ -946,6 +946,25 @@ describe("pending tab placeholder on create", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("forwards the born-pinned flag with the create, and nothing when it is unset", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(
+      async () => ({ sessionId: "$7", windowId: "@7", paneId: "%7", topologyGeneration: 2 }),
+    );
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+
+    act(() => harness.navigation.createSession("work", { pinned: true }));
+    await flush();
+    expect(performAction).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "createSession", name: "work", pinned: true }),
+    );
+
+    act(() => harness.navigation.createSession("other", { pinned: false }));
+    await flush();
+    expect(performAction).toHaveBeenLastCalledWith({ kind: "createSession", name: "other" });
+    await act(async () => renderer.unmount());
+  });
+
   /**
    * The startup command's one delivery point.
    *

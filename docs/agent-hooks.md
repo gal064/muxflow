@@ -70,9 +70,10 @@ Claude Code: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 Codex: the same, minus `StopFailure` and `Notification`, which its hook surface
 does not have (measured against Codex CLI 0.128, 0.147 and 0.149.1). A Codex
 turn that ends in failure is therefore indistinguishable from one that
-succeeds. A user-reviewed `PermissionRequest` and
-`PreToolUse(request_user_input)` are the observed blocked signals. Recorded
-rather than faked.
+succeeds. `UserPromptSubmit` captures the turn's approval reviewer once before
+tool work begins. A `PermissionRequest` whose exact turn was not classified as
+auto-reviewed and `PreToolUse(request_user_input)` are the observed blocked
+signals. Recorded rather than faked.
 
 A `Working` state that receives no further event for fifteen minutes decays to
 `Unknown`. Attention already earned survives; only the claim about right now is
@@ -87,10 +88,23 @@ is present, preventing silently broken agent configuration.
 
 Hooks submit compact state JSON through the private daemon socket and never send
 prompt text, terminal output, tool input, file contents, or credentials. The
+hook process accepts a bounded vendor envelope up to 64 MiB because tool-complete
+events can include the full result, including base64 image data. It parses that
+envelope as a stream and retains only the lifecycle allowlist, so large tool
+results do not become large daemon messages or durable mailbox entries.
+Retained lifecycle strings are individually limited to 16 KiB and the compact
+daemon payload remains limited to 256 KiB. The
 normalized Codex `PreToolUse` payload retains only the tool name needed to
-distinguish a question from ordinary work. Malformed or stale events are
-rejected; a temporarily unavailable daemon retains only a bounded, atomic
-latest-state record.
+distinguish a question from ordinary work. The normalized turn-start payload
+retains only its opaque turn ID and reviewer; later permission events retain
+the turn ID but never reread the transcript. A Claude `Stop` retains only a
+boolean saying whether a subagent is still running; task descriptions, commands,
+IDs, and the rest of Claude's background-task payload are discarded. Malformed
+or stale events are rejected. The daemon retains that boolean until the final
+`Stop`, including across restarts, so Claude's routine idle notification cannot
+misreport a long-running subagent as blocked. A real permission request remains
+blocked even if an idle notification follows it. A temporarily unavailable
+daemon retains only bounded, atomic hook state.
 
 For validation, use installed `codex --version` / `codex --help` and
 `claude --version` / `claude --help` only. Release QA must not send prompts or

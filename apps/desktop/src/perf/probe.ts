@@ -164,6 +164,33 @@ export function recordPerfMilestone(name: string, atMs = now()): number {
   return occurrence;
 }
 
+/**
+ * One structured record, for a measurement whose shape is a timeline rather
+ * than a duration.
+ *
+ * A sample answers "how long"; a switch timeline has to answer "how long, on
+ * which of six legs, behind how many bytes of what", and that only survives as
+ * one record with all of its fields together. It shares the sample sink,
+ * batching, byte bounds and record ids, so nothing here is a second channel —
+ * and like everything else in this module it is inert until the process opted
+ * in with `ADE_PERF_LOG`.
+ *
+ * `kind` frames the record; a field named `t` or `kind` cannot overwrite it.
+ */
+export function recordPerfRecord(kind: string, fields: Record<string, unknown>): void {
+  if (!enabled) return;
+  const record: Record<string, unknown> = { t: Date.now(), kind };
+  for (const [key, value] of Object.entries(fields)) {
+    if (key !== "t" && key !== "kind" && value !== undefined) record[key] = value;
+  }
+  try {
+    enqueueLine(JSON.stringify(record));
+  } catch {
+    recordSinkInvalid("renderer record could not be serialized");
+  }
+  scheduleFlush();
+}
+
 export function perfCounterSnapshot(): Record<string, number> {
   return Object.fromEntries([...counters.entries()].sort(([left], [right]) => left.localeCompare(right)));
 }

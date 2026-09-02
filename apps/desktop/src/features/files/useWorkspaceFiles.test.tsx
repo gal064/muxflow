@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
 import { act, create } from "react-test-renderer";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope, WorkspaceEvent } from "./types";
-import { keyForTransferConnection } from "./api";
+import { keyForScope, keyForTransferConnection } from "./api";
+import {
+  armPanePaint,
+  notePanePainted,
+  PANE_PAINT_TIMEOUT_MS,
+  resetPanePaintGate,
+} from "../terminal/panePaintGate";
 import { enablePerfProbe, perfSummary, resetPerfProbe } from "../../perf/probe";
 import { ACTIVE_ROOT_SETTLED_MULTIPLIER, ACTIVE_ROOT_STABLE_PROBES, useWorkspaceFiles } from "./useWorkspaceFiles";
 
@@ -86,6 +92,11 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+// The paint gate is a module singleton, so a pane one test armed would gate
+// the next one's probe. Every test that does not arm it wants the ordinary
+// case: nothing pending, nothing waited for.
+afterEach(() => { resetPanePaintGate(); });
 
 describe("useWorkspaceFiles", () => {
   it("keeps the authoritative tree through a transport gap and revalidates it once connected", async () => {
@@ -1257,5 +1268,134 @@ describe("useWorkspaceFiles", () => {
     });
     expect(current?.transfers[0]?.error).not.toBe("cancel was already terminal");
     await act(async () => { renderer.unmount(); });
+  });
+
+  it("holds the root probe behind the revealed pane's first paint", async () => {
+    // The scope effect fires on the *optimistic* switch, and the root it
+    // produces cascades into a directory listing and a Git lease — all on the
+    // link that is carrying the pane's own reveal. The paint gate is what puts
+    // the sidebar behind the screen the user actually asked for.
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    armPanePaint("%1");
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(
+      fixture.client.resolveActiveRoot,
+      "the Explorer asked for a root ahead of the pane's own screen",
+    ).not.toHaveBeenCalled();
+
+    await act(async () => { notePanePainted("%1"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(1);
+    expect(current?.root).toEqual(root);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("holds the root probe behind the paint even when the switch also moved the pane's cwd", async () => {
+    // A workspace switch changes the active pane's `current_path` as well as
+    // its scope, and the effect watching that path calls `rearm` *synchronously*
+    // in the same commit. Ungated, that probe took the one-probe-at-a-time
+    // latch and the gated call became a no-op — so the root, its directory
+    // listing and the Git watch behind it (a whole `git status`, 60-80 KB on the
+    // same ordered lane as the switch's own answer) all went out in front of the
+    // screen the user asked for. Only every entry point being gated makes the
+    // gate true.
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    function Harness({ scope, panePath }: { scope: FileWorkspaceScope; panePath: string }) {
+      useWorkspaceFiles(fixture.client, scope, keyForScope(scope), panePath);
+      return null;
+    }
+    armPanePaint("%1");
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<Harness scope={BASE_SCOPE} panePath="/repo" />);
+      await Promise.resolve();
+    });
+    await act(async () => { notePanePainted("%1"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(1);
+
+    const switched: FileWorkspaceScope = { ...BASE_SCOPE, sessionId: "$2", paneId: "%2" };
+    armPanePaint("%2");
+    await act(async () => {
+      renderer.update(<Harness scope={switched} panePath="/elsewhere" />);
+      await Promise.resolve();
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(
+      fixture.client.resolveActiveRoot,
+      "the pane's cwd change probed ahead of the pane's own screen",
+    ).toHaveBeenCalledTimes(1);
+
+    await act(async () => { notePanePainted("%2"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(2);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  /**
+   * The gate orders the *switch's* speculative sidebar work behind the screen
+   * the user asked for. A gesture is not speculative: pressing Refresh is a
+   * request for this answer, and the control a person reaches for when the
+   * Explorer looks stuck must not itself sit there doing nothing for the
+   * pane's whole paint budget.
+   */
+  it("answers the Refresh gesture in front of the paint gate", async () => {
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    armPanePaint("%1");
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    // The switch's own probe is behind the pane, where it belongs.
+    expect(fixture.client.resolveActiveRoot).not.toHaveBeenCalled();
+
+    // Pressed before the tree has a root at all — the Explorer looking stuck is
+    // exactly when this happens — so this is the path that only re-checks.
+    await act(async () => { current?.refresh(); await Promise.resolve(); });
+    expect(
+      fixture.client.resolveActiveRoot,
+      "the person's own Refresh waited out the pane's paint budget",
+    ).toHaveBeenCalledTimes(1);
+
+    await act(async () => { notePanePainted("%1"); await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(current?.root).toEqual(root);
+    const afterSwitch = vi.mocked(fixture.client.resolveActiveRoot).mock.calls.length;
+
+    // And again on the painted path, where the press also reads a directory:
+    // a fresh arm (the next switch) does not hold the gesture either.
+    armPanePaint("%1");
+    await act(async () => { current?.refresh(); await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(afterSwitch + 1);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("resolves the root anyway when the pane never paints", async () => {
+    // A timeout, never a barrier: a wedged renderer or a reveal the host never
+    // answers must not also cost the user their file tree.
+    vi.useFakeTimers();
+    const root: ActiveRoot = { token: "root", paneId: "%1", cwd: "/repo", path: "/repo", gitWorktree: true, revision: "1" };
+    const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
+    let current: ReturnType<typeof useWorkspaceFiles> | undefined;
+    function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
+    armPanePaint("%1");
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(PANE_PAINT_TIMEOUT_MS - 1); });
+    expect(fixture.client.resolveActiveRoot).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(1);
+    expect(current?.root).toEqual(root);
+    await act(async () => { renderer.unmount(); });
+    vi.useRealTimers();
   });
 });

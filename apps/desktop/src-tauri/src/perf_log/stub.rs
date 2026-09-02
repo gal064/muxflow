@@ -143,3 +143,94 @@ pub(crate) mod sink {
         Err(super::DISABLED.into())
     }
 }
+
+/// Inert twin of the switch-timeline instrumentation. Same paths and
+/// signatures, no clocks, no counters, and `finish` never produces a record —
+/// so `tmux_action` answers without a `timing` object and the renderer writes
+/// no `perf.timeline` line.
+pub(crate) mod switch_timing {
+    use std::io::Read;
+
+    #[derive(Clone, Copy)]
+    pub(crate) struct AnswerMark;
+
+    #[derive(Default)]
+    pub(crate) struct LinkCounters;
+
+    impl LinkCounters {
+        #[inline(always)]
+        pub(crate) fn new() -> Self {
+            Self
+        }
+
+        #[inline(always)]
+        pub(crate) fn bytes_read(&self) -> u64 {
+            0
+        }
+
+        #[inline(always)]
+        pub(crate) fn note_frame_read(
+            &self,
+            _frame: &tmux_agent_protocol::v1::Envelope,
+            _bytes_before: u64,
+        ) -> Option<AnswerMark> {
+            None
+        }
+
+        #[inline(always)]
+        pub(crate) fn totals(&self) -> Option<(u64, u64)> {
+            None
+        }
+    }
+
+    pub(crate) struct CountingReader<'a, R> {
+        inner: R,
+        counters: &'a LinkCounters,
+    }
+
+    impl<'a, R: Read> CountingReader<'a, R> {
+        #[inline(always)]
+        pub(crate) fn new(inner: R, counters: &'a LinkCounters) -> Self {
+            Self { inner, counters }
+        }
+    }
+
+    impl<R: Read> Read for CountingReader<'_, R> {
+        #[inline(always)]
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.counters;
+            self.inner.read(buffer)
+        }
+    }
+
+    pub(crate) struct RequestTiming;
+
+    impl RequestTiming {
+        #[inline(always)]
+        pub(crate) fn begin() -> Self {
+            Self
+        }
+
+        #[inline(always)]
+        pub(crate) fn inert() -> Self {
+            Self
+        }
+
+        #[inline(always)]
+        pub(crate) fn mark_written(
+            &mut self,
+            _request_id: u64,
+            _counters: &LinkCounters,
+            _in_flight: impl FnOnce() -> Option<u64>,
+        ) {
+        }
+
+        #[inline(always)]
+        pub(crate) fn mark_answer(&mut self, _answer: Option<AnswerMark>) {}
+
+        #[inline(always)]
+        pub(crate) fn finish(self) -> Option<serde_json::Value> {
+            None
+        }
+    }
+}

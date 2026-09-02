@@ -71,9 +71,13 @@ fn replay_preserves_an_auto_review_permission_as_working() {
     fs::create_dir_all(&dir).unwrap();
     let runtime = AgentRuntime::isolated(dir.join("agents.json"));
     let topology = topology("codex");
+    let mut prompt = event("prompt", 0, "UserPromptSubmit");
+    let mut prompt_payload = serde_json::json!({"hook_event_name": "UserPromptSubmit"});
+    prompt_payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "auto_review".into();
+    prompt_payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = "turn-1".into();
+    prompt.payload_json = serde_json::to_vec(&prompt_payload).unwrap();
     let mut permission = event("permission", 0, "PermissionRequest");
     let mut payload = serde_json::json!({"hook_event_name": "PermissionRequest"});
-    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "auto_review".into();
     payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = "turn-1".into();
     permission.payload_json = serde_json::to_vec(&payload).unwrap();
     let mut cached = event("cached-permission", 0, "PermissionRequest");
@@ -82,10 +86,7 @@ fn replay_preserves_an_auto_review_permission_as_working() {
     cached.payload_json = serde_json::to_vec(&cached_payload).unwrap();
 
     for (name, hook) in [
-        (
-            "hook-fallback-codex-7-00000000000000000001-a.pb",
-            event("prompt", 0, "UserPromptSubmit"),
-        ),
+        ("hook-fallback-codex-7-00000000000000000001-a.pb", prompt),
         (
             "hook-fallback-codex-7-00000000000000000002-b.pb",
             permission,

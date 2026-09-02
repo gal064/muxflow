@@ -103,6 +103,115 @@ describe("connectionReducer", () => {
     expect(recovered.resyncRequested).toBe(false);
   });
 
+  it("ignores a snapshot whose generation went backwards, and re-baselines after a reconnect", () => {
+    const live = connectionReducer(
+      connectionReducer(initialHostState, { type: "connection", phase: "connected" }),
+      { type: "snapshot", snapshot: populated, sequence: 7, generation: 12, serverIdentity: "server-a" },
+    );
+    // A frame overtaken in flight. Taking it would pin every later action to a
+    // generation the host has already left, and each one would be refused as
+    // stale until the next snapshot happened to arrive.
+    const late = connectionReducer(live, {
+      type: "snapshot", snapshot: empty, sequence: 8, generation: 11, serverIdentity: "server-a",
+    });
+    expect(late).toBe(live);
+    // Both restarts still land: another tmux server, and a reconnected link to
+    // the same one whose host process counts from zero again.
+    const otherServer = connectionReducer(live, {
+      type: "snapshot", snapshot: empty, sequence: 1, generation: 1, serverIdentity: "server-b",
+    });
+    expect(otherServer.generation).toBe(1);
+    const reconnected = connectionReducer(
+      connectionReducer(
+        // The link has to actually leave `connected` for the guard to stand
+        // down: that transition is what says the host process may have
+        // restarted. Becoming connected says nothing of the kind.
+        connectionReducer(live, { type: "connection", phase: "reconnecting" }),
+        { type: "connection", phase: "connected" },
+      ),
+      { type: "snapshot", snapshot: empty, sequence: 0, generation: 1, serverIdentity: "server-a" },
+    );
+    expect(reconnected.generation).toBe(1);
+    expect(reconnected.panes).toEqual({});
+  });
+
+  it("keeps the baseline the authoritative snapshot set when the link then reports connected", () => {
+    // The order the bridge actually produces: the epoch, then the
+    // authoritative snapshot, and only then `connected`. Becoming connected
+    // used to clear the baseline, which disarmed the guard on the very
+    // snapshot that had just armed it — a frame overtaken in flight then
+    // walked the generation backwards and every action stamped against it was
+    // refused as stale.
+    const baselined = connectionReducer(initialHostState, {
+      type: "snapshot", snapshot: populated, sequence: 7, generation: 12, serverIdentity: "server-a",
+    });
+    const connected = connectionReducer(baselined, { type: "connection", phase: "connected" });
+    expect(connected.canMutate).toBe(true);
+    const late = connectionReducer(connected, {
+      type: "snapshot", snapshot: empty, sequence: 8, generation: 11, serverIdentity: "server-a",
+    });
+    expect(late).toBe(connected);
+    expect(late.generation).toBe(12);
+  });
+
+  it("keeps the world a reconciliation acknowledgement did not describe", () => {
+    // The host answered a notification burst by finding nothing moved. It
+    // carries the generation and no tree — resending the server to say
+    // "unchanged" is tens of kilobytes ahead of the switch that burst belongs
+    // to — so the entities, the identity and the generation all stand, and
+    // only the sequence watermark advances.
+    const live = connectionReducer(initialHostState, {
+      type: "snapshot", snapshot: populated, sequence: 7, generation: 4, serverIdentity: "server-a",
+    });
+    const acknowledged = connectionReducer(live, {
+      type: "snapshot", sequence: 8, generation: 4, serverIdentity: "server-a",
+    });
+    expect(acknowledged.panes).toEqual(live.panes);
+    expect(acknowledged.windows).toEqual(live.windows);
+    expect(acknowledged.sessions).toEqual(live.sessions);
+    expect(acknowledged.generation).toBe(4);
+    expect(acknowledged.serverIdentity).toBe("server-a");
+    expect(acknowledged.lastSequence).toBe(8);
+
+    // And it never answers a rebuild this process asked for: only a world can.
+    const resyncing = connectionReducer(live, {
+      type: "orderedSnapshot", snapshot: empty, sequence: 9, serverIdentity: "server-b",
+    });
+    expect(resyncing.resyncRequested).toBe(true);
+    const stillResyncing = connectionReducer(resyncing, {
+      type: "snapshot", sequence: 10, generation: 4, serverIdentity: "server-a",
+    });
+    expect(stillResyncing.resyncRequested).toBe(true);
+  });
+
+  it("takes the generation a reconciliation acknowledgement carries, forwards only", () => {
+    // The generation is the whole content of the acknowledgement, and every
+    // action this side sends is stamped against it: holding a stale number is
+    // how a switch is refused for describing a world the host has already left.
+    const live = connectionReducer(initialHostState, {
+      type: "snapshot", snapshot: populated, sequence: 7, generation: 4, serverIdentity: "server-a",
+    });
+    const advanced = connectionReducer(live, {
+      type: "snapshot", sequence: 8, generation: 9, serverIdentity: "server-a",
+    });
+    expect(advanced.generation).toBe(9);
+    expect(advanced.panes).toEqual(live.panes);
+
+    // Never backwards. After a reconnect the stale-generation guard stands down
+    // — a restarted host counts from zero, and the next *world* is the new
+    // baseline — but a frame carrying no world is not that baseline, and the
+    // generation this side stamps its actions with must not drop under it.
+    const reconnected = connectionReducer(
+      connectionReducer(advanced, { type: "connection", phase: "reconnecting" }),
+      { type: "connection", phase: "connected" },
+    );
+    const late = connectionReducer(reconnected, {
+      type: "snapshot", sequence: 10, generation: 5, serverIdentity: "server-a",
+    });
+    expect(late.generation).toBe(9);
+    expect(late.lastSequence).toBe(10);
+  });
+
   it("accepts a lower sequence authoritative reconnect snapshot for the same server", () => {
     const state = connectionReducer(initialHostState, {
       type: "snapshot", snapshot: populated, sequence: 42, serverIdentity: "same-server",

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { RECENT_IDLE_WINDOW_MILLIS } from "./agentsList";
-import { displayState } from "./selectors";
+import { recentAgentExpiration } from "./agentsList";
 import type { AgentRecord } from "./types";
 
 /**
@@ -16,9 +15,8 @@ export function useRecentIdleClock(agents: readonly AgentRecord[], enabled: bool
     const now = Date.now();
     let nextExpiration: number | undefined;
     for (const agent of agents) {
-      if (displayState(agent) !== "idle") continue;
-      const expiration = agent.lifecycleChangedAt + RECENT_IDLE_WINDOW_MILLIS;
-      if (expiration <= now) continue;
+      const expiration = recentAgentExpiration(agent);
+      if (expiration === undefined || expiration <= now) continue;
       nextExpiration = nextExpiration === undefined
         ? expiration
         : Math.min(nextExpiration, expiration);

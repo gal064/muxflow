@@ -31,11 +31,12 @@ async fn ignored_directory_status_uses_a_canonical_repository_path() {
         .await
         .unwrap();
     assert!(status.authoritative);
-    assert!(status.entries.iter().any(|entry| {
-        entry.ignored
-            && entry.path == b"ignored-directory"
-            && entry.display_path == "ignored-directory"
-    }));
+    assert!(
+        status
+            .entries
+            .iter()
+            .any(|entry| { entry.ignored && entry.path == b"ignored-directory" })
+    );
 }
 
 #[tokio::test]
@@ -212,7 +213,6 @@ async fn invalid_byte_status_expansion_returns_bounded_placeholder_and_service_s
     let entries = (0_usize..11_000)
         .map(|index| v1::GitStatusEntry {
             path: [index.to_le_bytes().as_slice(), &[0xff; 1024]].concat(),
-            display_path: "�".repeat(1024),
             untracked: true,
             ..Default::default()
         })

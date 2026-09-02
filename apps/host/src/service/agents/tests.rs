@@ -93,10 +93,31 @@ fn hook_generations_dedupe_and_attention_are_monotonic() {
     assert_eq!(seen.reason, "seen");
     assert!(!seen.notify);
     assert!(seen.generation > done.generation);
+    let first_seen_at = seen.agent.unwrap().attention_seen_at_unix_millis;
+    assert!(first_seen_at > 0);
+    let repeated = runtime.mark_seen(&record.agent_id, 1).unwrap();
+    assert_eq!(
+        repeated.agent.unwrap().attention_seen_at_unix_millis,
+        first_seen_at,
+        "reading the same generation twice must not restart Recent"
+    );
     let snapshot = runtime.snapshot();
     assert!(snapshot.authoritative);
     assert_eq!(snapshot.notification_watermark, snapshot.generation);
     assert_eq!(snapshot.agents[0].seen_generation, 1);
+    let next_turn = runtime
+        .ingest_hook(&event("e3", 3, "UserPromptSubmit"))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert!(next_turn.attention_kind.is_empty());
+    assert_eq!(next_turn.attention_seen_at_unix_millis, 0);
+    let next_done = runtime.ingest_hook(&event("e4", 4, "Stop")).unwrap();
+    assert_eq!(
+        next_done.agent.unwrap().attention_seen_at_unix_millis,
+        0,
+        "a new unread generation must not inherit the prior read time"
+    );
 }
 
 #[test]

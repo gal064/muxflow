@@ -130,6 +130,11 @@ pub struct ShellPreferences {
     pub terminal_screen_reader: bool,
     #[serde(default)]
     pub copy_on_select: bool,
+    /// `None` is a save from before command-copy cleanup, whose frontend
+    /// default is enabled. Keeping absence distinct lets that default survive
+    /// the Rust storage round trip instead of becoming a false boolean.
+    #[serde(default)]
+    pub clean_wrapped_commands: Option<bool>,
     #[serde(default)]
     pub terminal_application_clipboard: bool,
     #[serde(default)]
@@ -577,6 +582,7 @@ mod tests {
                 pinned_only: true,
                 terminal_screen_reader: false,
                 copy_on_select: false,
+                clean_wrapped_commands: Some(false),
                 terminal_application_clipboard: false,
                 terminal_font_size: Some(13),
                 default_markdown_view: Some(AppTabViewMode::Preview),
@@ -740,6 +746,7 @@ mod tests {
                 && value.shell.pinned_only
                 && value.shell.terminal_screen_reader
                 && value.shell.copy_on_select
+                && value.shell.clean_wrapped_commands == Some(true)
                 && value.shell.terminal_application_clipboard
         );
         assert!(value.shell.window_geometry.is_some());
@@ -841,6 +848,7 @@ mod tests {
         assert_eq!(value.shell.panel_surface, PanelSurface::Files);
         assert_eq!(value.shell.agent_sort, AgentSortMode::Workspace);
         assert!(!value.shell.sidebar_collapsed);
+        assert_eq!(value.shell.clean_wrapped_commands, None);
         assert_eq!(value.shell.window_geometry.unwrap().width, 900);
     }
 

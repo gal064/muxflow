@@ -47,6 +47,10 @@ export function useWorkspaceCreate(options: WorkspaceCreateOptions) {
     const startupCommand = defaults.startupCommand;
     createSession(name, {
       directory: defaults.directory,
+      // Read at submit time, like the defaults: a workspace created while the
+      // list shows pinned only is born pinned, or it would drop out of the
+      // sidebar on the first switch away.
+      pinned: appStateRef.current.shell.pinnedOnly || undefined,
       // Built only when there is something to send: an unset command must not
       // leave a callback behind that reaches a pane with an empty line.
       onCreated: startupCommand

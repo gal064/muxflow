@@ -128,7 +128,8 @@ fn parse_options(arguments: &[String]) -> anyhow::Result<Options> {
 fn probe(connection: &SshControl, remote_path: &str) -> anyhow::Result<ProbeReport> {
     let path = expand_remote_path(remote_path);
     let script = format!(
-        "set -eu; os=$(uname -s); arch=$(uname -m); printf '%s\\n%s\\n' \"$os\" \"$arch\"; tmux -V; if git_version=$(git --version 2>/dev/null); then printf '%s\\n' \"$git_version\"; else printf 'unavailable\\n'; fi; if [ -x {path} ]; then printf 'installed\\n'; if version=$({path} version 2>/dev/null); then printf '%s\\n' \"$version\"; else printf '\\n'; fi; sha256sum {path} | cut -d' ' -f1; else printf 'absent\\n\\n\\n'; fi"
+        "set -eu; os=$(uname -s); arch=$(uname -m); printf '%s\\n%s\\n' \"$os\" \"$arch\"; {}; if git_version=$(git --version 2>/dev/null); then printf '%s\\n' \"$git_version\"; else printf 'unavailable\\n'; fi; if [ -x {path} ]; then printf 'installed\\n'; if version=$({path} version 2>/dev/null); then printf '%s\\n' \"$version\"; else printf '\\n'; fi; sha256sum {path} | cut -d' ' -f1; else printf 'absent\\n\\n\\n'; fi",
+        remote_tmux_version_command(),
     );
     let output = connection.command(&script)?;
     let text = String::from_utf8(output)?;
@@ -157,6 +158,13 @@ fn probe(connection: &SshControl, remote_path: &str) -> anyhow::Result<ProbeRepo
         digest,
         remote_path: remote_path.into(),
     })
+}
+
+/// Finds tmux in the non-interactive SSH environment without sourcing a shell
+/// profile. Kept in step with `tmux-control`'s Linux candidates: this probe runs
+/// before a helper is necessarily installed, so it cannot delegate yet.
+fn remote_tmux_version_command() -> &'static str {
+    r#"tmux_bin=''; if [ "${MUXFLOW_TMUX_PATH+x}" = x ]; then case "$MUXFLOW_TMUX_PATH" in /*) ;; *) echo 'MUXFLOW_TMUX_PATH must be absolute' >&2; exit 1;; esac; [ -f "$MUXFLOW_TMUX_PATH" ] && [ -x "$MUXFLOW_TMUX_PATH" ] || { echo 'MUXFLOW_TMUX_PATH is not executable' >&2; exit 1; }; tmux_bin=$MUXFLOW_TMUX_PATH; elif resolved=$(command -v tmux 2>/dev/null) && [ "${resolved#/}" != "$resolved" ] && [ -f "$resolved" ] && [ -x "$resolved" ]; then tmux_bin=$resolved; else for candidate in /usr/local/bin/tmux /usr/bin/tmux /bin/tmux /home/linuxbrew/.linuxbrew/bin/tmux /run/current-system/sw/bin/tmux /nix/var/nix/profiles/default/bin/tmux /usr/pkg/bin/tmux /snap/bin/tmux "$HOME/.local/bin/tmux" "$HOME/.nix-profile/bin/tmux" "$HOME/.linuxbrew/bin/tmux"; do if [ -f "$candidate" ] && [ -x "$candidate" ]; then tmux_bin=$candidate; break; fi; done; fi; [ -n "$tmux_bin" ] || { echo 'tmux executable was not found' >&2; exit 127; }; "$tmux_bin" -V"#
 }
 
 fn install(connection: &SshControl, options: &Options) -> anyhow::Result<()> {
@@ -762,6 +770,49 @@ mod tests {
         assert!(tmux_supported("tmux 3.3a"));
         assert!(tmux_supported("tmux 3.7"));
         assert!(!tmux_supported("tmux 3.2"));
+    }
+
+    #[test]
+    fn remote_probe_honors_an_absolute_tmux_override_without_a_login_shell() {
+        let temporary = tempfile::tempdir().unwrap();
+        let tmux = temporary.path().join("custom-tmux");
+        fs::write(&tmux, b"#!/bin/sh\nprintf 'tmux 9.9\\n'\n").unwrap();
+        fs::set_permissions(&tmux, fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", remote_tmux_version_command()])
+            .env("PATH", "/usr/bin:/bin")
+            .env("MUXFLOW_TMUX_PATH", &tmux)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"tmux 9.9\n");
+    }
+
+    #[test]
+    fn remote_probe_rejects_an_explicitly_empty_tmux_override() {
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", remote_tmux_version_command()])
+            .env("PATH", "/usr/bin:/bin")
+            .env("MUXFLOW_TMUX_PATH", "")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("must be absolute"));
+    }
+
+    #[test]
+    fn remote_probe_fallback_order_matches_the_runtime_resolver() {
+        let script = remote_tmux_version_command();
+        let fixed = script.find("/usr/local/bin/tmux").unwrap();
+        let home = script.find("$HOME/.local/bin/tmux").unwrap();
+        assert!(
+            fixed < home,
+            "fixed-prefix candidates must precede home candidates"
+        );
     }
 
     #[test]

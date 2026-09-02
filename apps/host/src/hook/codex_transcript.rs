@@ -31,14 +31,14 @@ impl ApprovalReviewer {
     }
 }
 
-/// Best-effort classification of a Codex permission request.
+/// Best-effort classification of a Codex turn's approval reviewer.
 ///
 /// Hook input is untrusted. The transcript must resolve to a regular JSONL file
 /// below this user's Codex session root, and only a bounded tail is inspected.
-/// Every failure returns `None`; the adapter treats that as a human request so
-/// an unreadable vendor detail can never hide a real approval from the user. A
-/// matched context with an unknown reviewer remains explicit so it cannot use
-/// an earlier cached auto-review result.
+/// Every failure returns `None`; ingest leaves that turn unclassified so a
+/// later permission request fails closed rather than hiding a real approval
+/// from the user. A matched context with an unknown reviewer remains explicit
+/// so it clears an earlier cached auto-review result.
 pub(super) fn approval_reviewer(payload: &Value, home: &Path) -> Option<ApprovalReviewer> {
     let turn_id = string_field(payload, &["turn_id", "turnId"])?;
     let supplied_path = Path::new(string_field(

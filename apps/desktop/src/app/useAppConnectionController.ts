@@ -38,7 +38,7 @@ import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
 import { resolveActiveWindowId, type OptimisticWindowSwitch } from "./windowSelection";
 import { resolveSelectedSession } from "../features/shell/model";
 import type { HostScopeToken } from "../features/shell/hostScope";
-import { recordPerfCounter } from "../perf/probe";
+import { perfProbeEnabled, recordPerfCounter, recordPerfRecord } from "../perf/probe";
 import { recordIncident } from "../diagnostics/incidents";
 import { writeTerminalApplicationClipboard } from "../features/terminal/terminalTransferApi";
 
@@ -236,6 +236,21 @@ export function useAppConnectionController({
   useEffect(() => () => inputLatencyReporter.dispose(), [inputLatencyReporter]);
   const echoLagProbe = useMemo(() => createEchoLagProbe({
     onSample: (_paneId, lagMs) => inputLatencyReporter.sample("endToEnd", lagMs),
+    // Only a measured process pays for this: with the probe off there is no
+    // reading to take, the probe skips its second call, and no record is built.
+    sampleLinkCounters: () => {
+      const currentClientId = clientIdRef.current;
+      if (!currentClientId || !perfProbeEnabled()) return undefined;
+      return fetchLinkStats(currentClientId).then((stats) =>
+        stats?.bytesReadTotal === undefined || stats.framesReadTotal === undefined
+          ? undefined
+          : { bytesRead: stats.bytesReadTotal, framesRead: stats.framesReadTotal });
+    },
+    // The fast baseline the outlier lines have to be compared against. It goes
+    // to the perf log rather than the journal: `input.echoLag` is the incident,
+    // this is the measurement.
+    onEcho: ({ paneId, sentAt, echoAt, lagMs, inputCount, bytesAhead, framesAhead }) =>
+      recordPerfRecord("perf.echo", { paneId, sentAt, echoAt, lagMs, inputCount, bytesAhead, framesAhead }),
     onIncident: ({ kind, ...detail }) => {
       // The probe has already applied its own threshold and its own per-pane
       // dedupe, so an outlier here is exactly one occasion of "the host
@@ -607,11 +622,19 @@ export function useAppConnectionController({
           }
           serverIdentityRef.current = event.serverIdentity;
           dispatchHost({ type: "snapshot", snapshot: event.snapshot, sequence: event.sequence, generation: event.generation, serverIdentity: event.serverIdentity });
-          setActiveSessionId((current) => resolveSelectedSession(
-            event.snapshot.sessions,
-            current,
-            snapshotRef.current.sessions.find((session) => session.id === current)?.name,
-          )?.id);
+          // An event with no snapshot is the host's reconciliation
+          // acknowledgement: the notification burst is answered and the world
+          // is the one already on screen. It closes the reconciling status
+          // above and re-selects nothing — there are no sessions to select
+          // from, and the ones held here did not move.
+          const described = event.snapshot;
+          if (described) {
+            setActiveSessionId((current) => resolveSelectedSession(
+              described.sessions,
+              current,
+              snapshotRef.current.sessions.find((session) => session.id === current)?.name,
+            )?.id);
+          }
           setStatus("Live");
         } else if (event.kind === "fileService") {
           fileClient.publishWireEvent(event.event);

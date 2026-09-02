@@ -19,9 +19,19 @@ import { readAtlasInvalidationCount } from "./atlasStaleProbe";
 import { notePaint, startLongTaskTracker } from "./paintTailProbe";
 import { createGridMismatchProbe, type GridMismatchProbe } from "./gridMismatchProbe";
 import { outputAfterRecovery, reducePaneReveal, type PaneRevealState } from "./PaneRevealState";
-import { prepareTerminalSnapshot, requestTerminalSeed, setTerminalVisibility } from "./api";
+import { PaneHistoryPager } from "./PaneHistoryPager";
+import { requestTerminalSeed, setTerminalVisibility } from "./api";
 import { ownTerminalBytes } from "./TerminalBytes";
 import { DeferredTerminalOutputQueue } from "./DeferredTerminalOutputQueue";
+import {
+  readingMayPageHistory,
+  readingScreenIsCurrent,
+  readingStateForAuthoritativeScreen,
+  readingStateForOutput,
+  readingStateForViewport,
+  returnToLive,
+  type TerminalReadingState,
+} from "./TerminalReadingState";
 import { describePaneDegradation, PaneDegradedWatchdog } from "./PaneDegradedWatchdog";
 import { awaitWithin } from "./timeBound";
 import { isQuietRevealError, REVEAL_RETRY_DELAY_MS, revealFailureAction } from "./revealRetry";
@@ -34,8 +44,8 @@ import {
   installTerminalCopyOnSelect,
   translateTerminalKey,
 } from "./terminalInputPolicy";
+import { armPanePaint, notePanePainted } from "./panePaintGate";
 export { paneRecoveryPlan } from "./PaneRecovery";
-export { copyCompletedTerminalSelection, translateTerminalKey } from "./terminalInputPolicy";
 
 // A pane may remount while its prior renderer is still draining. Serializing
 // visibility ownership keeps a late hide from overtaking the new reveal.
@@ -64,7 +74,7 @@ const PANE_HANDOFF_TIMEOUT_MS = 2_000;
  * distribution representative of paints a user is watching and the overhead
  * fixed.
  */
-export const PAINT_SAMPLE_INTERVAL_MS = 500;
+const PAINT_SAMPLE_INTERVAL_MS = 500;
 
 /**
  * How long a *successful* reveal may produce nothing before it is disbelieved.
@@ -158,7 +168,7 @@ export function reconcilePaneGrid(
  * observer callback that produced it, and the caller re-anchors `gridForBox`
  * only where tmux's grid is applied.
  */
-export function refitPaneGridToBox(
+function refitPaneGridToBox(
   renderer: Pick<TerminalRenderer, "setGrid">,
   pane: Pane,
   measured: TerminalSize | undefined,
@@ -267,6 +277,7 @@ interface Props {
   onDiagnostic?: (message: string) => void;
   onOpenFilePath?: (paneId: string, path: string) => void;
   copyOnSelect?: boolean;
+  cleanWrappedCommands?: boolean;
   terminalApplicationClipboard?: boolean;
   terminalFontSize?: number;
   platform?: Platform;
@@ -289,6 +300,7 @@ export function TerminalPane({
   onDiagnostic,
   onOpenFilePath,
   copyOnSelect = false,
+  cleanWrappedCommands = true,
   terminalApplicationClipboard = false,
   terminalFontSize = 13,
   platform = "linux",
@@ -325,6 +337,7 @@ export function TerminalPane({
   const clientIdRef = useRef(clientId);
   const appFocusedRef = useRef(appFocused);
   const copyOnSelectRef = useRef(copyOnSelect);
+  const cleanWrappedCommandsRef = useRef(cleanWrappedCommands);
   const terminalApplicationClipboardRef = useRef(terminalApplicationClipboard);
   const platformRef = useRef(platform);
   const rendererEpochRef = useRef<number | undefined>(undefined);
@@ -356,6 +369,8 @@ export function TerminalPane({
   const watchdogRef = useRef<PaneDegradedWatchdog | undefined>(undefined);
   const revealStateRef = useRef<PaneRevealState>({ ready: false, hasLocalState: false });
   const deferredOutputRef = useRef(new DeferredTerminalOutputQueue());
+  const returnToLiveRef = useRef<(() => void) | undefined>(undefined);
+  const sendTerminalInputRef = useRef<((input: TerminalInput) => void) | undefined>(undefined);
   const seedDiagnosticForNextSeedRef = useRef(false);
   const [rendererDiagnostic, setRendererDiagnostic] = useState<string>();
   const [seedDiagnostic, setSeedDiagnostic] = useState<string>();
@@ -375,6 +390,7 @@ export function TerminalPane({
   openFilePathRef.current = onOpenFilePath;
   clientIdRef.current = clientId;
   copyOnSelectRef.current = copyOnSelect;
+  cleanWrappedCommandsRef.current = cleanWrappedCommands;
   terminalApplicationClipboardRef.current = terminalApplicationClipboard;
   platformRef.current = platform;
   const paneTransferScope: TerminalTransferScope | undefined = transferScope ? {
@@ -431,6 +447,8 @@ export function TerminalPane({
     const initialPaint = createPaintTicket([], lifecycle);
     let rendererActive = true;
     let rendererEpoch: number | undefined;
+    let readingState: TerminalReadingState = "live";
+    let authoritativeScreenPending = false;
     const renderer = new XtermRenderer({
       fontSize: terminalFontSize,
       paneId: pane.id,
@@ -472,6 +490,41 @@ export function TerminalPane({
         }
       },
     });
+    const requestFreshSeed = (reason: string) => {
+      const currentClientId = clientIdRef.current;
+      if (currentClientId) void requestTerminalSeed(currentClientId, pane.id).catch((error) => {
+        recordIncident("pane.reseedFailed", { paneId: pane.id, error: String(error).slice(0, 200) });
+        // Same rule as the reveal path: a transport still coming up is journal
+        // material, not a toast — the watchdog re-arms and asks again.
+        if (!isQuietRevealError(error)) {
+          diagnosticRef.current?.(`${reason}; fresh seed request failed: ${String(error)}`);
+        }
+      });
+    };
+    const resumeLive = (reason: string) => {
+      const decision = returnToLive(readingState);
+      readingState = decision.state;
+      if (decision.scrollLocally) {
+        renderer.scrollToBottom();
+        return;
+      }
+      if (!decision.requestSeed) return;
+      // Keep the historical pixels up while the authoritative replacement is
+      // on the wire. Output arriving before it is handled by the pane's
+      // existing bounded recovery queue rather than written onto a stale base.
+      revealStateRef.current = { ready: false, hasLocalState: false };
+      deferredOutputRef.current.reset();
+      terminalStateCache.delete(pane.id);
+      watchdogRef.current?.note("rendererReseed");
+      requestFreshSeed(reason);
+    };
+    const sendTerminalInput = (input: TerminalInput) => {
+      resumeLive("Returning from terminal history requires a current screen");
+      inputRef.current(pane.id, input);
+    };
+    const returnToLiveFromUi = () => resumeLive("Returning to live terminal output requires a current screen");
+    returnToLiveRef.current = returnToLiveFromUi;
+    sendTerminalInputRef.current = sendTerminalInput;
     const commitRendered = (generation: number, terminalEpoch: number | undefined, establishesEpoch = false): boolean => {
       if (establishesEpoch && hub.generationEpoch === terminalEpoch) {
         rendererEpoch = terminalEpoch;
@@ -500,6 +553,7 @@ export function TerminalPane({
       // probe is off, so the reveal cannot live inside them either.
       revealTerminal();
       if (!commitRendered(generation, terminalEpoch, establishesEpoch)) return;
+      notePanePainted(pane.id);
       // The perceived-latency spans (create.*, window.switch, pane.split) end
       // at the frame that shows this pane's content, so they are closed apart
       // from the startup ticket below: that ticket publishes once per mount,
@@ -538,7 +592,7 @@ export function TerminalPane({
       // textarea. Own plain text in capture phase so xterm cannot wrap it in a
       // bracketed-paste envelope on its way through.
       interceptTerminalPlainTextPaste(event, (text) => {
-        inputRef.current(pane.id, { kind: "text", data: text });
+        sendTerminalInput({ kind: "text", data: text });
       });
     };
     terminalContainer.addEventListener("paste", interceptPaste, true);
@@ -563,12 +617,13 @@ export function TerminalPane({
       if (translated === undefined) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      inputRef.current(pane.id, { kind: "text", data: translated });
+      sendTerminalInput({ kind: "text", data: translated });
     };
     terminalContainer.addEventListener("keydown", handleTerminalKeyDown, true);
     const disposeCopyOnSelect = installTerminalCopyOnSelect({
       renderer,
       enabled: () => copyOnSelectRef.current,
+      cleanWrappedCommands: () => cleanWrappedCommandsRef.current,
       write: writeNativeTerminalClipboard,
       onError: (error) => {
         diagnosticRef.current?.(`Could not copy the terminal selection: ${String(error)}`);
@@ -576,25 +631,36 @@ export function TerminalPane({
     });
     // What this terminal is known to be showing, while that is exactly one
     // serialized screen with nothing written after it — the mount-time cache
-    // restore, or a handshake restore that arrived without a tail. Any byte
-    // written on top of it clears this.
+    // restore. Any byte written on top of it clears this.
     //
-    // It exists because a remount is answered with that same screen more than
-    // once: the host emits a pane-resource event for the hide, which the hub
-    // buffers and replays into the next mount, and then another for the reveal.
-    // Both carry this pane's own hide snapshot, and restoring a screen that is
-    // already on the terminal is an ESC c and a byte-identical rewrite — a
-    // blank frame followed by the text that was already there, which is the
-    // flicker a tab switch used to show two or three times.
-    //
-    // The serialized screen is kept, not just its generation: the generation is
-    // the host's claim about which bytes these are, and it is not always a true
-    // one. `set_visible(true)` restamps `snapshot_generation` without replacing
-    // the snapshot, and the idempotent path in `hide_with_checkpoint` returns
-    // the stored snapshot under a checkpoint this side has since re-serialized
-    // (both in crates/tmux-control/src/replay.rs). A skip decided on the
-    // generation alone keeps a screen the host is trying to replace.
-    let screenOnDisplay: { generation: number; terminalEpoch: number | undefined; serialized: string } | undefined;
+    // It is what a verified resume is checked against: the host verified its
+    // own record of the handoff, and only this side can say whether the screen
+    // actually on the terminal is the one that record names. A tail spliced
+    // onto the wrong screen is a hole nothing later repairs.
+    let screenOnDisplay: { generation: number; terminalEpoch: number | undefined } | undefined;
+    // This pane's walk up its own scrollback: what is on the wire, what has
+    // been spliced, how large the next page is, and when to stop. The reveal
+    // arms below tell it when the screen underneath it changed; everything else
+    // about paging is its own.
+    const historyPager = new PaneHistoryPager({
+      paneId: pane.id,
+      renderer,
+      clientId: () => clientIdRef.current,
+      journal: recordIncident,
+    });
+    const skipOutputForHistoricalScreen = (): boolean => {
+      if (readingState !== "reading" && readingState !== "outdated") return false;
+      const reading = readingStateForOutput(readingState);
+      readingState = reading.state;
+      if (reading.becameOutdated) {
+        renderer.noteUnrenderedOutput();
+        // A page already on the wire was captured against tmux's newer live
+        // display, not the frozen xterm it would rewrite. Orphan it alongside
+        // the first skipped bytes; the authoritative seed starts paging over.
+        historyPager.noteScreenGone();
+      }
+      return true;
+    };
     const cached = terminalStateCache.get(pane.id);
     const currentCached = cached?.terminalEpoch !== undefined && cached.terminalEpoch === hub.generationEpoch
       ? cached
@@ -602,17 +668,19 @@ export function TerminalPane({
     if (currentCached) {
       const cachedEpoch = currentCached.terminalEpoch;
       const restored = renderer.restore(currentCached.serialized, () => {
+        renderer.restoreViewport(currentCached.viewport);
         publishInitialPaint(currentCached.outputGeneration, cachedEpoch, true);
       }, currentCached.outputGeneration);
       // A fresh terminal cannot refuse a restore today, but a caller that
       // ignores the answer is how the tail-splice bug happened; if it ever
       // does refuse, the cache is not what this pane should show.
       if (restored) {
-        screenOnDisplay = {
-          generation: currentCached.outputGeneration,
-          terminalEpoch: cachedEpoch,
-          serialized: currentCached.serialized,
-        };
+        screenOnDisplay = { generation: currentCached.outputGeneration, terminalEpoch: cachedEpoch };
+        // Carried, because it is a fact about these bytes rather than about the
+        // terminal that produced them: a screen this pane was seeded with has
+        // nothing above it, and putting it back on a fresh xterm does not give
+        // it a history.
+        historyPager.restore(currentCached);
       } else terminalStateCache.delete(pane.id);
     } else if (cached) {
       terminalStateCache.delete(pane.id);
@@ -625,6 +693,8 @@ export function TerminalPane({
     };
     const flushDeferredOutput = (afterGeneration = -1) => {
       const deferred = outputAfterRecovery(deferredOutputRef.current.drain(), afterGeneration);
+      if (deferred.some((output) => output.data.byteLength > 0)
+        && skipOutputForHistoricalScreen()) return;
       // These bytes land on top of whatever screen is up, so it is no longer
       // the bare snapshot the handshake could be asked to skip.
       if (deferred.length) screenOnDisplay = undefined;
@@ -641,18 +711,6 @@ export function TerminalPane({
         );
       }
     };
-    const requestFreshSeed = (reason: string) => {
-      const currentClientId = clientIdRef.current;
-      if (currentClientId) void requestTerminalSeed(currentClientId, pane.id).catch((error) => {
-        recordIncident("pane.reseedFailed", { paneId: pane.id, error: String(error).slice(0, 200) });
-        // Same rule as the reveal path: a transport still coming up is journal
-        // material, not a toast — the watchdog re-arms and asks again.
-        if (!isQuietRevealError(error)) {
-          diagnosticRef.current?.(`${reason}; fresh seed request failed: ${String(error)}`);
-        }
-      });
-    };
-
     // The time bound on every one-shot recovery latch this pane can be caught
     // in. It arms only while the pane is degraded, so a pane that is working
     // runs no timers at all.
@@ -677,28 +735,100 @@ export function TerminalPane({
     });
     watchdogRef.current = watchdog;
 
-    const unsubscribeInput = renderer.onInput((input) => inputRef.current(pane.id, input));
-    const unsubscribeViewport = renderer.onViewportChange(setViewport);
+    // Automatic, and deliberately not a button: the user reaching the top of a
+    // pane *is* the request, and a row of chrome that appears there to be
+    // clicked is one more thing between them and their scrollback. The cost of
+    // being wrong is one page the user never looks at.
+    const unsubscribeTopReached = renderer.onScrollbackTopReached(() => {
+      if (readingMayPageHistory(readingState)) historyPager.requestPage("scrolledToTop");
+    });
+    // A reflow moves rows between what tmux keeps in its history and what it
+    // shows on its display, so a page already on the wire was asked against a
+    // boundary that no longer exists. Subscribed here rather than at each of
+    // the three places a grid is applied, because what matters is that the grid
+    // changed and not who asked for it.
+    const unsubscribeGrid = renderer.onGridApplied(() => historyPager.noteGridChanged());
+    const unsubscribeInput = renderer.onInput(sendTerminalInput);
+    const unsubscribeViewport = renderer.onViewportChange((next) => {
+      if (authoritativeScreenPending) {
+        setViewport(next);
+        return;
+      }
+      readingState = readingStateForViewport(readingState, next.atBottom);
+      if (readingState === "reading" && deferredOutputRef.current.byteLength > 0) {
+        // Output can already be waiting behind a reveal response when the user
+        // leaves the bottom. It becomes skipped output at that moment, not
+        // something a later readiness answer may flush into this view.
+        skipOutputForHistoricalScreen();
+        clearDeferredOutput();
+      }
+      setViewport(next);
+      if (next.atBottom && (readingState === "reading" || readingState === "outdated")) {
+        resumeLive("Returning to the bottom requires a current terminal screen");
+      }
+    });
     const unsubscribeEvents = hub.subscribePane(pane.id, (event) => {
+      if (event.kind === "terminalHistory") {
+        historyPager.receive(event);
+        return;
+      }
+      if (readingState === "refreshing" && event.kind === "paneResource") {
+        // Returning live superseded the reveal this resource answers. The one
+        // authoritative seed already requested owns recovery now; acting on a
+        // late resume/seed-debt answer would blank the historical pixels and
+        // ask a second time.
+        return;
+      }
       const transition = reducePaneReveal(revealStateRef.current, event);
       revealStateRef.current = transition.state;
       const effect = transition.effect;
       const generation = "generation" in event ? event.generation : 0;
       const eventEpoch = hub.generationEpoch;
-      // Content — of any size, from any of the three paths that put bytes on
-      // this terminal — is proof the reveal reached a host that is streaming
-      // this pane, which is the one thing the void watch is waiting to learn.
-      // An empty seed counts: the host answering at all means the subscription
-      // is live. Deliberately not extended to `deferOutput` or `awaitSeed`,
-      // which are output this pane cannot show yet and seed debt respectively —
-      // neither is a screen, and both leave the recovery worth asking for.
-      if (effect.kind === "seed" || effect.kind === "output" || effect.kind === "restore") {
+      /**
+       * What the recovery arm hangs on its screen landing: the pane painted,
+       * through the generation the host says that material carries.
+       */
+      const markRecoveryRendered = (throughGeneration: number) => () => {
+        publishInitialPaint(throughGeneration, eventEpoch, true);
+      };
+      /**
+       * A recovery screen did not land, so this pane is holding nothing and
+       * waits for a seed.
+       *
+       * `askBecause` is the sentence to ask with, and it is always needed: a
+       * refused tail is silent — the scheduler drops the record and the
+       * callback with it, so the pane just lost its acknowledgement and its
+       * reveal with nothing said.
+       */
+      const recoveryScreenLost = (askBecause: string) => {
+        clearDeferredOutput();
+        screenOnDisplay = undefined;
+        revealStateRef.current = { ready: false, hasLocalState: false };
+        watchdog.note("rendererReseed");
+        requestFreshSeed(askBecause);
+      };
+      // Content — of any size, from any of the paths that put bytes on this
+      // terminal — is proof the reveal reached a host that is streaming this
+      // pane, which is the one thing the void watch is waiting to learn. An
+      // empty seed counts, and so does a resume the host verified: the host
+      // answering at all means the subscription is live. Deliberately not
+      // extended to `deferOutput` or `awaitSeed`, which are output this pane
+      // cannot show yet and seed debt respectively — neither is a screen, and
+      // both leave the recovery worth asking for.
+      if (effect.kind === "seed" || effect.kind === "output" || effect.kind === "resume") {
         contentArrivalsRef.current += 1;
         cancelRevealVoidWatch(revealVoidTimerRef);
       }
       if (effect.kind === "seed") {
+        readingState = readingStateForAuthoritativeScreen();
+        authoritativeScreenPending = true;
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
+        // A seed is the visible grid and nothing above it, so this pane's
+        // scrollback is once again something to fetch rather than something it
+        // holds — including after a reconnect, which is where the whole
+        // scrollback of every pane used to arrive unasked for.
+        historyPager.noteScreenSeeded();
         // A seed replaces the screen wholesale, so whatever was up is not what
         // this terminal shows any more.
         screenOnDisplay = undefined;
@@ -707,14 +837,30 @@ export function TerminalPane({
         // shortest retry delay rather than inheriting this episode's backoff.
         watchdog.noteHealthy();
         renderer.seed(effect.data, () => {
+          authoritativeScreenPending = false;
           publishInitialPaint(generation, eventEpoch, true);
+          // The first page, fetched once the pane's own screen is on the glass
+          // and never before it: a seeded pane has no scrollback at all, and a
+          // user who reaches for the wheel a moment after a switch should find
+          // something above the screen rather than a request starting then. It
+          // rides behind the paint for the same reason the sidebar does — the
+          // answer the user is waiting for goes first, and this is ~30 KB
+          // afterwards rather than ~195 KB in front.
+          //
+          // Only from a seed. A pane restored from this side's cache, or
+          // resumed onto the screen it kept, is showing a buffer that already
+          // carries whatever history it had.
+          historyPager.requestPage("prefetch");
         }, generation);
         setRendererDiagnostic(undefined);
         if (seedDiagnosticForNextSeedRef.current) seedDiagnosticForNextSeedRef.current = false;
         else setSeedDiagnostic(undefined);
       } else if (effect.kind === "output") {
-        // Output reaching the renderer is proof the pane is not frozen.
+        // Output reaching this pane is proof the host is not frozen. While the
+        // user reads history it deliberately does not reach xterm: tmux keeps
+        // its copy-mode view separate from the live pane for the same reason.
         watchdog.noteHealthy();
+        if (skipOutputForHistoricalScreen()) return;
         screenOnDisplay = undefined;
         // Decided before the write and charged at the decision, so a burst of
         // chunks inside one interval yields exactly one sample rather than one
@@ -756,6 +902,10 @@ export function TerminalPane({
           commitRendered(generation, eventEpoch);
         }, generation);
       } else if (effect.kind === "deferOutput") {
+        // A reveal answer may still be in flight when the user starts reading.
+        // Such output is stale in exactly the same way as ordinary live output;
+        // it must not sit in the recovery queue and later repaint the history.
+        if (skipOutputForHistoricalScreen()) return;
         const admission = deferredOutputRef.current.enqueue({
           data: effect.data,
           generation,
@@ -769,9 +919,14 @@ export function TerminalPane({
           requestFreshSeed("Output arrived before pane recovery exceeded its byte or record budget");
         }
       } else if (effect.kind === "awaitSeed") {
+        readingState = readingStateForAuthoritativeScreen();
         terminalStateCache.delete(pane.id);
         clearDeferredOutput();
         screenOnDisplay = undefined;
+        // Nothing is on the terminal to splice above; the seed this is waiting
+        // for is what makes the scrollback askable again, and any page still on
+        // the wire belongs to the screen that just went away.
+        historyPager.noteScreenGone();
         // A handshake answer this reducer has no rule for used to fall through
         // to nothing at all. It recovers like any other seed debt now; what it
         // still owes is a record, because the shape itself is the finding.
@@ -785,7 +940,7 @@ export function TerminalPane({
         // the `requestSeed` branch below.
         watchdog.note("paneAwaitingSeed");
         renderer.seed(ownTerminalBytes(new Uint8Array()));
-        setRendererDiagnostic(`${effect.reason}; waiting for a fresh terminal seed…`);
+        if (effect.reason) setRendererDiagnostic(`${effect.reason}; waiting for a fresh terminal seed…`);
         // Deliberately not revealed. This branch's blank RIS is seed debt, not
         // content, and showing it is a whole extra visible repaint on the way to
         // the screen the arriving seed paints (which reveals for itself). The
@@ -793,67 +948,85 @@ export function TerminalPane({
         // what is happening either way, and the fallback armed at the top of
         // this effect owns the case where that seed never comes.
         if (effect.requestSeed) requestFreshSeed(effect.reason);
-      } else if (effect.kind === "restore") {
-        const markRecoveryRendered = () => {
-          publishInitialPaint(effect.tailThroughGeneration, eventEpoch, true);
-        };
-        // When the host is handing back exactly the screen the cache already
-        // painted, restoring it again is an ESC c and a byte-identical rewrite
-        // — a blank frame followed by the text that was already there. Only the
-        // raw tail is new information then. The generation and epoch have to
-        // agree *and* the bytes have to match: the generation is the host's
-        // claim about which screen this is, and it is not always a true one
-        // (see `screenOnDisplay`). The byte comparison runs only after the two
-        // cheap checks have passed, and length settles almost every mismatch
-        // before a character is read.
-        const skipRedundantRestore = screenOnDisplay !== undefined
+      } else if (effect.kind === "resume") {
+        // The host verified its record of the handoff; only this side can
+        // verify that the screen on the terminal is the one that record names.
+        // A tail spliced onto the wrong screen is a hole nothing later repairs,
+        // so any doubt is answered with a photograph.
+        const holdingTheVerifiedScreen = screenOnDisplay !== undefined
           && screenOnDisplay.terminalEpoch === eventEpoch
-          && screenOnDisplay.generation === effect.snapshotGeneration
-          && screenOnDisplay.serialized.length === effect.serialized.length
-          && screenOnDisplay.serialized === effect.serialized;
-        // The snapshot and its raw tail are one screen in two pieces. If the
-        // snapshot was refused, the tail must not be written onto whatever the
-        // terminal happens to be showing, and nothing may be reported as
-        // rendered: the renderer has already asked the host for a seed, and
-        // this pane waits for it.
-        const restored = skipRedundantRestore || renderer.restore(
-          effect.serialized,
-          effect.rawTail.byteLength ? undefined : markRecoveryRendered,
-          effect.rawTail.byteLength ? effect.snapshotGeneration : effect.tailThroughGeneration,
-          effect.tailThroughGeneration,
-        );
-        // Only once the snapshot is down, and never after a refusal. An empty
-        // tail is still written on the skipped path: the scheduler queues it as
-        // an ordered barrier, and that barrier is what carries the
-        // acknowledgement and the reveal the skipped restore would otherwise
-        // have carried.
-        const writesTail = restored && (skipRedundantRestore || effect.rawTail.byteLength > 0);
-        const tailQueued = writesTail
-          ? renderer.write(effect.rawTail, markRecoveryRendered, effect.tailThroughGeneration)
-          : true;
-        if (!restored || !tailQueued) {
+          && screenOnDisplay.generation === effect.snapshotGeneration;
+        if (!holdingTheVerifiedScreen) {
+          readingState = readingStateForAuthoritativeScreen();
+          revealStateRef.current = { ready: false, hasLocalState: false };
+          terminalStateCache.delete(pane.id);
           clearDeferredOutput();
           screenOnDisplay = undefined;
-          revealStateRef.current = { ready: false, hasLocalState: false };
-          // A refused restore has already asked the host for a seed. A refused
-          // *tail* has not: the scheduler drops the record and the callback
-          // with it, so this pane just lost its acknowledgement and its reveal
-          // with nothing said. Say it, and ask.
-          if (restored && !tailQueued) {
-            watchdog.note("rendererReseed");
-            requestFreshSeed(`Pane ${pane.id} could not queue the tail of its recovery screen`);
-          }
+          // The screen is about to be blanked and reseeded, exactly as in the
+          // `awaitSeed` arm: a page asked for against it has nowhere left to
+          // land, and there is nothing to splice above until the seed arrives.
+          historyPager.noteScreenGone();
+          watchdog.note("paneAwaitingSeed");
+          renderer.seed(ownTerminalBytes(new Uint8Array()));
+          const reason = `Pane ${pane.id} is not showing the screen the host resumed it from`;
+          setRendererDiagnostic(`${reason}; waiting for a fresh terminal seed…`);
+          requestFreshSeed(reason);
         } else {
-          // A tail-less answer leaves the terminal showing exactly this
-          // snapshot, which is what lets the *second* copy of it — the reveal's,
-          // after the hide's — be skipped as well.
-          screenOnDisplay = effect.rawTail.byteLength === 0
-            ? { generation: effect.tailThroughGeneration, terminalEpoch: eventEpoch, serialized: effect.serialized }
-            : undefined;
-          flushDeferredOutput(effect.tailThroughGeneration);
-          // Recovery material laid a real screen down; the pane is whole again.
-          watchdog.noteHealthy();
-          setRendererDiagnostic(undefined);
+          const resumeHasOutput = effect.rawTail.byteLength > 0
+            || deferredOutputRef.current.byteLength > 0;
+          if (resumeHasOutput && skipOutputForHistoricalScreen()) {
+            // The cached base is still the exact view being read. The tail and
+            // any output that raced the reveal are represented by the one seed
+            // requested when the user returns live, so retain neither here.
+            clearDeferredOutput();
+            watchdog.noteHealthy();
+            setRendererDiagnostic(undefined);
+            return;
+          }
+          // Written even when it is empty: the scheduler queues a zero-byte
+          // record as an ordered barrier, and that barrier is what carries the
+          // acknowledgement and the reveal for an idle pane — the whole answer
+          // to the ordinary switch.
+          const tailQueued = renderer.write(
+            effect.rawTail,
+            markRecoveryRendered(effect.tailThroughGeneration),
+            effect.tailThroughGeneration,
+          );
+          if (!tailQueued) {
+            recoveryScreenLost(`Pane ${pane.id} could not queue the tail of its resumed screen`);
+          } else {
+            // Bytes on top of the cached screen mean it is no longer the bare
+            // snapshot a later handshake answer could be asked to skip.
+            if (effect.rawTail.byteLength > 0) screenOnDisplay = undefined;
+            flushDeferredOutput(effect.tailThroughGeneration);
+            watchdog.noteHealthy();
+            setRendererDiagnostic(undefined);
+          }
+        }
+      } else if (effect.kind === "hideEchoAfterReady") {
+        // This pane's own hide, acknowledged after it had already come back and
+        // started drawing. Ignored — the screen on the glass is the right one
+        // and the echo carries nothing to replace it with — but recorded,
+        // because a hide landing behind a reveal is the shape that used to take
+        // a pane the user was looking at and blank it.
+        recordIncident("pane.hideEchoAfterReady", { paneId: pane.id });
+      } else if (effect.kind === "awaitAnswer") {
+        // The same echo, at a pane whose reveal is still outstanding. The echo
+        // itself says nothing — the reveal's own answer is the authoritative one
+        // and it is still coming — so a pane showing the screen it kept waits
+        // for it silently and keeps that screen.
+        //
+        // A pane showing *nothing* is a different matter, and it is the one the
+        // dead end used to serve: it asks for the seed straight away, exactly as
+        // the dead end did, because two seconds of blank terminal is the cost of
+        // waiting to find out whether the reveal is coming. The bound stays on
+        // top of that for the case where the seed does not come either. What is
+        // deliberately not done is the rest of the dead end: no blanking, no
+        // banner — the watchdog raises one if it ever fires — and no cache
+        // eviction, because none of that was ever this event's to do.
+        if (!effect.showingScreen) {
+          watchdog.note("paneAwaitingSeed");
+          requestFreshSeed(`Pane ${pane.id} has nothing to show while its reveal goes unanswered`);
         }
       } else if (effect.kind === "diagnostic") {
         // Seed diagnostics describe fidelity limitations in this pane only.
@@ -914,18 +1087,19 @@ export function TerminalPane({
 
     const controller: TerminalPaneController = {
       focus: () => renderer.focus(),
-      copy: async () => {
-        if (!renderer.hasSelection()) return false;
-        await writeNativeTerminalClipboard(renderer.getSelection());
-        return true;
-      },
+      copy: () => copyCompletedTerminalSelection(
+        renderer,
+        true,
+        writeNativeTerminalClipboard,
+        cleanWrappedCommandsRef.current,
+      ),
       paste: async () => {
         if (await transferControllerRef.current?.pasteClipboard()) return true;
-        inputRef.current(pane.id, { kind: "text", data: await navigator.clipboard.readText() });
+        sendTerminalInput({ kind: "text", data: await navigator.clipboard.readText() });
         return true;
       },
       showSearch: () => setSearching(true),
-      scrollToBottom: () => renderer.scrollToBottom(),
+      scrollToBottom: () => resumeLive("Returning to live terminal output requires a current screen"),
     };
     controllerRef.current(pane.id, controller);
     reportMeasurements();
@@ -950,11 +1124,16 @@ export function TerminalPane({
       unsubscribeMeasurements();
       unsubscribeEvents();
       unsubscribeViewport();
+      unsubscribeTopReached();
+      unsubscribeGrid();
+      historyPager.dispose();
       unsubscribeInput();
       terminalContainer.removeEventListener("paste", interceptPaste, true);
       terminalContainer.removeEventListener("keydown", handleTerminalKeyDown, true);
       disposeCopyOnSelect();
       controllerRef.current(pane.id, undefined);
+      if (returnToLiveRef.current === returnToLiveFromUi) returnToLiveRef.current = undefined;
+      if (sendTerminalInputRef.current === sendTerminalInput) sendTerminalInputRef.current = undefined;
       const currentClientId = clientIdRef.current;
       const handoff = (async () => {
         try {
@@ -963,26 +1142,40 @@ export function TerminalPane({
           const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
           if (!currentCheckpoint) return;
           const snapshotMatchesEpoch = rendererEpoch === currentCheckpoint.terminalEpoch;
+          const snapshotIsCurrent = readingScreenIsCurrent(readingState);
           const checkpoint = snapshotMatchesEpoch
             ? { ...currentCheckpoint, outputGeneration: drained.outputGeneration }
             : { ...currentCheckpoint, outputGeneration: 0 };
-          const prepared = prepareTerminalSnapshot(drained.serialized);
-          if (snapshotMatchesEpoch) {
-            terminalStateCache.set(pane.id, prepared, checkpoint);
-          }
-          else terminalStateCache.delete(pane.id);
-          if (!prepared.retained && snapshotMatchesEpoch) {
-            diagnosticRef.current?.(
-              `The ${pane.id} renderer snapshot is ${prepared.originalByteLength} bytes; host recovery will use a fresh seed.`,
-            );
-          }
+          // The screen stays here. What crosses is the checkpoint it was taken
+          // at and one bit saying it was kept — the host answers the next
+          // reveal with the output since that checkpoint, and the 180-390 KB it
+          // used to hand back was this renderer's own screen returning to it.
+          // How far up its own history this screen got goes with it. The pages
+          // already spliced are part of the buffer this serializes, so the
+          // restore it feeds continues above them rather than fetching them a
+          // second time — which is what the row count it reports as `skip`
+          // does — and a pane that already reached the top of tmux's history
+          // must not go asking for it again.
+          if (snapshotMatchesEpoch && snapshotIsCurrent) {
+            terminalStateCache.set(pane.id, drained.serialized, {
+              checkpoint,
+              history: historyPager.snapshot(),
+              viewport: drained.viewport,
+            });
+          } else terminalStateCache.delete(pane.id);
+          // A cache that declined the screen (too large for its budget) leaves
+          // nothing to resume from, and saying so is what makes the reveal ask
+          // for a seed instead of a tail.
+          const rendererHoldsSnapshot = snapshotMatchesEpoch
+            && snapshotIsCurrent
+            && terminalStateCache.get(pane.id) !== undefined;
           if (!currentClientId || clientIdRef.current !== currentClientId) return;
           try {
             await setTerminalVisibility(
               currentClientId,
               pane.id,
               false,
-              snapshotMatchesEpoch ? prepared.data : new Uint8Array(),
+              rendererHoldsSnapshot,
               checkpoint,
             );
           } catch (error) {
@@ -1109,11 +1302,22 @@ export function TerminalPane({
       if (!active || lastRevealKeyRef.current !== revealKey) return;
       const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
       if (!currentCheckpoint || currentCheckpoint.terminalEpoch !== checkpoint.terminalEpoch) return;
+      const rendererMatchesEpoch = rendererEpochRef.current === currentCheckpoint.terminalEpoch;
+      // The screen this terminal is showing, decided synchronously. The mount
+      // restores the cached screen before this runs and deletes the entry if
+      // the restore was refused, so a cache entry in the current epoch *is* the
+      // screen on the glass — and the checkpoint it was cached under is the one
+      // the host recorded for the handoff, which is what the resume is matched
+      // against. `rendererEpochRef` cannot answer this: it is set from a paint
+      // callback that has not necessarily run yet, and a reveal that waited for
+      // a frame would be a switch that waited for a frame.
+      const held = terminalStateCache.get(pane.id);
+      const holdsHandoffScreen = held !== undefined
+        && held.terminalEpoch === currentCheckpoint.terminalEpoch;
       revealStateRef.current = {
         ready: false,
-        hasLocalState: rendererEpochRef.current === currentCheckpoint.terminalEpoch,
+        hasLocalState: rendererMatchesEpoch || holdsHandoffScreen,
       };
-      const rendererMatchesEpoch = rendererEpochRef.current === currentCheckpoint.terminalEpoch;
       // Read before the request goes out, so the host answering it *during* the
       // call still counts as this reveal having produced something.
       const contentBeforeReveal = contentArrivalsRef.current;
@@ -1122,8 +1326,13 @@ export function TerminalPane({
           clientId,
           pane.id,
           true,
-          new Uint8Array(),
-          rendererMatchesEpoch ? currentCheckpoint : { ...currentCheckpoint, outputGeneration: 0 },
+          holdsHandoffScreen,
+          // A pane holding the handoff screen names *that* screen's cutoff, not
+          // the hub's rendered watermark: it is the one the host recorded, and
+          // the tail it answers with continues exactly it.
+          holdsHandoffScreen
+            ? { terminalEpoch: currentCheckpoint.terminalEpoch, outputGeneration: held.outputGeneration }
+            : rendererMatchesEpoch ? currentCheckpoint : { ...currentCheckpoint, outputGeneration: 0 },
         );
         watchdogRef.current?.clear("revealFailed");
         // The host took the request; nothing here proves it acted on it. Start
@@ -1239,6 +1448,7 @@ export function TerminalPane({
       if (!checkpoint) return;
       const revealKey = `${clientId}:${checkpoint.terminalEpoch}:${revealAttemptRef.current}`;
       if (lastRevealKeyRef.current === revealKey) return;
+      armPanePaint(pane.id);
       lastRevealKeyRef.current = revealKey;
       // Whatever was still queued to retry belongs to the key this supersedes,
       // and so does whatever void watch the superseded reveal armed: this
@@ -1354,7 +1564,7 @@ export function TerminalPane({
       // what the program receives. `xterm.paste` would wrap it in a second
       // envelope, which is how markers used to get doubled across the tmux
       // boundary.
-      onPaste={(value) => inputRef.current(pane.id, { kind: "text", data: value })}
+      onPaste={(value) => sendTerminalInputRef.current?.({ kind: "text", data: value })}
       registry={transferRegistry}
       scope={paneTransferScope}
       target={container}
@@ -1377,7 +1587,7 @@ export function TerminalPane({
     </form>}
     {viewport.newOutput && !viewport.atBottom && <button
       className="new-output"
-      onClick={() => rendererRef.current?.scrollToBottom()}
+      onClick={() => returnToLiveRef.current?.()}
       type="button"
     >New output ↓</button>}
     {(visibleSeedDiagnostic(seedDiagnostic) || rendererDiagnostic) && <div className="renderer-diagnostic" role="status">

@@ -10,7 +10,7 @@ import {
   type CombinedTab,
 } from "../features/shell/model";
 import type { AppOwnedTab } from "../features/shell/types";
-import type { AuthoritativePrecondition, TmuxAction, TmuxActionResult } from "../features/tmux/actions";
+import { closePrecondition, type AuthoritativePrecondition, type TmuxAction, type TmuxActionResult } from "../features/tmux/actions";
 import type { TmuxSnapshot } from "./types";
 
 interface BulkTabCloseOptions {
@@ -82,15 +82,14 @@ export function useBulkTabClose(options: BulkTabCloseOptions) {
       const terminalWindow = snapshotRef.current.windows.find((item) => item.id === tab.id);
       if (!terminalWindow) continue;
 
-      // Every close advances the generation once for dispatch and again for the
-      // tmux notification. Guard the server identity but not that moving
-      // generation, or every close after the first can be rejected as stale.
+      // No dialog pinned this set's topology, and every close moves it again:
+      // `closePrecondition` guards the connection and lets the rest reconcile.
       const result = await performAction({
         kind: "closeWindow",
         sessionId: terminalWindow.sessionId,
         windowId: terminalWindow.id,
         confirmed: true,
-      }, { serverIdentity: scope.serverIdentity, generation: 0 });
+      }, closePrecondition(scope.serverIdentity));
       if (!sameHostConnection(scope, hostScopeRef.current)) return;
       if (!result) {
         failed += 1;

@@ -18,10 +18,11 @@ use super::filesystem::{
 use super::snapshot::discover_authoritative;
 use super::terminal::VisibilityChange;
 use super::{
-    EVENT_QUEUE, SequencerControl, TerminalClients, broadcast_control_event, emit_event,
-    lock_topology_generation, reconcile_internal_tmux_change, reconcile_terminal_clients,
-    response_error, response_ok, response_snapshot, same_action_topology, send_response,
-    send_snapshot_response, snapshot_from_identity, testing_enabled, tmux_actions,
+    EVENT_QUEUE, SequencerControl, TerminalClients, action_topology_diff, broadcast_control_event,
+    emit_event, lock_topology_generation, reconcile_internal_tmux_change,
+    reconcile_terminal_clients, response_error, response_ok, response_snapshot,
+    same_action_topology, send_response, send_snapshot_response, snapshot_from_identity,
+    testing_enabled, tmux_actions,
 };
 
 mod active_root_dispatch;

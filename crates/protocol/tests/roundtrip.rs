@@ -23,6 +23,7 @@ fn terminal_bytes_round_trip_without_utf8_conversion() {
             pane_id: "%3".into(),
             data: vec![0, 0xff, 0x1b, b'[', b'H'],
             generation: 7,
+            ..Default::default()
         })),
     };
 
@@ -390,6 +391,7 @@ fn phase6_agent_contract_round_trips_exact_route_and_reconnect_watermark() {
         attention_generation: (1_u64 << 53) + 7,
         attention_kind: "blocked".into(),
         lifecycle_changed_at_unix_millis: 1_786_000_000_000,
+        attention_seen_at_unix_millis: 1_786_000_000_100,
         present: true,
         ..Default::default()
     };
@@ -530,8 +532,9 @@ fn open_file_stream_operation_and_payload_are_append_only() {
     // Push reuses the Git lane's request and result messages, so it costs one
     // operation number and nothing else on the wire.
     assert_eq!(v1::Operation::GitPush as i32, 47);
+    assert_eq!(v1::Operation::RequestTerminalHistory as i32, 48);
     assert_eq!(v1::Operation::TestDelay as i32, 100);
-    assert!(v1::Operation::try_from(48).is_err());
+    assert!(v1::Operation::try_from(49).is_err());
 }
 
 #[test]
@@ -645,10 +648,12 @@ fn terminal_file_resolution_round_trips_its_exact_pane_route() {
 fn operation_additions_are_required_capabilities() {
     use tmux_agent_protocol::{
         CAP_FILE_STREAM, CAP_TERMINAL_FILE_RESOLUTION, CAP_TERMINAL_OUTPUT_CREDIT,
-        HOST_CAPABILITIES, capability_names, missing_host_capabilities,
+        CAP_TMUX_EXECUTABLE_RESOLUTION, HOST_CAPABILITIES, capability_names,
+        missing_host_capabilities,
     };
     assert_eq!(CAP_FILE_STREAM, 1 << 15);
     assert_eq!(CAP_TERMINAL_FILE_RESOLUTION, 1 << 16);
+    assert_eq!(CAP_TMUX_EXECUTABLE_RESOLUTION, 1 << 17);
     // Append-only: every previously assigned bit keeps its position.
     assert_eq!(CAP_TERMINAL_OUTPUT_CREDIT, 1 << 14);
 
@@ -678,10 +683,248 @@ fn operation_additions_are_required_capabilities() {
         capability_names(missing_host_capabilities(pre_terminal_file_helper)),
         vec!["terminalFileResolution"]
     );
+    let pre_resolver_helper = HOST_CAPABILITIES & !CAP_TMUX_EXECUTABLE_RESOLUTION;
+    assert_eq!(
+        missing_host_capabilities(pre_resolver_helper),
+        CAP_TMUX_EXECUTABLE_RESOLUTION,
+        "a helper that cannot find installer-provided tmux must be refused"
+    );
+    assert_eq!(
+        capability_names(missing_host_capabilities(pre_resolver_helper)),
+        vec!["tmuxExecutableResolution"]
+    );
     // Every required bit has a name, so no refusal can be unexplainable.
     assert!(!capability_names(HOST_CAPABILITIES).contains(&"unknown"));
     assert_eq!(
         capability_names(HOST_CAPABILITIES).len(),
         HOST_CAPABILITIES.count_ones() as usize
     );
+}
+
+/// The two bools the renderer-owned screen is built on, and their numbers.
+///
+/// The host stores no copy of a hidden pane's screen any more: the renderer
+/// keeps it and says so, and the host answers a reveal with the output since
+/// the checkpoint it recorded. Both halves of that are one bool each, and each
+/// one has to survive the wire at the number it was assigned — a field number
+/// that moves is read as a neighbouring field by every peer that did not move
+/// with it.
+#[test]
+fn renderer_holds_snapshot_and_resume_from_renderer_round_trip_at_their_own_numbers() {
+    let request = v1::Request {
+        operation: v1::Operation::SetTerminalVisibility.into(),
+        scope: "%2".into(),
+        visible: true,
+        terminal_epoch: 7,
+        terminal_generation_cutoff: 42,
+        terminal_renderer_holds_snapshot: true,
+        ..Default::default()
+    };
+    let bytes = request.encode_to_vec();
+    assert_eq!(v1::Request::decode(bytes.as_slice()).unwrap(), request);
+    // Field 16, varint: tag 0x80 0x01, value 1.
+    assert!(
+        bytes.windows(3).any(|window| window == [0x80, 0x01, 0x01]),
+        "terminal_renderer_holds_snapshot moved off field 16"
+    );
+
+    let answer = v1::PaneResource {
+        pane_id: "%2".into(),
+        state: v1::PaneResourceState::Visible.into(),
+        raw_tail: b"printed while hidden".to_vec(),
+        generation: 44,
+        snapshot_generation: 42,
+        tail_through_generation: 43,
+        resume_from_renderer: true,
+        ..Default::default()
+    };
+    let bytes = answer.encode_to_vec();
+    assert_eq!(v1::PaneResource::decode(bytes.as_slice()).unwrap(), answer);
+    // Field 10, varint: tag 0x50, value 1.
+    assert!(
+        bytes.windows(2).any(|window| window == [0x50, 0x01]),
+        "resume_from_renderer moved off field 10"
+    );
+    // The two answers are exclusive: a resume says "draw what you are holding
+    // and add this", a seed says "throw it away". A message carrying both would
+    // be read differently by the two sides of the same reveal.
+    assert!(!answer.requires_seed);
+}
+
+/// Both skew directions degrade to screen-first seeding, which is slower than
+/// the resume and never wrong.
+#[test]
+fn a_renderer_handoff_across_a_version_skew_degrades_to_a_seed() {
+    // Old desktop, new host: the hide still uploads a screen and neither the
+    // hide nor the reveal carries the flag. The host's rule — a tail only for a
+    // renderer that says it is still holding the screen the tail continues —
+    // is therefore never satisfied, and every reveal is answered with a seed.
+    let old_desktop_reveal = v1::Request {
+        operation: v1::Operation::SetTerminalVisibility.into(),
+        scope: "%2".into(),
+        visible: true,
+        data: b"a screen the host ignores".to_vec(),
+        terminal_epoch: 7,
+        terminal_generation_cutoff: 42,
+        ..Default::default()
+    };
+    let decoded = v1::Request::decode(old_desktop_reveal.encode_to_vec().as_slice()).unwrap();
+    assert!(!decoded.terminal_renderer_holds_snapshot);
+    assert_eq!(decoded, old_desktop_reveal);
+
+    // New desktop, old host: the flag rides in a field number the old host has
+    // never heard of, and an unknown field is skipped rather than refused — so
+    // the request is still a valid hide, just one whose empty payload that host
+    // reads as "no recoverable screen". Its answer sets no
+    // `resume_from_renderer`, which the desktop reads as seed debt.
+    let new_desktop_hide = v1::Request {
+        operation: v1::Operation::SetTerminalVisibility.into(),
+        scope: "%2".into(),
+        visible: false,
+        terminal_epoch: 7,
+        terminal_generation_cutoff: 42,
+        terminal_renderer_holds_snapshot: true,
+        ..Default::default()
+    };
+    let mut bytes = new_desktop_hide.encode_to_vec();
+    // A field number neither peer assigns, to state the tolerance itself.
+    bytes.extend_from_slice(&[0xf8, 0x06, 0x01]);
+    let decoded = v1::Request::decode(bytes.as_slice()).unwrap();
+    assert!(decoded.terminal_renderer_holds_snapshot);
+    assert!(decoded.data.is_empty());
+
+    let old_host_answer = v1::PaneResource {
+        pane_id: "%2".into(),
+        state: v1::PaneResourceState::Released.into(),
+        requires_seed: true,
+        recovery_reason: "renderer handoff omitted a recoverable snapshot".into(),
+        ..Default::default()
+    };
+    let decoded = v1::PaneResource::decode(old_host_answer.encode_to_vec().as_slice()).unwrap();
+    assert!(!decoded.resume_from_renderer);
+    assert!(decoded.requires_seed);
+}
+
+/// The lazy-scrollback contract: one operation number, one event number, one
+/// field.
+///
+/// The numbers matter more than the shapes. A screen-only seed leaves the
+/// scrollback in tmux, and this is the only way back to it — so an operation or
+/// event number that moves does not degrade the feature, it points a peer at a
+/// different one.
+#[test]
+fn terminal_history_request_and_answer_round_trip_at_their_own_numbers() {
+    assert_eq!(v1::Operation::RequestTerminalHistory as i32, 48);
+    assert_eq!(v1::EventKind::TerminalHistory as i32, 19);
+
+    let request = v1::Request {
+        operation: v1::Operation::RequestTerminalHistory.into(),
+        scope: "%3".into(),
+        terminal_history_lines: 2000,
+        terminal_history_skip_lines: 40,
+        ..Default::default()
+    };
+    let bytes = request.encode_to_vec();
+    assert_eq!(v1::Request::decode(bytes.as_slice()).unwrap(), request);
+    // Field 17, varint: tag 0x88 0x01, then 2000 as a varint.
+    assert!(
+        bytes
+            .windows(4)
+            .any(|window| window == [0x88, 0x01, 0xd0, 0x0f]),
+        "terminal_history_lines moved off field 17"
+    );
+    // Field 18, varint: tag 0x90 0x01, then 40.
+    assert!(
+        bytes.windows(3).any(|window| window == [0x90, 0x01, 0x28]),
+        "terminal_history_skip_lines moved off field 18"
+    );
+    // It asks for a photograph and nothing else: no visibility claim, no
+    // checkpoint, no payload. A history request that carried one of those would
+    // be a second, quieter way to change a pane's state.
+    assert!(!request.visible);
+    assert_eq!(request.terminal_epoch, 0);
+    assert_eq!(request.terminal_generation_cutoff, 0);
+    assert!(request.data.is_empty());
+
+    let answer = v1::HostEvent {
+        kind: v1::EventKind::TerminalHistory.into(),
+        terminal: Some(v1::TerminalBytes {
+            pane_id: "%3".into(),
+            data: b"older\r\nnewer".to_vec(),
+            // Zero, deliberately: the history is not part of the ordered output
+            // stream and claims no place in it.
+            generation: 0,
+            // How much scrollback tmux holds, which is the only thing that ends
+            // the paging: the answer's own rows cannot say, because `-J` joins
+            // wrapped ones.
+            history_size: 1_200,
+            history_size_known: true,
+        }),
+        ..Default::default()
+    };
+    let answer_bytes = answer.encode_to_vec();
+    assert_eq!(
+        v1::HostEvent::decode(answer_bytes.as_slice()).unwrap(),
+        answer
+    );
+
+    // A size the host could not read is absent rather than zero, and the two
+    // must stay tellable apart: an unknown size means "ask again", a real zero
+    // means there is nothing above the screen. A peer that predates the field
+    // reads neither, and its paging degrades to the first page only.
+    let unanswered = v1::TerminalBytes {
+        pane_id: "%3".into(),
+        data: b"older".to_vec(),
+        ..Default::default()
+    };
+    let decoded = v1::TerminalBytes::decode(unanswered.encode_to_vec().as_slice()).unwrap();
+    assert!(!decoded.history_size_known);
+    assert_eq!(decoded.history_size, 0);
+    let empty_history = v1::TerminalBytes {
+        pane_id: "%3".into(),
+        data: b"older".to_vec(),
+        history_size: 0,
+        history_size_known: true,
+        ..Default::default()
+    };
+    assert_ne!(decoded, empty_history);
+}
+
+/// An old desktop must not mistake a history answer for a seed.
+///
+/// Both carry `TerminalBytes` for one pane, so the only thing separating "put
+/// this above your screen" from "this *is* your screen" is the event kind. An
+/// unknown enum value decodes as its number and `try_from` refuses it, which is
+/// what makes the answer inert rather than destructive on a peer that predates
+/// it.
+#[test]
+fn an_unknown_terminal_history_event_is_inert_rather_than_a_seed() {
+    let answer = v1::HostEvent {
+        kind: v1::EventKind::TerminalHistory.into(),
+        terminal: Some(v1::TerminalBytes {
+            pane_id: "%3".into(),
+            data: b"scrollback".to_vec(),
+            generation: 0,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let decoded = v1::HostEvent::decode(answer.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded.kind, 19);
+    assert_ne!(decoded.kind, v1::EventKind::TerminalSeed as i32);
+    assert_ne!(decoded.kind, v1::EventKind::TerminalOutput as i32);
+    // The shape a peer that has never heard of 19 sees: `try_from` fails, and
+    // the fallback is the unspecified kind — an event it drops, never a screen
+    // it applies.
+    assert!(v1::EventKind::try_from(999).is_err());
+    assert_eq!(
+        v1::EventKind::try_from(999).unwrap_or_default(),
+        v1::EventKind::Unspecified
+    );
+
+    // And the same in the other direction: an operation number a host predating
+    // 48 cannot resolve is refused at admission rather than run as its
+    // neighbour.
+    assert!(v1::Operation::try_from(48).is_ok());
+    assert!(v1::Operation::try_from(49).is_err());
 }

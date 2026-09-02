@@ -1,57 +1,108 @@
 import { describe, expect, it } from "vitest";
 import { TerminalStateCache } from "./TerminalStateCache";
-import { prepareTerminalSnapshot } from "./api";
 
-const prepared = (serialized: string, maxBytes = Number.MAX_SAFE_INTEGER) =>
-  prepareTerminalSnapshot(serialized, maxBytes);
+const viewport = { atBottom: true, viewportLine: 0, grid: { columns: 80, rows: 24 } } as const;
+const options = (
+  checkpoint?: { terminalEpoch: number; outputGeneration: number },
+  history?: { screenSeeded: boolean; historyExhausted: boolean; historyNextPageLines: number },
+) => ({ checkpoint, history, viewport });
 
 describe("TerminalStateCache", () => {
   it("keeps only bounded, recently used hidden pane snapshots", () => {
     const cache = new TerminalStateCache(2, 10);
-    cache.set("%1", prepared("one")); cache.set("%2", prepared("two"));
+    cache.set("%1", "one", options()); cache.set("%2", "two", options());
     expect(cache.get("%1")?.serialized).toBe("one");
-    cache.set("%3", prepared("three"));
+    cache.set("%3", "three", options());
     expect(cache.get("%2")).toBeUndefined();
     expect(cache.size).toBe(2);
   });
 
   it("rejects oversized serialization rather than retaining unbounded memory", () => {
     const cache = new TerminalStateCache(2, 3);
-    cache.set("%1", prepared("long"));
+    cache.set("%1", "long", options());
     expect(cache.size).toBe(0);
   });
 
   it("enforces a UTF-8 aggregate LRU budget across many pane snapshots", () => {
     const cache = new TerminalStateCache(100, 12, 20);
-    for (let pane = 1; pane <= 50; pane += 1) cache.set(`%${pane}`, prepared("λλ"));
+    for (let pane = 1; pane <= 50; pane += 1) cache.set(`%${pane}`, "λλ", options());
     expect(cache.size).toBe(5);
     expect(cache.retainedByteLength).toBe(20);
     expect(cache.get("%1")).toBeUndefined();
     expect(cache.get("%50")?.serialized).toBe("λλ");
   });
 
-  it("reuses a prepared snapshot's encoded length for exact cache accounting", () => {
+  it("measures the screen in UTF-8 bytes rather than characters", () => {
     const cache = new TerminalStateCache(2, 10, 10);
-    cache.set("%1", prepared("λλ"), { terminalEpoch: 7, outputGeneration: 9 });
-    expect(cache.get("%1")).toMatchObject({ byteLength: 4, terminalEpoch: 7, outputGeneration: 9 });
+    cache.set("%1", "λλ", options({ terminalEpoch: 7, outputGeneration: 9 }));
+    expect(cache.get("%1")).toMatchObject({
+      byteLength: 4, terminalEpoch: 7, outputGeneration: 9, viewport,
+    });
     expect(cache.retainedByteLength).toBe(4);
   });
 
-  it("cannot retain a snapshot rejected by the canonical encoder", () => {
-    const cache = new TerminalStateCache(2, 10, 10);
-    cache.set("%1", prepared("old"));
-    cache.set("%1", prepared("oversized", 3));
-    expect(cache.get("%1")).toBeUndefined();
-    expect(cache.retainedByteLength).toBe(0);
+  // An eviction is not free: this cache is what a hidden pane's reveal resumes
+  // from, so a pane evicted while the user is still working in it pays a full
+  // host seed on its next reveal. Twenty was under the number of panes a real
+  // session has open, which made ordinary switching evict panes that were about
+  // to come back.
+  it("holds a real session's worth of panes, inside a hard byte bound", () => {
+    const cache = new TerminalStateCache();
+    expect(cache.capacity).toBe(64);
+    for (let pane = 1; pane <= 64; pane += 1) cache.set(`%${pane}`, `screen-${pane}`, options());
+    expect(cache.size).toBe(64);
+    expect(cache.get("%1")?.serialized).toBe("screen-1");
+
+    // The count is not the only bound: the bytes are checked on every insert,
+    // so a larger capacity cannot become a larger footprint.
+    const bounded = new TerminalStateCache(64, 1_000, 40);
+    for (let pane = 1; pane <= 64; pane += 1) bounded.set(`%${pane}`, "0123456789", options());
+    expect(bounded.size).toBe(4);
+    expect(bounded.retainedByteLength).toBe(40);
   });
 
-  it("freezes preparation metadata and accounts from its canonical bytes", () => {
+  // A screen carries how far up its own history it has been paged, because the
+  // pages are part of the bytes: a restore that forgot would fetch them again.
+  // The size of the *next* page rides along for the same reason — the ladder
+  // that grows it is sizing the cost of rewriting these bytes, and a restore
+  // that forgot it would climb from the bottom again.
+  it("carries a screen's paging state, defaulting to a screen nobody paged", () => {
+    const cache = new TerminalStateCache();
+    cache.set("%1", "plain", options());
+    expect(cache.get("%1")).toMatchObject({
+      screenSeeded: false, historyExhausted: false, historyNextPageLines: 0,
+    });
+    cache.set("%2", "paged", options(undefined, {
+      screenSeeded: true, historyExhausted: true, historyNextPageLines: 2_400,
+    }));
+    expect(cache.get("%2")).toMatchObject({
+      screenSeeded: true, historyExhausted: true, historyNextPageLines: 2_400,
+    });
+  });
+
+  // The invariant the docstring claims: a read is a use. `Map` iterates in
+  // insertion order and eviction takes the front of it, so a `get` that did not
+  // reorder would make this a FIFO — and a FIFO evicts the pane the user keeps
+  // returning to, which costs that pane a full host seed on its next reveal.
+  it("counts a read as a use, so the pane a reveal keeps returning to survives", () => {
+    const cache = new TerminalStateCache(2, 100, 100);
+    cache.set("%1", "one", options());
+    cache.set("%2", "two", options());
+    // %1 is the oldest by insertion and the newest by use.
+    expect(cache.get("%1")?.serialized).toBe("one");
+    cache.set("%3", "three", options());
+    expect(cache.get("%1")?.serialized, "the least *recently used* screen was evicted").toBe("one");
+    expect(cache.get("%2")).toBeUndefined();
+  });
+
+  // This cache is now the only copy of a hidden pane's screen, so declining one
+  // has to drop what it was holding rather than keep a stale screen beside a
+  // newer one it refused. The pane's next reveal is answered with a seed.
+  it("forgets the screen it was holding when a newer one is refused", () => {
     const cache = new TerminalStateCache(2, 10, 10);
-    const snapshot = prepared("λ");
-    expect(Object.isFrozen(snapshot)).toBe(true);
-    expect(() => { (snapshot as unknown as { serialized: string }).serialized = "x".repeat(100); }).toThrow();
-    cache.set("%1", snapshot);
-    expect(cache.get("%1")?.byteLength).toBe(snapshot.data.byteLength);
-    expect(cache.retainedByteLength).toBe(2);
+    cache.set("%1", "old", options());
+    cache.set("%1", "a screen past the budget", options());
+    expect(cache.get("%1")).toBeUndefined();
+    expect(cache.retainedByteLength).toBe(0);
   });
 });

@@ -13,6 +13,7 @@ import {
   recordPerfHighWater,
   recordPerfJsonBytes,
   recordPerfJsonBytesDeferred,
+  recordPerfRecord,
   recordPerfSample,
   resetPerfProbe,
 } from "./probe";
@@ -212,6 +213,35 @@ describe("performance operation snapshots", () => {
     }
 
     expect(perfCounterSnapshot()).toMatchObject({ "workflow.panePaintSpanCapacityDrops": 1 });
+  });
+
+  it("writes a structured record as one line and never lets its fields frame it", async () => {
+    const appended: string[] = [];
+    enablePerfProbe(async (lines) => { appended.push(...lines); });
+
+    recordPerfRecord("perf.timeline", {
+      action: "selectSession",
+      kind: "must not overwrite the record's own label",
+      d1: 1_700_000_000_000,
+      framesAheadByKind: { terminalSeed: 4 },
+      absent: undefined,
+    });
+    await flushPerfProbe();
+
+    const record = JSON.parse(appended[0]) as Record<string, unknown>;
+    expect(record).toMatchObject({
+      kind: "perf.timeline",
+      action: "selectSession",
+      d1: 1_700_000_000_000,
+      framesAheadByKind: { terminalSeed: 4 },
+    });
+    expect(record).not.toHaveProperty("absent");
+    expect(appended[0]).not.toContain("\n");
+  });
+
+  it("records nothing structured while the probe is disabled", () => {
+    recordPerfRecord("perf.echo", { lagMs: 12 });
+    expect(perfSummary()).toEqual([]);
   });
 
   it("keeps an unserializable measurement payload from affecting the request", async () => {

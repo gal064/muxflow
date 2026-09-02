@@ -112,6 +112,8 @@ export interface ShellState {
   terminalScreenReader: boolean;
   /** Copies a completed, non-empty terminal selection to the system clipboard. */
   copyOnSelect: boolean;
+  /** Joins only high-confidence display-wrapped shell commands before copying. */
+  cleanWrappedCommands: boolean;
   /** Allows terminal programs to write the system clipboard through OSC 52. */
   terminalApplicationClipboard: boolean;
   /** Terminal text size in integer CSS pixels. */
@@ -181,6 +183,7 @@ export const defaultShellState: ShellState = {
   pinnedOnly: false,
   terminalScreenReader: false,
   copyOnSelect: false,
+  cleanWrappedCommands: true,
   terminalApplicationClipboard: false,
   terminalFontSize: 13,
   defaultMarkdownView: "split",
@@ -230,6 +233,9 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       pinnedOnly: Boolean(shell?.pinnedOnly),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
       copyOnSelect: Boolean(shell?.copyOnSelect),
+      cleanWrappedCommands: typeof shell?.cleanWrappedCommands === "boolean"
+        ? shell.cleanWrappedCommands
+        : defaultShellState.cleanWrappedCommands,
       terminalApplicationClipboard: Boolean(shell?.terminalApplicationClipboard),
       terminalFontSize: clampedTerminalFontSize(shell?.terminalFontSize),
       defaultMarkdownView: normalizedViewMode(shell?.defaultMarkdownView),

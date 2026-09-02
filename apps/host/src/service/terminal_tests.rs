@@ -1,5 +1,11 @@
 use super::*;
 
+/// A capture ledger for the writes a test performs directly. Coalescing is
+/// per control client, so a test that owns neither gets its own.
+fn capture_ledger() -> Mutex<HashSet<String>> {
+    Mutex::new(HashSet::new())
+}
+
 fn visibility_permit(
     sender: &mpsc::Sender<SequencerControl>,
 ) -> mpsc::OwnedPermit<SequencerControl> {
@@ -86,6 +92,20 @@ impl RecordedClient {
     /// switch-client" is a statement about a stream that has gone past the point
     /// where one would have appeared, not about a stream that has not caught up.
     fn fence(&self, clients: &mut TerminalClients, occurrences: usize) {
+        // This fixture records the control stream and answers none of it, so
+        // every capture it was ever sent is still "in flight" and the next one
+        // would be coalesced away. Nothing here is about coalescing — the
+        // fence exists to push the stream past the write under test — so the
+        // ledger is emptied first. `a_capture_already_in_flight_is_not_queued_twice`
+        // is where the guard itself is proved.
+        clients
+            .clients
+            .get("$1")
+            .expect("the recorded client owns %1")
+            .capture_in_flight
+            .lock()
+            .unwrap()
+            .clear();
         clients.request_seed("%1").unwrap();
         self.wait_for(occurrences, "__ADE_CAPTURE__");
     }
@@ -403,7 +423,6 @@ async fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() 
         resources
             .hide_with_checkpoint(
                 &pane_id,
-                vec![b'S'],
                 VisibilityCheckpoint {
                     epoch: 1,
                     generation: 0,
@@ -447,10 +466,10 @@ async fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() 
                 "%1",
                 VisibilityChange {
                     visible: true,
-                    serialized_snapshot: Vec::new(),
+                    renderer_holds_snapshot: true,
                     checkpoint: VisibilityCheckpoint {
                         epoch: 1,
-                        generation: 1,
+                        generation: 0,
                     },
                 },
                 permit,
@@ -529,10 +548,9 @@ async fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() 
         v1::EventKind::try_from(recovery.kind).unwrap(),
         v1::EventKind::PaneResource
     );
-    assert_eq!(
-        recovery.pane_resource.unwrap().serialized_snapshot,
-        vec![b'S']
-    );
+    // The renderer's own screen is the recovery base; what crosses is the
+    // host's verification of it and the output since.
+    assert!(recovery.pane_resource.unwrap().resume_from_renderer);
     assert_eq!(
         v1::EventKind::try_from(output_event.kind).unwrap(),
         v1::EventKind::TerminalOutput
@@ -650,7 +668,7 @@ fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
             "%1",
             VisibilityChange {
                 visible: false,
-                serialized_snapshot: vec![b'S'],
+                renderer_holds_snapshot: true,
                 checkpoint: VisibilityCheckpoint {
                     epoch: 1,
                     generation: 1,
@@ -696,7 +714,6 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
             .unwrap()
             .hide_with_checkpoint(
                 "%1",
-                vec![b'S'],
                 VisibilityCheckpoint {
                     epoch: 1,
                     generation: 0,
@@ -726,7 +743,6 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
             let resources = clients.resources.lock().unwrap();
             let resource = resources.get("%1").unwrap();
             assert_eq!(resource.state, StoredResourceState::HiddenBuffered);
-            assert_eq!(resource.serialized_snapshot, vec![b'S']);
             continue;
         }
         assert!(
@@ -735,10 +751,10 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
                     "%1",
                     VisibilityChange {
                         visible: true,
-                        serialized_snapshot: Vec::new(),
+                        renderer_holds_snapshot: true,
                         checkpoint: VisibilityCheckpoint {
                             epoch: 1,
-                            generation: 1,
+                            generation: 0,
                         },
                     },
                     permit.unwrap(),
@@ -751,9 +767,134 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
         let resource = resources.get("%1").unwrap();
         assert_eq!(resource.state, StoredResourceState::Released);
         assert!(resource.requires_seed);
-        assert!(resource.serialized_snapshot.is_empty());
         assert!(resource.raw_tail.is_empty());
     }
+}
+
+/// The ledger records a capture tmux received, not one this process wrote.
+///
+/// It is read to *suppress* seeds, so an entry standing for a capture that
+/// never left this process silences the request that would replace it, and the
+/// pane waits for a photograph nobody is taking. Recording after the flush
+/// risks one redundant photograph; recording before it risks none at all.
+#[test]
+fn a_capture_whose_flush_failed_is_not_recorded_as_in_flight() {
+    struct UnflushableStdin;
+    impl Write for UnflushableStdin {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("tmux control stdin is gone"))
+        }
+    }
+
+    let stdin = Arc::new(Mutex::new(UnflushableStdin));
+    let ledger = capture_ledger();
+    assert!(write_capture_request_resuming(&stdin, &ledger, "%1", false).is_err());
+    assert!(
+        ledger.lock().unwrap().is_empty(),
+        "a capture tmux never received would coalesce away the seed that replaces it"
+    );
+}
+
+/// A pane's tail crosses the wire once, on the reveal that draws it.
+///
+/// The hide is an acknowledgement, not a delivery: the renderer is on its way
+/// out of that workspace and ignores a `hiddenBuffered` echo, so bytes sent
+/// here are paid for ahead of the switch the user is waiting for and then paid
+/// for again when the reveal hands back the same tail. The store keeps them —
+/// that is the point — and only the answer is empty.
+#[test]
+fn a_hide_answers_with_no_bytes_and_the_reveal_carries_the_whole_tail() {
+    let output_credit = Arc::new(OutputCredit::negotiated(true));
+    let mut clients =
+        TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
+    let (events, mut receiver) = mpsc::channel(8);
+    let attachment = start_long_lived_attachment(
+        events.clone(),
+        Arc::clone(&clients.resources),
+        Arc::clone(&clients.generation),
+        Arc::clone(&output_credit),
+        Arc::clone(&clients.emission_order),
+    )
+    .unwrap();
+    clients.clients.insert("$1".into(), attachment);
+    clients.generation.store(2, Ordering::Release);
+    {
+        let mut resources = clients.resources.lock().unwrap();
+        resources.set_visible("%1", true, 1);
+        resources.record_output("%1", b"printed-while-visible", 2);
+    }
+    let checkpoint = VisibilityCheckpoint {
+        epoch: 1,
+        generation: 1,
+    };
+
+    clients
+        .set_visibility(
+            "%1",
+            VisibilityChange {
+                visible: false,
+                renderer_holds_snapshot: true,
+                checkpoint,
+            },
+            visibility_permit(&events),
+            &events,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+    let hide = ordered_event_within(
+        &mut receiver,
+        Duration::from_secs(5),
+        "hide did not emit its recovery event",
+    );
+    let hidden = hide.pane_resource.as_ref().unwrap();
+    assert!(
+        hidden.raw_tail.is_empty(),
+        "the hide answer carried {} bytes",
+        hidden.raw_tail.len()
+    );
+    assert_eq!(hide.terminal_delivery_bytes, 0);
+    assert_eq!(
+        clients
+            .resources
+            .lock()
+            .unwrap()
+            .get("%1")
+            .unwrap()
+            .raw_tail,
+        b"printed-while-visible",
+        "the host stopped holding the tail it must hand back on the reveal"
+    );
+
+    clients
+        .set_visibility(
+            "%1",
+            VisibilityChange {
+                visible: true,
+                renderer_holds_snapshot: true,
+                checkpoint,
+            },
+            visibility_permit(&events),
+            &events,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let reveal = ordered_event_within(
+        &mut receiver,
+        Duration::from_secs(5),
+        "reveal did not emit its recovery event",
+    );
+    let revealed = reveal.pane_resource.as_ref().unwrap();
+    assert!(revealed.resume_from_renderer);
+    assert_eq!(revealed.raw_tail, b"printed-while-visible");
+    assert_eq!(
+        reveal.terminal_delivery_bytes as usize,
+        revealed.raw_tail.len()
+    );
+    clients.stop();
 }
 
 #[test]
@@ -848,7 +989,7 @@ fn client_resize_refuses_sizes_no_display_has_and_names_them() {
 #[test]
 fn resume_command_quotes_the_pause_argument_tmux_lexer_rejects() {
     let sink = Arc::new(Mutex::new(Vec::new()));
-    write_capture_request_resuming(&sink, "%5", true).unwrap();
+    write_capture_request_resuming(&sink, &capture_ledger(), "%5", true).unwrap();
     let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
     let lines: Vec<_> = written.lines().collect();
     assert_eq!(lines[0], "display-message -p '__ADE_RESUME__:5'");
@@ -857,10 +998,10 @@ fn resume_command_quotes_the_pause_argument_tmux_lexer_rejects() {
     // replaying it, so the capture that shares this lock hold is what
     // actually recovers the screen. The resume alone would leave a hole.
     assert_eq!(lines[2], "display-message -p '__ADE_CAPTURE__:5'");
-    assert!(lines[3].starts_with("capture-pane -p -e -J -S -2000 -t %5"));
+    assert!(lines[3].starts_with("capture-pane -p -e -J -t %5"));
 
     let sink = Arc::new(Mutex::new(Vec::new()));
-    write_capture_request_resuming(&sink, "%5", false).unwrap();
+    write_capture_request_resuming(&sink, &capture_ledger(), "%5", false).unwrap();
     let written = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
     assert!(!written.contains("refresh-client"));
     assert!(!written.contains("__ADE_RESUME__"));
@@ -889,9 +1030,16 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
 
     let unchanged = current.clone();
     assert!(
-        apply_membership_update(&mut current, &unchanged, &stream_tx, &mut stdin, true)
-            .unwrap()
-            .is_empty()
+        apply_membership_update(
+            &mut current,
+            &unchanged,
+            &stream_tx,
+            &mut stdin,
+            &capture_ledger(),
+            true
+        )
+        .unwrap()
+        .is_empty()
     );
     assert!(stdin.is_empty());
     assert!(matches!(
@@ -901,7 +1049,15 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
 
     let desired = HashSet::from(["%2".into()]);
     assert_eq!(
-        apply_membership_update(&mut current, &desired, &stream_tx, &mut stdin, true).unwrap(),
+        apply_membership_update(
+            &mut current,
+            &desired,
+            &stream_tx,
+            &mut stdin,
+            &capture_ledger(),
+            true
+        )
+        .unwrap(),
         vec!["%1".to_owned()]
     );
     match stream_rx.try_recv().unwrap() {
@@ -925,7 +1081,17 @@ fn malformed_membership_id_has_no_partial_effects() {
     let (stream_tx, stream_rx) = std_mpsc::channel();
     let mut stdin = Vec::new();
 
-    assert!(apply_membership_update(&mut current, &desired, &stream_tx, &mut stdin, true).is_err());
+    assert!(
+        apply_membership_update(
+            &mut current,
+            &desired,
+            &stream_tx,
+            &mut stdin,
+            &capture_ledger(),
+            true
+        )
+        .is_err()
+    );
     assert_eq!(current, HashSet::from(["%1".into()]));
     assert!(stdin.is_empty());
     assert!(matches!(
@@ -966,8 +1132,15 @@ fn failed_membership_batch_remains_retryable() {
     };
 
     assert!(
-        apply_membership_update(&mut current, &failed_desired, &stream_tx, &mut stdin, true,)
-            .is_err()
+        apply_membership_update(
+            &mut current,
+            &failed_desired,
+            &stream_tx,
+            &mut stdin,
+            &capture_ledger(),
+            true,
+        )
+        .is_err()
     );
     assert_eq!(current, HashSet::from(["%1".into()]));
 
@@ -975,7 +1148,7 @@ fn failed_membership_batch_remains_retryable() {
         &["%1".into()],
         Arc::new(crate::service::terminal::FlowControl::default()),
     );
-    stream.apply_control(stream_rx.recv().unwrap());
+    stream.apply_control(stream_rx.recv().unwrap(), &capture_ledger());
     assert_eq!(
         stream.pane_states.keys().cloned().collect::<HashSet<_>>(),
         HashSet::from(["%2".into()])
@@ -983,16 +1156,19 @@ fn failed_membership_batch_remains_retryable() {
     if let PaneSeedState::Pending { buffered, .. } = stream.pane_states.get_mut("%2").unwrap() {
         buffered.push((7, b"preserve-me".to_vec()));
     }
-    stream.apply_control(StreamControl::Membership {
-        pane_ids: vec!["%2".into()],
-    });
+    stream.apply_control(
+        StreamControl::Membership {
+            pane_ids: vec!["%2".into()],
+        },
+        &capture_ledger(),
+    );
     assert!(matches!(
         stream.pane_states.get("%2"),
         Some(PaneSeedState::Pending { buffered, .. })
             if buffered == &[(7, b"preserve-me".to_vec())]
     ));
 
-    stream.apply_control(stream_rx.recv().unwrap());
+    stream.apply_control(stream_rx.recv().unwrap(), &capture_ledger());
     assert_eq!(
         stream.pane_states.keys().cloned().collect::<HashSet<_>>(),
         HashSet::from(["%1".into()]),
@@ -1000,12 +1176,19 @@ fn failed_membership_batch_remains_retryable() {
     );
 
     assert_eq!(
-        apply_membership_update(&mut current, &next_desired, &stream_tx, &mut stdin, true,)
-            .unwrap(),
+        apply_membership_update(
+            &mut current,
+            &next_desired,
+            &stream_tx,
+            &mut stdin,
+            &capture_ledger(),
+            true,
+        )
+        .unwrap(),
         vec!["%1".to_owned()]
     );
     assert_eq!(current, next_desired);
-    stream.apply_control(stream_rx.recv().unwrap());
+    stream.apply_control(stream_rx.recv().unwrap(), &capture_ledger());
     assert_eq!(
         stream.pane_states.keys().cloned().collect::<HashSet<_>>(),
         HashSet::from(["%3".into()]),
@@ -1116,8 +1299,29 @@ fn mounting_one_pane_does_not_reveal_inactive_window_resources() {
     assert!(resources.is_hidden("%2"));
 }
 
+/// A seed is a photograph of the screen, not of the scrollback.
+///
+/// The capture that produces it asks tmux for the displayed grid alone — a
+/// 200x50 screen is ~10 KB where `-S -2000` was ~191 KB, and that difference
+/// sits on the wire ahead of the answer to the switch the user is waiting for.
+/// Everything else about the seed is unchanged, which is what the mode
+/// assertions below are for: dropping the history must not cost a single one
+/// of the terminal modes tmux exposes.
 #[test]
-fn seed_restores_every_tmux_exposed_terminal_mode() {
+fn a_screen_seed_carries_no_scrollback_and_still_restores_every_mode() {
+    let capture = capture_command("%1");
+    assert!(
+        !capture.contains("-S "),
+        "the seed capture must ask for no history range: {capture}"
+    );
+    assert!(capture.starts_with("capture-pane -p -e -J -t %1 ;"));
+    assert!(capture.contains("capture-pane -p -e -N -t %1"));
+    // The alternate-screen views and metadata leg are the rest of the seed;
+    // none may accidentally grow a history range.
+    assert!(capture.contains("capture-pane -p -e -J -a -q -t %1"));
+    assert!(capture.contains("capture-pane -p -e -N -a -q -t %1"));
+    assert!(capture.contains("__ADE_META__"));
+
     let seed = build_seed(
         "%1",
         vec![b"primary history".to_vec()],
@@ -1144,6 +1348,113 @@ fn seed_restores_every_tmux_exposed_terminal_mode() {
             "missing mode sequence {expected:?}"
         );
     }
+    // A screen capture of a partly filled pane is mostly blank lines, so the
+    // repaint ends wherever the last line left the cursor — several rows above
+    // where tmux says it is. Placement is therefore absolute and last, and
+    // nothing is painted after it that could move it.
+    assert!(
+        seed.bytes.ends_with(b"\x1b[6;5H"),
+        "the cursor must be placed absolutely, as the final act of the seed"
+    );
+}
+
+/// Five independent callers ask for one pane's screen on a single workspace
+/// switch — membership, the reveal, the renderer's own request, the reseed
+/// loop, the desktop's watchdog — and before this each one cost another whole
+/// screen on the wire ahead of the switch's answer. A capture already written
+/// and not yet answered *is* the seed the second caller wants.
+#[test]
+fn a_capture_already_in_flight_is_not_queued_twice() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    {
+        // This fixture's child holds the recording open and its control stream
+        // shut, so the reader reaches EOF at once and empties the ledger on its
+        // way out — a client that cannot answer must not hold a pane out of the
+        // seed that replaces it. The capture in flight is therefore stated here
+        // rather than inherited from the attachment's own startup.
+        let attachment = clients.clients.get("$1").expect("the fixture owns %1");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !attachment.stopped.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reader never finished"
+            );
+            std::thread::yield_now();
+        }
+        attachment
+            .capture_in_flight
+            .lock()
+            .unwrap()
+            .insert("%1".to_owned());
+    }
+    // Neither of these may reach tmux: the capture already written is the seed
+    // they are asking for.
+    clients.request_seed("%1").unwrap();
+    clients.request_seed("%1").unwrap();
+    // The fence empties the ledger and asks again, so a capture *does* reach
+    // the pipe: if either request above had been written it would be ahead of
+    // this one in the same stream, and the count would be three.
+    recorded.fence(&mut clients, 2);
+    assert_eq!(recorded.written().matches("__ADE_CAPTURE__").count(), 2);
+}
+
+/// The scrollback the screen-only seed no longer sends is not lost — it is in
+/// tmux, and this is how it is fetched: one command that asks for the history
+/// range alone, answering a question the user asked rather than joining the
+/// output stream.
+#[test]
+fn a_history_request_captures_only_the_scrollback_range() {
+    let command = capture_history_command("%1", 2000, 0);
+    assert!(command.contains("__ADE_HISTORY__:2000"));
+    // `-E -1` stops at the line above the screen: the history and the seed
+    // meet exactly once, with no row in both and none missing between them.
+    assert!(command.contains("-S -2000 -E -1"));
+    // No `__ADE_META__` leg, because this is not a screen: nothing in the answer
+    // may be mistaken for a seed the reader has to store.
+    assert!(!command.contains("__ADE_META__:"));
+    // No `-J`, unlike the screen capture. Joined lines make the answer's line
+    // count say nothing about how many rows it covers, and every other number
+    // in this protocol — `-S`/`-E`, the renderer's skip, `history_size` — is a
+    // row. One physical row per line is what lets them be compared at all. The
+    // reflow and copy that `-J` used to buy are bought instead by the way the
+    // desktop composes the page: a row that fills the grid is written without a
+    // line break, and xterm wraps it itself.
+    assert!(!command.contains(" -J "), "{command}");
+    // And the size probe stays, for the reason that outlived the join: tmux
+    // clamps a range running past the top of its history and answers one
+    // entirely above it with a single row, so the rows themselves cannot say
+    // the top was reached. Targeted, because `#{history_size}` is pane-scoped,
+    // and last, because the leading marker has to stay untargeted so that it
+    // always succeeds.
+    assert!(
+        command.ends_with("; display-message -p -t %1 '__ADE_HISTORY_META__:#{history_size}'"),
+        "{command}"
+    );
+}
+
+/// A pane that printed after it was seeded is not handed those rows twice.
+///
+/// tmux measures both bounds from the *current* display, so everything that
+/// scrolled off since the seed is above it — rows the renderer already has in
+/// its own scrollback. The renderer counts them and says so, and the range
+/// starts above them: `-S -(skip+lines) -E -(skip+1)`, which is contiguous with
+/// what the renderer is holding and overlaps none of it.
+#[test]
+fn a_history_request_starts_above_the_scrollback_the_renderer_already_holds() {
+    let command = capture_history_command("%1", 2000, 40);
+    assert!(command.contains("-S -2040 -E -41"));
+    // Still the range the user asked for, not a shorter one.
+    assert!(command.contains("__ADE_HISTORY__:2000"));
+
+    // A skip no buffer could justify is clamped rather than obeyed. tmux does
+    // not answer an out-of-range range with nothing — it clamps both bounds to
+    // the top of the history and answers with the single row there — so the
+    // answer's own size says nothing about whether the top was reached. What
+    // stops the pane asking again is `history_size`, and the renderer's mirror
+    // of this clamp; the clamp here only keeps the numbers finite.
+    let clamped = capture_history_command("%1", 10, u32::MAX);
+    assert!(clamped.contains("-S -10010 -E -10001"), "{clamped}");
 }
 
 #[test]
@@ -1229,30 +1540,57 @@ fn capture_and_metadata_are_correlated_across_distinct_tmux_command_blocks() {
         buffered.push((1, b"already captured".to_vec()));
         *buffered_bytes = b"already captured".len();
     }
-    state.pending_alternate = Some((pane_id, vec![b"visible screen".to_vec()], 1));
+    state.pending_visible_cells = Some((pane_id, vec![b"visible screen".to_vec()], 1));
     let PaneSeedState::Pending { buffered, .. } = state.pane_states.get("%1").unwrap() else {
         panic!("pane stopped awaiting its seed");
     };
     assert_eq!(buffered.len(), 1);
-    let CommandBlock::CaptureAlternate {
+    let CommandBlock::CaptureVisibleCells {
         pane_id,
         visible_lines,
         ..
     } = state.start_block(tag(3))
     else {
-        panic!("second capture block was not correlated with the first");
+        panic!("visible-cell capture was not correlated with the logical capture");
+    };
+    state.pending_alternate = Some(PendingAlternateCapture {
+        pane_id: pane_id.clone(),
+        visible_lines: visible_lines.clone(),
+        visible_cell_lines: vec![b"visible cell screen".to_vec()],
+        visible_boundary: 1,
+    });
+    let CommandBlock::CaptureAlternate {
+        visible_cell_lines, ..
+    } = state.start_block(tag(4))
+    else {
+        panic!("saved-normal capture was not correlated with the visible captures");
+    };
+    state.pending_saved_normal_cells = Some(PendingSavedNormalCells {
+        pane_id: pane_id.clone(),
+        visible_lines: visible_lines.clone(),
+        visible_cell_lines: visible_cell_lines.clone(),
+        saved_normal_lines: vec![b"saved normal screen".to_vec()],
+        visible_boundary: 1,
+    });
+    let CommandBlock::CaptureSavedNormalCells {
+        saved_normal_lines, ..
+    } = state.start_block(tag(5))
+    else {
+        panic!("saved-normal cell capture was not correlated with the logical capture");
     };
     state.pending_metadata = Some(PendingCaptureMetadata {
         pane_id: pane_id.clone(),
         visible_lines: visible_lines.clone(),
-        saved_normal_lines: vec![b"saved normal screen".to_vec()],
+        visible_cell_lines,
+        saved_normal_lines: saved_normal_lines.clone(),
+        saved_normal_cell_lines: vec![b"saved normal cell screen".to_vec()],
         visible_boundary: 1,
     });
     let CommandBlock::CaptureMetadata {
         saved_normal_lines, ..
-    } = state.start_block(tag(4))
+    } = state.start_block(tag(6))
     else {
-        panic!("metadata block was not correlated with both screen captures");
+        panic!("metadata block was not correlated with every screen capture");
     };
     let seed = build_seed(
         &pane_id,
@@ -1291,6 +1629,7 @@ fn capture_boundary_tracks_the_active_screen_without_duplicate_replay() {
 fn joined_capture_reconstructs_soft_wrap_at_authoritative_width() {
     let command = capture_command("%1");
     assert!(command.matches("capture-pane -p -e -J").count() == 2);
+    assert!(command.matches("capture-pane -p -e -N").count() == 2);
     assert!(command.contains("#{pane_width}"));
     let logical_line = vec![b'w'; 160];
     let seed = build_seed(
@@ -1318,6 +1657,70 @@ fn joined_capture_reconstructs_soft_wrap_at_authoritative_width() {
     assert!(wrap_enable < line);
 }
 
+#[test]
+fn screen_seed_preserves_a_styled_erase_through_the_end_of_the_row() {
+    let background = b"\x1b[48;2;65;69;76m";
+    let mut logical_row = background.to_vec();
+    logical_row.extend_from_slice(b"Proposed Plan");
+    let mut captured_cell_row = logical_row.clone();
+    captured_cell_row.extend_from_slice(&[b' '; 67]);
+
+    let seed = build_seed_with_cell_captures(
+        "%1",
+        vec![logical_row],
+        vec![captured_cell_row],
+        vec![],
+        vec![],
+        &[b"__ADE_META__:%1:0:0:0:1:0:0:0:0:0:1:0:0:1:80:".to_vec()],
+    )
+    .unwrap();
+    let expected = [background.as_slice(), b"\x1b[1;14H\x1b[K".as_slice()].concat();
+    assert!(
+        seed.bytes
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "the plan background must be repainted through the right edge"
+    );
+    assert!(
+        !seed.bytes.windows(67).any(|window| window == [b' '; 67]),
+        "preserving trailing cells must not turn every capture into a full-width payload"
+    );
+}
+
+#[test]
+fn screen_seed_preserves_each_differently_styled_trailing_blank_span() {
+    let red = b"\x1b[41m";
+    let blue = b"\x1b[44m";
+    let mut captured_cell_row = red.to_vec();
+    captured_cell_row.push(b'A');
+    captured_cell_row.extend_from_slice(&[b' '; 9]);
+    captured_cell_row.extend_from_slice(blue);
+    captured_cell_row.extend_from_slice(&[b' '; 10]);
+
+    let seed = build_seed_with_cell_captures(
+        "%1",
+        vec![[red.as_slice(), b"A"].concat()],
+        vec![captured_cell_row],
+        vec![],
+        vec![],
+        &[b"__ADE_META__:%1:0:0:0:1:0:0:0:0:0:1:0:0:1:20:".to_vec()],
+    )
+    .unwrap();
+    let expected = [
+        red.as_slice(),
+        b"\x1b[1;2H\x1b[9X".as_slice(),
+        blue.as_slice(),
+        b"\x1b[1;11H\x1b[K".as_slice(),
+    ]
+    .concat();
+    assert!(
+        seed.bytes
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "each trailing blank span must retain its own background"
+    );
+}
+
 /// The pane that froze forever, in one test.
 ///
 /// A reveal emits its recovery event and *then* asks tmux for the seed the
@@ -1334,12 +1737,11 @@ fn a_reveal_whose_seed_request_fails_owes_the_pane_a_seed_and_settles_it_later()
     {
         let mut resources = clients.resources.lock().unwrap();
         resources.ensure("%1", true, 0);
-        // An omitted renderer snapshot releases the resource, so the reveal
-        // below is the one that owes the pane an authoritative seed.
+        // The hide the reveal below cannot be matched against: it is answered
+        // with a seed, and that seed is the one the pane ends up owed.
         resources
             .hide_with_checkpoint(
                 "%1",
-                Vec::new(),
                 VisibilityCheckpoint {
                     epoch: 1,
                     generation: 0,
@@ -1384,7 +1786,7 @@ fn a_reveal_whose_seed_request_fails_owes_the_pane_a_seed_and_settles_it_later()
             "%1",
             VisibilityChange {
                 visible: true,
-                serialized_snapshot: Vec::new(),
+                renderer_holds_snapshot: false,
                 checkpoint: VisibilityCheckpoint {
                     epoch: 1,
                     generation: 1,
@@ -1472,7 +1874,7 @@ fn an_evicted_pane_is_reported_to_the_desktop_as_requiring_a_seed() {
         let mut store = resources.lock().unwrap();
         store.set_visible("%1", true, 0);
         store.ensure("%2", false, 0);
-        store.snapshot("%2", vec![b'x'; 64], 1);
+        store.append("%2", &[b'x'; 64], 1);
         assert!(store.take_degradations().is_empty());
     }
     let (events, mut receiver) = mpsc::channel(8);

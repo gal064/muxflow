@@ -3,6 +3,7 @@ use tauri::State;
 use tmux_agent_protocol::v1;
 
 use super::{TerminalClients, get_client};
+use crate::perf_log::switch_timing::RequestTiming;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,6 +125,12 @@ pub struct TmuxActionResultWire {
     #[serde(skip_serializing_if = "String::is_empty")]
     pane_id: String,
     topology_generation: u64,
+    /// The native half of this action's timeline — D2 to D5, the bytes and
+    /// frames read ahead of the answer, and the delivery window's outstanding
+    /// bytes at D3. Absent unless the process is running a measured build with
+    /// `ADE_PERF_LOG` set, which is what keeps the field free in a shipped app.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timing: Option<serde_json::Value>,
 }
 
 /// Async so a create, split, or tab switch never freezes the WebView's main
@@ -158,12 +165,18 @@ pub async fn tmux_action(
         }),
         ..Default::default()
     };
-    let response = tauri::async_runtime::spawn_blocking(move || {
-        client.flush_input()?;
-        client.request(request)
+    // D2: the invoke reached native. Everything before it is the renderer's
+    // own hop, which `perf.timeline` measures as d1 to d2.
+    let mut timing = RequestTiming::begin();
+    let (response, timing) = tauri::async_runtime::spawn_blocking(move || {
+        let result = client
+            .flush_input()
+            .and_then(|_| client.request_timed(request, &mut timing));
+        (result, timing)
     })
     .await
-    .map_err(|error| format!("tmux action task failed: {error}"))??;
+    .map_err(|error| format!("tmux action task failed: {error}"))?;
+    let response = response?;
     let result = response
         .tmux_action_result
         .ok_or_else(|| "host omitted tmux action result".to_owned())?;
@@ -172,6 +185,8 @@ pub async fn tmux_action(
         window_id: result.window_id,
         pane_id: result.pane_id,
         topology_generation: result.topology_generation,
+        // D5: the answer is about to cross back to the renderer.
+        timing: timing.finish(),
     })
 }
 

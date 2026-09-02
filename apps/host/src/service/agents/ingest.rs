@@ -209,8 +209,9 @@ impl AgentRuntime {
         let attention = previous
             .as_ref()
             .map_or(0, |record| record.attention_generation);
+        let codex_turn_start = adapter.id() == "codex" && parsed.event_name == "UserPromptSubmit";
         let codex_permission = adapter.id() == "codex" && parsed.event_name == "PermissionRequest";
-        let approval_turn_id = if codex_permission {
+        let approval_turn_id = if codex_turn_start || codex_permission {
             payload
                 .get(adapters::CODEX_APPROVAL_TURN_ID_FIELD)
                 .and_then(serde_json::Value::as_str)
@@ -218,11 +219,7 @@ impl AgentRuntime {
         } else {
             ""
         };
-        let approval_reviewer_present = codex_permission
-            && payload
-                .get(adapters::CODEX_APPROVAL_REVIEWER_FIELD)
-                .is_some();
-        let approval_reviewer = if codex_permission {
+        let approval_reviewer = if codex_turn_start {
             payload
                 .get(adapters::CODEX_APPROVAL_REVIEWER_FIELD)
                 .and_then(serde_json::Value::as_str)
@@ -230,12 +227,22 @@ impl AgentRuntime {
             None
         };
         let cached_auto_review = codex_permission
-            && !approval_reviewer_present
             && !approval_turn_id.is_empty()
             && previous
                 .as_ref()
                 .is_some_and(|record| record.codex_auto_review_turn_id == approval_turn_id);
-        let parsed_lifecycle = if cached_auto_review {
+        let previous_claude_has_running_subagent = previous
+            .as_ref()
+            .is_some_and(|record| record.claude_has_running_subagent);
+        let claude_idle_prompt_during_subagent = adapter.id() == "claude-code"
+            && previous_claude_has_running_subagent
+            && previous_lifecycle != v1::AgentLifecycleState::Blocked
+            && parsed.event_name == "Notification"
+            && payload
+                .get("notification_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("idle_prompt");
+        let parsed_lifecycle = if cached_auto_review || claude_idle_prompt_during_subagent {
             v1::AgentLifecycleState::Working
         } else {
             parsed.lifecycle
@@ -287,13 +294,18 @@ impl AgentRuntime {
                 record.attention_kind == "blocked"
                     && record.seen_generation >= record.attention_generation
             });
+        let superseded_seen_completion = lifecycle == v1::AgentLifecycleState::Working
+            && previous.as_ref().is_some_and(|record| {
+                record.attention_kind == "completed"
+                    && record.seen_generation >= record.attention_generation
+            });
         let attention_kind = if attention_transition {
             if lifecycle == v1::AgentLifecycleState::Blocked {
                 "blocked".into()
             } else {
                 "completed".into()
             }
-        } else if resolved_seen_block {
+        } else if resolved_seen_block || superseded_seen_completion {
             String::new()
         } else {
             previous
@@ -310,17 +322,34 @@ impl AgentRuntime {
         } else {
             latest_sequence
         };
-        let codex_auto_review_turn_id =
+        let codex_auto_review_turn_id = if codex_turn_start {
             if approval_reviewer == Some("auto_review") && !approval_turn_id.is_empty() {
                 approval_turn_id.to_owned()
-            } else if approval_reviewer_present {
-                String::new()
             } else {
-                previous
-                    .as_ref()
-                    .map(|record| record.codex_auto_review_turn_id.clone())
-                    .unwrap_or_default()
-            };
+                String::new()
+            }
+        } else {
+            previous
+                .as_ref()
+                .map(|record| record.codex_auto_review_turn_id.clone())
+                .unwrap_or_default()
+        };
+        let claude_has_running_subagent = if adapter.id() != "claude-code" {
+            false
+        } else if parsed.event_name == "Stop" {
+            if terminal_late {
+                previous_claude_has_running_subagent
+            } else {
+                payload
+                    .get(adapters::CLAUDE_HAS_RUNNING_SUBAGENT_FIELD)
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            }
+        } else if matches!(parsed.event_name.as_str(), "SessionStart" | "StopFailure") {
+            false
+        } else {
+            previous_claude_has_running_subagent
+        };
         let record = StoredAgent {
             agent_id: agent_id.clone(),
             adapter: adapter.legacy_kind() as i32,
@@ -336,6 +365,13 @@ impl AgentRuntime {
             attention_generation,
             attention_kind,
             seen_generation: previous.as_ref().map_or(0, |record| record.seen_generation),
+            attention_seen_at_unix_millis: if attention_transition || superseded_seen_completion {
+                0
+            } else {
+                previous
+                    .as_ref()
+                    .map_or(0, |record| record.attention_seen_at_unix_millis)
+            },
             updated_at_unix_millis: occurred_at,
             hook_authority_expires_at_unix_millis: observed_now
                 .saturating_add(parsed.authority_millis),
@@ -346,6 +382,7 @@ impl AgentRuntime {
             latest_source_generation,
             present: true,
             hook_terminal,
+            claude_has_running_subagent,
             codex_auto_review_turn_id,
             lifecycle_observed_at_unix_millis: observed_now,
             lifecycle_changed_at_unix_millis: lifecycle_changed_at,

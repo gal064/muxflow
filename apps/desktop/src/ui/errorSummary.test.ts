@@ -42,6 +42,17 @@ describe("summarizeSurfaceError", () => {
       .toBe("The host refused that upload.");
   });
 
+  it("distinguishes a missing tmux executable from an absent tmux server", () => {
+    const missing = summarizeSurfaceError(
+      "tmux_unavailable: tmux executable was not found; install tmux or set MUXFLOW_TMUX_PATH to an absolute executable path",
+    );
+    expect(missing.summary).toContain("Install tmux");
+    expect(missing.summary).toContain("MUXFLOW_TMUX_PATH");
+    expect(missing.detail).toContain("tmux executable was not found");
+    expect(summarizeSurfaceError("tmux_unavailable: tmux server is unavailable").summary)
+      .toBe("The connection to the host is down. Reconnect and try again.");
+  });
+
   it("falls back to the message itself when nothing is recognized, and never to an empty line", () => {
     // The fallback chain is the point: an unmapped rejection is still shown.
     expect(summarizeSurfaceError("The moon is in the wrong phase.").summary).toBe("The moon is in the wrong phase.");

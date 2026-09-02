@@ -5,6 +5,7 @@
 
 mod control;
 mod discovery;
+mod executable;
 mod input;
 mod layout;
 mod replay;
@@ -17,9 +18,11 @@ pub use discovery::{
     BatchedDiscovery, Pane, Session, TmuxSnapshot, Window, batched_discovery_args, discover,
     discover_with, discover_with_socket_name, parse_batched_discovery,
 };
+pub use executable::{TmuxExecutableError, tmux_command, tmux_executable};
 pub use input::{DESKTOP_INPUT_COALESCE_BYTES, HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
 pub use layout::{LayoutAxis, LayoutNode, LayoutParseError, parse_layout};
 pub use replay::{
     BufferedOutput, OutputDisposition, PaneDegradation, PaneDegradationCause, PaneResource,
-    PaneResourceState, PaneResourceStore, ReplayBatch, ScreenSeeder, VisibilityCheckpoint,
+    PaneResourceState, PaneResourceStore, REVEAL_TAIL_BOUND, ReplayBatch, ScreenSeeder,
+    VisibilityCheckpoint,
 };

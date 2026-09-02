@@ -117,7 +117,7 @@ describe("command registry", () => {
     expect(shortcut("view.togglePanel", "linux")).toBe("Ctrl+L");
     expect(shortcut("pane.splitRight", "mac")).toBe("Meta+D");
     expect(shortcut("pane.splitDown", "mac")).toBe("Meta+Shift+D");
-    expect(shortcut("pane.zoom", "mac")).toBe("Meta+Shift+Enter");
+    expect(shortcut("pane.zoom", "mac")).toBe("Meta+E");
     expect(shortcut("agents.jumpUnread", "mac")).toBe("Meta+Shift+U");
     expect(shortcut("workspace.select4", "mac")).toBe("Meta+4");
     expect(shortcut("tab.select4", "mac")).toBe("Ctrl+4");

@@ -117,6 +117,48 @@ expect detected_manually false
 # decides a record is stale.
 [[ "$(field hook_authority_expires_at_unix_millis)" -gt 0 ]] || fail "the hook took no lease"
 
+echo "== parallel subagents keep the parent working =="
+send UserPromptSubmit
+expect lifecycle working
+attention_before=$(field attention_generation)
+send Stop ',"background_tasks":[{"id":"short","type":"subagent","status":"running","description":"private short task"},{"id":"medium","type":"subagent","status":"running","description":"private medium task"},{"id":"long","type":"subagent","status":"running","description":"private long task"}]'
+expect lifecycle working
+expect hook_terminal false
+[[ "$(field attention_generation)" == "$attention_before" ]] || fail "an intermediate parent Stop earned completion attention"
+send Notification ',"notification_type":"idle_prompt"'
+expect lifecycle working
+expect claude_has_running_subagent true
+[[ "$(field attention_generation)" == "$attention_before" ]] || fail "an idle notification during subagent work earned blocked attention"
+send PermissionRequest
+expect lifecycle blocked
+blocked_attention=$(field attention_generation)
+send Notification ',"notification_type":"idle_prompt"'
+expect lifecycle blocked
+[[ "$(field attention_generation)" == "$blocked_attention" ]] || fail "a repeated idle notification earned duplicate blocked attention"
+send PostToolUse
+expect lifecycle working
+send SubagentStop ',"agent_id":"short"'
+expect lifecycle working
+send Stop ',"background_tasks":[{"id":"medium","type":"subagent","status":"running"},{"id":"long","type":"subagent","status":"running"}]'
+expect lifecycle working
+expect hook_terminal false
+send SubagentStop ',"agent_id":"medium"'
+expect lifecycle working
+send Stop ',"background_tasks":[{"id":"long","type":"subagent","status":"running"}]'
+expect lifecycle working
+expect hook_terminal false
+send SubagentStop ',"agent_id":"long"'
+expect lifecycle working
+send Stop
+expect lifecycle idle
+expect hook_terminal true
+expect claude_has_running_subagent false
+expect attention_kind completed
+[[ "$(field attention_generation)" -gt "$attention_before" ]] || fail "the final parent Stop earned no completion attention"
+if grep -Fq 'private short task' "$store"; then
+  fail "the normalized hook store retained a private subagent description"
+fi
+
 echo "== a failed turn also ends the turn =="
 send UserPromptSubmit
 expect lifecycle working

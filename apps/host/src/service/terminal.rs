@@ -16,7 +16,8 @@ use tmux_agent_protocol::v1;
 #[cfg(test)]
 use tmux_control::{CommandTag, ScreenSeeder};
 use tmux_control::{
-    PaneResourceState as StoredResourceState, PaneResourceStore, VisibilityCheckpoint,
+    PaneResourceState as StoredResourceState, PaneResourceStore, REVEAL_TAIL_BOUND,
+    VisibilityCheckpoint,
 };
 use tokio::sync::mpsc;
 
@@ -36,7 +37,7 @@ pub(super) use output_credit::{
 };
 mod seed;
 #[cfg(test)]
-use seed::{build_seed, parse_capture_metadata};
+use seed::{build_seed, build_seed_with_cell_captures, parse_capture_metadata};
 use seed::{build_seed_with_metadata, capture_metadata};
 mod startup;
 use startup::{join_workers, stop_process};
@@ -64,6 +65,14 @@ pub(super) struct TerminalAttachment {
     stopped: Arc<AtomicBool>,
     stream_tx: std_mpsc::Sender<StreamControl>,
     flow: Arc<FlowControl>,
+    /// Panes whose capture has been written to tmux and not yet answered.
+    ///
+    /// Shared with the reader, which is the only thing that can observe a
+    /// capture finishing. A capture in flight *is* this pane's next seed, so a
+    /// second request for the same pane buys nothing and costs the wire another
+    /// screen — five independent callers ask for one pane's screen on a single
+    /// workspace switch. See [`TerminalAttachment::request_seed`].
+    capture_in_flight: Arc<Mutex<HashSet<String>>>,
     /// The connection-wide delivery window, held so [`Self::stop`] can wake
     /// this attachment's workers parked in [`OutputCredit::reserve`].
     output_credit: Arc<OutputCredit>,
@@ -87,7 +96,11 @@ pub(super) struct TerminalAttachment {
 
 pub(super) struct VisibilityChange {
     pub(super) visible: bool,
-    pub(super) serialized_snapshot: Vec<u8>,
+    /// The renderer's own claim about the screen it is holding: on a hide, that
+    /// it kept a copy; on a reveal, that it still has the one the checkpoint
+    /// names. A reveal without it is answered with a seed, which is what makes
+    /// a desktop too old to send it correct rather than blank.
+    pub(super) renderer_holds_snapshot: bool,
     pub(super) checkpoint: VisibilityCheckpoint,
 }
 
@@ -162,6 +175,7 @@ impl TerminalAttachment {
                 pane_ids,
                 &self.stream_tx,
                 &mut *stdin,
+                &self.capture_in_flight,
                 self.reports_terminal_colors,
             )
         };
@@ -189,16 +203,62 @@ impl TerminalAttachment {
     /// drops a paused pane's output rather than replaying it — which is exactly
     /// what the user reported: switching to another tab and back refreshes the
     /// pane once, and it freezes again.
+    ///
+    /// A pane whose capture is already in flight is left alone: that capture is
+    /// the seed this request would ask for, and photographing the same screen
+    /// twice only puts a second copy of it on the wire ahead of the answer the
+    /// user is waiting for. The reader clears the entry on *every* exit from
+    /// the capture block, a discarded seed included, and [`Self::stop`] clears
+    /// the rest, so a pane cannot be held out of a seed it still needs.
+    /// `owed_seeds` is unaffected — it is the ledger for a request that could
+    /// not be written at all, which is a different failure.
     pub(super) fn request_seed(&mut self, pane_id: &str) -> anyhow::Result<()> {
         validate_tmux_id(pane_id, '%')?;
         if !self.contains_pane(pane_id) {
             bail!("pane is not owned by this session control client");
         }
+        if self.capture_in_flight.lock().unwrap().contains(pane_id) {
+            return Ok(());
+        }
         write_capture_request_resuming(
             &self.stdin,
+            &self.capture_in_flight,
             pane_id,
             self.flow.resume_before_capture(pane_id),
         )
+    }
+
+    /// Asks tmux for the scrollback above one pane's screen.
+    ///
+    /// Deliberately not coalesced against `capture_in_flight`. That ledger
+    /// means "a seed is already coming for this pane", and it is read to
+    /// *suppress* seeds: a history entry in it would silence the photograph a
+    /// reveal needs, which is the blank pane the ledger exists to avoid. The
+    /// two captures cannot collide either — tmux answers commands in order and
+    /// the reader correlates a block by the marker before it, so a history
+    /// block and a seed block are strictly sequential however they were
+    /// interleaved at the writer.
+    ///
+    /// The whole command is one line, so the marker and the capture reach tmux
+    /// adjacent by construction rather than by holding the lock across two
+    /// writes.
+    pub(super) fn request_history(
+        &mut self,
+        pane_id: &str,
+        lines: u32,
+        skip: u32,
+    ) -> anyhow::Result<()> {
+        validate_tmux_id(pane_id, '%')?;
+        if !self.contains_pane(pane_id) {
+            bail!("pane is not owned by this session control client");
+        }
+        let mut stdin = self
+            .stdin
+            .lock()
+            .map_err(|_| anyhow::anyhow!("tmux control stdin is poisoned"))?;
+        writeln!(stdin, "{}", capture_history_command(pane_id, lines, skip))?;
+        stdin.flush()?;
+        Ok(())
     }
 
     /// Takes back the hidden per-window pointer tmux actually sizes from, and
@@ -253,6 +313,11 @@ impl TerminalAttachment {
 
     pub(super) fn stop(&mut self) {
         stop_process(&self.stopped, &self.child);
+        // Nothing this client wrote will be answered now, and the reader that
+        // would have cleared these entries is on its way out. A pane must not
+        // inherit a capture that died with its attachment: the next client's
+        // seed for it has to be written, not coalesced away.
+        self.capture_in_flight.lock().unwrap().clear();
         // The store above is not a wakeup. A worker parked in `reserve`
         // re-checks `stopped` only when the shared credit's condvar fires, and
         // without this its join in `Drop` hangs the service thread.
@@ -272,6 +337,7 @@ fn apply_membership_update(
     desired: &HashSet<String>,
     stream_tx: &std_mpsc::Sender<StreamControl>,
     stdin: &mut impl Write,
+    capture_in_flight: &Mutex<HashSet<String>>,
     reports_terminal_colors: bool,
 ) -> anyhow::Result<Vec<String>> {
     let (added, removed) = membership_delta(current, desired);
@@ -305,6 +371,10 @@ fn apply_membership_update(
         let _ = send_authoritative_membership(stream_tx, current);
         return Err(error);
     }
+    capture_in_flight
+        .lock()
+        .unwrap()
+        .extend(added.iter().cloned());
     // Commit only after the reader notification and every correlated tmux
     // command were accepted. On a partial write the caller can retry the same
     // delta; treating it as an exact no-op would strand panes without seeds.
@@ -426,10 +496,12 @@ impl TerminalClients {
             last_size: None,
             session_attached: HashMap::new(),
             input_session: None,
+            // A hidden pane costs its tail and nothing else now, so the whole
+            // hidden-pane store is 512 KB instead of 16 MB.
             resources: Arc::new(Mutex::new(PaneResourceStore::with_total_limit(
                 32,
-                4 * 1024 * 1024,
-                16 * 1024 * 1024,
+                REVEAL_TAIL_BOUND,
+                32 * REVEAL_TAIL_BOUND,
             ))),
             generation: Arc::new(AtomicU64::new(0)),
             input: None,
@@ -489,15 +561,6 @@ impl TerminalClients {
             }
             if make_visible {
                 self.select_session(session_id)?;
-                for pane_id in pane_ids {
-                    // The same debt `set_visibility` records: this is an
-                    // internal seed request, and a pane whose request failed
-                    // must not be left waiting on a capture nobody re-asks for.
-                    if let Err(error) = self.request_seed(pane_id) {
-                        self.owe_seed(pane_id);
-                        return Err(error);
-                    }
-                }
             }
             self.settle_owed_seeds();
             return Ok(());
@@ -815,6 +878,19 @@ impl TerminalClients {
             .request_seed(pane_id)
     }
 
+    pub(super) fn request_history(
+        &mut self,
+        pane_id: &str,
+        lines: u32,
+        skip: u32,
+    ) -> anyhow::Result<()> {
+        self.clients
+            .values_mut()
+            .find(|client| client.contains_pane(pane_id))
+            .context("pane has no attached session control client")?
+            .request_history(pane_id, lines, skip)
+    }
+
     /// Seeds a pane because the renderer explicitly asked for its screen.
     ///
     /// The request is itself the statement of visibility — the desktop asks
@@ -863,7 +939,7 @@ impl TerminalClients {
     ) -> anyhow::Result<()> {
         let VisibilityChange {
             visible,
-            serialized_snapshot,
+            renderer_holds_snapshot,
             checkpoint,
         } = change;
         // Whichever operation owns this fence performs both its resource
@@ -887,12 +963,20 @@ impl TerminalClients {
         let (mut resource, requires_seed) = {
             let mut resources = self.resources.lock().unwrap();
             let resource = if visible {
+                // The checkpoint is passed only when the renderer says it is
+                // still holding that screen; the store answers anything else
+                // with a seed, because a tail written onto a screen nobody
+                // verified is a defect nothing later repairs.
                 resources
-                    .reveal(pane_id, generation)
+                    .reveal(
+                        pane_id,
+                        generation,
+                        renderer_holds_snapshot.then_some(checkpoint),
+                    )
                     .context("pane resource missing")?
             } else {
                 resources
-                    .hide_with_checkpoint(pane_id, serialized_snapshot, checkpoint, generation)
+                    .hide_with_checkpoint(pane_id, checkpoint, generation)
                     .map_err(anyhow::Error::msg)?
             };
             let requires_seed =
@@ -901,13 +985,20 @@ impl TerminalClients {
         };
         if visible {
             resource.state = StoredResourceState::Visible;
+        } else {
+            // A hide answers with no bytes at all. The store keeps the tail —
+            // this is a clone of it — because the *reveal* is what hands it
+            // back, and it is the only side that can. Shipping it here as well
+            // paid for the same output twice on the way out of a workspace the
+            // user has already left: the renderer ignores a `hiddenBuffered`
+            // echo, so those bytes were never drawn, and a second hide against
+            // the same checkpoint returned them a third time.
+            resource.raw_tail.clear();
         }
-        let charge = OutputCharge::terminal(
-            resource
-                .serialized_snapshot
-                .len()
-                .saturating_add(resource.raw_tail.len()),
-        );
+        // The tail is the whole payload: the host stores no screen to charge
+        // for, a hide carries nothing, and a reveal it cannot verify carries no
+        // bytes at all.
+        let charge = OutputCharge::terminal(resource.raw_tail.len());
         // Charged, never waited for. This runs as a blocking task that the
         // connection's ordered-operation lane awaits. Waiting for credit here
         // would wait on an acknowledgement consumed by that connection's frame
@@ -1088,6 +1179,13 @@ fn remove_unmounted_pane_resources(
 /// is still verified authoritatively — the `__ADE_META__` line inside the
 /// capture carries tmux's own `#{pane_id}` and `capture_metadata` refuses a
 /// capture whose metadata names a different pane.
+///
+/// The pane is recorded in `capture_in_flight` by the caller, and only once the
+/// write has been *flushed*: the ledger's one job is to suppress a second seed
+/// for a pane a photograph is already coming for, so an entry for a capture
+/// tmux never received would coalesce away the request that replaces it and
+/// leave the pane waiting for a screen nobody is taking. Recording late risks
+/// one redundant photograph; recording early risks none at all.
 fn queue_capture(stdin: &mut impl Write, pane_id: &str) -> anyhow::Result<()> {
     validate_tmux_id(pane_id, '%')?;
     writeln!(stdin, "{}", queue_marker("__ADE_CAPTURE__", pane_id))?;
@@ -1127,6 +1225,7 @@ pub(super) struct ControlWrite {
 /// other writer can land between them.
 fn write_capture_request_resuming<W: Write>(
     stdin: &Arc<Mutex<W>>,
+    capture_in_flight: &Mutex<HashSet<String>>,
     pane_id: &str,
     resume_first: bool,
 ) -> anyhow::Result<()> {
@@ -1146,6 +1245,7 @@ fn write_capture_request_resuming<W: Write>(
     }
     queue_capture(&mut *writer, pane_id)?;
     writer.flush()?;
+    capture_in_flight.lock().unwrap().insert(pane_id.to_owned());
     Ok(())
 }
 
@@ -1170,9 +1270,100 @@ pub(super) fn queue_input(input_id: u64, pane_id: &str) -> String {
     format!("display-message -p '__ADE_INPUT__:{input_id}:{digits}'")
 }
 
+/// Photographs one pane's *screen*.
+///
+/// No history range: the first capture takes what tmux is displaying and
+/// nothing above it. A 200x50 screen is ~10 KB where `-S -2000` was ~191 KB,
+/// and on a slow link that difference is the answer to a workspace switch
+/// arriving behind a quarter of a megabyte of scrollback the user cannot see.
+/// The scrollback is not lost — it is still in tmux, and it is fetched on
+/// demand rather than pushed on every reveal.
 fn capture_command(pane_id: &str) -> String {
     format!(
-        "capture-pane -p -e -J -S -2000 -t {pane_id} ; capture-pane -p -e -J -a -q -t {pane_id} ; display-message -p -t {pane_id} '__ADE_META__:#{{pane_id}}:#{{cursor_x}}:#{{cursor_y}}:#{{alternate_on}}:#{{bracket_paste_flag}}:#{{mouse_standard_flag}}:#{{mouse_button_flag}}:#{{mouse_any_flag}}:#{{mouse_sgr_flag}}:#{{mouse_utf8_flag}}:#{{cursor_flag}}:#{{keypad_cursor_flag}}:#{{keypad_flag}}:#{{wrap_flag}}:#{{pane_width}}:#{{focus_flag}}'"
+        "capture-pane -p -e -J -t {pane_id} ; capture-pane -p -e -N -t {pane_id} ; capture-pane -p -e -J -a -q -t {pane_id} ; capture-pane -p -e -N -a -q -t {pane_id} ; display-message -p -t {pane_id} '__ADE_META__:#{{pane_id}}:#{{cursor_x}}:#{{cursor_y}}:#{{alternate_on}}:#{{bracket_paste_flag}}:#{{mouse_standard_flag}}:#{{mouse_button_flag}}:#{{mouse_any_flag}}:#{{mouse_sgr_flag}}:#{{mouse_utf8_flag}}:#{{cursor_flag}}:#{{keypad_cursor_flag}}:#{{keypad_flag}}:#{{wrap_flag}}:#{{pane_width}}:#{{focus_flag}}'"
+    )
+}
+
+/// The most scrollback one request may photograph.
+///
+/// The renderer's own serialization keeps 10,000 lines, so anything above this
+/// could not be spliced in anyway, and the number bounds a capture the user is
+/// waiting on: it is written straight onto the control lane ahead of their next
+/// keystroke.
+const MAX_HISTORY_LINES: u32 = 10_000;
+
+/// The furthest above the display one request may start.
+///
+/// The renderer reports how much scrollback it is already holding, and a number
+/// larger than any buffer it could have is not a claim this host acts on: an
+/// unclamped one would put both bounds arbitrarily far past the top of tmux's
+/// history, and the capture command carrying them is written straight onto the
+/// control lane. The renderer mirrors this number and stops paging on it, which
+/// is what keeps a clamp from becoming a pane that asks for the same clamped
+/// rows on every wheel-up.
+const MAX_HISTORY_SKIP_LINES: u32 = MAX_HISTORY_LINES;
+
+/// Photographs the scrollback *above* one pane's screen.
+///
+/// The counterpart to [`capture_command`], which takes the screen and nothing
+/// above it. Both bounds count rows upwards from the display, `-1` being the
+/// row immediately above it, so `-S -(skip+lines) -E -(skip+1)` is exactly the
+/// `lines` rows above the `skip` the renderer already holds. The two ranges
+/// meet exactly once: no row appears in both and none is missing between them.
+///
+/// `skip` is what makes this true of a pane that has printed since it was
+/// seeded. tmux measures from the *current* display, so the rows that scrolled
+/// off in the meantime are above it — already in the renderer's own scrollback,
+/// and handed back a second time by an unskipped capture. The renderer counts
+/// what it holds and says so; the host does not guess.
+///
+/// The marker carries the line count as well as the pane, so the request is
+/// legible in a tmux log beside the answer it produced; the reader needs only
+/// the pane. There is no `__ADE_META__` leg — this is not a screen, and nothing
+/// in the answer may be mistaken for a seed the reader has to store.
+///
+/// No `-J`, and that is the whole reason this command is not the seed's.
+///
+/// `-J` joins each wrapped line back into one output line, which makes the
+/// answer's line count say nothing about how many *rows* it covers — a measured
+/// 60 rows of wrapped output came back as 20 lines. Every other number in this
+/// protocol is a row: `-S`/`-E` count rows, `skip` is the rows the renderer
+/// holds, `#{history_size}` is rows. A page whose own unit is lines cannot be
+/// lined up against any of them, and the renderer trimming a row-sized overlap
+/// off a line-sized page removes up to three times too much.
+///
+/// Without `-J` every captured line is one physical row at the width the pane
+/// had, which is the width the renderer had too — so the page, the skip and the
+/// size are all in the same unit and the arithmetic closes.
+///
+/// The old objection to dropping it was that scrollback spliced in hard-broken
+/// never reflows and copies back as separate lines. That is answered on the
+/// desktop rather than here: it composes the page so that a row filling the
+/// grid is written *without* a line break, xterm auto-wraps it, and the
+/// continuation carries xterm's own `isWrapped` — the same reflow and the same
+/// copy as a line the pane printed live. See `composeHistoryPage`.
+///
+/// The trailing `__ADE_HISTORY_META__` leg is how the answer says whether it
+/// reached the top. The rows it carries cannot say: tmux clamps a range that
+/// runs past the top of its history and answers one entirely above it with a
+/// single row rather than with nothing, so an emptier answer is not the signal.
+/// `#{history_size}` is the fact itself, and the renderer compares it against
+/// the rows it asked for.
+///
+/// It is a third command, and targeted, for the same reason the seed's
+/// `__ADE_META__` leg is: a pane-scoped format can only be expanded by a
+/// targeted `display-message`, and the leading marker has to stay untargeted so
+/// that it always succeeds. A targeted probe against a pane that has gone away
+/// is rejected — the reader answers that page without a size, and the renderer
+/// asks again.
+fn capture_history_command(pane_id: &str, lines: u32, skip: u32) -> String {
+    let lines = lines.clamp(1, MAX_HISTORY_LINES);
+    let skip = skip.min(MAX_HISTORY_SKIP_LINES);
+    let start = skip.saturating_add(lines);
+    let end = skip.saturating_add(1);
+    let digits = pane_id.strip_prefix('%').unwrap_or(pane_id);
+    format!(
+        "display-message -p '__ADE_HISTORY__:{lines}:{digits}' ; capture-pane -p -e -S -{start} -E -{end} -t {pane_id} ; display-message -p -t {pane_id} '__ADE_HISTORY_META__:#{{history_size}}'"
     )
 }
 
@@ -1181,7 +1372,10 @@ mod stream;
 #[cfg(test)]
 use stream::TestOutputEmission;
 #[cfg(test)]
-use stream::{CommandBlock, PaneSeedState, PendingCaptureMetadata, StreamState};
+use stream::{
+    CommandBlock, PaneSeedState, PendingAlternateCapture, PendingCaptureMetadata,
+    PendingSavedNormalCells, StreamState,
+};
 use stream::{ControlStreamReader, StreamControl, read_control_stream};
 
 pub(super) fn validate_tmux_id(value: &str, prefix: char) -> anyhow::Result<()> {

@@ -40,12 +40,12 @@ pub(super) fn pane_resource_event(
         pane_resource: Some(v1::PaneResource {
             pane_id: pane_id.into(),
             state: protocol_state(resource.state),
-            serialized_snapshot: resource.serialized_snapshot,
             raw_tail: resource.raw_tail,
             generation: resource.generation,
             snapshot_generation: resource.snapshot_generation,
             tail_through_generation: resource.tail_through_generation,
             requires_seed: resource.requires_seed,
+            resume_from_renderer: resource.resume_from_renderer,
             recovery_reason: resource.recovery_reason,
         }),
         terminal_delivery_bytes: charge.bytes,
@@ -73,6 +73,14 @@ pub(super) fn take_pane_degradations(resources: &Mutex<PaneResourceStore>) -> Ve
 /// degradation is. The charge is therefore zero, and the event travels the
 /// ordinary queue rather than the credit path — a recovery-class event, which
 /// [`crate::service::emit_event`] defers rather than drops.
+///
+/// A hidden pane outgrowing its tail bound is counted and not reported. It is
+/// what a busy background pane does, not a fault: its reveal is answered with a
+/// photograph, which is fresher than the tail would have been, and telling the
+/// desktop about it would put an ordered pane-resource event in front of every
+/// switch for every noisy pane — the traffic the bound exists to remove. An
+/// eviction is the opposite: nobody asked for it and nothing else will mention
+/// it, so it is still spoken.
 pub(super) fn emit_pane_degradations(
     sender: &mpsc::Sender<SequencerControl>,
     overflowed: &AtomicBool,
@@ -83,6 +91,12 @@ pub(super) fn emit_pane_degradations(
             degradation.cause == PaneDegradationCause::GlobalBudget,
             degradation.state == PaneResourceState::Released,
         );
+        // The store's own record honours this predicate too: a cause nobody
+        // speaks never displaces one that is spoken, so nothing that reaches
+        // here was overwritten by something this loop then drops.
+        if !degradation.cause.reportable() {
+            continue;
+        }
         emit_event(
             sender,
             overflowed,
@@ -90,12 +104,12 @@ pub(super) fn emit_pane_degradations(
                 &degradation.pane_id,
                 PaneResource {
                     state: degradation.state,
-                    serialized_snapshot: Vec::new(),
                     raw_tail: Vec::new(),
                     generation: degradation.generation,
                     snapshot_generation: degradation.generation,
                     tail_through_generation: degradation.generation,
                     requires_seed: true,
+                    resume_from_renderer: false,
                     recovery_reason: degradation.reason,
                 },
                 OutputCharge::default(),

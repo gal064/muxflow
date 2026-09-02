@@ -59,8 +59,13 @@ pub(super) struct StoredAgent {
     pub present: bool,
     #[serde(default)]
     pub hook_terminal: bool,
-    /// The exact Codex turn whose transcript identified native auto-review.
-    /// A missing reviewer may reuse this only when its turn ID matches.
+    /// Claude's parent has stopped while at least one background subagent is
+    /// still running. Retained across daemon restarts so Claude's routine idle
+    /// notification cannot turn that live work into a false blocked state.
+    #[serde(default)]
+    pub claude_has_running_subagent: bool,
+    /// The exact Codex turn whose start identified native auto-review. A
+    /// permission request may reuse this only when its turn ID matches.
     #[serde(default)]
     pub codex_auto_review_turn_id: String,
     /// When something last said what this agent was *doing*.
@@ -80,6 +85,12 @@ pub(super) struct StoredAgent {
     /// have, then every real lifecycle transition advances it exactly once.
     #[serde(default)]
     pub lifecycle_changed_at_unix_millis: i64,
+    /// When the current seen attention generation was first acknowledged.
+    ///
+    /// Repeated acknowledgements do not move this clock. It is the stable
+    /// origin for a completed agent's post-read Recent window.
+    #[serde(default)]
+    pub attention_seen_at_unix_millis: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,14 +126,25 @@ pub(super) fn load(path: &Path) -> StoredState {
                     record.updated_at_unix_millis
                 };
         }
+        // Stores written before this field existed cannot recover the actual
+        // acknowledgement time. Preserve their previous Recent/Idle behavior
+        // by using the completion transition as the one-time repair baseline.
+        if record.attention_seen_at_unix_millis == 0
+            && record.attention_kind == "completed"
+            && record.attention_generation > 0
+            && record.seen_generation >= record.attention_generation
+        {
+            record.attention_seen_at_unix_millis = record.lifecycle_changed_at_unix_millis;
+        }
         // A terminal hook is proof that the turn ended. Normalize the invalid
         // combination observed in a live schema-2 store (`hook_terminal: true`
         // with `lifecycle: working`) so the next daemon snapshot repairs the
         // UI immediately instead of waiting up to the stale-working TTL.
-        if record.hook_terminal
-            && record.lifecycle != tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32
-        {
-            record.lifecycle = tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32;
+        if record.hook_terminal {
+            record.claude_has_running_subagent = false;
+            if record.lifecycle != tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32 {
+                record.lifecycle = tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32;
+            }
         }
     }
     state
@@ -225,6 +247,7 @@ mod tests {
         // is what the staleness sweep reads as "fall back to `updated_at`".
         assert_eq!(record.lifecycle_observed_at_unix_millis, 0);
         assert_eq!(record.lifecycle_changed_at_unix_millis, 1786000000000);
+        assert!(!record.claude_has_running_subagent);
         fs::remove_file(path).unwrap();
     }
 
@@ -321,7 +344,7 @@ mod tests {
                   "state_generation": 9,
                   "attention_generation": 2,
                   "attention_kind": "completed",
-                  "seen_generation": 1,
+                  "seen_generation": 2,
                   "updated_at_unix_millis": 1786000000000,
                   "hook_authority_expires_at_unix_millis": 0,
                   "detected_manually": false,
@@ -339,7 +362,11 @@ mod tests {
             .expect("the record survived the removed field");
         assert_eq!(record.lifecycle, 3);
         assert_eq!(record.attention_kind, "completed");
-        assert_eq!(record.seen_generation, 1);
+        assert_eq!(record.seen_generation, 2);
+        assert_eq!(
+            record.attention_seen_at_unix_millis, record.lifecycle_changed_at_unix_millis,
+            "an already-seen completion uses its transition as the migration baseline"
+        );
         assert_eq!(record.route.pane_id, "%1");
         assert!(record.codex_auto_review_turn_id.is_empty());
         fs::remove_file(path).unwrap();
@@ -376,6 +403,7 @@ mod tests {
                 attention_generation: 1,
                 attention_kind: "completed".into(),
                 seen_generation: 1,
+                attention_seen_at_unix_millis: 1,
                 updated_at_unix_millis: 1,
                 hook_authority_expires_at_unix_millis: 1,
                 detected_manually: false,
@@ -383,6 +411,7 @@ mod tests {
                 latest_source_generation: 0,
                 present: true,
                 hook_terminal: true,
+                claude_has_running_subagent: false,
                 codex_auto_review_turn_id: String::new(),
                 lifecycle_observed_at_unix_millis: 1,
                 lifecycle_changed_at_unix_millis: 1,

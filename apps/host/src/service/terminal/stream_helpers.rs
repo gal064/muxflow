@@ -50,12 +50,70 @@ pub(super) fn emit_terminal(
     stopped: &AtomicBool,
     output_credit: &OutputCredit,
 ) -> bool {
+    emit_terminal_bytes(
+        sender,
+        overflowed,
+        kind,
+        v1::TerminalBytes {
+            pane_id,
+            data,
+            generation,
+            ..Default::default()
+        },
+        stopped,
+        output_credit,
+    )
+}
+
+/// Queues one pane's scrollback answer.
+///
+/// Its own entry point because it is the only terminal record that carries a
+/// number the output stream has no use for: how much history tmux holds, which
+/// is what lets the renderer stop paging at the top instead of asking forever.
+/// `history_size` is `None` when the probe did not answer — a pane that went
+/// away between the capture and it — and the renderer reads that as a page to
+/// ask for again, never as the end of the history.
+pub(super) fn emit_terminal_history(
+    sender: &mpsc::Sender<SequencerControl>,
+    overflowed: &AtomicBool,
+    pane_id: String,
+    data: Vec<u8>,
+    history_size: Option<u32>,
+    stopped: &AtomicBool,
+    output_credit: &OutputCredit,
+) -> bool {
+    emit_terminal_bytes(
+        sender,
+        overflowed,
+        v1::EventKind::TerminalHistory,
+        v1::TerminalBytes {
+            pane_id,
+            data,
+            // Deliberately not part of the output ordering: see the block that
+            // produces it.
+            generation: 0,
+            history_size: history_size.unwrap_or(0),
+            history_size_known: history_size.is_some(),
+        },
+        stopped,
+        output_credit,
+    )
+}
+
+fn emit_terminal_bytes(
+    sender: &mpsc::Sender<SequencerControl>,
+    overflowed: &AtomicBool,
+    kind: v1::EventKind,
+    terminal: v1::TerminalBytes,
+    stopped: &AtomicBool,
+    output_credit: &OutputCredit,
+) -> bool {
     // Terminal bytes are lossless and already arrive on the dedicated control
     // reader thread. Let the bounded sequencer queue propagate socket pressure
     // back to that reader; tmux can then apply its own pause/continue protocol.
     // A nonblocking send here turned a normal 100 ms / 100 Mbit bandwidth-delay
     // window into a full-connection resync as soon as 1,024 records accumulated.
-    let charge = OutputCharge::terminal(data.len());
+    let charge = OutputCharge::terminal(terminal.data.len());
     let Ok(reservation) = output_credit.admit(charge, stopped) else {
         // A stopped attachment is a deliberate local teardown; only a closed
         // credit is a connection-wide loss worth the overflow resync.
@@ -67,11 +125,7 @@ pub(super) fn emit_terminal(
     if sender
         .blocking_send(SequencerControl::OrderedEvent(v1::HostEvent {
             kind: kind.into(),
-            terminal: Some(v1::TerminalBytes {
-                pane_id,
-                data,
-                generation,
-            }),
+            terminal: Some(terminal),
             terminal_delivery_bytes: charge.bytes,
             terminal_delivery_records: charge.records,
             ..Default::default()

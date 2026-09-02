@@ -70,7 +70,7 @@ export function acknowledgeNotificationActivation(
   scope: AgentRequestScope,
   route: Pick<AgentNotificationRoute, "agentId" | "attentionGeneration">,
 ): Promise<void> {
-  return client.markSeen(scope, route.agentId, route.attentionGeneration);
+  return client.markSeen(scope, route.agentId, route.attentionGeneration).then(() => undefined);
 }
 
 export interface NotificationTransitionContext {
