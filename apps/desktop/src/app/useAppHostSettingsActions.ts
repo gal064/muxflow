@@ -105,6 +105,9 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
       options.setConnection(profile.connection);
       options.setSelectedProfileId(profile.id);
       options.setConnectionEpoch((value) => value + 1);
+      options.setProfiles((current) => current.some((item) => item.id === profile.id)
+        ? current.map((item) => item.id === profile.id ? profile : item)
+        : [profile, ...current]);
       void saveActiveProfile(profile);
       options.setStatus("Discovering local tmux…");
       return;
