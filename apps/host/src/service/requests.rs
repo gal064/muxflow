@@ -33,6 +33,7 @@ mod filesystem_dispatch;
 pub(super) mod git_dispatch;
 pub(super) mod operation_policy;
 mod tmux_action_dispatch;
+mod voice_dispatch;
 pub(super) use dispatcher::handle_request;
 
 #[derive(Clone)]

@@ -120,6 +120,19 @@ pub(crate) async fn handle_request(
             return;
         }
 
+        (Handler::Voice, Some(operation)) => {
+            super::voice_dispatch::handle(
+                request_id,
+                operation,
+                request,
+                control_tx,
+                &cancellation,
+            )
+            .await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
         (
             Handler::ActiveRoot,
             Some(v1::Operation::ResolveActiveRoot | v1::Operation::ResolveTerminalFile),

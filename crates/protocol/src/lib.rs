@@ -133,6 +133,15 @@ pub const CAP_TERMINAL_FILE_RESOLUTION: u64 = 1 << 16;
 /// Dock-launched app. The required bit makes the bridge retire that daemon and
 /// start the helper shipped with the desktop.
 pub const CAP_TMUX_EXECUTABLE_RESOLUTION: u64 = 1 << 17;
+/// The helper serves the five `OPERATION_VOICE_*` operations and pushes
+/// `VOICE_REPLY` events (docs/mobile/voice-mode-plan.md).
+///
+/// Required, like every other bit, so the phone's handshake names what a
+/// helper that predates voice is missing instead of failing the first
+/// utterance with an unknown-operation error. Whether voice is *usable* on the
+/// host (uv installed, model provisioned) is a runtime answer from
+/// `OPERATION_VOICE_STATUS`, not a capability.
+pub const CAP_VOICE: u64 = 1 << 18;
 pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_ORDERED_EVENTS
     | CAP_CANCELLATION
@@ -150,10 +159,11 @@ pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_TERMINAL_OUTPUT_CREDIT
     | CAP_FILE_STREAM
     | CAP_TERMINAL_FILE_RESOLUTION
-    | CAP_TMUX_EXECUTABLE_RESOLUTION;
+    | CAP_TMUX_EXECUTABLE_RESOLUTION
+    | CAP_VOICE;
 
 /// Every required capability, with the name a refusal reports it by.
-const CAPABILITY_NAMES: [(u64, &str); 18] = [
+const CAPABILITY_NAMES: [(u64, &str); 19] = [
     (CAP_SNAPSHOTS, "snapshots"),
     (CAP_ORDERED_EVENTS, "orderedEvents"),
     (CAP_CANCELLATION, "cancellation"),
@@ -172,6 +182,7 @@ const CAPABILITY_NAMES: [(u64, &str); 18] = [
     (CAP_FILE_STREAM, "fileStream"),
     (CAP_TERMINAL_FILE_RESOLUTION, "terminalFileResolution"),
     (CAP_TMUX_EXECUTABLE_RESOLUTION, "tmuxExecutableResolution"),
+    (CAP_VOICE, "voice"),
 ];
 
 /// Which required capabilities `advertised` does not carry.
