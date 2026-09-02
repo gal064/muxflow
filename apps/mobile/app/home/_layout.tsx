@@ -3,7 +3,7 @@ import { StyleSheet, Text, View } from "react-native";
 
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { needsAttention } from "../../src/store/selectors";
+import { waitingCount } from "../../src/store/selectors";
 import { ConnectionDot } from "../../src/features/hosts/ConnectionDot";
 import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
 import { useSession } from "../../src/ui/hooks";
@@ -13,7 +13,8 @@ import { colors, metrics, typeScale } from "../../src/ui/tokens";
 export default function HomeLayout() {
   const insets = useSafeAreaInsets();
   const label = useSession((s) => s.connection.host?.label ?? "Muxflow");
-  const badge = useSession((s) => Object.values(s.agents).filter((a) => a.present && needsAttention(a) && a.lifecycle === "blocked").length);
+  // The desktop's bell count (`unreadCount`): every agent that is blocked, or done and not yet looked at.
+  const badge = useSession(waitingCount);
   return (
     <Tabs
       screenOptions={{

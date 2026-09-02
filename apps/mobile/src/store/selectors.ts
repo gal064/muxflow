@@ -102,6 +102,53 @@ export function blockedAgentCount(state: Pick<SessionState, "agents">): number {
   return Object.values(state.agents).filter((agent) => agent.present && displayState(agent) === "blocked").length;
 }
 
+/** The two states that ask for a human. */
+export type WaitingState = "blocked" | "done";
+
+/**
+ * The state that puts an agent in front of you, or undefined: blocked, or
+ * finished without its pane having been looked at. The desktop's
+ * `needsAttention(state)` (`agentsList.ts`) — what its bell counts, what its
+ * unread "1" badge marks and what a workspace row's badge adds up. Note the
+ * asymmetry with `needsAttention` above: looking at a blocked agent does not
+ * answer it, so it stays waiting until its lifecycle moves on; looking at a
+ * completion is all a completion asks for. A gone agent cannot wait on
+ * anyone.
+ */
+export function waitingState(agent: Agent): WaitingState | undefined {
+  if (!agent.present) return undefined;
+  const state = displayState(agent);
+  return state === "blocked" || state === "done" ? state : undefined;
+}
+
+/**
+ * How many agents are waiting, and the loudest thing they are waiting for —
+ * the desktop's workspace rollup (`selectors.ts` `deriveAgentRollups`, where
+ * blocked outranks done) reduced to what one row paints. `loudest` is
+ * undefined when nobody is waiting.
+ */
+export interface WaitingSummary {
+  count: number;
+  loudest: WaitingState | undefined;
+}
+
+export function summarizeWaiting(agents: Iterable<Agent>): WaitingSummary {
+  let count = 0;
+  let loudest: WaitingState | undefined;
+  for (const agent of agents) {
+    const state = waitingState(agent);
+    if (!state) continue;
+    count += 1;
+    if (state === "blocked" || loudest === undefined) loudest = state;
+  }
+  return { count, loudest };
+}
+
+/** The number on the Agents tab: every waiting agent on the host (the desktop's `unreadCount`). */
+export function waitingCount(state: Pick<SessionState, "agents">): number {
+  return summarizeWaiting(Object.values(state.agents)).count;
+}
+
 /**
  * Whether an agent's workspace or tab is pinned on the host. Used to lead its
  * status peers in `sortedAgents`.
