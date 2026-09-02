@@ -26,8 +26,8 @@ export const SPINNER_STEP_DEGREES = 360 / SPINNER_STEPS;
  */
 export const SPINNER_ARC_TURNS = 0.3;
 
-/** Track opacity. The desktop's is 35 %; lower here so the arc stands off it. */
-export const SPINNER_TRACK_OPACITY = 0.25;
+/** Track opacity, the desktop's 35 %: in the heading's `--chrome-dim` a fainter track vanished on `--chrome-bg`. */
+export const SPINNER_TRACK_OPACITY = 0.35;
 
 /** The upper bound on repaints per second one visible spinner causes. */
 export const SPINNER_REPAINTS_PER_SECOND = 1000 / SPINNER_STEP_MS;

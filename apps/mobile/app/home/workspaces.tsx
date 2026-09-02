@@ -2,7 +2,7 @@ import { useRouter } from "expo-router";
 import { useCallback, useState } from "react";
 import { FlatList, RefreshControl, StyleSheet, Text } from "react-native";
 
-import { waitingColor, waitingInSession, waitingLabel, windowCountLabel } from "../../src/features/agents/agentViews";
+import { waitingColor, waitingInk, waitingInSession, waitingLabel, windowCountLabel } from "../../src/features/agents/agentViews";
 import { refreshAgents } from "../../src/features/agents/refresh";
 import { stripAgentStatusGlyphs } from "../../src/features/agents/agentLabels";
 import { toRouteParam } from "../../src/navigation/routeParams";
@@ -53,7 +53,7 @@ export default function WorkspacesScreen() {
             onPress={() => router.push({ pathname: "/workspace/[sessionId]", params: { sessionId: toRouteParam(item.id) } })}
             subtitle={windowCountLabel(item.windowCount)}
             title={stripAgentStatusGlyphs(item.name)}
-            trailing={waiting.loudest ? <Text style={[styles.waiting, { color: waitingColor(waiting.loudest) }]}>{waitingLabel(waiting.count)}</Text> : undefined}
+            trailing={waiting.loudest ? <Text style={[styles.waiting, { color: waitingInk(waiting.loudest) }]}>{waitingLabel(waiting.count)}</Text> : undefined}
           />
           </>
         );

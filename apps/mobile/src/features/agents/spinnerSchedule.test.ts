@@ -24,9 +24,9 @@ describe("spinner schedule (§9.3.1: a handful of repaints a second, not sixty)"
     expect(SPINNER_TURN_MS).toBeLessThanOrEqual(1500);
   });
 
-  it("draws an arc that reads as an arc in a still frame: longer than the desktop's quarter, on a fainter track", () => {
+  it("draws an arc that reads as an arc in a still frame: longer than the desktop's quarter, on the desktop's track", () => {
     expect(SPINNER_ARC_TURNS).toBeGreaterThan(0.25);
     expect(SPINNER_ARC_TURNS).toBeLessThan(0.5);
-    expect(SPINNER_TRACK_OPACITY).toBeLessThanOrEqual(0.35);
+    expect(SPINNER_TRACK_OPACITY).toBe(0.35);
   });
 });

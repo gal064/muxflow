@@ -56,6 +56,8 @@ export function Spinner({ ink, ring, size, animate }: { ink: string; ring: strin
             strokeDasharray={`${ARC} ${CIRCUMFERENCE - ARC}`}
             strokeLinecap="round"
             strokeWidth={ARC_STROKE}
+            // A dash starts at 3 o'clock; the resting arc (reduced motion, a paused tab) should sit at 12 like a clock hand.
+            transform={`rotate(-90 ${BOX / 2} ${BOX / 2})`}
           />
         </Svg>
       </Animated.View>

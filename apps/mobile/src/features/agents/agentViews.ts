@@ -52,6 +52,15 @@ export function waitingColor(state: WaitingState): string {
   return state === "blocked" ? colors.danger : colors.ok;
 }
 
+/**
+ * The ink for text in a waiting state: `--danger-ink` for blocked (the
+ * bar's `--danger` is 3.75:1 on `--chrome-bg`, too faint to read as words),
+ * `--ok` for done, which already clears 7:1.
+ */
+export function waitingInk(state: WaitingState): string {
+  return state === "blocked" ? colors.dangerInk : colors.ok;
+}
+
 /** §9.3.2: the desktop's "N agents waiting", as the row's chip. */
 export function waitingLabel(count: number): string {
   return `${count} waiting`;

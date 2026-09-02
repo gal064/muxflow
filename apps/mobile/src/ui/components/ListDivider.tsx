@@ -19,8 +19,10 @@ const styles = StyleSheet.create({
   divider: {
     backgroundColor: colors.chromeBg,
     borderTopColor: colors.chromeHairline,
-    // The same rule `ListRow` draws under itself, so a divider's line is not thinner than the row line above it.
+    // The same rule `ListRow` draws under itself, laid over the row's own
+    // bottom rule: one hairline between a row and a divider, not two.
     borderTopWidth: metrics.hairlineWidth,
+    marginTop: -metrics.hairlineWidth,
     paddingBottom: 6,
     paddingHorizontal: 16,
     paddingTop: 14,
