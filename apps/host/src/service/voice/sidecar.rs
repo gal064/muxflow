@@ -124,10 +124,14 @@ impl SidecarChild {
     /// 1 MiB), killed when dropped and — on Linux — when the daemon dies.
     pub(crate) fn spawn_with(mut command: Command, log: &Path) -> io::Result<Self> {
         let log_file = open_log(log)?;
+        // `uv run` keeps the interpreter as its own child rather than exec'ing
+        // it, so the sidecar is a process group: `kill()` signals the group and
+        // reaches Python directly instead of hoping uv forwards the signal.
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(log_file))
+            .process_group(0)
             .kill_on_drop(true);
         #[cfg(target_os = "linux")]
         // SAFETY: prctl is async-signal-safe and touches only this process.
@@ -194,14 +198,13 @@ impl SidecarChild {
             .await
             .map_err(|error| SidecarFailure::Crashed(format!("stdin: {error}")))?;
 
-        let deadline = tokio::time::Instant::now() + bound;
+        // Once a cancel has gone out the sidecar gets a short grace of its own
+        // to acknowledge; the original bound no longer applies, but *some*
+        // bound must, or a stuck sidecar holds the slot forever.
+        let mut deadline = tokio::time::Instant::now() + bound;
         let mut cancel_sent = false;
         loop {
-            let remaining = if cancel_sent {
-                CANCEL_GRACE
-            } else {
-                deadline.saturating_duration_since(tokio::time::Instant::now())
-            };
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let frame = tokio::select! {
                 frame = self.frames.recv() => frame,
                 _ = sleep(remaining.min(CANCEL_POLL)) => {
@@ -210,6 +213,7 @@ impl SidecarChild {
                     }
                     if !cancel_sent && cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
                         cancel_sent = true;
+                        deadline = tokio::time::Instant::now() + CANCEL_GRACE;
                         let cancel_line = format!("{{\"op\":\"cancel\",\"id\":{id}}}\n");
                         if self.stdin.write_all(cancel_line.as_bytes()).await.is_err()
                             || self.stdin.flush().await.is_err()
@@ -256,6 +260,13 @@ impl SidecarChild {
 
     pub(crate) async fn kill(mut self) {
         self.reader.abort();
+        if let Some(pid) = self.child.id().and_then(|pid| i32::try_from(pid).ok()) {
+            // SAFETY: the child was spawned into its own process group whose
+            // id is its pid; a group that has already exited is an ESRCH.
+            unsafe {
+                libc::kill(-pid, libc::SIGTERM);
+            }
+        }
         let _ = self.child.start_kill();
         let _ = timeout(Duration::from_secs(5), self.child.wait()).await;
     }
@@ -372,6 +383,7 @@ while IFS= read -r line; do
     slow) sleep 2; printf '{"id":%s,"ok":true}\n' "$id" ;;
     progress) printf '{"id":%s,"event":"progress","phase":"downloading","transferred":1,"total":2}\n' "$id"; printf '{"id":%s,"event":"progress","phase":"downloading","transferred":2,"total":2}\n' "$id"; printf '{"id":%s,"ok":true}\n' "$id" ;;
     cancelme) while IFS= read -r c; do case "$c" in *cancel*) printf '{"id":%s,"ok":false,"class":"cancelled","error":"provision cancelled"}\n' "$id"; break ;; esac; done ;;
+    ignorecancel) sleep 30 ;;
     *) printf '{"id":%s,"ok":false,"class":"input","error":"unknown"}\n' "$id" ;;
   esac
 done
@@ -509,6 +521,33 @@ done
         };
         let (outcome, ()) = tokio::join!(request, flag);
         assert!(matches!(outcome.unwrap_err(), SidecarFailure::Cancelled));
+        child.kill().await;
+    }
+
+    /// A sidecar that never acknowledges the cancel must not hold the request
+    /// past the grace period: that request holds the one sidecar slot.
+    #[tokio::test]
+    async fn an_unacknowledged_cancel_times_out_after_its_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = spawn_echo(dir.path());
+        let cancel = AtomicBool::new(true);
+        let mut ignore_events = ignore;
+        let started = std::time::Instant::now();
+        let outcome = child
+            .request(
+                op("ignorecancel"),
+                &[],
+                Duration::from_secs(60),
+                Some(&cancel),
+                &mut ignore_events,
+            )
+            .await;
+        assert!(matches!(outcome.unwrap_err(), SidecarFailure::Timeout));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= CANCEL_GRACE && elapsed < CANCEL_GRACE + Duration::from_secs(3),
+            "{elapsed:?}"
+        );
         child.kill().await;
     }
 

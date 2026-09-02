@@ -73,6 +73,29 @@ impl ModelLayout {
         let _ = fs::remove_dir_all(&self.dir);
     }
 
+    /// Removes the sidecar's in-progress files (`.partial-*`, `.extract-*`)
+    /// beside the model: what a provision the host had to kill leaves behind.
+    pub(crate) fn sweep_partials(&self) {
+        let Some(parent) = self.dir.parent() else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(parent) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(".partial-") || name.starts_with(".extract-") {
+                let path = entry.path();
+                if path.is_dir() {
+                    let _ = fs::remove_dir_all(&path);
+                } else {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
     /// The header the sidecar's `load` needs.
     pub(crate) fn load_header(&self) -> serde_json::Map<String, serde_json::Value> {
         let mut header = serde_json::Map::new();
@@ -152,5 +175,14 @@ mod tests {
         assert!(!layout.complete());
         layout.remove();
         assert!(!layout.dir().exists());
+
+        let models = layout.dir().parent().unwrap();
+        fs::write(models.join(".partial-77.tar.bz2"), b"half").unwrap();
+        fs::create_dir_all(models.join(".extract-77.model")).unwrap();
+        fs::write(models.join("keep.txt"), b"unrelated").unwrap();
+        layout.sweep_partials();
+        assert!(!models.join(".partial-77.tar.bz2").exists());
+        assert!(!models.join(".extract-77.model").exists());
+        assert!(models.join("keep.txt").exists());
     }
 }

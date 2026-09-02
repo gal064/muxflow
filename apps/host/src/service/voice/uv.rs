@@ -19,7 +19,7 @@ pub(crate) fn uv_executable() -> Result<PathBuf, ExecutableError> {
     resolve_executable(
         OVERRIDE_ENV,
         "uv",
-        installer_candidates(home.as_deref()),
+        || installer_candidates(home.as_deref()),
         &AUTOMATIC_UV,
     )
 }

@@ -117,6 +117,13 @@ pub(crate) struct VoiceService {
     /// back a `#!/bin/sh` stand-in instead of `uv run`.
     command_factory: Box<CommandFactory>,
     slot: tokio::sync::Mutex<Slot>,
+    /// The model is loaded in a live sidecar: what `VoiceStatus.sidecar_running`
+    /// reports. Kept beside the slot because the slot is locked for the whole
+    /// of a request, including a cold `uv run`, and "busy" is not "hot".
+    hot: AtomicBool,
+    /// The live child's process group, so shutdown can reach it while a
+    /// request holds the slot. Zero when there is no child.
+    child_pid: std::sync::atomic::AtomicI32,
     waiters: AtomicUsize,
     books: Mutex<Bookkeeping>,
     sessions: Mutex<HashMap<String, Session>>,
@@ -165,6 +172,8 @@ impl VoiceService {
                 child: None,
                 loaded: false,
             }),
+            hot: AtomicBool::new(false),
+            child_pid: std::sync::atomic::AtomicI32::new(0),
             waiters: AtomicUsize::new(0),
             books: Mutex::new(Bookkeeping::default()),
             sessions: Mutex::new(HashMap::new()),
@@ -184,11 +193,8 @@ impl VoiceService {
         let mut status = v1::VoiceStatus {
             model_dir: model.dir().to_string_lossy().into_owned(),
             model_download_bytes: provision::MODEL_DOWNLOAD_BYTES,
-            detail: books.last_error.clone(),
-            sidecar_running: self
-                .slot
-                .try_lock()
-                .map_or(true, |slot| slot.child.is_some() && slot.loaded),
+            detail: bounded_detail(&books.last_error),
+            sidecar_running: self.hot.load(Ordering::Acquire),
             ..Default::default()
         };
         match (self.uv_lookup)() {
@@ -327,7 +333,9 @@ impl VoiceService {
                 }),
                 ..Default::default()
             };
-            if !send_control_event_to(connection_id, event) {
+            // A full queue is a burst of terminal output, not a departed
+            // phone: only a connection that is gone loses its sessions.
+            if send_control_event_to(connection_id, event) == super::events::Delivery::Gone {
                 service
                     .sessions
                     .lock()
@@ -390,6 +398,9 @@ impl VoiceService {
         let final_progress = match &outcome {
             Ok(()) => provision::progress(operation_id, provision::PHASE_READY, 0, 0, ""),
             Err(error) => {
+                // The sidecar removes its own partials when it gets to; a
+                // sidecar the host killed did not, so sweep here as well.
+                model.sweep_partials();
                 provision::progress(operation_id, provision::PHASE_FAILED, 0, 0, &error.message)
             }
         };
@@ -443,6 +454,11 @@ impl VoiceService {
         let verifying = provision::progress(operation_id, provision::PHASE_VERIFYING, 0, 0, "");
         self.emit_progress(&verifying, on_progress);
         if let Err(error) = self.ensure_loaded(cancel).await {
+            if error.code == "cancelled" {
+                // The bytes are fine as far as anyone knows; the next STATUS
+                // finds a complete model and the next request verifies it.
+                return Err(error);
+            }
             // A model that does not load is not a model; the next provision
             // must start from nothing rather than verify the same bytes.
             model.remove();
@@ -719,7 +735,9 @@ impl VoiceService {
         cancel: &AtomicBool,
         on_progress: &mut (dyn FnMut(&serde_json::Value) + Send),
     ) -> Result<sidecar::Reply, VoiceError> {
-        if self.waiters.fetch_add(1, Ordering::AcqRel) >= MAX_WAITERS {
+        // The count includes the request in flight, so "more than
+        // MAX_WAITERS waiting" is a previous value above the bound.
+        if self.waiters.fetch_add(1, Ordering::AcqRel) > MAX_WAITERS {
             self.waiters.fetch_sub(1, Ordering::AcqRel);
             return Err(VoiceError::new(
                 "voice_busy",
@@ -757,7 +775,10 @@ impl VoiceService {
                 )
                 .await
             {
-                Ok(_) => slot.loaded = true,
+                Ok(_) => {
+                    slot.loaded = true;
+                    self.hot.store(true, Ordering::Release);
+                }
                 Err(failure) => return Err(self.handle_failure(&mut slot, failure).await),
             }
             self.touch();
@@ -810,6 +831,13 @@ impl VoiceService {
             });
         match spawned {
             Ok(child) => {
+                self.child_pid.store(
+                    child
+                        .id()
+                        .and_then(|pid| i32::try_from(pid).ok())
+                        .unwrap_or(0),
+                    Ordering::Release,
+                );
                 slot.child = Some(child);
                 slot.loaded = false;
                 self.start_idle_task();
@@ -834,10 +862,7 @@ impl VoiceService {
                 }
             }
             SidecarFailure::Timeout => {
-                if let Some(child) = slot.child.take() {
-                    child.kill().await;
-                }
-                slot.loaded = false;
+                self.drop_child(slot).await;
                 self.books.lock().unwrap().last_error = "sidecar timed out".into();
                 VoiceError::new(
                     "voice_sidecar_timeout",
@@ -849,13 +874,19 @@ impl VoiceService {
                 )
             }
             SidecarFailure::Crashed(detail) => {
-                if let Some(child) = slot.child.take() {
-                    child.kill().await;
-                }
-                slot.loaded = false;
+                self.drop_child(slot).await;
                 self.record_crash(detail);
                 self.sidecar_failed()
             }
+        }
+    }
+
+    async fn drop_child(&self, slot: &mut Slot) {
+        self.hot.store(false, Ordering::Release);
+        self.child_pid.store(0, Ordering::Release);
+        slot.loaded = false;
+        if let Some(child) = slot.child.take() {
+            child.kill().await;
         }
     }
 
@@ -886,15 +917,17 @@ impl VoiceService {
     }
 
     fn sidecar_failed(&self) -> VoiceError {
-        let books = self.books.lock().unwrap();
+        // Computed before the books are locked: `crashed_too_often` locks them
+        // too, and `std::sync::Mutex` is not reentrant.
+        let retryable = !self.crashed_too_often();
+        let last_error = self.books.lock().unwrap().last_error.clone();
         VoiceError::new(
             "voice_sidecar_failed",
             format!(
-                "{}; see {}",
-                books.last_error,
+                "{last_error}; see {}",
                 sidecar::log_path(&self.cache_dir).display()
             ),
-            !self.crashed_too_often(),
+            retryable,
         )
     }
 
@@ -944,10 +977,7 @@ impl VoiceService {
         if !idle {
             return;
         }
-        if let Some(child) = slot.child.take() {
-            child.kill().await;
-        }
-        slot.loaded = false;
+        self.drop_child(&mut slot).await;
     }
 
     #[cfg(test)]
@@ -961,12 +991,25 @@ impl VoiceService {
     }
 
     /// Kills the sidecar. Called on cooperative daemon shutdown.
+    ///
+    /// Does not wait for the slot: a request in flight — a two-hour provision,
+    /// a cold load — must not hold up `daemon-stop`. The child's process group
+    /// is signalled directly; the request then fails and drops the child.
     pub(crate) async fn shutdown(&self) {
-        let mut slot = self.slot.lock().await;
-        if let Some(child) = slot.child.take() {
-            child.kill().await;
+        match self.slot.try_lock() {
+            Ok(mut slot) => self.drop_child(&mut slot).await,
+            Err(_) => {
+                let pid = self.child_pid.swap(0, Ordering::AcqRel);
+                if pid > 0 {
+                    // SAFETY: the pid names a process group this service
+                    // spawned; a group already gone is an ESRCH, nothing more.
+                    unsafe {
+                        libc::kill(-pid, libc::SIGTERM);
+                    }
+                }
+                self.hot.store(false, Ordering::Release);
+            }
         }
-        slot.loaded = false;
     }
 }
 
@@ -983,6 +1026,18 @@ impl Drop for WaiterGuard<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// Sidecar diagnostics as `VoiceStatus.detail`: long enough to read, short
+/// enough that a stray traceback cannot become the status payload.
+fn bounded_detail(detail: &str) -> String {
+    const MAX_DETAIL_CHARS: usize = 512;
+    if detail.chars().count() <= MAX_DETAIL_CHARS {
+        return detail.to_owned();
+    }
+    let mut cut: String = detail.chars().take(MAX_DETAIL_CHARS).collect();
+    cut.push('…');
+    cut
 }
 
 fn prune_sessions(sessions: &mut HashMap<String, Session>) {

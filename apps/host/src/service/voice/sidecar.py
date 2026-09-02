@@ -11,6 +11,7 @@ import asyncio
 import ctypes
 import json
 import os
+import queue
 import shutil
 import signal
 import sys
@@ -155,11 +156,11 @@ class Provisioner:
             self.download(url, partial, request_id)
             self.extract(partial, extract, model_dir, request_id)
         finally:
-            for path in (partial,):
-                if os.path.exists(path):
-                    os.remove(path)
-            if os.path.isdir(extract):
-                shutil.rmtree(extract, ignore_errors=True)
+            if os.path.exists(partial):
+                os.remove(partial)
+            for directory in (extract, extract + ".model"):
+                if os.path.isdir(directory):
+                    shutil.rmtree(directory, ignore_errors=True)
         with open(os.path.join(model_dir, ".complete"), "w", encoding="utf-8") as marker:
             marker.write(url)
 
@@ -237,20 +238,35 @@ class Provisioner:
         os.rename(staged, model_dir)
 
 
-def serve():
-    set_parent_death_signal()
-    stdin = sys.stdin.buffer
-    recognizer = Recognizer()
-    provisioner = Provisioner()
+def read_requests(stdin, requests, provisioner):
+    """Reader thread: frames are parsed as they arrive, so a `cancel` written
+    while a download is running is acted on now, not after it finishes."""
     while True:
         header, body = read_frame(stdin)
         if header is None:
+            requests.put(None)
             return
-        op = header.get("op")
-        request_id = header.get("id")
-        if op == "cancel":
+        if header.get("op") == "cancel":
             provisioner.cancel.set()
             continue
+        requests.put((header, body))
+
+
+def serve():
+    set_parent_death_signal()
+    recognizer = Recognizer()
+    provisioner = Provisioner()
+    requests = queue.Queue()
+    threading.Thread(
+        target=read_requests, args=(sys.stdin.buffer, requests, provisioner), daemon=True
+    ).start()
+    while True:
+        item = requests.get()
+        if item is None:
+            return
+        header, body = item
+        op = header.get("op")
+        request_id = header.get("id")
         try:
             if op == "load":
                 millis = recognizer.load(header)

@@ -62,7 +62,7 @@ pub fn tmux_executable() -> Result<PathBuf, TmuxExecutableError> {
     resolve_executable(
         OVERRIDE_ENV,
         "tmux",
-        known_installer_candidates(home.as_deref()),
+        || known_installer_candidates(home.as_deref()),
         &AUTOMATIC_TMUX,
     )
     .map_err(Into::into)
@@ -76,18 +76,18 @@ pub fn tmux_command() -> Result<Command, TmuxExecutableError> {
 /// `override_env` wins outright and an invalid one never falls back; otherwise
 /// every absolute `PATH` entry, the platform's registered path files, then the
 /// caller's `installer` candidates, in that order, and the first executable
-/// found is remembered in `cache` until it stops being executable.
+/// found is remembered in `cache` until it stops being executable. The
+/// candidates are built only on a cache miss: this sits on the tmux hot path.
 pub fn resolve_executable(
     override_env: &'static str,
     program: &'static str,
-    installer: impl IntoIterator<Item = PathBuf>,
+    installer: impl FnOnce() -> Vec<PathBuf>,
     cache: &Mutex<Option<PathBuf>>,
 ) -> Result<PathBuf, ExecutableError> {
     if let Some(path) = resolve_override(std::env::var_os(override_env), override_env)? {
         return Ok(path);
     }
-    let installer: Vec<PathBuf> = installer.into_iter().collect();
-    resolve_automatic(cache, || automatic_candidates(program, installer)).ok_or(
+    resolve_automatic(cache, || automatic_candidates(program, installer())).ok_or(
         ExecutableError::NotFound {
             program,
             override_env,
@@ -370,7 +370,7 @@ mod tests {
             resolve_executable(
                 "MUXFLOW_TEST_UV_UNSET",
                 "muxflow-resolver-probe",
-                [installed.clone()],
+                || vec![installed.clone()],
                 &cache
             ),
             Ok(installed.clone())
@@ -379,7 +379,7 @@ mod tests {
         let missing = resolve_executable(
             "MUXFLOW_TEST_UV_UNSET",
             "definitely-not-installed-xyz",
-            Vec::new(),
+            Vec::new,
             &Mutex::new(None),
         )
         .unwrap_err();
