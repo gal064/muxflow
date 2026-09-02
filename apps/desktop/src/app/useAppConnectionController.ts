@@ -200,8 +200,6 @@ export function useAppConnectionController({
    */
   const clientIdRef = useRef<string | undefined>(undefined);
   clientIdRef.current = clientId;
-  const terminalEpochRef = useRef(0);
-  terminalEpochRef.current = terminalEpoch;
   /**
    * Which host profile `clientId` was established for. A link's client is by
    * construction its own host's, so this is the active host whenever there is
@@ -323,8 +321,10 @@ export function useAppConnectionController({
 
   /**
    * Per-host runtime, keyed by profile id. Created the first time a host is
-   * asked about — which can be a render, for the facade's `hub` — and dropped
-   * when its link stops.
+   * asked about — which can be a render, for the facade's `hub`: the surface
+   * needs the hub as a prop, and get-or-create is idempotent, so a render
+   * React discards leaves nothing behind but the runtime the next one wants —
+   * and dropped when its link stops.
    */
   const runtimes = useRef(new Map<string, LinkRuntime>());
   const runtimeFor = useCallback((profileId: string): LinkRuntime => {
@@ -827,7 +827,10 @@ export function useAppConnectionController({
   // snapshot, its client, its remembered session — changes constantly and
   // must never restart a bridge, and neither must a change to a *different*
   // host's link. The diff is against the bridges actually running, so a host
-  // that stops being shown loses its bridge and nothing else is touched.
+  // that stops being shown loses its bridge and nothing else is touched. The
+  // closure is pinned on purpose: `startLinkBridge` reads every changing fact
+  // through a ref, and the clients, `setStatus` and the telemetry it captures
+  // are built once for the app.
   const bridgeKeys = useMemo(() => links.order
     .map((profileId) => `${profileId}\0${terminalBridgeKey(links.byProfileId[profileId].connection, links.byProfileId[profileId].connectionEpoch)}`)
     .join("\n"), [links]);
@@ -934,6 +937,6 @@ export function useAppConnectionController({
     profiles, profilesHydrated, reconnectHost, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
     setProfileRecovery, setProfiles, setSelectedProfileId, setSshConfigPath, setSshTarget,
-    snapshot, snapshotRef, sshConfigPath, sshTarget, terminalEpoch, terminalEpochRef, windows,
+    snapshot, snapshotRef, sshConfigPath, sshTarget, terminalEpoch, windows,
   };
 }

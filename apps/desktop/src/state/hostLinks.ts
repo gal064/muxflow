@@ -67,7 +67,11 @@ export function emptyHostLink(profileId: string, connection: ConnectionSpec, con
 }
 
 function sameConnection(left: ConnectionSpec, right: ConnectionSpec): boolean {
-  return left === right || JSON.stringify(left) === JSON.stringify(right);
+  if (left === right) return true;
+  if (left.mode === "local" || right.mode === "local") return left.mode === right.mode;
+  return left.profileId === right.profileId
+    && left.target === right.target
+    && (left.configPath ?? undefined) === (right.configPath ?? undefined);
 }
 
 function resolve<T>(update: SetStateAction<T>, current: T): T {

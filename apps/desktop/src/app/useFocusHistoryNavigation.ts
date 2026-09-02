@@ -79,7 +79,10 @@ export function useFocusHistoryNavigation(options: FocusHistoryNavigationOptions
     expected.current = undefined;
     if (awaited && landedAt(awaited, point)) return;
     setHistory((current) => visitFocus(current, point));
-  }, [activeSessionId, activeWindowId, selectedAppTabId]);
+    // The host is a dependency because the tuple alone cannot tell two hosts
+    // apart — both may be sitting on `$0`/`@0` — and the new host's first
+    // point must be recorded after the clear above.
+  }, [activeSessionId, activeWindowId, hostProfileId, selectedAppTabId]);
 
   useEffect(() => {
     setHistory((current) => pruneFocusHistory(current, exists));
