@@ -8,6 +8,7 @@ import { colors, fonts, radii, typeScale } from "../../ui/tokens";
 import { formatBytes, provisionFraction, provisionPhaseLabel } from "./format";
 import type { VoiceController } from "./VoiceController";
 import { useVoice } from "./voiceHooks";
+import type { VoiceHostStatus } from "./voiceStore";
 
 /**
  * The readiness card under the message list (design.md §9.11): the uv install
@@ -18,7 +19,24 @@ import { useVoice } from "./voiceHooks";
 export function VoiceStatusCard({ controller, connected }: { controller: VoiceController; connected: boolean }) {
   const status = useVoice((s) => s.hostStatus);
   const [consent, setConsent] = useState(false);
+  const size = status.modelDownloadBytes > 0 ? formatBytes(status.modelDownloadBytes) : "~640 MB";
+  return (
+    <>
+      <ReadinessCard connected={connected} controller={controller} onSetUp={() => setConsent(true)} size={size} status={status} />
+      <ConsentDialog
+        onCancel={() => setConsent(false)}
+        onConfirm={() => {
+          setConsent(false);
+          void controller.provision();
+        }}
+        size={size}
+        visible={consent}
+      />
+    </>
+  );
+}
 
+function ReadinessCard({ status, connected, controller, size, onSetUp }: { status: VoiceHostStatus; connected: boolean; controller: VoiceController; size: string; onSetUp: () => void }) {
   if (status.readiness === "ready") return null;
   if (!connected && status.readiness === "unknown") return null;
 
@@ -68,25 +86,30 @@ export function VoiceStatusCard({ controller, connected }: { controller: VoiceCo
   }
 
   // modelMissing
-  const size = status.modelDownloadBytes > 0 ? formatBytes(status.modelDownloadBytes) : "~640 MB";
   const failed = status.provision?.phase === "failed" ? status.provision.error : "";
   return (
     <View style={styles.card}>
       <Text style={styles.heading}>Voice isn't set up on this host</Text>
-      <Text style={styles.body}>The speech model is downloaded once, onto the host, and stays there.</Text>
+      <Text style={styles.body}>Downloads the speech model ({size}) to the host, once. It stays there.</Text>
       {failed ? <Text style={styles.error}>Last attempt failed: {failed}</Text> : null}
-      <Button disabled={!connected} label="Set up voice" onPress={() => setConsent(true)} />
-      <Dialog
-        actions={[
-          { label: "Cancel", onPress: () => setConsent(false) },
-          { label: "Download", onPress: () => { setConsent(false); void controller.provision(); }, variant: "primary" },
-        ]}
-        message={`This downloads the speech model (${size}) to the host and installs its Python runtime with uv. Nothing is downloaded to this phone.`}
-        onDismiss={() => setConsent(false)}
-        title="Set up voice on the host?"
-        visible={consent}
-      />
+      <Button disabled={!connected} label="Set up voice" onPress={onSetUp} />
     </View>
+  );
+}
+
+/** The consent dialog, mounted whatever the readiness so closing it is a `visible={false}` render, not an unmount mid-fade. */
+function ConsentDialog({ visible, size, onCancel, onConfirm }: { visible: boolean; size: string; onCancel: () => void; onConfirm: () => void }) {
+  return (
+    <Dialog
+      actions={[
+        { label: "Cancel", onPress: onCancel },
+        { label: "Download", onPress: onConfirm, variant: "primary" },
+      ]}
+      message={`This downloads the speech model (${size}) to the host and installs its Python runtime with uv. Nothing is downloaded to this phone.`}
+      onDismiss={onCancel}
+      title="Set up voice on the host?"
+      visible={visible}
+    />
   );
 }
 

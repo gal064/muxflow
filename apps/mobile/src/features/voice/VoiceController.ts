@@ -119,6 +119,7 @@ export class VoiceController {
   /** The screen left (Back, Files); the session and its registration stay. */
   blur(): void {
     this.focused = false;
+    this.disarm();
   }
 
   /** The app came back to the foreground while this screen is on top. */
@@ -161,6 +162,7 @@ export class VoiceController {
     this.disposed = true;
     this.focused = false;
     this.wantRegistered = false;
+    this.disarm();
     this.stopRefreshTimer();
     this.unsubscribePlayer();
     const store = this.options.store.getState();
@@ -259,7 +261,7 @@ export class VoiceController {
     }
     if (!uri || durationMs < MIN_UTTERANCE_MS) {
       this.log(`utterance.discarded durationMs=${durationMs}`);
-      this.arm();
+      this.rearm();
       this.setPhaseIfAlive("idle");
       return;
     }
@@ -267,10 +269,15 @@ export class VoiceController {
     let text: string;
     try {
       // Read before re-arming: on iOS a bare prepare reuses (and truncates) the same file URL.
-      const audio = await files.read(uri);
-      files.delete(uri);
+      let audio: Uint8Array;
+      try {
+        audio = await files.read(uri);
+      } finally {
+        // The recording has served its purpose (or never will): it does not stay in the cache.
+        files.delete(uri);
+      }
       // Re-arm for the next press while the host works on this one.
-      this.arm();
+      this.rearm();
       const connection = this.liveConnection();
       if (!connection) throw new Error("Not connected.");
       const response = await connection.request(voiceTranscribe(newOperationId(), audio, RECORDING_MIME), { timeoutMs: TRANSCRIBE_TIMEOUT_MS });
@@ -279,7 +286,7 @@ export class VoiceController {
       text = (transcript?.text ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim();
       this.log(`transcribe ${audio.byteLength} bytes durationMs=${durationMs} → ${text.length} chars in ${this.now() - startedAt} ms (audio ${transcript?.audioMillis ?? 0} ms, decode ${transcript?.decodeMillis ?? 0} ms)`);
     } catch (error) {
-      this.arm();
+      this.rearm();
       this.fail("transcribe", error);
       this.setPhaseIfAlive("idle");
       return;
@@ -453,6 +460,24 @@ export class VoiceController {
   }
 
   // ---- helpers ------------------------------------------------------------------
+
+  /**
+   * Nobody is listening: an armed recorder holds an open (empty) file in the
+   * cache, so release it once idle. The next focus arms again.
+   */
+  private disarm(): void {
+    void (this.arming ?? Promise.resolve()).then(() => {
+      if (this.focused) return;
+      const phase = this.options.store.getState().sessions[this.agentId]?.phase;
+      if (phase === undefined || phase === "idle") this.options.recorder.release();
+    });
+  }
+
+  /** After a release: arm again for the next press if someone is still on the screen, else let the recorder go. */
+  private rearm(): void {
+    if (this.focused) this.arm();
+    else this.options.recorder.release();
+  }
 
   /** Prepares the recorder once per release so press-in is `record()` alone (§2b). */
   private arm(): void {

@@ -167,7 +167,8 @@ const MessageBubble = memo(function MessageBubble({ message, controller }: { mes
   const stamp = new Date(message.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return (
     <View style={[styles.bubbleRow, you && styles.bubbleRowYou]}>
-      <View style={[styles.bubble, you ? styles.bubbleYou : styles.bubbleAgent]}>
+      {/* A bubble sizes to its text; one that carries the player takes the row, or the player's flex track collapses to a stub. */}
+      <View style={[styles.bubble, you ? styles.bubbleYou : styles.bubbleAgent, controller ? styles.bubbleWithPlayer : null]}>
         {/* The text is the tap target; the player below stays its own set of controls for a screen reader. */}
         <Pressable
           accessibilityHint={you ? undefined : expanded ? "Collapses the reply" : "Expands the reply"}
@@ -213,6 +214,7 @@ const styles = StyleSheet.create({
   // `--chrome-raised` on `--chrome-bg` is a 1.07:1 step; the hairline is what separates a bubble from the page.
   bubbleAgent: { backgroundColor: colors.chromeRaised, borderColor: colors.chromeBorder },
   bubbleYou: { backgroundColor: colors.accentWash, borderColor: colors.accent },
+  bubbleWithPlayer: { width: "88%" },
   // With the 10 dp slop this makes a one-line reply a 48 dp expand target.
   expandTarget: { minHeight: 28 },
   bubbleText: { color: colors.chromeInk, fontSize: typeScale.body, lineHeight: 20 },

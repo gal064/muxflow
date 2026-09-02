@@ -571,3 +571,57 @@ describe("VoiceController recorder edges (review round 3)", () => {
     expect(h.toasts).toHaveLength(1);
   });
 });
+
+describe("VoiceController recording hygiene (integration QA)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("deletes the recording after a refused transcription and after a read that fails", async () => {
+    const h = harness();
+    h.connection.answer(Operation.VOICE_TRANSCRIBE, () => {
+      throw new HostError("voice_audio_undecodable", "bad audio", create(VoiceResponseSchema, { operationId: "x", retryable: false }));
+    });
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    await h.controller.endUtterance();
+    expect(h.files.deleted).toEqual(["file:///cache/rec-1.m4a"]);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+
+    h.recorder.nextUri = "file:///cache/rec-2.m4a"; // not in the fake store: read throws
+    h.controller.beginUtterance();
+    await settle();
+    await h.controller.endUtterance();
+    expect(h.files.deleted).toEqual(["file:///cache/rec-1.m4a", "file:///cache/rec-2.m4a"]);
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+  });
+
+  it("leaving the screen releases an idle recorder; the next focus arms it again; End releases too", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    expect(h.recorder.prepared).toBe(1);
+    h.controller.blur();
+    await settle();
+    expect(h.recorder.released).toBe(1);
+    h.controller.focus();
+    await settle();
+    expect(h.recorder.prepared).toBe(1);
+    // Mid-utterance the recorder is not released from under the controller.
+    h.controller.beginUtterance();
+    await settle();
+    h.controller.blur();
+    await settle();
+    expect(h.recorder.released).toBe(1);
+    await h.controller.endUtterance();
+    await settle();
+    expect(h.recorder.released).toBe(2);
+    h.controller.focus();
+    await settle();
+    await h.controller.endSession();
+    await settle();
+    expect(h.recorder.released).toBe(3);
+  });
+});
