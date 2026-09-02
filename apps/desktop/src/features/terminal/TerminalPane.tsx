@@ -247,7 +247,11 @@ export interface TerminalPaneController {
 interface Props {
   appFocused?: boolean;
   clientId?: string;
-  /** Which host this pane belongs to; pane ids repeat across tmux servers. */
+  /**
+   * Which host this pane belongs to; pane ids repeat across tmux servers.
+   * Fixed for the lifetime of a mount — the surface remounts panes on a host
+   * switch, and the effects here capture the key they mounted with.
+   */
   cacheScope: string;
   pane: Pane;
   hub: TerminalEventHub;
