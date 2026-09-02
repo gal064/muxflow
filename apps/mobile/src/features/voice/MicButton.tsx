@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { ActivityIndicator, Animated, Easing, Pressable, StyleSheet, Text, View } from "react-native";
 
+import { MicIcon } from "../../ui/components/MediaIcons";
 import { colors, typeScale } from "../../ui/tokens";
 import type { VoicePhase } from "./voiceStore";
 
@@ -53,9 +54,11 @@ export function MicButton({ phase, disabled, hint, onPressIn, onPressOut }: MicB
           disabled={disabled || busy}
           onPressIn={onPressIn}
           onPressOut={onPressOut}
-          style={[styles.button, recording && styles.buttonRecording, (disabled || busy) && styles.buttonDisabled]}
+          // A thumb drifting off the disc mid-sentence must not count as a release.
+          pressRetentionOffset={64}
+          style={[styles.button, recording && styles.buttonRecording, disabled && styles.buttonDisabled]}
         >
-          {busy ? <ActivityIndicator color={colors.accentInk} size="large" /> : <Text style={styles.glyph}>🎙</Text>}
+          {busy ? <ActivityIndicator color={colors.accentInk} size="large" /> : <MicIcon color={colors.accentInk} size={44} />}
         </Pressable>
       </View>
       <Text style={styles.label}>{label}</Text>
@@ -71,7 +74,6 @@ const styles = StyleSheet.create({
   button: { alignItems: "center", backgroundColor: colors.accent, borderRadius: SIZE / 2, height: SIZE, justifyContent: "center", width: SIZE },
   buttonRecording: { backgroundColor: colors.danger },
   buttonDisabled: { opacity: 0.4 },
-  glyph: { fontSize: 40, lineHeight: 48 },
   label: { color: colors.chromeInkStrong, fontSize: typeScale.rowTitle, fontWeight: "600" },
   hint: { color: colors.chromeDim, fontSize: typeScale.rowSecondary, paddingHorizontal: 24, textAlign: "center" },
 });

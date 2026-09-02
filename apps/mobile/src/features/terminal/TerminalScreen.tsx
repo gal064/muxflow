@@ -11,6 +11,7 @@ import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
+import { MicIcon } from "../../ui/components/MediaIcons";
 import { StatusPill } from "../../ui/components/StatusPill";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
@@ -118,7 +119,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
             onPress={() => router.push({ pathname: "/voice/[paneId]", params: { paneId: toRouteParam(paneId), sessionId: toRouteParam(sessionId), agentId: toRouteParam(agent.id) } })}
             style={styles.iconButton}
           >
-            <Text style={styles.micGlyph}>🎙</Text>
+            <MicIcon color={colors.accent} size={22} />
           </Pressable>
         )}
         {gone ? null : (
@@ -213,7 +214,6 @@ const styles = StyleSheet.create({
   backGlyph: { color: colors.chromeInkStrong, fontSize: 26, fontWeight: "600", lineHeight: 30 },
   title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
   filesGlyph: { color: colors.accent, fontSize: 24, lineHeight: 28 },
-  micGlyph: { fontSize: 20, lineHeight: 26 },
   terminalArea: { backgroundColor: colors.chromeBg, flex: 1 },
   banner: {
     backgroundColor: colors.chromeSelected,

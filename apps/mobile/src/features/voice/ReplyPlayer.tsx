@@ -1,16 +1,20 @@
 import { useCallback, useRef } from "react";
 import { Pressable, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
 
+import { PauseIcon, PlayIcon, StopIcon } from "../../ui/components/MediaIcons";
 import { colors, radii, typeScale } from "../../ui/tokens";
 import { formatClock } from "./format";
 import type { VoiceController } from "./VoiceController";
 import { useVoice } from "./voiceHooks";
 import type { VoiceMessage } from "./voiceStore";
 
+/** Swipe up/down on the seek bar with a screen reader moves by this much. */
+const SEEK_STEP_MS = 5_000;
+
 /**
  * The Telegram-shaped voice message on the newest agent reply (design.md
  * §9.11): play/pause, a thin position bar that is also the seek target, the
- * clock, and the unplayed dot. Subscribes to `playback` itself so 4 Hz
+ * clock, the unplayed dot, and Stop. Subscribes to `playback` itself so 4 Hz
  * position ticks re-render this row and nothing above it.
  */
 export function ReplyPlayer({ message, controller }: { message: VoiceMessage; controller: VoiceController }) {
@@ -20,6 +24,7 @@ export function ReplyPlayer({ message, controller }: { message: VoiceMessage; co
     width.current = event.nativeEvent.layout.width;
   }, []);
   const playing = playback?.state === "playing";
+  const loaded = playback !== undefined && playback.state !== "stopped";
   const durationMs = playback?.durationMs ?? 0;
   const positionMs = playback?.positionMs ?? 0;
   const fraction = durationMs > 0 ? Math.min(1, positionMs / durationMs) : 0;
@@ -30,10 +35,20 @@ export function ReplyPlayer({ message, controller }: { message: VoiceMessage; co
     else controller.resume();
   }, [controller, message.id, playback]);
 
-  const seek = useCallback((x: number) => {
-    if (!playback || durationMs <= 0 || width.current <= 0) return;
-    controller.seek(Math.round((Math.min(Math.max(x, 0), width.current) / width.current) * durationMs));
-  }, [controller, durationMs, playback]);
+  const seekTo = useCallback((target: number) => {
+    // A tap on a reply that is not loaded yet starts it; the position is only
+    // known once the player reports a duration.
+    if (!playback) {
+      controller.play(message.id);
+      return;
+    }
+    controller.seek(target);
+  }, [controller, message.id, playback]);
+
+  const seekAt = useCallback((x: number) => {
+    if (playback && (durationMs <= 0 || width.current <= 0)) return;
+    seekTo(Math.round((Math.min(Math.max(x, 0), width.current) / Math.max(width.current, 1)) * durationMs));
+  }, [durationMs, playback, seekTo]);
 
   if (message.audioError) {
     return (
@@ -50,21 +65,23 @@ export function ReplyPlayer({ message, controller }: { message: VoiceMessage; co
   return (
     <View style={styles.row}>
       <Pressable
-        accessibilityLabel={playing ? "Pause reply" : "Play reply"}
+        accessibilityLabel={playing ? "Pause reply" : message.played ? "Play reply" : "Play unplayed reply"}
         accessibilityRole="button"
         onPress={toggle}
         style={({ pressed }) => [styles.playButton, pressed && styles.pressed]}
       >
-        <Text style={styles.playGlyph}>{playing ? "❙❙" : "▶"}</Text>
+        {playing ? <PauseIcon color={colors.accentInk} size={24} /> : <PlayIcon color={colors.accentInk} size={24} />}
       </Pressable>
       <View style={styles.trackColumn}>
         <Pressable
+          accessibilityActions={[{ name: "increment", label: "Skip forward" }, { name: "decrement", label: "Skip back" }]}
           accessibilityLabel="Seek"
           accessibilityRole="adjustable"
-          accessibilityValue={{ min: 0, max: durationMs, now: positionMs }}
+          accessibilityValue={{ min: 0, max: durationMs, now: positionMs, text: `${formatClock(positionMs)} of ${formatClock(durationMs)}` }}
           hitSlop={{ top: 14, bottom: 14 }}
+          onAccessibilityAction={(event) => seekTo(event.nativeEvent.actionName === "increment" ? positionMs + SEEK_STEP_MS : positionMs - SEEK_STEP_MS)}
           onLayout={onLayout}
-          onPress={(event) => seek(event.nativeEvent.locationX)}
+          onPress={(event) => seekAt(event.nativeEvent.locationX)}
           style={styles.trackHit}
         >
           <View style={styles.track}>
@@ -73,14 +90,21 @@ export function ReplyPlayer({ message, controller }: { message: VoiceMessage; co
         </Pressable>
         <View style={styles.clockRow}>
           <Text style={styles.clock}>{formatClock(playback ? positionMs : 0)}{durationMs > 0 ? ` / ${formatClock(durationMs)}` : ""}</Text>
-          {message.played ? null : <View accessibilityLabel="Unplayed" style={styles.unplayedDot} />}
+          {message.played ? null : <View importantForAccessibility="no" style={styles.unplayedDot} />}
         </View>
       </View>
-      {playback && playback.state !== "stopped" ? (
-        <Pressable accessibilityLabel="Stop reply" accessibilityRole="button" onPress={() => controller.stop()} style={({ pressed }) => [styles.stopButton, pressed && styles.pressed]}>
-          <Text style={styles.stopGlyph}>■</Text>
-        </Pressable>
-      ) : null}
+      {/* The slot is always reserved so the track does not shrink under the finger when Play is tapped. */}
+      <Pressable
+        accessibilityElementsHidden={!loaded}
+        accessibilityLabel="Stop reply"
+        accessibilityRole="button"
+        disabled={!loaded}
+        importantForAccessibility={loaded ? "auto" : "no-hide-descendants"}
+        onPress={() => controller.stop()}
+        style={({ pressed }) => [styles.stopButton, pressed && styles.pressed, !loaded && styles.stopHidden]}
+      >
+        <StopIcon color={colors.chromeInk} size={22} />
+      </Pressable>
     </View>
   );
 }
@@ -88,9 +112,8 @@ export function ReplyPlayer({ message, controller }: { message: VoiceMessage; co
 const styles = StyleSheet.create({
   row: { alignItems: "center", flexDirection: "row", gap: 8, marginTop: 8 },
   playButton: { alignItems: "center", backgroundColor: colors.accent, borderRadius: 24, height: 48, justifyContent: "center", width: 48 },
-  playGlyph: { color: colors.accentInk, fontSize: 18, fontWeight: "600" },
   stopButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
-  stopGlyph: { color: colors.chromeInk, fontSize: 18 },
+  stopHidden: { opacity: 0 },
   pressed: { opacity: 0.75 },
   trackColumn: { flex: 1, gap: 4 },
   trackHit: { justifyContent: "center", minHeight: 20 },

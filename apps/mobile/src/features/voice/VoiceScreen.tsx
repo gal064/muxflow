@@ -8,6 +8,7 @@ import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { Dialog } from "../../ui/components/Dialog";
+import { EmptyState } from "../../ui/components/EmptyState";
 import { StatusPill } from "../../ui/components/StatusPill";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
@@ -77,16 +78,14 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     list.current?.scrollToEnd({ animated: true });
   }, [messages.length]);
 
-  const title = agent?.displayName || "Voice";
+  const title = agent?.displayName || "this agent";
   const gone = agent !== undefined && !agent.present;
   const hint = !connected
     ? "Not connected"
-    : !agent
-      ? "This agent is no longer on the host"
-      : gone
-        ? "This agent has gone"
-        : readiness !== "ready"
-          ? "Voice isn't ready on the host"
+    : !agent || gone
+      ? "This agent no longer exists"
+      : readiness !== "ready"
+        ? "Voice isn't set up on this host"
           : "";
   const micDisabled = hint !== "";
 
@@ -103,7 +102,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={() => router.back()} style={styles.iconButton}>
           <Text style={styles.backGlyph}>←</Text>
         </Pressable>
-        <Text numberOfLines={1} style={styles.title}>{title}</Text>
+        <Text numberOfLines={1} style={styles.title}>{agent?.displayName || "Voice"}</Text>
         {agent ? <StatusPill state={agentPillState(agent)} /> : null}
         <Pressable accessibilityLabel="End session" accessibilityRole="button" onPress={() => setConfirmEnd(true)} style={styles.endButton}>
           <Text style={styles.endLabel}>End</Text>
@@ -112,10 +111,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
 
       <ScrollView contentContainerStyle={styles.listContent} ref={list} style={styles.list}>
         {messages.length === 0 ? (
-          <View style={styles.empty}>
-            <Text style={styles.emptyHeading}>Talk to {title}</Text>
-            <Text style={styles.emptyBody}>Hold the button, say what you want typed into the agent's terminal, and let go. The agent's next reply is read back to you here.</Text>
-          </View>
+          <EmptyState heading={`Talk to ${title}`} lines={["Hold the button, say what you want typed into the agent's terminal, and let go.", "The agent's next reply is read back to you here."]} />
         ) : null}
         {messages.map((message) => (
           <MessageBubble controller={message.id === newest?.id ? controller : undefined} key={message.id} message={message} />
@@ -150,22 +146,24 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
 const MessageBubble = memo(function MessageBubble({ message, controller }: { message: VoiceMessage; controller: VoiceController | undefined }) {
   const [expanded, setExpanded] = useState(false);
   const you = message.kind === "you";
-  const time = new Date(message.at);
-  const stamp = `${time.getHours()}:${time.getMinutes().toString().padStart(2, "0")}`;
+  const stamp = new Date(message.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return (
     <View style={[styles.bubbleRow, you && styles.bubbleRowYou]}>
-      <Pressable
-        accessibilityLabel={`${you ? "You said" : "Agent replied"}: ${message.text}`}
-        accessibilityRole={you ? "text" : "button"}
-        disabled={you}
-        onPress={() => setExpanded((value) => !value)}
-        style={[styles.bubble, you ? styles.bubbleYou : styles.bubbleAgent]}
-      >
-        <Text numberOfLines={you || expanded ? undefined : 3} style={[styles.bubbleText, you && styles.bubbleTextYou]}>{message.text}</Text>
-        {message.truncated && expanded ? <Text style={styles.truncatedNote}>Spoken reply shortened; the rest is in the terminal.</Text> : null}
+      <View style={[styles.bubble, you ? styles.bubbleYou : styles.bubbleAgent]}>
+        {/* The text is the tap target; the player below stays its own set of controls for a screen reader. */}
+        <Pressable
+          accessibilityHint={you ? undefined : expanded ? "Collapses the reply" : "Expands the reply"}
+          accessibilityLabel={`: `}
+          accessibilityRole={you ? "text" : "button"}
+          disabled={you}
+          onPress={() => setExpanded((value) => !value)}
+        >
+          <Text numberOfLines={you || expanded ? undefined : 3} style={[styles.bubbleText, you && styles.bubbleTextYou]}>{message.text}</Text>
+          {message.truncated && expanded ? <Text style={styles.truncatedNote}>Spoken reply shortened; the rest is in the terminal.</Text> : null}
+        </Pressable>
         {controller ? <ReplyPlayer controller={controller} message={message} /> : null}
         <Text style={[styles.stamp, you && styles.stampYou]}>{stamp}</Text>
-      </Pressable>
+      </View>
     </View>
   );
 });
@@ -189,17 +187,15 @@ const styles = StyleSheet.create({
   endLabel: { color: colors.dangerInk, fontSize: typeScale.body, fontWeight: "600" },
   list: { flex: 1 },
   listContent: { gap: 8, paddingHorizontal: 12, paddingVertical: 12 },
-  empty: { alignItems: "center", gap: 8, paddingHorizontal: 24, paddingVertical: 32 },
-  emptyHeading: { color: colors.chromeInkStrong, fontSize: typeScale.rowTitle, fontWeight: "600" },
-  emptyBody: { color: colors.chromeDim, fontSize: typeScale.body, textAlign: "center" },
   bubbleRow: { flexDirection: "row", justifyContent: "flex-start" },
   bubbleRowYou: { justifyContent: "flex-end" },
-  bubble: { borderRadius: radii.sheet, gap: 4, maxWidth: "88%", paddingHorizontal: 14, paddingVertical: 10 },
-  bubbleAgent: { backgroundColor: colors.chromeRaised },
-  bubbleYou: { backgroundColor: colors.accentWash },
+  bubble: { borderRadius: radii.card, borderWidth: metrics.hairlineWidth, gap: 4, maxWidth: "88%", paddingHorizontal: 14, paddingVertical: 10 },
+  // `--chrome-raised` on `--chrome-bg` is a 1.07:1 step; the hairline is what separates a bubble from the page.
+  bubbleAgent: { backgroundColor: colors.chromeRaised, borderColor: colors.chromeBorder },
+  bubbleYou: { backgroundColor: colors.accentWash, borderColor: colors.chromeBorder },
   bubbleText: { color: colors.chromeInk, fontSize: typeScale.body, lineHeight: 20 },
   bubbleTextYou: { color: colors.chromeInkStrong },
   truncatedNote: { color: colors.chromeDim, fontSize: typeScale.meta, fontStyle: "italic" },
-  stamp: { color: colors.chromeFaint, fontSize: typeScale.meta },
+  stamp: { color: colors.chromeDim, fontSize: typeScale.meta },
   stampYou: { textAlign: "right" },
 });

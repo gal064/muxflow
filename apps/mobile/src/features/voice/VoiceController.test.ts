@@ -285,7 +285,7 @@ describe("VoiceController", () => {
     h.controller.beginUtterance();
     await h.controller.endUtterance();
     await settle();
-    expect(h.toasts).toContain("Voice isn't set up on this host yet.");
+    expect(h.toasts).toContain("Voice isn't set up on this host.");
     expect(h.connection.of(Operation.VOICE_STATUS)).toHaveLength(2);
     expect(h.store.getState().hostStatus.readiness).toBe("modelMissing");
     expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(0);
