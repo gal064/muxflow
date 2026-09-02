@@ -75,7 +75,9 @@ export function toast(message: string): void {
  */
 export async function connectHost(host: SavedHost): Promise<void> {
   if (!factory) throw new Error("no transport factory: call setTransportFactory first");
-  await disconnectHost();
+  // A reconnect to the same host keeps the voice sessions: their host-side
+  // registrations are per connection and are re-sent on `onConnected`.
+  await disconnectHost({ keepVoiceSessions: controlHost?.id === host.id });
   const dial = factory;
   controlHost = host;
   const connection = new HostConnection({
@@ -155,15 +157,15 @@ export function openBulkConnection(): Promise<HostConnection> {
   return ready;
 }
 
-export async function disconnectHost(): Promise<void> {
+export async function disconnectHost({ keepVoiceSessions = false }: { keepVoiceSessions?: boolean } = {}): Promise<void> {
   dropBulk();
   const connection = control;
   control = null;
   controlHost = null;
   connection?.disconnect();
   filesStore.getState().clearAll();
-  // Voice sessions are registered per connection on the host; without one they are dead weight.
-  voiceRegistry.disposeAll();
+  // Voice sessions are registered per connection on the host; without one (or on another host) they are dead weight.
+  if (!keepVoiceSessions) voiceRegistry.disposeAll();
   sessionStore.getState().clearHostState();
   sessionStore.getState().setConnection({ state: "idle", attempt: 0, message: undefined, host: undefined });
 }

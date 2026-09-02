@@ -5,14 +5,14 @@
 // session. The session outlives the screen: `voiceRegistry` keeps the
 // controller until `endSession()`; the screen `focus()`es and `blur()`s it.
 
-import { type HostConnection } from "../../protocol/HostConnection";
+import { HostError, type HostConnection } from "../../protocol/HostConnection";
 import type { VoiceSpeech } from "../../protocol/gen/envelope_pb";
 import { newOperationId, terminalInput, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "../../protocol/requests";
 import { utf8Encode } from "../terminal/bytes";
 import { CR } from "../terminal/chips";
 import { RECORDING_MIME, type PlayerStatus, type VoiceFiles, type VoicePlayer, type VoiceRecorder } from "./audioPorts";
 import { describeVoiceError, STATUS_CHANGING_CODES } from "./voiceErrors";
-import { latestReply, type VoiceMessage, type VoiceStore } from "./voiceStore";
+import { latestReply, type VoiceMessage, type VoiceReadinessState, type VoiceStore } from "./voiceStore";
 
 export interface VoiceControllerOptions {
   agentId: string;
@@ -41,18 +41,30 @@ export const SPEAK_TIMEOUT_MS = 60_000;
 /** The ~640 MB download answers only when done; progress arrives as events. */
 export const PROVISION_TIMEOUT_MS = 60 * 60_000;
 
+/** Refusals that are really a readiness report (§4.6): the card shows them, no toast. */
+const READINESS_CODES: Record<string, VoiceReadinessState> = {
+  voice_uv_missing: "uvMissing",
+  voice_model_missing: "modelMissing",
+  voice_provisioning: "provisioning",
+};
+
 export class VoiceController {
   readonly agentId: string;
   readonly paneId: string;
   readonly sessionId: string;
   private focused = false;
-  private registered = false;
+  /** The screen has been opened at least once: the host should know about this session. */
+  private wantRegistered = false;
   private disposed = false;
+  /** Runs only after a registration succeeded; stops on a refusal that says the host is not ready. */
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
+  private registering = false;
   /** The message whose file the shared player currently holds, when this controller loaded it. */
   private loadedMessageId: string | undefined;
   private lastReplyGeneration = 0n;
   private messageCounter = 0;
+  /** The `prepare()` in flight, so a press that lands before it settles waits for it instead of failing. */
+  private arming: Promise<void> | undefined;
   private readonly unsubscribePlayer: () => void;
   private readonly now: () => number;
   private readonly sessionRefreshMs: number;
@@ -67,6 +79,10 @@ export class VoiceController {
     this.unsubscribePlayer = options.player.onStatus((status) => this.onPlayerStatus(status));
   }
 
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
   // ---- lifecycle ------------------------------------------------------------
 
   /**
@@ -77,13 +93,10 @@ export class VoiceController {
   focus(): void {
     if (this.disposed) return;
     this.focused = true;
+    this.wantRegistered = true;
     void this.refreshStatus(true);
-    if (!this.registered) {
-      this.registered = true;
-      this.refreshTimer = setInterval(() => void this.registerSession(), this.sessionRefreshMs);
-    }
     void this.registerSession();
-    this.options.recorder.prepare().catch((error: unknown) => this.fail("recorder.prepare", error));
+    this.arm();
     this.playUnplayedIfListening();
   }
 
@@ -99,17 +112,24 @@ export class VoiceController {
 
   /** Every reconnect is a new connection, and the host's registration is per connection (§4.3). */
   onConnected(): void {
-    if (this.disposed || !this.registered) return;
-    void this.registerSession();
+    if (this.disposed) return;
+    this.reregister();
     if (this.focused) void this.refreshStatus(true);
+  }
+
+  /** Registers again on the current connection (a reconnect, or another session's End cleared it). */
+  reregister(): void {
+    if (this.disposed || !this.wantRegistered) return;
+    void this.registerSession();
   }
 
   /** Clears the host registration, deletes the kept MP3 and forgets the session. */
   async endSession(): Promise<void> {
     if (this.disposed) return;
     const connection = this.liveConnection();
+    const registered = this.refreshTimer !== undefined;
     this.dispose();
-    if (!connection) return;
+    if (!connection || !registered) return;
     try {
       await connection.request(voiceSession(""));
       this.log("session.cleared");
@@ -123,15 +143,15 @@ export class VoiceController {
     if (this.disposed) return;
     this.disposed = true;
     this.focused = false;
-    if (this.refreshTimer !== undefined) clearInterval(this.refreshTimer);
-    this.refreshTimer = undefined;
+    this.wantRegistered = false;
+    this.stopRefreshTimer();
     this.unsubscribePlayer();
     const store = this.options.store.getState();
-    if (this.loadedMessageId !== undefined) {
+    if (this.ownPlayback()) {
       this.options.player.stop();
       store.setPlayback(undefined);
-      this.loadedMessageId = undefined;
     }
+    this.loadedMessageId = undefined;
     const reply = latestReply(store.sessions[this.agentId]);
     if (reply?.fileUri) this.options.files.delete(reply.fileUri);
     store.removeSession(this.agentId);
@@ -147,7 +167,10 @@ export class VoiceController {
       if (this.disposed) return;
       if (response.voice?.status) this.options.store.getState().setHostStatus(response.voice.status);
       this.log(`status readiness=${response.voice?.status?.readiness ?? "?"} warm=${warm}`);
+      // A host that became ready since the last try can take the registration now.
+      if (this.options.store.getState().hostStatus.readiness === "ready" && this.refreshTimer === undefined && !this.registering) this.reregister();
     } catch (error) {
+      if (this.applyReadinessRefusal(error)) return;
       this.fail("status", error);
     }
   }
@@ -164,6 +187,7 @@ export class VoiceController {
       if (this.disposed) return;
       if (response.voice?.status) this.options.store.getState().setHostStatus(response.voice.status);
       this.log("provision → ok");
+      this.reregister();
     } catch (error) {
       this.fail("provision", error);
       // Whatever the refusal was, the card should show the host's own view of it.
@@ -177,16 +201,27 @@ export class VoiceController {
   beginUtterance(): void {
     if (this.disposed) return;
     const store = this.options.store.getState();
-    if (store.sessions[this.agentId]?.phase !== "idle") return;
-    if (this.loadedMessageId !== undefined && store.playback?.state === "playing") this.stop();
-    try {
-      this.options.recorder.record();
-    } catch (error) {
-      this.fail("record", error);
-      return;
+    if (store.sessions[this.agentId]?.phase !== "idle" || store.recorderError) return;
+    // Whatever is playing, this session's reply or another's, yields to the voice.
+    if (store.playback?.state === "playing") {
+      this.options.player.stop();
+      store.setPlayback({ ...store.playback, state: "stopped", positionMs: 0 });
     }
     store.setPhase(this.agentId, "recording");
     this.log("utterance.begin");
+    // A press that lands while the recorder is still re-arming after the
+    // previous release waits for it; a release before then finds nothing
+    // recorded and is discarded.
+    const armed = this.arming ?? Promise.resolve();
+    void armed.then(() => {
+      if (this.disposed || this.options.store.getState().sessions[this.agentId]?.phase !== "recording") return;
+      try {
+        this.options.recorder.record();
+      } catch (error) {
+        this.fail("record", error);
+        this.setPhaseIfAlive("idle");
+      }
+    });
   }
 
   /** Press-out: stop → read → VOICE_TRANSCRIBE → TERMINAL_INPUT of `transcript + CR`. */
@@ -196,6 +231,8 @@ export class VoiceController {
     if (store.sessions[this.agentId]?.phase !== "recording") return;
     store.setPhase(this.agentId, "transcribing");
     const { recorder, files } = this.options;
+    // The press may still be waiting for the recorder (see beginUtterance).
+    await (this.arming ?? Promise.resolve()).catch(() => undefined);
     let uri: string | null = null;
     let durationMs = 0;
     try {
@@ -204,7 +241,7 @@ export class VoiceController {
       this.fail("recorder.stop", error);
     }
     // Re-arm for the next press while the host works on this one.
-    recorder.prepare().catch((error: unknown) => this.fail("recorder.prepare", error));
+    this.arm();
     if (!uri || durationMs < MIN_UTTERANCE_MS) {
       this.log(`utterance.discarded durationMs=${durationMs}`);
       this.setPhaseIfAlive("idle");
@@ -293,18 +330,18 @@ export class VoiceController {
     this.playUnplayedIfListening();
   }
 
-  /** The Retry on a reply whose pushed audio failed: synthesize it now and play. */
+  /** The Retry on the newest reply whose pushed audio failed: synthesize it now and play. */
   async retrySpeak(messageId: string): Promise<void> {
     const connection = this.liveConnection();
     if (!connection) return;
     const message = this.find(messageId);
-    if (!message || message.kind !== "agent") return;
+    // Only the newest reply may hold the session's one file (§1).
+    if (!message || message.kind !== "agent" || latestReply(this.options.store.getState().sessions[this.agentId])?.id !== messageId) return;
     try {
       const response = await connection.request(voiceSpeak(newOperationId(), message.text), { timeoutMs: SPEAK_TIMEOUT_MS });
       if (this.disposed) return;
       const speech = response.voice?.speech;
       if (!speech || speech.audio.byteLength === 0) throw new Error("The host returned no audio.");
-      // Only the newest reply keeps a file; a retry on an older one plays and is not kept.
       const uri = this.options.files.writeReply(this.agentId, speech.audio);
       this.options.store.getState().setMessageAudio(this.agentId, messageId, uri);
       this.log(`speak.retry ${speech.audio.byteLength} bytes`);
@@ -394,15 +431,62 @@ export class VoiceController {
 
   // ---- helpers ------------------------------------------------------------------
 
+  /** Prepares the recorder once per release so press-in is `record()` alone (§2b). */
+  private arm(): void {
+    if (this.arming) return;
+    const store = this.options.store.getState();
+    if (store.recorderError) return;
+    this.arming = this.options.recorder.prepare()
+      .then(() => {
+        if (!this.disposed) this.options.store.getState().setRecorderError(undefined);
+      })
+      .catch((error: unknown) => {
+        // Permission denied (or a recorder that cannot start) is a phone-side
+        // state the mic shows, not a toast per press.
+        this.log(`recorder.prepare.failed ${describe(error)}`);
+        if (!this.disposed) this.options.store.getState().setRecorderError(describe(error));
+      })
+      .finally(() => {
+        this.arming = undefined;
+      });
+  }
+
   private async registerSession(): Promise<void> {
     const connection = this.liveConnection();
-    if (!connection || this.disposed) return;
+    if (!connection || this.disposed || !this.wantRegistered || this.registering) return;
+    this.registering = true;
     try {
       await connection.request(voiceSession(this.agentId));
+      if (this.disposed) return;
       this.log("session.registered");
+      this.refreshTimer ??= setInterval(() => void this.registerSession(), this.sessionRefreshMs);
     } catch (error) {
+      // A host that is not set up cannot hold a session; the readiness card
+      // says so, and the loop restarts once STATUS reports ready.
+      if (this.applyReadinessRefusal(error)) {
+        this.stopRefreshTimer();
+        this.log(`session.refused ${describe(error)}`);
+        return;
+      }
       this.fail("session", error);
+    } finally {
+      this.registering = false;
     }
+  }
+
+  private stopRefreshTimer(): void {
+    if (this.refreshTimer !== undefined) clearInterval(this.refreshTimer);
+    this.refreshTimer = undefined;
+  }
+
+  /** A `voice_uv_missing` / `voice_model_missing` / `voice_provisioning` refusal becomes the readiness shown on the card. */
+  private applyReadinessRefusal(error: unknown): boolean {
+    if (!(error instanceof HostError)) return false;
+    const readiness = READINESS_CODES[error.code];
+    if (!readiness || this.disposed) return false;
+    const store = this.options.store.getState();
+    if (readiness !== "provisioning" || store.hostStatus.readiness !== "provisioning") store.setReadiness(readiness, error.message);
+    return true;
   }
 
   private liveConnection(): HostConnection | null {

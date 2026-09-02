@@ -1,5 +1,5 @@
 import { useFocusEffect, useRouter } from "expo-router";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -44,11 +44,12 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const agent = useSession((s) => s.agents[agentId]);
   const connected = useSession((s) => s.connection.state === "connected");
   const readiness = useVoice((s) => s.hostStatus.readiness);
+  const recorderError = useVoice((s) => s.recorderError);
   const session = useVoice((s) => s.sessions[agentId]);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const list = useRef<ScrollView>(null);
 
-  const controller: VoiceController = useMemo(() => voiceRegistry.open({
+  const open = useCallback((): VoiceController => voiceRegistry.open({
     agentId,
     paneId,
     sessionId,
@@ -58,11 +59,16 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     toast,
     log,
   }), [agentId, paneId, sessionId]);
+  const [controller, setController] = useState(open);
 
+  // Each focus asks the registry again: a user disconnect disposes the session
+  // this screen was built on, and the next focus starts a fresh one.
   useFocusEffect(useCallback(() => {
-    controller.focus();
-    return () => controller.blur();
-  }, [controller]));
+    const live = controller.isDisposed ? open() : controller;
+    if (live !== controller) setController(live);
+    live.focus();
+    return () => live.blur();
+  }, [controller, open]));
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (next) => {
