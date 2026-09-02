@@ -40,7 +40,8 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVISION_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 pub(crate) const MAX_SESSIONS: usize = 8;
 const SESSION_TTL: Duration = Duration::from_secs(10 * 60);
-const MAX_SPEAK_CHARS: usize = 4_000;
+/// SPEAK input bound: a raw reply the hook forwarded (32 KiB) must replay.
+const MAX_SPEAK_CHARS: usize = 32 * 1024;
 
 /// One refusal, as the wire wants it: a code from §4.6, a message, and whether
 /// the same request could succeed if repeated.
@@ -49,6 +50,11 @@ pub(crate) struct VoiceError {
     pub(crate) code: &'static str,
     pub(crate) message: String,
     pub(crate) retryable: bool,
+    /// The sidecar itself judged the model files bad (`class: "model"`), as
+    /// opposed to crashing, timing out or being cancelled while loading them.
+    /// Not on the wire; provisioning uses it to decide whether a download is
+    /// worth keeping.
+    model_fault: bool,
 }
 
 impl VoiceError {
@@ -57,11 +63,20 @@ impl VoiceError {
             code,
             message: message.into(),
             retryable,
+            model_fault: false,
         }
     }
 
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::new("voice_invalid_request", message, false)
+    }
+
+    pub(crate) fn unsupported_provider() -> Self {
+        Self::new(
+            "voice_provider_unsupported",
+            "only Edge TTS is available on this host",
+            false,
+        )
     }
 
     fn cancelled() -> Self {
@@ -219,6 +234,9 @@ impl VoiceService {
     /// Spawns the sidecar and loads the model on a detached task; a no-op
     /// when it is already hot.
     pub(crate) fn warm(self: &Arc<Self>) {
+        if self.hot.load(Ordering::Acquire) {
+            return;
+        }
         let service = Arc::clone(self);
         tokio::spawn(async move {
             let _ = service.ensure_loaded(&AtomicBool::new(false)).await;
@@ -444,6 +462,7 @@ impl VoiceService {
             body: Vec::new(),
             bound: PROVISION_TIMEOUT,
             needs_model: false,
+            cancellable: true,
         };
         self.sidecar_request(request, cancel, &mut forward)
             .await
@@ -451,22 +470,34 @@ impl VoiceService {
                 "cancelled" | "voice_busy" | "voice_sidecar_failed" | "voice_uv_missing" => error,
                 _ => VoiceError::new("voice_provision_failed", error.message, true),
             })?;
-        let verifying = provision::progress(operation_id, provision::PHASE_VERIFYING, 0, 0, "");
-        self.emit_progress(&verifying, on_progress);
-        if let Err(error) = self.ensure_loaded(cancel).await {
-            if error.code == "cancelled" {
-                // The bytes are fine as far as anyone knows; the next STATUS
-                // finds a complete model and the next request verifies it.
-                return Err(error);
-            }
-            // A model that does not load is not a model; the next provision
-            // must start from nothing rather than verify the same bytes.
+        if !model.complete() {
+            // The sidecar said it finished, yet the layout is not there: the
+            // archive did not contain what it should have.
             model.remove();
             return Err(VoiceError::new(
                 "voice_provision_failed",
-                error.message,
+                "the download did not produce a complete model",
                 true,
             ));
+        }
+        let verifying = provision::progress(operation_id, provision::PHASE_VERIFYING, 0, 0, "");
+        self.emit_progress(&verifying, on_progress);
+        if let Err(error) = self.ensure_loaded(cancel).await {
+            if error.model_fault {
+                // The sidecar read the files and rejected them: a corrupt
+                // download, and the next provision must start from nothing
+                // rather than verify the same bytes.
+                model.remove();
+                return Err(VoiceError::new(
+                    "voice_provision_failed",
+                    error.message,
+                    true,
+                ));
+            }
+            // Cancelled, crashed or timed out while loading: the bytes are fine
+            // as far as anyone knows. The next STATUS finds a complete model
+            // and the next request verifies it, without another 487 MB.
+            return Err(error);
         }
         Ok(())
     }
@@ -558,12 +589,16 @@ impl VoiceService {
         let mut header = serde_json::Map::new();
         header.insert("op".into(), "transcribe".into());
         header.insert("sample_rate".into(), pcm.sample_rate.into());
+        if !language_hint.is_empty() {
+            header.insert("language".into(), language_hint.into());
+        }
         let body: Vec<u8> = pcm.samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         let request = SidecarRequest {
             header,
             body,
             bound: Duration::from_secs(30) + Duration::from_millis(u64::from(audio_millis) * 2),
             needs_model: true,
+            cancellable: false,
         };
         let sidecar_started = Instant::now();
         let reply = self.sidecar_request(request, cancel, &mut |_| {}).await?;
@@ -607,11 +642,7 @@ impl VoiceService {
             provider,
             v1::VoiceProvider::Unspecified | v1::VoiceProvider::EdgeTts
         ) {
-            return Err(VoiceError::new(
-                "voice_provider_unsupported",
-                "only Edge TTS is available on this host",
-                false,
-            ));
+            return Err(VoiceError::unsupported_provider());
         }
         if text.trim().is_empty() {
             return Err(VoiceError::invalid("text is required"));
@@ -671,6 +702,7 @@ impl VoiceService {
             // Speech does not need the recognizer, but a host without the
             // model is not "set up" for voice; §4.6 answers model_missing.
             needs_model: false,
+            cancellable: false,
         };
         let started = Instant::now();
         let reply = self.sidecar_request(request, cancel, &mut |_| {}).await?;
@@ -720,6 +752,7 @@ impl VoiceService {
             body: Vec::new(),
             bound: Duration::ZERO,
             needs_model: true,
+            cancellable: false,
         };
         self.sidecar_request(request, cancel, &mut |_| {})
             .await
@@ -796,7 +829,7 @@ impl VoiceService {
                 request.header,
                 &request.body,
                 request.bound,
-                Some(cancel),
+                request.cancellable.then_some(cancel),
                 on_progress,
             )
             .await;
@@ -858,6 +891,10 @@ impl VoiceService {
                 match class.as_str() {
                     "network" => VoiceError::new("voice_network_unavailable", error, true),
                     "input" => VoiceError::invalid(error),
+                    "model" => VoiceError {
+                        model_fault: true,
+                        ..VoiceError::new("voice_sidecar_failed", error, false)
+                    },
                     _ => VoiceError::new("voice_sidecar_failed", error, true),
                 }
             }
@@ -1018,6 +1055,10 @@ struct SidecarRequest {
     body: Vec<u8>,
     bound: Duration,
     needs_model: bool,
+    /// Whether the sidecar can interrupt this op when told to. Only a
+    /// provision can; sending `cancel` for anything else would only make the
+    /// host give up on a healthy sidecar mid-load and pay a cold start.
+    cancellable: bool,
 }
 
 struct WaiterGuard<'a>(&'a AtomicUsize);

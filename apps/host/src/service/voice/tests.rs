@@ -204,6 +204,7 @@ async fn refusals_are_mapped_by_class_and_leave_the_child_alive() {
         body: Vec::new(),
         bound: Duration::from_secs(5),
         needs_model: false,
+        cancellable: false,
     };
     let error = service
         .sidecar_request(request, &not_cancelled(), &mut |_| {})
@@ -483,17 +484,18 @@ async fn provision_needs_consent_runs_the_sidecar_and_verifies_by_loading() {
     let outcome = service
         .provision("op-2", true, &not_cancelled(), &mut record)
         .await;
-    // The fake never wrote the model, so verification fails and cleans up.
+    // The fake never wrote the model: the layout check after the download
+    // fails before anything is verified, and nothing is left behind.
     let error = outcome.unwrap_err();
     assert_eq!(error.code, "voice_provision_failed");
     assert!(error.retryable);
+    assert!(error.message.contains("complete model"));
     assert_eq!(
         seen,
         [
             ("installing_runtime".to_owned(), 0),
             ("downloading".to_owned(), 1),
             ("downloading".to_owned(), 2),
-            ("verifying".to_owned(), 0),
             ("failed".to_owned(), 0),
         ]
     );
@@ -519,6 +521,85 @@ async fn provision_needs_consent_runs_the_sidecar_and_verifies_by_loading() {
     assert_eq!(seen.last().map(|(phase, _)| phase.as_str()), Some("ready"));
     assert!(status.sidecar_running);
     assert!(fs::read_dir(dir.path()).unwrap().count() > 0);
+}
+
+/// Verification deletes the download only when the sidecar itself rejected
+/// the files; a sidecar that crashed or was cancelled mid-load says nothing
+/// about the bytes, and 487 MB must not be thrown away on its account.
+#[tokio::test]
+async fn verification_keeps_the_model_unless_the_sidecar_rejects_it() {
+    let dir = tempfile::tempdir().unwrap();
+    // `provision` answers ok; `load` crashes the sidecar.
+    let crashing = ECHO_SIDECAR
+        .replace("progress) printf", "provision) printf")
+        .replace(
+            "load) printf '{\"id\":%s,\"ok\":true,\"load_millis\":7}\\n' \"$id\" ;;",
+            "load) exit 3 ;;",
+        );
+    assert!(crashing.contains("load) exit 3"), "fixture edit missed");
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, &crashing);
+    service.model().remove();
+    let mut record = |progress: &v1::VoiceProvisionProgress| {
+        if progress.phase == provision::PHASE_DOWNLOADING {
+            service.model().write_fake_complete();
+        }
+    };
+    let error = service
+        .provision("op", true, &not_cancelled(), &mut record)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "voice_sidecar_failed");
+    assert!(
+        service.model().complete(),
+        "a crash during verify deleted the download"
+    );
+
+    // The sidecar's own verdict on the files is what removes them.
+    let rejecting = ECHO_SIDECAR
+        .replace("progress) printf", "provision) printf")
+        .replace(
+            "load) printf '{\"id\":%s,\"ok\":true,\"load_millis\":7}\\n' \"$id\" ;;",
+            "load) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"bad onnx\"}\\n' \"$id\" ;;",
+        );
+    let strict = super::tests::service(dir.path(), DEFAULT_IDLE_AFTER, &rejecting);
+    strict.model().remove();
+    let mut record = |progress: &v1::VoiceProvisionProgress| {
+        if progress.phase == provision::PHASE_DOWNLOADING {
+            strict.model().write_fake_complete();
+        }
+    };
+    let error = strict
+        .provision("op", true, &not_cancelled(), &mut record)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "voice_provision_failed");
+    assert!(error.message.contains("bad onnx"));
+    assert!(!strict.model().complete(), "a rejected model survived");
+}
+
+/// A cancel flag raised during a transcribe or speak must not reach the
+/// sidecar: it cannot interrupt those, and giving up on it mid-op would only
+/// throw away a hot model. The request is answered cancelled by the dispatcher.
+#[tokio::test]
+async fn a_cancel_during_speak_leaves_the_hot_sidecar_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
+    service
+        .speak("warm", v1::VoiceProvider::EdgeTts, "", &not_cancelled())
+        .await
+        .unwrap();
+    let pid = service.sidecar_pid().await.unwrap();
+    let cancel = AtomicBool::new(false);
+    let speak = service.speak("second", v1::VoiceProvider::EdgeTts, "", &cancel);
+    let flag = async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancel.store(true, Ordering::Release);
+    };
+    let (outcome, ()) = tokio::join!(speak, flag);
+    // The echo sidecar answers at once, so the flag is only seen if the
+    // request path forwards it; either way the child must still be there.
+    let _ = outcome;
+    assert_eq!(service.sidecar_pid().await, Some(pid));
 }
 
 #[test]
