@@ -663,6 +663,12 @@ export async function startTerminal(
   sessionId: string,
   paneIds: string[],
   connection: ConnectionSpec,
+  /**
+   * Whether the bridge attaches a terminal at all. A host shown beside the
+   * active one relays topology and agents only, until `selectTerminalSession`
+   * names a session on it.
+   */
+  attach: boolean,
   onEvent: (event: TerminalEvent) => void,
 ): Promise<string> {
   const measurementEnabled = await perfProbeReady();
@@ -675,7 +681,7 @@ export async function startTerminal(
   let startedClientId: string | undefined;
   try {
     const startRequest = {
-      sessionId, paneIds, connection, measurementId: acknowledgements.measurementId,
+      sessionId, paneIds, connection, attach, measurementId: acknowledgements.measurementId,
     };
     const boundary = { ...startRequest, onEvent: channel };
     const clientId = await measurePerfRequest("workflow.connect", "terminal", boundary, async (request) => {

@@ -1,5 +1,13 @@
 import type { HostProfile } from "../../app/types";
 
+/** The host mark drawn before a host's rows: its letter, else its label's first character. */
+export function hostLetter(profile: Pick<HostProfile, "id" | "label" | "letter">): string {
+  const [letter] = profile.letter ?? "";
+  const [fromLabel] = profile.label.trim();
+  const [fromId] = profile.id;
+  return (letter ?? fromLabel ?? fromId ?? "").toUpperCase();
+}
+
 export function savedSshProfileId(target: string, configPath: string): string {
   const slug = target.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/-+/g, "-").slice(0, 64) || "host";
   const bytes = new TextEncoder().encode(`${target}\0${configPath}`);

@@ -114,6 +114,7 @@ describe("App orchestration", () => {
       id: "remote-a",
       label: "qa-host-2",
       connection: { mode: "ssh", profileId: "remote-a", target: "qa-host-2" },
+      shown: true,
     }]);
 
     // A second machine is a deliberate act, and it starts from an empty form

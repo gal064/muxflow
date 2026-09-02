@@ -54,6 +54,10 @@ export interface HostProfile {
   id: string;
   label: string;
   connection: ConnectionSpec;
+  /** One character. Absent means "derive from the label". */
+  letter?: string;
+  /** Checked in the host chooser. Absent means false. */
+  shown?: boolean;
 }
 
 export interface PersistedProfiles {

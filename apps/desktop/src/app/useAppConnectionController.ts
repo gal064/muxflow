@@ -512,7 +512,7 @@ export function useAppConnectionController({
     let topologyDirtyName: string | undefined;
     let topologyDirtyCount = 0;
     const scope = terminalBridgeScope(activeSessionIdRef.current);
-    void startTerminal(scope.sessionId, scope.paneIds, connection, (event) => {
+    void startTerminal(scope.sessionId, scope.paneIds, connection, true, (event) => {
       if (disposed) return;
       hub.publish(event, () => {
         if (event.kind === "generationEpoch") {

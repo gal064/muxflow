@@ -639,6 +639,20 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
         terminal_scope(&snapshot, "$99", &["%99".into()]),
         ("$1".into(), Vec::<String>::new())
     );
+
+    // A bridge started without `attach` names no session, so a connect
+    // attaches nothing rather than falling back to the first session; once a
+    // selection is recorded, every connect attaches what it names.
+    let client = TerminalClient::new();
+    assert_eq!(attach_scope(&client, &snapshot), None);
+    *client.terminal_selection.lock().unwrap() = Some(TerminalSelection {
+        session_id: "$1".into(),
+        pane_ids: Vec::new(),
+    });
+    assert_eq!(
+        attach_scope(&client, &snapshot),
+        Some(("$1".into(), vec!["%2".into()]))
+    );
 }
 
 #[test]

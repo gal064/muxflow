@@ -120,7 +120,7 @@ describe("remote helper reconciliation", () => {
   async function connected(probeResult: () => Promise<RemoteHelperProbe>, profile: unknown = sshProfile) {
     let publish!: (event: TerminalEvent) => void;
     startTerminalMock.mockImplementation(async (
-      _sessionId: string, _paneIds: string[], _connection: ConnectionSpec, onEvent: (event: TerminalEvent) => void,
+      _sessionId: string, _paneIds: string[], _connection: ConnectionSpec, _attach: boolean, onEvent: (event: TerminalEvent) => void,
     ) => {
       publish = onEvent;
       return "client-1";
