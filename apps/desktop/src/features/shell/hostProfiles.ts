@@ -1,4 +1,15 @@
-import type { HostProfile } from "../../app/types";
+import type { ConnectionSpec, HostProfile } from "../../app/types";
+
+/**
+ * The connection a saved host is opened with. An SSH profile saved before the
+ * connection carried its own id is given the profile's, so
+ * `hostProfileId(connection)` names the profile it was saved under.
+ */
+export function profileConnection(profile: HostProfile): ConnectionSpec {
+  return profile.connection.mode === "ssh"
+    ? { ...profile.connection, profileId: profile.connection.profileId || profile.id }
+    : profile.connection;
+}
 
 /** The host mark drawn before a host's rows: its letter, else its label's first character. */
 export function hostLetter(profile: Pick<HostProfile, "id" | "label" | "letter">): string {

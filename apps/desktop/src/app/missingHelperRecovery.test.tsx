@@ -63,7 +63,7 @@ function harness() {
     reconnect: () => undefined,
     setConnection: () => undefined,
   };
-  const client = { publishWireEvent: vi.fn(), publishWireSnapshot: vi.fn() } as never;
+  const client = { publishWireEvent: vi.fn(), publishWireSnapshot: vi.fn(), retireConnection: vi.fn() } as never;
   // Stable, like the `useState` setter the shell passes: the controller keys
   // its profile load on it, and a fresh function per render re-runs that load
   // forever.

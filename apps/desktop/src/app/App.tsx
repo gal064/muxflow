@@ -22,6 +22,7 @@ import { abandonPanePaintSpansForScope } from "../perf/probe";
 import { recordIncident } from "../diagnostics/incidents";
 import type { TmuxAction } from "../features/tmux/actions";
 import { TauriAgentClient } from "../features/agents/api";
+import type { AgentRuntimeScope } from "../features/agents/types";
 import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
 import { useRecentIdleClock } from "../features/agents/useRecentIdleClock";
 import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
@@ -216,9 +217,9 @@ export function App() {
     setStatus,
   });
   const {
-    activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
+    activateHost, activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
-    currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, inputLatencyReporter,
+    currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, inputLatencyReporter, links,
     optimisticWindow, profileRecovery,
     profiles, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
@@ -278,11 +279,6 @@ export function App() {
   // A new bridge is a new link; the last one's measured round-trip describes
   // nothing about it.
   useEffect(() => { resetHostLatency(); }, [clientId]);
-  // The file client outlives any one bridge, so a connection that has gone must
-  // take its shared directory watches with it: the host lost those
-  // registrations along with the connection, and the records left behind hold
-  // promises nothing can settle.
-  useEffect(() => () => { if (clientId) fileClient.retireConnection(clientId); }, [clientId, fileClient]);
   const appRecovery = useAppRecoveryController({
     appState,
     currentHostProfileId,
@@ -401,6 +397,7 @@ export function App() {
     confirmHelperInstall, connect, deleteSavedProfile: deleteSelectedProfile, probeHelper, selectProfile,
     switchHostProfile: switchAgentHostProfile,
   } = useAppHostSettingsActions({
+    activateHost,
     clearActiveSelection: () => {
       setActiveSessionId(undefined);
       setActiveWindowId(undefined);
@@ -435,6 +432,27 @@ export function App() {
     }));
   }, [setAppState]);
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
+  // Every host with a bridge, the active one included. A host that leaves the
+  // list loses its agent records.
+  const shownHostIds = useMemo(() => links.map((link) => link.profileId), [links]);
+  // Every other shown host with a live, mutable client: its agents are
+  // requested under its own scope and routed to its own slice. The scope
+  // carries the host's topology windows, the same way the active host's
+  // scope does, so its snapshot can prove an agent's window is gone.
+  const peerScopes = useMemo<AgentRuntimeScope[]>(() => links.flatMap((link) => {
+    const { serverIdentity, canMutate, generation, windows: topologyWindows } = link.hostState;
+    if (link.profileId === currentHostProfileId || !link.clientId || !serverIdentity || !canMutate) return [];
+    return [{
+      scope: {
+        clientId: link.clientId,
+        hostProfileId: link.profileId,
+        serverIdentity,
+        topologyGeneration: generation,
+        connectionEpoch: link.terminalEpoch,
+      },
+      topologyWindowIds: Object.keys(topologyWindows),
+    }];
+  }), [currentHostProfileId, links]);
   const {
     hostSetup: agentHostSetup,
     notificationActivation,
@@ -467,7 +485,7 @@ export function App() {
     // agent setup question waits, so two dialogs can never stack.
     hostSetupAllowed: !helperOwnsHostSetupLane(helperState),
     hostLabel,
-    peerScopes: [], shownHostIds: [currentHostProfileId],
+    peerScopes, shownHostIds,
     profiles,
     recordDecision: recordHostSetupDecision,
     requestReconnect: () => setConnectionEpoch((value) => value + 1),

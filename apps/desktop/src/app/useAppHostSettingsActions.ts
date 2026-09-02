@@ -6,6 +6,8 @@ import type { HostScopeToken } from "../features/shell/hostScope";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
 
 interface HostSettingsActionsOptions {
+  /** Makes a saved host the one on screen; see `useAppConnectionController`. */
+  activateHost(profileId: string): void;
   clearActiveSelection(): void;
   connection: ConnectionSpec;
   connectionMode: ConnectionSpec["mode"];
@@ -147,20 +149,19 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
     options.setStatus(`Connecting to ${target}…`);
   }, [options, saveActiveProfile]);
 
+  /**
+   * Moves the app onto a saved host and shows it in the form. The host's own
+   * link keeps whatever it already holds — a host shown beside the active one
+   * has a live bridge, and switching to it must neither restart that bridge
+   * nor wipe what it has said.
+   */
   const switchHostProfile = useCallback((profile: HostProfile) => {
-    const connection: ConnectionSpec = profile.connection.mode === "ssh"
-      ? { ...profile.connection, profileId: profile.connection.profileId || profile.id }
-      : profile.connection;
-    options.resetHost();
-    options.clearActiveSelection();
-    options.setConnection(connection);
-    options.setConnectionMode(connection.mode);
-    if (connection.mode === "ssh") {
-      options.setSshTarget(connection.target);
-      options.setSshConfigPath(connection.configPath ?? "");
+    options.activateHost(profile.id);
+    options.setConnectionMode(profile.connection.mode);
+    if (profile.connection.mode === "ssh") {
+      options.setSshTarget(profile.connection.target);
+      options.setSshConfigPath(profile.connection.configPath ?? "");
     }
-    void invoke("set_last_profile_id", { profileId: profile.id })
-      .catch((error) => options.setStatus(String(error)));
   }, [options]);
 
   return {
