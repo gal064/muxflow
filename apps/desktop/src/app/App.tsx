@@ -74,9 +74,10 @@ import {
 import { useContextMenusOpen } from "../ui/ContextMenu";
 import { useFocusHistoryNavigation } from "./useFocusHistoryNavigation";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
-import { WorkspaceSidebar } from "../features/workspaces/WorkspaceSidebar";
+import { mergedWorkspaceRows, pinnedOnlyMergedRows, type HostRowSource } from "../features/workspaces/mergedWorkspaceRows";
+import { WorkspaceSidebar, type SidebarHost } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
-import { inferHome, pinnedOnlyRows, workspaceRows } from "../features/workspaces/workspaceRows";
+import { inferHome } from "../features/workspaces/workspaceRows";
 import type { ConnectionSpec, HostProfile, Pane, Session } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
@@ -486,9 +487,25 @@ export function App() {
   );
 
   const home = useMemo(() => inferHome(snapshot.panes.map((pane) => pane.currentPath)), [snapshot.panes]);
-  // Every workspace on this server, pinned first. ⌘P reads this whole; the
-  // sidebar, ⌘1–9 and the agents list read the narrowed version below.
-  const switcherRows = useMemo(() => workspaceRows({
+  // The one host this build shows: the merged list has a single source, so
+  // letters stay hidden and the rows come out in `workspaceRows` order.
+  const hostLetter = hostLabel.charAt(0).toUpperCase();
+  // `currentHostScope` is a fresh object every render; the rows that carry it
+  // must only be rebuilt when what it says changes, or every status line and
+  // latency sample would re-sort every workspace and agent row.
+  const { hostProfileId: scopeHostId, connectionKey: scopeKey, connectionEpoch: scopeEpoch, serverIdentity: scopeIdentity, generation: scopeGeneration } = currentHostScope;
+  const rowScope = useMemo<HostScopeToken>(
+    () => ({ hostProfileId: scopeHostId, connectionKey: scopeKey, connectionEpoch: scopeEpoch, serverIdentity: scopeIdentity, generation: scopeGeneration }),
+    [scopeEpoch, scopeGeneration, scopeHostId, scopeIdentity, scopeKey],
+  );
+  const hostSource = useMemo<HostRowSource>(() => ({
+    hostProfileId: currentHostProfileId,
+    letter: hostLetter,
+    label: hostLabel,
+    phase: hostState.phase,
+    canMutate: hostState.canMutate,
+    transport: connection.mode,
+    scope: rowScope,
     snapshot,
     activeSessionId,
     agents: agentRuntime.agents,
@@ -496,10 +513,30 @@ export function App() {
     attentionByWorkspace: agentRuntime.rollups.byWorkspace,
     activeBranch: workspaceGit.status?.repository.headName,
     home,
-  }), [activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, home, snapshot, workspaceGit.status]);
+  }), [
+    activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, connection.mode,
+    currentHostProfileId, home, hostLabel, hostLetter, hostState.canMutate, hostState.phase, rowScope, snapshot, workspaceGit.status,
+  ]);
+  const sidebarHosts = useMemo<SidebarHost[]>(() => [{
+    profileId: currentHostProfileId,
+    letter: hostLetter,
+    label: hostLabel,
+    transport: connection.mode,
+    phase: hostState.phase,
+    canMutate: hostState.canMutate,
+    scope: rowScope,
+    active: true,
+    shown: true,
+    latencyMs: latency?.milliseconds,
+  }], [connection.mode, currentHostProfileId, hostLabel, hostLetter, hostState.canMutate, hostState.phase, latency?.milliseconds, rowScope]);
+  // Every workspace on this server, pinned first. ⌘P reads this whole; the
+  // sidebar, ⌘1–9 and the agents list read the narrowed version below.
+  const switcherRows = useMemo(() => mergedWorkspaceRows([hostSource], false), [hostSource]);
   const sidebarRows = useMemo(
-    () => appState.shell.pinnedOnly ? pinnedOnlyRows(switcherRows, activeSessionId) : switcherRows,
-    [activeSessionId, appState.shell.pinnedOnly, switcherRows],
+    () => appState.shell.pinnedOnly
+      ? pinnedOnlyMergedRows(switcherRows, { hostProfileId: currentHostProfileId, sessionId: activeSessionId })
+      : switcherRows,
+    [activeSessionId, appState.shell.pinnedOnly, currentHostProfileId, switcherRows],
   );
   const agentRows = useMemo(() => {
     const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
@@ -516,6 +553,8 @@ export function App() {
         workspaceOrder: orderBySession.get(record.sessionId) ?? Number.MAX_SAFE_INTEGER,
         workspaceName: record.sessionName || "unknown workspace",
         hostLabel,
+        // No letter until a second host can be shown beside this one.
+        hostLetter: "",
         tabIndex: windowIndexById.get(record.windowId),
         workspacePinned: pinnedSessionIds.has(record.sessionId),
         tabPinned: pinnedWindowIds.has(record.windowId),
@@ -1065,11 +1104,8 @@ export function App() {
         agentSort={appState.shell.agentSort}
         agentsRatio={appState.shell.agentsSectionRatio}
         compactWorkspaces={appState.shell.compactWorkspaces}
-        canMutate={hostState.canMutate}
-        commandScope={currentHostScope}
         hookNotice={agentHostSetup.notice}
-        hostLabel={hostLabel}
-        latencyMs={latency?.milliseconds}
+        hosts={sidebarHosts}
         onSetUpHost={agentHostSetup.offerable ? agentHostSetup.offer : undefined}
         onAgentsRatio={(ratio) => updateShell({ agentsSectionRatio: clampedAgentsRatio(ratio) })}
         maxWidth={Math.max(SIDEBAR_MIN_WIDTH, Math.floor(windowWidth / 3))}
@@ -1094,17 +1130,16 @@ export function App() {
         }}
         onReviewHooks={agentWorkflow.reviewHooks}
         onSelectAgent={selectAgentRow}
-        onSelectWorkspace={selectSession}
+        onSelectWorkspace={(row) => selectSession(row.session.id)}
         onTogglePinnedOnly={() => void runCommand(appState.shell.pinnedOnly ? "workspaces.showAll" : "workspaces.showPinnedOnly")}
         onTogglePinnedAgentTab={toggleAgentTabPin}
-        onTogglePinnedWorkspace={toggleWorkspacePin}
+        onTogglePinnedWorkspace={(row) => toggleWorkspacePin(row.session, row.scope)}
+        onToggleShown={() => setStatus("Host visibility is wired in the next step.")}
         onSortMode={(mode) => updateShell({ agentSort: mode })}
-        onWorkspaceCommand={(session, commandId, scope) => void runCommand(commandId, { kind: "session", id: session.id, scope })}
-        phase={hostState.phase}
+        onWorkspaceCommand={(row, commandId) => void runCommand(commandId, { kind: "session", id: row.session.id, scope: row.scope })}
         pinnedOnly={appState.shell.pinnedOnly}
         rows={sidebarRows}
         stateGlyphs={appState.shell.agentStateGlyphs}
-        transport={connection.mode}
       />}
       <section className="workspace" aria-label={activeSession ? `Workspace ${activeSession.name}` : "Workspace"}>
         <TabStrip
@@ -1373,7 +1408,7 @@ export function App() {
     />}
     {workspaceSwitcherOpen && <WorkspaceSwitcher
       onClose={() => setWorkspaceSwitcherOpen(false)}
-      onSelect={selectSession}
+      onSelect={(row) => selectSession(row.session.id)}
       // Every workspace, filtered or not. The filter is a way to quieten the
       // list, not a way to make a workspace unreachable; leaving the switcher
       // narrowed would mean the only way back to an unpinned workspace is to
