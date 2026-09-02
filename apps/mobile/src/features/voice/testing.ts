@@ -58,6 +58,7 @@ export class FakeRecorder implements VoiceRecorder {
   recording = false;
   nextUri: string | null = "file:///cache/rec-1.m4a";
   nextDurationMs = 2_000;
+  released = 0;
   async prepare(): Promise<void> {
     this.prepared += 1;
   }
@@ -70,7 +71,11 @@ export class FakeRecorder implements VoiceRecorder {
     this.recording = false;
     return { uri: this.nextUri, durationMs: this.nextDurationMs };
   }
-  release(): void {}
+  release(): void {
+    if (this.recording) return;
+    this.released += 1;
+    this.prepared = 0;
+  }
 }
 
 export class FakePlayer implements VoicePlayer {
