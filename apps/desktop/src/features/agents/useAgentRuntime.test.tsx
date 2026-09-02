@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { act, create } from "react-test-renderer";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentClient } from "./api";
@@ -288,7 +289,12 @@ function MultiHost({ client, hosts = ["local", "remote"], shown = hosts, focusHo
   });
   observe?.(runtime);
   const names = (hostProfileId: string) => runtime.byHost.get(hostProfileId)?.agents.map((record) => `${record.id}:${record.displayName}`).join(",") ?? "-";
-  return <output data-local={names("local")} data-remote={names("remote")} data-active={runtime.agents.map((record) => record.displayName).join(",")} data-authoritative={String(runtime.state.authoritative)} />;
+  return <output
+    data-local={names("local")} data-remote={names("remote")}
+    data-active={runtime.agents.map((record) => record.displayName).join(",")}
+    data-authoritative={String(runtime.state.authoritative)}
+    data-topology-generation={runtime.topologyAuthority?.topologyGeneration}
+  />;
 }
 
 describe("useAgentRuntime across hosts", () => {
@@ -373,9 +379,11 @@ describe("useAgentRuntime across hosts", () => {
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<MultiHost client={client} focused={false} focusHost="remote" />); });
     expect(renderer.root.findByType("output").props["data-authoritative"]).toBe("true");
+    expect(renderer.root.findByType("output").props["data-topology-generation"]).toBe(3);
     await act(async () => renderer.update(<MultiHost client={client} focused={false} focusHost="remote" hosts={["local"]} shown={["local", "remote"]} />));
     const output = renderer.root.findByType("output");
     expect(output.props["data-authoritative"]).toBe("false");
+    expect(output.props["data-topology-generation"]).toBeUndefined();
     expect(output.props["data-active"]).toBe("");
     expect(output.props["data-local"]).toBe("agent-1:Local one");
     await act(async () => renderer.update(<MultiHost client={client} focused={false} focusHost="remote" remoteEpoch={2} />));
@@ -397,6 +405,46 @@ describe("useAgentRuntime across hosts", () => {
     expect(output.props["data-authoritative"]).toBe("false");
     expect(output.props["data-active"]).toBe("");
     expect(output.props["data-local"]).toBe("agent-1:Local one");
+    await act(async () => renderer.unmount());
+  });
+
+  it("notifies the same agent id at the same generation on each host", async () => {
+    const client = twoHosts();
+    const emitNotification = vi.fn(async () => ({ id: 1, actionable: true }));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} focused={false} effects={{ emitNotification, playSound: vi.fn(async () => undefined) }} />); });
+    for (const [hostProfileId, serverIdentity, record] of [
+      ["local", "server-a", agent({ lifecycle: "blocked", lifecycleGeneration: 4, attentionGeneration: 4 })],
+      ["remote", "server-r", remoteAgent({ lifecycle: "blocked", lifecycleGeneration: 4, attentionGeneration: 4 })],
+    ] as const) {
+      await act(async () => client.publish({ kind: "upsert", hostProfileId, serverIdentity, connectionEpoch: 1, sequence: agentGeneration(4), record }));
+    }
+    expect(emitNotification).toHaveBeenCalledTimes(2);
+    await act(async () => renderer.unmount());
+  });
+
+  it("refreshes only the host it is asked about", async () => {
+    const client = twoHosts();
+    let latest!: ReturnType<typeof useAgentRuntime>;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} focused={false} observe={(runtime) => { latest = runtime; }} />); });
+    expect(client.snapshot).toHaveBeenCalledTimes(2);
+    await act(async () => latest.refreshSnapshot("remote"));
+    expect(client.snapshot).toHaveBeenCalledTimes(3);
+    expect(client.snapshot).toHaveBeenLastCalledWith(remoteScope);
+    await act(async () => latest.refreshSnapshot());
+    expect(client.snapshot).toHaveBeenCalledTimes(4);
+    expect(client.snapshot).toHaveBeenLastCalledWith(scope);
+    await act(async () => renderer.unmount());
+  });
+
+  it("requests again after a StrictMode remount instead of keeping a cancelled request", async () => {
+    const client = twoHosts();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<StrictMode><MultiHost client={client} focused={false} /></StrictMode>); });
+    const output = renderer.root.findByType("output");
+    expect(output.props["data-local"]).toBe("agent-1:Local one");
+    expect(output.props["data-remote"]).toBe("agent-1:Remote one");
     await act(async () => renderer.unmount());
   });
 

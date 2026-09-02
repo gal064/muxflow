@@ -127,7 +127,7 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
       : undefined,
     host,
     onHooksChanged: (action, hostProfileId, hostIdentity) => {
-      runtime.refreshSnapshot();
+      runtime.refreshSnapshot(hostProfileId);
       options.recordDecision(hostProfileId, action === "install" ? "accepted" : "declined");
       if (action === "uninstall") {
         void runtime.removeHostNaming(hostIdentity).catch((cause) => options.setStatus(String(cause)));
