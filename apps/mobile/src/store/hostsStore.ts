@@ -5,6 +5,7 @@
 // module (§6.2, §14).
 
 import { createStore, type StoreApi } from "zustand/vanilla";
+import { secureStoreStorage, type KeyValueStorage } from "./secureStorage";
 
 export interface SavedHost {
   /** uuid */
@@ -34,10 +35,7 @@ export interface HostsPersisted {
 }
 
 /** The slice of expo-secure-store this store needs; swapped for a fake in tests. */
-export interface HostsStorage {
-  getItem(key: string): Promise<string | null>;
-  setItem(key: string, value: string): Promise<void>;
-}
+export type HostsStorage = KeyValueStorage;
 
 export const HOSTS_STORAGE_KEY = "muxflow.hosts.v1";
 
@@ -270,23 +268,6 @@ export function createHostsStore(storage: HostsStorage): HostsStore {
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
-
-/**
- * expo-secure-store, required lazily so this module can be imported (and unit
- * tested) without a native runtime.
- */
-export const secureStoreStorage: HostsStorage = {
-  async getItem(key) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const store = require("expo-secure-store") as typeof import("expo-secure-store");
-    return store.getItemAsync(key);
-  },
-  async setItem(key, value) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const store = require("expo-secure-store") as typeof import("expo-secure-store");
-    await store.setItemAsync(key, value);
-  },
-};
 
 /**
  * The app-wide store. It reads the persisted value as soon as it is imported,
