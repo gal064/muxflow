@@ -53,9 +53,9 @@ export function ListRow({ title, subtitle, height, edgeColor, accessibilityLabel
   );
 }
 
-/** One run of line-2 text in the row's subtitle type, for a composed `subtitleContent`. */
-export function ListRowSubtitleText({ children, shrink = true }: { children: string; shrink?: boolean }) {
-  return <Text numberOfLines={1} style={[styles.subtitle, !shrink && styles.subtitleFixed]}>{children}</Text>;
+/** One run of line-2 text in the row's subtitle type, for a composed `subtitleContent`. Runs share the shrinking. */
+export function ListRowSubtitleText({ children }: { children: string }) {
+  return <Text numberOfLines={1} style={styles.subtitle}>{children}</Text>;
 }
 
 const styles = StyleSheet.create({
@@ -80,6 +80,5 @@ const styles = StyleSheet.create({
   title: { color: colors.chromeInkStrong, flexShrink: 1, fontSize: typeScale.rowTitle },
   titleAccessory: { flexShrink: 0 },
   subtitle: { color: colors.chromeDim, flexShrink: 1, fontSize: typeScale.rowSecondary },
-  subtitleFixed: { flexShrink: 0 },
   trailing: { alignItems: "flex-end" },
 });

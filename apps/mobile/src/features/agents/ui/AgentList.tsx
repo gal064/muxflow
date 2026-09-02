@@ -57,16 +57,17 @@ export function AgentList({ onOpen, refreshing, onRefresh, empty }: AgentListPro
         </>
       }
       refreshControl={<RefreshControl colors={[colors.accent]} progressBackgroundColor={colors.chromeRaised} onRefresh={onRefresh} refreshing={refreshing} />}
-      renderItem={({ item, index }) => <Item afterDivider={items[index - 1]?.kind === "divider"} animate={animate} item={item} onOpen={onOpen} />}
+      renderItem={({ item, index }) => <Item animate={animate} index={index} item={item} items={items} onOpen={onOpen} />}
       style={styles.list}
     />
   );
 }
 
-function Item({ item, onOpen, afterDivider, animate }: { item: AgentListItem; onOpen(agent: Agent): void; afterDivider: boolean; animate: boolean }) {
+function Item({ item, items, index, onOpen, animate }: { item: AgentListItem; items: AgentListItem[]; index: number; onOpen(agent: Agent): void; animate: boolean }) {
+  const afterDivider = items[index - 1]?.kind === "divider";
   switch (item.kind) {
     case "divider":
-      return <ListDivider label={item.label} />;
+      return <ListDivider afterRow={items[index - 1]?.kind === "agent"} label={item.label} />;
     case "section":
       return (
         <GroupHeading afterDivider={afterDivider} count={item.count} label={item.label}>
@@ -114,8 +115,8 @@ function Item({ item, onOpen, afterDivider, animate }: { item: AgentListItem; on
 /**
  * Line 2 with the workspace's pin after its name — `work2 📌 · build` — so
  * the pin sits against the word it belongs to and the line's left edge stays
- * flush with the unpinned rows'. The window's run is the one that gives way
- * when the line is too long.
+ * flush with the unpinned rows'. When the line is too long both runs
+ * ellipsise in proportion, as one string would have.
  */
 function PinnedWorkspaceSubtitle({ item }: { item: AgentRowItem }) {
   return (

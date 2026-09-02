@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { StyleSheet, View } from "react-native";
-import Animated, { cancelAnimation, Easing, ReduceMotion, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from "react-native-reanimated";
+import Animated, { cancelAnimation, Easing, makeMutable, ReduceMotion, useAnimatedStyle, withRepeat, withTiming } from "react-native-reanimated";
 import Svg, { Circle } from "react-native-svg";
 
 import { SPINNER_ARC_TURNS, SPINNER_STEPS, SPINNER_TRACK_OPACITY, SPINNER_TURN_MS } from "../spinnerSchedule";
@@ -19,28 +19,17 @@ import { SPINNER_ARC_TURNS, SPINNER_STEPS, SPINNER_TRACK_OPACITY, SPINNER_TURN_M
  * arc is a hardware-textured layer, so each step is a transform of a cached
  * bitmap rather than a redraw of the SVG.
  *
- * `animate` false freezes the arc where it is: the caller says when nobody
- * can see it (unfocused tab, backgrounded app) or when the user asked for
- * reduced motion — a still arc is the desktop's reduced-motion rendering too.
+ * Every spinner reads one module-wide clock rather than owning a timer, so
+ * five working rows step on the same frame and cost the same ten repaints a
+ * second as one; the clock runs while any spinner with `animate` is mounted
+ * and stops, resting the arcs at 12 o'clock, when the last one leaves.
+ * `animate` false means nobody can see it (unfocused tab, backgrounded app)
+ * or the user asked for reduced motion — a still arc is the desktop's
+ * reduced-motion rendering too.
  */
 export function Spinner({ ink, ring, size, animate }: { ink: string; ring: string; size: number; animate: boolean }) {
-  const turn = useSharedValue(0);
-  useEffect(() => {
-    if (!animate) {
-      cancelAnimation(turn);
-      return;
-    }
-    turn.value = 0;
-    turn.value = withRepeat(
-      withTiming(360, { duration: SPINNER_TURN_MS, easing: Easing.steps(SPINNER_STEPS, false), reduceMotion: ReduceMotion.Never }),
-      -1,
-      false,
-      undefined,
-      ReduceMotion.Never,
-    );
-    return () => cancelAnimation(turn);
-  }, [animate, turn]);
-  const rotation = useAnimatedStyle(() => ({ transform: [{ rotate: `${turn.value}deg` }] }));
+  useEffect(() => (animate ? acquireClock() : undefined), [animate]);
+  const rotation = useAnimatedStyle(() => ({ transform: [{ rotate: `${clock.value}deg` }] }));
   const inner = size - 2 * RING_WIDTH;
   return (
     <View style={[styles.ring, { width: size, height: size, borderRadius: size / 2, backgroundColor: ring }]}>
@@ -63,6 +52,38 @@ export function Spinner({ ink, ring, size, animate }: { ink: string; ring: strin
       </Animated.View>
     </View>
   );
+}
+
+/** The one rotation, in degrees, every mounted spinner draws. */
+const clock = makeMutable(0);
+let clockUsers = 0;
+
+/**
+ * Counts a spinner in; the first one starts the clock and the last one out
+ * stops it and rests it at 0. `ReduceMotion.System` is reanimated's own
+ * synchronous read of the OS setting: the caller's `animate` (read from
+ * `AccessibilityInfo` asynchronously) catches later changes, this catches the
+ * first frames before that promise settles.
+ */
+function acquireClock(): () => void {
+  clockUsers += 1;
+  if (clockUsers === 1) {
+    clock.value = 0;
+    clock.value = withRepeat(
+      withTiming(360, { duration: SPINNER_TURN_MS, easing: Easing.steps(SPINNER_STEPS, false), reduceMotion: ReduceMotion.System }),
+      -1,
+      false,
+      undefined,
+      ReduceMotion.System,
+    );
+  }
+  return () => {
+    clockUsers -= 1;
+    if (clockUsers === 0) {
+      cancelAnimation(clock);
+      clock.value = 0;
+    }
+  };
 }
 
 /** The knockout ring around the badge, matching `StateBadge`'s. */
