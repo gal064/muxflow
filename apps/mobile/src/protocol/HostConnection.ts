@@ -19,6 +19,7 @@ import {
   type Request,
   type Response,
   type ServerHello,
+  type VoiceResponse,
 } from "./gen/envelope_pb";
 import { requestTerminalSeed, subscribeFull } from "./requests";
 import { TransportDialError, type Transport, type TransportClose, type TransportCloseReason } from "./Transport";
@@ -47,7 +48,12 @@ const FATAL_CLOSE_REASONS: ReadonlySet<TransportCloseReason> = new Set(["authFai
 const HELPER_MISSING_EXIT_CODE = 127;
 
 export class HostError extends Error {
-  constructor(readonly code: string, message: string) {
+  /**
+   * `Response.voice` of a refused voice operation: the echoed `operationId`
+   * and `retryable`, which live there because `Response` has no retry flag
+   * (docs/mobile/voice-mode-plan.md §3). Undefined for every other refusal.
+   */
+  constructor(readonly code: string, message: string, readonly voice?: VoiceResponse) {
     super(message);
     this.name = "HostError";
   }
@@ -523,7 +529,7 @@ export class HostConnection {
         this.noteAnswer(attempt);
         const response = payload.value;
         if (response.ok) pending.resolve(response);
-        else pending.reject(new HostError(response.errorCode, response.displayMessage));
+        else pending.reject(new HostError(response.errorCode, response.displayMessage, response.voice));
         return;
       }
       case "fileStream": {

@@ -4,7 +4,10 @@
 //! answers `voice_model_missing` so the host compiles against the final enum
 //! and the phone gets a truthful, non-retryable answer. Wave 2 replaces the
 //! body of [`handle_inner`] with the `VoiceService` calls; the dispatcher arm,
-//! the policy rows and this signature stay.
+//! the policy rows and this signature stay. Wave 2 also owns the request
+//! shape: a `Request` with no `voice` payload is answered here as if it were
+//! empty, and should become `voice_invalid_request` (plan §4.6) once there is
+//! a handler that reads the fields.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

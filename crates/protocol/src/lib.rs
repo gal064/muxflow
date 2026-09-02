@@ -136,11 +136,11 @@ pub const CAP_TMUX_EXECUTABLE_RESOLUTION: u64 = 1 << 17;
 /// The helper serves the five `OPERATION_VOICE_*` operations and pushes
 /// `VOICE_REPLY` events (docs/mobile/voice-mode-plan.md).
 ///
-/// Required, like every other bit, so the phone's handshake names what a
-/// helper that predates voice is missing instead of failing the first
-/// utterance with an unknown-operation error. Whether voice is *usable* on the
-/// host (uv installed, model provisioned) is a runtime answer from
-/// `OPERATION_VOICE_STATUS`, not a capability.
+/// Required, like every other bit: the phone demands the full set, so a
+/// helper without it is refused at the handshake with "voice" named rather
+/// than failing the first utterance with an unknown-operation error. Whether
+/// voice is *usable* on the host (uv installed, model provisioned) is a
+/// runtime answer from `OPERATION_VOICE_STATUS`, not a capability.
 pub const CAP_VOICE: u64 = 1 << 18;
 pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_ORDERED_EVENTS
