@@ -32,9 +32,6 @@ export const colors = {
   // ── Status ────────────────────────────────────────────────────────────
   ok: "#28c840",
   warn: "#febc2e",
-
-  /** The spinner ring's track: the desktop's `color-mix(in srgb, currentColor 35%, transparent)` over `--chrome-ink`. */
-  spinnerTrack: "rgba(196, 200, 198, 0.35)",
 } as const;
 
 /**

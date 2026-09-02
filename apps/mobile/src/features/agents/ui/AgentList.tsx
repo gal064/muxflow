@@ -3,6 +3,7 @@ import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from "rea
 import { useStore } from "zustand";
 
 import { prefsStore } from "../../../store/prefsStore";
+import type { AgentDisplayState } from "../../../store/selectors";
 import type { Agent } from "../../../store/sessionStore";
 import { ListDivider } from "../../../ui/components/ListDivider";
 import { ListRow } from "../../../ui/components/ListRow";
@@ -51,31 +52,33 @@ export function AgentList({ onOpen, refreshing, onRefresh, empty }: AgentListPro
         </>
       }
       refreshControl={<RefreshControl colors={[colors.accent]} progressBackgroundColor={colors.chromeRaised} onRefresh={onRefresh} refreshing={refreshing} />}
-      renderItem={({ item }) => <Item item={item} onOpen={onOpen} />}
+      renderItem={({ item, index }) => <Item afterDivider={items[index - 1]?.kind === "divider"} item={item} onOpen={onOpen} />}
       style={styles.list}
     />
   );
 }
 
-function Item({ item, onOpen }: { item: AgentListItem; onOpen(agent: Agent): void }) {
+function Item({ item, onOpen, afterDivider }: { item: AgentListItem; onOpen(agent: Agent): void; afterDivider: boolean }) {
   switch (item.kind) {
     case "divider":
       return <ListDivider label={item.label} />;
     case "section":
       return (
-        <GroupHeading count={item.count} label={item.label}>
-          <StateBadge ring={colors.chromeBg} size={12} state={item.state} />
+        <GroupHeading afterDivider={afterDivider} count={item.count} label={item.label}>
+          <StateBadge ink={colors.chromeDim} ring={colors.chromeBg} size={12} state={item.state} />
         </GroupHeading>
       );
     case "group":
       return (
-        <GroupHeading count={item.count} label={item.workspaceName}>
+        <GroupHeading afterDivider={afterDivider} count={item.count} label={item.workspaceName}>
           {item.pinned ? <PinIcon color={colors.chromeDim} size={12} /> : null}
         </GroupHeading>
       );
     case "agent":
       return (
         <ListRow
+          // The desktop's aria-label: the state is drawn, so it is spoken here.
+          accessibilityLabel={[item.title, STATE_WORDS[item.state], item.attention ? "needs you" : undefined, item.subtitle, item.agent.present ? undefined : "gone"].filter(Boolean).join(", ")}
           dimmed={!item.agent.present}
           // Unread blocked or completed: the mobile shape of the desktop's
           // "1" badge. The docked dot says blocked; the bar says *unread*.
@@ -85,7 +88,7 @@ function Item({ item, onOpen }: { item: AgentListItem; onOpen(agent: Agent): voi
           onPress={() => onOpen(item.agent)}
           subtitle={item.subtitle}
           title={item.title}
-          titleAccessory={item.pinned ? <PinIcon color={colors.chromeDim} size={13} /> : null}
+          titleAccessory={item.pinned ? <PinIcon color={colors.chromeDim} size={14} /> : null}
           // A gone agent has no live state to dock; the word is the only honest mark.
           trailing={item.agent.present ? undefined : <StatusPill state="gone" />}
         />
@@ -93,15 +96,26 @@ function Item({ item, onOpen }: { item: AgentListItem; onOpen(agent: Agent): voi
   }
 }
 
+const STATE_WORDS: Record<AgentDisplayState, string> = {
+  blocked: "blocked",
+  working: "working",
+  done: "finished",
+  idle: "idle",
+  unknown: "status unknown",
+};
+
 /**
- * A group's heading: an optional mark, the label, and the count out at the
- * right edge — the desktop's `.agent-workspace-heading`. The count is what
- * tells you a collapsed-looking group has six agents in it.
+ * A group's heading: a mark slot, the label, and the count out at the right
+ * edge — the desktop's `.agent-workspace-heading`. The mark slot is the width
+ * of the rows' avatar column whether or not a mark is drawn, so heading
+ * labels align with row titles and a heading reads as a different level from
+ * the full-bleed Pinned / Others dividers. The count is what tells you a
+ * collapsed-looking group has six agents in it.
  */
-function GroupHeading({ label, count, children }: { label: string; count: number; children?: React.ReactNode }) {
+function GroupHeading({ label, count, children, afterDivider }: { label: string; count: number; children?: React.ReactNode; afterDivider: boolean }) {
   return (
-    <View style={styles.heading}>
-      {children ? <View style={styles.headingMark}>{children}</View> : null}
+    <View style={[styles.heading, afterDivider && styles.headingAfterDivider]}>
+      <View style={styles.headingMark}>{children}</View>
       <Text numberOfLines={1} style={styles.headingLabel}>{label}</Text>
       <Text style={styles.headingCount}>{count}</Text>
     </View>
@@ -119,6 +133,7 @@ function ModeToggle({ mode, onChange }: { mode: AgentListMode; onChange(mode: Ag
             <Pressable
               accessibilityRole="tab"
               accessibilityState={{ selected }}
+              hitSlop={{ top: 8, bottom: 8 }}
               key={entry.mode}
               onPress={() => onChange(entry.mode)}
               style={[styles.segment, selected && styles.segmentSelected]}
@@ -139,18 +154,19 @@ const styles = StyleSheet.create({
   heading: {
     alignItems: "center",
     flexDirection: "row",
-    gap: 8,
+    gap: 12,
     paddingBottom: 6,
     paddingHorizontal: 16,
     paddingTop: 16,
   },
-  headingMark: { alignItems: "center", justifyContent: "center", width: 14 },
+  // A divider already supplies the space above (the desktop's `.list-block:first-child > .list-divider`).
+  headingAfterDivider: { paddingTop: 6 },
+  headingMark: { alignItems: "center", justifyContent: "center", width: metrics.agentAvatarSize },
   headingLabel: { color: colors.chromeDim, flexShrink: 1, fontSize: typeScale.rowSecondary, fontWeight: "600" },
   headingCount: {
-    color: colors.chromeFaint,
+    color: colors.chromeDim,
     fontFamily: fonts.mono,
     fontSize: typeScale.meta,
-    fontVariant: ["tabular-nums"],
     marginLeft: "auto",
   },
   toggleRow: { alignItems: "flex-end", paddingHorizontal: 16, paddingTop: 12 },
@@ -161,7 +177,8 @@ const styles = StyleSheet.create({
     padding: 2,
   },
   segment: { borderRadius: radii.pill - 2, minHeight: 32, justifyContent: "center", paddingHorizontal: 14 },
-  segmentSelected: { backgroundColor: colors.chromeSelected },
+  // `accentWash` + `accent` is the app's "this segment is selected" treatment (files/ui/parts.tsx).
+  segmentSelected: { backgroundColor: colors.accentWash },
   segmentLabel: { color: colors.chromeDim, fontSize: typeScale.rowSecondary, fontWeight: "600" },
-  segmentLabelSelected: { color: colors.chromeInkStrong },
+  segmentLabelSelected: { color: colors.accent },
 });

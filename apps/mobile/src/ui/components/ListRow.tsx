@@ -7,8 +7,10 @@ export interface ListRowProps {
   title: string;
   subtitle?: string;
   height: number;
-  /** 3 dp bar on the left edge (§9.3.1) in this colour, when set. */
+  /** 3 dp bar on the left edge (§9.3.1) in this colour, when set. Overlays the gutter so the body does not shift. */
   edgeColor?: string;
+  /** Spoken in place of the title and subtitle, for rows whose state is drawn rather than written. */
+  accessibilityLabel?: string;
   leading?: ReactNode;
   /** Drawn right after the title text — a pin, say — so it hugs the end of the name rather than the row's edge. */
   titleAccessory?: ReactNode;
@@ -20,9 +22,10 @@ export interface ListRowProps {
 }
 
 /** A list row per §9.3/§9.4: hairline-separated, title 16 sp, second line 13 sp `--chrome-dim`. */
-export function ListRow({ title, subtitle, height, edgeColor, leading, titleAccessory, trailing, dimmed, onPress, disabled, titleColor }: ListRowProps) {
+export function ListRow({ title, subtitle, height, edgeColor, accessibilityLabel, leading, titleAccessory, trailing, dimmed, onPress, disabled, titleColor }: ListRowProps) {
   return (
     <Pressable
+      accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
       disabled={disabled || !onPress}
       onPress={onPress}
@@ -51,7 +54,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
   },
   pressed: { backgroundColor: colors.chromeHover },
-  edge: { width: metrics.attentionEdgeBarWidth },
+  edge: { bottom: 0, left: 0, position: "absolute", top: 0, width: metrics.attentionEdgeBarWidth },
   body: {
     alignItems: "center",
     flex: 1,
