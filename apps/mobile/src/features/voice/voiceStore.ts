@@ -137,81 +137,81 @@ export function createVoiceStore(): VoiceStore {
     }
 
     return {
-    ...initialVoiceState(),
+      ...initialVoiceState(),
 
-    setHostStatus(status) {
-      set({ hostStatus: hostStatusFromProto(status) });
-    },
+      setHostStatus(status) {
+        set({ hostStatus: hostStatusFromProto(status) });
+      },
 
-    applyProvisionProgress(provision) {
-      const current = get().hostStatus;
-      const readiness: VoiceReadinessState = provision.phase === "ready"
-        ? "ready"
-        : provision.phase === "failed"
-          ? "modelMissing"
-          : "provisioning";
-      set({ hostStatus: { ...current, readiness, provision: provision.phase === "ready" ? undefined : provision } });
-    },
+      applyProvisionProgress(provision) {
+        const current = get().hostStatus;
+        const readiness: VoiceReadinessState = provision.phase === "ready"
+          ? "ready"
+          : provision.phase === "failed"
+            ? "modelMissing"
+            : "provisioning";
+        set({ hostStatus: { ...current, readiness, provision: provision.phase === "ready" ? undefined : provision } });
+      },
 
-    ensureSession(agentId, paneId, sessionId, now) {
-      const existing = get().sessions[agentId];
-      if (existing) {
-        if (existing.paneId === paneId && existing.sessionId === sessionId) return;
-        set({ sessions: { ...get().sessions, [agentId]: { ...existing, paneId, sessionId } } });
-        return;
-      }
-      set({ sessions: { ...get().sessions, [agentId]: { agentId, paneId, sessionId, startedAt: now, messages: [], phase: "idle" } } });
-    },
+      ensureSession(agentId, paneId, sessionId, now) {
+        const existing = get().sessions[agentId];
+        if (existing) {
+          if (existing.paneId === paneId && existing.sessionId === sessionId) return;
+          set({ sessions: { ...get().sessions, [agentId]: { ...existing, paneId, sessionId } } });
+          return;
+        }
+        set({ sessions: { ...get().sessions, [agentId]: { agentId, paneId, sessionId, startedAt: now, messages: [], phase: "idle" } } });
+      },
 
-    setPhase(agentId, phase) {
-      updateSession(agentId, (session) => (session.phase === phase ? session : { ...session, phase }));
-    },
+      setPhase(agentId, phase) {
+        updateSession(agentId, (session) => (session.phase === phase ? session : { ...session, phase }));
+      },
 
-    appendMessage(agentId, message) {
-      updateSession(agentId, (session) => ({ ...session, messages: [...session.messages, message] }));
-    },
+      appendMessage(agentId, message) {
+        updateSession(agentId, (session) => ({ ...session, messages: [...session.messages, message] }));
+      },
 
-    appendReply(agentId, message) {
-      let dropped: string | undefined;
-      updateSession(agentId, (session) => {
-        const messages = session.messages.map((existing) => {
-          if (existing.kind !== "agent" || existing.fileUri === undefined) return existing;
-          dropped = existing.fileUri;
-          return { ...existing, fileUri: undefined };
+      appendReply(agentId, message) {
+        let dropped: string | undefined;
+        updateSession(agentId, (session) => {
+          const messages = session.messages.map((existing) => {
+            if (existing.kind !== "agent" || existing.fileUri === undefined) return existing;
+            dropped = existing.fileUri;
+            return { ...existing, fileUri: undefined };
+          });
+          messages.push(message);
+          return { ...session, messages };
         });
-        messages.push(message);
-        return { ...session, messages };
-      });
-      return dropped;
-    },
+        return dropped;
+      },
 
-    markPlayed(agentId, messageId) {
-      updateMessage(agentId, messageId, (message) => (message.played ? message : { ...message, played: true }));
-    },
+      markPlayed(agentId, messageId) {
+        updateMessage(agentId, messageId, (message) => (message.played ? message : { ...message, played: true }));
+      },
 
-    setMessageAudio(agentId, messageId, fileUri) {
-      updateMessage(agentId, messageId, (message) => ({ ...message, fileUri, audioError: undefined }));
-    },
+      setMessageAudio(agentId, messageId, fileUri) {
+        updateMessage(agentId, messageId, (message) => ({ ...message, fileUri, audioError: undefined }));
+      },
 
-    setPlayback(playback) {
-      set({ playback });
-    },
+      setPlayback(playback) {
+        set({ playback });
+      },
 
-    removeSession(agentId) {
-      const sessions = { ...get().sessions };
-      delete sessions[agentId];
-      const playback = get().playback;
-      const playingHere = playback && get().sessions[agentId]?.messages.some((message) => message.id === playback.messageId);
-      set({ sessions, ...(playingHere ? { playback: undefined } : {}) });
-    },
+      removeSession(agentId) {
+        const sessions = { ...get().sessions };
+        delete sessions[agentId];
+        const playback = get().playback;
+        const playingHere = playback && get().sessions[agentId]?.messages.some((message) => message.id === playback.messageId);
+        set({ sessions, ...(playingHere ? { playback: undefined } : {}) });
+      },
 
-    setAutoPlay(autoPlay) {
-      set({ autoPlay });
-    },
+      setAutoPlay(autoPlay) {
+        set({ autoPlay });
+      },
 
-    setLastError(message) {
-      set({ lastError: message });
-    },
+      setLastError(message) {
+        set({ lastError: message });
+      },
     };
   });
 }

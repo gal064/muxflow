@@ -5,15 +5,10 @@
 
 import { AudioModule, AudioQuality, IOSOutputFormat, requestRecordingPermissionsAsync, setAudioModeAsync, type RecordingOptions } from "expo-audio";
 import type { AudioRecorder } from "expo-audio";
+import type { VoiceRecorder } from "./audioPorts";
 
-export interface VoiceRecorder {
-  /** Permission, audio mode and `prepareToRecordAsync`, so press-in only calls `record()` (§2b). */
-  prepare(): Promise<void>;
-  record(): void;
-  /** Stops and returns the file and its length; `uri` is null when nothing was captured. */
-  stop(): Promise<{ uri: string | null; durationMs: number }>;
-  release(): void;
-}
+export type { VoiceRecorder } from "./audioPorts";
+export { RECORDING_MIME } from "./audioPorts";
 
 /** Mono 16 kHz AAC at 48 kbps in an `.m4a` container: ~6 KB/s, what parakeet wants (§2b). */
 export const RECORDING_PRESET: RecordingOptions = {
@@ -25,9 +20,6 @@ export const RECORDING_PRESET: RecordingOptions = {
   ios: { outputFormat: IOSOutputFormat.MPEG4AAC, audioQuality: AudioQuality.MEDIUM },
   web: {},
 };
-
-/** `Request.voice.audioMime` for the preset above. */
-export const RECORDING_MIME = "audio/mp4";
 
 export class RecordingPermissionDenied extends Error {
   constructor() {
