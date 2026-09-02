@@ -6,6 +6,7 @@ import { agentTitle, agentsInWindow, loudestPill } from "../../src/features/agen
 import { stripAgentStatusGlyphs } from "../../src/features/agents/agentLabels";
 import { createTerminalWindow } from "../../src/features/terminal/createWindow";
 import { activePaneForWindow } from "../../src/features/terminal/panes";
+import { fromRouteParam, toRouteParam } from "../../src/navigation/routeParams";
 import { getConnection, toast } from "../../src/session/connectionManager";
 import { sessionStore } from "../../src/store/sessionStore";
 import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
@@ -19,7 +20,8 @@ const NEW_PANE_TOPOLOGY_WAIT_MS = 3_000;
 
 /** Workspace — design.md §9.4. */
 export default function WorkspaceScreen() {
-  const { sessionId } = useLocalSearchParams<{ sessionId: string }>();
+  const params = useLocalSearchParams<{ sessionId: string }>();
+  const sessionId = fromRouteParam(params.sessionId);
   const router = useRouter();
   const state = useSession((s) => s);
   const session = sessionId ? state.sessions[sessionId] : undefined;
@@ -28,7 +30,7 @@ export default function WorkspaceScreen() {
   const [creating, setCreating] = useState(false);
 
   const openPane = useCallback((paneId: string) => {
-    router.push({ pathname: "/terminal/[paneId]", params: { paneId, sessionId: sessionId ?? "" } });
+    router.push({ pathname: "/terminal/[paneId]", params: { paneId: toRouteParam(paneId), sessionId: toRouteParam(sessionId ?? "") } });
   }, [router, sessionId]);
 
   const browseFiles = useCallback(() => {
@@ -36,7 +38,7 @@ export default function WorkspaceScreen() {
     const activeWindow = windows.find((w) => w.active) ?? windows[0];
     const pane = activeWindow ? activePaneForWindow(sessionStore.getState(), activeWindow.id) : undefined;
     if (!pane) return;
-    router.push({ pathname: "/files/[paneId]", params: { paneId: pane.id } });
+    router.push({ pathname: "/files/[paneId]", params: { paneId: toRouteParam(pane.id) } });
   }, [router, sessionId, windows]);
 
   const newTerminal = useCallback(async () => {

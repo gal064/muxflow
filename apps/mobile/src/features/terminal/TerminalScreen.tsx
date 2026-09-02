@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { agentForPane, agentPillState } from "../agents/agentViews";
 import { stripAgentStatusGlyphs } from "../agents/agentLabels";
+import { toRouteParam } from "../../navigation/routeParams";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
@@ -114,7 +115,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
           <Pressable
             accessibilityLabel="Files"
             accessibilityRole="button"
-            onPress={() => router.push({ pathname: "/files/[paneId]", params: { paneId } })}
+            onPress={() => router.push({ pathname: "/files/[paneId]", params: { paneId: toRouteParam(paneId) } })}
             style={styles.iconButton}
           >
             <Text style={styles.filesGlyph}>▤</Text>

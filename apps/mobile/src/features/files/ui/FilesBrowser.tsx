@@ -7,6 +7,7 @@ import { Stack, useRouter } from "expo-router";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { useStore } from "zustand";
 
+import { toRouteParam } from "../../../navigation/routeParams";
 import { FileKind } from "../../../protocol/gen/envelope_pb";
 import { colors, metrics, typeScale } from "../../../ui/tokens";
 import { relativeToRoot, rootTitle, subtitleFor } from "../activeRoot";
@@ -39,10 +40,10 @@ export function FilesBrowser({ paneId, path, name }: FilesBrowserProps) {
     (entry: DirectoryEntry) => {
       switch (entry.action) {
         case "openDirectory":
-          router.push({ pathname: "/files/[paneId]/dir", params: { paneId, path: entry.path, name: entry.name } });
+          router.push({ pathname: "/files/[paneId]/dir", params: { paneId: toRouteParam(paneId), path: toRouteParam(entry.path), name: toRouteParam(entry.name) } });
           return;
         case "openFile":
-          router.push({ pathname: "/file/[paneId]", params: { paneId, path: entry.path, name: entry.name } });
+          router.push({ pathname: "/file/[paneId]", params: { paneId: toRouteParam(paneId), path: toRouteParam(entry.path), name: toRouteParam(entry.name) } });
           return;
         default:
           // §9.6 step 4: an unresolved symlink, a socket or a device does nothing.
