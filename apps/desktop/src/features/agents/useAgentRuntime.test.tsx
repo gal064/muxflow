@@ -1,8 +1,9 @@
+import { StrictMode } from "react";
 import { act, create } from "react-test-renderer";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentClient } from "./api";
 import { displayState } from "./selectors";
-import { defaultAgentSoundPreferences, type AgentRequestScope, type AgentSnapshot, type AgentWireEvent } from "./types";
+import { defaultAgentSoundPreferences, type AgentRecord, type AgentRequestScope, type AgentSnapshot, type AgentWireEvent } from "./types";
 import { agent } from "./testFixtures";
 import { useAgentRuntime, type AgentRuntimeOptions } from "./useAgentRuntime";
 import { agentGeneration } from "./generation";
@@ -25,8 +26,9 @@ function clientFor(snapshot: AgentSnapshot): AgentClient & { markSeen: ReturnTyp
 
 function Harness({ client, connected = true, focused = true, automaticSeen = true, connectionEpoch = 1, topologyGeneration = 9, topologyWindowIds = ["@1"], effects, onNotificationInstrumentation, onSoundInstrumentation }: { client: AgentClient; connected?: boolean; focused?: boolean; automaticSeen?: boolean; connectionEpoch?: number; topologyGeneration?: number; topologyWindowIds?: string[]; effects?: AgentRuntimeOptions["effects"]; onNotificationInstrumentation?: AgentRuntimeOptions["onNotificationInstrumentation"]; onSoundInstrumentation?: AgentRuntimeOptions["onSoundInstrumentation"] }) {
   const runtime = useAgentRuntime({
-    client, scope: connected ? { ...scope, connectionEpoch, topologyGeneration } : undefined,
-    topologyWindowIds,
+    client,
+    scopes: connected ? [{ scope: { ...scope, connectionEpoch, topologyGeneration }, topologyWindowIds }] : [],
+    shownHostIds: ["local"],
     focus: { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@1", paneId: "%1", appFocused: focused, terminalVisible: true, automaticSeen },
     soundPreferences: defaultAgentSoundPreferences,
     onStatus: vi.fn(),
@@ -236,5 +238,231 @@ describe("useAgentRuntime focus semantics", () => {
     expect(notificationInstrumentation).toHaveBeenCalledWith(expect.objectContaining({ outcome: "emitted", actionable: false }));
     expect(soundInstrumentation).toHaveBeenCalledWith({ event: "blocked", outcome: "played" });
     await act(async () => renderer!.unmount());
+  });
+});
+
+const remoteScope: AgentRequestScope = { clientId: "client-remote", hostProfileId: "remote", serverIdentity: "server-r", topologyGeneration: 3, connectionEpoch: 1 };
+const remoteAgent = (overrides: Parameters<typeof agent>[0] = {}) => agent({ hostProfileId: "remote", serverIdentity: "server-r", ...overrides });
+
+function snapshotOf(target: AgentRequestScope, agents: AgentRecord[], revision = 3): AgentSnapshot {
+  return {
+    hostProfileId: target.hostProfileId, serverIdentity: target.serverIdentity, connectionEpoch: target.connectionEpoch,
+    revision: agentGeneration(revision), eventSequence: agentGeneration(revision), acceptedGeneration: agentGeneration(revision),
+    notificationWatermark: agentGeneration(revision), authoritative: true, adapters: [], agents,
+  };
+}
+
+function multiHostClient(snapshots: Readonly<Record<string, AgentSnapshot>>) {
+  const client = clientFor(snapshots.local);
+  client.snapshot = vi.fn(async (target: AgentRequestScope) => snapshots[target.hostProfileId]);
+  return client;
+}
+
+interface MultiHostProps {
+  client: ReturnType<typeof clientFor>;
+  /** Hosts with a live scope; every host is shown unless `shown` says otherwise. */
+  hosts?: readonly string[];
+  shown?: readonly string[];
+  focusHost?: string;
+  focused?: boolean;
+  remoteEpoch?: number;
+  effects?: AgentRuntimeOptions["effects"];
+  onNotificationInstrumentation?: AgentRuntimeOptions["onNotificationInstrumentation"];
+  observe?(runtime: ReturnType<typeof useAgentRuntime>): void;
+}
+
+function MultiHost({ client, hosts = ["local", "remote"], shown = hosts, focusHost = "local", focused = true, remoteEpoch = 1, effects, onNotificationInstrumentation, observe }: MultiHostProps) {
+  const runtime = useAgentRuntime({
+    client,
+    scopes: hosts.map((hostProfileId) => ({
+      scope: hostProfileId === "local" ? scope : { ...remoteScope, connectionEpoch: remoteEpoch },
+      topologyWindowIds: ["@1"],
+    })),
+    shownHostIds: shown,
+    focus: {
+      hostProfileId: focusHost, serverIdentity: focusHost === "local" ? "server-a" : "server-r",
+      sessionId: "$1", windowId: "@1", paneId: "%1", appFocused: focused, terminalVisible: true, automaticSeen: true,
+    },
+    soundPreferences: defaultAgentSoundPreferences,
+    onStatus: vi.fn(),
+    effects, onNotificationInstrumentation,
+  });
+  observe?.(runtime);
+  const names = (hostProfileId: string) => runtime.byHost.get(hostProfileId)?.agents.map((record) => `${record.id}:${record.displayName}`).join(",") ?? "-";
+  return <output
+    data-local={names("local")} data-remote={names("remote")}
+    data-active={runtime.agents.map((record) => record.displayName).join(",")}
+    data-authoritative={String(runtime.state.authoritative)}
+    data-topology-generation={runtime.topologyAuthority?.topologyGeneration}
+  />;
+}
+
+describe("useAgentRuntime across hosts", () => {
+  beforeEach(() => {
+    invokeMock.mockClear();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  });
+
+  const twoHosts = () => multiHostClient({
+    local: snapshotOf(scope, [agent({ displayName: "Local one" })]),
+    remote: snapshotOf(remoteScope, [remoteAgent({ displayName: "Remote one" })]),
+  });
+
+  it("requests one snapshot per scope and projects every host", async () => {
+    const client = twoHosts();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} focused={false} />); });
+    expect(client.snapshot).toHaveBeenCalledTimes(2);
+    expect(client.snapshot).toHaveBeenCalledWith(scope);
+    expect(client.snapshot).toHaveBeenCalledWith(remoteScope);
+    const output = renderer.root.findByType("output");
+    expect(output.props["data-local"]).toBe("agent-1:Local one");
+    expect(output.props["data-remote"]).toBe("agent-1:Remote one");
+    expect(output.props["data-active"]).toBe("Local one");
+    await act(async () => renderer.unmount());
+  });
+
+  it("notifies and plays a sound for a blocked agent on a host the user is not looking at", async () => {
+    const client = twoHosts();
+    const emitNotification = vi.fn(async () => ({ id: 1, actionable: true }));
+    const playSound = vi.fn(async () => undefined);
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} effects={{ emitNotification, playSound }} />); });
+    // Same pane id as the focused pane, on the other host: pane ids repeat
+    // across tmux servers, so the focus rule has to look at the host too.
+    await act(async () => client.publish({
+      kind: "upsert", hostProfileId: "remote", serverIdentity: "server-r", connectionEpoch: 1, sequence: agentGeneration(4),
+      record: remoteAgent({ lifecycle: "blocked", lifecycleGeneration: 4, attentionGeneration: 4 }),
+    }));
+    expect(emitNotification).toHaveBeenCalledTimes(1);
+    expect(emitNotification).toHaveBeenCalledWith(expect.objectContaining({
+      event: "blocked", route: expect.objectContaining({ hostProfileId: "remote", serverIdentity: "server-r" }),
+    }));
+    expect(playSound).toHaveBeenCalledWith("blocked", defaultAgentSoundPreferences, expect.any(Function));
+    await act(async () => renderer.unmount());
+  });
+
+  it("suppresses the same transition on the focused host's focused pane", async () => {
+    const client = twoHosts();
+    const emitNotification = vi.fn(async () => ({ id: 1, actionable: true }));
+    const playSound = vi.fn(async () => undefined);
+    const instrumentation = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} effects={{ emitNotification, playSound }} onNotificationInstrumentation={instrumentation} />); });
+    await act(async () => client.publish({
+      kind: "upsert", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, sequence: agentGeneration(4),
+      record: agent({ lifecycle: "blocked", lifecycleGeneration: 4, attentionGeneration: 4 }),
+    }));
+    expect(emitNotification).not.toHaveBeenCalled();
+    expect(playSound).not.toHaveBeenCalled();
+    expect(instrumentation).toHaveBeenCalledWith(expect.objectContaining({ outcome: "suppressed-focused" }));
+    await act(async () => renderer.unmount());
+  });
+
+  it("marks seen only on the active host", async () => {
+    const client = multiHostClient({
+      local: snapshotOf(scope, [agent({ lifecycle: "idle", attentionGeneration: 3, seenGeneration: 1 })]),
+      remote: snapshotOf(remoteScope, [remoteAgent({ lifecycle: "idle", attentionGeneration: 3, seenGeneration: 1 })]),
+    });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} />); });
+    expect(client.markSeen).toHaveBeenCalledTimes(1);
+    expect(client.markSeen).toHaveBeenCalledWith(scope, "agent-1", "3");
+    await act(async () => renderer.update(<MultiHost client={client} focusHost="remote" />));
+    expect(client.markSeen).toHaveBeenCalledTimes(2);
+    expect(client.markSeen).toHaveBeenLastCalledWith(remoteScope, "agent-1", "3");
+    await act(async () => renderer.unmount());
+  });
+
+  it("disconnects only the host whose scope vanished and re-requests only that host", async () => {
+    const client = twoHosts();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} focused={false} focusHost="remote" />); });
+    expect(renderer.root.findByType("output").props["data-authoritative"]).toBe("true");
+    expect(renderer.root.findByType("output").props["data-topology-generation"]).toBe(3);
+    await act(async () => renderer.update(<MultiHost client={client} focused={false} focusHost="remote" hosts={["local"]} shown={["local", "remote"]} />));
+    const output = renderer.root.findByType("output");
+    expect(output.props["data-authoritative"]).toBe("false");
+    expect(output.props["data-topology-generation"]).toBeUndefined();
+    expect(output.props["data-active"]).toBe("");
+    expect(output.props["data-local"]).toBe("agent-1:Local one");
+    await act(async () => renderer.update(<MultiHost client={client} focused={false} focusHost="remote" remoteEpoch={2} />));
+    expect(client.snapshot).toHaveBeenCalledTimes(3);
+    expect(client.snapshot).toHaveBeenLastCalledWith({ ...remoteScope, connectionEpoch: 2 });
+    expect(vi.mocked(client.snapshot).mock.calls.filter(([target]) => target.hostProfileId === "local")).toHaveLength(1);
+    await act(async () => renderer.unmount());
+  });
+
+  it("drops a host that is no longer shown and ignores its stragglers", async () => {
+    const client = twoHosts();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} focused={false} focusHost="remote" />); });
+    await act(async () => renderer.update(<MultiHost client={client} focused={false} focusHost="remote" hosts={["local"]} shown={["local"]} />));
+    await act(async () => client.publish({
+      kind: "snapshot", snapshot: snapshotOf(remoteScope, [remoteAgent({ displayName: "Straggler" })], 5),
+    }));
+    const output = renderer.root.findByType("output");
+    expect(output.props["data-authoritative"]).toBe("false");
+    expect(output.props["data-active"]).toBe("");
+    expect(output.props["data-local"]).toBe("agent-1:Local one");
+    await act(async () => renderer.unmount());
+  });
+
+  it("notifies the same agent id at the same generation on each host", async () => {
+    const client = twoHosts();
+    const emitNotification = vi.fn(async () => ({ id: 1, actionable: true }));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} focused={false} effects={{ emitNotification, playSound: vi.fn(async () => undefined) }} />); });
+    for (const [hostProfileId, serverIdentity, record] of [
+      ["local", "server-a", agent({ lifecycle: "blocked", lifecycleGeneration: 4, attentionGeneration: 4 })],
+      ["remote", "server-r", remoteAgent({ lifecycle: "blocked", lifecycleGeneration: 4, attentionGeneration: 4 })],
+    ] as const) {
+      await act(async () => client.publish({ kind: "upsert", hostProfileId, serverIdentity, connectionEpoch: 1, sequence: agentGeneration(4), record }));
+    }
+    expect(emitNotification).toHaveBeenCalledTimes(2);
+    await act(async () => renderer.unmount());
+  });
+
+  it("refreshes only the host it is asked about", async () => {
+    const client = twoHosts();
+    let latest!: ReturnType<typeof useAgentRuntime>;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} focused={false} observe={(runtime) => { latest = runtime; }} />); });
+    expect(client.snapshot).toHaveBeenCalledTimes(2);
+    await act(async () => latest.refreshSnapshot("remote"));
+    expect(client.snapshot).toHaveBeenCalledTimes(3);
+    expect(client.snapshot).toHaveBeenLastCalledWith(remoteScope);
+    await act(async () => latest.refreshSnapshot());
+    expect(client.snapshot).toHaveBeenCalledTimes(4);
+    expect(client.snapshot).toHaveBeenLastCalledWith(scope);
+    await act(async () => renderer.unmount());
+  });
+
+  it("requests again after a StrictMode remount instead of keeping a cancelled request", async () => {
+    const client = twoHosts();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<StrictMode><MultiHost client={client} focused={false} /></StrictMode>); });
+    const output = renderer.root.findByType("output");
+    expect(output.props["data-local"]).toBe("agent-1:Local one");
+    expect(output.props["data-remote"]).toBe("agent-1:Remote one");
+    await act(async () => renderer.unmount());
+  });
+
+  it("keeps another host's projection identity across one host's event", async () => {
+    const client = twoHosts();
+    const observed: Array<ReturnType<typeof useAgentRuntime>["byHost"]> = [];
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} focused={false} observe={(runtime) => observed.push(runtime.byHost)} />); });
+    const before = observed[observed.length - 1];
+    await act(async () => client.publish({
+      kind: "upsert", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, sequence: agentGeneration(4),
+      record: agent({ displayName: "Local renamed" }),
+    }));
+    const after = observed[observed.length - 1];
+    expect(after).not.toBe(before);
+    expect(after.get("remote")).toBe(before.get("remote"));
+    expect(after.get("local")).not.toBe(before.get("local"));
+    expect(after.get("local")?.agents[0].displayName).toBe("Local renamed");
+    await act(async () => renderer.unmount());
   });
 });
