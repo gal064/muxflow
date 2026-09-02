@@ -100,7 +100,8 @@ async fn transcribe_decodes_the_fixture_loads_once_and_single_lines_the_text() {
         .await
         .unwrap();
     assert_eq!(service.sidecar_pid().await, pid);
-    assert_eq!(service.slot.lock().await.child.as_ref().unwrap().next_id, 3);
+    // ping, load, transcribe, transcribe.
+    assert_eq!(service.slot.lock().await.child.as_ref().unwrap().next_id, 4);
 }
 
 #[tokio::test]
@@ -219,8 +220,13 @@ async fn refusals_are_mapped_by_class_and_leave_the_child_alive() {
 #[tokio::test]
 async fn a_crash_respawns_and_three_in_a_minute_stop_being_retryable() {
     let dir = tempfile::tempdir().unwrap();
-    // A sidecar that dies on its first frame: every request is a crash.
-    let service = service(dir.path(), DEFAULT_IDLE_AFTER, "read -r line; exit 3\n");
+    // A sidecar that answers the spawn-time ping and dies on the next frame:
+    // every request is a crash.
+    let service = service(
+        dir.path(),
+        DEFAULT_IDLE_AFTER,
+        "read -r line; printf '{\"id\":1,\"ok\":true}\\n'; read -r line; exit 3\n",
+    );
     let mut codes = Vec::new();
     for _ in 0..3 {
         let error = service
@@ -413,11 +419,11 @@ async fn a_full_queue_drops_the_reply_but_keeps_the_session() {
 #[tokio::test]
 async fn a_failed_synthesis_still_pushes_the_text_with_the_error_in_status() {
     let dir = tempfile::tempdir().unwrap();
-    // Every op is refused as a network failure.
+    // Every op but the spawn-time ping is refused as a network failure.
     let service = service(
         dir.path(),
         DEFAULT_IDLE_AFTER,
-        r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); printf '{"id":%s,"ok":false,"class":"network","error":"offline"}\n' "$id"; done
+        r#"while IFS= read -r line; do id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); case "$line" in *ping*) printf '{"id":%s,"ok":true}\n' "$id" ;; *) printf '{"id":%s,"ok":false,"class":"network","error":"offline"}\n' "$id" ;; esac; done
 "#,
     );
     let (voice_tx, mut voice_rx) = mpsc::channel::<SequencerControl>(8);
@@ -472,13 +478,18 @@ async fn provision_needs_consent_runs_the_sidecar_and_verifies_by_loading() {
         .unwrap_err();
     assert_eq!(refused.code, "voice_consent_required");
 
-    // Already complete: idempotent READY, no sidecar.
+    // Already complete: re-verified by loading, then READY with a hot sidecar.
     let status = service
         .provision("op-1", true, &not_cancelled(), &mut record)
         .await
         .unwrap();
     assert_eq!(status.readiness, v1::VoiceReadiness::Ready as i32);
-    assert!(service.sidecar_pid().await.is_none());
+    assert!(status.sidecar_running);
+    assert!(
+        seen.is_empty(),
+        "re-verification emitted provision progress"
+    );
+    service.shutdown().await;
 
     service.model().remove();
     let outcome = service
@@ -600,6 +611,82 @@ async fn a_cancel_during_speak_leaves_the_hot_sidecar_alone() {
     // request path forwards it; either way the child must still be there.
     let _ = outcome;
     assert_eq!(service.sidecar_pid().await, Some(pid));
+}
+
+/// A cancel raised while the model is still loading for a cold transcribe is
+/// answered `cancelled` without the sidecar hearing of it: the load finishes
+/// and the next request finds the model hot.
+#[tokio::test]
+async fn a_cancel_during_a_cold_load_keeps_the_loaded_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let slow_load = ECHO_SIDECAR.replace("load) printf", "load) sleep 1; printf");
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, &slow_load);
+    let cancel = AtomicBool::new(false);
+    let transcribe = service.transcribe(FIXTURE.to_vec(), "audio/mp4", "", &cancel);
+    let flag = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        cancel.store(true, Ordering::Release);
+    };
+    let (outcome, ()) = tokio::join!(transcribe, flag);
+    assert_eq!(outcome.unwrap_err().code, "cancelled");
+    let pid = service
+        .sidecar_pid()
+        .await
+        .expect("the load was allowed to finish");
+    assert!(service.status().sidecar_running);
+    service
+        .transcribe(FIXTURE.to_vec(), "audio/mp4", "", &not_cancelled())
+        .await
+        .unwrap();
+    assert_eq!(service.sidecar_pid().await, Some(pid));
+}
+
+/// An archive the sidecar could not extract is a failed download (§4.6),
+/// retryable, not a broken sidecar.
+#[tokio::test]
+async fn a_refused_extraction_is_a_retryable_provision_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = ECHO_SIDECAR.replace(
+        "refuse) printf '{\"id\":%s,\"ok\":false,\"class\":\"network\",\"error\":\"offline\"}\\n' \"$id\" ;;",
+        "provision) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"archive lacks tokens.txt\"}\\n' \"$id\" ;;",
+    );
+    assert!(script.contains("archive lacks"), "fixture edit missed");
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, &script);
+    service.model().remove();
+    let error = service
+        .provision("op", true, &not_cancelled(), &mut |_| {})
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "voice_provision_failed");
+    assert!(error.retryable);
+    assert!(error.message.contains("archive lacks tokens.txt"));
+    // The sidecar was not at fault: it is still there for the retry.
+    assert!(service.sidecar_pid().await.is_some());
+}
+
+/// PROVISION on a model that is complete on disk re-verifies it; a model the
+/// sidecar rejects is dropped so the next attempt downloads afresh.
+#[tokio::test]
+async fn provision_reverifies_a_complete_model_and_drops_a_rejected_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let rejecting = ECHO_SIDECAR.replace(
+        "load) printf '{\"id\":%s,\"ok\":true,\"load_millis\":7}\\n' \"$id\" ;;",
+        "load) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"bad onnx\"}\\n' \"$id\" ;;",
+    );
+    assert!(rejecting.contains("bad onnx"), "fixture edit missed");
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, &rejecting);
+    assert!(service.model().complete());
+    let error = service
+        .provision("op", true, &not_cancelled(), &mut |_| {})
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "voice_provision_failed");
+    assert!(error.retryable);
+    assert!(!service.model().complete(), "the rejected model was kept");
+    assert_eq!(
+        service.status().readiness,
+        v1::VoiceReadiness::ModelMissing as i32
+    );
 }
 
 #[test]

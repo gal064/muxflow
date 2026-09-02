@@ -136,6 +136,9 @@ pub(crate) struct VoiceService {
     /// reports. Kept beside the slot because the slot is locked for the whole
     /// of a request, including a cold `uv run`, and "busy" is not "hot".
     hot: AtomicBool,
+    /// A warm-up task is in flight; a second STATUS `warm` before it finishes
+    /// must not queue another waiter behind the same cold start.
+    warming: AtomicBool,
     /// The live child's process group, so shutdown can reach it while a
     /// request holds the slot. Zero when there is no child.
     child_pid: std::sync::atomic::AtomicI32,
@@ -188,6 +191,7 @@ impl VoiceService {
                 loaded: false,
             }),
             hot: AtomicBool::new(false),
+            warming: AtomicBool::new(false),
             child_pid: std::sync::atomic::AtomicI32::new(0),
             waiters: AtomicUsize::new(0),
             books: Mutex::new(Bookkeeping::default()),
@@ -204,15 +208,22 @@ impl VoiceService {
     /// Readiness right now. Answers at once and spawns nothing.
     pub(crate) fn status(&self) -> v1::VoiceStatus {
         let model = self.model();
-        let books = self.books.lock().unwrap();
+        // The filesystem and PATH are consulted before the books are locked:
+        // nothing blocking happens under that mutex.
+        let uv = (self.uv_lookup)();
+        let complete = model.complete();
+        let (last_error, provisioning) = {
+            let books = self.books.lock().unwrap();
+            (books.last_error.clone(), books.provisioning.clone())
+        };
         let mut status = v1::VoiceStatus {
             model_dir: model.dir().to_string_lossy().into_owned(),
             model_download_bytes: provision::MODEL_DOWNLOAD_BYTES,
-            detail: bounded_detail(&books.last_error),
+            detail: bounded_detail(&last_error),
             sidecar_running: self.hot.load(Ordering::Acquire),
             ..Default::default()
         };
-        match (self.uv_lookup)() {
+        match uv {
             Err(error) => {
                 status.readiness = v1::VoiceReadiness::UvMissing.into();
                 status.detail = uv::install_hint(&error);
@@ -220,10 +231,10 @@ impl VoiceService {
             }
             Ok(path) => status.uv_path = path.to_string_lossy().into_owned(),
         }
-        if let Some(progress) = &books.provisioning {
+        if let Some(progress) = provisioning {
             status.readiness = v1::VoiceReadiness::Provisioning.into();
-            status.provision = Some(progress.clone());
-        } else if model.complete() {
+            status.provision = Some(progress);
+        } else if complete {
             status.readiness = v1::VoiceReadiness::Ready.into();
         } else {
             status.readiness = v1::VoiceReadiness::ModelMissing.into();
@@ -234,12 +245,18 @@ impl VoiceService {
     /// Spawns the sidecar and loads the model on a detached task; a no-op
     /// when it is already hot.
     pub(crate) fn warm(self: &Arc<Self>) {
-        if self.hot.load(Ordering::Acquire) {
+        if self.hot.load(Ordering::Acquire)
+            || self
+                .warming
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
             return;
         }
         let service = Arc::clone(self);
         tokio::spawn(async move {
             let _ = service.ensure_loaded(&AtomicBool::new(false)).await;
+            service.warming.store(false, Ordering::Release);
         });
     }
 
@@ -319,7 +336,7 @@ impl VoiceService {
                 Err(error) => (
                     Vec::new(),
                     Some(v1::VoiceStatus {
-                        detail: error.to_string(),
+                        detail: bounded_detail(&error.to_string()),
                         ..service.status()
                     }),
                 ),
@@ -389,7 +406,7 @@ impl VoiceService {
             ));
         }
         let model = self.model();
-        {
+        let already_complete = {
             let mut books = self.books.lock().unwrap();
             if books.provisioning.is_some() {
                 return Err(VoiceError::new(
@@ -399,16 +416,34 @@ impl VoiceService {
                 ));
             }
             if model.complete() {
-                drop(books);
-                return Ok(self.status());
+                true
+            } else {
+                books.provisioning = Some(provision::progress(
+                    operation_id,
+                    provision::PHASE_INSTALLING_RUNTIME,
+                    0,
+                    0,
+                    "",
+                ));
+                false
             }
-            books.provisioning = Some(provision::progress(
-                operation_id,
-                provision::PHASE_INSTALLING_RUNTIME,
-                0,
-                0,
-                "",
-            ));
+        };
+        if already_complete {
+            // Not a plain no-op: verifying is what turns a model the sidecar
+            // has rejected — corrupted on disk, or outgrown by a pin bump —
+            // back into a fresh download on the next attempt.
+            return match self.ensure_loaded(cancel).await {
+                Ok(()) => Ok(self.status()),
+                Err(error) if error.model_fault => {
+                    model.remove();
+                    Err(VoiceError::new(
+                        "voice_provision_failed",
+                        error.message,
+                        true,
+                    ))
+                }
+                Err(error) => Err(error),
+            };
         }
         let outcome = self
             .provision_inner(operation_id, &model, cancel, on_progress)
@@ -417,8 +452,12 @@ impl VoiceService {
             Ok(()) => provision::progress(operation_id, provision::PHASE_READY, 0, 0, ""),
             Err(error) => {
                 // The sidecar removes its own partials when it gets to; a
-                // sidecar the host killed did not, so sweep here as well.
-                model.sweep_partials();
+                // sidecar the host killed did not, so sweep here as well — but
+                // only when this provision reached a sidecar at all, so a
+                // refusal at the door never touches another process's download.
+                if !matches!(error.code, "voice_busy" | "voice_uv_missing") {
+                    model.sweep_partials();
+                }
                 provision::progress(operation_id, provision::PHASE_FAILED, 0, 0, &error.message)
             }
         };
@@ -467,7 +506,10 @@ impl VoiceService {
         self.sidecar_request(request, cancel, &mut forward)
             .await
             .map_err(|error| match error.code {
-                "cancelled" | "voice_busy" | "voice_sidecar_failed" | "voice_uv_missing" => error,
+                // Not about the download: the phone should show these as they are.
+                "cancelled" | "voice_busy" | "voice_uv_missing" | "voice_sidecar_timeout" => error,
+                // A refused, crashed or otherwise failed download or extraction
+                // (§4.6): retryable, and the sidecar's reason rides along.
                 _ => VoiceError::new("voice_provision_failed", error.message, true),
             })?;
         if !model.complete() {
@@ -787,6 +829,16 @@ impl VoiceService {
         }
         if slot.child.is_none() {
             self.spawn_into(&mut slot)?;
+            // The first frame after a spawn waits on `uv run` resolving the
+            // interpreter and wheels: give that the cold-start allowance
+            // (§4.3, 120 s) rather than charging it to the request's own bound.
+            let child = slot.child.as_mut().expect("spawned above");
+            if let Err(failure) = child
+                .request(ping_header(), &[], LOAD_TIMEOUT, None, &mut |_| {})
+                .await
+            {
+                return Err(self.handle_failure(&mut slot, failure).await);
+            }
         }
         if request.needs_model && !slot.loaded {
             let model = self.model();
@@ -798,14 +850,10 @@ impl VoiceService {
                 ));
             }
             let child = slot.child.as_mut().expect("spawned above");
+            // Never cancellable: the sidecar cannot interrupt a load, and
+            // giving up on it would only throw away the model it is loading.
             match child
-                .request(
-                    model.load_header(),
-                    &[],
-                    LOAD_TIMEOUT,
-                    Some(cancel),
-                    &mut |_| {},
-                )
+                .request(model.load_header(), &[], LOAD_TIMEOUT, None, &mut |_| {})
                 .await
             {
                 Ok(_) => {
@@ -822,6 +870,12 @@ impl VoiceService {
                 header: serde_json::Value::Null,
                 body: Vec::new(),
             });
+        }
+        if cancel.load(Ordering::Acquire) {
+            // The load kept the sidecar hot for the next request; this one
+            // was given up on while it waited.
+            self.touch();
+            return Err(VoiceError::cancelled());
         }
         let child = slot.child.as_mut().expect("spawned above");
         let outcome = child
@@ -887,6 +941,7 @@ impl VoiceService {
         match failure {
             SidecarFailure::Cancelled => VoiceError::cancelled(),
             SidecarFailure::Refused { class, error } => {
+                let error = bounded_detail(&error);
                 self.books.lock().unwrap().last_error = error.clone();
                 match class.as_str() {
                     "network" => VoiceError::new("voice_network_unavailable", error, true),
@@ -900,19 +955,21 @@ impl VoiceService {
             }
             SidecarFailure::Timeout => {
                 self.drop_child(slot).await;
-                self.books.lock().unwrap().last_error = "sidecar timed out".into();
+                // A sidecar that keeps hanging is as broken as one that keeps
+                // dying: it counts toward the same backoff.
+                self.record_crash("sidecar timed out".into());
                 VoiceError::new(
                     "voice_sidecar_timeout",
                     format!(
                         "the voice sidecar did not answer in time; see {}",
                         sidecar::log_path(&self.cache_dir).display()
                     ),
-                    true,
+                    !self.crashed_too_often(),
                 )
             }
             SidecarFailure::Crashed(detail) => {
                 self.drop_child(slot).await;
-                self.record_crash(detail);
+                self.record_crash(bounded_detail(&detail));
                 self.sidecar_failed()
             }
         }
@@ -1048,6 +1105,12 @@ impl VoiceService {
             }
         }
     }
+}
+
+fn ping_header() -> serde_json::Map<String, serde_json::Value> {
+    let mut header = serde_json::Map::new();
+    header.insert("op".into(), "ping".into());
+    header
 }
 
 struct SidecarRequest {
