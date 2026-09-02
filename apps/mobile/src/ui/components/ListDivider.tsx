@@ -1,6 +1,6 @@
 import { StyleSheet, Text, View } from "react-native";
 
-import { colors, typeScale } from "../tokens";
+import { colors, metrics, typeScale } from "../tokens";
 
 /**
  * A labelled divider between list blocks — the mobile counterpart of the
@@ -19,7 +19,8 @@ const styles = StyleSheet.create({
   divider: {
     backgroundColor: colors.chromeBg,
     borderTopColor: colors.chromeHairline,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    // The same rule `ListRow` draws under itself, so a divider's line is not thinner than the row line above it.
+    borderTopWidth: metrics.hairlineWidth,
     paddingBottom: 6,
     paddingHorizontal: 16,
     paddingTop: 14,

@@ -67,6 +67,14 @@ function state(
   };
 }
 
+/** Each row's pins by id: "", "window", "workspace" or "window+workspace". */
+function pins(items: AgentListItem[]): Record<string, string> {
+  return Object.fromEntries(items.filter((i) => i.kind === "agent").map((i) => [
+    i.agent.id,
+    [i.windowPinned ? "window" : "", i.workspacePinned ? "workspace" : ""].filter(Boolean).join("+"),
+  ]));
+}
+
 /** A readable trace of the list: `#Label`, `>Workspace`, `--Divider`, `id`. */
 function trace(items: AgentListItem[]): string[] {
   return items.map((item) => {
@@ -194,17 +202,42 @@ describe("priority mode", () => {
       oldIdle("pinned-idle", { sessionId: "$pinned", windowId: "@p" }),
     ], sessions, windows), "priority", NOW);
     expect(trace(items)).toEqual(["#Working(3)", "tab-pinned", "ws-pinned", "unpinned-newer", "#Idle(1)", "pinned-idle"]);
-    const pins = Object.fromEntries(items.filter((i) => i.kind === "agent").map((i) => [(i as { agent: Agent }).agent.id, (i as { pinned: boolean }).pinned]));
-    expect(pins).toEqual({ "tab-pinned": true, "ws-pinned": true, "unpinned-newer": false, "pinned-idle": true });
+    expect(pins(items)).toEqual({
+      "tab-pinned": "window",
+      "ws-pinned": "workspace",
+      "unpinned-newer": "",
+      "pinned-idle": "workspace",
+    });
+  });
+
+  it("marks a pinned window inside a pinned workspace with both pins, one per kind", () => {
+    const sessions = [session("$pinned", "pinned-ws", 0, true)];
+    const windows = [window("@tab", "$pinned", 0, "w", true), window("@plain", "$pinned", 1, "w")];
+    const items = buildAgentListItems(state([
+      working("both", { sessionId: "$pinned", windowId: "@tab" }),
+      working("ws-only", { sessionId: "$pinned", windowId: "@plain" }),
+    ], sessions, windows), "priority", NOW);
+    expect(pins(items)).toEqual({ both: "window+workspace", "ws-only": "workspace" });
   });
 
   it("fills the row copy: title, workspace · window subtitle, attention, state", () => {
     const items = buildAgentListItems(state([blocked("b"), agent({ id: "w", displayName: "" })]), "priority", NOW);
     const rows = items.filter((i) => i.kind === "agent") as Extract<AgentListItem, { kind: "agent" }>[];
-    expect(rows.map((r) => [r.title, r.subtitle, r.attention, r.state])).toEqual([
-      ["b", "alpha · win-1", true, "blocked"],
-      ["win-1", "alpha · win-1", false, "working"],
+    expect(rows.map((r) => [r.title, r.subtitle, r.waiting, r.state])).toEqual([
+      ["b", "alpha · win-1", "blocked", "blocked"],
+      ["win-1", "alpha · win-1", undefined, "working"],
     ]);
+  });
+
+  it("keeps a seen blocked row waiting, clears a seen completion, and never a gone row (desktop needsAttention(state))", () => {
+    const items = buildAgentListItems(state([
+      blockedSeen("seen-blocked"),
+      done("unread-done"),
+      agent({ id: "seen-done", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 2n, seenGeneration: 2n, attentionSeenAtMs: NOW - 1 }),
+      blocked("gone-blocked", { present: false }),
+    ]), "priority", NOW);
+    const waiting = Object.fromEntries(items.filter((i) => i.kind === "agent").map((i) => [i.agent.id, i.waiting]));
+    expect(waiting).toEqual({ "seen-blocked": "blocked", "unread-done": "done", "seen-done": undefined, "gone-blocked": undefined });
   });
 
   it("gives every item a unique, stable key, unchanged when a row changes bucket", () => {
@@ -278,15 +311,18 @@ describe("workspace mode", () => {
     expect(trace(items)).toEqual([">charlie(5)", "c1", "c0-a", "c0-a-twin", "c0-z", "c0-gone"]);
     const rows = items.filter((i) => i.kind === "agent") as Extract<AgentListItem, { kind: "agent" }>[];
     // Only the pinned window earns a pin in this mode; the workspace pin is the divider.
-    expect(rows.map((r) => [r.agent.id, r.pinned, r.subtitle])).toEqual([
+    expect(rows.map((r) => [r.agent.id, r.windowPinned, r.subtitle])).toEqual([
       ["c1", true, "c-pinned"], ["c0-a", false, "c-first"], ["c0-a-twin", false, "c-first"], ["c0-z", false, "c-first"], ["c0-gone", false, "c-first"],
     ]);
   });
 
-  it("does not pin rows of a pinned workspace unless their window is pinned", () => {
-    const items = buildAgentListItems(state([working("b-1", { sessionId: "$b", windowId: "@b0" })], sessions, windows), "workspace", NOW);
-    expect((items[2] as { pinned: boolean }).pinned).toBe(false);
+  it("leaves the workspace pin to the group heading: rows carry only their window's pin", () => {
+    const items = buildAgentListItems(state([
+      working("b-1", { sessionId: "$b", windowId: "@b0" }),
+      working("c-1", { sessionId: "$c", windowId: "@c1" }),
+    ], sessions, windows), "workspace", NOW);
     expect((items[1] as { pinned: boolean }).pinned).toBe(true);
+    expect(pins(items)).toEqual({ "b-1": "", "c-1": "window" });
   });
 
   it("keeps a workspace the host no longer lists, named by the fallback, after the live ones", () => {
