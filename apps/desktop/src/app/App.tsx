@@ -466,6 +466,7 @@ export function App() {
     // agent setup question waits, so two dialogs can never stack.
     hostSetupAllowed: !helperOwnsHostSetupLane(helperState),
     hostLabel,
+    peerScopes: [], shownHostIds: [currentHostProfileId],
     profiles,
     recordDecision: recordHostSetupDecision,
     requestReconnect: () => setConnectionEpoch((value) => value + 1),

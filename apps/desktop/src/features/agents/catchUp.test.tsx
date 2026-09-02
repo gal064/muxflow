@@ -51,8 +51,8 @@ function client(): AgentClient {
 function Sidebar({ client: agentClient, connected, connectionEpoch }: { client: AgentClient; connected: boolean; connectionEpoch: number }) {
   const runtime = useAgentRuntime({
     client: agentClient,
-    scope: connected ? { ...scope, connectionEpoch } : undefined,
-    topologyWindowIds: ["@1", "@2"],
+    scopes: connected ? [{ scope: { ...scope, connectionEpoch }, topologyWindowIds: ["@1", "@2"] }] : [],
+    shownHostIds: ["local"],
     // Deliberately not focused on either pane: catch-up must not be quietly
     // consumed by the same render that displays it.
     focus: { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@9", paneId: "%9", appFocused: false, terminalVisible: true, automaticSeen: true },

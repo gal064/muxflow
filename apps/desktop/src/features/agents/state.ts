@@ -1,13 +1,15 @@
 import { agentGeneration, compareAgentGenerations, generationAtLeast, zeroGeneration, type AgentGeneration } from "./generation";
-import type { AgentRecord, AgentStoreState, AgentWireEvent } from "./types";
+import type { AgentRecord, AgentStoreState, AgentWireEvent, HostAgentState } from "./types";
 
-export const initialAgentState: AgentStoreState = {
+export const initialHostAgentState: HostAgentState = {
   snapshotRevision: zeroGeneration,
   eventSequence: zeroGeneration,
   authoritative: false,
   byId: {},
   adapters: [],
 };
+
+export const initialAgentState: AgentStoreState = { byHost: {} };
 
 export type AgentAction =
   | { type: "wire"; event: AgentWireEvent }
@@ -20,11 +22,30 @@ export type AgentAction =
     serverIdentity: string;
     connectionEpoch: number;
   }
-  | { type: "disconnect" }
+  | { type: "disconnect"; hostProfileId: string }
+  /** The host is no longer shown: its slice goes, not just its authority. */
+  | { type: "remove"; hostProfileId: string }
   | { type: "reset" };
 
 export function agentReducer(state: AgentStoreState, action: AgentAction): AgentStoreState {
   if (action.type === "reset") return initialAgentState;
+  const hostProfileId = action.type === "wire" ? wireEventHost(action.event) : action.hostProfileId;
+  if (action.type === "remove") {
+    if (!(hostProfileId in state.byHost)) return state;
+    const byHost = { ...state.byHost };
+    delete byHost[hostProfileId];
+    return { byHost };
+  }
+  const host = state.byHost[hostProfileId] ?? initialHostAgentState;
+  const next = hostReducer(host, action);
+  return next === host ? state : { byHost: { ...state.byHost, [hostProfileId]: next } };
+}
+
+export function wireEventHost(event: AgentWireEvent): string {
+  return event.kind === "snapshot" ? event.snapshot.hostProfileId : event.hostProfileId;
+}
+
+function hostReducer(state: HostAgentState, action: Exclude<AgentAction, { type: "reset" | "remove" }>): HostAgentState {
   if (action.type === "disconnect") return state.authoritative ? { ...state, authoritative: false } : state;
   if (action.type === "seenAck") {
     if (state.hostProfileId !== action.hostProfileId
@@ -87,7 +108,7 @@ export function agentReducer(state: AgentStoreState, action: AgentAction): Agent
   return { ...state, eventSequence: event.sequence, byId };
 }
 
-function sameScope(state: AgentStoreState, hostProfileId: string, serverIdentity: string): boolean {
+function sameScope(state: HostAgentState, hostProfileId: string, serverIdentity: string): boolean {
   return state.hostProfileId === undefined
     || (state.hostProfileId === hostProfileId && state.serverIdentity === serverIdentity);
 }
@@ -108,11 +129,11 @@ function validGeneration(value: AgentGeneration): boolean {
 
 /** Optimistically mirrors only the exact generation acknowledged by the host. */
 export function acknowledgeSeen(
-  state: AgentStoreState,
+  state: HostAgentState,
   agentId: string,
   attentionGeneration: AgentGeneration,
   attentionSeenAt = Date.now(),
-): AgentStoreState {
+): HostAgentState {
   const record = state.byId[agentId];
   if (!record || record.attentionGeneration !== attentionGeneration) return state;
   const advances = !generationAtLeast(record.seenGeneration, attentionGeneration);
