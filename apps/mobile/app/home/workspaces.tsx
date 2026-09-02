@@ -46,7 +46,7 @@ export default function WorkspacesScreen() {
         return (
           <>
           {index === dividers.pinnedAt ? <ListDivider label="Pinned" /> : null}
-          {index === dividers.restAt ? <ListDivider label="Workspaces" /> : null}
+          {index === dividers.restAt ? <ListDivider afterRow label="Workspaces" /> : null}
           <ListRow
             edgeColor={waiting.loudest ? waitingColor(waiting.loudest) : undefined}
             height={metrics.sessionRowHeight}
