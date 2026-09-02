@@ -120,8 +120,13 @@ describe.skipIf(!availability.available)(`live host (${availability.reason ?? "c
     const seedsBeforeAttach = delivered.filter((d) => d.kind === "seed" && d.paneId === paneId).length;
     await connection.request(attachTerminal(sessionId, paneId));
     say("ATTACH_TERMINAL → ok");
-    const seed = await waitFor("TERMINAL_SEED after attach", () => delivered.filter((d) => d.kind === "seed" && d.paneId === paneId)[seedsBeforeAttach]);
-    say(`TERMINAL_SEED after ATTACH_TERMINAL: ${seed.text.length} bytes generation=${seed.generation}`);
+    // The attach mounts the pane but photographs nothing when the session's
+    // control client already exists (CREATE_WINDOW selected it): the seed is
+    // asked for explicitly, as the controller does (§7.6 step 1).
+    await connection.request(requestTerminalSeed(paneId));
+    say("REQUEST_TERMINAL_SEED after attach → ok");
+    const seed = await waitFor("TERMINAL_SEED after attach + seed request", () => delivered.filter((d) => d.kind === "seed" && d.paneId === paneId)[seedsBeforeAttach]);
+    say(`TERMINAL_SEED: ${seed.text.length} bytes generation=${seed.generation} (screen-only)`);
     expect(seed.text.length).toBeGreaterThan(0);
     const size = harness.tmux(["display-message", "-p", "-t", paneId, "#{pane_width}x#{pane_height}"]);
     say(`pane size after RESIZE_TERMINAL 40x20: ${size}`);
@@ -204,8 +209,13 @@ describe.skipIf(!availability.available)(`live host (${availability.reason ?? "c
     store.getState().setFocusedPane(undefined);
     await connection.request(setTerminalVisibility(paneId, false, { terminalEpoch: connection.connectionEpoch, generationCutoff: 0n }));
     say(`SET_TERMINAL_VISIBILITY(false, data=empty, terminalEpoch=${connection.connectionEpoch}) → ok`);
-    const hidden = await waitFor("PANE_RESOURCE after hide", () => log.find((l) => l.includes("pane.resource") && l.includes("state=3")));
-    say(`  ${hidden.replace("[muxflow] ", "")} (state 3 = RELEASED: an empty handoff snapshot cannot be buffered, so the reveal reseeds)`);
+    // A hide answers with no bytes and no PANE_RESOURCE at all (host
+    // `set_visibility`: the store keeps the tail, the *reveal* hands it back).
+    // The phone never held a renderer snapshot, so its reveal is answered
+    // with a seed.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const hideEvents = log.filter((l) => l.includes("pane.resource"));
+    say(`PANE_RESOURCE events after hide: ${hideEvents.length} (none expected: a hide carries nothing)`);
     // Output produced while hidden is not delivered.
     const hiddenBefore = delivered.length;
     await connection.request(terminalInput(paneId, new TextEncoder().encode("echo hidden-$((40+3))\n")));

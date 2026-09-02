@@ -74,6 +74,204 @@ function terminalEvent(kind: EventKind, sequence: bigint, data: Uint8Array, gene
   }, { sequence });
 }
 
+describe("TerminalController scrollback paging (§7.6.1)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  async function seeded() {
+    const h = harness();
+    await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 80, rows: 24 });
+    await answerNext(h.transport()); // select
+    await answerNext(h.transport()); // resize
+    await answerNext(h.transport()); // attach
+    await answerNext(h.transport()); // seed request (§7.6 step 1)
+    h.transport().feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 1n));
+    await settle();
+    h.page.length = 0;
+    return h;
+  }
+
+  function historyEvent(sequence: bigint, rows: string[], historySize: number, known = true): Envelope {
+    return hostEnvelope({
+      case: "event",
+      value: create(HostEventSchema, {
+        kind: EventKind.TERMINAL_HISTORY,
+        terminal: create(TerminalBytesSchema, {
+          paneId: "%1",
+          data: new TextEncoder().encode(rows.join("\r\n")),
+          historySize,
+          historySizeKnown: known,
+        }),
+      }),
+    }, { sequence });
+  }
+
+  it("atTop asks for a first page with the page's rows as skip, splices the answer above the retained bytes, and doubles the next page", async () => {
+    const h = await seeded();
+    const out = new TextEncoder().encode("more");
+    h.transport().feed(terminalEvent(EventKind.TERMINAL_OUTPUT, 2n, out, 2n));
+    await settle();
+    h.controller.onPageMessage({ t: "atTop", above: 7 });
+    await settle();
+    const [frame] = h.transport().drain();
+    if (frame?.payload.case !== "request") throw new Error("expected the history request");
+    expect(frame.payload.value.operation).toBe(Operation.REQUEST_TERMINAL_HISTORY);
+    expect(frame.payload.value.scope).toBe("%1");
+    expect(frame.payload.value.terminalHistoryLines).toBe(300);
+    expect(frame.payload.value.terminalHistorySkipLines).toBe(7);
+    h.transport().feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
+    h.transport().feed(historyEvent(3n, ["one", "two", "three"], 5000));
+    await settle();
+    const splice = h.page.at(-1);
+    if (splice?.t !== "splice") throw new Error(`expected a splice, got ${String(splice?.t)}`);
+    expect(atob(splice.hist)).toBe("one\r\ntwo\r\nthree");
+    // The tail replays the seed and every output since, in order.
+    expect(atob(splice.tail)).toBe("\x1b[2J$ more");
+    expect(splice.rowsAdded).toBe(3);
+    // The next page doubles, and its splice stacks the older page above the
+    // one already held — the buffer is rebuilt whole, so nothing may be left out.
+    h.controller.onPageMessage({ t: "atTop", above: 10 });
+    await settle();
+    const [next] = h.transport().drain();
+    if (next?.payload.case !== "request") throw new Error("expected the second history request");
+    expect(next.payload.value.terminalHistoryLines).toBe(600);
+    expect(next.payload.value.terminalHistorySkipLines).toBe(10);
+    h.transport().feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: next.requestId }));
+    h.transport().feed(historyEvent(4n, ["older-a", "older-b"], 5000));
+    await settle();
+    const second = h.page.at(-1);
+    if (second?.t !== "splice") throw new Error("expected the second splice");
+    expect(atob(second.hist)).toBe("older-a\r\nolder-b\r\none\r\ntwo\r\nthree");
+    expect(second.rowsAdded).toBe(2);
+    expect(atob(second.tail)).toBe("\x1b[2J$ more");
+  });
+
+  it("one request in flight; done when the spliced rows reach tmux's history size; an unknown size asks again", async () => {
+    const h = await seeded();
+    h.controller.onPageMessage({ t: "atTop", above: 0 });
+    await settle();
+    const [frame] = h.transport().drain();
+    if (frame?.payload.case !== "request") throw new Error("expected the history request");
+    // A second atTop while the first is unanswered is ignored.
+    h.controller.onPageMessage({ t: "atTop", above: 0 });
+    await settle();
+    expect(h.transport().drain()).toHaveLength(0);
+    h.transport().feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
+    // Probe failed: sizeKnown=false is "ask again", so paging continues…
+    h.transport().feed(historyEvent(2n, ["a", "b"], 0, false));
+    await settle();
+    h.controller.onPageMessage({ t: "atTop", above: 2 });
+    await settle();
+    const [second] = h.transport().drain();
+    if (second?.payload.case !== "request") throw new Error("expected another request");
+    h.transport().feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: second.requestId }));
+    // …until a known size says the two rows plus these two are everything.
+    h.transport().feed(historyEvent(3n, ["c", "d"], 4));
+    await settle();
+    h.controller.onPageMessage({ t: "atTop", above: 4 });
+    await settle();
+    expect(h.transport().drain()).toHaveLength(0);
+  });
+
+  it("stops at the scrollback limit and never asks for more rows than fit under it", async () => {
+    const h = await seeded();
+    h.controller.onPageMessage({ t: "atTop", above: 9_900 });
+    await settle();
+    const [frame] = h.transport().drain();
+    if (frame?.payload.case !== "request") throw new Error("expected the history request");
+    expect(frame.payload.value.terminalHistoryLines).toBe(100);
+    h.transport().feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
+    h.transport().feed(historyEvent(2n, Array.from({ length: 100 }, (_, i) => `r${i}`), 50_000));
+    await settle();
+    h.controller.onPageMessage({ t: "atTop", above: 10_000 });
+    await settle();
+    expect(h.transport().drain()).toHaveLength(0);
+  });
+
+  it("a late rejection of an older request does not unlatch the one in flight", async () => {
+    const h = await seeded();
+    h.controller.onPageMessage({ t: "atTop", above: 0 });
+    await settle();
+    const [first] = h.transport().drain();
+    if (first?.payload.case !== "request") throw new Error("expected the first request");
+    // A reseed resets the ledger while the first request is unanswered…
+    h.transport().feed(terminalEvent(EventKind.TERMINAL_SEED, 2n, SEED, 3n));
+    await settle();
+    h.controller.onPageMessage({ t: "atTop", above: 0 });
+    await settle();
+    const [second] = h.transport().drain();
+    if (second?.payload.case !== "request") throw new Error("expected the second request");
+    // …then the host rejects the first one late.
+    h.transport().feed(hostEnvelope({ case: "response", value: okResponse({ ok: false, errorCode: "pane_gone", displayMessage: "gone" }) }, { requestId: first.requestId }));
+    await settle();
+    h.controller.onPageMessage({ t: "atTop", above: 0 });
+    await settle();
+    expect(h.transport().drain()).toHaveLength(0); // the second is still in flight
+  });
+
+  it("discards the clamp row tmux answers an empty history with, and trims a page that ran past the top", async () => {
+    const h = await seeded();
+    // Nothing above the screen: history_size 0, tmux still answers one row.
+    h.controller.onPageMessage({ t: "atTop", above: 0 });
+    await settle();
+    const [first] = h.transport().drain();
+    if (first?.payload.case !== "request") throw new Error("expected the history request");
+    h.transport().feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: first.requestId }));
+    h.transport().feed(historyEvent(2n, ["$ "], 0));
+    await settle();
+    expect(h.page.filter((m) => m.t === "splice")).toHaveLength(0);
+    // Done: no further request for this seed.
+    h.controller.onPageMessage({ t: "atTop", above: 0 });
+    await settle();
+    expect(h.transport().drain()).toHaveLength(0);
+
+    // A page that asked for 300 rows above 5 held, of a 7-row history: only
+    // the last 2 rows of the answer are real.
+    const g = await seeded();
+    g.controller.onPageMessage({ t: "atTop", above: 5 });
+    await settle();
+    const [req] = g.transport().drain();
+    if (req?.payload.case !== "request") throw new Error("expected the history request");
+    g.transport().feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: req.requestId }));
+    g.transport().feed(historyEvent(2n, ["clamp", "clamp", "real-1", "real-2"], 7));
+    await settle();
+    const splice = g.page.at(-1);
+    if (splice?.t !== "splice") throw new Error("expected a splice");
+    expect(atob(splice.hist)).toBe("real-1\r\nreal-2");
+    g.controller.onPageMessage({ t: "atTop", above: 7 });
+    await settle();
+    expect(g.transport().drain()).toHaveLength(0); // 5 + 2 = 7: the top was reached
+  });
+
+  it("a fresh seed resets the ledger: the retained tail restarts and paging is live again", async () => {
+    const h = await seeded();
+    h.controller.onPageMessage({ t: "atTop", above: 0 });
+    await settle();
+    const [frame] = h.transport().drain();
+    if (frame?.payload.case !== "request") throw new Error("expected the history request");
+    h.transport().feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
+    // The reseed lands before the answer: the answer has nothing to splice against.
+    const reseed = new TextEncoder().encode("\x1b[2Jnew");
+    h.transport().feed(terminalEvent(EventKind.TERMINAL_SEED, 2n, reseed, 3n));
+    h.transport().feed(historyEvent(3n, ["stale"], 100));
+    await settle();
+    expect(h.page.filter((m) => m.t === "splice")).toHaveLength(0);
+    // Paging works against the new screen, with the new tail.
+    h.controller.onPageMessage({ t: "atTop", above: 1 });
+    await settle();
+    const [again] = h.transport().drain();
+    if (again?.payload.case !== "request") throw new Error("expected a request after the reseed");
+    h.transport().feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: again.requestId }));
+    h.transport().feed(historyEvent(4n, ["h1"], 2)); // 1 held + 1 above
+    await settle();
+    const splice = h.page.at(-1);
+    if (splice?.t !== "splice") throw new Error("expected a splice after the reseed");
+    expect(atob(splice.tail)).toBe("\x1b[2Jnew");
+  });
+});
+
 describe("TerminalController attach lifecycle (§7.6)", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
@@ -94,6 +292,9 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     expect(resize).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 46, rows: 40 });
     const attach = await answerNext(t);
     expect(attach).toMatchObject({ operation: Operation.ATTACH_TERMINAL, sessionId: "$1", paneIds: ["%1"] });
+    // The attach mounts; the seed is asked for explicitly right behind it.
+    const seedRequest = await answerNext(t);
+    expect(seedRequest).toMatchObject({ operation: Operation.REQUEST_TERMINAL_SEED, scope: "%1" });
     // No SET_TERMINAL_VISIBILITY(true) on mount: the attach is the reveal.
     expect(t.drain()).toHaveLength(0);
     expect(h.controller.snapshot.phase).toBe("attaching");
@@ -107,6 +308,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     await answerNext(t);
     await answerNext(t);
     await answerNext(t);
+    await answerNext(t); // seed request (§7.6 step 1)
     t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 5n));
     expect(h.page.at(-1)).toEqual({ t: "seed", b64: Buffer.from(SEED).toString("base64") });
     expect(h.controller.snapshot.phase).toBe("seeded");
@@ -139,6 +341,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     await answerNext(t);
     await answerNext(t);
     await answerNext(t);
+    await answerNext(t); // seed request (§7.6 step 1)
     const big = new Uint8Array(300); // window is 1000 bytes; 25 % is 250
     t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, big, 1n));
     const [ack] = t.drain();
@@ -153,6 +356,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     await answerNext(t);
     await answerNext(t);
     await answerNext(t);
+    await answerNext(t); // seed request (§7.6 step 1)
     await vi.advanceTimersByTimeAsync(4_999);
     expect(t.drain()).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(1);
@@ -177,6 +381,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     await answerNext(t);
     await answerNext(t);
     await answerNext(t);
+    await answerNext(t); // seed request (§7.6 step 1)
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 20 });
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 22 });
     await vi.advanceTimersByTimeAsync(149);
@@ -199,6 +404,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     await answerNext(t);
     await answerNext(t);
     await answerNext(t);
+    await answerNext(t); // seed request (§7.6 step 1)
     t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 9n));
     const stopped = h.controller.stop();
     expect(h.store.getState().focusedPaneId).toBeUndefined();
@@ -246,6 +452,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     await answerNext(t1);
     await answerNext(t1);
     await answerNext(t1);
+    await answerNext(t1); // seed request (§7.6 step 1)
     t1.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 1n));
     t1.closeFromRemote({ reason: "networkLost" });
     expect(h.store.getState().connection.state).toBe("reconnecting");
@@ -255,8 +462,8 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     t2.drain(); // ClientHello + Subscribe
     t2.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: 2n, terminalOutputWindowBytes: 1000n }) }, { requestId: 1n }));
     t2.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
-    const ops = [await answerNext(t2), await answerNext(t2), await answerNext(t2)].map((r) => r.operation);
-    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL]);
+    const ops = [await answerNext(t2), await answerNext(t2), await answerNext(t2), await answerNext(t2)].map((r) => r.operation);
+    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
     expect(h.store.getState().focusedPaneId).toBe("%1");
     // The hide on the new connection carries the new epoch.
     void h.controller.stop();
@@ -393,6 +600,7 @@ describe("TerminalController successor and reconnect", () => {
     await answerNext(t); // select
     await answerNext(t); // resize
     await answerNext(t); // attach
+    await answerNext(t); // seed request (§7.6 step 1)
     t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 50n));
     await settle();
     expect(h.controller.snapshot.phase).toBe("seeded");
@@ -406,6 +614,7 @@ describe("TerminalController successor and reconnect", () => {
     await answerNext(t); // select
     await answerNext(t); // resize
     await answerNext(t); // attach
+    await answerNext(t); // seed request (§7.6 step 1)
     h.page.length = 0;
     t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 2n));
     await settle();

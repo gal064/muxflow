@@ -14,6 +14,7 @@ function agent(overrides: Partial<Agent> = {}): Agent {
     seenGeneration: 0n,
     updatedAtMs: 0,
     lifecycleChangedAtMs: 0,
+    attentionSeenAtMs: 0,
     present: true,
     route: { sessionId: "$1", sessionNameFallback: "", windowId: "@1", windowNameFallback: "", paneId: "%1", paneIndexFallback: 0 },
     ...overrides,

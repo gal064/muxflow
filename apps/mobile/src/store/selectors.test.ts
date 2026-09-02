@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentWindowName, agentWorkspaceName, compareAgents, displayState, needsAttention, sortedAgents, agentPinned, pinnedDividers } from "./selectors";
+import { agentWindowName, agentWorkspaceName, compareAgents, displayState, needsAttention, sortedAgents, agentPinned, pinnedDividers, RECENT_WINDOW_MS } from "./selectors";
 import type { Agent, SessionState } from "./sessionStore";
 
 function agent(overrides: Partial<Agent> & { id: string }): Agent {
@@ -13,6 +13,7 @@ function agent(overrides: Partial<Agent> & { id: string }): Agent {
     seenGeneration: 0n,
     updatedAtMs: 1000,
     lifecycleChangedAtMs: 1000,
+    attentionSeenAtMs: 0,
     present: true,
     route: { sessionId: "$1", sessionNameFallback: "fallback-ws", windowId: "@1", windowNameFallback: "fallback-win", paneId: "%1", paneIndexFallback: 0 },
     ...overrides,
@@ -38,7 +39,7 @@ describe("display state (§8.2, ported from the desktop)", () => {
 });
 
 describe("agents list order (§8.2)", () => {
-  it("orders blocked+attention, blocked, done, working, idle, unknown, then gone agents", () => {
+  it("orders blocked+attention, blocked, working, recent (done and fresh idle), idle, unknown, then gone agents", () => {
     const agents: Record<string, Agent> = {};
     for (const a of [
       agent({ id: "unknown", lifecycle: "unknown" }),
@@ -49,8 +50,28 @@ describe("agents list order (§8.2)", () => {
       agent({ id: "blocked-seen", lifecycle: "blocked", attentionKind: "blocked", attentionGeneration: 2n, seenGeneration: 2n }),
       agent({ id: "blocked-new", lifecycle: "blocked", attentionKind: "blocked", attentionGeneration: 2n, seenGeneration: 1n }),
     ]) agents[a.id] = a;
-    expect(sortedAgents({ agents, sessions: {}, windows: {} }).map((a) => a.id)).toEqual([
-      "blocked-new", "blocked-seen", "done", "working", "idle", "unknown", "gone-blocked",
+    // `now` far past every lifecycleChangedAtMs (1000), so plain idle is old.
+    expect(sortedAgents({ agents, sessions: {}, windows: {} }, 1_000_000_000).map((a) => a.id)).toEqual([
+      "blocked-new", "blocked-seen", "working", "done", "idle", "unknown", "gone-blocked",
+    ]);
+  });
+
+  it("keeps a freshly idle agent in the recent bucket, clocked from the seen completion when there is one", () => {
+    const now = 1_000_000_000;
+    const agents: Record<string, Agent> = {};
+    for (const a of [
+      agent({ id: "old-idle", lifecycle: "idle", lifecycleChangedAtMs: now - RECENT_WINDOW_MS - 1 }),
+      agent({ id: "fresh-idle", lifecycle: "idle", lifecycleChangedAtMs: now - 1000 }),
+      // Finished long ago, acknowledged just now: recent by the seen clock.
+      agent({
+        id: "seen-done", lifecycle: "idle", attentionKind: "completed",
+        attentionGeneration: 2n, seenGeneration: 2n,
+        lifecycleChangedAtMs: now - RECENT_WINDOW_MS - 1, attentionSeenAtMs: now - 1000,
+      }),
+      agent({ id: "working", lifecycle: "working", lifecycleChangedAtMs: now - 5000 }),
+    ]) agents[a.id] = a;
+    expect(sortedAgents({ agents, sessions: {}, windows: {} }, now).map((a) => a.id)).toEqual([
+      "working", "fresh-idle", "seen-done", "old-idle",
     ]);
   });
 
@@ -97,6 +118,7 @@ describe("pinned block (host-owned pins, desktop sidebar rule)", () => {
   });
 
   it("leads pinned rows only within their own status", () => {
+    const NOW = 1_000_000_000;
     const agents: Record<string, Agent> = {};
     for (const a of [
       agent({ id: "blocked-plain", lifecycle: "blocked", attentionKind: "blocked", attentionGeneration: 2n, seenGeneration: 1n, route: route("$1", "@1") }),
@@ -104,7 +126,7 @@ describe("pinned block (host-owned pins, desktop sidebar rule)", () => {
       agent({ id: "working-plain", lifecycle: "working", route: route("$1", "@1") }),
       agent({ id: "working-pinned", lifecycle: "working", route: route("$1", "@2") }),
     ]) agents[a.id] = a;
-    expect(sortedAgents({ agents, sessions, windows }).map((a) => a.id)).toEqual([
+    expect(sortedAgents({ agents, sessions, windows }, NOW).map((a) => a.id)).toEqual([
       "blocked-plain", "working-pinned", "working-plain", "idle-pinned",
     ]);
   });

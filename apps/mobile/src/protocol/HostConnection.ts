@@ -78,6 +78,12 @@ export interface TerminalSink {
    * pane of that session is affected.
    */
   exit(sessionId: string, detail: string): void;
+  /**
+   * One TERMINAL_HISTORY answer (§7.6.1): the rows above the screen, plus
+   * tmux's own history size when the targeted probe answered (`sizeKnown`
+   * false means "ask again", not "no scrollback").
+   */
+  history?(paneId: string, bytes: Uint8Array, historySize: number, sizeKnown: boolean): void;
 }
 
 export interface RequestOptions {
@@ -572,6 +578,10 @@ export class HostConnection {
     switch (event.kind) {
       case EventKind.TOPOLOGY_SNAPSHOT:
         if (event.snapshot) this.applySnapshotWithAgents(event.snapshot);
+        // A notified pass that found the world unchanged answers with the
+        // generation alone; ignoring it would leave guarded requests quoting a
+        // stale generation and refused as stale_topology.
+        else if (event.topologyGeneration > 0n) store.getState().applyTopologyAck(event.topologyGeneration);
         break;
       case EventKind.TOPOLOGY_DIRTY:
         break;
@@ -583,6 +593,11 @@ export class HostConnection {
         break;
       case EventKind.TERMINAL_OUTPUT:
         if (event.terminal) terminals?.output?.(event.terminal.paneId, event.terminal.data, event.terminal.generation);
+        break;
+      case EventKind.TERMINAL_HISTORY:
+        if (event.terminal) {
+          terminals?.history?.(event.terminal.paneId, event.terminal.data, event.terminal.historySize, event.terminal.historySizeKnown);
+        }
         break;
       case EventKind.TERMINAL_EXIT:
         terminals?.exit?.(event.scope, event.detail);

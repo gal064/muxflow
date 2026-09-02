@@ -10,6 +10,7 @@ export interface RegisteredTerminal {
   sessionId: string;
   seed(bytes: Uint8Array, generation: bigint): void;
   output(bytes: Uint8Array, generation: bigint): void;
+  history(bytes: Uint8Array, historySize: number, sizeKnown: boolean): void;
   exit(detail: string): void;
   onConnected(): void;
 }
@@ -34,6 +35,10 @@ export class TerminalRegistry implements TerminalSink {
 
   output(paneId: string, bytes: Uint8Array, generation: bigint): void {
     this.terminals.get(paneId)?.output(bytes, generation);
+  }
+
+  history(paneId: string, bytes: Uint8Array, historySize: number, sizeKnown: boolean): void {
+    this.terminals.get(paneId)?.history(bytes, historySize, sizeKnown);
   }
 
   /** TERMINAL_EXIT is scoped by session id ("$N"): every pane of that session. */
