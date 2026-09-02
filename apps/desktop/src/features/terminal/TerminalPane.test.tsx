@@ -493,6 +493,21 @@ describe("TerminalPane pane-paint span lifecycle", () => {
     await act(async () => renderer.unmount());
   });
 
+  // `%5` exists on every tmux server; a screen another host cached under it
+  // is not this pane's screen.
+  it("does not restore a screen another host cached under the same pane id", async () => {
+    const viewport = { atBottom: true, viewportLine: 0, grid: { columns: 80, rows: 24 } };
+    const checkpoint = { terminalEpoch: 7, outputGeneration: 3 };
+    terminalStateCache.set(terminalCacheKey("remote", "%5"), "remote-screen", { checkpoint, viewport });
+    // An unscoped key is what a call that forgot the scope would read.
+    terminalStateCache.set("%5", "unscoped-screen", { checkpoint, viewport });
+    const hub = new FakeHub();
+    const renderer = await mountPane(fixturePane("%5"), hub);
+    expect(renderers.created[0].restoredSerialized).toBeUndefined();
+    expect(terminalStateCache.get(terminalCacheKey("remote", "%5"))?.serialized).toBe("remote-screen");
+    await act(async () => renderer.unmount());
+  });
+
   it("does not reveal the deliberate blank a pane shows while it owes a seed", async () => {
     const hub = new FakeHub();
     const mounted = await mountPane(fixturePane("%await"), hub);

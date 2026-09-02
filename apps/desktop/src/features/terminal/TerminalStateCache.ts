@@ -108,11 +108,11 @@ export class TerminalStateCache {
    * back to. It is on the read rather than only on the write because a reveal
    * reads this entry and does not necessarily write one.
    */
-  get(paneId: string): CachedTerminalState | undefined {
-    const value = this.#states.get(paneId);
+  get(key: string): CachedTerminalState | undefined {
+    const value = this.#states.get(key);
     if (!value) return undefined;
-    this.#states.delete(paneId);
-    this.#states.set(paneId, value);
+    this.#states.delete(key);
+    this.#states.set(key, value);
     return value;
   }
 
@@ -127,7 +127,7 @@ export class TerminalStateCache {
    * sentence about it.
    */
   set(
-    paneId: string,
+    key: string,
     serialized: string,
     options: {
       checkpoint?: { terminalEpoch: number; outputGeneration: number };
@@ -137,11 +137,11 @@ export class TerminalStateCache {
   ): void {
     const byteLength = serialized ? encoder.encode(serialized).byteLength : 0;
     if (!serialized || byteLength > this.maxSerializedBytes || byteLength > this.maxTotalBytes) {
-      this.delete(paneId);
+      this.delete(key);
       return;
     }
-    this.delete(paneId);
-    this.#states.set(paneId, {
+    this.delete(key);
+    this.#states.set(key, {
       serialized,
       savedAt: Date.now(),
       byteLength,
@@ -160,10 +160,10 @@ export class TerminalStateCache {
     }
   }
 
-  delete(paneId: string): void {
-    const value = this.#states.get(paneId);
+  delete(key: string): void {
+    const value = this.#states.get(key);
     if (value) this.#retainedBytes -= value.byteLength;
-    this.#states.delete(paneId);
+    this.#states.delete(key);
   }
 
   clear(): void {
