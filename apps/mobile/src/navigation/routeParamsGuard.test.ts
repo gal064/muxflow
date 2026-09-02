@@ -48,7 +48,7 @@ function unencodedWrites(source: string): string[] {
 
 function undecodedReads(source: string): string[] {
   const offenders: string[] = [];
-  for (const match of source.matchAll(/const\s+(\{[^}]*\}|\w+)\s*=\s*useLocalSearchParams\b/g)) {
+  for (const match of source.matchAll(/const\s+(\{[^}]*\}|\w+)\s*=\s*use(?:Local|Global)SearchParams\b/g)) {
     const target = match[1] as string;
     if (target.startsWith("{")) {
       if (new RegExp(`\\b(${KEY_PATTERN})\\b`).test(target)) offenders.push(match[0]);
