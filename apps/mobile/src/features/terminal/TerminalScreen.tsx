@@ -111,6 +111,16 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
         </Pressable>
         <Text numberOfLines={1} style={styles.title}>{title}</Text>
         {agent ? <StatusPill state={agentPillState(agent)} /> : null}
+        {gone || !agent ? null : (
+          <Pressable
+            accessibilityLabel="Talk to this agent"
+            accessibilityRole="button"
+            onPress={() => router.push({ pathname: "/voice/[paneId]", params: { paneId: toRouteParam(paneId), sessionId: toRouteParam(sessionId), agentId: toRouteParam(agent.id) } })}
+            style={styles.iconButton}
+          >
+            <Text style={styles.micGlyph}>🎙</Text>
+          </Pressable>
+        )}
         {gone ? null : (
           <Pressable
             accessibilityLabel="Files"
@@ -203,6 +213,7 @@ const styles = StyleSheet.create({
   backGlyph: { color: colors.chromeInkStrong, fontSize: 26, fontWeight: "600", lineHeight: 30 },
   title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
   filesGlyph: { color: colors.accent, fontSize: 24, lineHeight: 28 },
+  micGlyph: { fontSize: 20, lineHeight: 26 },
   terminalArea: { backgroundColor: colors.chromeBg, flex: 1 },
   banner: {
     backgroundColor: colors.chromeSelected,

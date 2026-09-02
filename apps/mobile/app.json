@@ -25,6 +25,7 @@
       ],
       "expo-router",
       "expo-dev-client",
+      "expo-audio",
       "expo-secure-store",
       [
         "expo-notifications",

@@ -13,6 +13,7 @@ import { hostsStore, type SavedHost } from "../store/hostsStore";
 import { createSessionStore, sessionStore, type AgentTransition, type ConnectionState, type SessionStore } from "../store/sessionStore";
 import { terminalRegistry } from "../features/terminal/terminalRegistry";
 import { filesStore } from "../features/files/filesStore";
+import { voiceRegistry } from "../features/voice/voiceRegistry";
 import { log } from "./log";
 
 export type Lane = "control" | "bulk";
@@ -90,12 +91,15 @@ export async function connectHost(host: SavedHost): Promise<void> {
       // A new control epoch invalidates the bulk binding (§11.1).
       dropBulk();
       terminalRegistry.onConnected();
+      voiceRegistry.onConnected();
     },
     onAgentTransition: (transition) => {
       for (const listener of listeners) listener(transition);
     },
     // §7.4 routes ACTIVE_ROOT / directory / file-stream events to the files feature.
     onFileEvent: (event) => filesStore.getState().applyFileEvent(event),
+    // VOICE_PROVISION / VOICE_REPLY (voice-mode-plan.md §3) go to whichever voice session they name.
+    onVoiceEvent: (event) => voiceRegistry.onVoiceEvent(event),
     onToast: toast,
     log,
   });
@@ -158,6 +162,8 @@ export async function disconnectHost(): Promise<void> {
   controlHost = null;
   connection?.disconnect();
   filesStore.getState().clearAll();
+  // Voice sessions are registered per connection on the host; without one they are dead weight.
+  voiceRegistry.disposeAll();
   sessionStore.getState().clearHostState();
   sessionStore.getState().setConnection({ state: "idle", attempt: 0, message: undefined, host: undefined });
 }
