@@ -56,3 +56,16 @@ describe("VoiceRegistry", () => {
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(5);
   });
 });
+
+describe("VoiceRegistry host-global state (review round 2)", () => {
+  it("open() re-points an existing session at the agent's current pane; disposeAll forgets the host status", () => {
+    const h = harness();
+    h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
+    const same = h.registry.open({ agentId: "a", paneId: "%7", sessionId: "$1", ...h.deps });
+    expect(same.target).toEqual({ paneId: "%7", sessionId: "$1" });
+    expect(h.store.getState().sessions["a"]?.paneId).toBe("%7");
+    h.store.getState().setReadiness("ready", "");
+    h.registry.disposeAll();
+    expect(h.store.getState().hostStatus.readiness).toBe("unknown");
+  });
+});
