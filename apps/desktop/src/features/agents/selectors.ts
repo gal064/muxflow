@@ -3,7 +3,7 @@ import type {
   AgentDisplayState,
   AgentRecord,
   AgentRollups,
-  AgentStoreState,
+  HostAgentState,
 } from "./types";
 import { generationIsAfter, type AgentGeneration } from "./generation";
 
@@ -24,8 +24,8 @@ export function displayState(agent: AgentRecord): AgentDisplayState {
     : agent.lifecycle;
 }
 
-export function agentsForScope(state: AgentStoreState, hostProfileId: string, serverIdentity?: string): AgentRecord[] {
-  if (!state.authoritative || state.hostProfileId !== hostProfileId || state.serverIdentity !== serverIdentity) return [];
+export function agentsForScope(state: HostAgentState | undefined, hostProfileId: string, serverIdentity?: string): AgentRecord[] {
+  if (!state?.authoritative || state.hostProfileId !== hostProfileId || state.serverIdentity !== serverIdentity) return [];
   return Object.values(state.byId).sort(compareAgents);
 }
 
