@@ -96,15 +96,21 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
     .then(() => invoke("set_last_profile_id", { profileId: profile.id }))
     .catch((error) => options.setStatus(String(error))), [options]);
 
+  /**
+   * Connects to the host the form describes and makes it the one on screen,
+   * on a fresh bridge. The connection moves first: the reset, the cleared
+   * selection and the new epoch all land on the host being connected to,
+   * which is the point — a host shown beside it keeps everything it holds.
+   */
   const connect = useCallback(() => {
-    options.resetHost();
-    options.clearActiveSelection();
     if (options.connectionMode === "local") {
       const profile: HostProfile = {
         ...options.profiles.find((item) => item.id === "local"),
         id: "local", label: "Local", connection: { mode: "local" }, shown: true,
       };
       options.setConnection(profile.connection);
+      options.resetHost();
+      options.clearActiveSelection();
       options.setSelectedProfileId(profile.id);
       options.setConnectionEpoch((value) => value + 1);
       options.setProfiles((current) => current.some((item) => item.id === profile.id)
@@ -137,6 +143,8 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
     };
     const profile: HostProfile = { ...edited, id: profileId, label: target, connection, shown: true };
     options.setConnection(connection);
+    options.resetHost();
+    options.clearActiveSelection();
     options.setConnectionEpoch((value) => value + 1);
     options.setSelectedProfileId(profile.id);
     // An edit keeps its place in the list, exactly as the store keeps it: the

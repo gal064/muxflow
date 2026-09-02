@@ -4,7 +4,6 @@ import type { TauriAgentClient } from "../features/agents/api";
 import type { TauriFileWorkspaceClient } from "../features/files/api";
 import type { TauriGitWorkspaceClient } from "../features/git/api";
 import { helperConnectionKey } from "../features/shell/helperUpgrade";
-import { profileConnection } from "../features/shell/hostProfiles";
 import { hostProfileId } from "../features/shell/types";
 import {
   probeResumedLink,
@@ -32,6 +31,7 @@ import {
   hostLinksReducer,
   initialHostLinksState,
   shownHostProfiles,
+  syncHostLinks,
   type HostLink,
 } from "../state/hostLinks";
 import { userFacingBridgeFailure } from "./bridgeFailureText";
@@ -44,7 +44,6 @@ import {
 } from "./linkQuality";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
 import { resolveActiveWindowId, type OptimisticWindowSwitch } from "./windowSelection";
-import { resolveSelectedSession } from "../features/shell/model";
 import type { HostScopeToken } from "../features/shell/hostScope";
 import { perfProbeEnabled, recordPerfCounter, recordPerfRecord } from "../perf/probe";
 import { recordIncident } from "../diagnostics/incidents";
@@ -161,10 +160,11 @@ export function useAppConnectionController({
   const [appFocused, setAppFocused] = useState(() => typeof document === "undefined" || document.hasFocus());
   const activeProfileId = hostProfileId(connection);
   /**
-   * Which host the facade speaks for, known the moment the pointer moves
-   * rather than one render later: everything an event handler does "to the
-   * active host" after a `setConnection` in the same tick must land on the
-   * host just chosen, not the one being left.
+   * Which host the facade's setters aim at, moved the moment `setConnection`
+   * is called rather than one render later: a reset or an epoch bump issued
+   * after it in the same tick lands on the host just chosen, not the one
+   * being left. Only the pointer moves early; `clientIdRef` and the epoch
+   * ref follow with the commit, as they always have.
    */
   const activeProfileIdRef = useRef(activeProfileId);
   activeProfileIdRef.current = activeProfileId;
@@ -352,7 +352,9 @@ export function useAppConnectionController({
         setStatus(message);
         dispatchLinks({ type: "reconnect", profileId });
       },
-      (paneId) => echoLagProbe.noteOutput(paneId),
+      // The probe is keyed by pane id, and pane ids repeat across hosts: only
+      // the host the user is typing on may close its round trips.
+      (paneId) => { if (profileId === activeProfileIdRef.current) echoLagProbe.noteOutput(paneId); },
     );
     runtime = { hub, phase: "disconnected", resyncActive: false };
     runtimes.current.set(profileId, runtime);
@@ -391,12 +393,17 @@ export function useAppConnectionController({
       rebuild("skipped");
       return;
     }
-    const probedEpoch = terminalEpochRef.current;
+    const probedProfileId = activeProfileIdRef.current;
+    const probedBridge = runtimes.current.get(probedProfileId)?.bridge;
+    const probedEpoch = probedBridge?.terminalEpoch;
     void probeResumedLink(() => selectTerminalSession(probeClientId, probeSessionId)).then((outcome) => {
       // The bridge that was probed is the one the outcome speaks for. A link
-      // the native supervisor replaced meanwhile carries a new epoch and is
-      // already the authoritative rebuild this would have asked for.
-      if (clientIdRef.current !== probeClientId || terminalEpochRef.current !== probedEpoch) return;
+      // the native supervisor replaced meanwhile carries a new epoch, and one
+      // the renderer restarted is a new bridge: either is already the
+      // authoritative rebuild this would have asked for. A host switch in the
+      // meantime is neither — the probed link is still the one that slept.
+      const bridge = runtimes.current.get(probedProfileId)?.bridge;
+      if (bridge !== probedBridge || bridge?.terminalEpoch !== probedEpoch) return;
       if (outcome === "alive") {
         recordPerfCounter("connection.resume.linkAlive");
         recordIncident("resume.linkAlive", { trigger });
@@ -512,7 +519,7 @@ export function useAppConnectionController({
       setProfileRecovery(saved.recovery);
       const selected = saved.profiles.find((profile) => profile.id === saved.lastProfileId);
       if (!selected) return;
-      setConnection(profileConnection(selected));
+      setConnection(selected.connection);
       setConnectionMode(selected.connection.mode);
       setSelectedProfileId(selected.id);
       if (selected.connection.mode === "ssh") {
@@ -532,7 +539,15 @@ export function useAppConnectionController({
     () => (profilesHydrated ? shownHostProfiles(profiles, connection) : []),
     [connection, profiles, profilesHydrated],
   );
-  useEffect(() => dispatchLinks({ type: "sync", hosts: shownProfiles }), [shownProfiles]);
+  // Reconciled during render rather than in an effect, so the link set and
+  // the pointer agree in the same commit. Left to an effect, the corrected
+  // address and the epoch bump Connect sends together would commit once with
+  // the new epoch on the old address, and the bridge effect would open a
+  // bridge to the address the user had just left, only to replace it a render
+  // later. React re-runs the render at once when the reducer returns a
+  // different state, and the reducer returns the same one when nothing
+  // changed, so this settles in one pass.
+  if (syncHostLinks(links, shownProfiles) !== links) dispatchLinks({ type: "sync", hosts: shownProfiles });
 
   const windows = useMemo(() => snapshot.windows
     .filter((tmuxWindow) => tmuxWindow.sessionId === activeSessionId)
@@ -675,10 +690,13 @@ export function useAppConnectionController({
             recordPerfCounter("connection.reconnect.terminalFlowStall");
             recordIncident("reconnect.flowStall", { hostProfileId: profileId, paneId: event.paneId });
             setDetail("A terminal output stream stalled; reconnecting it now.");
-            setStatus("Terminal output stalled; reconnecting…");
+            announce("Terminal output stalled; reconnecting…");
             dispatchLinks({ type: "reconnect", profileId });
           }
         } else if (event.kind === "clipboardWrite") {
+          // A host that was active once stays attached, so it can still send
+          // these; only the host on screen may write the user's clipboard.
+          if (!isActive()) return;
           void writeTerminalApplicationClipboard(
             terminalApplicationClipboardEnabledRef.current,
             event.text,
@@ -711,10 +729,11 @@ export function useAppConnectionController({
           // Every attempt is journalled and every attempt stands in the strip;
           // only a failure the user has not already been told about is worth a
           // notice. While the link is up this is the first failure of an
-          // outage, which always speaks.
+          // outage, which always speaks — for the host on screen. A host
+          // beside it shows its failure as its own dot and detail.
           const repeated = !wasConnected && shown === lastBridgeFailure;
           lastBridgeFailure = shown;
-          if (!repeated && !verdictSpoken) setStatus(shown);
+          if (!repeated && !verdictSpoken) announce(shown);
           // The message is the only thing that separates "this host has no
           // helper" from "this host cannot be reached": both arrive as a dead
           // bridge, and only the first one has a fix the app can offer. The
@@ -760,10 +779,16 @@ export function useAppConnectionController({
           // is the one already on screen. Either way it closes the reconciling
           // status above.
           announce("Live");
-        } else if (event.kind === "fileService") {
-          fileClient.publishWireEvent(event.event);
-        } else if (event.kind === "gitService") {
-          gitClient.publishWireEvent(event.event);
+        } else if (event.kind === "fileService" || event.kind === "gitService") {
+          // The file and git clients are the active host's: the explorer,
+          // the diffs and the watches on screen belong to it, and a root
+          // change from a host that was active once — still attached, still
+          // relaying — would move the explorer onto a machine the user is
+          // not looking at. A host beside the active one relays topology and
+          // agents only.
+          if (!isActive()) return;
+          if (event.kind === "fileService") fileClient.publishWireEvent(event.event);
+          else gitClient.publishWireEvent(event.event);
         } else if (event.kind === "agentService") {
           const serverIdentity = runtime.serverIdentity;
           if (!serverIdentity) return;
@@ -786,7 +811,11 @@ export function useAppConnectionController({
       }
       if (isActive()) clientIdRef.current = id;
       dispatchLinks({ type: "client", profileId, clientId: id });
-    }).catch((error) => { if (!disposed) setStatus(String(error)); });
+    }).catch((error) => {
+      if (disposed) return;
+      setDetail(String(error));
+      announce(String(error));
+    });
     return bridge;
   }
 
@@ -796,9 +825,9 @@ export function useAppConnectionController({
   // must never restart a bridge, and neither must a change to a *different*
   // host's link. The diff is against the bridges actually running, so a host
   // that stops being shown loses its bridge and nothing else is touched.
-  const bridgeKeys = links.order
+  const bridgeKeys = useMemo(() => links.order
     .map((profileId) => `${profileId}\0${terminalBridgeKey(links.byProfileId[profileId].connection, links.byProfileId[profileId].connectionEpoch)}`)
-    .join("\n");
+    .join("\n"), [links]);
   useEffect(() => {
     const wanted = linksRef.current;
     for (const [profileId, runtime] of runtimes.current) {
@@ -835,15 +864,18 @@ export function useAppConnectionController({
   const activateHost = useCallback((profileId: string) => {
     if (profileId === activeProfileIdRef.current) return;
     const link = linksRef.current.byProfileId[profileId];
-    const profile = profilesRef.current.find((item) => item.id === profileId);
-    const target = link?.connection ?? (profile && profileConnection(profile));
+    const target = link?.connection ?? profilesRef.current.find((item) => item.id === profileId)?.connection;
     if (!target) return;
     setConnection(target);
-    const sessionId = link?.activeSessionId
-      ?? resolveSelectedSession(Object.values(link?.hostState.sessions ?? {}), undefined, undefined)?.id;
+    // Every snapshot lands a link on a session — the remembered one, or the
+    // first — so a link with none has not heard from its host yet, and the
+    // shell's visible-session assertion selects it when it does. A refusal
+    // here is journalled, not shown: that assertion retries the same fact.
     const targetClientId = runtimes.current.get(profileId)?.bridge?.clientId;
-    if (targetClientId && sessionId) {
-      void selectTerminalSession(targetClientId, sessionId).catch((error) => setStatus(String(error)));
+    if (targetClientId && link?.activeSessionId) {
+      void selectTerminalSession(targetClientId, link.activeSessionId).catch((error) => {
+        recordIncident("host.activateSelectFailed", { hostProfileId: profileId, message: String(error) });
+      });
     }
     void invoke("set_last_profile_id", { profileId }).catch((error) => setStatus(String(error)));
   }, [setConnection, setStatus]);

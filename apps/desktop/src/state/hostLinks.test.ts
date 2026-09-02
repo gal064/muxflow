@@ -138,14 +138,14 @@ describe("the host link set", () => {
 describe("which hosts are shown", () => {
   const profiles: HostProfile[] = [
     { id: "local", label: "Local", connection: local, shown: true },
-    { id: "qa", label: "qa", connection: { mode: "ssh", profileId: "", target: "qa-host" }, shown: true },
+    { id: "qa", label: "qa", connection: remote("qa", "qa-host"), shown: true },
     { id: "prod", label: "prod", connection: remote("prod") },
   ];
 
   it("lists the checked profiles in profile order, under the connection each is opened with", () => {
     expect(shownHostProfiles(profiles, local)).toEqual([
       { profileId: "local", connection: local },
-      { profileId: "qa", connection: { mode: "ssh", profileId: "qa", target: "qa-host" } },
+      { profileId: "qa", connection: remote("qa", "qa-host") },
     ]);
   });
 
@@ -153,7 +153,7 @@ describe("which hosts are shown", () => {
     const editing: ConnectionSpec = { mode: "ssh", profileId: "prod", target: "prod-host-2" };
     expect(shownHostProfiles(profiles, editing)).toEqual([
       { profileId: "local", connection: local },
-      { profileId: "qa", connection: { mode: "ssh", profileId: "qa", target: "qa-host" } },
+      { profileId: "qa", connection: remote("qa", "qa-host") },
       { profileId: "prod", connection: editing },
     ]);
     const unsaved: ConnectionSpec = { mode: "ssh", profileId: "new", target: "new-host" };
