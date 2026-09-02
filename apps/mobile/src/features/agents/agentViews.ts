@@ -1,8 +1,9 @@
 // Row copy for the Agents / Workspaces / Workspace screens (design.md §9.3, §9.4).
 
-import { displayState, needsAttention } from "../../store/selectors";
+import { displayState, summarizeWaiting, type WaitingState, type WaitingSummary } from "../../store/selectors";
 import type { Agent, SessionState } from "../../store/sessionStore";
 import type { PillState } from "../../ui/components/StatusPill";
+import { colors } from "../../ui/tokens";
 
 export function agentPillState(agent: Agent): PillState {
   return agent.present ? displayState(agent) : "gone";
@@ -36,8 +37,24 @@ export function loudestPill(agents: Agent[]): PillState | undefined {
   return best;
 }
 
-export function attentionCountInSession(state: Pick<SessionState, "agents">, sessionId: string): number {
-  return Object.values(state.agents).filter((agent) => agent.present && agent.route.sessionId === sessionId && needsAttention(agent)).length;
+/** §9.3.2: who is waiting in one workspace, and how loudly — the desktop's per-workspace `unread` and `attention`. */
+export function waitingInSession(state: Pick<SessionState, "agents">, sessionId: string): WaitingSummary {
+  return summarizeWaiting(Object.values(state.agents).filter((agent) => agent.route.sessionId === sessionId));
+}
+
+/**
+ * The colour a waiting state paints — the edge bar on both tabs and the
+ * Workspaces tab's count. Red says blocked; done is a notification and takes
+ * the bright green, as the desktop's `.workspace-state.done` and
+ * `.agent-mark-badge.done` do (`--ok`, not the muted `--state-done`).
+ */
+export function waitingColor(state: WaitingState): string {
+  return state === "blocked" ? colors.danger : colors.ok;
+}
+
+/** §9.3.2: the desktop's "N agents waiting", as the row's chip. */
+export function waitingLabel(count: number): string {
+  return `${count} waiting`;
 }
 
 /** §9.3.2: "1 window" singular. */
