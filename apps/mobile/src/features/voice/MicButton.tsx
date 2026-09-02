@@ -48,7 +48,7 @@ export function MicButton({ phase, disabled, hint, onPressIn, onPressOut }: MicB
         {recording ? <Animated.View pointerEvents="none" style={[styles.ring, ringStyle]} /> : null}
         <Pressable
           accessibilityHint="Press and hold, speak, then release to send"
-          accessibilityLabel="Hold to talk"
+          accessibilityLabel={label}
           accessibilityRole="button"
           accessibilityState={{ disabled: disabled || busy, busy }}
           disabled={disabled || busy}
@@ -61,7 +61,7 @@ export function MicButton({ phase, disabled, hint, onPressIn, onPressOut }: MicB
           {busy ? <ActivityIndicator color={colors.accentInk} size="large" /> : <MicIcon color={colors.accentInk} size={44} />}
         </Pressable>
       </View>
-      <Text style={styles.label}>{label}</Text>
+      <Text accessibilityLiveRegion="polite" style={styles.label}>{label}</Text>
       {disabled && hint ? <Text style={styles.hint}>{hint}</Text> : null}
     </View>
   );

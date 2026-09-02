@@ -65,7 +65,7 @@ export function ReplyPlayer({ message, controller }: { message: VoiceMessage; co
   return (
     <View style={styles.row}>
       <Pressable
-        accessibilityLabel={playing ? "Pause reply" : message.played ? "Play reply" : "Play unplayed reply"}
+        accessibilityLabel={playing ? "Pause reply" : message.played ? "Play reply" : "Play reply, not yet played"}
         accessibilityRole="button"
         onPress={toggle}
         style={({ pressed }) => [styles.playButton, pressed && styles.pressed]}
@@ -75,10 +75,9 @@ export function ReplyPlayer({ message, controller }: { message: VoiceMessage; co
       <View style={styles.trackColumn}>
         <Pressable
           accessibilityActions={[{ name: "increment", label: "Skip forward" }, { name: "decrement", label: "Skip back" }]}
-          accessibilityLabel="Seek"
+          accessibilityLabel="Playback position"
           accessibilityRole="adjustable"
           accessibilityValue={{ min: 0, max: durationMs, now: positionMs, text: `${formatClock(positionMs)} of ${formatClock(durationMs)}` }}
-          hitSlop={{ top: 14, bottom: 14 }}
           onAccessibilityAction={(event) => seekTo(event.nativeEvent.actionName === "increment" ? positionMs + SEEK_STEP_MS : positionMs - SEEK_STEP_MS)}
           onLayout={onLayout}
           onPress={(event) => seekAt(event.nativeEvent.locationX)}
@@ -115,9 +114,10 @@ const styles = StyleSheet.create({
   stopButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
   stopHidden: { opacity: 0 },
   pressed: { opacity: 0.75 },
-  trackColumn: { flex: 1, gap: 4 },
-  trackHit: { justifyContent: "center", minHeight: 20 },
-  track: { backgroundColor: colors.chromeBorder, borderRadius: 2, height: 3, overflow: "hidden" },
+  trackColumn: { flex: 1 },
+  // Hit slop is clipped by the parent, so the target is the view itself: 48 dp tall around a 3 dp rail.
+  trackHit: { justifyContent: "center", minHeight: 48 },
+  track: { backgroundColor: colors.chromeFaint, borderRadius: 2, height: 3, overflow: "hidden" },
   progress: { backgroundColor: colors.accent, height: 3 },
   clockRow: { alignItems: "center", flexDirection: "row", gap: 6 },
   clock: { color: colors.chromeDim, fontSize: typeScale.meta },

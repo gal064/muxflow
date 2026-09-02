@@ -11,7 +11,7 @@ import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
-import { MicIcon } from "../../ui/components/MediaIcons";
+import { FolderIcon, MicIcon } from "../../ui/components/MediaIcons";
 import { StatusPill } from "../../ui/components/StatusPill";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
@@ -129,7 +129,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
             onPress={() => router.push({ pathname: "/files/[paneId]", params: { paneId: toRouteParam(paneId) } })}
             style={styles.iconButton}
           >
-            <Text style={styles.filesGlyph}>▤</Text>
+            <FolderIcon color={colors.accent} size={24} />
           </Pressable>
         )}
       </View>
@@ -213,7 +213,6 @@ const styles = StyleSheet.create({
   iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
   backGlyph: { color: colors.chromeInkStrong, fontSize: 26, fontWeight: "600", lineHeight: 30 },
   title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
-  filesGlyph: { color: colors.accent, fontSize: 24, lineHeight: 28 },
   terminalArea: { backgroundColor: colors.chromeBg, flex: 1 },
   banner: {
     backgroundColor: colors.chromeSelected,

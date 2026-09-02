@@ -17,7 +17,8 @@ export function MicIcon({ size = 24, color }: { size?: number; color: string }) 
 export function PlayIcon({ size = 24, color }: { size?: number; color: string }) {
   return (
     <Svg height={size} viewBox="0 0 24 24" width={size}>
-      <Path d="M8 5.5v13l10.5-6.5z" fill={color} />
+      {/* Nudged one unit right: a centred triangle reads left of centre in a disc. */}
+      <Path d="M9 5.5v13l10.5-6.5z" fill={color} />
     </Svg>
   );
 }
@@ -35,6 +36,14 @@ export function StopIcon({ size = 24, color }: { size?: number; color: string })
   return (
     <Svg height={size} viewBox="0 0 24 24" width={size}>
       <Rect fill={color} height="12" rx="1.5" width="12" x="6" y="6" />
+    </Svg>
+  );
+}
+
+export function FolderIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2H19.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z" fill="none" stroke={color} strokeLinejoin="round" strokeWidth="2" />
     </Svg>
   );
 }
