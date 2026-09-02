@@ -5,6 +5,7 @@ import { FlatList, RefreshControl, StyleSheet, Text } from "react-native";
 import { attentionCountInSession, windowCountLabel } from "../../src/features/agents/agentViews";
 import { refreshAgents } from "../../src/features/agents/refresh";
 import { stripAgentStatusGlyphs } from "../../src/features/agents/agentLabels";
+import { toRouteParam } from "../../src/navigation/routeParams";
 import { EmptyState } from "../../src/ui/components/EmptyState";
 import { ListDivider } from "../../src/ui/components/ListDivider";
 import { ListRow } from "../../src/ui/components/ListRow";
@@ -46,7 +47,7 @@ export default function WorkspacesScreen() {
           <ListRow
             edgeColor={attention > 0 ? colors.danger : undefined}
             height={metrics.sessionRowHeight}
-            onPress={() => router.push({ pathname: "/workspace/[sessionId]", params: { sessionId: item.id } })}
+            onPress={() => router.push({ pathname: "/workspace/[sessionId]", params: { sessionId: toRouteParam(item.id) } })}
             subtitle={windowCountLabel(item.windowCount)}
             title={stripAgentStatusGlyphs(item.name)}
             trailing={attention > 0 ? <Text style={styles.needYou}>{attention} need you</Text> : undefined}
