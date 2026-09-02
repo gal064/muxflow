@@ -6,6 +6,7 @@
 // mark-seen waits for a connection rather than being dropped on the floor.
 
 import type { TapTarget } from "./payload";
+import { toRouteParam } from "../../navigation/routeParams";
 import { agentMarkSeen } from "../../protocol/requests";
 import { getConnection } from "../../session/connectionManager";
 import { log } from "../../session/log";
@@ -13,12 +14,13 @@ import { log } from "../../session/log";
 export interface TerminalRoute {
   pathname: "/terminal/[paneId]";
   /** `sessionId` travels too: on a cold start the topology has not arrived yet
-   * and the route would otherwise have no session to attach to (§9.5). */
+   * and the route would otherwise have no session to attach to (§9.5).
+   * Both are `toRouteParam`-encoded, like every pushed param. */
   params: { paneId: string; sessionId: string };
 }
 
 export function terminalRoute(target: TapTarget): TerminalRoute {
-  return { pathname: "/terminal/[paneId]", params: { paneId: target.paneId, sessionId: target.sessionId } };
+  return { pathname: "/terminal/[paneId]", params: { paneId: toRouteParam(target.paneId), sessionId: toRouteParam(target.sessionId) } };
 }
 
 /** Sends one mark-seen. `false` means "no connection to send it on, hold it". */

@@ -4,11 +4,15 @@ import { StyleSheet, View } from "react-native";
 import { FILE_VIEWER_COPY } from "../../src/features/files/presentation";
 import { CentredMessage } from "../../src/features/files/ui/parts";
 import { FileViewer } from "../../src/features/files/ui/FileViewer";
+import { fromRouteParam } from "../../src/navigation/routeParams";
 import { colors } from "../../src/ui/tokens";
 
 /** File viewer — design.md §9.7 (`?path=&name=`). */
 export default function FileViewerScreen() {
-  const { paneId, path, name } = useLocalSearchParams<{ paneId: string; path?: string; name?: string }>();
+  const params = useLocalSearchParams<{ paneId: string; path?: string; name?: string }>();
+  const paneId = fromRouteParam(params.paneId);
+  const path = fromRouteParam(params.path);
+  const name = fromRouteParam(params.name);
   // Every route is deep-linkable under the `muxflow` scheme, so `path` is not
   // guaranteed by the pushes inside the app.
   if (!path) {
