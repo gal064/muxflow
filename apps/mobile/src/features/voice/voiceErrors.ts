@@ -21,7 +21,7 @@ export function describeVoiceError(error: unknown): string | undefined {
     case "voice_uv_missing":
       return "uv is not installed on this host.";
     case "voice_model_missing":
-      return "Voice isn't set up on this host yet.";
+      return "Voice isn't set up on this host.";
     case "voice_consent_required":
       return "Voice setup needs your confirmation.";
     case "voice_provisioning":

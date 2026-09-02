@@ -3,6 +3,7 @@ import { StyleSheet, Text, View } from "react-native";
 
 import { Button } from "../../ui/components/Button";
 import { Dialog } from "../../ui/components/Dialog";
+import { StreamingBar } from "../files/ui/parts";
 import { colors, fonts, radii, typeScale } from "../../ui/tokens";
 import { formatBytes, provisionFraction, provisionPhaseLabel } from "./format";
 import type { VoiceController } from "./VoiceController";
@@ -34,7 +35,7 @@ export function VoiceStatusCard({ controller, connected }: { controller: VoiceCo
       <View style={styles.card}>
         <Text style={styles.heading}>uv not found on this host</Text>
         <Text style={styles.body}>Voice needs the uv Python runner on the host machine.</Text>
-        {status.detail ? <Text selectable style={styles.detail}>{status.detail}</Text> : null}
+        {status.detail ? <Text numberOfLines={3} selectable style={styles.detail}>{status.detail}</Text> : null}
         <Button label="Check again" onPress={() => void controller.refreshStatus(true)} variant="secondary" />
       </View>
     );
@@ -48,14 +49,15 @@ export function VoiceStatusCard({ controller, connected }: { controller: VoiceCo
       <View style={styles.card}>
         <Text style={styles.heading}>Setting up voice</Text>
         <Text style={styles.body}>{provisionPhaseLabel(progress?.phase ?? "")}</Text>
-        <View
-          accessibilityLabel="Setup progress"
-          accessibilityRole="progressbar"
-          accessibilityValue={percent === undefined ? { text: "in progress" } : { min: 0, max: 100, now: percent }}
-          style={styles.track}
-        >
-          <View style={[styles.progress, fraction === undefined ? styles.progressIndeterminate : { width: `${fraction * 100}%` }]} />
-        </View>
+        {fraction === undefined ? (
+          <View accessibilityLabel="Setup progress" accessibilityRole="progressbar" accessibilityValue={{ text: "in progress" }}>
+            <StreamingBar />
+          </View>
+        ) : (
+          <View accessibilityLabel="Setup progress" accessibilityRole="progressbar" accessibilityValue={{ min: 0, max: 100, now: percent }} style={styles.track}>
+            <View style={[styles.progress, { width: `${fraction * 100}%` }]} />
+          </View>
+        )}
         {progress && progress.totalBytes > 0 ? (
           <Text style={styles.meta}>{formatBytes(progress.transferredBytes)} of {formatBytes(progress.totalBytes)} · {percent}%</Text>
         ) : null}
@@ -71,7 +73,7 @@ export function VoiceStatusCard({ controller, connected }: { controller: VoiceCo
       <Text style={styles.heading}>Voice isn't set up on this host</Text>
       <Text style={styles.body}>The speech model is downloaded once, onto the host, and stays there.</Text>
       {failed ? <Text style={styles.error}>Last attempt failed: {failed}</Text> : null}
-      <Button disabled={!connected} label={`Set up voice · downloads ${size}`} onPress={() => setConsent(true)} />
+      <Button disabled={!connected} label="Set up voice" onPress={() => setConsent(true)} />
       <Dialog
         actions={[
           { label: "Cancel", onPress: () => setConsent(false) },
@@ -95,5 +97,4 @@ const styles = StyleSheet.create({
   meta: { color: colors.chromeDim, fontSize: typeScale.meta },
   track: { backgroundColor: colors.chromeBorder, borderRadius: 2, height: 4, overflow: "hidden" },
   progress: { backgroundColor: colors.accent, height: 4 },
-  progressIndeterminate: { opacity: 0.5, width: "100%" },
 });
