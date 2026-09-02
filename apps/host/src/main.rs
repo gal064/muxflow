@@ -21,6 +21,7 @@ mod paths;
 mod phase1_client;
 mod remote_helper;
 mod service;
+mod voice_cli;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -95,6 +96,10 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        // Host-side voice QA without a phone: the same `VoiceService` the
+        // dispatcher uses, against the same cache directory
+        // (docs/mobile/voice-mode-plan.md §4.1).
+        Some("voice") => voice_cli::run(std::env::args().skip(2).collect()).await,
         Some("doctor") => diagnostics::run_doctor(std::env::args().skip(2)),
         Some("support-bundle") => diagnostics::write_support_bundle(std::env::args().skip(2)),
         Some("hooks-status") => {
@@ -145,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(debug_assertions)]
         Some("phase1-client") => phase1_client::run(std::env::args().skip(2).collect()),
         _ => bail!(
-            "usage: muxflow-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|host-naming|helper|version|doctor [--json]|support-bundle --output PATH|discover>"
+            "usage: muxflow-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|host-naming|helper|version|doctor [--json]|support-bundle --output PATH|discover|voice <status|provision --yes|transcribe FILE|speak TEXT --out FILE>>"
         ),
     }
 }
