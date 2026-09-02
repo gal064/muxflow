@@ -23,9 +23,11 @@ export function VoiceStatusCard({ controller, connected }: { controller: VoiceCo
   if (!connected && status.readiness === "unknown") return null;
 
   if (status.readiness === "unknown") {
+    // Also the resting state after a STATUS that failed (timeout, dropped lane): the button is the retry.
     return (
       <View style={styles.card}>
         <Text style={styles.body}>Checking voice on the host…</Text>
+        <Button label="Check again" onPress={() => void controller.refreshStatus(true)} variant="secondary" />
       </View>
     );
   }

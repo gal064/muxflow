@@ -50,8 +50,8 @@ const READINESS_CODES: Record<string, VoiceReadinessState> = {
 
 export class VoiceController {
   readonly agentId: string;
-  readonly paneId: string;
-  readonly sessionId: string;
+  private paneId: string;
+  private sessionId: string;
   private focused = false;
   /** The screen has been opened at least once: the host should know about this session. */
   private wantRegistered = false;
@@ -59,6 +59,10 @@ export class VoiceController {
   /** Runs only after a registration succeeded; stops on a refusal that says the host is not ready. */
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
   private registering = false;
+  /** A `reregister()` that arrived while one was in flight runs right after it settles. */
+  private registerAgain = false;
+  /** The host acknowledged a registration at least once on this session's life. */
+  private everRegistered = false;
   /** The message whose file the shared player currently holds, when this controller loaded it. */
   private loadedMessageId: string | undefined;
   private lastReplyGeneration = 0n;
@@ -81,6 +85,18 @@ export class VoiceController {
 
   get isDisposed(): boolean {
     return this.disposed;
+  }
+
+  get target(): { paneId: string; sessionId: string } {
+    return { paneId: this.paneId, sessionId: this.sessionId };
+  }
+
+  /** The agent moved panes: the next transcript types into the new one. */
+  retarget(paneId: string, sessionId: string): void {
+    if (this.disposed || (paneId === this.paneId && sessionId === this.sessionId)) return;
+    this.paneId = paneId;
+    this.sessionId = sessionId;
+    this.options.store.getState().ensureSession(this.agentId, paneId, sessionId, this.now());
   }
 
   // ---- lifecycle ------------------------------------------------------------
@@ -127,7 +143,8 @@ export class VoiceController {
   async endSession(): Promise<void> {
     if (this.disposed) return;
     const connection = this.liveConnection();
-    const registered = this.refreshTimer !== undefined;
+    // A registration the host may hold (acknowledged, or still in flight) is cleared; one it refused is not.
+    const registered = this.everRegistered || this.registering;
     this.dispose();
     if (!connection || !registered) return;
     try {
@@ -256,7 +273,8 @@ export class VoiceController {
       if (!connection) throw new Error("Not connected.");
       const response = await connection.request(voiceTranscribe(newOperationId(), audio, RECORDING_MIME), { timeoutMs: TRANSCRIBE_TIMEOUT_MS });
       const transcript = response.voice?.transcript;
-      text = transcript?.text.trim() ?? "";
+      // The host single-lines the transcript (§4.4); a newline here would submit mid-text, so it is never trusted to.
+      text = (transcript?.text ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim();
       this.log(`transcribe ${audio.byteLength} bytes durationMs=${durationMs} → ${text.length} chars in ${this.now() - startedAt} ms (audio ${transcript?.audioMillis ?? 0} ms, decode ${transcript?.decodeMillis ?? 0} ms)`);
     } catch (error) {
       this.fail("transcribe", error);
@@ -304,11 +322,13 @@ export class VoiceController {
     const store = this.options.store.getState();
     const previous = latestReply(store.sessions[this.agentId]);
     if (previous?.fileUri) {
-      if (this.loadedMessageId === previous.id) {
+      // The shared player is stopped only if it still holds *this* reply; another
+      // session may have taken it since (`loadedMessageId` alone would be stale).
+      if (store.playback?.messageId === previous.id) {
         this.options.player.stop();
         store.setPlayback(undefined);
-        this.loadedMessageId = undefined;
       }
+      if (this.loadedMessageId === previous.id) this.loadedMessageId = undefined;
       this.options.files.delete(previous.fileUri);
     }
     const message = this.message("agent", speech.text, {
@@ -453,11 +473,17 @@ export class VoiceController {
 
   private async registerSession(): Promise<void> {
     const connection = this.liveConnection();
-    if (!connection || this.disposed || !this.wantRegistered || this.registering) return;
+    if (!connection || this.disposed || !this.wantRegistered) return;
+    if (this.registering) {
+      // Another session's End may have wiped this registration while ours was in flight: go again after it.
+      this.registerAgain = true;
+      return;
+    }
     this.registering = true;
     try {
       await connection.request(voiceSession(this.agentId));
       if (this.disposed) return;
+      this.everRegistered = true;
       this.log("session.registered");
       this.refreshTimer ??= setInterval(() => void this.registerSession(), this.sessionRefreshMs);
     } catch (error) {
@@ -466,11 +492,18 @@ export class VoiceController {
       if (this.applyReadinessRefusal(error)) {
         this.stopRefreshTimer();
         this.log(`session.refused ${describe(error)}`);
-        return;
+      } else if (this.focused) {
+        this.fail("session", error);
+      } else {
+        // A refresh failing behind another screen (link drop, slow host) is not worth a toast there.
+        this.log(`session.refresh.failed ${describe(error)}`);
       }
-      this.fail("session", error);
     } finally {
       this.registering = false;
+      if (this.registerAgain) {
+        this.registerAgain = false;
+        void this.registerSession();
+      }
     }
   }
 
@@ -521,7 +554,8 @@ export class VoiceController {
   private fail(what: string, error: unknown): void {
     const message = describeVoiceError(error);
     this.log(`${what}.failed ${describe(error)}`);
-    if (message === undefined) return;
+    // A request that settles after End or disconnect has nobody to tell.
+    if (message === undefined || this.disposed) return;
     this.options.store.getState().setLastError(message);
     this.options.toast?.(message);
     const code = (error as { code?: unknown }).code;

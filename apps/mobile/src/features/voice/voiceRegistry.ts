@@ -19,7 +19,11 @@ export class VoiceRegistry {
   /** The controller for `agentId`, created on the first open. A live session keeps its history. */
   open(options: VoiceSessionOptions): VoiceController {
     const existing = this.controllers.get(options.agentId);
-    if (existing) return existing;
+    if (existing) {
+      // The agent may have moved panes since the session began: type into where it is now.
+      existing.retarget(options.paneId, options.sessionId);
+      return existing;
+    }
     const controller = new VoiceController({ ...options, store: this.store });
     this.controllers.set(options.agentId, controller);
     return controller;
@@ -73,6 +77,7 @@ export class VoiceRegistry {
   disposeAll(): void {
     for (const controller of this.controllers.values()) controller.dispose();
     this.controllers.clear();
+    this.store.getState().resetHostStatus();
   }
 }
 

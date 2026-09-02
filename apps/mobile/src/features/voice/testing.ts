@@ -66,6 +66,7 @@ export class FakeRecorder implements VoiceRecorder {
     this.recording = true;
   }
   async stop(): Promise<{ uri: string | null; durationMs: number }> {
+    if (!this.recording) return { uri: null, durationMs: 0 };
     this.recording = false;
     return { uri: this.nextUri, durationMs: this.nextDurationMs };
   }

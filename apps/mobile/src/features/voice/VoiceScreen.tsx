@@ -61,8 +61,11 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   }), [agentId, paneId, sessionId]);
   const [controller, setController] = useState(open);
 
-  // Each focus asks the registry again: a user disconnect disposes the session
-  // this screen was built on, and the next focus starts a fresh one.
+  // A disconnect from the strip on this very screen disposes the session it was
+  // built on; the reconnect that follows (or the next focus) starts a fresh one.
+  useEffect(() => {
+    if (connected && controller.isDisposed) setController(open());
+  }, [connected, controller, open]);
   useFocusEffect(useCallback(() => {
     const live = controller.isDisposed ? open() : controller;
     if (live !== controller) setController(live);

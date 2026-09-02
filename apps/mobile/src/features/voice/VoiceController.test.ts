@@ -120,6 +120,7 @@ describe("VoiceController", () => {
     h.controller.focus();
     await settle();
     h.controller.beginUtterance();
+    await settle(); // the record() runs once the recorder is armed
     await h.controller.endUtterance();
     expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(0);
     expect(h.toasts).toContain("Didn't catch that.");
@@ -133,6 +134,7 @@ describe("VoiceController", () => {
     await settle();
     h.recorder.nextDurationMs = MIN_UTTERANCE_MS - 1;
     h.controller.beginUtterance();
+    await settle(); // the record() runs once the recorder is armed
     await h.controller.endUtterance();
     expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
     expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
@@ -284,6 +286,7 @@ describe("VoiceController", () => {
     await settle();
     h.connection.answer(Operation.VOICE_STATUS, () => statusResponse(VoiceReadiness.MODEL_MISSING));
     h.controller.beginUtterance();
+    await settle(); // the record() runs once the recorder is armed
     await h.controller.endUtterance();
     await settle();
     expect(h.toasts).toContain("Voice isn't set up on this host.");
@@ -412,5 +415,108 @@ describe("VoiceController against a host that is not set up (review round 1)", (
     b.dispose();
     expect(a.player.playing).toBe(false);
     expect(a.store.getState().playback).toBeUndefined();
+  });
+});
+
+describe("VoiceController shared resources and lifecycle (review round 2)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function pair() {
+    const a = harness("agent-a", "%3");
+    const b = new VoiceController({
+      agentId: "agent-b",
+      paneId: "%4",
+      sessionId: "$1",
+      store: a.store,
+      getConnection: () => a.connection.asHostConnection(),
+      recorder: a.recorder,
+      player: a.player,
+      files: a.files,
+      appInForeground: () => true,
+    });
+    return { ...a, b };
+  }
+
+  it("a new reply for A does not stop B's playback when B took the player after A", async () => {
+    const h = pair();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "A one."));
+    h.controller.blur();
+    h.b.onVoiceReply(reply("agent-b", "B one."));
+    h.b.play(latestReply(h.store.getState().sessions["agent-b"])!.id);
+    expect(h.player.loaded).toBe("file:///cache/voice/agent-b.mp3");
+    h.controller.onVoiceReply(reply("agent-a", "A two."));
+    expect(h.player.playing).toBe(true);
+    expect(h.store.getState().playback?.state).toBe("playing");
+    expect(h.files.deleted).toContain("file:///cache/voice/agent-a.mp3");
+    h.b.dispose();
+  });
+
+  it("a release before the recorder ever started is discarded without a host round trip", async () => {
+    const h = harness();
+    let armed: (() => void) | undefined;
+    h.recorder.prepare = () => new Promise((resolve) => { armed = () => { h.recorder.prepared += 1; resolve(); }; });
+    h.controller.focus();
+    h.controller.beginUtterance();
+    const released = h.controller.endUtterance();
+    armed!();
+    await released;
+    expect(h.recorder.recording).toBe(false);
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+    expect(h.toasts).toEqual([]);
+  });
+
+  it("a re-register that lands while one is in flight runs after it instead of being dropped", async () => {
+    const h = harness();
+    let release: (() => void) | undefined;
+    h.connection.answer(Operation.VOICE_SESSION, () => new Promise((resolve) => { release = () => resolve(create(ResponseSchema, { ok: true })); }));
+    h.controller.focus();
+    await settle();
+    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(1);
+    h.controller.reregister(); // e.g. another session's End cleared the connection
+    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(1);
+    release!();
+    await settle();
+    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(2);
+  });
+
+  it("End clears a registration that is still in flight; a refresh failure behind another screen only logs", async () => {
+    const h = harness();
+    // The first registration never answers; the clear that End sends does.
+    let calls = 0;
+    h.connection.answer(Operation.VOICE_SESSION, () => (calls++ === 0 ? new Promise(() => undefined) : create(ResponseSchema, { ok: true })));
+    h.controller.focus();
+    await settle();
+    await h.controller.endSession();
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.agentId)).toEqual(["agent-a", ""]);
+
+    const g = harness();
+    g.controller.focus();
+    await settle();
+    g.controller.blur();
+    g.connection.answer(Operation.VOICE_SESSION, () => { throw new Error("connection closed"); });
+    await vi.advanceTimersByTimeAsync(SESSION_REFRESH_MS);
+    expect(g.toasts).toEqual([]);
+    g.controller.focus();
+    await settle();
+    expect(g.toasts).toEqual(["connection closed"]);
+  });
+
+  it("retarget types the next transcript into the agent's new pane; a multi-line transcript is single-lined", async () => {
+    const h = harness();
+    h.connection.answer(Operation.VOICE_TRANSCRIBE, () => transcriptResponse("first line\nsecond line\r\n"));
+    h.controller.focus();
+    await settle();
+    h.controller.retarget("%9", "$2");
+    expect(h.store.getState().sessions["agent-a"]).toMatchObject({ paneId: "%9", sessionId: "$2" });
+    h.controller.beginUtterance();
+    await settle(); // the record() runs once the recorder is armed
+    await h.controller.endUtterance();
+    const input = h.connection.of(Operation.TERMINAL_INPUT)[0]!;
+    expect(input.scope).toBe("%9");
+    expect(new TextDecoder().decode(input.data)).toBe("first line second line\r");
   });
 });

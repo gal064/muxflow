@@ -102,6 +102,8 @@ export interface VoiceActions {
   setAutoPlay(autoPlay: boolean): void;
   setLastError(message: string | undefined): void;
   setRecorderError(message: string | undefined): void;
+  /** Another host (or none): what we knew about the previous one no longer applies. */
+  resetHostStatus(): void;
 }
 
 export type VoiceStore = StoreApi<VoiceState & VoiceActions>;
@@ -224,6 +226,10 @@ export function createVoiceStore(): VoiceStore {
 
       setRecorderError(message) {
         set({ recorderError: message });
+      },
+
+      resetHostStatus() {
+        set({ hostStatus: UNKNOWN_HOST_STATUS });
       },
     };
   });
