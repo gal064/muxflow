@@ -20,7 +20,9 @@ import { fromRouteParam, toRouteParam } from "./routeParams";
 // `validatePathConfig` (`build/fork/getStateFromPath.js` line 170), and that
 // module pulls in react-native, whose flow-typed entry point cannot be parsed
 // under node. vitest loads `node_modules` through Node's own `require`, out of
-// reach of `vi.mock`, so the stand-in goes into `require.cache` instead.
+// reach of `vi.mock`, so the stand-in goes into `require.cache` instead. It
+// has to be installed before `getStateFromPath` loads, hence the dynamic
+// import below; the static imports above do not reach that module.
 const nodeRequire = createRequire(import.meta.url);
 const nativeId = nodeRequire.resolve("expo-router/build/react-navigation/native");
 const nativeStandIn = new Module(nativeId);
@@ -63,7 +65,8 @@ function paramsSeenByScreen(href: { pathname: string; params: Record<string, str
   const state = getStateFromPath(resolveHref(href), linkingConfig);
   expect(state).toBeDefined();
   const focused = findFocusedRoute(state!);
-  expect(focused?.name).toBe(href.pathname.slice(1));
+  // `/files/[paneId]` is the `index` file of that directory.
+  expect(focused?.name).toBe(href.pathname === "/files/[paneId]" ? "files/[paneId]/index" : href.pathname.slice(1));
   return decodeLikeUseLocalSearchParams((focused?.params ?? {}) as Record<string, unknown>);
 }
 
@@ -101,6 +104,13 @@ describe("expo-router pipeline with the encoding", () => {
         expect(fromRouteParam(seen.path as string)).toBe(path);
         expect(fromRouteParam(seen.name as string)).toBe(name);
       }
+    }
+  });
+
+  it("delivers a pane id to the files root route exactly", () => {
+    for (const paneId of paneIds) {
+      const seen = paramsSeenByScreen({ pathname: "/files/[paneId]", params: { paneId: toRouteParam(paneId) } });
+      expect(fromRouteParam(seen.paneId as string)).toBe(paneId);
     }
   });
 
