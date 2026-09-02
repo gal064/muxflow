@@ -166,6 +166,8 @@ export function useAppConnectionController({
   };
   const hostScopeRef = useRef(currentHostScope);
   hostScopeRef.current = currentHostScope;
+  const clientHostProfileIdRef = useRef(clientHostProfileId);
+  clientHostProfileIdRef.current = clientHostProfileId;
   /**
    * The one thing six drops in two minutes never told the user: it is the
    * network.
@@ -270,10 +272,13 @@ export function useAppConnectionController({
   useEffect(() => () => echoLagProbe.dispose(), [echoLagProbe]);
   const hub = useMemo(() => new TerminalEventHub(
     (paneId, reason) => {
-      // Through the ref: the hub outlives the connection it was built under.
-      terminalStateCache.delete(terminalCacheKey(hostScopeRef.current.hostProfileId, paneId));
+      // The hub outlives the connection it was built under, and a reseed is
+      // for the pane on the *live* client — whose host can differ from the
+      // pending connection's in the window between a switch and its bridge.
       const currentClientId = clientIdRef.current;
-      if (!currentClientId) return;
+      const liveHostProfileId = clientHostProfileIdRef.current;
+      if (!currentClientId || liveHostProfileId === undefined) return;
+      terminalStateCache.delete(terminalCacheKey(liveHostProfileId, paneId));
       void requestTerminalSeed(currentClientId, paneId).catch((error) => {
         setStatus(`${reason}; seed request failed: ${String(error)}`);
       });
