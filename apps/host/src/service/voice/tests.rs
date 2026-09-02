@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, path::Path, time::Instant};
 
 use tmux_agent_protocol::v1;
 use tokio::sync::mpsc;
@@ -206,9 +206,10 @@ async fn refusals_are_mapped_by_class_and_leave_the_child_alive() {
         bound: Duration::from_secs(5),
         needs_model: false,
         cancellable: false,
+        invalidates_model: false,
     };
     let error = service
-        .sidecar_request(request, &not_cancelled(), &mut |_| {})
+        .sidecar_request(request, &not_cancelled(), None, &mut |_| {})
         .await
         .unwrap_err();
     assert_eq!(error.code, "voice_network_unavailable");
@@ -473,7 +474,7 @@ async fn provision_needs_consent_runs_the_sidecar_and_verifies_by_loading() {
         seen.push((progress.phase.clone(), progress.transferred_bytes));
     };
     let refused = service
-        .provision("op-1", false, &not_cancelled(), &mut record)
+        .provision("op-1", false, &not_cancelled(), None, &mut record)
         .await
         .unwrap_err();
     assert_eq!(refused.code, "voice_consent_required");
@@ -481,7 +482,7 @@ async fn provision_needs_consent_runs_the_sidecar_and_verifies_by_loading() {
     // Already complete: re-verified by loading, then READY with a hot
     // sidecar, and no provision progress emitted along the way.
     let status = service
-        .provision("op-1", true, &not_cancelled(), &mut |progress| {
+        .provision("op-1", true, &not_cancelled(), None, &mut |progress| {
             panic!("re-verification emitted provision progress: {progress:?}")
         })
         .await
@@ -492,7 +493,7 @@ async fn provision_needs_consent_runs_the_sidecar_and_verifies_by_loading() {
 
     service.model().remove();
     let outcome = service
-        .provision("op-2", true, &not_cancelled(), &mut record)
+        .provision("op-2", true, &not_cancelled(), None, &mut record)
         .await;
     // The fake never wrote the model: the layout check after the download
     // fails before anything is verified, and nothing is left behind.
@@ -524,7 +525,7 @@ async fn provision_needs_consent_runs_the_sidecar_and_verifies_by_loading() {
         seen.push((progress.phase.clone(), progress.transferred_bytes));
     };
     let status = service
-        .provision("op-3", true, &not_cancelled(), &mut record)
+        .provision("op-3", true, &not_cancelled(), None, &mut record)
         .await
         .unwrap();
     assert_eq!(status.readiness, v1::VoiceReadiness::Ready as i32);
@@ -555,7 +556,7 @@ async fn verification_keeps_the_model_unless_the_sidecar_rejects_it() {
         }
     };
     let error = service
-        .provision("op", true, &not_cancelled(), &mut record)
+        .provision("op", true, &not_cancelled(), None, &mut record)
         .await
         .unwrap_err();
     assert_eq!(error.code, "voice_sidecar_failed");
@@ -579,7 +580,7 @@ async fn verification_keeps_the_model_unless_the_sidecar_rejects_it() {
         }
     };
     let error = strict
-        .provision("op", true, &not_cancelled(), &mut record)
+        .provision("op", true, &not_cancelled(), None, &mut record)
         .await
         .unwrap_err();
     assert_eq!(error.code, "voice_provision_failed");
@@ -653,7 +654,7 @@ async fn a_refused_extraction_is_a_retryable_provision_failure() {
     let service = service(dir.path(), DEFAULT_IDLE_AFTER, &script);
     service.model().remove();
     let error = service
-        .provision("op", true, &not_cancelled(), &mut |_| {})
+        .provision("op", true, &not_cancelled(), None, &mut |_| {})
         .await
         .unwrap_err();
     assert_eq!(error.code, "voice_provision_failed");
@@ -676,7 +677,7 @@ async fn provision_reverifies_a_complete_model_and_drops_a_rejected_one() {
     let service = service(dir.path(), DEFAULT_IDLE_AFTER, &rejecting);
     assert!(service.model().complete());
     let error = service
-        .provision("op", true, &not_cancelled(), &mut |_| {})
+        .provision("op", true, &not_cancelled(), None, &mut |_| {})
         .await
         .unwrap_err();
     assert_eq!(error.code, "voice_provision_failed");
@@ -686,6 +687,110 @@ async fn provision_reverifies_a_complete_model_and_drops_a_rejected_one() {
         service.status().readiness,
         v1::VoiceReadiness::ModelMissing as i32
     );
+}
+
+/// The connection's teardown raises the same flag an explicit Cancel does;
+/// only the explicit one may stop a download. A provision whose connection
+/// dropped runs to completion, so the reconnecting phone finds it READY.
+#[tokio::test]
+async fn a_dropped_connection_does_not_cancel_a_provision() {
+    let dir = tempfile::tempdir().unwrap();
+    // `provision` waits for a cancel header, answering ok after 1 s if none
+    // arrives; a forwarded cancel would be acknowledged as cancelled.
+    let script = ECHO_SIDECAR.replace(
+        "progress) printf",
+        "provision) if read -t 1 -r c && case \"$c\" in *cancel*) true ;; *) false ;; esac; then printf '{\"id\":%s,\"ok\":false,\"class\":\"cancelled\",\"error\":\"provision cancelled\"}\\n' \"$id\"; continue; fi; printf",
+    );
+    assert!(script.contains("provision) if read"), "fixture edit missed");
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, &script);
+    service.model().remove();
+    let cancel = AtomicBool::new(false);
+    let closed = AtomicBool::new(false);
+    let mut record = |progress: &v1::VoiceProvisionProgress| {
+        if progress.phase == provision::PHASE_DOWNLOADING {
+            service.model().write_fake_complete();
+        }
+    };
+    let provision = service.provision("op", true, &cancel, Some(&closed), &mut record);
+    let teardown = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The order the connection uses: closed first, then every token.
+        closed.store(true, Ordering::Release);
+        cancel.store(true, Ordering::Release);
+    };
+    let (outcome, ()) = tokio::join!(provision, teardown);
+    // The download finished; only the verification step, which checks the
+    // token itself, sees the cancel — and keeps the complete model.
+    let error = outcome.unwrap_err();
+    assert_eq!(error.code, "cancelled");
+    assert!(
+        service.model().complete(),
+        "a dropped connection threw the download away"
+    );
+    assert_eq!(service.status().readiness, v1::VoiceReadiness::Ready as i32);
+
+    // An explicit Cancel on a live connection does stop it.
+    service.model().remove();
+    let cancel = AtomicBool::new(false);
+    let closed = AtomicBool::new(false);
+    let mut ignore = |_: &v1::VoiceProvisionProgress| {};
+    let provision = service.provision("op", true, &cancel, Some(&closed), &mut ignore);
+    let explicit = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancel.store(true, Ordering::Release);
+    };
+    let (outcome, ()) = tokio::join!(provision, explicit);
+    assert_eq!(outcome.unwrap_err().code, "cancelled");
+    assert!(!service.model().complete());
+}
+
+/// A sidecar the phone cancelled while it was mid-extraction cannot answer in
+/// time; killing it is the cancel's outcome, not a crash to hold against it.
+#[tokio::test]
+async fn an_unacknowledged_cancel_is_a_cancel_not_a_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = ECHO_SIDECAR.replace("progress) printf", "provision) sleep 30; printf");
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, &script);
+    service.model().remove();
+    let cancel = AtomicBool::new(true);
+    let started = Instant::now();
+    let error = service
+        .provision("op", true, &cancel, None, &mut |_| {})
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "cancelled");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(service.books.lock().unwrap().crashes.is_empty());
+    assert!(service.sidecar_pid().await.is_none());
+    // And the sidecar is spawned again without any backoff.
+    service.model().write_fake_complete();
+    service
+        .speak("after", v1::VoiceProvider::EdgeTts, "", &not_cancelled())
+        .await
+        .unwrap();
+}
+
+/// A model the sidecar refuses to load is reported MODEL_MISSING so the phone
+/// offers the re-provision that repairs it, instead of READY with every
+/// utterance failing.
+#[tokio::test]
+async fn a_rejected_model_is_reported_missing_until_a_load_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let rejecting = ECHO_SIDECAR.replace(
+        "load) printf '{\"id\":%s,\"ok\":true,\"load_millis\":7}\\n' \"$id\" ;;",
+        "load) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"bad onnx\"}\\n' \"$id\" ;;",
+    );
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, &rejecting);
+    assert_eq!(service.status().readiness, v1::VoiceReadiness::Ready as i32);
+    let error = service
+        .transcribe(FIXTURE.to_vec(), "audio/mp4", "", &not_cancelled())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "voice_sidecar_failed");
+    assert!(!error.retryable);
+    let status = service.status();
+    assert_eq!(status.readiness, v1::VoiceReadiness::ModelMissing as i32);
+    assert!(status.detail.contains("bad onnx"));
 }
 
 #[test]

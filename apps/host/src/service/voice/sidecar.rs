@@ -12,7 +12,6 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -88,6 +87,10 @@ pub(crate) enum SidecarFailure {
     Refused { class: String, error: String },
     /// The sidecar was told to cancel and did.
     Cancelled,
+    /// The sidecar was told to cancel and did not answer within the grace:
+    /// it is stuck in work it cannot interrupt and has to be killed, but that
+    /// is the cancel's doing, not a fault of its own.
+    CancelUnacknowledged,
     /// No reply within the bound; the child is no longer trustworthy.
     Timeout,
     /// stdout closed, or the child answered something that is not a frame.
@@ -169,15 +172,17 @@ impl SidecarChild {
     }
 
     /// Sends one request and waits for its final reply within `bound`,
-    /// handing every `progress` event for it to `on_progress`. With `cancel`
-    /// set while waiting, a `cancel` header is written and the request ends
-    /// as [`SidecarFailure::Cancelled`] once the sidecar acknowledges.
+    /// handing every `progress` event for it to `on_progress`. When `cancel`
+    /// answers true while waiting, a `cancel` header is written and the
+    /// request ends as [`SidecarFailure::Cancelled`] once the sidecar
+    /// acknowledges, or [`SidecarFailure::CancelUnacknowledged`] if it does
+    /// not within the grace.
     pub(crate) async fn request(
         &mut self,
         mut header: serde_json::Map<String, serde_json::Value>,
         body: &[u8],
         bound: Duration,
-        cancel: Option<&AtomicBool>,
+        cancel: Option<&(dyn Fn() -> bool + Sync)>,
         on_progress: &mut (dyn FnMut(&serde_json::Value) + Send),
     ) -> Result<Reply, SidecarFailure> {
         self.next_id += 1;
@@ -208,9 +213,13 @@ impl SidecarChild {
                 frame = self.frames.recv() => frame,
                 _ = sleep(remaining.min(CANCEL_POLL)) => {
                     if remaining.is_zero() {
-                        return Err(SidecarFailure::Timeout);
+                        return Err(if cancel_sent {
+                            SidecarFailure::CancelUnacknowledged
+                        } else {
+                            SidecarFailure::Timeout
+                        });
                     }
-                    if !cancel_sent && cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                    if !cancel_sent && cancel.is_some_and(|cancelled| cancelled()) {
                         cancel_sent = true;
                         deadline = tokio::time::Instant::now() + CANCEL_GRACE;
                         let cancel_line = format!("{{\"op\":\"cancel\",\"id\":{id}}}\n");
@@ -348,6 +357,8 @@ async fn read_frames(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
 
     /// A `#!/bin/sh` stand-in for the Python sidecar: reads header lines and
@@ -507,12 +518,13 @@ done
         let dir = tempfile::tempdir().unwrap();
         let mut child = spawn_echo(dir.path());
         let cancel = AtomicBool::new(false);
+        let cancelled = || cancel.load(Ordering::Acquire);
         let mut ignore_events = ignore;
         let request = child.request(
             op("cancelme"),
             &[],
             Duration::from_secs(5),
-            Some(&cancel),
+            Some(&cancelled),
             &mut ignore_events,
         );
         let flag = async {
@@ -530,7 +542,7 @@ done
     async fn an_unacknowledged_cancel_times_out_after_its_grace() {
         let dir = tempfile::tempdir().unwrap();
         let mut child = spawn_echo(dir.path());
-        let cancel = AtomicBool::new(true);
+        let cancelled = || true;
         let mut ignore_events = ignore;
         let started = std::time::Instant::now();
         let outcome = child
@@ -538,11 +550,14 @@ done
                 op("ignorecancel"),
                 &[],
                 Duration::from_secs(60),
-                Some(&cancel),
+                Some(&cancelled),
                 &mut ignore_events,
             )
             .await;
-        assert!(matches!(outcome.unwrap_err(), SidecarFailure::Timeout));
+        assert!(matches!(
+            outcome.unwrap_err(),
+            SidecarFailure::CancelUnacknowledged
+        ));
         let elapsed = started.elapsed();
         assert!(
             elapsed >= CANCEL_GRACE && elapsed < CANCEL_GRACE + Duration::from_secs(3),

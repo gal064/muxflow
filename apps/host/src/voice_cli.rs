@@ -78,7 +78,7 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
                 }
             };
             let status = service
-                .provision("cli", true, &cancel, &mut on_progress)
+                .provision("cli", true, &cancel, None, &mut on_progress)
                 .await
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             println!("{}", status_json(&status));
