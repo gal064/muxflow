@@ -90,7 +90,7 @@ function ReadinessCard({ status, connected, controller, size, onSetUp }: { statu
   return (
     <View style={styles.card}>
       <Text style={styles.heading}>Voice isn't set up on this host</Text>
-      <Text style={styles.body}>Downloads the speech model ({size}) to the host, once. It stays there.</Text>
+      <Text style={styles.body}>The speech model is downloaded once, onto the host, and stays there.</Text>
       {failed ? <Text style={styles.error}>Last attempt failed: {failed}</Text> : null}
       <Button disabled={!connected} label="Set up voice" onPress={onSetUp} />
     </View>

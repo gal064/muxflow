@@ -72,7 +72,8 @@ export class FakeRecorder implements VoiceRecorder {
     return { uri: this.nextUri, durationMs: this.nextDurationMs };
   }
   release(): void {
-    if (this.recording) return;
+    // Like the adapter: a live utterance is not released from under the controller, and releasing nothing is a no-op.
+    if (this.recording || this.prepared === 0) return;
     this.released += 1;
     this.prepared = 0;
   }
