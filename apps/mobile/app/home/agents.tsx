@@ -6,6 +6,7 @@ import { agentPillState, agentTitle, noAdapterWired } from "../../src/features/a
 import { markSeenIfNeeded } from "../../src/features/agents/markSeen";
 import { refreshAgents } from "../../src/features/agents/refresh";
 import { NotificationsOffBanner } from "../../src/features/notifications/ui/NotificationsOffBanner";
+import { toRouteParam } from "../../src/navigation/routeParams";
 import { toast } from "../../src/session/connectionManager";
 import { agentWindowName, agentWorkspaceName, displayState, needsAttention, sortedAgents } from "../../src/store/selectors";
 import type { Agent } from "../../src/store/sessionStore";
@@ -36,7 +37,7 @@ export default function AgentsScreen() {
       return;
     }
     markSeenIfNeeded(agent);
-    router.push({ pathname: "/terminal/[paneId]", params: { paneId: agent.route.paneId, sessionId: agent.route.sessionId } });
+    router.push({ pathname: "/terminal/[paneId]", params: { paneId: toRouteParam(agent.route.paneId), sessionId: toRouteParam(agent.route.sessionId) } });
   }, [router]);
 
   const empty = (

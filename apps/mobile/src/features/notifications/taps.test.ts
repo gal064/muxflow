@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { toRouteParam } from "../../navigation/routeParams";
 import { decodePayload, encodePayload, type TapTarget } from "./payload";
 import { createTapMarkSeen, terminalRoute } from "./taps";
 
@@ -37,7 +38,7 @@ describe("tap routing (§13)", () => {
   it("routes a tap payload to the agent's terminal", () => {
     expect(terminalRoute(target)).toEqual({
       pathname: "/terminal/[paneId]",
-      params: { paneId: "%12", sessionId: "$3" },
+      params: { paneId: toRouteParam("%12"), sessionId: toRouteParam("$3") },
     });
   });
 });
