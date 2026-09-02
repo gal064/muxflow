@@ -114,7 +114,11 @@ export interface AgentRowItem {
    */
   workspacePinned: boolean;
   title: string;
+  /** Line 2 as one string: what is spoken, and what is drawn when no glyph interrupts it. */
   subtitle: string;
+  /** Line 2's parts, for a row that draws the workspace pin between them. */
+  workspaceName: string;
+  windowName: string;
 }
 
 export interface PrioritySectionItem {
@@ -149,6 +153,9 @@ export function buildAgentListItems(state: ListState, mode: AgentListMode, now =
   return mode === "workspace" ? workspaceItems(state) : priorityItems(state, now);
 }
 
+/** Between the workspace and the window on line 2. */
+export const SUBTITLE_SEPARATOR = " · ";
+
 function rowKey(agent: Agent): string {
   return `agent:${agent.id}`;
 }
@@ -171,7 +178,9 @@ function priorityItems(state: ListState, now: number): AgentListItem[] {
         windowPinned: Boolean(state.windows[agent.route.windowId]?.pinned),
         workspacePinned: Boolean(state.sessions[agent.route.sessionId]?.pinned),
         title: agentTitle(state, agent),
-        subtitle: `${agentWorkspaceName(state, agent)} · ${agentWindowName(state, agent)}`,
+        subtitle: `${agentWorkspaceName(state, agent)}${SUBTITLE_SEPARATOR}${agentWindowName(state, agent)}`,
+        workspaceName: agentWorkspaceName(state, agent),
+        windowName: agentWindowName(state, agent),
       });
     }
   }
@@ -256,6 +265,8 @@ function workspaceItems(state: ListState): AgentListItem[] {
           title: agentTitle(state, agent),
           // The group heading already names the workspace.
           subtitle: agentWindowName(state, agent),
+          workspaceName: agentWorkspaceName(state, agent),
+          windowName: agentWindowName(state, agent),
         });
       }
     }

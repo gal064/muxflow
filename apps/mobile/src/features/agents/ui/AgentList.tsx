@@ -6,13 +6,13 @@ import { prefsStore } from "../../../store/prefsStore";
 import type { AgentDisplayState } from "../../../store/selectors";
 import type { Agent } from "../../../store/sessionStore";
 import { ListDivider } from "../../../ui/components/ListDivider";
-import { ListRow } from "../../../ui/components/ListRow";
+import { ListRow, ListRowSubtitleText } from "../../../ui/components/ListRow";
 import { StatusPill } from "../../../ui/components/StatusPill";
 import { useSession } from "../../../ui/hooks";
 import { colors, fonts, metrics, radii, typeScale } from "../../../ui/tokens";
 import { useAnimationsAllowed } from "../../../ui/useAnimationsAllowed";
 import { NotificationsOffBanner } from "../../notifications/ui/NotificationsOffBanner";
-import { AGENT_LIST_MODES, buildAgentListItems, type AgentListItem, type AgentListMode } from "../agentListModel";
+import { AGENT_LIST_MODES, buildAgentListItems, SUBTITLE_SEPARATOR, type AgentListItem, type AgentListMode, type AgentRowItem } from "../agentListModel";
 import { waitingColor } from "../agentViews";
 import { useRecentIdleClock } from "../useRecentIdleClock";
 import { PinIcon } from "./AgentIcon";
@@ -101,7 +101,7 @@ function Item({ item, onOpen, afterDivider, animate }: { item: AgentListItem; on
           subtitle={item.subtitle}
           // A pinned workspace pins its name, a pinned window pins the row's:
           // two glyphs in two places, so a row can say either or both.
-          subtitleLeading={item.workspacePinned ? <PinIcon color={colors.chromeDim} size={12} /> : null}
+          subtitleContent={item.workspacePinned ? <PinnedWorkspaceSubtitle item={item} /> : undefined}
           title={item.title}
           titleAccessory={item.windowPinned ? <PinIcon color={colors.chromeDim} size={14} /> : null}
           // A gone agent has no live state to dock; the word is the only honest mark.
@@ -109,6 +109,22 @@ function Item({ item, onOpen, afterDivider, animate }: { item: AgentListItem; on
         />
       );
   }
+}
+
+/**
+ * Line 2 with the workspace's pin after its name — `work2 📌 · build` — so
+ * the pin sits against the word it belongs to and the line's left edge stays
+ * flush with the unpinned rows'. The window's run is the one that gives way
+ * when the line is too long.
+ */
+function PinnedWorkspaceSubtitle({ item }: { item: AgentRowItem }) {
+  return (
+    <View style={styles.subtitleRuns}>
+      <ListRowSubtitleText>{item.workspaceName}</ListRowSubtitleText>
+      <PinIcon color={colors.chromeDim} size={12} />
+      <ListRowSubtitleText>{`${SUBTITLE_SEPARATOR}${item.windowName}`}</ListRowSubtitleText>
+    </View>
+  );
 }
 
 const STATE_WORDS: Record<AgentDisplayState, string> = {
@@ -202,6 +218,7 @@ const styles = StyleSheet.create({
   headingAfterDivider: { paddingTop: 6 },
   headingMark: { alignItems: "center", justifyContent: "center", width: metrics.agentAvatarSize },
   headingText: { alignItems: "baseline", flex: 1, flexDirection: "row", gap: 12 },
+  subtitleRuns: { alignItems: "center", flexDirection: "row", gap: 3 },
   headingLabel: { color: colors.chromeDim, flexShrink: 1, fontSize: typeScale.rowSecondary, fontWeight: "600" },
   headingCount: {
     color: colors.chromeDim,

@@ -10,6 +10,7 @@ import {
   nextRecentExpiration,
   priorityBucket,
   PRIORITY_SECTIONS,
+  SUBTITLE_SEPARATOR,
   type AgentListItem,
 } from "./agentListModel";
 
@@ -227,6 +228,8 @@ describe("priority mode", () => {
       ["b", "alpha · win-1", "blocked", "blocked"],
       ["win-1", "alpha · win-1", undefined, "working"],
     ]);
+    // The parts a pinned-workspace row draws the pin between spell the same line.
+    expect(rows.map((r) => `${r.workspaceName}${SUBTITLE_SEPARATOR}${r.windowName}`)).toEqual(rows.map((r) => r.subtitle));
   });
 
   it("keeps a seen blocked row waiting, clears a seen completion, and never a gone row (desktop needsAttention(state))", () => {
