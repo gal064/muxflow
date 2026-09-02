@@ -106,6 +106,15 @@ misreport a long-running subagent as blocked. A real permission request remains
 blocked even if an idle notification follows it. A temporarily unavailable
 daemon retains only bounded, atomic hook state.
 
+One field carries content, for voice mode only: a `Stop` from either adapter
+forwards `last_assistant_message` — the agent's final message of the turn —
+cut at 32 KiB on a character boundary with `last_assistant_message_truncated`
+set when it was cut. The daemon reads it once on ingest, hands it to the voice
+service to speak to a phone that registered a voice session for that agent,
+and stores none of it: `AgentRecord`, `agents.json` and every agent event are
+shaped by the lifecycle alone. No other event forwards it, `StopFailure`
+included. A host that never opened voice mode receives the field and drops it.
+
 For validation, use installed `codex --version` / `codex --help` and
 `claude --version` / `claude --help` only. Release QA must not send prompts or
 perform network-backed agent work with the user's accounts.

@@ -387,10 +387,33 @@ impl AgentRuntime {
             lifecycle_observed_at_unix_millis: observed_now,
             lifecycle_changed_at_unix_millis: lifecycle_changed_at,
         };
-        state.agents.insert(agent_id, record.clone());
+        state.agents.insert(agent_id.clone(), record.clone());
         if let Err(error) = self.persist_locked(&state) {
             *state = original;
             return Err(HookIngestFailure::Retryable(error));
+        }
+        drop(state);
+        // Voice mode (docs/mobile/voice-mode-plan.md §4.5): a `Stop` that ends
+        // the turn hands the final message on, after the state is committed,
+        // and keeps none of it. Claude's Stop while subagents still run leaves
+        // the lifecycle Working and is skipped, so one turn speaks once.
+        if parsed.event_name == "Stop"
+            && lifecycle == v1::AgentLifecycleState::Idle
+            && let Some(text) = payload
+                .get(adapters::LAST_ASSISTANT_MESSAGE_FIELD)
+                .and_then(serde_json::Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+        {
+            (self.reply_sink)(crate::service::voice::AgentReply {
+                agent_id,
+                text: text.to_owned(),
+                truncated: payload
+                    .get(adapters::LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD)
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true),
+                state_generation: generation,
+                occurred_at_unix_millis: occurred_at,
+            });
         }
         let reason = if lifecycle == v1::AgentLifecycleState::Blocked {
             "blocked"

@@ -54,6 +54,42 @@ pub(super) fn register_control_event_sink(
     ControlEventRegistration { id }
 }
 
+/// Whether the connection registered under `connection_id` is still open.
+pub(crate) fn control_sink_alive(connection_id: u64) -> bool {
+    CONTROL_EVENT_HUB.get().is_some_and(|hub| {
+        hub.lock()
+            .unwrap()
+            .iter()
+            .any(|sink| sink.id == connection_id && !sink.sender.is_closed())
+    })
+}
+
+/// Queues one ordered event for exactly one connection.
+///
+/// The hub otherwise fans every event out to every connection, which is right
+/// for topology and agent state and wrong for a spoken agent reply: that
+/// belongs to the one phone that registered a voice session for the agent
+/// (docs/mobile/voice-mode-plan.md §4.3). Returns `false` when the connection
+/// is gone or could not take the event, so the caller can drop what it was
+/// holding for it. A full queue is not retried: the reply is several hundred
+/// kilobytes the phone can ask for again, not a state change it must see.
+pub(crate) fn send_control_event_to(connection_id: u64, event: v1::HostEvent) -> bool {
+    let Some(hub) = CONTROL_EVENT_HUB.get() else {
+        return false;
+    };
+    let sender = hub
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|sink| sink.id == connection_id)
+        .map(|sink| sink.sender.clone());
+    sender.is_some_and(|sender| {
+        sender
+            .try_send(SequencerControl::OrderedEvent(event))
+            .is_ok()
+    })
+}
+
 pub(crate) fn broadcast_control_event(event: v1::HostEvent) {
     let Some(hub) = CONTROL_EVENT_HUB.get() else {
         return;
