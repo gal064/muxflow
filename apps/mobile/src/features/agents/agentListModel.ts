@@ -5,15 +5,15 @@
 // without a renderer.
 
 import {
-  agentPinned,
   agentWindowName,
   agentWorkspaceName,
   displayState,
   isRecentIdle,
-  needsAttention,
   recentExpirationMs,
   sortedAgents,
+  waitingState,
   type AgentDisplayState,
+  type WaitingState,
 } from "../../store/selectors";
 import type { Agent, SessionState } from "../../store/sessionStore";
 import { agentTitle } from "./agentViews";
@@ -98,18 +98,27 @@ export interface AgentRowItem {
   agent: Agent;
   /** What the mark's badge draws. */
   state: AgentDisplayState;
-  /** Unread blocked or completed: the row's edge bar (the desktop's "1" badge). */
-  attention: boolean;
   /**
-   * Whether the row draws a pin. In workspace mode only a pinned window
-   * earns one, as on the desktop, since the workspace's pin is the divider
-   * the group sits under; in priority mode there is no divider, so a pinned
-   * workspace's rows carry it too — the one place a workspace pin is visible
-   * in that order.
+   * Blocked, or finished and not yet looked at: the row's edge bar, in that
+   * state's colour (the desktop's unread "1" badge, `needsAttention(state)`).
    */
-  pinned: boolean;
+  waiting: WaitingState | undefined;
+  /** The window (tab) is pinned: a pin after the title, the desktop's row pin. */
+  windowPinned: boolean;
+  /**
+   * The workspace is pinned and this row is where that shows: a small pin
+   * before the workspace's name in the subtitle. Only priority mode sets it —
+   * there is no divider in that order, so its rows are the one place a
+   * workspace pin is visible. Workspace mode's group heading carries the pin
+   * instead, and its rows leave this false.
+   */
+  workspacePinned: boolean;
   title: string;
+  /** Line 2 as one string: what is spoken, and what is drawn when no glyph interrupts it. */
   subtitle: string;
+  /** Line 2's parts, for a row that draws the workspace pin between them. */
+  workspaceName: string;
+  windowName: string;
 }
 
 export interface PrioritySectionItem {
@@ -144,6 +153,9 @@ export function buildAgentListItems(state: ListState, mode: AgentListMode, now =
   return mode === "workspace" ? workspaceItems(state) : priorityItems(state, now);
 }
 
+/** Between the workspace and the window on line 2. */
+export const SUBTITLE_SEPARATOR = " · ";
+
 function rowKey(agent: Agent): string {
   return `agent:${agent.id}`;
 }
@@ -162,10 +174,13 @@ function priorityItems(state: ListState, now: number): AgentListItem[] {
         key: rowKey(agent),
         agent,
         state: markState(agent),
-        attention: agent.present && needsAttention(agent),
-        pinned: agentPinned(state, agent),
+        waiting: waitingState(agent),
+        windowPinned: Boolean(state.windows[agent.route.windowId]?.pinned),
+        workspacePinned: Boolean(state.sessions[agent.route.sessionId]?.pinned),
         title: agentTitle(state, agent),
-        subtitle: `${agentWorkspaceName(state, agent)} · ${agentWindowName(state, agent)}`,
+        subtitle: `${agentWorkspaceName(state, agent)}${SUBTITLE_SEPARATOR}${agentWindowName(state, agent)}`,
+        workspaceName: agentWorkspaceName(state, agent),
+        windowName: agentWindowName(state, agent),
       });
     }
   }
@@ -244,11 +259,14 @@ function workspaceItems(state: ListState): AgentListItem[] {
           key: rowKey(agent),
           agent,
           state: markState(agent),
-          attention: agent.present && needsAttention(agent),
-          pinned: Boolean(state.windows[agent.route.windowId]?.pinned),
+          waiting: waitingState(agent),
+          windowPinned: Boolean(state.windows[agent.route.windowId]?.pinned),
+          workspacePinned: false,
           title: agentTitle(state, agent),
           // The group heading already names the workspace.
           subtitle: agentWindowName(state, agent),
+          workspaceName: agentWorkspaceName(state, agent),
+          windowName: agentWindowName(state, agent),
         });
       }
     }
