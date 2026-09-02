@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentWindowName, agentWorkspaceName, compareAgents, displayState, needsAttention, sortedAgents, agentPinned, pinnedDividers, RECENT_WINDOW_MS } from "./selectors";
+import { agentWindowName, agentWorkspaceName, compareAgents, displayState, needsAttention, sortedAgents, agentPinned, pinnedDividers, RECENT_WINDOW_MS, summarizeWaiting, waitingCount, waitingState } from "./selectors";
 import type { Agent, SessionState } from "./sessionStore";
 
 function agent(overrides: Partial<Agent> & { id: string }): Agent {
@@ -136,5 +136,27 @@ describe("pinned block (host-owned pins, desktop sidebar rule)", () => {
     expect(pinnedDividers([false, false])).toEqual({ pinnedAt: null, restAt: null });
     expect(pinnedDividers([true, true])).toEqual({ pinnedAt: 0, restAt: null });
     expect(pinnedDividers([true, false, false])).toEqual({ pinnedAt: 0, restAt: 1 });
+  });
+});
+
+describe("waiting (the desktop's needsAttention(state): bell, unread badge, workspace count)", () => {
+  const seenBlocked = agent({ id: "seen-blocked", lifecycle: "blocked", attentionKind: "blocked", attentionGeneration: 2n, seenGeneration: 2n });
+  const unreadDone = agent({ id: "unread-done", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 2n, seenGeneration: 1n });
+  const seenDone = agent({ id: "seen-done", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 2n, seenGeneration: 2n });
+  const goneBlocked = agent({ id: "gone", lifecycle: "blocked", attentionKind: "blocked", attentionGeneration: 2n, seenGeneration: 1n, present: false });
+
+  it("waits while blocked whether or not it was looked at; a completion waits only until it is", () => {
+    expect(waitingState(seenBlocked)).toBe("blocked");
+    expect(waitingState(unreadDone)).toBe("done");
+    expect(waitingState(seenDone)).toBeUndefined();
+    expect(waitingState(agent({ id: "w" }))).toBeUndefined();
+    expect(waitingState(goneBlocked)).toBeUndefined();
+  });
+
+  it("counts every waiting agent and lets blocked outrank done as the loudest", () => {
+    expect(summarizeWaiting([unreadDone, seenDone])).toEqual({ count: 1, loudest: "done" });
+    expect(summarizeWaiting([unreadDone, seenBlocked, goneBlocked])).toEqual({ count: 2, loudest: "blocked" });
+    expect(summarizeWaiting([])).toEqual({ count: 0, loudest: undefined });
+    expect(waitingCount({ agents: { a: unreadDone, b: seenBlocked, c: seenDone, d: goneBlocked } })).toBe(2);
   });
 });
