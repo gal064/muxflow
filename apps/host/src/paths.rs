@@ -234,7 +234,7 @@ pub fn fallback_runtime_dir(candidates: &[PathBuf]) -> PathBuf {
         .unwrap_or_else(default_runtime_dir)
 }
 
-/// Where voice mode keeps the sidecar script, its log and the ~640 MB speech
+/// Where voice mode keeps the sidecar script, its log and the ~487 MB speech
 /// model (docs/mobile/voice-mode-plan.md §4.1): `MUXFLOW_VOICE_CACHE_DIR`, else
 /// `$XDG_CACHE_HOME/muxflow/voice`, else `~/.cache/muxflow/voice` (macOS
 /// `~/Library/Caches/dev.muxflow.desktop/voice`). Nothing here is created until

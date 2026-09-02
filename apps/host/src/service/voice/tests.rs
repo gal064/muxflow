@@ -169,7 +169,7 @@ async fn speak_shapes_text_validates_voice_and_returns_the_body() {
     for (text, voice, code) in [
         ("   ", "", "voice_invalid_request"),
         ("hi", "not a voice", "voice_invalid_request"),
-        ("```\ncode\n```", "", "voice_nothing_to_say"),
+        ("---\n\n<br/>", "", "voice_nothing_to_say"),
     ] {
         let error = service
             .speak(text, v1::VoiceProvider::EdgeTts, voice, &not_cancelled())
@@ -366,6 +366,49 @@ async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection()
     );
 }
 
+/// A phone whose event queue is momentarily full is still there; only a
+/// connection that closed loses its sessions.
+#[tokio::test]
+async fn a_full_queue_drops_the_reply_but_keeps_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
+    let (voice_tx, mut voice_rx) = mpsc::channel::<SequencerControl>(1);
+    let registration = register_control_event_sink(voice_tx.clone());
+    // Fill the one slot so the push cannot be queued.
+    voice_tx
+        .try_send(SequencerControl::OrderedEvent(v1::HostEvent::default()))
+        .unwrap();
+    service
+        .register_session(registration.id, "agent-full")
+        .unwrap();
+    service.push_reply(AgentReply {
+        agent_id: "agent-full".into(),
+        text: "Done.".into(),
+        truncated: false,
+        state_generation: 1,
+        occurred_at_unix_millis: 1,
+    });
+    // Wait for the detached task to have spoken and tried to push.
+    let settled = async {
+        while service.sidecar_pid().await.is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    tokio::time::timeout(Duration::from_secs(5), settled)
+        .await
+        .unwrap();
+    assert_eq!(
+        service.session_connection("agent-full"),
+        Some(registration.id)
+    );
+    let _ = voice_rx.try_recv();
+    assert!(
+        voice_rx.try_recv().is_err(),
+        "the dropped reply was queued after all"
+    );
+}
+
 #[tokio::test]
 async fn a_failed_synthesis_still_pushes_the_text_with_the_error_in_status() {
     let dir = tempfile::tempdir().unwrap();
@@ -480,7 +523,7 @@ async fn provision_needs_consent_runs_the_sidecar_and_verifies_by_loading() {
 
 #[test]
 fn language_tags_and_voice_ids_are_validated_by_shape() {
-    for tag in ["en", "en-US", "pt-BR", "zh-Hans-CN", "x-en"] {
+    for tag in ["en", "en-US", "pt-BR", "zh-Hans-CN", "ast-ES"] {
         assert!(valid_language_tag(tag), "{tag}");
     }
     for tag in ["", "e", "en_US", "en-", "english-language", "en US"] {

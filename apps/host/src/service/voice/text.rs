@@ -79,7 +79,6 @@ pub(crate) fn speech_text(markdown: &str, cap: usize) -> SpeechText {
         let mut body = trimmed;
         while let Some(rest) = body.strip_prefix('>') {
             body = rest.trim_start();
-            starts_block = true;
         }
         let heading = strip_heading(body);
         if let Some(rest) = heading {
@@ -426,10 +425,11 @@ mod tests {
         assert!(spoken.truncated);
         assert_eq!(spoken.text, format!("word word word word{REST_ON_SCREEN}"));
 
+        // No sentence and no whitespace inside the cap: the prefix is kept.
         let one_word = "x".repeat(40);
         let spoken = speech_text(&one_word, 10);
         assert!(spoken.truncated);
-        assert_eq!(spoken.text, REST_ON_SCREEN.trim_start());
+        assert_eq!(spoken.text, format!("{}{REST_ON_SCREEN}", "x".repeat(10)));
 
         let exact = "abc.";
         assert_eq!(

@@ -20,6 +20,7 @@ use symphonia::core::{
 pub(crate) const MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MIN_AUDIO_MILLIS: u32 = 200;
 pub(crate) const MAX_AUDIO_MILLIS: u32 = 120_000;
+const MAX_SKIPPED_PACKETS: u32 = 64;
 
 const ACCEPTED_MIME_TYPES: [&str; 4] = ["audio/mp4", "audio/x-m4a", "audio/m4a", "audio/aac"];
 
@@ -89,11 +90,20 @@ pub(crate) fn decode_to_mono_f32(bytes: Vec<u8>, mime: &str) -> Result<PcmMono, 
         samples: Vec::new(),
     };
     let mut interleaved = Vec::new();
+    // Symphonia lets a caller skip a malformed packet and continue; a stream
+    // that does nothing but produce them is not worth continuing on.
+    let mut skipped = 0_u32;
     loop {
+        if skipped > MAX_SKIPPED_PACKETS {
+            return Err(AudioError::Undecodable("too many malformed packets".into()));
+        }
         let packet = match reader.next_packet() {
             Ok(Some(packet)) => packet,
             Ok(None) => break,
-            Err(Error::DecodeError(_)) => continue,
+            Err(Error::DecodeError(_)) => {
+                skipped += 1;
+                continue;
+            }
             Err(error) => return Err(AudioError::Undecodable(format!("demux: {error}"))),
         };
         if packet.track_id != track_id {
@@ -101,7 +111,10 @@ pub(crate) fn decode_to_mono_f32(bytes: Vec<u8>, mime: &str) -> Result<PcmMono, 
         }
         let decoded = match decoder.decode(&packet) {
             Ok(decoded) => decoded,
-            Err(Error::DecodeError(_)) => continue,
+            Err(Error::DecodeError(_)) => {
+                skipped += 1;
+                continue;
+            }
             Err(error) => return Err(AudioError::Undecodable(format!("decode: {error}"))),
         };
         let spec = decoded.spec();
