@@ -187,7 +187,8 @@ function ModeToggle({ mode, onChange }: { mode: AgentListMode; onChange(mode: Ag
               onPress={() => onChange(entry.mode)}
               style={styles.segmentTarget}
             >
-              <View style={[styles.segment, selected && styles.segmentSelected]}>
+              <View style={styles.segment}>
+                <View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.segmentFill, { opacity: selected ? 1 : 0 }]} />
                 <Text style={[styles.segmentLabel, selected && styles.segmentLabelSelected]}>{entry.label}</Text>
               </View>
             </Pressable>
@@ -233,8 +234,12 @@ const styles = StyleSheet.create({
   toggleTrack: { backgroundColor: colors.chromeRaised, borderRadius: radii.pill + TOGGLE_INSET, bottom: 6, left: 0, position: "absolute", right: 0, top: 6 },
   segmentTarget: { paddingHorizontal: TOGGLE_INSET, paddingVertical: 8 },
   segment: { alignItems: "center", borderRadius: radii.pill, minHeight: 32, minWidth: SEGMENT_MIN_WIDTH, justifyContent: "center", paddingHorizontal: 14 },
+  // The selected wash is a fill layer mounted from the first frame and shown by opacity.
+  // Adding a background to an already-mounted rounded view made Android redraw it with
+  // square corners (QA row 43); a view that mounts with both keeps its arcs, and
+  // opacity never rebuilds the background drawable.
   // `accentWash` + `accent` is the app's "this segment is selected" treatment (files/ui/parts.tsx).
-  segmentSelected: { backgroundColor: colors.accentWash },
+  segmentFill: { backgroundColor: colors.accentWash, borderRadius: radii.pill },
   segmentLabel: { color: colors.chromeDim, fontSize: typeScale.rowSecondary, fontWeight: "600" },
   segmentLabelSelected: { color: colors.accent },
 });
