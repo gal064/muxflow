@@ -5,6 +5,7 @@ import {
   hostLinksReducer,
   initialHostLinksState,
   shownHostProfiles,
+  syncHostLinks,
   type HostLinksAction,
   type HostLinksState,
 } from "./hostLinks";
@@ -58,6 +59,16 @@ describe("the host link set", () => {
     // The link that stayed is the same object: nothing keyed on it recomputes.
     expect(reordered.byProfileId.qa).toBe(state.byProfileId.qa);
     expect(reordered.byProfileId.staging.connectionEpoch).toBe(2);
+  });
+
+  it("is a fixed point after one sync, so a render that reconciles it settles at once", () => {
+    const hosts = [{ profileId: "local", connection: local }, { profileId: "qa", connection: remote("qa") }];
+    const once = syncHostLinks(initialHostLinksState, hosts);
+    expect(syncHostLinks(once, hosts)).toBe(once);
+    const corrected = [hosts[0], { profileId: "qa", connection: remote("qa", "qa-2") }];
+    const moved = syncHostLinks(once, corrected);
+    expect(moved).not.toBe(once);
+    expect(syncHostLinks(moved, corrected)).toBe(moved);
   });
 
   it("moves a link onto a corrected address without minting an epoch", () => {

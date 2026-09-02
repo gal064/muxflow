@@ -349,7 +349,7 @@ export function useAppConnectionController({
         recordPerfCounter("connection.reconnect.observerFailure");
         recordIncident("reconnect.observerFailure", { hostProfileId: profileId, message });
         dispatchLinks({ type: "detail", profileId, detail: message });
-        setStatus(message);
+        if (profileId === activeProfileIdRef.current) setStatus(message);
         dispatchLinks({ type: "reconnect", profileId });
       },
       // The probe is keyed by pane id, and pane ids repeat across hosts: only
@@ -547,7 +547,8 @@ export function useAppConnectionController({
   // later. React re-runs the render at once when the reducer returns a
   // different state, and the reducer returns the same one when nothing
   // changed, so this settles in one pass.
-  if (syncHostLinks(links, shownProfiles) !== links) dispatchLinks({ type: "sync", hosts: shownProfiles });
+  const syncedLinks = useMemo(() => syncHostLinks(links, shownProfiles), [links, shownProfiles]);
+  if (syncedLinks !== links) dispatchLinks({ type: "sync", hosts: shownProfiles });
 
   const windows = useMemo(() => snapshot.windows
     .filter((tmuxWindow) => tmuxWindow.sessionId === activeSessionId)
@@ -639,7 +640,6 @@ export function useAppConnectionController({
       stop() {
         disposed = true;
         if (clientIdRef.current === bridge.clientId) clientIdRef.current = undefined;
-        if (isActive()) terminalEpochRef.current = 0;
         dispatchHost({ type: "connection", phase: "disconnected" });
         dispatchLinks({ type: "client", profileId, clientId: undefined });
         dispatchLinks({ type: "terminalEpoch", profileId, terminalEpoch: 0 });
@@ -659,7 +659,6 @@ export function useAppConnectionController({
         if (event.kind === "generationEpoch") {
           terminalStateCache.clearScope(profileId);
           bridge.terminalEpoch = event.epoch;
-          if (isActive()) terminalEpochRef.current = event.epoch;
           dispatchLinks({ type: "terminalEpoch", profileId, terminalEpoch: event.epoch });
         } else if (event.kind === "topologyDirty") {
           // First dirty of a burst wins: the snapshot that answers a burst
@@ -739,15 +738,19 @@ export function useAppConnectionController({
           // bridge, and only the first one has a fix the app can offer. The
           // wording comes from the bridge supervisor, which says either
           // "handshake" or "connection setup" for every failure of that stage.
-          if (event.kind === "error" && linkConnection.mode === "ssh" && /handshake|connection setup/i.test(event.message)) {
+          // Helper recovery is the active host's: it probes the connection on
+          // screen and offers the install there. A host beside it keeps its
+          // failure in its own detail until it is activated.
+          if (event.kind === "error" && isActive() && linkConnection.mode === "ssh" && /handshake|connection setup/i.test(event.message)) {
             handshakeFailureRef.current?.(linkConnection);
           }
         } else if (event.kind === "connectionState") {
-          // Let helper reconciliation observe the transport transition before
-          // publishing it to the shell. React batches both updates, so a live
-          // or read-only helper probe can arbitrate against other one-time host
-          // questions on that first settled render without delaying the bridge.
-          connectionStateChangedRef.current?.(linkConnection, event.state);
+          // Let helper reconciliation observe the active host's transport
+          // transition before publishing it to the shell. React batches both
+          // updates, so a live or read-only helper probe can arbitrate against
+          // other one-time host questions on that first settled render without
+          // delaying the bridge.
+          if (isActive()) connectionStateChangedRef.current?.(linkConnection, event.state);
           dispatchHost({ type: "connection", phase: event.state });
           if (event.state === "connected") {
             setDetail("");
@@ -862,10 +865,11 @@ export function useAppConnectionController({
    * shown becomes shown by being activated; its link appears with the pointer.
    */
   const activateHost = useCallback((profileId: string) => {
-    if (profileId === activeProfileIdRef.current) return;
     const link = linksRef.current.byProfileId[profileId];
     const target = link?.connection ?? profilesRef.current.find((item) => item.id === profileId)?.connection;
     if (!target) return;
+    void invoke("set_last_profile_id", { profileId }).catch((error) => setStatus(String(error)));
+    if (profileId === activeProfileIdRef.current) return;
     setConnection(target);
     // Every snapshot lands a link on a session — the remembered one, or the
     // first — so a link with none has not heard from its host yet, and the
@@ -877,7 +881,6 @@ export function useAppConnectionController({
         recordIncident("host.activateSelectFailed", { hostProfileId: profileId, message: String(error) });
       });
     }
-    void invoke("set_last_profile_id", { profileId }).catch((error) => setStatus(String(error)));
   }, [setConnection, setStatus]);
   const reconnectHost = useCallback((profileId: string) => dispatchLinks({ type: "reconnect", profileId }), []);
   const hubFor = useCallback((profileId: string) => runtimeFor(profileId).hub, [runtimeFor]);
@@ -905,7 +908,9 @@ export function useAppConnectionController({
    * Restarts the active host's bridge. Epochs are minted by the links
    * reducer, so the number a caller asks for is not the one assigned; every
    * caller asks for "one more than now", and any request for a change is
-   * honoured as exactly that.
+   * honoured as exactly that. A host with no link yet — one being connected
+   * to for the first time — starts on a fresh bridge anyway, so there is
+   * nothing to bump.
    */
   const setConnectionEpoch = useCallback((update: SetStateAction<number>) => {
     const profileId = activeProfileIdRef.current;

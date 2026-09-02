@@ -13,6 +13,8 @@ import {
 } from "../features/shell/focusHistory";
 
 export interface FocusHistoryNavigationOptions {
+  /** The host whose sessions and windows the points describe. */
+  hostProfileId: string;
   activeSessionId?: string;
   activeWindowId?: string;
   selectedAppTabId?: string;
@@ -57,13 +59,18 @@ export function useFocusHistoryNavigation(options: FocusHistoryNavigationOptions
   const optionsRef = useRef(options);
   optionsRef.current = options;
   const expected = useRef<FocusPoint | undefined>(undefined);
-  const { activeSessionId, activeWindowId, selectedAppTabId, sessions, windows, appTabs } = options;
+  const { activeSessionId, activeWindowId, hostProfileId, selectedAppTabId, sessions, windows, appTabs } = options;
 
   const exists = useCallback((point: FocusPoint) => sessions.some((session) => session.id === point.sessionId)
     && (!point.windowId || windows.some((window) => window.id === point.windowId))
     && (!point.appTabId || appTabs.some((tab) => tab.id === point.appTabId)), [appTabs, sessions, windows]);
   const existsRef = useRef(exists);
   existsRef.current = exists;
+
+  // A different host is a different tmux server with its own `$0` and
+  // `@0`: a point recorded on one must not be "restored" on the other. Cleared
+  // before the visit below records the new host's first point.
+  useEffect(() => { setHistory(emptyFocusHistory); }, [hostProfileId]);
 
   useEffect(() => {
     if (!activeSessionId) return;

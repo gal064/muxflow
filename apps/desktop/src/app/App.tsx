@@ -692,6 +692,7 @@ export function App() {
   }, [notificationActivation, setNavigationAppTab, shellNavigation]);
   const focusNavigation = useFocusHistoryNavigation({
     activeSessionId,
+    hostProfileId: currentHostProfileId,
     activeWindowId,
     appTabs: appState.appTabs,
     revealTerminal: revealTerminalUnderAppTab,
@@ -1225,7 +1226,11 @@ export function App() {
             className={selectedAppTab ? "terminal-layer terminal-layer-covered" : "terminal-layer"}
             inert={selectedAppTab ? true : undefined}
           >
+            {/* Keyed by host: pane ids repeat across tmux servers, so a host
+                switch remounts every pane rather than handing one machine's
+                pane the other's. */}
             <TerminalWorkspaceSurface
+              key={currentHostProfileId}
               activePane={activePane}
               activeWindow={activeWindow}
               appFocused={appFocused}

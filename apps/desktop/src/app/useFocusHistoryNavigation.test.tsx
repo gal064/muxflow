@@ -35,7 +35,7 @@ function mount(initial: Location) {
   let latest!: ReturnType<typeof useFocusHistoryNavigation>;
   function Harness(props: { location: Location }) {
     latest = useFocusHistoryNavigation({
-      ...props.location, revealTerminal, selectAppTab, selectSession, selectWindow, sessions, setStatus, windows,
+      ...props.location, hostProfileId: "local", revealTerminal, selectAppTab, selectSession, selectWindow, sessions, setStatus, windows,
     });
     return null;
   }

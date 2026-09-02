@@ -4,12 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResumeTrigger } from "../features/shell/useDesktopResumeRecovery";
 import { hostProfileId } from "../features/shell/types";
 import type { TerminalEvent } from "../features/terminal/api";
+import { terminalCacheKey, terminalStateCache } from "../features/terminal/TerminalStateCache";
 import type { ConnectionSpec, TmuxSnapshot } from "./types";
 import { useAppConnectionController } from "./useAppConnectionController";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const startTerminalMock = vi.hoisted(() => vi.fn());
 const stopTerminalMock = vi.hoisted(() => vi.fn(async (_clientId: string) => undefined));
+const requestTerminalSeedMock = vi.hoisted(() => vi.fn(async (_clientId: string, _paneId: string) => undefined));
 const clipboardMock = vi.hoisted(() => vi.fn(async (_enabled: boolean, _text: string) => undefined));
 const resume = vi.hoisted(() => ({
   trigger: undefined as ((trigger: ResumeTrigger) => void) | undefined,
@@ -26,7 +28,7 @@ vi.mock("../features/terminal/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../features/terminal/api")>(),
   startTerminal: startTerminalMock,
   stopTerminal: stopTerminalMock,
-  requestTerminalSeed: vi.fn(async () => undefined),
+  requestTerminalSeed: requestTerminalSeedMock,
 }));
 vi.mock("../features/terminal/terminalTransferApi", () => ({ writeTerminalApplicationClipboard: clipboardMock }));
 // The resume detectors are not under test either; what a dead link costs is.
@@ -53,14 +55,23 @@ const world = (serverIdentity: string, sessions: Array<[id: string, name: string
 };
 const calls = (command: string) => invokeMock.mock.calls.filter(([name]) => name === command).map(([, request]) => request);
 
+interface HarnessOptions {
+  /** Bridges whose `startTerminal` waits for `release()` before resolving. */
+  holdStart?(connection: ConnectionSpec): boolean;
+  onConnectionStateChanged?: Parameters<typeof useAppConnectionController>[0]["onConnectionStateChanged"];
+  onHandshakeFailure?(connection: ConnectionSpec): void;
+}
+
 /** The controller alone, on a Local host shown beside a saved SSH host. */
-async function twoShownHosts() {
+async function twoShownHosts(options: HarnessOptions = {}) {
   const bridges: Bridge[] = [];
+  const held: Array<() => void> = [];
   startTerminalMock.mockImplementation(async (
     _sessionId: string, _paneIds: string[], connection: ConnectionSpec, attach: boolean, onEvent: (event: TerminalEvent) => void,
   ) => {
     const clientId = `client-${bridges.length + 1}`;
     bridges.push({ clientId, connection, attach, publish: onEvent });
+    if (options.holdStart?.(connection)) await new Promise<void>((resolve) => { held.push(resolve); });
     return clientId;
   });
   invokeMock.mockImplementation((command: string) => {
@@ -88,6 +99,8 @@ async function twoShownHosts() {
   function Harness() {
     controller = useAppConnectionController({
       agentClient: agentClient as never, fileClient: fileClient as never, gitClient: gitClient as never, setStatus,
+      onConnectionStateChanged: options.onConnectionStateChanged,
+      onHandshakeFailure: options.onHandshakeFailure,
     });
     return null;
   }
@@ -105,6 +118,7 @@ async function twoShownHosts() {
     controller: () => controller,
     fileClient,
     gitClient,
+    release: () => { for (const resolve of held.splice(0)) resolve(); },
     renderer,
     retireConnection,
     statuses,
@@ -281,10 +295,10 @@ describe("one bridge per shown host", () => {
       // A host that has not named its server yet has nothing to stamp with.
       bridgeFor("local").publish({ kind: "agentService", scope: "snapshot", snapshot: agentSnapshot, sequence: 0 });
     });
-    expect(agentClient.publishWireSnapshot.mock.calls).toEqual([[
-      { clientId: "client-2", hostProfileId: "remote-a", serverIdentity: "srv-qa", topologyGeneration: 0, connectionEpoch: 3 },
-      agentSnapshot,
-    ]]);
+    expect(agentClient.publishWireSnapshot).toHaveBeenCalledTimes(1);
+    const [scope, published] = agentClient.publishWireSnapshot.mock.calls[0];
+    expect(scope).toMatchObject({ clientId: "client-2", hostProfileId: "remote-a", serverIdentity: "srv-qa", connectionEpoch: 3 });
+    expect(published).toBe(agentSnapshot);
     await unmount();
   });
 
@@ -320,6 +334,51 @@ describe("one bridge per shown host", () => {
     });
     expect(controller().linkFor("remote-a")?.connection).toEqual({ mode: "ssh", profileId: "remote-a", target: "qa-host-2" });
     expect(controller().links.map((link) => link.profileId)).toEqual(["local", "remote-a"]);
+    await unmount();
+  });
+
+  it("reseeds a pane on its own host, forgetting only that host's cached screen", async () => {
+    const { controller, unmount } = await twoShownHosts();
+    const forgotten = vi.spyOn(terminalStateCache, "delete");
+    await act(async () => { controller().hubFor("remote-a").onSeedRequired?.("%0", "test"); });
+    expect(forgotten.mock.calls).toEqual([[terminalCacheKey("remote-a", "%0")]]);
+    expect(requestTerminalSeedMock.mock.calls).toEqual([["client-2", "%0"]]);
+    forgotten.mockRestore();
+    await unmount();
+  });
+
+  it("stops a bridge whose start resolves after its host was un-shown, without adopting its client", async () => {
+    const { controller, release, retireConnection, unmount } = await twoShownHosts({
+      holdStart: (connection) => connection.mode === "ssh",
+    });
+    expect(controller().linkFor("remote-a")?.clientId).toBeUndefined();
+    await act(async () => {
+      controller().setProfiles((current) => current.map((profile) =>
+        profile.id === "remote-a" ? { ...profile, shown: false } : profile));
+    });
+    // Nothing to stop yet: the native id is not known.
+    expect(stopTerminalMock).not.toHaveBeenCalled();
+    await act(async () => { release(); });
+    expect(stopTerminalMock.mock.calls).toEqual([["client-2"]]);
+    // No watch could have been registered on a client the shell never saw.
+    expect(retireConnection).not.toHaveBeenCalled();
+    expect(controller().links.map((link) => link.profileId)).toEqual(["local"]);
+    expect(controller().clientId).toBe("client-1");
+    await unmount();
+  });
+
+  it("reports transport transitions and handshake failures for the active host only", async () => {
+    const states = vi.fn();
+    const handshakes = vi.fn();
+    const { bridgeFor, unmount } = await twoShownHosts({ onConnectionStateChanged: states, onHandshakeFailure: handshakes });
+    await act(async () => {
+      bridgeFor("remote-a").publish(connected);
+      bridgeFor("remote-a").publish({ kind: "error", message: "host closed during handshake: No such file or directory", sequence: 0 });
+      bridgeFor("local").publish(connected);
+    });
+    expect(states.mock.calls).toEqual([[{ mode: "local" }, "connected"]]);
+    expect(handshakes).not.toHaveBeenCalled();
+    expect(stopTerminalMock).not.toHaveBeenCalled();
     await unmount();
   });
 });
