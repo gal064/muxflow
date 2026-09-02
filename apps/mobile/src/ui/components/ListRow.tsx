@@ -10,6 +10,8 @@ export interface ListRowProps {
   /** 3 dp bar on the left edge (§9.3.1) in this colour, when set. */
   edgeColor?: string;
   leading?: ReactNode;
+  /** Drawn right after the title text — a pin, say — so it hugs the end of the name rather than the row's edge. */
+  titleAccessory?: ReactNode;
   trailing?: ReactNode;
   dimmed?: boolean;
   onPress?: () => void;
@@ -18,7 +20,7 @@ export interface ListRowProps {
 }
 
 /** A list row per §9.3/§9.4: hairline-separated, title 16 sp, second line 13 sp `--chrome-dim`. */
-export function ListRow({ title, subtitle, height, edgeColor, leading, trailing, dimmed, onPress, disabled, titleColor }: ListRowProps) {
+export function ListRow({ title, subtitle, height, edgeColor, leading, titleAccessory, trailing, dimmed, onPress, disabled, titleColor }: ListRowProps) {
   return (
     <Pressable
       accessibilityRole="button"
@@ -30,7 +32,10 @@ export function ListRow({ title, subtitle, height, edgeColor, leading, trailing,
       <View style={[styles.body, dimmed && styles.dimmed]}>
         {leading ? <View style={styles.leading}>{leading}</View> : null}
         <View style={styles.text}>
-          <Text style={[styles.title, titleColor ? { color: titleColor } : null]} numberOfLines={1}>{title}</Text>
+          <View style={styles.titleLine}>
+            <Text style={[styles.title, titleColor ? { color: titleColor } : null]} numberOfLines={1}>{title}</Text>
+            {titleAccessory ? <View style={styles.titleAccessory}>{titleAccessory}</View> : null}
+          </View>
           {subtitle ? <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text> : null}
         </View>
         {trailing ? <View style={styles.trailing}>{trailing}</View> : null}
@@ -57,7 +62,9 @@ const styles = StyleSheet.create({
   dimmed: { opacity: 0.5 },
   leading: {},
   text: { flex: 1, gap: 2 },
-  title: { color: colors.chromeInkStrong, fontSize: typeScale.rowTitle },
+  titleLine: { alignItems: "center", flexDirection: "row", gap: 6 },
+  title: { color: colors.chromeInkStrong, flexShrink: 1, fontSize: typeScale.rowTitle },
+  titleAccessory: { flexShrink: 0 },
   subtitle: { color: colors.chromeDim, fontSize: typeScale.rowSecondary },
   trailing: { alignItems: "flex-end" },
 });
