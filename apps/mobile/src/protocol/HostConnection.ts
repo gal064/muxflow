@@ -130,6 +130,8 @@ export interface HostConnectionOptions {
   onAgentTransition?: (transition: AgentTransition) => void;
   /** ACTIVE_ROOT, DIRECTORY_SNAPSHOT, FILE_CHANGED (§11). */
   onFileEvent?: (event: HostEvent) => void;
+  /** VOICE_PROVISION, VOICE_REPLY (docs/mobile/voice-mode-plan.md); payload in `event.voice`. */
+  onVoiceEvent?: (event: HostEvent) => void;
   onToast?: (message: string) => void;
   /** Fires on every transition to `connected`; open terminals re-attach here (§7.6 step 5). */
   onConnected?: () => void;
@@ -632,6 +634,10 @@ export class HostConnection {
       case EventKind.DIRECTORY_SNAPSHOT:
       case EventKind.FILE_CHANGED:
         this.options.onFileEvent?.(event);
+        break;
+      case EventKind.VOICE_PROVISION:
+      case EventKind.VOICE_REPLY:
+        this.options.onVoiceEvent?.(event);
         break;
       case EventKind.TERMINAL_CLIPBOARD_WRITE:
         break;
