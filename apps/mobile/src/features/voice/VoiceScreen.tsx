@@ -60,11 +60,13 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     log,
   }), [agentId, paneId, sessionId]);
   const [controller, setController] = useState(open);
+  // Set by End session: the screen is popping and must not resurrect the session it just ended.
+  const ending = useRef(false);
 
   // A disconnect from the strip on this very screen disposes the session it was
   // built on; the reconnect that follows (or the next focus) starts a fresh one.
   useEffect(() => {
-    if (connected && controller.isDisposed) setController(open());
+    if (connected && controller.isDisposed && !ending.current) setController(open());
   }, [connected, controller, open]);
   useFocusEffect(useCallback(() => {
     const live = controller.isDisposed ? open() : controller;
@@ -83,9 +85,6 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const messages = session?.messages ?? [];
   const phase = session?.phase ?? "idle";
   const newest = latestReply(session);
-  useEffect(() => {
-    list.current?.scrollToEnd({ animated: true });
-  }, [messages.length]);
 
   const title = agent?.displayName || "Agent";
   const gone = agent !== undefined && !agent.present;
@@ -109,6 +108,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
 
   const endSession = useCallback(() => {
     setConfirmEnd(false);
+    ending.current = true;
     void voiceRegistry.end(agentId);
     router.back();
   }, [agentId, router]);
@@ -127,7 +127,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         </Pressable>
       </View>
 
-      <ScrollView contentContainerStyle={styles.listContent} ref={list} style={styles.list}>
+      <ScrollView contentContainerStyle={styles.listContent} onContentSizeChange={() => list.current?.scrollToEnd({ animated: true })} ref={list} style={styles.list}>
         {messages.length === 0 ? (
           <EmptyState heading={`Talk to ${title}`} lines={["Hold the button, say what you want typed into the agent's terminal, and let go.", "The agent's next reply is read back to you here."]} />
         ) : null}

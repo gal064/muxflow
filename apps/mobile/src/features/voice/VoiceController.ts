@@ -257,18 +257,20 @@ export class VoiceController {
     } catch (error) {
       this.fail("recorder.stop", error);
     }
-    // Re-arm for the next press while the host works on this one.
-    this.arm();
     if (!uri || durationMs < MIN_UTTERANCE_MS) {
       this.log(`utterance.discarded durationMs=${durationMs}`);
+      this.arm();
       this.setPhaseIfAlive("idle");
       return;
     }
     const startedAt = this.now();
     let text: string;
     try {
+      // Read before re-arming: on iOS a bare prepare reuses (and truncates) the same file URL.
       const audio = await files.read(uri);
       files.delete(uri);
+      // Re-arm for the next press while the host works on this one.
+      this.arm();
       const connection = this.liveConnection();
       if (!connection) throw new Error("Not connected.");
       const response = await connection.request(voiceTranscribe(newOperationId(), audio, RECORDING_MIME), { timeoutMs: TRANSCRIBE_TIMEOUT_MS });
@@ -277,6 +279,7 @@ export class VoiceController {
       text = (transcript?.text ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim();
       this.log(`transcribe ${audio.byteLength} bytes durationMs=${durationMs} → ${text.length} chars in ${this.now() - startedAt} ms (audio ${transcript?.audioMillis ?? 0} ms, decode ${transcript?.decodeMillis ?? 0} ms)`);
     } catch (error) {
+      this.arm();
       this.fail("transcribe", error);
       this.setPhaseIfAlive("idle");
       return;
@@ -461,10 +464,16 @@ export class VoiceController {
         if (!this.disposed) this.options.store.getState().setRecorderError(undefined);
       })
       .catch((error: unknown) => {
-        // Permission denied (or a recorder that cannot start) is a phone-side
-        // state the mic shows, not a toast per press.
-        this.log(`recorder.prepare.failed ${describe(error)}`);
-        if (!this.disposed) this.options.store.getState().setRecorderError(describe(error));
+        if (this.disposed) return;
+        // Permission denied is a phone-side state the mic shows until it changes;
+        // any other prepare failure is transient and toasts once, and the next
+        // focus or release arms again.
+        if ((error as { name?: unknown }).name === "RecordingPermissionDenied") {
+          this.log(`recorder.prepare.denied ${describe(error)}`);
+          this.options.store.getState().setRecorderError(describe(error));
+        } else {
+          this.fail("recorder.prepare", error);
+        }
       })
       .finally(() => {
         this.arming = undefined;

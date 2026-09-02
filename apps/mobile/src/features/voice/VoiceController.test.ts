@@ -359,7 +359,9 @@ describe("VoiceController against a host that is not set up (review round 1)", (
 
   it("a denied microphone permission disables recording with a phone-side state instead of a toast per press", async () => {
     const h = harness();
-    h.recorder.prepare = async () => { throw new Error("Microphone permission was denied."); };
+    const denied = new Error("Microphone permission was denied.");
+    denied.name = "RecordingPermissionDenied";
+    h.recorder.prepare = async () => { throw denied; };
     h.controller.focus();
     await settle();
     expect(h.store.getState().recorderError).toBe("Microphone permission was denied.");
@@ -518,5 +520,54 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
     const input = h.connection.of(Operation.TERMINAL_INPUT)[0]!;
     expect(input.scope).toBe("%9");
     expect(new TextDecoder().decode(input.data)).toBe("first line second line\r");
+  });
+});
+
+describe("VoiceController recorder edges (review round 3)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("reads the recording before re-arming the recorder", async () => {
+    const h = harness();
+    const order: string[] = [];
+    const prepare = h.recorder.prepare.bind(h.recorder);
+    h.recorder.prepare = async () => { order.push("prepare"); await prepare(); };
+    const read = h.files.read.bind(h.files);
+    h.files.read = async (uri) => { order.push("read"); return read(uri); };
+    h.controller.focus();
+    await settle();
+    order.length = 0;
+    h.controller.beginUtterance();
+    await settle();
+    await h.controller.endUtterance();
+    expect(order).toEqual(["read", "prepare"]);
+  });
+
+  it("a transient prepare failure toasts once and does not disable the mic; a denied permission does", async () => {
+    const h = harness();
+    let attempts = 0;
+    const prepare = h.recorder.prepare.bind(h.recorder);
+    h.recorder.prepare = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("AudioRecorderPrepareException: busy");
+      await prepare();
+    };
+    h.controller.focus();
+    await settle();
+    expect(h.toasts).toEqual(["AudioRecorderPrepareException: busy"]);
+    expect(h.store.getState().recorderError).toBeUndefined();
+    h.controller.blur();
+    h.controller.focus();
+    await settle();
+    expect(h.recorder.prepared).toBe(1);
+    const denied = new Error("Microphone permission was denied.");
+    denied.name = "RecordingPermissionDenied";
+    h.recorder.prepare = async () => { throw denied; };
+    h.controller.beginUtterance();
+    await settle();
+    await h.controller.endUtterance();
+    await settle();
+    expect(h.store.getState().recorderError).toBe("Microphone permission was denied.");
+    expect(h.toasts).toHaveLength(1);
   });
 });
