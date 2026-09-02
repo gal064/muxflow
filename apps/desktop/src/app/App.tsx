@@ -1176,6 +1176,7 @@ export function App() {
               activeWindow={activeWindow}
               appFocused={appFocused}
               beginDividerDrag={beginDividerDrag}
+              cacheScope={currentHostProfileId}
               clientId={clientId}
               copyOnSelect={appState.shell.copyOnSelect}
               cleanWrappedCommands={appState.shell.cleanWrappedCommands}

@@ -184,7 +184,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => ({
 
 import { TerminalPane } from "./TerminalPane";
 import { type TerminalEvent } from "./api";
-import { terminalStateCache } from "./TerminalStateCache";
+import { terminalCacheKey, terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
 import type { PaneHealth, TerminalEventHub } from "./TerminalEventHub";
 
@@ -347,6 +347,7 @@ function paneElement(
 ) {
   return <TerminalPane
     appFocused={appFocused}
+    cacheScope="local"
     clientId={clientId}
     pane={pane}
     hub={hub.asHub()}
@@ -436,6 +437,7 @@ describe("TerminalPane pane-paint span lifecycle", () => {
     await act(async () => {
       mounted.update(<TerminalPane
         appFocused
+        cacheScope="local"
         clientId="client-a"
         pane={pane}
         hub={hub.asHub()}
@@ -465,7 +467,7 @@ describe("TerminalPane pane-paint span lifecycle", () => {
   });
 
   it("closes a switch span when the pane restores from the local cache", async () => {
-    terminalStateCache.set("%5", "warm-screen", {
+    terminalStateCache.set(terminalCacheKey("local", "%5"), "warm-screen", {
       checkpoint: { terminalEpoch: 7, outputGeneration: 3 },
       viewport: { atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 } },
     });
@@ -946,7 +948,7 @@ describe("tmux-style terminal reading", () => {
 
     await act(async () => { mounted.unmount(); await Promise.resolve(); });
 
-    expect(terminalStateCache.get("%read3")).toBeUndefined();
+    expect(terminalStateCache.get(terminalCacheKey("local", "%read3"))).toBeUndefined();
     const hide = api.setTerminalVisibility.mock.calls.find((call) => call[2] === false);
     expect(hide?.[3]).toBe(false);
   });
@@ -966,7 +968,7 @@ describe("tmux-style terminal reading", () => {
   });
 
   it("does not let a late cached-resume tail repaint a restored reading viewport", async () => {
-    terminalStateCache.set("%read5", "warm-screen", {
+    terminalStateCache.set(terminalCacheKey("local", "%read5"), "warm-screen", {
       checkpoint: { terminalEpoch: 7, outputGeneration: 3 },
       viewport: { atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 } },
     });
@@ -988,7 +990,7 @@ describe("tmux-style terminal reading", () => {
   });
 
   it("keeps one seed and the old pixels when return-live outruns a cached-resume answer", async () => {
-    terminalStateCache.set("%read7", "warm-screen", {
+    terminalStateCache.set(terminalCacheKey("local", "%read7"), "warm-screen", {
       checkpoint: { terminalEpoch: 7, outputGeneration: 3 },
       viewport: { atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 } },
     });
@@ -1009,7 +1011,7 @@ describe("tmux-style terminal reading", () => {
   });
 
   it("does not flush queued reveal output through a non-resume readiness answer", async () => {
-    terminalStateCache.set("%read8", "warm-screen", {
+    terminalStateCache.set(terminalCacheKey("local", "%read8"), "warm-screen", {
       checkpoint: { terminalEpoch: 7, outputGeneration: 3 },
       viewport: { atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 } },
     });
@@ -1343,7 +1345,7 @@ describe("lazy scrollback", () => {
   });
 
   it("never prefetches for a pane that came up from its own cached screen", async () => {
-    terminalStateCache.set("%p4", "warm-screen", {
+    terminalStateCache.set(terminalCacheKey("local", "%p4"), "warm-screen", {
       checkpoint: { terminalEpoch: 7, outputGeneration: 3 },
       viewport: { atBottom: false, viewportLine: 4, grid: { columns: 80, rows: 24 } },
     });
@@ -1367,8 +1369,8 @@ describe("lazy scrollback", () => {
     await act(async () => { renderers.created[0].flushRendered(); });
     // The hide keeps that screen here and tells the host it did.
     await act(async () => { first.unmount(); });
-    expect(terminalStateCache.get("%h5")?.screenSeeded).toBe(true);
-    expect(terminalStateCache.get("%h5")?.historyExhausted).toBe(false);
+    expect(terminalStateCache.get(terminalCacheKey("local", "%h5"))?.screenSeeded).toBe(true);
+    expect(terminalStateCache.get(terminalCacheKey("local", "%h5"))?.historyExhausted).toBe(false);
     api.requestTerminalHistory.mockClear();
 
     const remounted = await mountPane(fixturePane("%h5"), hub);
@@ -1397,11 +1399,11 @@ describe("lazy scrollback", () => {
 
     // The page is in the buffer this screen was serialized from, and the entry
     // says so — the restore continues from there rather than fetching it again.
-    expect(terminalStateCache.get("%h6")?.screenSeeded).toBe(true);
-    expect(terminalStateCache.get("%h6")?.historyExhausted).toBe(false);
+    expect(terminalStateCache.get(terminalCacheKey("local", "%h6"))?.screenSeeded).toBe(true);
+    expect(terminalStateCache.get(terminalCacheKey("local", "%h6"))?.historyExhausted).toBe(false);
     // Including where the page ladder had got to: these bytes cost what they
     // cost to rewrite whichever mount is holding them.
-    expect(terminalStateCache.get("%h6")?.historyNextPageLines).toBe(600);
+    expect(terminalStateCache.get(terminalCacheKey("local", "%h6"))?.historyNextPageLines).toBe(600);
     api.requestTerminalHistory.mockClear();
 
     const remounted = await mountPane(fixturePane("%h6"), hub);
@@ -1422,7 +1424,7 @@ describe("lazy scrollback", () => {
     renderer.scrollbackRows = 12;
     await act(async () => { first.unmount(); });
 
-    expect(terminalStateCache.get("%h10")?.historyExhausted).toBe(true);
+    expect(terminalStateCache.get(terminalCacheKey("local", "%h10"))?.historyExhausted).toBe(true);
     api.requestTerminalHistory.mockClear();
 
     const remounted = await mountPane(fixturePane("%h10"), hub);

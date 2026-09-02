@@ -18,6 +18,8 @@ type TerminalWorkspaceSurfaceProps = {
   activePane?: Pane;
   activeWindow?: Window;
   appFocused: boolean;
+  /** The active host's profile id; scopes every pane's screen cache. */
+  cacheScope: string;
   clientId?: string;
   controllers: MutableRefObject<Map<string, TerminalPaneController>>;
   grid: WindowGrid;
@@ -72,6 +74,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
       >
       <TerminalPane
         appFocused={props.appFocused}
+        cacheScope={props.cacheScope}
         clientId={props.clientId}
         pane={pane}
         copyOnSelect={Boolean(props.copyOnSelect)}

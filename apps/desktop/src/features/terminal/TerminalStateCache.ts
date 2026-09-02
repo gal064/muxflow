@@ -55,6 +55,16 @@ export interface CachedHistoryState {
   historyNextPageLines: number;
 }
 
+/**
+ * The key one pane's screen is kept under.
+ *
+ * Pane ids repeat across tmux servers — `%0` exists on every host — so a key
+ * has to name the host too. `scope` is the host profile id.
+ */
+export function terminalCacheKey(scope: string, paneId: string): string {
+  return `${scope}\0${paneId}`;
+}
+
 export class TerminalStateCache {
   readonly #states = new Map<string, CachedTerminalState>();
   #retainedBytes = 0;
@@ -159,6 +169,14 @@ export class TerminalStateCache {
   clear(): void {
     this.#states.clear();
     this.#retainedBytes = 0;
+  }
+
+  /** Forgets every screen kept under `terminalCacheKey(scope, …)`. */
+  clearScope(scope: string): void {
+    const prefix = terminalCacheKey(scope, "");
+    for (const key of [...this.#states.keys()]) {
+      if (key.startsWith(prefix)) this.delete(key);
+    }
   }
 
   get size(): number {
