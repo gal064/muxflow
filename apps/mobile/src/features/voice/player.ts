@@ -41,10 +41,10 @@ export function createExpoPlayer(): VoicePlayer {
     stop() {
       if (!player) return;
       player.pause();
-      void player.seekTo(0);
+      player.seekTo(0).catch(() => undefined);
     },
     seek(positionMs) {
-      void player?.seekTo(Math.max(0, positionMs) / 1000);
+      player?.seekTo(Math.max(0, positionMs) / 1000).catch(() => undefined);
     },
     onStatus(listener) {
       listeners.add(listener);
