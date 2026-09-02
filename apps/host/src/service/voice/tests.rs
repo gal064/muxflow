@@ -478,17 +478,16 @@ async fn provision_needs_consent_runs_the_sidecar_and_verifies_by_loading() {
         .unwrap_err();
     assert_eq!(refused.code, "voice_consent_required");
 
-    // Already complete: re-verified by loading, then READY with a hot sidecar.
+    // Already complete: re-verified by loading, then READY with a hot
+    // sidecar, and no provision progress emitted along the way.
     let status = service
-        .provision("op-1", true, &not_cancelled(), &mut record)
+        .provision("op-1", true, &not_cancelled(), &mut |progress| {
+            panic!("re-verification emitted provision progress: {progress:?}")
+        })
         .await
         .unwrap();
     assert_eq!(status.readiness, v1::VoiceReadiness::Ready as i32);
     assert!(status.sidecar_running);
-    assert!(
-        seen.is_empty(),
-        "re-verification emitted provision progress"
-    );
     service.shutdown().await;
 
     service.model().remove();
