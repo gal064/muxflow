@@ -373,6 +373,7 @@ while IFS= read -r line; do
   if [ -n "$bytes" ]; then head -c "$bytes" >/dev/null; fi
   case "$op" in
     load) printf '{"id":%s,"ok":true,"load_millis":7}\n' "$id" ;;
+    ping) printf '{"id":%s,"ok":true}\n' "$id" ;;
     transcribe) printf '{"id":%s,"ok":true,"text":"hello\\nworld","decode_millis":12}\n' "$id" ;;
     speak) printf '{"id":%s,"ok":true,"mime":"audio/mpeg","body_bytes":5}\n' "$id"; printf 'MP3!!' ;;
     refuse) printf '{"id":%s,"ok":false,"class":"network","error":"offline"}\n' "$id" ;;

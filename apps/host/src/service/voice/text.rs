@@ -279,7 +279,9 @@ fn strip_inline(text: &str) -> String {
             && characters
                 .get(index + 1)
                 .is_some_and(|next| next.is_ascii_alphabetic() || matches!(next, '/' | '!'))
-            && let Some(close) = characters[index..].iter().position(|c| *c == '>')
+            && let Some(close) = characters[index..characters.len().min(index + MAX_INLINE_SCAN)]
+                .iter()
+                .position(|c| *c == '>')
         {
             index += close + 1;
             continue;
@@ -308,11 +310,16 @@ fn starts_with(characters: &[char], index: usize, needle: &str) -> bool {
         .all(|(offset, expected)| characters.get(index + offset) == Some(&expected))
 }
 
+/// How far a `[`, `!` or `<` looks ahead for its closer. Keeps a line of
+/// unclosed brackets linear rather than quadratic in its length.
+const MAX_INLINE_SCAN: usize = 2048;
+
 /// `[text](url)` starting at `open`: the text and the index after `)`.
 fn bracket_link(characters: &[char], open: usize) -> Option<(String, usize)> {
     let mut depth = 0;
     let mut close = None;
-    for (offset, character) in characters[open..].iter().enumerate() {
+    let window = &characters[open..characters.len().min(open + MAX_INLINE_SCAN)];
+    for (offset, character) in window.iter().enumerate() {
         match character {
             '[' => depth += 1,
             ']' => {
@@ -329,7 +336,8 @@ fn bracket_link(characters: &[char], open: usize) -> Option<(String, usize)> {
     if characters.get(close + 1) != Some(&'(') {
         return None;
     }
-    let end = characters[close + 2..].iter().position(|c| *c == ')')? + close + 3;
+    let tail = &characters[close + 2..characters.len().min(close + 2 + MAX_INLINE_SCAN)];
+    let end = tail.iter().position(|c| *c == ')')? + close + 3;
     Some((characters[open + 1..close].iter().collect(), end))
 }
 
@@ -439,6 +447,17 @@ mod tests {
                 truncated: false
             }
         );
+    }
+
+    #[test]
+    fn a_line_of_unclosed_brackets_is_handled_in_linear_time() {
+        let hostile = "[".repeat(32 * 1024);
+        let started = std::time::Instant::now();
+        let spoken = speech_text(&hostile, SPEECH_CAP_CHARS);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(spoken.truncated);
+        let angles = "<".repeat(32 * 1024);
+        assert!(speech_text(&angles, SPEECH_CAP_CHARS).truncated);
     }
 
     #[test]
