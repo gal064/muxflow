@@ -23,6 +23,7 @@ pub(crate) async fn handle_request(
         bulk_connection,
         bulk_available,
         connection_epoch,
+        connection_id,
         closed,
     } = context;
     let control_tx = &control_tx;
@@ -126,7 +127,9 @@ pub(crate) async fn handle_request(
                 operation,
                 request,
                 control_tx,
+                connection_id,
                 &cancellation,
+                &closed,
             )
             .await;
             pending.lock().unwrap().remove(&request_id);
