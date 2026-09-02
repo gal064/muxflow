@@ -22,6 +22,7 @@ const surfaceProps = (windowName: string) => ({
   activePane: pane,
   activeWindow: { id: "@1", sessionId: "$1", index: 0, name: windowName, active: true, layout: "" },
   beginDividerDrag: vi.fn(),
+  cacheScope: "local",
   clientId: "client-a",
   controllers: { current: new Map() },
   focusPane: vi.fn(),
