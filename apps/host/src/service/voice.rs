@@ -146,7 +146,7 @@ impl VoiceService {
             cache_dir,
             idle_after,
             uv::uv_executable,
-            Box::new(|uv, script, cache_dir| SidecarChild::uv_command(uv, script, cache_dir)),
+            Box::new(SidecarChild::uv_command),
         )
     }
 
