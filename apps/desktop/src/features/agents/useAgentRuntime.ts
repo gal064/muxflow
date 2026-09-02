@@ -62,7 +62,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
   const runtimeMemory = useRef(new AgentRuntimeMemory());
   const pendingSeen = useRef(new Set<string>());
   const requests = useRef(new Map<string, SnapshotRequest>());
-  const projections = useRef(new Map<string, { slice: HostAgentState | undefined; serverIdentity: string | undefined; projection: AgentHostProjection }>());
+  const projections = useRef(new Map<string, { slice: HostAgentState | undefined; projection: AgentHostProjection }>());
 
   const processTransition = useCallback((previous: AgentRecord | undefined, next: AgentRecord, replayed: boolean, reconciledSnapshot = false) => {
     const key = recordKey(next);
@@ -153,17 +153,17 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
   // Anything that changes what the host would answer without changing the
   // scope — installing hooks is the one that exists — bumps this to ask again.
   const [resnapshot, setResnapshot] = useState<Readonly<Record<string, number>>>({});
-  const refreshSnapshot = useCallback(() => setResnapshot((current) => {
-    const hostProfileId = optionsRef.current.focus.hostProfileId;
-    return { ...current, [hostProfileId]: (current[hostProfileId] ?? 0) + 1 };
-  }), []);
+  const refreshSnapshot = useCallback((hostProfileId = optionsRef.current.focus.hostProfileId) => setResnapshot((current) => ({
+    ...current, [hostProfileId]: (current[hostProfileId] ?? 0) + 1,
+  })), []);
 
   const scopeKeys = options.scopes.map((entry) => requestScopeKey(entry.scope)).join("\n");
   const shownKey = options.shownHostIds.join("\n");
   const scopes = useMemo(() => optionsRef.current.scopes, [scopeKeys]);
 
   useEffect(() => {
-    const { client, scopes: wanted, shownHostIds } = optionsRef.current;
+    const { client, scopes, shownHostIds } = optionsRef.current;
+    const wanted = scopes.filter(({ scope }) => shownHostIds.includes(scope.hostProfileId));
     const inFlight = requests.current;
     const requestKeys = new Map(wanted.map(({ scope }) => [scope.hostProfileId, `${requestScopeKey(scope)}\0${resnapshot[scope.hostProfileId] ?? 0}`]));
     for (const [hostProfileId, request] of inFlight) {
@@ -194,7 +194,10 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
       });
     }
   }, [accept, options.client, resnapshot, scopeKeys, shownKey]);
-  useEffect(() => () => { for (const request of requests.current.values()) request.cancel(); }, []);
+  useEffect(() => () => {
+    for (const request of requests.current.values()) request.cancel();
+    requests.current.clear();
+  }, []);
 
   const focusScope = useMemo(
     () => scopes.find((entry) => entry.scope.hostProfileId === options.focus.hostProfileId)?.scope,
@@ -203,20 +206,21 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
   const focusHost = state.byHost[options.focus.hostProfileId];
   const projection = useMemo(() => {
     const cache = projections.current;
+    const used = new Set<string>();
     const project = (hostProfileId: string, serverIdentity: string | undefined): AgentHostProjection => {
       const slice = state.byHost[hostProfileId];
-      const cached = cache.get(hostProfileId);
-      if (cached && cached.slice === slice && cached.serverIdentity === serverIdentity) return cached.projection;
+      const key = `${hostProfileId}\0${serverIdentity}`;
+      used.add(key);
+      const cached = cache.get(key);
+      if (cached && cached.slice === slice) return cached.projection;
       const agents = agentsForScope(slice, hostProfileId, serverIdentity);
       const projection = { agents, adapters: slice?.adapters ?? initialHostAgentState.adapters, rollups: deriveAgentRollups(agents) };
-      cache.set(hostProfileId, { slice, serverIdentity, projection });
+      cache.set(key, { slice, projection });
       return projection;
     };
     const byHost = new Map(scopes.map(({ scope }) => [scope.hostProfileId, project(scope.hostProfileId, scope.serverIdentity)]));
     const active = project(options.focus.hostProfileId, options.focus.serverIdentity);
-    for (const hostProfileId of cache.keys()) {
-      if (!byHost.has(hostProfileId) && hostProfileId !== options.focus.hostProfileId) cache.delete(hostProfileId);
-    }
+    for (const key of cache.keys()) if (!used.has(key)) cache.delete(key);
     return { byHost, active };
   }, [options.focus.hostProfileId, options.focus.serverIdentity, scopes, state]);
   const agents = projection.active.agents;

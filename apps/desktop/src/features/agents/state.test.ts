@@ -191,6 +191,17 @@ describe("agentReducer across hosts", () => {
     } });
     expect(remoteAt5.byHost.remote.byId["agent-1"]).toBeUndefined();
     expect(remoteAt5.byHost.local.byId["agent-1"].displayName).toBe("Far ahead");
+    // A's epoch and server identity are no alibi for an event addressed to B.
+    const otherEpoch = agentReducer(both, { type: "wire", event: {
+      kind: "retired", hostProfileId: "remote", serverIdentity: "server-a", connectionEpoch: 2, sequence: agentGeneration(5),
+      retiredAgentIds: ["agent-1"],
+    } });
+    expect(otherEpoch).toBe(both);
+    const otherServer = agentReducer(both, { type: "wire", event: {
+      kind: "retired", hostProfileId: "remote", serverIdentity: "server-b", connectionEpoch: 1, sequence: agentGeneration(5),
+      retiredAgentIds: ["agent-1"],
+    } });
+    expect(otherServer).toBe(both);
   });
 
   it("acknowledges seen only on the named host", () => {
