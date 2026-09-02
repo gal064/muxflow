@@ -6,6 +6,12 @@ const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
 pub(crate) const CODEX_APPROVAL_REVIEWER_FIELD: &str = "approval_reviewer";
 pub(crate) const CODEX_APPROVAL_TURN_ID_FIELD: &str = "approval_turn_id";
 pub(crate) const CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: &str = "has_running_subagent";
+/// The agent's final message, forwarded on `Stop` by both adapters for voice
+/// mode (docs/mobile/voice-mode-plan.md §4.5). Consumed by ingest and handed
+/// to the voice service; never stored in `AgentRecord` or `agents.json`.
+pub(crate) const LAST_ASSISTANT_MESSAGE_FIELD: &str = "last_assistant_message";
+/// Set when the hook cut the message at its 32 KiB bound.
+pub(crate) const LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD: &str = "last_assistant_message_truncated";
 pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed *event set* changes, not only the command
 /// string: an install from an older version covers fewer events, and reporting

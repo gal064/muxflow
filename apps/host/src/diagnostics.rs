@@ -1042,6 +1042,29 @@ mod switch_timing {
         }));
     }
 
+    /// One line per voice leg (docs/mobile/voice-mode-plan.md §2b): how long
+    /// the AAC decode took here, how long the sidecar round trip took, and the
+    /// decode time the sidecar reported for itself. Durations and an audio
+    /// length only; never the transcript or the reply.
+    pub(crate) fn write_voice_timing_log(
+        leg: &str,
+        audio_millis: u32,
+        decode: Option<Duration>,
+        sidecar_round_trip: Duration,
+        sidecar_decode_millis: u32,
+    ) {
+        append_timing_line(&serde_json::json!({
+            "atUnixMillis": now_epoch_millis(),
+            "subsystem": "host_daemon",
+            "event": "voice",
+            "leg": leg,
+            "audioMs": audio_millis,
+            "decodeMs": decode.map(whole_millis),
+            "sidecarMs": whole_millis(sidecar_round_trip),
+            "sidecarDecodeMs": sidecar_decode_millis,
+        }));
+    }
+
     /// One line per seed handed to the sequencer, with how long the pane's
     /// capture block took to arrive from tmux.
     pub(crate) fn write_seed_timing_log(pane_id: &str, bytes: usize, capture: Option<Duration>) {
@@ -1098,11 +1121,22 @@ mod switch_timing {
     #[inline(always)]
     pub(crate) fn write_seed_timing_log(_pane_id: &str, _bytes: usize, _capture: Option<Duration>) {
     }
+
+    #[inline(always)]
+    pub(crate) fn write_voice_timing_log(
+        _leg: &str,
+        _audio_millis: u32,
+        _decode: Option<Duration>,
+        _sidecar_round_trip: Duration,
+        _sidecar_decode_millis: u32,
+    ) {
+    }
 }
 
 pub(crate) use switch_timing::{
     handler_entry_stamp, note_request_read, note_response_enqueued, record_frame_write,
     record_response_written, write_seed_timing_log, write_tmux_action_timing_log,
+    write_voice_timing_log,
 };
 
 #[derive(Debug, Serialize)]

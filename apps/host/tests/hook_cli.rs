@@ -115,6 +115,57 @@ fn cli_discards_large_tool_results_for_claude_and_codex() {
     }
 }
 
+/// Voice mode (docs/mobile/voice-mode-plan.md §4.7): a Codex `Stop` piped
+/// through the CLI persists a `payload_json` that carries the final message
+/// and still nothing else private.
+#[test]
+fn cli_forwards_the_last_assistant_message_on_stop() {
+    let runtime_root = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::current_dir().unwrap().join("tmp")
+    };
+    let runtime = runtime_root.join(format!("voice-hook-cli-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&runtime).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
+        .args(["hook", "ingest", "--adapter", "codex"])
+        .env("ADE_HOST_RUNTIME_DIR", &runtime)
+        .env("TMUX_PANE", "%78")
+        .env_remove("TMUX")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"hook_event_name":"Stop","session_id":"s","last_assistant_message":"Done: the tests pass.","prompt":"private","transcript_path":"/private/path"}"#)
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+
+    let mailbox = fs::read_dir(&runtime)
+        .unwrap()
+        .flatten()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("hook-fallback-codex-78-")
+        })
+        .expect("the Stop was not filed");
+    let event = v1::AgentHookEvent::decode(fs::read(mailbox.path()).unwrap().as_slice()).unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "s",
+            "last_assistant_message": "Done: the tests pass.",
+        })
+    );
+    fs::remove_dir_all(runtime).unwrap();
+}
+
 /// The agent's configuration follows the user out of tmux; the hook must not
 /// complain when it gets there.
 ///

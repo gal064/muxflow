@@ -27,59 +27,109 @@ pub enum TmuxExecutableError {
     NotFound,
 }
 
+/// Why a program could not be resolved, naming the program and its override
+/// variable so the same message shape serves tmux and any other helper the
+/// host has to find without a shell.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum ExecutableError {
+    #[error("{override_env} must name an absolute executable file")]
+    InvalidOverride { override_env: &'static str },
+    #[error(
+        "{program} executable was not found; install {program} or set {override_env} to an absolute executable path"
+    )]
+    NotFound {
+        program: &'static str,
+        override_env: &'static str,
+    },
+}
+
+impl From<ExecutableError> for TmuxExecutableError {
+    fn from(error: ExecutableError) -> Self {
+        match error {
+            ExecutableError::InvalidOverride { .. } => Self::InvalidOverride,
+            ExecutableError::NotFound { .. } => Self::NotFound,
+        }
+    }
+}
+
 /// Resolves the tmux client without starting a shell.
 ///
 /// GUI applications on macOS inherit a system-only `PATH`, so Homebrew and
 /// other package-manager prefixes are searched explicitly after the process
 /// path and the system's path registry. A valid explicit override always wins.
 pub fn tmux_executable() -> Result<PathBuf, TmuxExecutableError> {
-    if let Some(path) = resolve_override(std::env::var_os(OVERRIDE_ENV))? {
-        return Ok(path);
-    }
-    resolve_automatic(&AUTOMATIC_TMUX, automatic_candidates)
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    resolve_executable(
+        OVERRIDE_ENV,
+        "tmux",
+        known_installer_candidates(home.as_deref()),
+        &AUTOMATIC_TMUX,
+    )
+    .map_err(Into::into)
 }
 
 pub fn tmux_command() -> Result<Command, TmuxExecutableError> {
     Ok(Command::new(tmux_executable()?))
 }
 
-fn resolve_automatic(
+/// Finds `program` the way [`tmux_executable`] finds tmux: a valid
+/// `override_env` wins outright and an invalid one never falls back; otherwise
+/// every absolute `PATH` entry, the platform's registered path files, then the
+/// caller's `installer` candidates, in that order, and the first executable
+/// found is remembered in `cache` until it stops being executable.
+pub fn resolve_executable(
+    override_env: &'static str,
+    program: &'static str,
+    installer: impl IntoIterator<Item = PathBuf>,
     cache: &Mutex<Option<PathBuf>>,
-    candidates: impl FnOnce() -> Vec<PathBuf>,
-) -> Result<PathBuf, TmuxExecutableError> {
-    let Ok(mut cached) = cache.lock() else {
-        return first_executable(candidates()).ok_or(TmuxExecutableError::NotFound);
-    };
-    if let Some(path) = cached.as_ref().filter(|path| executable(path)) {
-        return Ok(path.clone());
+) -> Result<PathBuf, ExecutableError> {
+    if let Some(path) = resolve_override(std::env::var_os(override_env), override_env)? {
+        return Ok(path);
     }
-
-    let path = first_executable(candidates()).ok_or(TmuxExecutableError::NotFound)?;
-    *cached = Some(path.clone());
-    Ok(path)
-}
-
-fn automatic_candidates() -> Vec<PathBuf> {
-    let path = std::env::var_os("PATH");
-    #[cfg(target_os = "macos")]
-    let registered = macos_registered_candidates();
-    #[cfg(not(target_os = "macos"))]
-    let registered = Vec::new();
-
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    automatic_candidates_from(
-        path.as_deref(),
-        registered,
-        known_installer_candidates(home.as_deref()),
+    let installer: Vec<PathBuf> = installer.into_iter().collect();
+    resolve_automatic(cache, || automatic_candidates(program, installer)).ok_or(
+        ExecutableError::NotFound {
+            program,
+            override_env,
+        },
     )
 }
 
+fn resolve_automatic(
+    cache: &Mutex<Option<PathBuf>>,
+    candidates: impl FnOnce() -> Vec<PathBuf>,
+) -> Option<PathBuf> {
+    let Ok(mut cached) = cache.lock() else {
+        return first_executable(candidates());
+    };
+    if let Some(path) = cached.as_ref().filter(|path| executable(path)) {
+        return Some(path.clone());
+    }
+
+    let path = first_executable(candidates())?;
+    *cached = Some(path.clone());
+    Some(path)
+}
+
+fn automatic_candidates(program: &str, installer: Vec<PathBuf>) -> Vec<PathBuf> {
+    let path = std::env::var_os("PATH");
+    #[cfg(target_os = "macos")]
+    let registered = macos_registered_candidates(program);
+    #[cfg(not(target_os = "macos"))]
+    let registered = Vec::new();
+
+    automatic_candidates_from(program, path.as_deref(), registered, installer)
+}
+
 fn automatic_candidates_from(
+    program: &str,
     path: Option<&std::ffi::OsStr>,
     registered: impl IntoIterator<Item = PathBuf>,
     installer: impl IntoIterator<Item = PathBuf>,
 ) -> Vec<PathBuf> {
-    let mut candidates = path.map(path_candidates).unwrap_or_default();
+    let mut candidates = path
+        .map(|path| path_candidates(path, program))
+        .unwrap_or_default();
     candidates.extend(registered);
     candidates.extend(installer);
     candidates
@@ -119,25 +169,28 @@ fn known_installer_candidates(home: Option<&Path>) -> Vec<PathBuf> {
     candidates
 }
 
-fn resolve_override(value: Option<OsString>) -> Result<Option<PathBuf>, TmuxExecutableError> {
+fn resolve_override(
+    value: Option<OsString>,
+    override_env: &'static str,
+) -> Result<Option<PathBuf>, ExecutableError> {
     let Some(value) = value else {
         return Ok(None);
     };
     let path = PathBuf::from(value);
     executable(&path)
         .then_some(Some(path))
-        .ok_or(TmuxExecutableError::InvalidOverride)
+        .ok_or(ExecutableError::InvalidOverride { override_env })
 }
 
-fn path_candidates(path: &std::ffi::OsStr) -> Vec<PathBuf> {
+fn path_candidates(path: &std::ffi::OsStr, program: &str) -> Vec<PathBuf> {
     std::env::split_paths(path)
         .filter(|directory| directory.is_absolute())
-        .map(|directory| directory.join("tmux"))
+        .map(|directory| directory.join(program))
         .collect()
 }
 
 #[cfg(target_os = "macos")]
-fn macos_registered_candidates() -> Vec<PathBuf> {
+fn macos_registered_candidates(program: &str) -> Vec<PathBuf> {
     let mut files = vec![PathBuf::from("/etc/paths")];
     if let Ok(entries) = fs::read_dir("/etc/paths.d") {
         let mut registered = entries
@@ -149,12 +202,12 @@ fn macos_registered_candidates() -> Vec<PathBuf> {
     }
     files
         .iter()
-        .flat_map(|file| path_file_candidates(file))
+        .flat_map(|file| path_file_candidates(file, program))
         .collect()
 }
 
 #[cfg(target_os = "macos")]
-fn path_file_candidates(file: &Path) -> Vec<PathBuf> {
+fn path_file_candidates(file: &Path, program: &str) -> Vec<PathBuf> {
     if !fs::metadata(file)
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= MAX_PATH_FILE_BYTES)
     {
@@ -169,7 +222,7 @@ fn path_file_candidates(file: &Path) -> Vec<PathBuf> {
         .filter(|line| !line.is_empty())
         .map(PathBuf::from)
         .filter(|directory| directory.is_absolute())
-        .map(|directory| directory.join("tmux"))
+        .map(|directory| directory.join(program))
         .collect()
 }
 
@@ -260,7 +313,7 @@ mod tests {
 
         assert_eq!(
             resolve_automatic(&cache, || vec![second.clone()]),
-            Ok(second.clone())
+            Some(second.clone())
         );
         assert_eq!(*cache.lock().unwrap(), Some(second));
     }
@@ -283,14 +336,55 @@ mod tests {
         let root = TestRoot::new();
         let overridden = root.executable("custom/tmux");
         assert_eq!(
-            resolve_override(Some(overridden.clone().into_os_string())),
+            resolve_override(Some(overridden.clone().into_os_string()), OVERRIDE_ENV),
             Ok(Some(overridden))
         );
         assert_eq!(
-            resolve_override(Some(OsString::from("relative/tmux"))),
-            Err(TmuxExecutableError::InvalidOverride)
+            resolve_override(Some(OsString::from("relative/tmux")), OVERRIDE_ENV),
+            Err(ExecutableError::InvalidOverride {
+                override_env: OVERRIDE_ENV
+            })
         );
-        assert_eq!(resolve_override(None), Ok(None));
+        assert_eq!(resolve_override(None, OVERRIDE_ENV), Ok(None));
+        assert_eq!(
+            TmuxExecutableError::from(ExecutableError::NotFound {
+                program: "tmux",
+                override_env: OVERRIDE_ENV
+            }),
+            TmuxExecutableError::NotFound
+        );
+    }
+
+    /// The generalized resolver behind `tmux_executable()`: an override wins
+    /// over every candidate, an invalid one never falls back, and a missing
+    /// program names itself and its variable.
+    #[test]
+    fn resolve_executable_honours_override_precedence_and_names_the_program() {
+        let root = TestRoot::new();
+        let installed = root.executable("installer/uv");
+        let cache = Mutex::new(None);
+        // No override: the installer candidate is found and cached.
+        assert_eq!(
+            resolve_executable("MUXFLOW_TEST_UV_UNSET", "uv", [installed.clone()], &cache),
+            Ok(installed.clone())
+        );
+        assert_eq!(*cache.lock().unwrap(), Some(installed));
+        let missing = resolve_executable(
+            "MUXFLOW_TEST_UV_UNSET",
+            "definitely-not-installed-xyz",
+            Vec::new(),
+            &Mutex::new(None),
+        )
+        .unwrap_err();
+        assert_eq!(
+            missing,
+            ExecutableError::NotFound {
+                program: "definitely-not-installed-xyz",
+                override_env: "MUXFLOW_TEST_UV_UNSET"
+            }
+        );
+        assert!(missing.to_string().contains("definitely-not-installed-xyz"));
+        assert!(missing.to_string().contains("MUXFLOW_TEST_UV_UNSET"));
     }
 
     #[test]
@@ -300,7 +394,7 @@ mod tests {
         let second = root.0.join("second");
         let encoded = std::env::join_paths([&first, Path::new("relative"), &second]).unwrap();
         assert_eq!(
-            path_candidates(&encoded),
+            path_candidates(&encoded, "tmux"),
             [first.join("tmux"), second.join("tmux")]
         );
     }
@@ -334,6 +428,7 @@ mod tests {
         let dock_path = OsString::from("/usr/bin:/bin:/usr/sbin:/sbin");
         assert_eq!(
             first_executable(automatic_candidates_from(
+                "tmux",
                 Some(&dock_path),
                 Vec::new(),
                 [fallback.clone()],
@@ -349,7 +444,7 @@ mod tests {
         let file = root.0.join("paths");
         fs::write(&file, "/one/bin\nrelative\n\n/two/bin\n").unwrap();
         assert_eq!(
-            path_file_candidates(&file),
+            path_file_candidates(&file, "tmux"),
             [
                 PathBuf::from("/one/bin/tmux"),
                 PathBuf::from("/two/bin/tmux")
@@ -357,6 +452,6 @@ mod tests {
         );
 
         fs::write(&file, vec![b'x'; MAX_PATH_FILE_BYTES as usize + 1]).unwrap();
-        assert!(path_file_candidates(&file).is_empty());
+        assert!(path_file_candidates(&file, "tmux").is_empty());
     }
 }

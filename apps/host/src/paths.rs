@@ -234,6 +234,36 @@ pub fn fallback_runtime_dir(candidates: &[PathBuf]) -> PathBuf {
         .unwrap_or_else(default_runtime_dir)
 }
 
+/// Where voice mode keeps the sidecar script, its log and the ~640 MB speech
+/// model (docs/mobile/voice-mode-plan.md §4.1): `MUXFLOW_VOICE_CACHE_DIR`, else
+/// `$XDG_CACHE_HOME/muxflow/voice`, else `~/.cache/muxflow/voice` (macOS
+/// `~/Library/Caches/dev.muxflow.desktop/voice`). Nothing here is created until
+/// the first voice request; `prepare_voice_cache_dir` makes it 0700.
+pub fn voice_cache_dir() -> PathBuf {
+    resolved_voice_cache_dir(environment)
+}
+
+fn resolved_voice_cache_dir(environment: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+    if let Some(path) = environment("MUXFLOW_VOICE_CACHE_DIR") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = environment("XDG_CACHE_HOME") {
+        return PathBuf::from(path).join("muxflow/voice");
+    }
+    let home = environment("HOME").map(PathBuf::from).unwrap_or_default();
+    if cfg!(target_os = "macos") {
+        home.join("Library/Caches/dev.muxflow.desktop/voice")
+    } else {
+        home.join(".cache/muxflow/voice")
+    }
+}
+
+pub fn prepare_voice_cache_dir(path: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
 /// A Unix socket bind must fit `sockaddr_un::sun_path` including its
 /// terminator: 104 bytes on Darwin, 108 on Linux. The default runtime
 /// directory is short, but `ADE_HOST_RUNTIME_DIR` and `XDG_RUNTIME_DIR` can
@@ -312,6 +342,39 @@ mod tests {
         let error = check_socket_path_length(&path).unwrap_err().to_string();
         assert!(error.contains(&SOCKET_PATH_BYTES.to_string()), "{error}");
         assert!(error.contains("ADE_HOST_RUNTIME_DIR"), "{error}");
+    }
+
+    #[test]
+    fn voice_cache_dir_prefers_the_override_then_xdg_then_home() {
+        let environment = |name: &str| match name {
+            "MUXFLOW_VOICE_CACHE_DIR" => Some(OsString::from("/pinned/voice")),
+            "XDG_CACHE_HOME" => Some(OsString::from("/xdg")),
+            "HOME" => Some(OsString::from("/home/someone")),
+            _ => None,
+        };
+        assert_eq!(
+            resolved_voice_cache_dir(environment),
+            PathBuf::from("/pinned/voice")
+        );
+        let xdg = |name: &str| match name {
+            "XDG_CACHE_HOME" => Some(OsString::from("/xdg")),
+            "HOME" => Some(OsString::from("/home/someone")),
+            _ => None,
+        };
+        assert_eq!(
+            resolved_voice_cache_dir(xdg),
+            PathBuf::from("/xdg/muxflow/voice")
+        );
+        let home_only = |name: &str| match name {
+            "HOME" => Some(OsString::from("/home/someone")),
+            _ => None,
+        };
+        let expected = if cfg!(target_os = "macos") {
+            "/home/someone/Library/Caches/dev.muxflow.desktop/voice"
+        } else {
+            "/home/someone/.cache/muxflow/voice"
+        };
+        assert_eq!(resolved_voice_cache_dir(home_only), PathBuf::from(expected));
     }
 
     #[test]
