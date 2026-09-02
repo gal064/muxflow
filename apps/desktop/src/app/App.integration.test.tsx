@@ -9,6 +9,8 @@ import { App } from "./App";
 const invokeMock = vi.hoisted(() => vi.fn());
 const listenMock = vi.hoisted(() => vi.fn(async () => () => undefined));
 const closeRequestedMock = vi.hoisted(() => vi.fn(async () => () => undefined));
+/** The host row anchors its menu under itself; the test renderer has no box to measure. */
+const hostRowClick = { currentTarget: { getBoundingClientRect: () => ({ left: 0, bottom: 0 }) } };
 
 vi.mock("@tauri-apps/api/core", () => ({
   Channel: class { onmessage?: (value: ArrayBuffer) => void },
@@ -91,9 +93,11 @@ describe("App orchestration", () => {
     let renderer: ReactTestRenderer;
     await act(async () => { renderer = create(<App />); });
     const openSettings = async () => {
+      // The host row opens the host menu; settings is its last item.
       const hostRow = renderer.root.findAllByType("button")
         .find((button) => String(button.props["aria-label"] ?? "").startsWith("Host "))!;
-      await act(async () => { hostRow.props.onClick(); });
+      await act(async () => { hostRow.props.onClick(hostRowClick); });
+      await act(async () => { renderer.root.findByProps({ "data-menu-item": "settings" }).props.onClick(); });
     };
     const sshTarget = () => renderer.root.findAllByType("input")
       .find((input) => input.props.placeholder === "Host or config alias")!;
@@ -154,7 +158,8 @@ describe("App orchestration", () => {
     const hostRow = renderer!.root.findAllByType("button")
       .find((button) => String(button.props["aria-label"] ?? "").startsWith("Host "));
     expect(hostRow).toBeDefined();
-    await act(async () => { hostRow!.props.onClick(); });
+    await act(async () => { hostRow!.props.onClick(hostRowClick); });
+    await act(async () => { renderer!.root.findByProps({ "data-menu-item": "settings" }).props.onClick(); });
     const connect = renderer!.root.findAllByType("button")
       .find((button) => button.props.children === "Connect");
     expect(connect).toBeDefined();

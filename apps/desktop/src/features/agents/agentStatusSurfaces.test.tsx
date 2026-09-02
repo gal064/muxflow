@@ -5,9 +5,10 @@ import stylesCss from "../../styles.css?raw";
 import type { Session, TmuxSnapshot } from "../../app/types";
 import { combineWorkspaceTabs } from "../shell/model";
 import { TabStrip } from "../workspaces/TabStrip";
-import { WorkspaceSidebar } from "../workspaces/WorkspaceSidebar";
+import { WorkspaceSidebar, type SidebarHost } from "../workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../workspaces/WorkspaceSwitcher";
-import { workspaceRows } from "../workspaces/workspaceRows";
+import type { MergedWorkspaceRow } from "../workspaces/mergedWorkspaceRows";
+import { workspaceRows, type WorkspaceRowModel } from "../workspaces/workspaceRows";
 import { buildAgentRows, unreadCount, jumpTarget } from "./agentsList";
 import { deriveAgentRollups } from "./selectors";
 import { agent } from "./testFixtures";
@@ -24,12 +25,20 @@ const rowsFor = (agents: readonly AgentRecord[]) => buildAgentRows(
   "status",
 );
 
+const remoteHost: SidebarHost = {
+  profileId: "remote", letter: "R", label: "remote-linux", transport: "ssh", phase: "connected", canMutate: true,
+  scope: commandScope, active: true, shown: true, latencyMs: 41,
+};
+const mergedRow = (row: WorkspaceRowModel): MergedWorkspaceRow => ({
+  ...row, key: `remote\0${row.session.id}`, hostProfileId: "remote", letter: "", scope: commandScope, canMutate: true,
+});
+
 const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
-  adapters={[]} agents={[]} agentSort="status" agentsRatio={0.4} canMutate commandScope={commandScope} compactWorkspaces={false} hostLabel="remote-linux"
-  latencyMs={41} maxWidth={426} onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop}
+  adapters={[]} agents={[]} agentSort="status" agentsRatio={0.4} compactWorkspaces={false} hosts={[remoteHost]}
+  maxWidth={426} onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop}
   onRenameAgent={noop} onResumeAgent={noop} onReviewHooks={noop} onSelectAgent={noop}
-  onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
-  phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
+  onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onToggleShown={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
+  rows={[]} stateGlyphs={false} width={240}
   {...overrides}
 />);
 
@@ -166,7 +175,7 @@ describe("one derivation, three surfaces", () => {
       />),
       renderToStaticMarkup(<WorkspaceSwitcher
         onClose={noop} onSelect={noop} stateGlyphs
-        rows={[{ session, active: true, attention: "blocked", unread: 1, working: false, pinned: false, agents: [], agentOverflow: 0 }]}
+        rows={[mergedRow({ session, active: true, attention: "blocked", unread: 1, working: false, pinned: false, agents: [], agentOverflow: 0 })]}
       />),
     ];
     for (const html of surfaces) expect(html).toMatch(/class="(state|tab)-dot [a-z]+ glyphs"/);
@@ -178,7 +187,7 @@ describe("one derivation, three surfaces", () => {
     // state while every other surface said it as a process.
     const switcherRow = (attention: "working" | "blocked") => renderToStaticMarkup(<WorkspaceSwitcher
       onClose={noop} onSelect={noop} stateGlyphs={false}
-      rows={[{ session, active: true, attention, unread: 0, working: attention === "working", pinned: false, agents: [], agentOverflow: 0 }]}
+      rows={[mergedRow({ session, active: true, attention, unread: 0, working: attention === "working", pinned: false, agents: [], agentOverflow: 0 })]}
     />);
     expect(switcherRow("working")).toContain('<span aria-label="Agent working" class="spinner" role="img"></span>');
     expect(switcherRow("working")).not.toContain("state-dot working");
@@ -245,7 +254,7 @@ describe("idle shows nothing, on every surface that draws state", () => {
     // The workspace switcher's rows share the same dot and the same rule.
     const switcher = renderToStaticMarkup(<WorkspaceSwitcher
       onClose={noop} onSelect={noop} stateGlyphs={false}
-      rows={[{ session, active: true, attention: "idle", unread: 0, working: false, pinned: false, agents: [], agentOverflow: 0 }]}
+      rows={[mergedRow({ session, active: true, attention: "idle", unread: 0, working: false, pinned: false, agents: [], agentOverflow: 0 })]}
     />);
     expect(switcher).toContain('<span aria-hidden="true" class="state-dot idle"></span>');
   });

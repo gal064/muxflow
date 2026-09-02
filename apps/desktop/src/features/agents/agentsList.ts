@@ -50,6 +50,8 @@ export interface AgentLocation {
   workspaceName: string;
   /** User-facing host identity, needed when workspace names collide. */
   hostLabel?: string;
+  /** The host mark drawn before the name; absent or "" draws none. */
+  hostLetter?: string;
   tabIndex?: number;
   /**
    * Whether this agent's workspace and tab are pinned, as the host reports
