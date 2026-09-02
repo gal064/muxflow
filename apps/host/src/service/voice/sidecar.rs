@@ -164,7 +164,6 @@ impl SidecarChild {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn id(&self) -> Option<u32> {
         self.child.id()
     }
