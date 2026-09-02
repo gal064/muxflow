@@ -26,6 +26,7 @@ import { isTerminalFileLinkActivation, terminalFileLinkCellRange, terminalFileLi
 import type { Platform } from "../../commands/registry";
 import { installOsc52ClipboardWrite } from "./osc52Clipboard";
 import { captureTerminalSelection, type TerminalSelectionSnapshot } from "./terminalSelection";
+import { terminalWebLinks } from "./terminalWebLinks";
 import {
   captureTerminalViewport,
   resizeTerminalPreservingViewport,
@@ -1255,19 +1256,16 @@ export class XtermRenderer implements TerminalRenderer {
     const line = bufferLine?.translateToString(true);
     if (!line || !bufferLine) return undefined;
     const links: ILink[] = [];
-    const pattern = /https?:\/\/[^\s<>"']+/gu;
-    for (const match of line.matchAll(pattern)) {
-      const text = match[0];
-      const start = (match.index ?? 0) + 1;
+    for (const link of terminalWebLinks(line)) {
       links.push({
-        text,
+        text: link.text,
         range: {
-          start: { x: start, y: bufferLineNumber },
+          start: { x: link.start + 1, y: bufferLineNumber },
           // xterm's range is inclusive at both ends; one past the text
           // would make the cell after the URL a live link.
-          end: { x: start + text.length - 1, y: bufferLineNumber },
+          end: { x: link.end, y: bufferLineNumber },
         },
-        activate: (event) => this.#activateLink(event, text),
+        activate: (event) => this.#activateLink(event, link.text),
       });
     }
     if (this.#options.onOpenFilePath) {
