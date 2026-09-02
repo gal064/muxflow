@@ -162,7 +162,7 @@ export class VoiceController {
     this.disposed = true;
     this.focused = false;
     this.wantRegistered = false;
-    this.disarm();
+    this.disarm(true);
     this.stopRefreshTimer();
     this.unsubscribePlayer();
     const store = this.options.store.getState();
@@ -465,11 +465,21 @@ export class VoiceController {
    * Nobody is listening: an armed recorder holds an open (empty) file in the
    * cache, so release it once idle. The next focus arms again.
    */
-  private disarm(): void {
+  private disarm(disposing = false): void {
+    const { recorder, files } = this.options;
+    // Disposed mid-hold (End, disconnect): endUtterance() will not run, so the
+    // live recording is stopped here, or the microphone stays hot.
+    if (disposing && this.options.store.getState().sessions[this.agentId]?.phase === "recording") {
+      void (this.arming ?? Promise.resolve()).then(() => recorder.stop()).then(({ uri }) => {
+        if (uri) files.delete(uri);
+        recorder.release();
+      }).catch((error: unknown) => this.log(`recorder.stop.failed ${describe(error)}`));
+      return;
+    }
     void (this.arming ?? Promise.resolve()).then(() => {
       if (this.focused) return;
       const phase = this.options.store.getState().sessions[this.agentId]?.phase;
-      if (phase === undefined || phase === "idle") this.options.recorder.release();
+      if (phase === undefined || phase === "idle") recorder.release();
     });
   }
 
@@ -564,6 +574,8 @@ export class VoiceController {
   private setPhaseIfAlive(phase: "idle"): void {
     if (this.disposed) return;
     this.options.store.getState().setPhase(this.agentId, phase);
+    // The screen may have been left while the host was transcribing: the recorder re-armed then is nobody's now.
+    if (!this.focused) this.disarm();
   }
 
   private find(messageId: string): VoiceMessage | undefined {

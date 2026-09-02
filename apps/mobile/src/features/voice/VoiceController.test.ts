@@ -625,3 +625,46 @@ describe("VoiceController recording hygiene (integration QA)", () => {
     expect(h.recorder.released).toBe(3);
   });
 });
+
+describe("VoiceController recorder release races (QA fix review)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("a session disposed mid-hold stops the live recording, deletes it and releases the recorder", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    expect(h.recorder.recording).toBe(true);
+    h.controller.dispose();
+    await settle();
+    expect(h.recorder.recording).toBe(false);
+    expect(h.recorder.released).toBe(1);
+    expect(h.files.deleted).toContain("file:///cache/rec-1.m4a");
+    await h.controller.endUtterance(); // the lift after End is a no-op
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+  });
+
+  it("leaving during the transcription releases the recorder once the utterance settles", async () => {
+    const h = harness();
+    let answer: ((response: ReturnType<typeof transcriptResponse>) => void) | undefined;
+    h.connection.answer(Operation.VOICE_TRANSCRIBE, () => new Promise((resolve) => { answer = resolve; }));
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    const released = h.controller.endUtterance();
+    await settle();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("transcribing");
+    expect(h.recorder.prepared).toBe(2); // re-armed while still focused
+    h.controller.blur();
+    await settle();
+    expect(h.recorder.released).toBe(0); // not from under a transcription
+    answer!(transcriptResponse("hello"));
+    await released;
+    await settle();
+    expect(h.recorder.released).toBe(1);
+    expect(h.recorder.prepared).toBe(0);
+  });
+});
