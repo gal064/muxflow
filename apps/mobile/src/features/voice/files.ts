@@ -5,12 +5,9 @@
 
 import { Directory, File, Paths } from "expo-file-system";
 
-export interface VoiceFiles {
-  read(uri: string): Promise<Uint8Array>;
-  /** Writes the reply MP3 for `agentId`, replacing any previous one, and returns its uri. */
-  writeReply(agentId: string, bytes: Uint8Array): string;
-  delete(uri: string): void;
-}
+import type { VoiceFiles } from "./audioPorts";
+
+export type { VoiceFiles } from "./audioPorts";
 
 export function createExpoFiles(): VoiceFiles {
   let directory: Directory | undefined;

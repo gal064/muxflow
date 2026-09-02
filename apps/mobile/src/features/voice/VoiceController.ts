@@ -10,9 +10,7 @@ import type { VoiceSpeech } from "../../protocol/gen/envelope_pb";
 import { newOperationId, terminalInput, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "../../protocol/requests";
 import { utf8Encode } from "../terminal/bytes";
 import { CR } from "../terminal/chips";
-import type { VoiceFiles } from "./files";
-import type { PlayerStatus, VoicePlayer } from "./player";
-import { RECORDING_MIME, type VoiceRecorder } from "./recorder";
+import { RECORDING_MIME, type PlayerStatus, type VoiceFiles, type VoicePlayer, type VoiceRecorder } from "./audioPorts";
 import { describeVoiceError, STATUS_CHANGING_CODES } from "./voiceErrors";
 import { latestReply, type VoiceMessage, type VoiceStore } from "./voiceStore";
 

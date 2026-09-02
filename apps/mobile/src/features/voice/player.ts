@@ -4,25 +4,9 @@
 
 import { createAudioPlayer, type AudioPlayer, type AudioStatus } from "expo-audio";
 
-export interface PlayerStatus {
-  positionMs: number;
-  durationMs: number;
-  playing: boolean;
-  /** The current source reached its end. */
-  finished: boolean;
-}
+import type { PlayerStatus, VoicePlayer } from "./audioPorts";
 
-export interface VoicePlayer {
-  /** Loads `uri` (replacing any previous source) without playing it. */
-  load(uri: string): void;
-  play(): void;
-  pause(): void;
-  /** Pauses and rewinds. */
-  stop(): void;
-  seek(positionMs: number): void;
-  onStatus(listener: (status: PlayerStatus) => void): () => void;
-  release(): void;
-}
+export type { PlayerStatus, VoicePlayer } from "./audioPorts";
 
 /** Position updates at 4 Hz: enough for a thin bar, far from a re-render storm (§2b). */
 export const PLAYER_UPDATE_INTERVAL_MS = 250;
