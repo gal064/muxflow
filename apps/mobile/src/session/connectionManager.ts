@@ -13,6 +13,7 @@ import { hostsStore, type SavedHost } from "../store/hostsStore";
 import { createSessionStore, sessionStore, type AgentTransition, type ConnectionState, type SessionStore } from "../store/sessionStore";
 import { terminalRegistry } from "../features/terminal/terminalRegistry";
 import { filesStore } from "../features/files/filesStore";
+import { voiceRegistry } from "../features/voice/voiceRegistry";
 import { log } from "./log";
 
 export type Lane = "control" | "bulk";
@@ -74,7 +75,9 @@ export function toast(message: string): void {
  */
 export async function connectHost(host: SavedHost): Promise<void> {
   if (!factory) throw new Error("no transport factory: call setTransportFactory first");
-  await disconnectHost();
+  // A reconnect to the same host keeps the voice sessions: their host-side
+  // registrations are per connection and are re-sent on `onConnected`.
+  await disconnectHost({ keepVoiceSessions: controlHost?.id === host.id });
   const dial = factory;
   controlHost = host;
   const connection = new HostConnection({
@@ -90,12 +93,15 @@ export async function connectHost(host: SavedHost): Promise<void> {
       // A new control epoch invalidates the bulk binding (§11.1).
       dropBulk();
       terminalRegistry.onConnected();
+      voiceRegistry.onConnected();
     },
     onAgentTransition: (transition) => {
       for (const listener of listeners) listener(transition);
     },
     // §7.4 routes ACTIVE_ROOT / directory / file-stream events to the files feature.
     onFileEvent: (event) => filesStore.getState().applyFileEvent(event),
+    // VOICE_PROVISION / VOICE_REPLY (voice-mode-plan.md §3) go to whichever voice session they name.
+    onVoiceEvent: (event) => voiceRegistry.onVoiceEvent(event),
     onToast: toast,
     log,
   });
@@ -151,13 +157,15 @@ export function openBulkConnection(): Promise<HostConnection> {
   return ready;
 }
 
-export async function disconnectHost(): Promise<void> {
+export async function disconnectHost({ keepVoiceSessions = false }: { keepVoiceSessions?: boolean } = {}): Promise<void> {
   dropBulk();
   const connection = control;
   control = null;
   controlHost = null;
   connection?.disconnect();
   filesStore.getState().clearAll();
+  // Voice sessions are registered per connection on the host; without one (or on another host) they are dead weight.
+  if (!keepVoiceSessions) voiceRegistry.disposeAll();
   sessionStore.getState().clearHostState();
   sessionStore.getState().setConnection({ state: "idle", attempt: 0, message: undefined, host: undefined });
 }
