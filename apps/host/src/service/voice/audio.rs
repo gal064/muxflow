@@ -8,6 +8,7 @@
 use std::io::Cursor;
 
 use symphonia::core::{
+    audio::{Audio, GenericAudioBufferRef},
     codecs::{CodecParameters, audio::AudioDecoderOptions},
     errors::Error,
     formats::{FormatOptions, TrackType, probe::Hint},
@@ -89,7 +90,6 @@ pub(crate) fn decode_to_mono_f32(bytes: Vec<u8>, mime: &str) -> Result<PcmMono, 
         sample_rate: 0,
         samples: Vec::new(),
     };
-    let mut interleaved = Vec::new();
     // Symphonia lets a caller skip a malformed packet and continue; a stream
     // that does nothing but produce them is not worth continuing on.
     let mut skipped = 0_u32;
@@ -117,18 +117,33 @@ pub(crate) fn decode_to_mono_f32(bytes: Vec<u8>, mime: &str) -> Result<PcmMono, 
             }
             Err(error) => return Err(AudioError::Undecodable(format!("decode: {error}"))),
         };
-        let spec = decoded.spec();
-        let channels = spec.channels().count().max(1);
+        // The AAC decoder always yields f32 planes. Taking that variant and
+        // averaging the planes directly, rather than through symphonia's
+        // generic interleave-and-convert path, keeps the per-sample-format
+        // conversion matrix out of the binary (docs/mobile/voice-mode-plan.md
+        // §2b size budget).
+        let GenericAudioBufferRef::F32(buffer) = decoded else {
+            return Err(AudioError::Undecodable(
+                "decoder produced a non-f32 sample format".into(),
+            ));
+        };
         if pcm.sample_rate == 0 {
-            pcm.sample_rate = spec.rate();
+            pcm.sample_rate = buffer.spec().rate();
         }
-        interleaved.clear();
-        decoded.copy_to_vec_interleaved::<f32>(&mut interleaved);
-        pcm.samples.extend(
-            interleaved
-                .chunks(channels)
-                .map(|frame| frame.iter().sum::<f32>() / channels as f32),
-        );
+        let planes: Vec<&[f32]> = (0..buffer.num_planes())
+            .filter_map(|index| buffer.plane(index))
+            .collect();
+        if planes.is_empty() {
+            continue;
+        }
+        let scale = 1.0 / planes.len() as f32;
+        pcm.samples.extend((0..buffer.frames()).map(|frame| {
+            planes
+                .iter()
+                .map(|plane| plane.get(frame).copied().unwrap_or(0.0))
+                .sum::<f32>()
+                * scale
+        }));
         if pcm.duration_millis() > MAX_AUDIO_MILLIS {
             return Err(AudioError::TooLong);
         }

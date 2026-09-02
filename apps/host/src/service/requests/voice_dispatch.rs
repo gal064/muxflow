@@ -50,38 +50,31 @@ async fn handle_inner(
             false,
         );
     }
-    let outcome = dispatch(operation, &request, connection_id, cancellation).await;
+    let operation_id = request.operation_id.clone();
+    let outcome = dispatch(operation, request, connection_id, cancellation).await;
     // The flag is checked again before answering: a Cancel that arrived while
     // the sidecar was working must not be answered with a stale success.
     if cancellation.load(Ordering::Acquire) {
-        return voice_error(
-            &request.operation_id,
-            "cancelled",
-            "request was cancelled",
-            false,
-        );
+        return voice_error(&operation_id, "cancelled", "request was cancelled", false);
     }
     match outcome {
         Ok(voice) => v1::Response {
             ok: true,
             voice: Some(v1::VoiceResponse {
-                operation_id: request.operation_id,
+                operation_id,
                 ..voice
             }),
             ..Default::default()
         },
-        Err(error) => voice_error(
-            &request.operation_id,
-            error.code,
-            &error.message,
-            error.retryable,
-        ),
+        Err(error) => voice_error(&operation_id, error.code, &error.message, error.retryable),
     }
 }
 
+/// Takes the request by value so the utterance (up to 8 MiB) moves into the
+/// service instead of being copied.
 async fn dispatch(
     operation: v1::Operation,
-    request: &v1::VoiceRequest,
+    request: v1::VoiceRequest,
     connection_id: u64,
     cancellation: &AtomicBool,
 ) -> Result<v1::VoiceResponse, VoiceError> {
@@ -122,7 +115,7 @@ async fn dispatch(
         v1::Operation::VoiceTranscribe => {
             let transcript = service
                 .transcribe(
-                    request.audio.clone(),
+                    request.audio,
                     &request.audio_mime,
                     &request.language_hint,
                     cancellation,
@@ -134,12 +127,8 @@ async fn dispatch(
             })
         }
         v1::Operation::VoiceSpeak => {
-            let provider =
-                v1::VoiceProvider::try_from(request.provider).map_err(|_| VoiceError {
-                    code: "voice_provider_unsupported",
-                    message: "unknown voice provider".into(),
-                    retryable: false,
-                })?;
+            let provider = v1::VoiceProvider::try_from(request.provider)
+                .map_err(|_| VoiceError::unsupported_provider())?;
             let speech = service
                 .speak(&request.text, provider, &request.voice, cancellation)
                 .await?;
