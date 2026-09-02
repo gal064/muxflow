@@ -3,7 +3,7 @@ import type { AgentClient } from "./api";
 import { compareAgentGenerations, generationIsAfter, zeroGeneration } from "./generation";
 import { emitNativeAgentNotification, decideAgentNotification } from "./notifications";
 import { agentsForScope, agentsMatchingFocusedPane, deriveAgentRollups } from "./selectors";
-import { agentReducer, initialAgentState, initialHostAgentState, wireEventHost } from "./state";
+import { agentReducer, initialAgentState, initialHostAgentState, wireEventHost, type AgentAction } from "./state";
 import { playAgentSound, type SoundInstrumentation } from "./sound";
 import { AgentRuntimeMemory } from "./runtimeMemory";
 import { agentHostIdentity } from "./types";
@@ -57,6 +57,12 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
   const [topologyAuthorities, setTopologyAuthorities] = useState<Readonly<Record<string, AgentTopologyAuthority>>>({});
   const stateRef = useRef(state);
   stateRef.current = state;
+  // `accept` reduces against the ref before React renders, so every dispatch
+  // has to move the ref too or a live event lands on a slice already gone.
+  const apply = useCallback((action: AgentAction) => {
+    stateRef.current = agentReducer(stateRef.current, action);
+    dispatch(action);
+  }, []);
   const optionsRef = useRef(options);
   optionsRef.current = options;
   const runtimeMemory = useRef(new AgentRuntimeMemory());
@@ -103,8 +109,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     const previousState = stateRef.current;
     const nextState = agentReducer(previousState, { type: "wire", event });
     if (nextState === previousState) return;
-    stateRef.current = nextState;
-    dispatch({ type: "wire", event });
+    apply({ type: "wire", event });
     const previousHost = previousState.byHost[hostProfileId];
     const nextHost = nextState.byHost[hostProfileId];
     if (event.kind === "snapshot") {
@@ -146,7 +151,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     const previousRecords = previousScope?.records ?? previousHost?.byId ?? {};
     if (event.kind === "upsert") processTransition(previousRecords[event.record.id], event.record, Boolean(event.replayed));
     runtimeMemory.current.commitScope(key, previousScope?.watermark ?? zeroGeneration, nextHost.byId);
-  }, [processTransition]);
+  }, [apply, processTransition]);
 
   useEffect(() => options.client.subscribe(accept), [accept, options.client]);
 
@@ -159,7 +164,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
 
   const scopeKeys = options.scopes.map((entry) => requestScopeKey(entry.scope)).join("\n");
   const shownKey = options.shownHostIds.join("\n");
-  const scopes = useMemo(() => optionsRef.current.scopes, [scopeKeys]);
+  const scopes = useMemo(() => options.scopes, [scopeKeys]);
 
   useEffect(() => {
     const { client, scopes, shownHostIds } = optionsRef.current;
@@ -171,13 +176,13 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
       request.cancel();
       inFlight.delete(hostProfileId);
       if (!requestKeys.has(hostProfileId) && shownHostIds.includes(hostProfileId)) {
-        dispatch({ type: "disconnect", hostProfileId });
+        apply({ type: "disconnect", hostProfileId });
         setTopologyAuthorities((current) => without(current, hostProfileId));
       }
     }
     for (const hostProfileId of Object.keys(stateRef.current.byHost)) {
       if (shownHostIds.includes(hostProfileId)) continue;
-      dispatch({ type: "remove", hostProfileId });
+      apply({ type: "remove", hostProfileId });
       setTopologyAuthorities((current) => without(current, hostProfileId));
     }
     for (const { scope, topologyWindowIds } of wanted) {
@@ -193,7 +198,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
         if (!cancelled) optionsRef.current.onStatus(`Agent snapshot unavailable for ${scope.hostProfileId}: ${String(error)}`);
       });
     }
-  }, [accept, options.client, resnapshot, scopeKeys, shownKey]);
+  }, [accept, apply, options.client, resnapshot, scopeKeys, shownKey]);
   useEffect(() => () => {
     for (const request of requests.current.values()) request.cancel();
     requests.current.clear();
@@ -205,6 +210,8 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
   );
   const focusHost = state.byHost[options.focus.hostProfileId];
   const projection = useMemo(() => {
+    // Mutated during render on purpose: a discarded render can only evict
+    // entries, never serve a stale one, because each is keyed by its slice.
     const cache = projections.current;
     const used = new Set<string>();
     const project = (hostProfileId: string, serverIdentity: string | undefined): AgentHostProjection => {
@@ -239,7 +246,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
       if (pendingSeen.current.has(key)) continue;
       pendingSeen.current.add(key);
       void options.client.markSeen(scope, current.agentId, current.attentionGeneration).then((accepted) => {
-        dispatch({
+        apply({
           type: "seenAck",
           ...current,
           attentionSeenAt: accepted?.attentionSeenAt ?? Date.now(),
@@ -251,7 +258,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
         pendingSeen.current.delete(key);
       });
     }
-  }, [agents, focusScope, options.client, options.focus.appFocused, options.focus.automaticSeen, options.focus.paneId, options.focus.terminalVisible]);
+  }, [agents, apply, focusScope, options.client, options.focus.appFocused, options.focus.automaticSeen, options.focus.paneId, options.focus.terminalVisible]);
 
   const launch = useCallback((request: AgentLaunchRequest) => {
     const scope = activeScope(optionsRef.current);
