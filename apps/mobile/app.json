@@ -25,6 +25,12 @@
       ],
       "expo-router",
       "expo-dev-client",
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": false
+        }
+      ],
       "expo-secure-store",
       [
         "expo-notifications",
