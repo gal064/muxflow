@@ -31,16 +31,22 @@ export class RecordingPermissionDenied extends Error {
 export function createExpoRecorder(): VoiceRecorder {
   let recorder: AudioRecorder | undefined;
   let prepared = false;
+  let preparing: Promise<void> | undefined;
   let startedAt = 0;
+  const prepareNow = async (): Promise<void> => {
+    const permission = await requestRecordingPermissionsAsync();
+    if (!permission.granted) throw new RecordingPermissionDenied();
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, interruptionMode: "duckOthers" });
+    recorder ??= new AudioModule.AudioRecorder(RECORDING_PRESET);
+    await recorder.prepareToRecordAsync();
+    prepared = true;
+  };
   return {
-    async prepare() {
-      if (prepared) return;
-      const permission = await requestRecordingPermissionsAsync();
-      if (!permission.granted) throw new RecordingPermissionDenied();
-      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, interruptionMode: "duckOthers" });
-      recorder ??= new AudioModule.AudioRecorder(RECORDING_PRESET);
-      await recorder.prepareToRecordAsync();
-      prepared = true;
+    prepare() {
+      if (prepared) return Promise.resolve();
+      // Two callers (a release re-arm and a re-focus) share one native prepare.
+      preparing ??= prepareNow().finally(() => { preparing = undefined; });
+      return preparing;
     },
     record() {
       if (!recorder || !prepared) throw new Error("recorder not prepared");

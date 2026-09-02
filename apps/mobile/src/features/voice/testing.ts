@@ -115,7 +115,6 @@ export class FakePlayer implements VoicePlayer {
 export class FakeFiles implements VoiceFiles {
   readonly files = new Map<string, Uint8Array>();
   readonly deleted: string[] = [];
-  private writes = 0;
   constructor() {
     this.files.set("file:///cache/rec-1.m4a", new TextEncoder().encode("aac-bytes"));
   }
@@ -125,8 +124,7 @@ export class FakeFiles implements VoiceFiles {
     return bytes;
   }
   writeReply(agentId: string, bytes: Uint8Array): string {
-    this.writes += 1;
-    const uri = `file:///cache/voice/${agentId}-${this.writes}.mp3`;
+    const uri = `file:///cache/voice/${agentId}.mp3`;
     this.files.set(uri, bytes);
     return uri;
   }

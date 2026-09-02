@@ -42,12 +42,17 @@ describe("VoiceRegistry", () => {
     await Promise.resolve();
     // Only the focused-at-least-once session is registered; b never opened a screen.
     expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.agentId)).toEqual(["a", "a"]);
+    // b opens its screen too, so both are registered; End on a clears the whole
+    // connection's registrations, so b registers again right after.
+    h.registry.get("b")!.focus();
+    await Promise.resolve();
     await h.registry.end("a");
-    expect(h.connection.of(Operation.VOICE_SESSION).at(-1)?.voice?.agentId).toBe("");
+    await Promise.resolve();
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.agentId)).toEqual(["a", "a", "b", "", "b"]);
     expect(h.registry.get("a")).toBeUndefined();
     h.registry.disposeAll();
     expect(h.registry.get("b")).toBeUndefined();
     expect(h.store.getState().sessions).toEqual({});
-    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(3);
+    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(5);
   });
 });

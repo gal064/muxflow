@@ -35,6 +35,9 @@ export class VoiceRegistry {
     if (!controller) return;
     this.controllers.delete(agentId);
     await controller.endSession();
+    // `voiceSession("")` clears every registration on the connection, not one
+    // agent's (plan §4.3), so the sessions that remain register again.
+    for (const survivor of this.controllers.values()) survivor.reregister();
   }
 
   /** EVENT_KIND_VOICE_PROVISION → host status; EVENT_KIND_VOICE_REPLY → that agent's session. */

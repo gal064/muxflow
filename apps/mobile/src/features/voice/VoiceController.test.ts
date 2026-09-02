@@ -1,7 +1,7 @@
 import { create } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HostError } from "../../protocol/HostConnection";
-import { Operation, VoiceReadiness, VoiceResponseSchema, VoiceSpeechSchema, type VoiceSpeech } from "../../protocol/gen/envelope_pb";
+import { Operation, ResponseSchema, VoiceReadiness, VoiceResponseSchema, VoiceSpeechSchema, type VoiceSpeech } from "../../protocol/gen/envelope_pb";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, speechResponse, statusResponse, transcriptResponse } from "./testing";
 import { MIN_UTTERANCE_MS, SESSION_REFRESH_MS, VoiceController } from "./VoiceController";
 import { createVoiceStore, latestReply } from "./voiceStore";
@@ -58,6 +58,7 @@ describe("VoiceController", () => {
     // Hold / release → transcript → TERMINAL_INPUT of utf8(text) + CR.
     h.controller.beginUtterance();
     expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recording");
+    await settle();
     expect(h.recorder.recording).toBe(true);
     await h.controller.endUtterance();
     const transcribe = h.connection.of(Operation.VOICE_TRANSCRIBE);
@@ -80,21 +81,21 @@ describe("VoiceController", () => {
     h.controller.onVoiceReply(reply("agent-a", "Here are the files."));
     let latest = latestReply(h.store.getState().sessions["agent-a"])!;
     expect(latest.text).toBe("Here are the files.");
-    expect(latest.fileUri).toBe("file:///cache/voice/agent-a-1.mp3");
+    expect(latest.fileUri).toBe("file:///cache/voice/agent-a.mp3");
     expect(latest.played).toBe(true);
-    expect(h.player.loaded).toBe("file:///cache/voice/agent-a-1.mp3");
+    expect(h.player.loaded).toBe("file:///cache/voice/agent-a.mp3");
     expect(h.player.calls.filter((c) => c === "play")).toHaveLength(1);
     expect(h.store.getState().playback).toMatchObject({ messageId: latest.id, state: "playing" });
 
     // Background: the second reply replaces the first file, stops its playback, and stays unplayed.
     h.setForeground(false);
     h.controller.onVoiceReply(reply("agent-a", "Second answer."));
-    expect(h.files.deleted).toContain("file:///cache/voice/agent-a-1.mp3");
+    expect(h.files.deleted).toContain("file:///cache/voice/agent-a.mp3");
     expect(h.player.calls.at(-1)).toBe("stop");
     latest = latestReply(h.store.getState().sessions["agent-a"])!;
     expect(latest.text).toBe("Second answer.");
     expect(latest.played).toBe(false);
-    expect(latest.fileUri).toBe("file:///cache/voice/agent-a-2.mp3");
+    expect(latest.fileUri).toBe("file:///cache/voice/agent-a.mp3");
     expect(h.store.getState().playback).toBeUndefined();
     const first = h.store.getState().sessions["agent-a"]!.messages[1]!;
     expect(first.fileUri).toBeUndefined(); // older reply stays as text
@@ -102,13 +103,13 @@ describe("VoiceController", () => {
     // Foreground again with the screen still on top: the unplayed reply plays.
     h.setForeground(true);
     h.controller.onAppActive();
-    expect(h.player.loaded).toBe("file:///cache/voice/agent-a-2.mp3");
+    expect(h.player.loaded).toBe("file:///cache/voice/agent-a.mp3");
     expect(latestReply(h.store.getState().sessions["agent-a"])!.played).toBe(true);
 
     // End session: host registration cleared with "", file deleted, session forgotten.
     await h.controller.endSession();
     expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.agentId)).toEqual(["agent-a", ""]);
-    expect(h.files.deleted).toContain("file:///cache/voice/agent-a-2.mp3");
+    expect(h.files.deleted).toContain("file:///cache/voice/agent-a.mp3");
     expect(h.store.getState().sessions["agent-a"]).toBeUndefined();
     expect(h.store.getState().playback).toBeUndefined();
   });
@@ -186,10 +187,10 @@ describe("VoiceController", () => {
     // Only the focused one auto-played; B's stays unplayed with its own file.
     expect(latestReply(a.store.getState().sessions["agent-a"])!.played).toBe(true);
     expect(latestReply(a.store.getState().sessions["agent-b"])!.played).toBe(false);
-    expect(latestReply(a.store.getState().sessions["agent-b"])!.fileUri).toBe("file:///cache/voice/agent-b-2.mp3");
+    expect(latestReply(a.store.getState().sessions["agent-b"])!.fileUri).toBe("file:///cache/voice/agent-b.mp3");
     // B taking the player takes the playback slot; A's controls stop applying.
     b.play(latestReply(a.store.getState().sessions["agent-b"])!.id);
-    expect(a.player.loaded).toBe("file:///cache/voice/agent-b-2.mp3");
+    expect(a.player.loaded).toBe("file:///cache/voice/agent-b.mp3");
     a.controller.pause();
     expect(a.store.getState().playback?.state).toBe("playing");
     b.pause();
@@ -259,7 +260,7 @@ describe("VoiceController", () => {
     await h.controller.retrySpeak(message.id);
     expect(h.connection.of(Operation.VOICE_SPEAK)[0]!.voice?.text).toBe("Spoken.");
     const retried = latestReply(h.store.getState().sessions["agent-a"])!;
-    expect(retried.fileUri).toBe("file:///cache/voice/agent-a-1.mp3");
+    expect(retried.fileUri).toBe("file:///cache/voice/agent-a.mp3");
     expect(retried.audioError).toBeUndefined();
     expect(retried.played).toBe(true);
     expect(h.player.playing).toBe(true);
@@ -304,5 +305,112 @@ describe("VoiceController", () => {
     await pending;
     expect(h.store.getState().hostStatus.readiness).toBe("ready");
     expect(h.store.getState().hostStatus.provision).toBeUndefined();
+  });
+});
+
+describe("VoiceController against a host that is not set up (review round 1)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const refuse = (code: string, message: string) => () => {
+    throw new HostError(code, message, create(VoiceResponseSchema, { operationId: "x", retryable: false }));
+  };
+
+  it("a voice_model_missing refusal of STATUS and SESSION becomes the card's readiness, with no toast and no refresh loop", async () => {
+    const h = harness();
+    h.connection.answer(Operation.VOICE_STATUS, refuse("voice_model_missing", "model not provisioned"));
+    h.connection.answer(Operation.VOICE_SESSION, refuse("voice_model_missing", "model not provisioned"));
+    h.controller.focus();
+    await settle();
+    expect(h.store.getState().hostStatus).toMatchObject({ readiness: "modelMissing", detail: "model not provisioned" });
+    expect(h.toasts).toEqual([]);
+    await vi.advanceTimersByTimeAsync(SESSION_REFRESH_MS * 2);
+    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(1);
+    expect(h.toasts).toEqual([]);
+    // uv missing maps too, and a reconnect does not toast either.
+    h.connection.answer(Operation.VOICE_STATUS, refuse("voice_uv_missing", "install uv: curl ..."));
+    h.connection.answer(Operation.VOICE_SESSION, refuse("voice_uv_missing", "install uv: curl ..."));
+    h.controller.onConnected();
+    await settle();
+    expect(h.store.getState().hostStatus).toMatchObject({ readiness: "uvMissing", detail: "install uv: curl ..." });
+    expect(h.toasts).toEqual([]);
+    // End on a never-registered session sends no clear.
+    await h.controller.endSession();
+    expect(h.connection.of(Operation.VOICE_SESSION).every((r) => r.voice?.agentId === "agent-a")).toBe(true);
+  });
+
+  it("registers as soon as a later STATUS reports ready, then keeps the refresh loop", async () => {
+    const h = harness();
+    h.connection.answer(Operation.VOICE_STATUS, refuse("voice_model_missing", "missing"));
+    h.connection.answer(Operation.VOICE_SESSION, refuse("voice_model_missing", "missing"));
+    h.controller.focus();
+    await settle();
+    h.connection.answer(Operation.VOICE_STATUS, () => statusResponse(VoiceReadiness.READY));
+    h.connection.answer(Operation.VOICE_SESSION, () => create(ResponseSchema, { ok: true }));
+    await h.controller.refreshStatus();
+    await settle();
+    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(SESSION_REFRESH_MS);
+    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(3);
+  });
+
+  it("a denied microphone permission disables recording with a phone-side state instead of a toast per press", async () => {
+    const h = harness();
+    h.recorder.prepare = async () => { throw new Error("Microphone permission was denied."); };
+    h.controller.focus();
+    await settle();
+    expect(h.store.getState().recorderError).toBe("Microphone permission was denied.");
+    h.controller.beginUtterance();
+    await settle();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+    expect(h.recorder.recording).toBe(false);
+    expect(h.toasts).toEqual([]);
+  });
+
+  it("a press that lands while the recorder is still re-arming waits for it", async () => {
+    const h = harness();
+    let armed: (() => void) | undefined;
+    h.recorder.prepare = () => new Promise((resolve) => { armed = () => { h.recorder.prepared += 1; resolve(); }; });
+    h.controller.focus();
+    h.controller.beginUtterance();
+    await settle();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recording");
+    expect(h.recorder.recording).toBe(false);
+    armed!();
+    await settle();
+    expect(h.recorder.recording).toBe(true);
+    expect(h.toasts).toEqual([]);
+  });
+
+  it("talking stops another session's playback; ending a session leaves another's playback alone", async () => {
+    const a = harness("agent-a", "%3");
+    const b = new VoiceController({
+      agentId: "agent-b",
+      paneId: "%4",
+      sessionId: "$1",
+      store: a.store,
+      getConnection: () => a.connection.asHostConnection(),
+      recorder: a.recorder,
+      player: a.player,
+      files: a.files,
+      appInForeground: () => true,
+    });
+    a.controller.focus();
+    await settle();
+    b.onVoiceReply(reply("agent-b", "For B."));
+    b.play(latestReply(a.store.getState().sessions["agent-b"])!.id);
+    expect(a.player.playing).toBe(true);
+    a.controller.beginUtterance();
+    expect(a.player.playing).toBe(false);
+    expect(a.store.getState().playback?.state).toBe("stopped");
+    await a.controller.endUtterance();
+    b.resume();
+    expect(a.player.playing).toBe(true);
+    await a.controller.endSession();
+    expect(a.player.playing).toBe(true);
+    expect(a.store.getState().playback?.state).toBe("playing");
+    b.dispose();
+    expect(a.player.playing).toBe(false);
+    expect(a.store.getState().playback).toBeUndefined();
   });
 });

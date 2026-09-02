@@ -74,10 +74,14 @@ export interface VoiceState {
   playback: Playback | undefined;
   autoPlay: boolean;
   lastError: string | undefined;
+  /** Why the microphone cannot be used on this phone (permission denied); disables the mic with a hint. */
+  recorderError: string | undefined;
 }
 
 export interface VoiceActions {
   setHostStatus(status: VoiceStatus): void;
+  /** A refusal that says what the host lacks (`voice_uv_missing` / `voice_model_missing`) is a status too. */
+  setReadiness(readiness: VoiceReadinessState, detail: string): void;
   /** One EVENT_KIND_VOICE_PROVISION line; `ready` / `failed` also move `readiness`. */
   applyProvisionProgress(progress: ProvisionProgress): void;
   /** Creates the session when absent; an existing one keeps its history. */
@@ -97,6 +101,7 @@ export interface VoiceActions {
   removeSession(agentId: string): void;
   setAutoPlay(autoPlay: boolean): void;
   setLastError(message: string | undefined): void;
+  setRecorderError(message: string | undefined): void;
 }
 
 export type VoiceStore = StoreApi<VoiceState & VoiceActions>;
@@ -111,7 +116,7 @@ export const UNKNOWN_HOST_STATUS: VoiceHostStatus = {
 };
 
 export function initialVoiceState(): VoiceState {
-  return { hostStatus: UNKNOWN_HOST_STATUS, sessions: {}, playback: undefined, autoPlay: true, lastError: undefined };
+  return { hostStatus: UNKNOWN_HOST_STATUS, sessions: {}, playback: undefined, autoPlay: true, lastError: undefined, recorderError: undefined };
 }
 
 export function createVoiceStore(): VoiceStore {
@@ -141,6 +146,10 @@ export function createVoiceStore(): VoiceStore {
 
       setHostStatus(status) {
         set({ hostStatus: hostStatusFromProto(status) });
+      },
+
+      setReadiness(readiness, detail) {
+        set({ hostStatus: { ...get().hostStatus, readiness, detail, provision: undefined } });
       },
 
       applyProvisionProgress(provision) {
@@ -211,6 +220,10 @@ export function createVoiceStore(): VoiceStore {
 
       setLastError(message) {
         set({ lastError: message });
+      },
+
+      setRecorderError(message) {
+        set({ recorderError: message });
       },
     };
   });
