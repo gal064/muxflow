@@ -82,7 +82,8 @@ describe("the host letter", () => {
 
   it("marks ⌘P rows before the title", () => {
     const html = renderToStaticMarkup(<WorkspaceSwitcher onClose={noop} onSelect={noop} rows={[row(peer, "$0", "delta")]} stateGlyphs={false} />);
-    expect(html).toContain(`${LETTER("P")}<span class="palette-title">delta</span>`);
+    // Announced, not hidden: it is the only host cue a ⌘P row has.
+    expect(html).toContain('<span class="host-letter">P</span><span class="palette-title">delta</span>');
     // The row key holds a NUL; the DOM id must not.
     expect(html).not.toContain("\0");
     expect(html).toContain('id="workspace-option-peer%00%240"');
@@ -91,6 +92,7 @@ describe("the host letter", () => {
   it("takes the shortcut index's slot and flips to the knockout ink on the active row", () => {
     expect(stylesCss).toMatch(/\.host-letter \{\n\s+width: 12px; flex: 0 0 auto;/);
     expect(stylesCss).toContain(".workspace-button.active .host-letter { color: var(--accent-ink); }");
+    expect(stylesCss).toContain(".palette-row.selected:not([data-unavailable]) .host-letter { color: var(--accent-ink); }");
   });
 });
 

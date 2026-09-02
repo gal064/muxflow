@@ -88,7 +88,10 @@ export function WorkspaceSwitcher(props: WorkspaceSwitcherProps) {
           tabIndex={-1}
           type="button"
         >
-          {row.letter && <span aria-hidden="true" className="host-letter">{row.letter}</span>}
+          {/* Not hidden from the accessibility tree, unlike the sidebar's: this
+              row has no host label to say "on <host>" with, and the letter is
+              the only thing telling two same-named workspaces apart. */}
+          {row.letter && <span className="host-letter">{row.letter}</span>}
           <span className="palette-title">{row.session.name}</span>
           {row.attention !== "none" && <AgentStateIndicator glyphs={props.stateGlyphs} label={`Agent ${row.attention}`} state={row.attention} />}
           {workspaceMetaLine(row) && <span className="palette-meta">{workspaceMetaLine(row)}</span>}
