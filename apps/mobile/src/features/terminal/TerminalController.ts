@@ -7,6 +7,7 @@ import { type HostConnection } from "../../protocol/HostConnection";
 import {
   attachTerminal,
   resizeTerminal,
+  requestTerminalHistory,
   requestTerminalSeed,
   selectTerminalSession,
   setTerminalVisibility,
@@ -63,6 +64,22 @@ export const RESIZE_DEBOUNCE_MS = 150;
 export const ATTACH_RETRY_MS = 2_000;
 export const ATTACH_RETRY_LIMIT = 3;
 
+// §7.6.1 scrollback paging: a screen-only seed carries nothing above the
+// screen; reaching the top of the buffer fetches the history above it. The
+// first page is small (a slow link carries it inside a frame), later pages
+// double up to the ceiling — the desktop's numbers (`PaneHistoryPager.ts`).
+export const HISTORY_PAGE_LINES = 300;
+export const HISTORY_MAX_PAGE_LINES = 4_800;
+/**
+ * The host's MAX_HISTORY_SKIP_LINES, mirrored, and the page's xterm
+ * `scrollback` — the same number on purpose: a skip at the host's clamp
+ * would refetch the same rows forever, and a buffer that trims its top would
+ * throw the reader to the bottom on every splice. Paging stops at either.
+ */
+export const HISTORY_MAX_SKIP_LINES = 10_000;
+/** Splices replay everything since the seed; past this the rebuild is too heavy for a phone and paging stops. */
+export const HISTORY_RETAINED_CAP_BYTES = 4 * 1024 * 1024;
+
 export class TerminalController {
   readonly paneId: string;
   readonly sessionId: string;
@@ -82,6 +99,22 @@ export class TerminalController {
   private resizeTimer: ReturnType<typeof setTimeout> | undefined;
   private attachRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private attachFailures = 0;
+  // ---- §7.6.1 history paging state, reset by every seed ----
+  /** Everything handed to xterm since the seed (the seed first); a splice replays it above nothing but history. */
+  private retained: Uint8Array[] = [];
+  private retainedBytes = 0;
+  /** Rows of history already spliced in, across every page. */
+  private splicedRows = 0;
+  /** The pages spliced so far, newest (highest above the screen) first; every splice replays all of them. */
+  private pages: Uint8Array[] = [];
+  /** Serial of the request in flight, so a late rejection of an older one cannot unlatch a newer one. */
+  private historySerial = 0;
+  private historyLines = HISTORY_PAGE_LINES;
+  private historyInFlight = false;
+  /** The `skip` the in-flight request quoted: the rows the page held when it asked. */
+  private historySkipInFlight = 0;
+  /** Latched when the host said the top was reached, the skip hit the clamp, or retention overflowed. */
+  private historyDone = false;
   private readonly seedTimeoutMs: number;
   private readonly resizeDebounceMs: number;
 
@@ -108,6 +141,7 @@ export class TerminalController {
       sessionId: this.sessionId,
       seed: (bytes, generation) => this.seed(bytes, generation),
       output: (bytes, generation) => this.output(bytes, generation),
+      history: (bytes, historySize, sizeKnown) => this.history(bytes, historySize, sizeKnown),
       exit: (detail) => this.exit(detail),
       onConnected: () => this.onConnected(),
     });
@@ -131,6 +165,9 @@ export class TerminalController {
         return;
       }
       case "written":
+        return;
+      case "atTop":
+        this.onAtTop(message.above);
         return;
       case "log":
         this.log(`page: ${message.line}`);
@@ -195,6 +232,15 @@ export class TerminalController {
     }
     this.clearSeedTimers();
     if (generation > this.lastGeneration) this.lastGeneration = generation;
+    // A seed resets the page, so it resets the history ledger too: the pane's
+    // scrollback above this screen is unfetched again.
+    this.retained = [bytes];
+    this.retainedBytes = bytes.byteLength;
+    this.splicedRows = 0;
+    this.pages = [];
+    this.historyLines = HISTORY_PAGE_LINES;
+    this.historyInFlight = false;
+    this.historyDone = false;
     this.options.page.send({ t: "seed", b64: toBase64(bytes) });
     this.log(`seed ${bytes.byteLength} bytes generation=${generation}`);
     if (this.phase !== "exited") this.setPhase("seeded");
@@ -206,12 +252,107 @@ export class TerminalController {
     // Credit for these bytes is acknowledged by HostConnection as soon as they
     // are handed to the page (§7.7 "handed to xterm"); the page's `written`
     // echo is diagnostic only.
+    this.retain(bytes);
     this.options.page.send({ t: "out", b64: toBase64(bytes) });
     // Output without a seed (host-abnormal) still means the pane is alive.
     if (this.phase === "noOutput" || this.phase === "attaching") {
       this.clearSeedTimers();
       this.setPhase("seeded");
     }
+  }
+
+  // ---- §7.6.1 scrollback paging -----------------------------------------------
+
+  private retain(bytes: Uint8Array): void {
+    // Nothing will splice again: neither the tail nor the pages are needed.
+    if (this.historyDone) {
+      if (this.retainedBytes > 0) {
+        this.retained = [];
+        this.retainedBytes = 0;
+        this.pages = [];
+      }
+      return;
+    }
+    this.retained.push(bytes);
+    this.retainedBytes += bytes.byteLength;
+    if (this.retainedBytes > HISTORY_RETAINED_CAP_BYTES) {
+      // The splice replays this buffer wholesale; past the cap that rebuild is
+      // heavier than the scrollback is worth on a phone.
+      this.retained = [];
+      this.retainedBytes = 0;
+      this.historyDone = true;
+      this.log("history.retention.dropped (cap exceeded)");
+    }
+  }
+
+  /** The page hit the top of its buffer holding `above` scrollback rows. */
+  private onAtTop(above: number): void {
+    if (this.stopped || this.historyInFlight || this.historyDone || this.phase !== "seeded") return;
+    const connection = this.liveConnection();
+    if (!connection) return;
+    // tmux measures from the current display, so everything the page holds
+    // above the screen — rows that scrolled off since the seed and the pages
+    // spliced so far alike — is the skip. `above` counts both.
+    const skip = above;
+    // The page's scrollback is the host's clamp: at it, nothing more can be
+    // held, and a request past it would answer with the rows at the clamp
+    // on every reach-the-top.
+    if (skip >= HISTORY_MAX_SKIP_LINES) {
+      this.historyDone = true;
+      this.log(`history.done skip=${skip} at the scrollback limit`);
+      return;
+    }
+    const lines = Math.min(this.historyLines, HISTORY_MAX_SKIP_LINES - skip);
+    const serial = ++this.historySerial;
+    this.historyInFlight = true;
+    this.historySkipInFlight = skip;
+    this.log(`history.request lines=${lines} skip=${skip}`);
+    connection.request(requestTerminalHistory(this.paneId, lines, skip)).catch((error: unknown) => {
+      if (this.historySerial === serial) this.historyInFlight = false;
+      this.log(`history.request.failed ${describe(error)}`);
+    });
+  }
+
+  /** One TERMINAL_HISTORY answer; compose the splice and hand it to the page. */
+  private history(bytes: Uint8Array, historySize: number, sizeKnown: boolean): void {
+    if (this.stopped) return;
+    const wasInFlight = this.historyInFlight;
+    this.historyInFlight = false;
+    // An answer for a request this attach did not make (a reseed raced it) has
+    // nothing to splice against.
+    if (!wasInFlight || this.historyDone) {
+      this.log(`history.discarded ${bytes.byteLength} bytes`);
+      return;
+    }
+    let rows = bytes.byteLength === 0 ? 0 : countRows(bytes);
+    // tmux answers a range that lies entirely above its history with one row
+    // rather than with nothing, and clamps one that runs past the top. When
+    // the probe answered, `#{history_size}` says how many rows exist above
+    // the display, so only that many beyond the skip are real; the rest is the
+    // clamp row, and splicing it would duplicate a screen row above the top.
+    if (sizeKnown) {
+      const available = Math.max(0, historySize - this.historySkipInFlight);
+      if (rows > available) {
+        this.log(`history.clamped rows=${rows} available=${available}`);
+        rows = available;
+        bytes = available === 0 ? new Uint8Array(0) : takeRows(bytes, available);
+      }
+    }
+    if (rows > 0) {
+      // Every page fetched so far goes back in, newest (topmost) first: the
+      // splice rebuilds the whole buffer, so a page left out would be a hole.
+      this.pages.unshift(bytes);
+      const tail = concat(this.retained, this.retainedBytes);
+      this.options.page.send({ t: "splice", hist: toBase64(joinRows(this.pages)), rowsAdded: rows, tail: toBase64(tail) });
+      this.splicedRows += rows;
+      this.historyLines = Math.min(this.historyLines * 2, HISTORY_MAX_PAGE_LINES);
+    }
+    // `#{history_size}` is the fact of the top: everything at or past it is the
+    // end. An unanswered probe (pane gone mid-capture) means ask again, and
+    // tmux answers a range entirely above its history with one row, so an
+    // empty-ish answer is not the signal.
+    if (sizeKnown && this.historySkipInFlight + rows >= historySize) this.historyDone = true;
+    this.log(`history ${bytes.byteLength} bytes rows=${rows} spliced=${this.splicedRows} size=${sizeKnown ? historySize : "?"}${this.historyDone ? " done" : ""}`);
   }
 
   private exit(detail: string): void {
@@ -266,6 +407,16 @@ export class TerminalController {
       await connection.request(attachTerminal(this.sessionId, this.paneId));
       this.attached = true;
       this.attachFailures = 0;
+      // The attach mounts the pane; it does not photograph it. A session whose
+      // control client already exists (selected earlier, or the window was
+      // just created) commits the pane without a capture, and since the host's
+      // hide/reveal rework flipping it visible captures nothing either — the
+      // desktop always follows with an explicit reveal. This is the phone's:
+      // idempotent, because a capture already in flight for a fresh
+      // attachment coalesces it (`capture_in_flight`).
+      if (!this.stopped) {
+        connection.request(requestTerminalSeed(this.paneId)).catch((error: unknown) => this.log(`seed.request.failed ${describe(error)}`));
+      }
       if (this.stopped) {
         // Backed out mid-attach: the attach still revealed the pane, so hide it
         // (§7.6 step 4) — unless a successor controller already owns the pane,
@@ -369,4 +520,51 @@ export class TerminalController {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Rows in a history payload: CRLF separators + 1, and no trailing separator. */
+function countRows(bytes: Uint8Array): number {
+  let rows = 1;
+  for (let index = 0; index + 1 < bytes.byteLength; index += 1) {
+    if (bytes[index] === 0x0d && bytes[index + 1] === 0x0a) rows += 1;
+  }
+  return rows;
+}
+
+/** The last `count` rows of a CRLF-joined page: tmux fills a clamped range from the top, so the real rows are at the end. */
+function takeRows(bytes: Uint8Array, count: number): Uint8Array {
+  let seen = 0;
+  for (let index = bytes.byteLength - 2; index >= 0; index -= 1) {
+    if (bytes[index] === 0x0d && bytes[index + 1] === 0x0a) {
+      seen += 1;
+      if (seen === count) return bytes.subarray(index + 2);
+    }
+  }
+  return bytes;
+}
+
+/** Pages joined with one CRLF between them (each page carries none at its ends). */
+function joinRows(pages: readonly Uint8Array[]): Uint8Array {
+  const separator = Uint8Array.of(0x0d, 0x0a);
+  const pieces: Uint8Array[] = [];
+  let total = 0;
+  pages.forEach((page, index) => {
+    if (index > 0) {
+      pieces.push(separator);
+      total += 2;
+    }
+    pieces.push(page);
+    total += page.byteLength;
+  });
+  return concat(pieces, total);
+}
+
+function concat(pieces: readonly Uint8Array[], total: number): Uint8Array {
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const piece of pieces) {
+    joined.set(piece, offset);
+    offset += piece.byteLength;
+  }
+  return joined;
 }

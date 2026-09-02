@@ -83,6 +83,13 @@ export interface Agent {
    * lists ordered by it do not reshuffle on every hook.
    */
   lifecycleChangedAtMs: number;
+  /**
+   * When the current attention generation was first acknowledged (zero while
+   * unread or without attention). The recency clock for an acknowledged
+   * completion: the row stays Recent for a window after the user saw it, not
+   * after the agent finished.
+   */
+  attentionSeenAtMs: number;
   present: boolean;
   route: AgentRoute;
 }
@@ -120,6 +127,12 @@ export interface SessionActions {
   setServerIdentity(serverIdentity: string): void;
   /** §8.1: replace the three topology maps wholesale; agents too when the embedded snapshot is authoritative. */
   applySnapshot(snapshot: Snapshot): void;
+  /**
+   * §8.1: a TOPOLOGY_SNAPSHOT that carries no snapshot acknowledges an
+   * unchanged world with the generation alone. The entities are kept; only the
+   * generation moves, so a guarded request sends the current one.
+   */
+  applyTopologyAck(generation: bigint): void;
   /** §8.2: an authoritative snapshot replaces the whole agent map and sets the watermark. */
   applyAgentSnapshot(snapshot: AgentSnapshot): AgentTransition[];
   /** §8.2: upsert `event.agent` unless stale; remove `retiredAgentIds`. Returns the transition when an upsert happened. */
@@ -155,6 +168,11 @@ export function createSessionStore(): SessionStore {
 
     setServerIdentity(serverIdentity) {
       set({ serverIdentity });
+    },
+
+    applyTopologyAck(generation) {
+      // Never backwards: an ack that raced a full snapshot must not undo it.
+      if (generation > get().topologyGeneration) set({ topologyGeneration: generation });
     },
 
     applySnapshot(snapshot) {
@@ -284,6 +302,7 @@ export function agentFromProto(record: ProtoAgentRecord): Agent {
     // A helper from before the field decodes it as zero; its update time is
     // the only clock it can offer.
     lifecycleChangedAtMs: Number(record.lifecycleChangedAtUnixMillis) || Number(record.updatedAtUnixMillis),
+    attentionSeenAtMs: Number(record.attentionSeenAtUnixMillis),
     present: record.present,
     route: {
       sessionId: route?.sessionId ?? "",

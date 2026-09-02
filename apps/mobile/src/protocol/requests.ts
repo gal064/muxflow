@@ -65,6 +65,21 @@ export function requestTerminalSeed(paneId: string): Request {
   return create(RequestSchema, { operation: Operation.REQUEST_TERMINAL_SEED, scope: paneId });
 }
 
+/**
+ * §7.6.1: the scrollback above a pane's screen, which a screen-only seed
+ * deliberately does not carry. `lines` rows above the `skip` rows the renderer
+ * already holds; the answer is one TERMINAL_HISTORY event and moves no
+ * generation.
+ */
+export function requestTerminalHistory(paneId: string, lines: number, skip: number): Request {
+  return create(RequestSchema, {
+    operation: Operation.REQUEST_TERMINAL_HISTORY,
+    scope: paneId,
+    terminalHistoryLines: lines,
+    terminalHistorySkipLines: skip,
+  });
+}
+
 export function terminalInput(paneId: string, data: Uint8Array): Request {
   return create(RequestSchema, { operation: Operation.TERMINAL_INPUT, scope: paneId, data });
 }

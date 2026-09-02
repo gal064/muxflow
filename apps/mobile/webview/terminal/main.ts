@@ -33,6 +33,9 @@ let term: Terminal | undefined;
 let fit: FitAddon | undefined;
 let lastGrid: Grid | undefined;
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+/** Last time the top of the buffer was reported (§7.6.1); one report per 2 s. */
+let lastAtTopMs = 0;
+const AT_TOP_THROTTLE_MS = 2_000;
 
 function root(): HTMLElement {
   return document.getElementById("terminal") as HTMLElement;
@@ -84,7 +87,10 @@ async function init(): Promise<void> {
     fontFamily: '"JetBrains Mono", monospace',
     fontSize: TERMINAL_FONT_SIZE_PX,
     lineHeight: TERMINAL_LINE_HEIGHT,
-    scrollback: 1000,
+    // The host clamps history at 10,000 rows and the controller stops paging
+    // there (`HISTORY_MAX_SKIP_LINES`); a smaller buffer would trim its top
+    // and throw the reader to the bottom on every splice past it.
+    scrollback: 10_000,
     scrollOnUserInput: false,
     disableStdin: true,
     theme: terminalTheme,
@@ -92,15 +98,96 @@ async function init(): Promise<void> {
   fit = new FitAddon();
   term.loadAddon(fit);
   term.open(root());
+  // §7.6.1: reaching the top of the normal buffer asks the app for the
+  // scrollback a screen-only seed left behind. The alternate screen has no
+  // scrollback, and an empty buffer (nothing above the screen yet, or nothing
+  // ever) still counts: `above` is 0 and the app decides.
+  // Touch scrolling. xterm's own viewport is a scrollable div under the
+  // screen layer, and inside this WebView a finger drag never reaches it (the
+  // page is `overflow: hidden` and the screen layer takes the pointer), so
+  // the drag is turned into `scrollLines` here: one row per cell height, the
+  // remainder carried to the next move so slow drags still scroll.
+  let touchY: number | undefined;
+  let touchCarry = 0;
+  const el = root();
+  el.addEventListener("touchstart", (event) => {
+    touchY = event.touches[0]?.clientY;
+    touchCarry = 0;
+  }, { passive: true });
+  el.addEventListener("touchmove", (event) => {
+    if (!term || touchY === undefined) return;
+    const y = event.touches[0]?.clientY;
+    if (y === undefined) return;
+    const cellHeight = lastGrid ? el.clientHeight / lastGrid.rows : NOMINAL_CELL.height;
+    const delta = (touchY - y) / cellHeight + touchCarry;
+    const rows = Math.trunc(delta);
+    touchCarry = delta - rows;
+    touchY = y;
+    if (rows !== 0) term.scrollLines(rows);
+    event.preventDefault();
+  }, { passive: false });
+  el.addEventListener("touchend", () => {
+    touchY = undefined;
+  }, { passive: true });
+  term.onScroll(() => {
+    if (!term || term.buffer.active.type === "alternate") return;
+    if (term.buffer.active.viewportY > 0) return;
+    const now = Date.now();
+    if (now - lastAtTopMs < AT_TOP_THROTTLE_MS) return;
+    lastAtTopMs = now;
+    post({ t: "atTop", above: Math.max(0, term.buffer.active.length - term.rows) });
+  });
   measure(true);
   window.addEventListener("resize", scheduleMeasure);
   post({ t: "ready" });
 }
 
+/**
+ * A reset ordered through xterm's write queue. `reset()` itself does not
+ * touch the queue, and `write()` always parses later (and slices large writes
+ * across frames), so a reset issued directly would land in the middle of
+ * output still being parsed — those bytes would then be written into the
+ * fresh buffer ahead of whatever follows the reset.
+ */
+function resetInOrder(then: () => void): void {
+  if (!term) return;
+  term.write("", () => {
+    term?.reset();
+    then();
+  });
+}
+
 function write(bytes: Uint8Array, reset: boolean): void {
   if (!term) return;
-  if (reset) term.reset();
-  term.write(bytes, () => post({ t: "written", bytes: bytes.byteLength }));
+  const go = () => term?.write(bytes, () => post({ t: "written", bytes: bytes.byteLength }));
+  if (reset) resetInOrder(go);
+  else go();
+}
+
+/**
+ * §7.6.1: rebuild the buffer as history + screen. xterm has no prepend, so the
+ * page resets, writes the history rows, scrolls all of them above the display
+ * with one newline per screen row (the tail's seed begins with `ESC[2J ESC[H`,
+ * which erases the display in place — a history row still on it would never
+ * reach the scrollback), replays the tail, and puts the viewport back on the
+ * first row the reader was already looking at: the history occupies exactly
+ * its own row count above it.
+ */
+function splice(hist: Uint8Array, rowsAdded: number, tail: Uint8Array): void {
+  if (!term) return;
+  const pushOut = new TextEncoder().encode("\r\n".repeat(term.rows));
+  resetInOrder(() => {
+    if (!term) return;
+    if (hist.byteLength > 0) term.write(hist);
+    term.write(pushOut);
+    term.write(tail, () => {
+      if (!term) return;
+      // The newest page sits above everything the reader already had, so the
+      // row they were reading is now that many rows down from the top.
+      term.scrollToLine(rowsAdded);
+      post({ t: "written", bytes: hist.byteLength + tail.byteLength });
+    });
+  });
 }
 
 function receive(message: ToPageMessage): void {
@@ -116,6 +203,9 @@ function receive(message: ToPageMessage): void {
       return;
     case "out":
       write(decodeBase64(message.b64), false);
+      return;
+    case "splice":
+      splice(decodeBase64(message.hist), message.rowsAdded, decodeBase64(message.tail));
       return;
   }
 }

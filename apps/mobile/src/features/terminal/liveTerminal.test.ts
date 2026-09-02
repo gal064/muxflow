@@ -104,8 +104,10 @@ describe.skipIf(!availability.available)(`live terminal (${availability.reason ?
     const generation = controller.generation;
     await controller.stop();
     expect(store.getState().focusedPaneId).toBeUndefined();
-    const released = await waitFor("PANE_RESOURCE released", () => log.find((l) => l.includes("pane.resource") && l.includes("state=3")));
-    say(`hide (epoch=${connection.connectionEpoch}, cutoff=${generation}) → ${released.replace("[muxflow] ", "")}`);
+    // A hide is answered with nothing — no bytes, no PANE_RESOURCE; the
+    // reveal is what hands a hidden pane's output back (as a seed here).
+    expect(log.some((l) => l.includes("hide → ok"))).toBe(true);
+    say(`hide (epoch=${connection.connectionEpoch}, cutoff=${generation}) → ok; PANE_RESOURCE events: ${log.filter((l) => l.includes("pane.resource")).length}`);
     expect(log.some((l) => l.includes("seed.request.failed") || l.includes("REQUEST_TERMINAL_SEED"))).toBe(false);
     harness.tmux(["send-keys", "-t", created.paneId, "echo hidden-$((40+4))", "Enter"]);
     await new Promise((resolve) => setTimeout(resolve, 400));

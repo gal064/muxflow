@@ -6,6 +6,9 @@ import type { Agent, SessionState } from "./sessionStore";
 
 export type AgentDisplayState = Agent["lifecycle"] | "done";
 
+/** How long an acknowledged completed or freshly idle agent stays near the active work. */
+export const RECENT_WINDOW_MS = 4 * 60 * 60 * 1_000;
+
 export function needsAttention(agent: Agent): boolean {
   return agent.attentionGeneration > agent.seenGeneration;
 }
@@ -16,28 +19,40 @@ export function displayState(agent: Agent): AgentDisplayState {
     : agent.lifecycle;
 }
 
-/** Lower sorts first: blocked+needsAttention, blocked, done, working, idle, unknown. */
-function rank(agent: Agent): number {
+/**
+ * Lower sorts first: blocked+needsAttention, blocked, working, recent, idle,
+ * unknown — the desktop's priority buckets (`agentsList.ts`). "Done" shares
+ * the recent bucket: acknowledging a completion changes only the row's dot and
+ * badge, so the tap that clears them does not move the row out from under the
+ * finger. A freshly idle agent stays recent for `RECENT_WINDOW_MS`, counted
+ * from the acknowledgement for a seen completion and from the lifecycle change
+ * otherwise.
+ */
+function rank(agent: Agent, now: number): number {
   const state = displayState(agent);
   if (state === "blocked") return needsAttention(agent) ? 0 : 1;
   switch (state) {
-    case "done":
-      return 2;
     case "working":
+      return 2;
+    case "done":
       return 3;
-    case "idle":
-      return 4;
+    case "idle": {
+      const recentSince = agent.attentionKind === "completed" && agent.attentionSeenAtMs > 0
+        ? agent.attentionSeenAtMs
+        : agent.lifecycleChangedAtMs;
+      return now - recentSince < RECENT_WINDOW_MS ? 3 : 4;
+    }
     default:
       return 5;
   }
 }
 
-export function compareAgents(left: Agent, right: Agent): number {
+export function compareAgents(left: Agent, right: Agent, now = Date.now()): number {
   // Agents that are gone are shown last, whatever their retained state.
   if (left.present !== right.present) return left.present ? -1 : 1;
   // Inside a state, only a real lifecycle transition changes recency, so
   // repeated hooks and route-only updates cannot reshuffle rows.
-  return rank(left) - rank(right)
+  return rank(left, now) - rank(right, now)
     || right.lifecycleChangedAtMs - left.lifecycleChangedAtMs
     || left.displayName.localeCompare(right.displayName)
     || left.id.localeCompare(right.id);
@@ -49,12 +64,12 @@ export function compareAgents(left: Agent, right: Agent): number {
  * not outrank a louder status (the desktop's `byStatus` in
  * `apps/desktop/src/features/agents/agentsList.ts`).
  */
-export function sortedAgents(state: Pick<SessionState, "agents" | "sessions" | "windows">): Agent[] {
+export function sortedAgents(state: Pick<SessionState, "agents" | "sessions" | "windows">, now = Date.now()): Agent[] {
   return Object.values(state.agents).sort((left, right) => {
     if (left.present !== right.present) return left.present ? -1 : 1;
-    return rank(left) - rank(right)
+    return rank(left, now) - rank(right, now)
       || Number(agentPinned(state, right)) - Number(agentPinned(state, left))
-      || compareAgents(left, right);
+      || compareAgents(left, right, now);
   });
 }
 
