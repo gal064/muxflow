@@ -490,6 +490,14 @@ export function App() {
   // The one host this build shows: the merged list has a single source, so
   // letters stay hidden and the rows come out in `workspaceRows` order.
   const hostLetter = hostLabel.charAt(0).toUpperCase();
+  // `currentHostScope` is a fresh object every render; the rows that carry it
+  // must only be rebuilt when what it says changes, or every status line and
+  // latency sample would re-sort every workspace and agent row.
+  const { hostProfileId: scopeHostId, connectionKey: scopeKey, connectionEpoch: scopeEpoch, serverIdentity: scopeIdentity, generation: scopeGeneration } = currentHostScope;
+  const rowScope = useMemo<HostScopeToken>(
+    () => ({ hostProfileId: scopeHostId, connectionKey: scopeKey, connectionEpoch: scopeEpoch, serverIdentity: scopeIdentity, generation: scopeGeneration }),
+    [scopeEpoch, scopeGeneration, scopeHostId, scopeIdentity, scopeKey],
+  );
   const hostSource = useMemo<HostRowSource>(() => ({
     hostProfileId: currentHostProfileId,
     letter: hostLetter,
@@ -497,7 +505,7 @@ export function App() {
     phase: hostState.phase,
     canMutate: hostState.canMutate,
     transport: connection.mode,
-    scope: currentHostScope,
+    scope: rowScope,
     snapshot,
     activeSessionId,
     agents: agentRuntime.agents,
@@ -507,7 +515,7 @@ export function App() {
     home,
   }), [
     activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, connection.mode,
-    currentHostProfileId, currentHostScope, home, hostLabel, hostLetter, hostState.canMutate, hostState.phase, snapshot, workspaceGit.status,
+    currentHostProfileId, home, hostLabel, hostLetter, hostState.canMutate, hostState.phase, rowScope, snapshot, workspaceGit.status,
   ]);
   const sidebarHosts = useMemo<SidebarHost[]>(() => [{
     profileId: currentHostProfileId,
@@ -516,11 +524,11 @@ export function App() {
     transport: connection.mode,
     phase: hostState.phase,
     canMutate: hostState.canMutate,
-    scope: currentHostScope,
+    scope: rowScope,
     active: true,
     shown: true,
     latencyMs: latency?.milliseconds,
-  }], [connection.mode, currentHostProfileId, currentHostScope, hostLabel, hostLetter, hostState.canMutate, hostState.phase, latency?.milliseconds]);
+  }], [connection.mode, currentHostProfileId, hostLabel, hostLetter, hostState.canMutate, hostState.phase, latency?.milliseconds, rowScope]);
   // Every workspace on this server, pinned first. ⌘P reads this whole; the
   // sidebar, ⌘1–9 and the agents list read the narrowed version below.
   const switcherRows = useMemo(() => mergedWorkspaceRows([hostSource], false), [hostSource]);
