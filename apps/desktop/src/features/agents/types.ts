@@ -101,7 +101,8 @@ export type AgentWireEvent =
   | { kind: "retired"; hostProfileId: string; serverIdentity: string; connectionEpoch: number; sequence: AgentGeneration; retiredAgentIds: readonly string[]; replayed?: boolean }
   | { kind: "removed"; hostProfileId: string; serverIdentity: string; connectionEpoch: number; sequence: AgentGeneration; agentId: string; updatedAt: number; replayed?: boolean };
 
-export interface AgentStoreState {
+/** One host's agent records; `hostProfileId` is unset until its first snapshot. */
+export interface HostAgentState {
   hostProfileId?: string;
   serverIdentity?: string;
   connectionEpoch?: number;
@@ -110,6 +111,10 @@ export interface AgentStoreState {
   authoritative: boolean;
   byId: Readonly<Record<string, AgentRecord>>;
   adapters: readonly AgentAdapterDescriptor[];
+}
+
+export interface AgentStoreState {
+  byHost: Readonly<Record<string, HostAgentState>>;
 }
 
 export interface AgentAttentionRollup {
@@ -203,6 +208,18 @@ export interface AgentRequestScope {
   serverIdentity: string;
   topologyGeneration: number;
   connectionEpoch: number;
+}
+
+/** A request scope plus the tmux windows its snapshot can prove absence for. */
+export interface AgentRuntimeScope {
+  scope: AgentRequestScope;
+  topologyWindowIds: readonly string[];
+}
+
+export interface AgentHostProjection {
+  agents: readonly AgentRecord[];
+  adapters: readonly AgentAdapterDescriptor[];
+  rollups: AgentRollups;
 }
 
 /**
