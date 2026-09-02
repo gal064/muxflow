@@ -10,6 +10,10 @@ The command refuses to overwrite an existing path. Move or remove an old bundle,
 
 Common report states:
 
+- `dependencies.tmux.available: false` — install tmux 3.3 or newer. Muxflow
+  automatically checks standard system, Homebrew, MacPorts, pkgsrc, Linuxbrew,
+  and Nix locations. For another layout, set `MUXFLOW_TMUX_PATH` to the absolute
+  executable path and restart the helper daemon.
 - `daemon.state: not_running` — start or reconnect the desktop app, which starts the user daemon.
 - `daemon.state: unsafe_or_invalid_endpoint` — a non-socket or non-private object occupies the daemon endpoint. Stop and inspect the user runtime directory rather than deleting an unknown object automatically.
 - `daemon.runtimeState: invalid_or_unsafe` — runtime diagnostics had unsafe permissions, an unsupported/corrupt schema, or a symlink. Restarting the daemon creates a clean bounded state only when the runtime directory itself is private.

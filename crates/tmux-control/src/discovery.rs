@@ -67,6 +67,8 @@ pub struct TmuxSnapshot {
 
 #[derive(Debug, Error)]
 pub enum DiscoverError {
+    #[error(transparent)]
+    Executable(#[from] crate::TmuxExecutableError),
     #[error("failed to run tmux: {0}")]
     Spawn(#[from] std::io::Error),
     #[error("tmux command failed: {0}")]
@@ -76,7 +78,8 @@ pub enum DiscoverError {
 }
 
 pub fn discover() -> Result<TmuxSnapshot, DiscoverError> {
-    discover_with(|args| Command::new("tmux").args(args).output())
+    let executable = crate::tmux_executable()?;
+    discover_with(|args| Command::new(&executable).args(args).output())
 }
 
 /// Discovers an explicitly named tmux server (`tmux -L <name>`).
@@ -89,8 +92,9 @@ pub fn discover_with_socket_name(socket_name: &str) -> Result<TmuxSnapshot, Disc
             "invalid empty tmux socket name".into(),
         ));
     }
+    let executable = crate::tmux_executable()?;
     discover_with(|args| {
-        let mut command = Command::new("tmux");
+        let mut command = Command::new(&executable);
         // `TMUX` identifies the caller's current server and takes precedence
         // over `-L`; explicit server selection must therefore drop it.
         command

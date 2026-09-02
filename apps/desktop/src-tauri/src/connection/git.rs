@@ -1,5 +1,7 @@
 use std::sync::atomic::Ordering;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tauri::State;
@@ -209,12 +211,18 @@ fn status_json(value: &v1::GitStatusSnapshot) -> Value {
         "copyDetectionIncomplete": value.copy_detection_incomplete })
 }
 
+/// Paths cross this hop as base64 rather than as JSON integer arrays — the
+/// renderer wants base64 anyway, and an array costs about four bytes per path
+/// byte across a snapshot that is re-sent whole on every touched file. The
+/// display strings are derived here with the same `from_utf8_lossy` the host
+/// used before the wire fields were removed.
 fn status_entry_json(value: &v1::GitStatusEntry) -> Value {
-    json!({ "path": value.path, "displayPath": value.display_path, "originalPath": value.original_path,
-        "displayOriginalPath": value.display_original_path, "indexKind": change_kind_name(value.index_kind),
+    json!({ "path": BASE64.encode(&value.path), "displayPath": String::from_utf8_lossy(&value.path),
+        "originalPath": BASE64.encode(&value.original_path),
+        "displayOriginalPath": String::from_utf8_lossy(&value.original_path),
+        "indexKind": change_kind_name(value.index_kind),
         "worktreeKind": change_kind_name(value.worktree_kind), "indexStatus": value.index_status,
-        "worktreeStatus": value.worktree_status, "headMode": value.head_mode, "indexMode": value.index_mode,
-        "worktreeMode": value.worktree_mode, "headOid": value.head_oid, "indexOid": value.index_oid,
+        "worktreeStatus": value.worktree_status,
         "untracked": value.untracked, "ignored": value.ignored, "conflicted": value.conflicted,
         "conflictCode": value.conflict_code, "submodule": value.submodule, "submoduleState": value.submodule_state,
         "symlink": value.symlink, "binary": value.binary, "renameScore": value.rename_score })
@@ -344,6 +352,40 @@ mod tests {
         );
         assert_eq!(value["command"]["statusOmitted"], true);
         assert_eq!(value["command"]["pushTarget"], "origin/main");
+    }
+
+    /// The renderer reads paths as base64 and shows the lossy rendering; both
+    /// come from the one `path` field the wire still carries, so a path that is
+    /// not UTF-8 survives the hop exactly and still has a name to display.
+    #[test]
+    fn status_entry_paths_cross_the_hop_as_base64_with_a_lossy_display_name() {
+        let value = git_response_json(&v1::GitResponse {
+            status: Some(v1::GitStatusSnapshot {
+                entries: vec![
+                    v1::GitStatusEntry {
+                        path: b"src/\xff.rs".to_vec(),
+                        original_path: b"old".to_vec(),
+                        ..Default::default()
+                    },
+                    v1::GitStatusEntry {
+                        path: b"plain".to_vec(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let renamed = &value["status"]["entries"][0];
+        assert_eq!(renamed["path"], "c3JjL/8ucnM=");
+        assert_eq!(renamed["displayPath"], "src/\u{fffd}.rs");
+        assert_eq!(renamed["originalPath"], "b2xk");
+        assert_eq!(renamed["displayOriginalPath"], "old");
+        let plain = &value["status"]["entries"][1];
+        assert_eq!(plain["path"], "cGxhaW4=");
+        assert_eq!(plain["displayPath"], "plain");
+        assert_eq!(plain["originalPath"], "");
+        assert_eq!(plain["displayOriginalPath"], "");
     }
 
     /// A push is a mutation bound to the connection generation, and the wire

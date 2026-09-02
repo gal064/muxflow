@@ -63,5 +63,6 @@ pub(super) fn record(value: &StoredAgent) -> v1::AgentRecord {
         present: value.present,
         attention_kind: value.attention_kind.clone(),
         lifecycle_changed_at_unix_millis: value.lifecycle_changed_at_unix_millis,
+        attention_seen_at_unix_millis: value.attention_seen_at_unix_millis,
     }
 }

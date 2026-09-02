@@ -377,6 +377,7 @@ mod coalescing_tests {
                 pane_id: pane_id.into(),
                 data,
                 generation,
+                ..Default::default()
             }),
             ..Default::default()
         })

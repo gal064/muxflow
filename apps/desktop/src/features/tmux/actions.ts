@@ -27,7 +27,8 @@ export interface TmuxAction {
    * What `setPinned` writes for its session, or for `windowId` inside it when
    * that is given. A pin is host state rather than a tmux mutation, so it takes
    * this pipeline for the scope checks and the authoritative snapshot that
-   * follows, not because tmux is sent anything.
+   * follows, not because tmux is sent anything. `createSession` reads it too:
+   * true creates the workspace already pinned.
    */
   pinned?: boolean;
   confirmed?: boolean;
@@ -46,11 +47,49 @@ export interface AuthoritativePrecondition {
   generation: number;
 }
 
+/**
+ * What one close guards on the host: the server it was aimed at, and nothing
+ * else.
+ *
+ * No close pins a topology generation — the workspace close that shows a
+ * dialog included. What a confirmation gets consent for is a *named target*:
+ * the dialog says which workspace, by the id the action carries, and that id
+ * does not change meaning when the topology moves. Target id plus server
+ * identity is therefore the whole of the consent; a generation adds no safety
+ * on top of it.
+ *
+ * It takes plenty away. An agent animating a pane title moves the host's
+ * generation several times a second and every close moves it again, while a
+ * dialog stands open for seconds — so a pinned close arrives against a
+ * generation that is already gone and comes back `stale_topology`. Worse, a
+ * pin also switches off the retry ladder (`pinsGeneration` in
+ * `actionReconciliation`), so the second click is refused exactly like the
+ * first: a confirmed close could never win.
+ *
+ * Every close stamps `generation: 0` — the host's "no generation guard" — and
+ * reconciles against whatever generation is live when tmux is finally asked.
+ * A close naming something that has since gone away still fails on its target,
+ * where it should.
+ */
+export function closePrecondition(serverIdentity: string): AuthoritativePrecondition {
+  return { serverIdentity, generation: 0 };
+}
+
+/**
+ * The native half of one action's switch timeline, passed straight through to
+ * the `perf.timeline` record. Present only when the process is running a
+ * measured build with `ADE_PERF_LOG` set; see `perf_log/switch_timing.rs` for
+ * what each stamp means. Deliberately opaque here: this layer joins it, it does
+ * not interpret it.
+ */
+export type TmuxActionTiming = Record<string, unknown>;
+
 export interface TmuxActionResult {
   sessionId?: string;
   windowId?: string;
   paneId?: string;
   topologyGeneration: number;
+  timing?: TmuxActionTiming;
 }
 
 interface WireTmuxAction {

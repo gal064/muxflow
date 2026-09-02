@@ -52,7 +52,6 @@ fn unmerged_entry(fields: &[&[u8]]) -> anyhow::Result<v1::GitStatusEntry> {
         bail!("malformed unmerged XY status");
     }
     Ok(v1::GitStatusEntry {
-        display_path: String::from_utf8_lossy(&path).into_owned(),
         path,
         index_kind: v1::GitChangeKind::Unmerged.into(),
         worktree_kind: v1::GitChangeKind::Unmerged.into(),
@@ -65,8 +64,6 @@ fn unmerged_entry(fields: &[&[u8]]) -> anyhow::Result<v1::GitStatusEntry> {
         conflict_code: String::from_utf8_lossy(xy).into_owned(),
         submodule: fields[2] != b"N...",
         submodule_state: String::from_utf8_lossy(fields[2]).into_owned(),
-        head_oid: String::from_utf8_lossy(fields[7]).into_owned(),
-        index_oid: String::from_utf8_lossy(fields[8]).into_owned(),
         ..Default::default()
     })
 }
@@ -86,7 +83,6 @@ fn untracked_entry(record: &[u8]) -> anyhow::Result<v1::GitStatusEntry> {
         path.pop();
     }
     Ok(v1::GitStatusEntry {
-        display_path: String::from_utf8_lossy(&path).into_owned(),
         path,
         untracked: !ignored,
         ignored,
@@ -112,9 +108,7 @@ fn entry_from_ordinary(
     }
     let path = fields.last().unwrap().to_vec();
     Ok(v1::GitStatusEntry {
-        display_path: String::from_utf8_lossy(&path).into_owned(),
         path,
-        display_original_path: String::from_utf8_lossy(&original_path).into_owned(),
         original_path,
         index_kind: change_kind(xy[0]).into(),
         worktree_kind: change_kind(xy[1]).into(),
@@ -123,8 +117,6 @@ fn entry_from_ordinary(
         head_mode: parse_mode(fields[3])?,
         index_mode: parse_mode(fields[4])?,
         worktree_mode: parse_mode(fields[5])?,
-        head_oid: String::from_utf8_lossy(fields[6]).into_owned(),
-        index_oid: String::from_utf8_lossy(fields[7]).into_owned(),
         submodule: fields[2] != b"N...",
         submodule_state: String::from_utf8_lossy(fields[2]).into_owned(),
         rename_score,

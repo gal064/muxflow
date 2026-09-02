@@ -7,7 +7,7 @@ import type { WireFileEvent } from "../files/api";
 import type { WireGitEvent } from "../git/api";
 import type { WireAgentEvent, WireAgentSnapshot } from "../agents/api";
 import type { OperationRecorder } from "../../perf/operations";
-import { copyTerminalBytes, ownTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
+import { copyTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
 import type { RustInputLatencyHistogram } from "./inputLatencyStats";
 
 interface SequencedTerminalEvent {
@@ -19,6 +19,19 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "seed"; paneId: string; generation: number; data: OwnedTerminalBytes }
   | { kind: "output"; paneId: string; generation: number; data: OwnedTerminalBytes }
   | { kind: "seedDiagnostic"; paneId: string; message: string }
+  /**
+   * One page of the scrollback above a pane's screen, answering one
+   * `requestTerminalHistory`. Deliberately not a seed: it carries no
+   * generation, because it claims no place in the output ordering — the
+   * renderer splices it above what it is already showing, or discards it.
+   *
+   * `historySize` is how many lines tmux holds for the pane, which is what the
+   * renderer compares against the rows it asked for to know whether this page
+   * reached the top. It is absent when the host's probe went unanswered — the
+   * pane went away mid-request — and that is not the same as a history of zero
+   * rows: an absent size means ask again.
+   */
+  | { kind: "terminalHistory"; paneId: string; data: OwnedTerminalBytes; historySize?: number }
   | { kind: "flowStalled"; paneId: string; message: string }
   | { kind: "flowPaused"; paneId: string; message: string }
   | { kind: "clipboardWrite"; text: string }
@@ -32,14 +45,27 @@ export type TerminalEvent = SequencedTerminalEvent & (
       paneId: string;
       state: "visible" | "hiddenBuffered" | "released" | "unspecified";
       requiresSeed: boolean;
+      /**
+       * The host verified its record of this pane's handoff against the
+       * reveal's checkpoint: `rawTail` is the complete output since it, and the
+       * screen it continues is the one this renderer is already holding. An
+       * empty tail is the ordinary answer for a pane that printed nothing while
+       * hidden, and it still means "you may draw" — which is why every decision
+       * about this answer reads the flag and never the byte count.
+       */
+      resumeFromRenderer: boolean;
       recoveryReason: string;
       generation: number;
       snapshotGeneration: number;
       tailThroughGeneration: number;
-      serializedSnapshot: OwnedTerminalBytes;
       rawTail: OwnedTerminalBytes;
     }
-  | { kind: "snapshot"; snapshot: TmuxSnapshot; generation: number; serverIdentity: string; authoritative: boolean }
+  /**
+   * A topology answer. `snapshot` is absent on a reconciliation
+   * acknowledgement — a notified host pass that found the world unchanged and
+   * sent the generation alone rather than a tree this process already holds.
+   */
+  | { kind: "snapshot"; snapshot?: TmuxSnapshot; generation: number; serverIdentity: string; authoritative: boolean }
   | { kind: "fileService"; scope: string; event: WireFileEvent }
   | { kind: "gitService"; scope: string; event: WireGitEvent }
   | { kind: "agentService"; scope: string; event?: WireAgentEvent; snapshot?: WireAgentSnapshot }
@@ -47,45 +73,15 @@ export type TerminalEvent = SequencedTerminalEvent & (
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const encoder = new TextEncoder();
-export const MAX_HOST_TERMINAL_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 export const MAX_HOST_TERMINAL_INPUT_BYTES = 1024 * 1024;
 const COMMON_HEADER_BYTES = 11;
-const PANE_RESOURCE_HEADER_BYTES = 38;
-
-declare const preparedTerminalSnapshot: unique symbol;
-
-export interface PreparedTerminalSnapshot {
-  readonly [preparedTerminalSnapshot]: true;
-  readonly serialized: string;
-  readonly data: OwnedTerminalBytes;
-  readonly originalByteLength: number;
-  readonly retained: boolean;
-}
+const PANE_RESOURCE_HEADER_BYTES = 34;
+/** One presence byte and the big-endian `history_size` that follows it. */
+const TERMINAL_HISTORY_HEADER_BYTES = 5;
 
 export interface TerminalVisibilityCheckpoint {
   terminalEpoch: number;
   outputGeneration: number;
-}
-
-export function prepareTerminalSnapshot(
-  serialized: string,
-  maxBytes = MAX_HOST_TERMINAL_SNAPSHOT_BYTES,
-): PreparedTerminalSnapshot {
-  const encoded = encoder.encode(serialized);
-  if (encoded.byteLength > maxBytes) {
-    return Object.freeze({
-      serialized,
-      data: ownTerminalBytes(new Uint8Array()),
-      originalByteLength: encoded.byteLength,
-      retained: false,
-    }) as PreparedTerminalSnapshot;
-  }
-  return Object.freeze({
-    serialized,
-    data: ownTerminalBytes(encoded),
-    originalByteLength: encoded.byteLength,
-    retained: true,
-  }) as PreparedTerminalSnapshot;
 }
 
 export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: OperationRecorder): TerminalEvent {
@@ -138,12 +134,19 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
       if (!Number.isSafeInteger(parsed.sequence) || parsed.sequence < 0) throw new Error("invalid snapshot sequence");
       if (parsed.sequence !== sequence) throw new Error("snapshot sequence conflicts with its common frame header");
       if (!Number.isSafeInteger(parsed.generation) || parsed.generation < 0) throw new Error("invalid snapshot generation");
-      if (typeof parsed.serverIdentity !== "string" || typeof parsed.authoritative !== "boolean" || !parsed.snapshot) {
+      if (typeof parsed.serverIdentity !== "string" || typeof parsed.authoritative !== "boolean") {
+        throw new Error("invalid topology snapshot metadata");
+      }
+      // No tree at all is the reconciliation acknowledgement: a notified host
+      // pass found the world exactly as this process already holds it and sent
+      // the generation alone. It closes the reconciliation state and nothing
+      // else — see the reducer's snapshot arm.
+      if (parsed.snapshot !== undefined && parsed.snapshot !== null && typeof parsed.snapshot !== "object") {
         throw new Error("invalid topology snapshot metadata");
       }
       if (!parsed.authoritative) requireHostSequence(sequence, "ordered topology snapshot");
-      const { sequence: _embeddedSequence, ...snapshot } = parsed;
-      return { kind: "snapshot", sequence, ...snapshot };
+      const { sequence: _embeddedSequence, snapshot, ...metadata } = parsed;
+      return { kind: "snapshot", sequence, snapshot: snapshot ?? undefined, ...metadata };
     }
     case 8:
       requireHostSequence(sequence, "protocol progress");
@@ -224,6 +227,21 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
       } catch {
         throw new Error("terminal clipboard write payload is not valid UTF-8");
       }
+    case 18: {
+      requireHostSequence(sequence, "terminal history");
+      requirePaneId(label, "terminal history");
+      if (data.byteLength < TERMINAL_HISTORY_HEADER_BYTES) throw new Error("terminal history frame is truncated");
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      const known = view.getUint8(0) === 1;
+      const historySize = view.getUint32(1);
+      return {
+        kind: "terminalHistory",
+        paneId: label,
+        data: copyTerminalBytes(data.subarray(TERMINAL_HISTORY_HEADER_BYTES)),
+        ...(known ? { historySize } : {}),
+        sequence,
+      };
+    }
     default: throw new Error(`unknown terminal frame kind ${frame[0]}`);
   }
 }
@@ -515,7 +533,7 @@ function decodePaneResource(
   const state = (["unspecified", "visible", "hiddenBuffered", "released"] as const)[payload[0]];
   if (!state) throw new Error("invalid pane resource state");
   const flags = payload[1];
-  if ((flags & ~1) !== 0) throw new Error("pane resource payload has unknown flags");
+  if ((flags & ~3) !== 0) throw new Error("pane resource payload has unknown flags");
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   const generation = safeBigIntToNumber(view.getBigUint64(2, false), "pane resource generation");
   const snapshotGeneration = safeBigIntToNumber(view.getBigUint64(10, false), "pane resource snapshot generation");
@@ -524,31 +542,28 @@ function decodePaneResource(
     throw new Error("pane resource generation metadata is inconsistent");
   }
   const reasonLength = view.getUint32(26, false);
-  const snapshotLength = view.getUint32(30, false);
-  const tailLength = view.getUint32(34, false);
-  const expectedLength = PANE_RESOURCE_HEADER_BYTES + reasonLength + snapshotLength + tailLength;
+  const tailLength = view.getUint32(30, false);
+  const expectedLength = PANE_RESOURCE_HEADER_BYTES + reasonLength + tailLength;
   if (expectedLength !== payload.byteLength) throw new Error("pane resource length fields do not match its payload");
   const reasonEnd = PANE_RESOURCE_HEADER_BYTES + reasonLength;
-  const snapshotEnd = reasonEnd + snapshotLength;
   let recoveryReason: string;
   try {
     recoveryReason = decoder.decode(payload.subarray(PANE_RESOURCE_HEADER_BYTES, reasonEnd));
   } catch {
     throw new Error("pane resource recovery reason is not valid UTF-8");
   }
-  const serializedSnapshot = copyTerminalBytes(payload.subarray(reasonEnd, snapshotEnd));
-  const rawTail = copyTerminalBytes(payload.subarray(snapshotEnd));
-  measurements?.add("terminal.decoder.copiedBytes", serializedSnapshot.byteLength + rawTail.byteLength);
+  const rawTail = copyTerminalBytes(payload.subarray(reasonEnd));
+  measurements?.add("terminal.decoder.copiedBytes", rawTail.byteLength);
   return {
     kind: "paneResource",
     paneId,
     state,
     requiresSeed: Boolean(flags & 1),
+    resumeFromRenderer: Boolean(flags & 2),
     recoveryReason,
     generation,
     snapshotGeneration,
     tailThroughGeneration,
-    serializedSnapshot,
     rawTail,
     sequence,
   };
@@ -819,10 +834,10 @@ export function setTerminalVisibility(
   clientId: string,
   paneId: string,
   visible: boolean,
-  serializedSnapshot: Uint8Array,
+  rendererHoldsSnapshot: boolean,
   checkpoint: TerminalVisibilityCheckpoint,
 ): Promise<void> {
-  const frame = encodeTerminalVisibilityFrame(clientId, paneId, visible, serializedSnapshot, checkpoint);
+  const frame = encodeTerminalVisibilityFrame(clientId, paneId, visible, rendererHoldsSnapshot, checkpoint);
   return measurePerfRequest(
     visible ? "invoke.set_terminal_visibility.reveal" : "invoke.set_terminal_visibility.hide",
     "terminal",
@@ -834,25 +849,30 @@ export function setTerminalVisibility(
 
 /**
  * Frames a visibility change as a raw IPC body: the input frame's header, then
- * a visibility byte, the terminal epoch and the output cutoff as big-endian
- * `u64`s, then the snapshot bytes.
+ * a visibility byte, a flags byte, and the terminal epoch and output cutoff as
+ * big-endian `u64`s.
  *
- * A hide carries the renderer's serialized screen, up to 4 MiB. As a JSON
- * argument that becomes an array of numbers — around 15 MB of text to
- * stringify here and re-parse on the other side, on the thread that is
- * supposed to be painting the tab the user just switched to.
+ * A hide used to carry the renderer's serialized screen, up to 4 MiB of it,
+ * which is why this body is raw rather than JSON — an array of numbers that
+ * size is around 15 MB of text to stringify here and re-parse on the other
+ * side, on the thread that is supposed to be painting the tab the user just
+ * switched to. It carries no screen now: bit 0 of the flags byte says the
+ * renderer kept its own, which is what lets the host answer the reveal with the
+ * output since the checkpoint instead of a copy of the screen. The body stays
+ * raw because the frame is still on the switch path and a JSON round trip there
+ * costs more than the frame does.
  */
 export function encodeTerminalVisibilityFrame(
   clientId: string,
   paneId: string,
   visible: boolean,
-  serializedSnapshot: Uint8Array,
+  rendererHoldsSnapshot: boolean,
   checkpoint: TerminalVisibilityCheckpoint,
 ): Uint8Array {
   const client = encoder.encode(clientId);
   const pane = encoder.encode(paneId);
   const scalarsOffset = 4 + client.byteLength + pane.byteLength;
-  const frame = new Uint8Array(scalarsOffset + 17 + serializedSnapshot.byteLength);
+  const frame = new Uint8Array(scalarsOffset + 18);
   const view = new DataView(frame.buffer);
   view.setUint16(0, client.byteLength, false);
   frame.set(client, 2);
@@ -860,10 +880,34 @@ export function encodeTerminalVisibilityFrame(
   view.setUint16(paneOffset, pane.byteLength, false);
   frame.set(pane, paneOffset + 2);
   frame[scalarsOffset] = visible ? 1 : 0;
-  view.setBigUint64(scalarsOffset + 1, BigInt(checkpoint.terminalEpoch), false);
-  view.setBigUint64(scalarsOffset + 9, BigInt(checkpoint.outputGeneration), false);
-  frame.set(serializedSnapshot, scalarsOffset + 17);
+  frame[scalarsOffset + 1] = rendererHoldsSnapshot ? 1 : 0;
+  view.setBigUint64(scalarsOffset + 2, BigInt(checkpoint.terminalEpoch), false);
+  view.setBigUint64(scalarsOffset + 10, BigInt(checkpoint.outputGeneration), false);
   return frame;
+}
+
+/**
+ * Asks the host for the scrollback above a pane's screen.
+ *
+ * Separate from `requestTerminalSeed` because it asks a different question: a
+ * seed request also asserts that this pane is visible and settles its seed
+ * debt, and a photograph of the scrollback does neither.
+ *
+ * `skipLines` is the scrollback this renderer is already holding. tmux measures
+ * its capture from the pane's current display, so a pane that has printed since
+ * it was seeded would be handed the rows that scrolled off in the meantime a
+ * second time, and the splice would show them twice.
+ */
+export function requestTerminalHistory(
+  clientId: string,
+  paneId: string,
+  lines: number,
+  skipLines: number,
+): Promise<void> {
+  const boundary = { clientId, paneId, lines, skipLines };
+  return measurePerfRequest(
+    "invoke.request_terminal_history", "terminal", boundary, (request) => invoke("request_terminal_history", request),
+  );
 }
 
 export function requestTerminalSeed(clientId: string, paneId: string): Promise<void> {
@@ -882,6 +926,14 @@ export interface TerminalLinkStats {
   msSinceLastHostEvent: number;
   /** Requests the native side gave up waiting on, since this client started. */
   lateRequestsTotal: number;
+  /**
+   * Bytes and frames the native reader has taken off the ssh stream since this
+   * connection started. Absent unless the process is running a measured build
+   * with `ADE_PERF_LOG` set: sampled at a keystroke and again at its echo, the
+   * difference is how much other traffic the echo waited behind.
+   */
+  bytesReadTotal?: number;
+  framesReadTotal?: number;
 }
 
 /**

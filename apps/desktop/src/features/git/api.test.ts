@@ -115,15 +115,24 @@ describe("TauriGitWorkspaceClient", () => {
     expect(requests[0][1].command).toMatchObject({ operation: "push", repositoryId: "repo-id", expectedStatusGeneration: "7" });
   });
 
-  it("turns malformed event generations and byte arrays into a scoped error instead of crashing the shell", () => {
+  it("turns malformed event generations into a scoped error instead of crashing the shell", () => {
     const client = new TauriGitWorkspaceClient();
     const events: unknown[] = [];
     client.subscribe((event) => events.push(event));
     const malformed = wireStatus() as ReturnType<typeof wireStatus> & { generation: string };
     malformed.generation = "9e99";
-    malformed.entries[0].path = [999];
     client.publishWireEvent({ rootToken: "root-token", status: malformed });
     expect(events).toEqual([expect.objectContaining({ kind: "error", rootToken: "root-token", error: expect.stringContaining("decimal u64") })]);
+  });
+
+  it("turns a path that is not base64 into a scoped error instead of crashing the shell", () => {
+    const client = new TauriGitWorkspaceClient();
+    const events: unknown[] = [];
+    client.subscribe((event) => events.push(event));
+    const malformed = wireStatus();
+    malformed.entries[0].path = "not base64!";
+    client.publishWireEvent({ rootToken: "root-token", status: malformed });
+    expect(events).toEqual([expect.objectContaining({ kind: "error", rootToken: "root-token", error: expect.stringContaining("malformed Git status") })]);
   });
 
   it("propagates AbortSignal cancellation to the exact live protocol request", async () => {
@@ -155,6 +164,6 @@ function wireRepository() { return { repositoryId: "repo-id", worktreeRoot: "/re
 function wireStatus() {
   return {
     repository: wireRepository(), generation: "18446744073709551615", sourceGeneration: "source", authoritative: true, totalEntryCount: "1", copyDetectionIncomplete: true,
-    entries: [{ path: [...new TextEncoder().encode("--a file\tx\n")], displayPath: "--a file\\tx\\n", originalPath: [], displayOriginalPath: "", indexKind: "unspecified", worktreeKind: "modified", indexStatus: ".", worktreeStatus: "M", conflicted: false, conflictCode: "", untracked: false, ignored: false, submodule: false, submoduleState: "", symlink: false, binary: false, renameScore: "" }],
+    entries: [{ path: "LS1hIGZpbGUJeAo=", displayPath: "--a file\\tx\\n", originalPath: "", displayOriginalPath: "", indexKind: "unspecified", worktreeKind: "modified", indexStatus: ".", worktreeStatus: "M", conflicted: false, conflictCode: "", untracked: false, ignored: false, submodule: false, submoduleState: "", symlink: false, binary: false, renameScore: "" }],
   };
 }

@@ -768,7 +768,7 @@ export function App() {
 
     closeAppTab: closeWorkspaceAppTab,
     combinedTabs, controllers, currentHostProfileId, deletableHostProfile: deletableProfile,
-    focusDirection, generation: hostState.generation, hostScope: currentHostScope,
+    focusDirection, hostScope: currentHostScope,
     isHostScopeCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
     jumpToUnreadAgent: () => {
       const target = jumpTarget(agentRows);
@@ -1059,6 +1059,7 @@ export function App() {
         phase={hostState.phase}
       />
       {sidebarOpen && <WorkspaceSidebar
+        activePaneId={activePane?.id}
         adapters={agentRuntime.adapters}
         agents={visibleAgentRows}
         agentSort={appState.shell.agentSort}
@@ -1177,6 +1178,7 @@ export function App() {
               beginDividerDrag={beginDividerDrag}
               clientId={clientId}
               copyOnSelect={appState.shell.copyOnSelect}
+              cleanWrappedCommands={appState.shell.cleanWrappedCommands}
               terminalApplicationClipboard={appState.shell.terminalApplicationClipboard}
               terminalFontSize={appState.shell.terminalFontSize}
               controllers={controllers}

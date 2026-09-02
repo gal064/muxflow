@@ -125,6 +125,14 @@ pub const CAP_FILE_STREAM: u64 = 1 << 15;
 /// Resolves explicit terminal-output paths against the authoritative pane cwd.
 /// Required so a desktop cannot offer operation 46 to a helper that predates it.
 pub const CAP_TERMINAL_FILE_RESOLUTION: u64 = 1 << 16;
+/// The helper resolves tmux independently of an interactive shell `PATH`.
+///
+/// Required even though it adds no request type: a daemon survives desktop
+/// upgrades, and a same-version daemon predating this behavior would otherwise
+/// remain "compatible" while every local tmux operation still failed from a
+/// Dock-launched app. The required bit makes the bridge retire that daemon and
+/// start the helper shipped with the desktop.
+pub const CAP_TMUX_EXECUTABLE_RESOLUTION: u64 = 1 << 17;
 pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_ORDERED_EVENTS
     | CAP_CANCELLATION
@@ -141,10 +149,11 @@ pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
     | CAP_TERMINAL_UPLOAD
     | CAP_TERMINAL_OUTPUT_CREDIT
     | CAP_FILE_STREAM
-    | CAP_TERMINAL_FILE_RESOLUTION;
+    | CAP_TERMINAL_FILE_RESOLUTION
+    | CAP_TMUX_EXECUTABLE_RESOLUTION;
 
 /// Every required capability, with the name a refusal reports it by.
-const CAPABILITY_NAMES: [(u64, &str); 17] = [
+const CAPABILITY_NAMES: [(u64, &str); 18] = [
     (CAP_SNAPSHOTS, "snapshots"),
     (CAP_ORDERED_EVENTS, "orderedEvents"),
     (CAP_CANCELLATION, "cancellation"),
@@ -162,6 +171,7 @@ const CAPABILITY_NAMES: [(u64, &str); 17] = [
     (CAP_TERMINAL_OUTPUT_CREDIT, "terminalOutputCredit"),
     (CAP_FILE_STREAM, "fileStream"),
     (CAP_TERMINAL_FILE_RESOLUTION, "terminalFileResolution"),
+    (CAP_TMUX_EXECUTABLE_RESOLUTION, "tmuxExecutableResolution"),
 ];
 
 /// Which required capabilities `advertised` does not carry.

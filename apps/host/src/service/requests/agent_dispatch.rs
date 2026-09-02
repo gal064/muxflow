@@ -226,7 +226,7 @@ fn launch_agent(
     let split = placement == v1::AgentPlacementKind::Split;
     let output = if split {
         validate_tmux_id(&request.pane_id, '%')?;
-        tmux_command()
+        tmux_command()?
             .args(["split-window", "-P", "-F", PLACEMENT_FORMAT])
             .arg("-t")
             .arg(&request.pane_id)
@@ -236,7 +236,7 @@ fn launch_agent(
             .output()
     } else {
         validate_tmux_id(&request.session_id, '$')?;
-        tmux_command()
+        tmux_command()?
             .args(["new-window", "-P", "-F", PLACEMENT_FORMAT])
             .arg("-t")
             .arg(&request.session_id)

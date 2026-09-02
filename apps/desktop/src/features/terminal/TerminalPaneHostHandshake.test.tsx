@@ -36,11 +36,13 @@ import type { Pane } from "../../app/types";
 const api = vi.hoisted(() => ({
   setTerminalVisibility: vi.fn(async (..._args: unknown[]) => undefined),
   requestTerminalSeed: vi.fn(async (..._args: unknown[]) => undefined),
+  requestTerminalHistory: vi.fn(async (..._args: unknown[]) => undefined),
 }));
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
   setTerminalVisibility: api.setTerminalVisibility,
   requestTerminalSeed: api.requestTerminalSeed,
+  requestTerminalHistory: api.requestTerminalHistory,
 }));
 
 const journal = vi.hoisted(() => ({ recordIncident: vi.fn((..._args: unknown[]) => undefined) }));
@@ -143,9 +145,16 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
       this.grid = size;
       return { kind: "applied", size };
     }
+    restoreViewport(): void {}
     onInput(): () => void { return () => undefined; }
     onSelectionChange(): () => void { return () => undefined; }
     onViewportChange(): () => void { return () => undefined; }
+    onScrollbackTopReached(): () => void { return () => undefined; }
+    isAlternateScreenActive(): boolean { return false; }
+    get scrollbackRows(): number { return 0; }
+    get scrollbackLimit(): number { return 10_000; }
+    async prependHistory(): Promise<"applied" | "superseded"> { return "applied"; }
+    onGridApplied(): () => void { return () => undefined; }
     focus(): void {}
     blur(): void {}
     hasSelection(): boolean { return false; }
@@ -154,16 +163,18 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
     search(): boolean { return false; }
     clearSearch(): void {}
     scrollToBottom(): void {}
+    noteUnrenderedOutput(): void {}
     serialize(): string { return this.screen; }
     disposeGpuRenderer(): void {}
     dispose(): void { this.#scheduler.dispose(); }
 
-    drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number }> {
+    drainAndSerialize(): Promise<{ serialized: string; outputGeneration: number; viewport: { atBottom: boolean; viewportLine: number; grid: Size } }> {
       const drained = this.#scheduler.sealAndDrain();
       this.pump();
       return drained.then(() => ({
         serialized: this.screen,
         outputGeneration: this.#generations.appliedGeneration,
+        viewport: { atBottom: true, viewportLine: 0, grid: this.grid },
       }));
     }
 
@@ -212,10 +223,10 @@ import { ownTerminalBytes } from "./TerminalBytes";
 import { resetPerfProbe } from "../../perf/probe";
 import { REVEAL_RETRY_DELAY_MS, STALE_REVEAL_EPOCH_CODE } from "./revealRetry";
 import { GRID_MISMATCH_SUSTAIN_MS } from "./gridMismatchProbe";
+import { PANE_WATCHDOG_BASE_DELAY_MS } from "./PaneDegradedWatchdog";
 import type { TerminalEvent } from "./api";
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 /** Any non-zero epoch; the host rejects a zero one. */
 const EPOCH = 7;
 /** `TerminalPane`'s own reveal backstop, plus room for the timers around it. */
@@ -225,12 +236,12 @@ type PaneResourceState = "visible" | "hiddenBuffered" | "released" | "unspecifie
 
 interface HostResource {
   state: PaneResourceState;
-  serializedSnapshot: string;
   rawTail: string;
   generation: number;
   snapshotGeneration: number;
   tailThroughGeneration: number;
   requiresSeed: boolean;
+  resumeFromRenderer: boolean;
   recoveryReason: string;
 }
 
@@ -270,9 +281,9 @@ class FakeHost {
     if (existing) return existing;
     const resource: HostResource = {
       state: visible ? "visible" : "hiddenBuffered",
-      serializedSnapshot: "", rawTail: "",
+      rawTail: "",
       generation, snapshotGeneration: generation, tailThroughGeneration: generation,
-      requiresSeed: false, recoveryReason: "",
+      requiresSeed: false, resumeFromRenderer: false, recoveryReason: "",
     };
     this.resources.set(paneId, resource);
     return resource;
@@ -311,18 +322,18 @@ class FakeHost {
   }
 
   /**
-   * `PaneResourceStore::snapshot` — the stream's capture path. The capture is
-   * stored against a brand-new generation (`terminal_generation.fetch_add`),
-   * and it is only put on the wire when the pane is already visible to the
-   * host, which is why a pane the desktop has not revealed yet gets its first
-   * screen through the reveal handshake rather than as a seed.
+   * `PaneResourceStore::seeded` — the stream's capture path. The screen goes to
+   * the renderer and nowhere else; what the host keeps is the boundary it is
+   * current through, against a brand-new generation
+   * (`terminal_generation.fetch_add`). It is only put on the wire when the pane
+   * is already visible to the host, which is why a pane the desktop has not
+   * revealed yet gets its first screen from the seed its reveal asks for.
    */
   capture(paneId: string): void {
     const generation = this.#nextGeneration();
     const resource = this.#ensure(paneId, false, generation);
     const screen = this.tmux.get(paneId) ?? "";
     this.journals.delete(paneId);
-    resource.serializedSnapshot = screen;
     resource.rawTail = "";
     resource.snapshotGeneration = generation;
     resource.tailThroughGeneration = generation;
@@ -345,9 +356,9 @@ class FakeHost {
     // visibility, so the resource is forced visible before the capture.
     if (resource) {
       resource.state = "visible";
-      resource.serializedSnapshot = "";
       resource.rawTail = "";
       resource.requiresSeed = false;
+      resource.resumeFromRenderer = false;
       resource.recoveryReason = "";
       this.checkpoints.delete(paneId);
     } else this.#ensure(paneId, true, this.generation);
@@ -356,34 +367,59 @@ class FakeHost {
 
   /**
    * `PaneResourceStore::reveal`, then `set_terminal_visibility`'s
-   * `if visible { resource.state = Visible }` — the emitted state is always
-   * `visible` on this path however the stored resource was parked.
+   * `if visible { resource.state = Visible }` and its
+   * `if requires_seed { request_seed }` — the emitted state is always `visible`
+   * on this path however the stored resource was parked.
+   *
+   * The tail is handed back only to the renderer that says it is still holding
+   * the screen this host recorded the handoff at. Anything else — a renderer
+   * holding nothing, a checkpoint this host never recorded, a released pane —
+   * is answered with a seed and no bytes, and the host is the one that asks
+   * tmux for it.
    */
-  reveal(paneId: string): void {
+  reveal(
+    paneId: string,
+    rendererHoldsSnapshot: boolean,
+    checkpoint: { terminalEpoch: number; outputGeneration: number },
+  ): void {
     const generation = this.#nextGeneration();
     const resource = this.#ensure(paneId, true, generation);
-    let recovery: HostResource;
-    if (resource.state === "visible") {
-      resource.generation = generation;
-      recovery = {
-        ...resource, serializedSnapshot: "", rawTail: "",
+    const resumes = rendererHoldsSnapshot
+      && this.checkpoints.get(paneId) === `${checkpoint.terminalEpoch}:${checkpoint.outputGeneration}`
+      && resource.state === "hiddenBuffered"
+      && !resource.requiresSeed;
+    const recovery: HostResource = resumes
+      ? {
+        ...resource, state: "visible", generation,
+        requiresSeed: false, resumeFromRenderer: true, recoveryReason: "",
+      }
+      : {
+        state: "visible", rawTail: "",
         generation, snapshotGeneration: generation, tailThroughGeneration: generation,
+        requiresSeed: true, resumeFromRenderer: false,
+        recoveryReason: "the reveal did not match the renderer handoff this host recorded",
       };
-    } else {
-      recovery = { ...resource };
-      resource.serializedSnapshot = "";
-      resource.rawTail = "";
-      resource.state = "visible";
-      resource.generation = generation;
-      this.journals.delete(paneId);
-      this.checkpoints.delete(paneId);
-    }
-    this.emitted.push(`reveal(snapshot=${recovery.snapshotGeneration},bytes=${recovery.serializedSnapshot.length})`);
-    this.#publishResource(paneId, { ...recovery, state: "visible" });
+    resource.state = "visible";
+    resource.rawTail = "";
+    resource.generation = generation;
+    resource.snapshotGeneration = generation;
+    resource.tailThroughGeneration = generation;
+    resource.requiresSeed = !resumes;
+    resource.recoveryReason = recovery.recoveryReason;
+    this.journals.delete(paneId);
+    this.checkpoints.delete(paneId);
+    this.emitted.push(`reveal(resume=${resumes},bytes=${recovery.rawTail.length})`);
+    this.#publishResource(paneId, recovery);
+    if (!resumes) this.capture(paneId);
   }
 
-  /** `PaneResourceStore::hide_with_checkpoint`, including its release rules. */
-  hide(paneId: string, snapshot: Uint8Array, checkpoint: { terminalEpoch: number; outputGeneration: number }): void {
+  /**
+   * `PaneResourceStore::hide_with_checkpoint`, including its release rules.
+   *
+   * It stores no screen: the renderer keeps that, and this records the
+   * checkpoint it was kept at plus the output since.
+   */
+  hide(paneId: string, checkpoint: { terminalEpoch: number; outputGeneration: number }): void {
     const generation = this.#nextGeneration();
     const resource = this.#ensure(paneId, true, generation);
     const key = `${checkpoint.terminalEpoch}:${checkpoint.outputGeneration}`;
@@ -411,44 +447,13 @@ class FakeHost {
     resource.generation = Math.max(tailThrough, generation);
     resource.snapshotGeneration = checkpoint.outputGeneration;
     resource.tailThroughGeneration = tailThrough;
-    if (snapshot.byteLength === 0) {
-      // "An empty IPC payload cannot distinguish a valid blank renderer
-      // serialization from an omitted one", so the host refuses to claim it has
-      // a recovery base.
-      resource.state = "released";
-      resource.requiresSeed = true;
-      resource.recoveryReason = "renderer handoff omitted a recoverable snapshot";
-      resource.serializedSnapshot = "";
-      resource.rawTail = "";
-    } else {
-      resource.state = "hiddenBuffered";
-      resource.serializedSnapshot = decoder.decode(snapshot);
-      resource.rawTail = tail;
-      resource.requiresSeed = false;
-      resource.recoveryReason = "";
-    }
+    resource.state = "hiddenBuffered";
+    resource.rawTail = tail;
+    resource.requiresSeed = false;
+    resource.recoveryReason = "";
     this.checkpoints.set(paneId, key);
     this.emitted.push(`hide(state=${resource.state},snapshot=${resource.snapshotGeneration})`);
     this.#publishResource(paneId, { ...resource });
-  }
-
-  /**
-   * The `set_visible(true)` hazard, in one call: `replay.rs` restamps
-   * `snapshot_generation` to the current generation and never clears
-   * `serialized_snapshot`, so a resource can end up offering old bytes under a
-   * generation the desktop recognises as its own checkpoint.
-   */
-  forgeSnapshotUnderGeneration(paneId: string, bytes: string, snapshotGeneration: number): void {
-    const resource = this.#ensure(paneId, false, this.generation);
-    resource.state = "hiddenBuffered";
-    resource.serializedSnapshot = bytes;
-    resource.rawTail = "";
-    resource.snapshotGeneration = snapshotGeneration;
-    resource.tailThroughGeneration = snapshotGeneration;
-    resource.requiresSeed = false;
-    // The restamp itself advances the store's generation, which is what keeps
-    // the resulting event ahead of the hub's per-pane watermark.
-    resource.generation = this.#nextGeneration();
   }
 
   /** A resource event in a state this desktop build has no rule for. */
@@ -456,20 +461,20 @@ class FakeHost {
     const generation = this.#nextGeneration();
     this.emitted.push(`unusable(${state})`);
     this.#publishResource(paneId, {
-      state, serializedSnapshot: "", rawTail: "",
+      state, rawTail: "",
       generation, snapshotGeneration: generation, tailThroughGeneration: generation,
-      requiresSeed: false, recoveryReason: "",
+      requiresSeed: false, resumeFromRenderer: false, recoveryReason: "",
     });
   }
 
   #publishResource(paneId: string, resource: HostResource): void {
     this.#publish({
       kind: "paneResource", paneId, state: resource.state, requiresSeed: resource.requiresSeed,
+      resumeFromRenderer: resource.resumeFromRenderer,
       recoveryReason: resource.recoveryReason, generation: resource.generation,
       snapshotGeneration: resource.snapshotGeneration,
       tailThroughGeneration: resource.tailThroughGeneration,
       sequence: this.#nextSequence(),
-      serializedSnapshot: ownTerminalBytes(encoder.encode(resource.serializedSnapshot)),
       rawTail: ownTerminalBytes(encoder.encode(resource.rawTail)),
     });
   }
@@ -567,10 +572,11 @@ beforeEach(() => {
   host = new FakeHost(hub);
   // The transport, with one turn of latency so nothing in the pane can rely on
   // the host answering inside its own call stack.
-  api.setTerminalVisibility.mockImplementation(async (_client, paneId, visible, snapshot, checkpoint) => {
+  api.setTerminalVisibility.mockImplementation(async (_client, paneId, visible, holdsSnapshot, checkpoint) => {
     await Promise.resolve();
-    if (visible) host.reveal(paneId as string);
-    else host.hide(paneId as string, snapshot as Uint8Array, checkpoint as { terminalEpoch: number; outputGeneration: number });
+    const cutoff = checkpoint as { terminalEpoch: number; outputGeneration: number };
+    if (visible) host.reveal(paneId as string, holdsSnapshot as boolean, cutoff);
+    else host.hide(paneId as string, cutoff);
     pumpAll();
   });
   api.requestTerminalSeed.mockImplementation(async (_client, paneId) => {
@@ -648,23 +654,95 @@ describe("reveal answers the reducer has no rule for", () => {
   // life, deferring every later output instead of writing it, and said nothing
   // to the watchdog, the diagnostic banner or the journal. An unset or newer
   // `PaneResourceState` decodes as `unspecified` and lands here.
-  for (const state of ["unspecified", "hiddenBuffered"] as const) {
-    it(`asks for a seed when the host answers with ${state} and no material`, async () => {
-      host.announceEpoch();
-      host.output("%1", "TMUX HAS THIS");
-      const mounted = await mountPane(fixturePane("%1"));
-      api.requestTerminalSeed.mockClear();
+  it("asks for a seed when the host answers with unspecified and no material", async () => {
+    host.announceEpoch();
+    host.output("%1", "TMUX HAS THIS");
+    const mounted = await mountPane(fixturePane("%1"));
+    api.requestTerminalSeed.mockClear();
 
-      await act(async () => { host.publishUnusableResource("%1", state); pumpAll(); });
-      await settle();
+    await act(async () => { host.publishUnusableResource("%1", "unspecified"); pumpAll(); });
+    await settle();
 
-      expect(api.requestTerminalSeed).toHaveBeenCalled();
-      expect(journal.recordIncident).toHaveBeenCalledWith("pane.revealDeadEnd", { paneId: "%1", state });
-      // And the recovery actually lands: the pane is not merely noisy about it.
-      expect(renderer().screen).toBe("TMUX HAS THIS");
-      await unmountPane(mounted);
-    });
-  }
+    expect(api.requestTerminalSeed).toHaveBeenCalled();
+    expect(journal.recordIncident).toHaveBeenCalledWith(
+      "pane.revealDeadEnd", { paneId: "%1", state: "unspecified" },
+    );
+    // And the recovery actually lands: the pane is not merely noisy about it.
+    expect(renderer().screen).toBe("TMUX HAS THIS");
+    await unmountPane(mounted);
+  });
+
+  // `hiddenBuffered` used to be read the same way and is not the same thing.
+  // `PaneResourceStore::reveal` stamps `Visible` on every path it can return by,
+  // so a `hiddenBuffered` resource arriving at a mounted pane is always this
+  // side's own hide echoed back — replayed out of the hub's dormant backlog into
+  // the next mount, because the hide is sent after this pane unsubscribes. Read
+  // as a dead end it blanked a pane the user was looking at and bought a seed
+  // nobody needed: `pane.revealDeadEnd {paneId:"%194", state:"hiddenBuffered"}`,
+  // on a busy pane, on ordinary Wi-Fi.
+  it("ignores its own hide echoed back rather than blanking the pane", async () => {
+    host.announceEpoch();
+    host.output("%1", "TMUX HAS THIS");
+    const mounted = await mountPane(fixturePane("%1"));
+    await settle();
+    const showing = renderer().screen;
+    api.requestTerminalSeed.mockClear();
+    journal.recordIncident.mockClear();
+
+    await act(async () => { host.publishUnusableResource("%1", "hiddenBuffered"); pumpAll(); });
+    await settle();
+
+    expect(journal.recordIncident).not.toHaveBeenCalledWith("pane.revealDeadEnd", expect.anything());
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+    // The whole point: the screen the user is looking at is still on the glass.
+    expect(renderer().screen).toBe(showing);
+    await unmountPane(mounted);
+  });
+
+  // Ignoring it is not the same as forgetting the pane. A mount whose reveal is
+  // never answered has nothing on it, and the echo is the only event it will
+  // ever see — so what the dead end got right is kept: the seed is asked for on
+  // the spot, because two seconds of blank terminal is the cost of waiting to
+  // find out whether the reveal is coming.
+  it("asks for a seed on the spot when the echo reaches a pane with nothing on it", async () => {
+    api.setTerminalVisibility.mockImplementation(async () => { await Promise.resolve(); });
+    host.announceEpoch();
+    host.output("%1", "TMUX HAS THIS");
+    const mounted = await mountPane(fixturePane("%1"));
+    api.requestTerminalSeed.mockClear();
+    journal.recordIncident.mockClear();
+
+    await act(async () => { host.publishUnusableResource("%1", "hiddenBuffered"); pumpAll(); });
+    await settle();
+
+    expect(api.requestTerminalSeed).toHaveBeenCalled();
+    // And it lands: the pane is showing what tmux has, not a blank screen and a
+    // banner, and it never had to wait out the watchdog to get there.
+    expect(renderer().screen).toBe("TMUX HAS THIS");
+    expect(journal.recordIncident).not.toHaveBeenCalledWith("pane.degraded", expect.anything());
+    await unmountPane(mounted);
+  });
+
+  // And the bound underneath it, for the case where the seed does not come
+  // either. The banner is the watchdog's to raise: until it fires there is
+  // nothing to tell the user that they could act on.
+  it("still bounds the wait when neither the reveal nor the seed is answered", async () => {
+    api.setTerminalVisibility.mockImplementation(async () => { await Promise.resolve(); });
+    api.requestTerminalSeed.mockImplementation(async () => { await Promise.resolve(); });
+    host.announceEpoch();
+    const mounted = await mountPane(fixturePane("%1"));
+    journal.recordIncident.mockClear();
+
+    await act(async () => { host.publishUnusableResource("%1", "hiddenBuffered"); pumpAll(); });
+    await settle();
+    expect(journal.recordIncident).not.toHaveBeenCalledWith("pane.degraded", expect.anything());
+
+    await settle(PANE_WATCHDOG_BASE_DELAY_MS);
+    expect(journal.recordIncident).toHaveBeenCalledWith(
+      "pane.degraded", { paneId: "%1", reason: "paneAwaitingSeed", attempt: 0 },
+    );
+    await unmountPane(mounted);
+  });
 
   // A companion invariant rather than a second regression test: the recovery
   // above is what fails without the fix, and this pins that recovering from it
@@ -684,7 +762,7 @@ describe("reveal answers the reducer has no rule for", () => {
   });
 });
 
-describe("the redundant restore a tab switch used to repaint", () => {
+describe("a verified resume onto the screen the renderer already holds", () => {
   /** Mounts, lets the host seed the pane, then hides it so a cache exists. */
   async function warmPane(paneId: string, screen: string): Promise<void> {
     host.announceEpoch();
@@ -708,33 +786,22 @@ describe("the redundant restore a tab switch used to repaint", () => {
     await unmountPane(mounted);
   });
 
-  it("still acknowledges and reveals when the skipped restore has no tail", async () => {
+  it("still acknowledges and reveals when the resume has no tail", async () => {
     await warmPane("%1", "WARM SCREEN");
+    const seedsBefore = host.emitted.filter((line) => line.startsWith("seed@")).length;
 
     const mounted = await mountPane(fixturePane("%1"));
 
     expect(renderer().log.filter((entry) => entry.startsWith("restore("))).toHaveLength(1);
     // The empty tail rides the scheduler's ordered barrier, which is what
-    // carries the acknowledgement and the reveal the skipped restore would have.
+    // carries the acknowledgement and the reveal the resume would have.
     expect(renderer().log.some((entry) => entry.startsWith("write:0@"))).toBe(true);
     expect(renderer().screen).toBe("WARM SCREEN");
     expect(painted()).toBe(true);
-    await unmountPane(mounted);
-  });
-
-  it("restores when the host's bytes differ from the cache under the same generation", async () => {
-    await warmPane("%1", "WARM SCREEN");
-    const cached = terminalStateCache.get("%1");
-    // The `set_visible(true)` / idempotent-hide hazard: same generation, other
-    // bytes. A skip decided on the generation alone keeps the stale screen and
-    // never shows what the host is trying to hand over.
-    host.forgeSnapshotUnderGeneration("%1", "HOST SCREEN", cached!.outputGeneration);
-
-    const mounted = await mountPane(fixturePane("%1"));
-
-    expect(renderer().log.filter((entry) => entry.startsWith("restore("))).toHaveLength(2);
-    expect(renderer().screen).toBe("HOST SCREEN");
-    expect(painted()).toBe(true);
+    // And the whole exchange is one bit and no bytes: an idle pane coming back
+    // costs neither a screen on the wire nor a capture on the host.
+    expect(host.emitted).toContain("reveal(resume=true,bytes=0)");
+    expect(host.emitted.filter((line) => line.startsWith("seed@"))).toHaveLength(seedsBefore);
     await unmountPane(mounted);
   });
 
@@ -742,7 +809,7 @@ describe("the redundant restore a tab switch used to repaint", () => {
     await warmPane("%1", "WARM SCREEN");
     api.requestTerminalSeed.mockClear();
     // A sealed or overflowed scheduler drops the record and the callback with
-    // it, so the acknowledgement and the reveal the skipped restore delegated
+    // it, so the acknowledgement and the reveal the resume delegated
     // to that empty write are simply lost. Losing them quietly is what this
     // pane must never do.
     renderers.refuseNewWrites = true;

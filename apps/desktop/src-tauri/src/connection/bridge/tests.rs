@@ -302,6 +302,7 @@ fn charged_output(sequence: u64, bytes: &[u8]) -> v1::Envelope {
                 pane_id: "%1".into(),
                 data: bytes.to_vec(),
                 generation: 1,
+                ..Default::default()
             }),
             terminal_delivery_bytes: bytes.len() as u64,
             terminal_delivery_records: 1,

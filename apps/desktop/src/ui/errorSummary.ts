@@ -66,6 +66,7 @@ const CODE_OVERRIDE_SUMMARY: readonly (readonly [RegExp, string])[] = [
  * host or the OS produces — the errno arms are the ones the Phase 10 pass hit.
  */
 const REASON_SUMMARY: readonly (readonly [RegExp, string])[] = [
+  [/tmux executable was not found|MUXFLOW_TMUX_PATH/i, "Muxflow could not find tmux on this host. Install tmux or set MUXFLOW_TMUX_PATH to its absolute path."],
   [/file name too long|os error 63/i, "That name is longer than this filesystem allows. Use a shorter one."],
   [
     /mutation parent changed|no-follow directory|unsafe component|outside the active root|escapes the active root|leaf changed or is unsafe/i,

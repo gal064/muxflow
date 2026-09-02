@@ -107,6 +107,7 @@ pub(super) fn topology(
                 attention_generation: 0,
                 attention_kind: String::new(),
                 seen_generation: 0,
+                attention_seen_at_unix_millis: 0,
                 updated_at_unix_millis: now,
                 hook_authority_expires_at_unix_millis: 0,
                 detected_manually: true,
@@ -114,6 +115,7 @@ pub(super) fn topology(
                 latest_source_generation: 0,
                 present: true,
                 hook_terminal: false,
+                claude_has_running_subagent: false,
                 codex_auto_review_turn_id: String::new(),
                 // Process detection proves a process exists; it is not an
                 // observation of what that process is doing, so it starts no

@@ -15,12 +15,19 @@ import {
  * turned an ordinary `stale_topology` rejection into the user's "creates take
  * seconds". The host answers a batched discovery in tens of milliseconds, so
  * on a nearby host a newer generation that is coming at all arrives well
- * inside this bound. The bound is a second rather than the 250 ms that once
- * sufficed because the topology still has to cross the link: on a 300 ms
- * round trip (2026-08-29, shaped to 150 ms each way) it never made 250 ms,
- * both retries expired, and an ordinary refusal reached the user as an error.
- * Two seconds of apparent hang is the worst case; anything slower than this
- * is a stall the user is better off seeing than waiting through.
+ * inside this bound.
+ *
+ * The bound is a second rather than the 250 ms that once sufficed because the
+ * topology still has to cross the link: on a 300 ms round trip (2026-08-29,
+ * shaped to 150 ms each way) it never made 250 ms, both retries expired, and
+ * an ordinary refusal reached the user as an error. What reached the user that
+ * way was a *switch*, and the host no longer refuses one for a stale
+ * generation at all. What is left here is every kind that still carries the
+ * guard — create, close, rename, reorder, split, resize, zoom, pin — for which
+ * a slow link is exactly the case that needs the longer wait; this returns the
+ * moment the newer topology lands, so a fast link pays nothing for it. Two
+ * seconds of apparent hang is the worst case; anything slower than this is a
+ * stall the user is better off seeing than waiting through.
  */
 const ACTION_RECONCILE_TIMEOUT_MS = 1_000;
 const ACTION_RECONCILE_RETRIES = 2;

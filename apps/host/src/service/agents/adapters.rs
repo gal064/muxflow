@@ -5,6 +5,7 @@ use tmux_agent_protocol::v1;
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
 pub(crate) const CODEX_APPROVAL_REVIEWER_FIELD: &str = "approval_reviewer";
 pub(crate) const CODEX_APPROVAL_TURN_ID_FIELD: &str = "approval_turn_id";
+pub(crate) const CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: &str = "has_running_subagent";
 pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed *event set* changes, not only the command
 /// string: an install from an older version covers fewer events, and reporting
@@ -120,11 +121,13 @@ impl AgentAdapter for CodexAdapter {
     /// Two events Claude Code has are absent from that surface and are
     /// therefore gaps rather than omissions: there is no `StopFailure`, so a
     /// turn that ends in failure is indistinguishable from one that succeeds,
-    /// and there is no `Notification`. A `PermissionRequest` classified by its
-    /// normalized reviewer and `PreToolUse(request_user_input)` are the two
+    /// and there is no `Notification`. `UserPromptSubmit` captures the turn's
+    /// normalized reviewer before work starts; an unclassified or mismatched
+    /// `PermissionRequest` and `PreToolUse(request_user_input)` are the two
     /// observed signals that a Codex agent is blocked. `SubagentStart` is
-    /// deliberately not taken: it says nothing `PreToolUse` has not already
-    /// said, and every hook costs a daemon connection.
+    /// deliberately not taken: it
+    /// says nothing `PreToolUse` has not already said, and every hook costs a
+    /// daemon connection.
     fn hook_events(&self) -> &'static [&'static str] {
         &[
             "SessionStart",
@@ -161,26 +164,12 @@ impl AgentAdapter for CodexAdapter {
             } else {
                 v1::AgentLifecycleState::Working
             };
-        let permission_lifecycle = if payload
-            .get(CODEX_APPROVAL_REVIEWER_FIELD)
-            .and_then(Value::as_str)
-            == Some("auto_review")
-            && payload
-                .get(CODEX_APPROVAL_TURN_ID_FIELD)
-                .and_then(Value::as_str)
-                .is_some_and(|turn_id| !turn_id.is_empty())
-        {
-            v1::AgentLifecycleState::Working
-        } else {
-            // Missing, unreadable and future reviewer values all preserve
-            // the safe behavior: a request that might need the user is
-            // blocked until another hook resolves it.
-            v1::AgentLifecycleState::Blocked
-        };
         parse_common_hook(
             payload,
             &[
-                ("PermissionRequest", permission_lifecycle),
+                // Ingest may promote this to Working only when the request's
+                // turn matches the reviewer captured at UserPromptSubmit.
+                ("PermissionRequest", v1::AgentLifecycleState::Blocked),
                 ("UserPromptSubmit", v1::AgentLifecycleState::Working),
                 ("PreToolUse", pre_tool_lifecycle),
                 ("PostToolUse", v1::AgentLifecycleState::Working),
@@ -273,6 +262,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
             };
             return Ok(parsed(payload, lifecycle));
         }
+        let stop_lifecycle = if payload
+            .get(CLAUDE_HAS_RUNNING_SUBAGENT_FIELD)
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            v1::AgentLifecycleState::Working
+        } else {
+            v1::AgentLifecycleState::Idle
+        };
         parse_common_hook(
             payload,
             &[
@@ -281,15 +279,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 ("PreToolUse", v1::AgentLifecycleState::Working),
                 ("PostToolUse", v1::AgentLifecycleState::Working),
                 ("SubagentStop", v1::AgentLifecycleState::Working),
-                // A `Stop` is a finished turn, unconditionally — including one
-                // that leaves background tasks or session crons running behind
-                // it. Background work is not foreground attention, and reading
-                // it as `Working` left every such pane working forever; worse,
-                // it withheld the terminal flag `ingest` sets on an idle Stop,
-                // which is exactly what stops Claude Code's routine idle
-                // notification (~60s after any idle turn) from reading as
-                // Blocked.
-                ("Stop", v1::AgentLifecycleState::Idle),
+                // Claude's parent emits `Stop` while background subagents are
+                // still running. The hook CLI reduces the raw task list to one
+                // privacy-safe boolean. Only this kind of background work
+                // extends the user's turn; commands and session crons do not.
+                ("Stop", stop_lifecycle),
                 // A failed turn is over. It is the case most worth surfacing
                 // and the one that used to leave the row working forever.
                 ("StopFailure", v1::AgentLifecycleState::Idle),
@@ -453,14 +447,9 @@ mod tests {
     }
 
     #[test]
-    fn codex_permission_is_working_only_for_an_explicit_auto_reviewer() {
+    fn codex_permission_requires_ingest_to_match_the_turn_cache() {
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
-        for (reviewer, expected) in [
-            (Some("auto_review"), v1::AgentLifecycleState::Working),
-            (Some("user"), v1::AgentLifecycleState::Blocked),
-            (Some("future_reviewer"), v1::AgentLifecycleState::Blocked),
-            (None, v1::AgentLifecycleState::Blocked),
-        ] {
+        for reviewer in [Some("auto_review"), Some("user"), None] {
             let mut payload = serde_json::json!({
                 "hook_event_name": "PermissionRequest",
                 "session_id": "codex-session",
@@ -469,25 +458,11 @@ mod tests {
             if let Some(reviewer) = reviewer {
                 payload[CODEX_APPROVAL_REVIEWER_FIELD] = reviewer.into();
             }
-            assert_eq!(codex.parse_hook(&payload).unwrap().lifecycle, expected);
+            assert_eq!(
+                codex.parse_hook(&payload).unwrap().lifecycle,
+                v1::AgentLifecycleState::Blocked
+            );
         }
-        let missing_turn = serde_json::json!({
-            "hook_event_name": "PermissionRequest",
-            CODEX_APPROVAL_REVIEWER_FIELD: "auto_review",
-        });
-        assert_eq!(
-            codex.parse_hook(&missing_turn).unwrap().lifecycle,
-            v1::AgentLifecycleState::Blocked
-        );
-        let malformed_reviewer = serde_json::json!({
-            "hook_event_name": "PermissionRequest",
-            CODEX_APPROVAL_TURN_ID_FIELD: "turn-1",
-            CODEX_APPROVAL_REVIEWER_FIELD: {},
-        });
-        assert_eq!(
-            codex.parse_hook(&malformed_reviewer).unwrap().lifecycle,
-            v1::AgentLifecycleState::Blocked
-        );
     }
 
     #[test]
@@ -564,18 +539,31 @@ mod tests {
         );
     }
 
-    /// Background work outlives the turn that started it; the turn is still
-    /// over. Reading these payloads as `Working` is what pinned a pane to
-    /// "working" for the rest of the session.
+    /// Only a running subagent extends the user's turn. Ordinary background
+    /// work and session crons still end at `Stop`.
     #[test]
-    fn claude_stop_with_live_background_work_still_ends_the_turn() {
+    fn claude_stop_distinguishes_a_running_subagent_from_other_background_work() {
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
-        for field in ["background_tasks", "session_crons"] {
-            let payload = serde_json::json!({
+        let running_subagent = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "claude-session",
+            CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: true
+        });
+        assert_eq!(
+            claude.parse_hook(&running_subagent).unwrap().lifecycle,
+            v1::AgentLifecycleState::Working
+        );
+        for payload in [
+            serde_json::json!({
                 "hook_event_name": "Stop",
                 "session_id": "claude-session",
-                field: [{"command": "sleep 300", "status": "running"}]
-            });
+                CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: false
+            }),
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "session_id": "claude-session"
+            }),
+        ] {
             assert_eq!(
                 claude.parse_hook(&payload).unwrap().lifecycle,
                 v1::AgentLifecycleState::Idle

@@ -17,7 +17,10 @@ pub(super) enum TerminalEvent {
         name: String,
     },
     Snapshot {
-        snapshot: tmux_control::TmuxSnapshot,
+        /// Absent on a reconciliation acknowledgement: the host found the
+        /// world exactly as the desktop already holds it and sent the
+        /// generation alone rather than the tree again.
+        snapshot: Option<tmux_control::TmuxSnapshot>,
         sequence: u64,
         generation: u64,
         server_identity: String,
@@ -37,11 +40,11 @@ pub(super) enum TerminalEvent {
         pane_id: String,
         state: String,
         requires_seed: bool,
+        resume_from_renderer: bool,
         recovery_reason: String,
         generation: u64,
         snapshot_generation: u64,
         tail_through_generation: u64,
-        serialized_snapshot: Vec<u8>,
         raw_tail: Vec<u8>,
     },
     SeedDiagnostic {
@@ -69,6 +72,22 @@ pub(super) enum TerminalEvent {
     },
     ClipboardWrite {
         data: Vec<u8>,
+    },
+    /// The scrollback above a pane's screen, answering one history request.
+    ///
+    /// Deliberately not a `Seed`: it carries no generation because it claims no
+    /// place in the output ordering, and the renderer splices it above what it
+    /// is already showing rather than replacing it.
+    History {
+        pane_id: String,
+        data: Vec<u8>,
+        /// How much scrollback tmux holds for the pane, when it answered.
+        ///
+        /// The renderer compares it against the rows it asked for to decide
+        /// whether this page reached the top. `None` is the probe not having
+        /// answered — a pane that went away mid-request — and means "ask
+        /// again", which is a different answer from a history of zero rows.
+        history_size: Option<u32>,
     },
     FileService {
         scope: String,
@@ -141,11 +160,11 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
             pane_id,
             state,
             requires_seed,
+            resume_from_renderer,
             recovery_reason,
             generation,
             snapshot_generation,
             tail_through_generation,
-            serialized_snapshot,
             raw_tail,
         } => {
             let state = match state.as_str() {
@@ -154,19 +173,20 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
                 "released" => 3,
                 _ => 0,
             };
-            let payload_len =
-                38 + recovery_reason.len() + serialized_snapshot.len() + raw_tail.len();
+            let payload_len = 34 + recovery_reason.len() + raw_tail.len();
             encode_parts(9, &pane_id, sequence, payload_len, |frame| {
                 frame.push(state);
-                frame.push(u8::from(requires_seed));
+                // One flags byte, not one byte per flag: bit 0 is the seed the
+                // host owes this pane, bit 1 is the tail it verified against
+                // the renderer's own screen. The two are exclusive, and the
+                // decoder refuses any bit it does not know.
+                frame.push(u8::from(requires_seed) | (u8::from(resume_from_renderer) << 1));
                 frame.extend_from_slice(&generation.to_be_bytes());
                 frame.extend_from_slice(&snapshot_generation.to_be_bytes());
                 frame.extend_from_slice(&tail_through_generation.to_be_bytes());
                 frame.extend_from_slice(&(recovery_reason.len() as u32).to_be_bytes());
-                frame.extend_from_slice(&(serialized_snapshot.len() as u32).to_be_bytes());
                 frame.extend_from_slice(&(raw_tail.len() as u32).to_be_bytes());
                 frame.extend_from_slice(recovery_reason.as_bytes());
-                frame.extend_from_slice(&serialized_snapshot);
                 frame.extend_from_slice(&raw_tail);
             })
         }
@@ -182,6 +202,18 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
         TerminalEvent::ClipboardWrite { data } => {
             encode_bytes(17, "terminal-clipboard".into(), sequence, data)
         }
+        TerminalEvent::History {
+            pane_id,
+            data,
+            history_size,
+        } => encode_parts(18, &pane_id, sequence, 5 + data.len(), |frame| {
+            // One presence byte and a big-endian u32, ahead of the rows. The
+            // same shape as `encode_terminal`'s generation header: a fixed-size
+            // number the payload's own bytes could never be mistaken for.
+            frame.push(u8::from(history_size.is_some()));
+            frame.extend_from_slice(&history_size.unwrap_or(0).to_be_bytes());
+            frame.extend_from_slice(&data);
+        }),
         TerminalEvent::FileService { scope, payload } => encode_bytes(12, scope, sequence, payload),
         TerminalEvent::GitService { scope, payload } => encode_bytes(13, scope, sequence, payload),
         TerminalEvent::AgentService { scope, payload } => {

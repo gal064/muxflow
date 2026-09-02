@@ -182,7 +182,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "pane.resizeRight", title: "Resize pane right", group: "Pane", defaults: { linux: "Ctrl+Shift+ArrowRight" }, mutates: true, requires: "pane" },
   { id: "pane.resizeUp", title: "Resize pane up", group: "Pane", defaults: { linux: "Ctrl+Shift+ArrowUp" }, mutates: true, requires: "pane" },
   { id: "pane.resizeDown", title: "Resize pane down", group: "Pane", defaults: { linux: "Ctrl+Shift+ArrowDown" }, mutates: true, requires: "pane" },
-  { id: "pane.zoom", title: "Toggle pane zoom", group: "Pane", defaults: { mac: "Meta+Shift+Enter", linux: "Ctrl+Shift+Enter" }, mutates: true, requires: "pane" },
+  { id: "pane.zoom", title: "Toggle pane zoom", group: "Pane", defaults: { mac: "Meta+E", linux: "Ctrl+Shift+Enter" }, mutates: true, requires: "pane" },
   { id: "pane.close", title: "Close pane…", group: "Pane", mutates: true, requires: "pane", destructive: true },
   { id: "terminal.copy", title: "Copy terminal selection", group: "Terminal", defaults: { mac: "Meta+C", linux: "Ctrl+Shift+C" }, requires: "pane" },
   { id: "terminal.paste", title: "Paste into terminal", group: "Terminal", defaults: { mac: "Meta+V", linux: "Ctrl+Shift+V" }, requires: "pane" },

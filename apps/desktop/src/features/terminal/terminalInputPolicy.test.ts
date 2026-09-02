@@ -12,6 +12,7 @@ import {
   translateTerminalKey,
   type TerminalKeyContext,
 } from "./terminalInputPolicy";
+import type { TerminalSelectionSnapshot } from "./terminalSelection";
 
 const key = (overrides: Partial<KeyboardEvent> = {}) => ({
   altKey: false,
@@ -141,6 +142,31 @@ describe("copy on select", () => {
     expect(write).not.toHaveBeenCalled();
   });
 
+  it("uses the synchronous rich selection snapshot for configured command cleanup", async () => {
+    const text = "ssh -N --first value --second\n  destination.example";
+    const snapshot: TerminalSelectionSnapshot = {
+      text,
+      columns: 46,
+      metadataComplete: true,
+      rows: [
+        { text: text.split("\n")[0], isWrapped: false, occupiedEndCell: 42, firstTextCell: 0, firstTokenCells: 3, selectedEndCell: 46, textCells: 34, styledTextCells: 34 },
+        { text: text.split("\n")[1], isWrapped: false, occupiedEndCell: 21, firstTextCell: 2, firstTokenCells: 19, selectedEndCell: 21, textCells: 19, styledTextCells: 19 },
+      ],
+    };
+    const renderer = {
+      hasSelection: () => true,
+      getSelection: () => text,
+      getSelectionSnapshot: () => snapshot,
+    };
+    const write = vi.fn();
+
+    await copyCompletedTerminalSelection(renderer, true, write, true);
+    expect(write).toHaveBeenLastCalledWith("ssh -N --first value --second destination.example");
+
+    await copyCompletedTerminalSelection(renderer, true, write, false);
+    expect(write).toHaveBeenLastCalledWith(text);
+  });
+
   it("copies directly from xterm selection changes and reads the setting at event time", async () => {
     let notifySelectionChange: () => void = () => undefined;
     let selection = "";
@@ -181,6 +207,40 @@ describe("copy on select", () => {
 
     dispose();
     expect(disposeSelection).toHaveBeenCalledOnce();
+  });
+
+  it("reads command cleanup at selection-event time without reinstalling the listener", async () => {
+    let notifySelectionChange: () => void = () => undefined;
+    let clean = false;
+    const text = "ssh -N --first value --second\n  destination.example";
+    const snapshot: TerminalSelectionSnapshot = {
+      text, columns: 46, metadataComplete: true,
+      rows: [
+        { text: text.split("\n")[0], isWrapped: false, occupiedEndCell: 42, firstTextCell: 0, firstTokenCells: 3, selectedEndCell: 46, textCells: 34, styledTextCells: 34 },
+        { text: text.split("\n")[1], isWrapped: false, occupiedEndCell: 21, firstTextCell: 2, firstTokenCells: 19, selectedEndCell: 21, textCells: 19, styledTextCells: 19 },
+      ],
+    };
+    const write = vi.fn();
+    installTerminalCopyOnSelect({
+      renderer: {
+        hasSelection: () => true,
+        getSelection: () => text,
+        getSelectionSnapshot: () => snapshot,
+        onSelectionChange: (listener: () => void) => { notifySelectionChange = listener; return () => undefined; },
+      },
+      enabled: () => true,
+      cleanWrappedCommands: () => clean,
+      write,
+      onError: vi.fn(),
+    });
+
+    notifySelectionChange();
+    await Promise.resolve();
+    expect(write).toHaveBeenLastCalledWith(text);
+    clean = true;
+    notifySelectionChange();
+    await Promise.resolve();
+    expect(write).toHaveBeenLastCalledWith("ssh -N --first value --second destination.example");
   });
 
   it("reports native clipboard failures from a selection change", async () => {

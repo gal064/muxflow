@@ -270,6 +270,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
           </label>
           <p className="settings-hint">Copies completed, non-empty terminal selections to the system clipboard.</p>
           <label className="settings-check">
+            <input checked={props.shell.cleanWrappedCommands} onChange={(event) => props.onShell({ cleanWrappedCommands: event.target.checked })} type="checkbox" />
+            Clean wrapped commands when copying
+          </label>
+          <p className="settings-hint">Joins only high-confidence display wraps in code-styled shell commands.</p>
+          <label className="settings-check">
             <input checked={props.shell.terminalApplicationClipboard} onChange={(event) => props.onShell({ terminalApplicationClipboard: event.target.checked })} type="checkbox" />
             Allow terminal apps to copy
           </label>

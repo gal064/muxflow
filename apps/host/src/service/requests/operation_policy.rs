@@ -125,6 +125,17 @@ impl OperationPolicy {
                 Scheduling::Inline,
                 Handler::TmuxAction,
             ),
+            // Detached, unlike every other terminal operation: a scrollback
+            // capture is thousands of lines the user is waiting on, and running
+            // it inline would hold the reader loop — and every keystroke behind
+            // it — for the length of that capture. Read-only, because it
+            // photographs and changes nothing.
+            v1::Operation::RequestTerminalHistory => (
+                Access::ReadOnly,
+                Lane::Control,
+                Scheduling::Detached,
+                Handler::Terminal,
+            ),
             v1::Operation::ResolveActiveRoot | v1::Operation::ResolveTerminalFile => (
                 Access::ReadOnly,
                 Lane::Control,
@@ -344,6 +355,7 @@ mod tests {
             (TmuxAction, M, C, I, MH),
             (SetTerminalVisibility, M, C, I, TH),
             (RequestTerminalSeed, M, C, I, TH),
+            (RequestTerminalHistory, R, C, Dd, TH),
             (ResolveActiveRoot, R, C, Dd, AR),
             (ResolveTerminalFile, R, C, Dd, AR),
             (ListDirectory, R, C, Dd, FH),

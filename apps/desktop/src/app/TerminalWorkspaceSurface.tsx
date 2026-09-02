@@ -27,6 +27,7 @@ type TerminalWorkspaceSurfaceProps = {
   paneAttention?: ReadonlyMap<string, AgentAttentionRollup>;
   panes: Pane[];
   copyOnSelect?: boolean;
+  cleanWrappedCommands?: boolean;
   terminalApplicationClipboard?: boolean;
   terminalFontSize: number;
   platform?: Platform;
@@ -52,6 +53,7 @@ type TerminalWorkspaceSurfaceProps = {
 /** Memoized terminal-only boundary: unrelated root notices/dialogs never revisit live panes. */
 export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
   const { activePane, activeWindow, grid } = props;
+  const hasMultiplePanes = props.mountedPanes.length > 1;
   return <div className="terminal-window" ref={props.surfaceRef} aria-label={activeWindow ? `Terminal tab ${stripAgentStatusGlyphs(activeWindow.name)}` : "Terminal"}>
     {props.mountedPanes.map((pane) => {
       // The floating `%N · cmd` badge is gone: it overlapped the pane's own
@@ -60,16 +62,20 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
       // focus, 2.5px for an agent that wants a human.
       const attention = props.paneAttention?.get(pane.id)?.state;
       const wantsAttention = attention !== undefined && attention !== "none" && needsAttention(attention);
+      const zoomed = Boolean(activeWindow?.zoomed);
+      const hasRightSeparator = hasMultiplePanes && !zoomed && pane.left + pane.width < grid.width;
+      const hasBottomSeparator = hasMultiplePanes && !zoomed && pane.top + pane.height < grid.height;
       return <div
         className={`pane-frame${pane.active ? " active" : ""}${wantsAttention ? " attention" : ""}`}
         key={pane.id}
-        style={renderedPaneStyle(pane, grid, Boolean(activeWindow?.zoomed))}
+        style={renderedPaneStyle(pane, grid, zoomed)}
       >
       <TerminalPane
         appFocused={props.appFocused}
         clientId={props.clientId}
         pane={pane}
         copyOnSelect={Boolean(props.copyOnSelect)}
+        cleanWrappedCommands={props.cleanWrappedCommands ?? true}
         terminalApplicationClipboard={Boolean(props.terminalApplicationClipboard)}
         terminalFontSize={props.terminalFontSize}
         platform={props.platform ?? "linux"}
@@ -86,7 +92,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         transferRegistry={props.terminalTransferRegistry}
         transferScope={props.terminalTransferScope}
       />
-      <div
+      {hasRightSeparator && <div
         aria-label={`Resize ${pane.id} horizontally`}
         aria-orientation="vertical"
         aria-valuemax={100}
@@ -101,8 +107,8 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         onPointerDown={(event) => props.beginDividerDrag(event, pane, "horizontal")}
         role="separator"
         tabIndex={0}
-      />
-      <div
+      />}
+      {hasBottomSeparator && <div
         aria-label={`Resize ${pane.id} vertically`}
         aria-orientation="horizontal"
         aria-valuemax={100}
@@ -117,7 +123,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         onPointerDown={(event) => props.beginDividerDrag(event, pane, "vertical")}
         role="separator"
         tabIndex={0}
-      />
+      />}
     </div>;
     })}
     {props.panes.length === 0 && <p className="quiet-empty">No tmux panes in this terminal window.</p>}

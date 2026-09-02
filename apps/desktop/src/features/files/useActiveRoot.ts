@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { keyForScope, sameRoot } from "./api";
 import { createPaintTicket } from "../../perf/paintTicket";
+import { awaitPanePaint } from "../terminal/panePaintGate";
 import { useCommittedRef } from "../../commands/useCommittedRef";
 import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope } from "./types";
 
@@ -70,8 +71,23 @@ interface Options {
  * mutable state sat alongside six others that had nothing to do with them.
  */
 export function useActiveRoot(options: Options): {
-  /** Something happened that could genuinely have moved the root. Probes now. */
+  /**
+   * Something happened that could genuinely have moved the root. Probes behind
+   * the active pane's paint — see `resolveBehindPaint`.
+   */
   rearm: () => void;
+  /**
+   * A person asked for this answer. Probes now, in front of the paint gate.
+   *
+   * The gate orders the Explorer behind the pane's own screen because on a
+   * *switch* the screen is what the user is waiting for and the root probe is
+   * speculative. Neither is true of a gesture: pressing Refresh is a request
+   * for this answer and nothing else, and making it wait up to
+   * `PANE_PAINT_TIMEOUT_MS` for a paint the person did not ask about is the
+   * one control they reach for when the Explorer looks stuck taking two thirds
+   * of a second to do anything at all.
+   */
+  rearmNow: () => void;
   /**
    * The user is working, so stop being settled — but issue nothing.
    *
@@ -85,6 +101,7 @@ export function useActiveRoot(options: Options): {
 } {
   const probeSerial = useRef(0);
   const rearmRef = useRef<(() => void) | undefined>(undefined);
+  const rearmNowRef = useRef<(() => void) | undefined>(undefined);
   const activityRef = useRef<(() => void) | undefined>(undefined);
   // Read only from the probe, which runs long after the render that set it.
   const latest = useCommittedRef(options);
@@ -143,7 +160,33 @@ export function useActiveRoot(options: Options): {
       }
     };
 
-    void resolve();
+    /**
+     * Probes behind the pane's own screen, not ahead of it.
+     *
+     * Every entry point goes through here, and that is the point. The root
+     * cascades into a directory listing *and* a Git watch whose bootstrap is a
+     * whole `git status` — 60-80 KB, on the same ordered lane as the answer to
+     * the switch — so a probe that skips the gate puts all of it in front of the
+     * screen the user is waiting for. Gating only the scope effect was not
+     * enough: a switch changes the active pane's `current_path` as well as the
+     * scope, and the effect watching that path calls `rearm` *synchronously* in
+     * the same commit, taking the `resolving` latch and reducing the gated call
+     * to a no-op. That is the ordering the timeline caught.
+     *
+     * The gate is a timeout and never a barrier: a pane that never paints costs
+     * a probe 600 ms and nothing more. It costs nothing at all on the paths it
+     * is not there for — a `cd` in the pane the user is already looking at, or
+     * the backstop's tick — because a pane that has already painted resolves
+     * the wait synchronously.
+     *
+     * Every entry point *that the user did not ask for*, to be exact. A gesture
+     * goes through `rearmNow` and calls `resolve` directly: see its note.
+     */
+    const resolveBehindPaint = () => {
+      const painting = latest.current.scope()?.paneId;
+      void (painting === undefined ? Promise.resolve() : awaitPanePaint(painting)).then(resolve);
+    };
+    resolveBehindPaint();
     // A foreground backstop, not a pipeline. Pane and window changes rebuild
     // this scope and re-resolve immediately, so the only thing left for a timer
     // to catch is `cd` inside the pane the user is already in — for which tmux
@@ -166,7 +209,7 @@ export function useActiveRoot(options: Options): {
       // why this slows down rather than stopping.
       const settled = unchangedProbes >= ACTIVE_ROOT_STABLE_PROBES;
       if (settled && ticks % ACTIVE_ROOT_SETTLED_MULTIPLIER !== 0) return;
-      void resolve();
+      resolveBehindPaint();
     }, ACTIVE_ROOT_BACKSTOP_MS);
     const noteActivity = () => {
       unchangedProbes = 0;
@@ -174,9 +217,18 @@ export function useActiveRoot(options: Options): {
     };
     const rearm = () => {
       noteActivity();
+      if (foreground()) resolveBehindPaint();
+    };
+    // Ungated on purpose, and only ever reached from an explicit gesture. The
+    // `foreground()` check stays: a hidden window's Refresh is not a thing that
+    // happens, and the rule that a hidden window issues nothing is worth more
+    // than the case it would cover.
+    const rearmNow = () => {
+      noteActivity();
       if (foreground()) void resolve();
     };
     rearmRef.current = rearm;
+    rearmNowRef.current = rearmNow;
     activityRef.current = noteActivity;
     const onVisibility = () => { if (foreground()) rearm(); };
     document?.addEventListener?.("visibilitychange", onVisibility);
@@ -186,6 +238,7 @@ export function useActiveRoot(options: Options): {
       window.clearInterval(backstop);
       document?.removeEventListener?.("visibilitychange", onVisibility);
       rearmRef.current = undefined;
+      rearmNowRef.current = undefined;
       activityRef.current = undefined;
     };
   }, [client, scopeKey]);
@@ -219,6 +272,7 @@ export function useActiveRoot(options: Options): {
   // Stable, because callers keep it in dependency arrays and in event
   // handlers that must not be rebuilt on every render.
   const rearm = useCallback(() => rearmRef.current?.(), []);
+  const rearmNow = useCallback(() => rearmNowRef.current?.(), []);
   const noteActivity = useCallback(() => activityRef.current?.(), []);
-  return { rearm, noteActivity };
+  return { rearm, rearmNow, noteActivity };
 }

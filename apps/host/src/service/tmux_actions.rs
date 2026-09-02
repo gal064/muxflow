@@ -50,11 +50,8 @@ pub(super) fn execute(
     // external-client race between the last precheck and the mutation.
     let mut before = expected_snapshot;
     let identity = expected_identity;
-    if !action.expected_server_identity.is_empty() && action.expected_server_identity != identity {
-        bail!("stale topology: tmux server identity changed");
-    }
-    if action.expected_generation != 0 && action.expected_generation != known_generation {
-        bail!("stale topology: generation changed");
+    if let Some(refusal) = staleness_refusal(kind, &action, known_generation, &identity) {
+        bail!("{refusal}");
     }
 
     require_confirmation(kind, action.confirmed)?;
@@ -63,7 +60,7 @@ pub(super) fn execute(
     let postcondition_before = before.clone();
 
     let mut result = v1::TmuxActionResult::default();
-    let mut command = tmux_command();
+    let mut command = tmux_command()?;
     match kind {
         v1::TmuxActionKind::CreateSession => {
             configure_new_session(&mut command, &action)?;
@@ -217,7 +214,24 @@ pub(super) fn execute(
     // emitted by this command. The authoritative post-discovery that follows
     // therefore closes exactly those epochs; later dirtiness remains pending.
     let covered_dirty_epoch = before_post_discovery(kind, &result)?;
-    let (snapshot, server_identity) = finalize_action(kind, discover_consistent, server_identity)?;
+    let (mut snapshot, server_identity) =
+        finalize_action(kind, discover_consistent, server_identity)?;
+    if kind == v1::TmuxActionKind::CreateSession && action.pinned {
+        // A create issued while the app lists pinned workspaces only is born
+        // pinned, or it would drop out of the list on the first switch away.
+        // Written after the post-discovery on purpose: the pin names a session
+        // only the post-action snapshot contains, and on the bootstrap create
+        // the pre-action identity is "tmux:none" — the sidecar must be keyed
+        // by the identity of the server the create just started.
+        // A refusal-shaped error here would be a lie: the session exists.
+        set_pinned(&server_identity, &mut snapshot, &result.session_id, "", true).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "outcome unknown: tmux created the session but its pin could not be written: {error}"
+                )
+            },
+        )?;
+    }
     if result.pane_id.is_empty() {
         result.pane_id = interaction_pane_id(kind, &postcondition_action, &result, &snapshot)
             .unwrap_or_default();
@@ -243,6 +257,52 @@ pub(super) fn execute(
         server_identity,
         covered_dirty_epoch,
     })
+}
+
+/// Selection actions: idempotent, carrying no state of their own, and validated
+/// entirely by the target id `validate_targets` looks up in the pre-action
+/// snapshot. Selecting `@7` means the same thing whatever the pane geometry did
+/// since the caller last saw the topology, and re-running it changes nothing.
+///
+/// Everything else is excluded on purpose. Create/close/kill/rename/reorder act
+/// on a topology the caller reasoned about (an index, a neighbour, the one they
+/// meant), split and resize change geometry, zoom flips a window's layout, and
+/// a pin writes host state — for those a generation guard is the caller's
+/// consent stamp and must keep refusing.
+pub(super) fn selection_only(kind: v1::TmuxActionKind) -> bool {
+    matches!(
+        kind,
+        v1::TmuxActionKind::SelectSession
+            | v1::TmuxActionKind::SelectWindow
+            | v1::TmuxActionKind::FocusPane
+    )
+}
+
+/// The staleness gate every action passes before its tmux command runs.
+///
+/// A different tmux server is always real staleness: nothing the caller named
+/// exists on it. A newer *generation* is not, for a selection: on a slow link
+/// every switch resizes the visible session, which bumps the generation, and
+/// the snapshot carrying it is still crossing the wire when the user's next
+/// switch is sent — so the switch that would fix the screen was the one being
+/// refused. `validate_targets` still runs, so a selection naming something that
+/// has gone away fails as cleanly as before.
+fn staleness_refusal(
+    kind: v1::TmuxActionKind,
+    action: &v1::TmuxAction,
+    known_generation: u64,
+    identity: &str,
+) -> Option<&'static str> {
+    if !action.expected_server_identity.is_empty() && action.expected_server_identity != identity {
+        return Some("stale topology: tmux server identity changed");
+    }
+    if selection_only(kind) {
+        return None;
+    }
+    if action.expected_generation != 0 && action.expected_generation != known_generation {
+        return Some("stale topology: generation changed");
+    }
+    None
 }
 
 fn interaction_pane_id(
@@ -344,8 +404,9 @@ fn action_postcondition(
     let window = |id: &str| after.windows.iter().find(|item| item.id == id);
     let pane = |id: &str| after.panes.iter().find(|item| item.id == id);
     match kind {
-        v1::TmuxActionKind::CreateSession => session(&result.session_id)
-            .is_some_and(|item| action.name.is_empty() || item.name == action.name),
+        v1::TmuxActionKind::CreateSession => session(&result.session_id).is_some_and(|item| {
+            (action.name.is_empty() || item.name == action.name) && (!action.pinned || item.pinned)
+        }),
         v1::TmuxActionKind::RenameSession => {
             session(&action.session_id).is_some_and(|item| item.name == action.name)
         }
@@ -480,6 +541,7 @@ pub(super) fn discover_before_action() -> anyhow::Result<(tmux_control::TmuxSnap
 pub(super) fn discover_for_action(
     kind: v1::TmuxActionKind,
 ) -> anyhow::Result<(tmux_control::TmuxSnapshot, String)> {
+    tmux_control::tmux_executable().context("locate tmux executable")?;
     normalize_pre_action_discovery(kind, discover_consistent(), server_identity)
 }
 
@@ -647,13 +709,16 @@ fn reorder_window(
             .collect()
     };
     if !adjacent_ids.is_empty() {
-        run(window_reorder_command(window_id, &adjacent_ids))?;
+        run(window_reorder_command(window_id, &adjacent_ids)?)?;
     }
     Ok(())
 }
 
-fn window_reorder_command(window_id: &str, adjacent_ids: &[&str]) -> std::process::Command {
-    let mut command = tmux_command();
+fn window_reorder_command(
+    window_id: &str,
+    adjacent_ids: &[&str],
+) -> anyhow::Result<std::process::Command> {
+    let mut command = tmux_command()?;
     if let Some((first, rest)) = adjacent_ids.split_first() {
         command.args(["swap-window", "-d", "-s", window_id, "-t", first]);
         for adjacent in rest {
@@ -661,7 +726,7 @@ fn window_reorder_command(window_id: &str, adjacent_ids: &[&str]) -> std::proces
             command.args(["swap-window", "-d", "-s", window_id, "-t", adjacent]);
         }
     }
-    command
+    Ok(command)
 }
 
 fn window_reorder_postcondition(

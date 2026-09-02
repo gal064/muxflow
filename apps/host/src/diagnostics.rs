@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs::{self, OpenOptions},
     io::{Read, Write},
     os::fd::AsRawFd,
@@ -750,6 +751,360 @@ pub fn write_safe_log(class: SafeErrorClass) {
     eprintln!("{line}");
 }
 
+// ---------------------------------------------------------------------------
+// `switch_timing`: the host half of the opt-in perf-log timeline.
+//
+// The desktop's `perf_log::switch_timing` measures a tmux action from the
+// renderer out and back; this measures the same action from inside the daemon,
+// and `requestId` joins the two halves. One JSON line per tmux action, per
+// tmux-action response reaching the wire, per frame big or slow enough to hold
+// a later answer up, and per emitted seed, appended to `timing.log` in the
+// runtime directory (`/tmp/muxflow-<uid>/timing.log`). Nothing reads it but a
+// human with `jq`, and nothing in the daemon branches on it.
+//
+// Compile-out scheme, mirroring `apps/desktop/src-tauri/src/perf_log.rs`: the
+// real implementation is compiled whenever `debug_assertions` is on (plain
+// `cargo build` / `cargo test`) or the non-default `perf-log` cargo feature is
+// enabled. A plain release build therefore carries only the inert stubs below,
+// so a shipped helper writes no timing log and pays nothing for the marks; a
+// measurement build re-enables it with
+// `cargo build --locked --release -p muxflow-host --features perf-log`, which
+// is what `MUXFLOW_PERF_BUILD=1` passes for every packaged helper. Call sites
+// stay unconditional because the stub module keeps identical paths and
+// signatures. There is deliberately no second runtime switch: compiled in
+// means writing.
+//
+// The fields are request ids, tmux's own ordinals, wall-clock stamps, durations
+// and byte counts: no path, hostname, session name or terminal content, so this
+// stays inside the privacy declaration above.
+// ---------------------------------------------------------------------------
+
+/// One tmux action's host-side timeline, as the dispatcher measured it.
+///
+/// Declared outside the two twins below so both take the same record: a dozen
+/// positional arguments — three durations and four strings among them — is a
+/// signature the inert twin has to repeat exactly and the one call site has to
+/// be read against, and named fields are neither.
+///
+/// A build without the log reads none of these fields, which is what the
+/// exemption says; a measured build writes every one of them out.
+#[cfg_attr(not(any(debug_assertions, feature = "perf-log")), allow(dead_code))]
+pub(crate) struct TmuxActionTiming<'a> {
+    /// Joins this line to the desktop's `perf.timeline` record and to the
+    /// `responseWritten` line the writer task adds.
+    pub(crate) request_id: u64,
+    pub(crate) kind: &'a str,
+    pub(crate) session_id: &'a str,
+    pub(crate) window_id: &'a str,
+    /// H2, from `handler_entry_stamp`.
+    pub(crate) handler_entry_unix_millis: i64,
+    pub(crate) flush_discover: Duration,
+    pub(crate) execute: Duration,
+    /// How long the topology epoch barrier waited, and whether it ended without
+    /// covering a dirty epoch. `None` for an action that never reached it.
+    pub(crate) barrier: Option<(Duration, bool)>,
+    pub(crate) total_to_enqueue: Duration,
+    pub(crate) queue_depth_at_enqueue: usize,
+    pub(crate) outcome: &'a str,
+    /// Which section of the topology moved under the action, when the precheck
+    /// found one had; `None` on every line that did not refresh.
+    pub(crate) topology_diff: Option<&'static str>,
+}
+
+#[cfg(any(debug_assertions, feature = "perf-log"))]
+mod switch_timing {
+    use std::{
+        collections::HashMap,
+        fs::{self, OpenOptions},
+        io::Write,
+        os::unix::fs::OpenOptionsExt,
+        sync::{Mutex, OnceLock},
+        time::{Duration, Instant},
+    };
+
+    use super::{TmuxActionTiming, now_epoch_millis, whole_millis};
+    use crate::paths;
+
+    /// Past this the timing log starts over. It is a debugging artefact, not
+    /// history, and it is written far more often than the other daemon logs.
+    const MAX_TIMING_LOG_BYTES: u64 = 8 * 1024 * 1024;
+
+    /// Appends one line to `timing.log`, on the same terms as `bridge.log`: the
+    /// runtime directory is the user's own, and a symlink out of it is refused.
+    fn append_timing_line(line: &serde_json::Value) {
+        let path = paths::runtime_dir().join("timing.log");
+        let oversized = fs::symlink_metadata(&path)
+            .map(|metadata| metadata.is_file() && metadata.len() > MAX_TIMING_LOG_BYTES)
+            .unwrap_or(false);
+        let mut options = OpenOptions::new();
+        options
+            .create(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        if oversized {
+            options.truncate(true);
+        } else {
+            options.append(true);
+        }
+        if let Ok(mut file) = options.open(&path) {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
+    /// A request-keyed map big enough for any burst the desktop can produce and
+    /// small enough that a leaked entry cannot grow without bound. Entries are
+    /// removed by the line that joins them; the cap covers the requests that
+    /// never reach one (refused at admission, cancelled, connection lost).
+    const MAX_TRACKED_REQUESTS: usize = 512;
+
+    fn prune<T>(map: &mut HashMap<u64, T>) {
+        if map.len() > MAX_TRACKED_REQUESTS {
+            map.clear();
+        }
+    }
+
+    /// When each tmux-action response was handed to the sequencer, keyed by
+    /// request id, so the writer task can name the queue-to-wire delay it then
+    /// paid.
+    static RESPONSE_ENQUEUED_AT: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
+
+    fn response_enqueued_at() -> &'static Mutex<HashMap<u64, Instant>> {
+        RESPONSE_ENQUEUED_AT.get_or_init(Default::default)
+    }
+
+    /// When each tmux-action request frame was read off the socket (H1), keyed
+    /// by request id. The `tmuxAction` line joins it as `readAtUnixMillis`, so
+    /// the desktop's "the answer took four seconds" can be split into "the
+    /// request was still arriving" and "the answer was still leaving".
+    static REQUEST_READ_AT: OnceLock<Mutex<HashMap<u64, i64>>> = OnceLock::new();
+
+    fn request_read_at() -> &'static Mutex<HashMap<u64, i64>> {
+        REQUEST_READ_AT.get_or_init(Default::default)
+    }
+
+    static REQUEST_OPERATION: OnceLock<Mutex<HashMap<u64, i32>>> = OnceLock::new();
+
+    fn request_operation() -> &'static Mutex<HashMap<u64, i32>> {
+        REQUEST_OPERATION.get_or_init(Default::default)
+    }
+
+    /// Stamps a tmux-action request frame the moment the reader decoded it
+    /// (H1). Only a tmux action is stamped, because only a tmux action has a
+    /// `tmuxAction` line coming back to join the stamp.
+    ///
+    /// The operation itself is remembered for every request: it is what lets a
+    /// `bigFrame` line say which question an oversized answer was answering.
+    pub(crate) fn note_request_read(request_id: u64, operation: i32) {
+        {
+            let mut operations = request_operation().lock().unwrap();
+            prune(&mut operations);
+            operations.insert(request_id, operation);
+        }
+        if operation != tmux_agent_protocol::v1::Operation::TmuxAction as i32 {
+            return;
+        }
+        let mut map = request_read_at().lock().unwrap();
+        prune(&mut map);
+        map.insert(request_id, now_epoch_millis());
+    }
+
+    /// H2 of the switch timeline: the wall clock at tmux-action handler entry,
+    /// carried by the caller into `write_tmux_action_timing_log` because only
+    /// the handler knows where its own work began. Zero when compiled out.
+    pub(crate) fn handler_entry_stamp() -> i64 {
+        now_epoch_millis()
+    }
+
+    /// Marks a response as one the writer should time. Only the tmux action
+    /// dispatch calls this, so every other response stays untracked and untimed.
+    pub(crate) fn note_response_enqueued(request_id: u64) {
+        let mut map = response_enqueued_at().lock().unwrap();
+        prune(&mut map);
+        map.insert(request_id, Instant::now());
+    }
+
+    /// One line per tmux action, written where its response is handed to the
+    /// sequencer. The two writer-side numbers are a separate `responseWritten`
+    /// line, joined to this one by `requestId`.
+    pub(crate) fn write_tmux_action_timing_log(timing: TmuxActionTiming<'_>) {
+        let read_at = request_read_at().lock().unwrap().remove(&timing.request_id);
+        append_timing_line(&serde_json::json!({
+            "atUnixMillis": now_epoch_millis(),
+            "subsystem": "host_daemon",
+            "event": "tmuxAction",
+            "requestId": timing.request_id,
+            "kind": timing.kind,
+            "sessionId": (!timing.session_id.is_empty()).then_some(timing.session_id),
+            "windowId": (!timing.window_id.is_empty()).then_some(timing.window_id),
+            // H1: the request frame was decoded off the socket. Absent when the
+            // reader never saw it as a tmux action (a duplicate id, or a helper
+            // that started after the request).
+            "readAtUnixMillis": read_at,
+            // H2: this handler began. H1 to here is the wait inside the daemon
+            // before any tmux work started.
+            "handlerEntryUnixMillis": timing.handler_entry_unix_millis,
+            "flushDiscoverMs": whole_millis(timing.flush_discover),
+            "executeMs": whole_millis(timing.execute),
+            "barrierWaitMs": timing.barrier.map(|(wait, _)| whole_millis(wait)),
+            "barrierTimedOut": timing.barrier.map(|(_, timed_out)| timed_out),
+            "totalToEnqueueMs": whole_millis(timing.total_to_enqueue),
+            "queueDepthAtEnqueue": timing.queue_depth_at_enqueue,
+            "outcome": timing.outcome,
+            "topologyDiff": timing.topology_diff,
+        }));
+    }
+
+    /// The writer half of the line above: when the answer reached the wire (H3),
+    /// how long it sat on the sequencer channel, and how long its own socket
+    /// write took. Silent for every response `note_response_enqueued` did not
+    /// mark.
+    pub(crate) fn record_response_written(
+        request_id: u64,
+        write_started: Instant,
+        write: Duration,
+    ) {
+        let Some(enqueued) = response_enqueued_at().lock().unwrap().remove(&request_id) else {
+            return;
+        };
+        // H3, taken once: the writer calls this as soon as the write returns,
+        // so the same stamp names both the line and the moment measured.
+        let written_at = now_epoch_millis();
+        append_timing_line(&serde_json::json!({
+            "atUnixMillis": written_at,
+            "subsystem": "host_daemon",
+            "event": "responseWritten",
+            "requestId": request_id,
+            "writtenAtUnixMillis": written_at,
+            "enqueueToWireMs": whole_millis(write_started.saturating_duration_since(enqueued)),
+            "writeMs": whole_millis(write),
+        }));
+    }
+
+    /// How big one frame has to be before it is named in the log. A frame this
+    /// size is what a later answer waits behind on a slow link, however quickly
+    /// the write itself returned into the kernel's buffer.
+    const BIG_FRAME_THRESHOLD: usize = 32 * 1024;
+    /// How slow one frame write has to be before it is worth a line of its own:
+    /// the one ordered writer was blocked for a quarter of a second, which is
+    /// the shape a stalled link takes from inside the daemon.
+    const SLOW_FRAME_WRITE_THRESHOLD: Duration = Duration::from_millis(250);
+
+    /// Names a frame big enough to hold up whatever followed it, slow enough to
+    /// have blocked the one ordered writer, or both.
+    ///
+    /// The frame size is a closure because measuring it means walking the
+    /// encoded message: the inert twin never calls it, so a build without the
+    /// log pays nothing per frame.
+    ///
+    /// `event_kind`/`pane_id` name which ordered event blocked the writer,
+    /// because "event" alone did not say which — and which one it is is the
+    /// whole question a stalled link asks.
+    pub(crate) fn record_frame_write(
+        kind: &str,
+        event_kind: Option<&str>,
+        pane_id: Option<&str>,
+        request_id: u64,
+        frame_bytes: impl FnOnce() -> usize,
+        write: Duration,
+    ) {
+        let bytes = frame_bytes();
+        if bytes >= BIG_FRAME_THRESHOLD {
+            let operation = (kind == "response")
+                .then(|| request_operation().lock().unwrap().remove(&request_id))
+                .flatten()
+                .and_then(|operation| tmux_agent_protocol::v1::Operation::try_from(operation).ok())
+                .map(|operation| operation.as_str_name());
+            append_timing_line(&serde_json::json!({
+                "atUnixMillis": now_epoch_millis(),
+                "subsystem": "host_daemon",
+                "event": "bigFrame",
+                "frameBytes": bytes,
+                "kind": kind,
+                "eventKind": event_kind,
+                "paneId": pane_id,
+                "requestId": request_id,
+                "operation": operation,
+            }));
+        }
+        if write < SLOW_FRAME_WRITE_THRESHOLD {
+            return;
+        }
+        append_timing_line(&serde_json::json!({
+            "atUnixMillis": now_epoch_millis(),
+            "subsystem": "host_daemon",
+            "event": "slowWrite",
+            "frameBytes": bytes,
+            "writeMs": whole_millis(write),
+            "kind": kind,
+            "eventKind": event_kind,
+            "paneId": pane_id,
+        }));
+    }
+
+    /// One line per seed handed to the sequencer, with how long the pane's
+    /// capture block took to arrive from tmux.
+    pub(crate) fn write_seed_timing_log(pane_id: &str, bytes: usize, capture: Option<Duration>) {
+        append_timing_line(&serde_json::json!({
+            "atUnixMillis": now_epoch_millis(),
+            "subsystem": "host_daemon",
+            "event": "seed",
+            "paneId": pane_id,
+            "bytes": bytes,
+            "captureMs": capture.map(whole_millis),
+        }));
+    }
+}
+
+/// Inert replacement compiled into a plain release build. Same paths, same
+/// signatures, no state and no I/O — see the compile-out note above.
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+mod switch_timing {
+    use std::time::{Duration, Instant};
+
+    #[inline(always)]
+    pub(crate) fn note_request_read(_request_id: u64, _operation: i32) {}
+
+    #[inline(always)]
+    pub(crate) fn handler_entry_stamp() -> i64 {
+        0
+    }
+
+    #[inline(always)]
+    pub(crate) fn note_response_enqueued(_request_id: u64) {}
+
+    #[inline(always)]
+    pub(crate) fn write_tmux_action_timing_log(_timing: super::TmuxActionTiming<'_>) {}
+
+    #[inline(always)]
+    pub(crate) fn record_response_written(
+        _request_id: u64,
+        _write_started: Instant,
+        _write: Duration,
+    ) {
+    }
+
+    #[inline(always)]
+    pub(crate) fn record_frame_write(
+        _kind: &str,
+        _event_kind: Option<&str>,
+        _pane_id: Option<&str>,
+        _request_id: u64,
+        _frame_bytes: impl FnOnce() -> usize,
+        _write: Duration,
+    ) {
+    }
+
+    #[inline(always)]
+    pub(crate) fn write_seed_timing_log(_pane_id: &str, _bytes: usize, _capture: Option<Duration>) {
+    }
+}
+
+pub(crate) use switch_timing::{
+    handler_entry_stamp, note_request_read, note_response_enqueued, record_frame_write,
+    record_response_written, write_seed_timing_log, write_tmux_action_timing_log,
+};
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DiagnosticsReport {
@@ -886,7 +1241,7 @@ fn build_report() -> DiagnosticsReport {
             ),
         },
         dependencies: DependenciesReport {
-            tmux: dependency_version("tmux", "-V"),
+            tmux: tmux_dependency_version(),
             git: dependency_version("git", "--version"),
             ssh: dependency_version("ssh", "-V"),
         },
@@ -941,7 +1296,26 @@ fn print_human_report(report: &DiagnosticsReport) {
 }
 
 fn dependency_version(program: &str, version_argument: &str) -> DependencyReport {
-    let output = bounded_dependency_probe(program, version_argument, DEPENDENCY_PROBE_TIMEOUT);
+    dependency_version_at(program, OsStr::new(program), version_argument)
+}
+
+fn tmux_dependency_version() -> DependencyReport {
+    let Ok(executable) = tmux_control::tmux_executable() else {
+        return DependencyReport {
+            available: false,
+            version: None,
+            probe: "unavailable_or_timeout",
+        };
+    };
+    dependency_version_at("tmux", executable.as_os_str(), "-V")
+}
+
+fn dependency_version_at(
+    program: &str,
+    executable: &OsStr,
+    version_argument: &str,
+) -> DependencyReport {
+    let output = bounded_dependency_probe(executable, version_argument, DEPENDENCY_PROBE_TIMEOUT);
     let Ok((status, stdout, stderr)) = output else {
         return DependencyReport {
             available: false,
@@ -965,7 +1339,7 @@ fn dependency_version(program: &str, version_argument: &str) -> DependencyReport
 }
 
 fn bounded_dependency_probe(
-    program: &str,
+    program: &OsStr,
     version_argument: &str,
     timeout: Duration,
 ) -> std::io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
@@ -1451,11 +1825,8 @@ mod tests {
         fs::write(&script, b"#!/bin/sh\nsleep 10\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
         let started = Instant::now();
-        let result = bounded_dependency_probe(
-            script.to_str().unwrap(),
-            "--version",
-            Duration::from_millis(75),
-        );
+        let result =
+            bounded_dependency_probe(script.as_os_str(), "--version", Duration::from_millis(75));
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
         fs::remove_dir_all(root).unwrap();
@@ -1471,12 +1842,9 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-        let (_, stdout, stderr) = bounded_dependency_probe(
-            script.to_str().unwrap(),
-            "--version",
-            Duration::from_secs(2),
-        )
-        .unwrap();
+        let (_, stdout, stderr) =
+            bounded_dependency_probe(script.as_os_str(), "--version", Duration::from_secs(2))
+                .unwrap();
         assert!(stdout.len() <= DEPENDENCY_OUTPUT_LIMIT);
         assert!(stderr.len() <= DEPENDENCY_OUTPUT_LIMIT);
         fs::remove_dir_all(root).unwrap();

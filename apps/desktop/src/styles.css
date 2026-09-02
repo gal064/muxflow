@@ -409,7 +409,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    spinner. One size for every group-heading indicator. */
 .state-dot.agent-group-dot, .spinner.agent-group-dot { width: 7px; height: 7px; align-self: center; }
 .spinner.agent-group-dot { color: var(--chrome-dim); }
-.agent-button:hover:not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
+.agent-button.selected { background: var(--chrome-selected); }
+.agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
 /* Reachable by keyboard, still clearly not actionable — see the note at the
    call site for why this is not `disabled`. */
 .agent-button[data-unavailable] { opacity: .5; cursor: not-allowed; }
@@ -438,7 +439,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    around it keeps one uniform gap, and that gap now separates agents rather
    than alternating between "this agent's state" and "the next agent's icon". */
 .agent-mark-glyphs { align-items: center; gap: 3px; }
-.agent-button:hover:not(:disabled):not([data-unavailable]) .agent-mark,
+.agent-button.selected .agent-mark { --badge-ring: var(--chrome-selected); }
+.agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) .agent-mark,
 .workspace-button:hover:not(.active) .agent-mark { --badge-ring: var(--chrome-hover); }
 .workspace-button.active .agent-mark { --badge-ring: var(--accent); }
 .agent-mark-badge {
@@ -699,16 +701,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    between splits; painting it in the terminal's own background makes it
    disappear, and the dividers below are drawn deliberately instead. */
 .terminal-window { position: absolute; inset: 4px; min-height: 0; background: var(--term-bg); }
-/* The frame's edge is drawn, not laid out: an inset shadow costs no pixels,
-   while a border costs each pane the same width however small the pane is, and
-   the tmux client size can only give that allowance back in proportion. */
-/* The edge was `--chrome-bg` while chrome was a near-black: a dark line drawn
-   against the pane's own background. `--chrome-bg` is the terminal background
-   now, so that line would be invisible and two panes either side of a split
-   would read as one — this is the one place the chrome/terminal merge takes
-   something away rather than giving it. `--chrome-border` restores a drawn edge
-   from the same ramp every other divider in the app comes from. */
-.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); box-shadow: inset -1px -1px 0 var(--chrome-border); }
+/* Divider handles below draw the frame's right and bottom edges without
+   spending layout pixels. Keeping that line out of this shadow matters: the
+   active state replaces the frame shadow with its focus ring, but must not
+   make the split itself disappear. */
+.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); }
 .pane-frame.active { box-shadow: inset 0 0 0 var(--focus-ring) var(--accent); }
 .pane-frame.attention::after {
   content: ""; position: absolute; inset: var(--attention-inset);
@@ -737,9 +734,16 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .terminal-pane .xterm .xterm-screen { background-color: var(--term-bg); }
 .terminal-pane[data-local-selection-active="true"] { box-shadow: inset 0 0 0 1px var(--chrome-dim); }
 .terminal-pane .xterm-viewport { scrollbar-width: thin; scrollbar-color: var(--chrome-faint) transparent; }
+/* The line stays one pixel wide while its transparent hit target reaches 12px
+   into the pane. Keeping the target inside the clipped frame makes its owner
+   unambiguous at a split and avoids relying on overflow for pointer events. */
 .divider-handle { position: absolute; z-index: 7; padding: 0; border: 0; background: transparent; touch-action: none; }
-.divider-handle.horizontal { top: 0; right: -3px; width: 7px; height: 100%; cursor: col-resize; }
-.divider-handle.vertical { bottom: -3px; left: 0; width: 100%; height: 7px; cursor: row-resize; }
+.divider-handle::after { content: ""; position: absolute; background: var(--chrome-hairline); pointer-events: none; }
+.divider-handle.horizontal { top: 0; right: 0; width: 12px; height: 100%; cursor: col-resize; }
+.divider-handle.horizontal::after { top: 0; right: 0; width: 1px; height: 100%; }
+.divider-handle.vertical { bottom: 0; left: 0; width: 100%; height: 12px; cursor: row-resize; }
+.divider-handle.vertical::after { bottom: 0; left: 0; width: 100%; height: 1px; }
+.divider-handle:hover::after, .divider-handle:focus-visible::after { background: var(--accent); }
 
 .terminal-search {
   position: absolute; z-index: 6; top: 6px; right: 6px;
@@ -1479,7 +1483,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 @media (forced-colors: active) {
   /* Colors are replaced by the system palette here, so anything that carried
      meaning purely as a color has to carry it as a border or an outline. */
-  .workspace-button.active, .tab.active, .pane-frame.active, .palette-row.selected,
+  .workspace-button.active, .tab.active, .pane-frame.active, .palette-row.selected, .agent-button.selected,
   .panel-tab.active, .segment.active, .file-row[aria-selected="true"],
   .bar-button[aria-pressed="true"] {
     outline: 2px solid Highlight; outline-offset: -2px;

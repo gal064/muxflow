@@ -63,6 +63,7 @@
     "pinnedOnly": true,
     "terminalScreenReader": true,
     "copyOnSelect": true,
+    "cleanWrappedCommands": true,
     "terminalApplicationClipboard": true,
     "terminalFontSize": 17,
     "defaultMarkdownView": "preview",

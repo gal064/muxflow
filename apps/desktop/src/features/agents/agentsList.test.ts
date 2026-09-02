@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAgentRows, groupAgentRows, groupAgentRowsByStatus, jumpTarget, needsAttention, nextSortMode,
-  RECENT_IDLE_WINDOW_MILLIS, sortModeLabel, unreadCount, type AgentLocation,
+  RECENT_IDLE_WINDOW_MILLIS, selectedAgentIdForPane, sortModeLabel, unreadCount, type AgentLocation,
 } from "./agentsList";
 import { agent } from "./testFixtures";
 import type { AgentRecord } from "./types";
@@ -19,7 +19,7 @@ const done = agent({ id: "done", displayName: "claude two", lifecycle: "idle", a
 const idle = agent({ id: "idle", displayName: "claude three", lifecycle: "idle", sessionId: "$2", updatedAt: 5 });
 
 describe("agents section ordering", () => {
-  it("ranks the visual queue blocked > working > done > idle", () => {
+  it("ranks the visual queue blocked > working > recent completion > idle", () => {
     const rows = buildAgentRows([idle, working, done, blocked], locate, () => true, "status");
     expect(rows.map((row) => row.agent.id)).toEqual(["blocked", "working", "done", "idle"]);
   });
@@ -73,23 +73,21 @@ describe("agents section ordering", () => {
     expect(sortModeLabel("workspace")).toBe("workspace");
   });
 
-  it("buckets the priority order into the four groups you read top to bottom", () => {
+  it("buckets the priority order without a separate Done group", () => {
     const unknown = agent({ id: "unknown", lifecycle: "unknown" });
     const rows = buildAgentRows([idle, working, done, blocked, unknown], locate, () => true, "status");
     const groups = groupAgentRowsByStatus(rows);
-    // Not the sort's order: `compareAgents` ranks done-unread above working,
-    // which is right for "where does ⌘⇧U land" and wrong for a column read top
-    // to bottom, where Working between Blocked and Done is what makes it a
-    // queue. Unknown shares Idle's bucket — a gap in reporting is not a fifth
-    // thing an agent can be doing.
+    // Completion attention belongs in Recent; its row dot and badge carry the
+    // unread fact. Unknown shares Idle's bucket — a gap in reporting is not a
+    // separate thing an agent can be doing.
     expect(groups.map((group) => [group.label, group.rows.map((row) => row.agent.id)])).toEqual([
       ["Blocked", ["blocked"]],
       ["Working", ["working"]],
-      ["Done", ["done"]],
+      ["Recent", ["done"]],
       ["Idle", ["idle", "unknown"]],
     ]);
     // Every group draws a state dot, and it is the group's state, not a row's.
-    expect(groups.map((group) => group.state)).toEqual(["blocked", "working", "done", "idle"]);
+    expect(groups.map((group) => group.state)).toEqual(["blocked", "working", "idle", "idle"]);
     // An empty bucket is absent, not an empty heading.
     expect(groupAgentRowsByStatus(buildAgentRows([working], locate, () => true, "status"))
       .map((group) => group.key)).toEqual(["working"]);
@@ -154,23 +152,58 @@ describe("agents section ordering", () => {
     ]);
   });
 
-  it("moves acknowledged Done into Recent without resetting its completion time", () => {
+  it("keeps a completion in Recent when acknowledgement clears its dot", () => {
     const now = 100_000_000;
     const completion = now - 60 * 60 * 1_000;
     const completed = agent({
       id: "completed", lifecycle: "idle", attentionKind: "completed",
       attentionGeneration: 4, seenGeneration: 1, lifecycleChangedAt: completion,
     });
-    const doneRow = buildAgentRows([completed], locate, () => true, "status", now)[0];
-    const acknowledgedRow = buildAgentRows(
-      [{ ...completed, seenGeneration: completed.attentionGeneration }],
+    const neighbor = agent({
+      id: "neighbor", lifecycle: "idle", lifecycleChangedAt: completion - 1_000,
+    });
+    const doneRows = buildAgentRows([neighbor, completed], locate, () => true, "status", now);
+    const acknowledgedRows = buildAgentRows(
+      [neighbor, {
+        ...completed,
+        seenGeneration: completed.attentionGeneration,
+        attentionSeenAt: now,
+      }],
       locate,
       () => true,
       "status",
       now,
-    )[0];
-    expect([doneRow.priorityBucket, acknowledgedRow.priorityBucket]).toEqual(["done", "recent"]);
+    );
+    const doneRow = doneRows.find((row) => row.agent.id === completed.id)!;
+    const acknowledgedRow = acknowledgedRows.find((row) => row.agent.id === completed.id)!;
+    expect([doneRow.priorityBucket, acknowledgedRow.priorityBucket]).toEqual(["recent", "recent"]);
+    expect([doneRow.state, acknowledgedRow.state]).toEqual(["done", "idle"]);
+    expect(acknowledgedRows.map((row) => row.agent.id)).toEqual(doneRows.map((row) => row.agent.id));
     expect(acknowledgedRow.agent.lifecycleChangedAt).toBe(completion);
+  });
+
+  it("keeps unread completions Recent indefinitely and starts four hours when read", () => {
+    const now = 10 * RECENT_IDLE_WINDOW_MILLIS;
+    const completedLongAgo = agent({
+      lifecycle: "idle",
+      attentionKind: "completed",
+      attentionGeneration: 4,
+      seenGeneration: 1,
+      lifecycleChangedAt: now - 8 * RECENT_IDLE_WINDOW_MILLIS,
+    });
+    expect(buildAgentRows([completedLongAgo], locate, () => true, "status", now)[0].priorityBucket)
+      .toBe("recent");
+
+    const read = {
+      ...completedLongAgo,
+      seenGeneration: completedLongAgo.attentionGeneration,
+      attentionSeenAt: now,
+    };
+    expect(buildAgentRows([read], locate, () => true, "status", now)[0].priorityBucket)
+      .toBe("recent");
+    expect(buildAgentRows(
+      [read], locate, () => true, "status", now + RECENT_IDLE_WINDOW_MILLIS,
+    )[0].priorityBucket).toBe("idle");
   });
 
   it("keeps agents whose workspace is not in the list last instead of dropping them", () => {
@@ -294,5 +327,38 @@ describe("the bell and ⌘⇧U ignore pins", () => {
     const rows = buildAgentRows([pinnedDone, blockedElsewhere], place, () => true, "status");
     expect(rows[0].agent.id).toBe("blocked-away");
     expect(jumpTarget(rows)?.agent.id).toBe("blocked-away");
+  });
+});
+
+describe("active pane agent selection", () => {
+  const rowsForSelection = (agents: readonly AgentRecord[], routable = () => true) =>
+    buildAgentRows(agents, locate, routable, "status");
+
+  it("selects the routable agent whose exact pane is active, including idle agents", () => {
+    const activeIdle = agent({ id: "active-idle", paneId: "%7", lifecycle: "idle" });
+    const elsewhere = agent({ id: "elsewhere", paneId: "%8", lifecycle: "working" });
+    const rows = rowsForSelection([elsewhere, activeIdle]);
+    expect(selectedAgentIdForPane(rows, "%7")).toBe("active-idle");
+    expect(selectedAgentIdForPane(rows, "%missing")).toBeUndefined();
+    expect(selectedAgentIdForPane(rows, undefined)).toBeUndefined();
+    expect(selectedAgentIdForPane(rowsForSelection([activeIdle], () => false), "%7")).toBeUndefined();
+  });
+
+  it("resolves a defensive duplicate to native, then newest, then stable id", () => {
+    const manual = agent({
+      id: "manual", paneId: "%7", detectedManually: true, nativeSessionId: "", updatedAt: 999,
+    });
+    const nativeOld = agent({
+      id: "native-old", paneId: "%7", detectedManually: false, nativeSessionId: "session-old", updatedAt: 10,
+    });
+    const nativeNewB = agent({
+      id: "native-b", paneId: "%7", detectedManually: false, nativeSessionId: "session-b", updatedAt: 20,
+    });
+    const nativeNewA = agent({
+      id: "native-a", paneId: "%7", detectedManually: false, nativeSessionId: "session-a", updatedAt: 20,
+    });
+    expect(selectedAgentIdForPane(rowsForSelection([manual, nativeOld]), "%7")).toBe("native-old");
+    expect(selectedAgentIdForPane(rowsForSelection([nativeOld, nativeNewB]), "%7")).toBe("native-b");
+    expect(selectedAgentIdForPane(rowsForSelection([nativeNewB, nativeNewA]), "%7")).toBe("native-a");
   });
 });

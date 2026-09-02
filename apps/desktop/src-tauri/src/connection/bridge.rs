@@ -18,9 +18,9 @@ use super::transport::{
     with_bridge_diagnostic,
 };
 use super::{
-    ConnectionSpec, InitialHostState, REQUEST_TIMEOUT, TerminalClient, TerminalEvent,
-    TerminalEventChannel, mark_input_reconnected, send_event, snapshot_from_proto,
-    validate_tmux_id, writer::ControlWriterHandle,
+    ConnectionSpec, CountingReader, InitialHostState, PendingAnswer, REQUEST_TIMEOUT,
+    TerminalClient, TerminalEvent, TerminalEventChannel, mark_input_reconnected, send_event,
+    snapshot_from_proto, validate_tmux_id, writer::ControlWriterHandle,
 };
 
 /// A teardown this side ordered reaches the supervisor as the reader's
@@ -242,7 +242,7 @@ fn run_bridge_once(
             sequence,
             TerminalEvent::Snapshot {
                 server_identity: hello.server_identity.clone(),
-                snapshot: initial.snapshot,
+                snapshot: Some(initial.snapshot),
                 sequence,
                 generation: initial.generation,
                 authoritative: true,
@@ -357,8 +357,11 @@ fn run_bridge_once(
     }
     super::flush_delivery_ack(client)?;
     *connected_at = Some(Instant::now());
+    // From here on the frame parser reads through a counter, so a late answer
+    // can name the bytes that were ahead of it on the wire. Free in a build
+    // without the measurement compiled in.
     read_protocol_stream(
-        reader,
+        CountingReader::new(reader, &client.link_counters),
         sequence,
         &hello.server_identity,
         channel,
@@ -538,10 +541,15 @@ fn read_protocol_stream(
     // will never deliver: see the quarantine below.
     let mut quarantined_charge = super::HostCharge::default();
     loop {
+        // Read before the frame, because the counting reader has already added
+        // this frame's own bytes by the time the envelope exists — and this
+        // answer's own bytes were never ahead of it.
+        let bytes_before = client.link_counters.bytes_read();
         let frame = read_frame_sync(&mut reader)
             .map_err(|error| error.to_string())?
             .ok_or("host bridge closed")?;
         client.note_host_frame();
+        let answer_mark = client.link_counters.note_frame_read(&frame, bytes_before);
         let mut frame = frame;
         if matches!(frame.payload, Some(Payload::Response(_))) {
             let Some(Payload::Response(response)) = frame.payload.take() else {
@@ -561,7 +569,7 @@ fn read_protocol_stream(
                     channel,
                     response.accepted_sequence,
                     TerminalEvent::Snapshot {
-                        snapshot: snapshot_from_proto(protocol_snapshot),
+                        snapshot: Some(snapshot_from_proto(protocol_snapshot)),
                         sequence: response.accepted_sequence,
                         generation,
                         server_identity: snapshot_identity,
@@ -596,7 +604,10 @@ fn read_protocol_stream(
                 continue;
             }
             if let Some(waiter) = client.pending.lock().unwrap().remove(&frame.request_id) {
-                let _ = waiter.send(Ok(response));
+                let _ = waiter.send(Ok(PendingAnswer {
+                    response,
+                    mark: answer_mark,
+                }));
             }
             continue;
         }
@@ -748,6 +759,26 @@ fn process_event(
     let event_sequence = frame.sequence;
     let mut scoped_seed = None;
     match v1::EventKind::try_from(event.kind).unwrap_or_default() {
+        // A topology event with no snapshot is a reconciliation
+        // acknowledgement: a notified pass found the world exactly as the
+        // desktop already holds it and says so with the generation alone.
+        // Forwarded rather than dropped because it spent an event sequence,
+        // and because closing the frontend's reconciliation state is the whole
+        // point of it. Its identity is this connection's own — an
+        // acknowledgement asserts nothing about which server answered, and a
+        // server that really did change arrives as a described snapshot, which
+        // is where that check lives.
+        v1::EventKind::TopologySnapshot if event.snapshot.is_none() => send_protocol_event(
+            channel,
+            event_sequence,
+            TerminalEvent::Snapshot {
+                snapshot: None,
+                sequence: frame.sequence,
+                generation: event.topology_generation,
+                server_identity: expected_server_identity.to_owned(),
+                authoritative: false,
+            },
+        )?,
         v1::EventKind::TopologySnapshot => {
             let value = event
                 .snapshot
@@ -764,7 +795,7 @@ fn process_event(
                 channel,
                 event_sequence,
                 TerminalEvent::Snapshot {
-                    snapshot: snapshot_from_proto(value),
+                    snapshot: Some(snapshot_from_proto(value)),
                     sequence: frame.sequence,
                     generation,
                     server_identity,
@@ -886,6 +917,28 @@ fn process_event(
             };
             send_charged_protocol_event(channel, event_sequence, value, delivery_charge)?;
         }
+        v1::EventKind::TerminalHistory => {
+            let terminal = event
+                .terminal
+                .ok_or("terminal history event omitted bytes")?;
+            // Charged like a seed — it is the same kind of bulk answer and
+            // shares the same delivery window — but delivered as its own frame
+            // so nothing downstream can mistake it for the pane's screen.
+            send_charged_protocol_event(
+                channel,
+                event_sequence,
+                TerminalEvent::History {
+                    pane_id: terminal.pane_id,
+                    data: terminal.data,
+                    // Absent, not zero, when the host could not read it: the
+                    // renderer stops paging at the top of the history and must
+                    // not mistake "tmux did not answer" for "there is nothing
+                    // above this".
+                    history_size: terminal.history_size_known.then_some(terminal.history_size),
+                },
+                delivery_charge,
+            )?;
+        }
         v1::EventKind::TerminalExit => send_protocol_event(
             channel,
             event_sequence,
@@ -911,11 +964,11 @@ fn process_event(
                     pane_id: resource.pane_id,
                     state,
                     requires_seed: resource.requires_seed,
+                    resume_from_renderer: resource.resume_from_renderer,
                     recovery_reason: resource.recovery_reason,
                     generation: resource.generation,
                     snapshot_generation: resource.snapshot_generation,
                     tail_through_generation: resource.tail_through_generation,
-                    serialized_snapshot: resource.serialized_snapshot,
                     raw_tail: resource.raw_tail,
                 },
                 delivery_charge,
