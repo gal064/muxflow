@@ -126,10 +126,23 @@ pub(crate) struct PendingAnswer {
     mark: Option<AnswerMark>,
 }
 
+/// The session the renderer is showing on this host, as the bridge attaches
+/// it on every connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalSelection {
+    pub(crate) session_id: String,
+    pub(crate) pane_ids: Vec<String>,
+}
+
 pub(crate) struct TerminalClient {
     bulk_scope: Uuid,
     writer: Mutex<Option<ControlWriterHandle>>,
     child: Mutex<Option<Child>>,
+    /// `None` until the renderer names a session: the bridge then relays
+    /// topology and agent state but attaches no terminal and seeds no pane.
+    /// `select_terminal_session` fills it, and every later reconnect
+    /// attaches what it names.
+    terminal_selection: Mutex<Option<TerminalSelection>>,
     /// Why this side last tore its own transport down, for the bridge
     /// supervisor to append to the error the dying bridge reports. Without it
     /// every local teardown reaches the journal as the *reader's* symptom
@@ -211,6 +224,7 @@ impl TerminalClient {
             bulk_scope: Uuid::new_v4(),
             writer: Mutex::new(None),
             child: Mutex::new(None),
+            terminal_selection: Mutex::new(None),
             teardown_reason: Mutex::new(None),
             unanswered_requests: AtomicU32::new(0),
             last_answer_at: AtomicU64::new(monotonic_millis()),
@@ -787,6 +801,7 @@ pub fn start_terminal(
     session_id: String,
     pane_ids: Vec<String>,
     connection: ConnectionSpec,
+    attach: bool,
     measurement_id: String,
     on_event: Channel<InvokeResponseBody>,
     clients: State<'_, TerminalClients>,
@@ -806,6 +821,12 @@ pub fn start_terminal(
         ConnectionSpec::Local => "local".into(),
         ConnectionSpec::Ssh { profile_id, .. } => profile_id.clone(),
     };
+    if attach {
+        *client.terminal_selection.lock().unwrap() = Some(TerminalSelection {
+            session_id,
+            pane_ids,
+        });
+    }
     client.start_dispatchers(&client_id)?;
     let event_channel = TerminalEventChannel::new(
         measurement_id,
@@ -822,16 +843,7 @@ pub fn start_terminal(
     let worker_channel = event_channel.clone();
     thread::Builder::new()
         .name(format!("host-bridge-{client_id}"))
-        .spawn(move || {
-            supervise_bridge(
-                worker_id,
-                connection,
-                session_id,
-                pane_ids,
-                worker_channel,
-                worker_client,
-            )
-        })
+        .spawn(move || supervise_bridge(worker_id, connection, worker_channel, worker_client))
         .map_err(|error| {
             client.shutdown_transport("host bridge supervisor failed to start");
             let _ = event_channel.send(encode_event(TerminalEvent::ConnectionState {
@@ -920,6 +932,13 @@ pub async fn select_terminal_session(
 ) -> Result<(), String> {
     validate_tmux_id(&session_id, '$')?;
     let client = get_client(&clients, &client_id)?;
+    // Recorded before the host answers: the next reconnect attaches this
+    // session whether or not the host had a control client for it yet, and the
+    // shell retries the request itself until it does.
+    *client.terminal_selection.lock().unwrap() = Some(TerminalSelection {
+        session_id: session_id.clone(),
+        pane_ids: Vec::new(),
+    });
     let request = v1::Request {
         operation: v1::Operation::SelectTerminalSession.into(),
         session_id,
@@ -1257,8 +1276,8 @@ mod bridge;
 use bridge::supervise_bridge;
 #[cfg(test)]
 use bridge::{
-    handshake_admission, reconnect_delay_millis, reconnect_jitter, scoped_terminal_recovery,
-    terminal_scope, validate_event_sequence,
+    attach_scope, handshake_admission, reconnect_delay_millis, reconnect_jitter,
+    scoped_terminal_recovery, terminal_scope, validate_event_sequence,
 };
 
 fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {

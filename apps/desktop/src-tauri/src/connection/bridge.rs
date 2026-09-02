@@ -38,8 +38,6 @@ fn name_local_teardown(error: String, reason: Option<&'static str>) -> String {
 pub(super) fn supervise_bridge(
     client_id: String,
     connection: ConnectionSpec,
-    session_id: String,
-    pane_ids: Vec<String>,
     channel: TerminalEventChannel,
     client: Arc<TerminalClient>,
 ) {
@@ -69,8 +67,6 @@ pub(super) fn supervise_bridge(
             Ok(lease) => run_bridge_once(
                 &connection,
                 lease.as_ref(),
-                &session_id,
-                &pane_ids,
                 &channel,
                 &client,
                 &mut connected_at,
@@ -168,8 +164,6 @@ pub(super) fn reconnect_jitter(client_id: &str, attempt: u32) -> u64 {
 fn run_bridge_once(
     connection: &ConnectionSpec,
     ssh_lease: Option<&SshLease>,
-    session_id: &str,
-    pane_ids: &[String],
     channel: &TerminalEventChannel,
     client: &Arc<TerminalClient>,
     connected_at: &mut Option<Instant>,
@@ -236,7 +230,7 @@ fn run_bridge_once(
     let mut terminal_scope_value = None;
     if let Some(initial) = initial {
         sequence = initial.accepted_sequence;
-        terminal_scope_value = Some(terminal_scope(&initial.snapshot, session_id, pane_ids));
+        terminal_scope_value = attach_scope(client, &initial.snapshot);
         send_protocol_event(
             channel,
             sequence,
@@ -700,6 +694,20 @@ fn event_delivery_charge(frame: &v1::Envelope) -> super::HostCharge {
     }
 }
 
+/// What this connect attaches: nothing while the renderer has not named a
+/// session for this host.
+pub(super) fn attach_scope(
+    client: &TerminalClient,
+    snapshot: &tmux_control::TmuxSnapshot,
+) -> Option<(String, Vec<String>)> {
+    let selection = client.terminal_selection.lock().unwrap().clone()?;
+    Some(terminal_scope(
+        snapshot,
+        &selection.session_id,
+        &selection.pane_ids,
+    ))
+}
+
 pub(super) fn terminal_scope(
     snapshot: &tmux_control::TmuxSnapshot,
     requested_session: &str,
@@ -1025,6 +1033,12 @@ fn process_event(
             )?;
         }
         _ => send_protocol_event(channel, event_sequence, TerminalEvent::ProtocolProgress)?,
+    }
+    // No pane of a host the renderer has not named a session on is being
+    // shown, so none is owed a seed; the one the renderer requests when it
+    // mounts the pane is the seed that counts.
+    if client.terminal_selection.lock().unwrap().is_none() {
+        scoped_seed = None;
     }
     Ok((frame.sequence, scoped_seed))
 }

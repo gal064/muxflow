@@ -65,7 +65,7 @@ describe("native terminal client ownership", () => {
     });
     boundary.failAfterStartResolves = true;
 
-    await expect(startTerminal("", [], { mode: "local" }, () => undefined))
+    await expect(startTerminal("", [], { mode: "local" }, true, () => undefined))
       .rejects.toThrow("boundary bookkeeping failed");
 
     expect(invoke).toHaveBeenCalledWith("stop_terminal", { clientId: "client-orphaned" });
@@ -77,7 +77,7 @@ describe("native terminal client ownership", () => {
       return undefined;
     });
     boundary.failAfterStartResolves = true;
-    await expect(startTerminal("", [], { mode: "local" }, () => undefined)).rejects.toThrow();
+    await expect(startTerminal("", [], { mode: "local" }, true, () => undefined)).rejects.toThrow();
 
     // The registration maps are module-private, so their state is read the way
     // the app reads it: a later start that finds the failed id still tracked
@@ -87,7 +87,7 @@ describe("native terminal client ownership", () => {
       if (command === "start_terminal") return "client-after-failure";
       return undefined;
     });
-    const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+    const clientId = await startTerminal("", [], { mode: "local" }, true, () => undefined);
 
     expect(clientId).toBe("client-after-failure");
     expect(journalledIncidents("terminal.multiClient")).toEqual([]);
@@ -100,7 +100,7 @@ describe("native terminal client ownership", () => {
       return undefined;
     });
 
-    const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+    const clientId = await startTerminal("", [], { mode: "local" }, true, () => undefined);
 
     expect(journalledIncidents("terminal.multiClient")).toEqual([]);
     await stopTerminal(clientId);
@@ -118,13 +118,13 @@ describe("native terminal client ownership", () => {
       if (command === "start_terminal") return "client-first";
       return undefined;
     });
-    const first = await startTerminal("", [], { mode: "local" }, () => undefined);
+    const first = await startTerminal("", [], { mode: "local" }, true, () => undefined);
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === "start_terminal") return "client-second";
       return undefined;
     });
     const second = await startTerminal(
-      "", [], { mode: "ssh", profileId: "ssh-host-0000000000000000", target: "host" }, () => undefined,
+      "", [], { mode: "ssh", profileId: "ssh-host-0000000000000000", target: "host" }, true, () => undefined,
     );
 
     const incidents = journalledIncidents("terminal.multiClient");
@@ -148,13 +148,13 @@ describe("native terminal client ownership", () => {
       if (command === "start_terminal") return "client-first";
       return undefined;
     });
-    const first = await startTerminal("", [], { mode: "local" }, () => undefined);
+    const first = await startTerminal("", [], { mode: "local" }, true, () => undefined);
     await stopTerminal(first);
     vi.mocked(invoke).mockImplementation(async (command) => {
       if (command === "start_terminal") return "client-second";
       return undefined;
     });
-    const second = await startTerminal("", [], { mode: "local" }, () => undefined);
+    const second = await startTerminal("", [], { mode: "local" }, true, () => undefined);
 
     expect(journalledIncidents("terminal.multiClient")).toEqual([]);
     await stopTerminal(second);
