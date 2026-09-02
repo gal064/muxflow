@@ -56,7 +56,7 @@ export function StateBadge({ state, ring, size = BADGE_SIZE, ink = colors.chrome
           the border width, which on a 10 dp circle draws three coarse gaps. */}
       {state === "unknown"
         ? <Svg height={inner} viewBox="0 0 10 10" width={inner}>
-          <Circle cx={5} cy={5} fill="none" r={4.25} stroke={colors.chromeDim} strokeDasharray="2 2" strokeWidth={1.5} />
+          <Circle cx={5} cy={5} fill="none" r={UNKNOWN_R} stroke={colors.chromeDim} strokeDasharray={`${UNKNOWN_DASH} ${UNKNOWN_DASH}`} strokeWidth={1.5} />
         </Svg>
         : null}
     </View>
@@ -95,6 +95,9 @@ const ICON_SIZE = 20;
 /** Outer badge size including its ring; the desktop's 6px dot in a 1.5px ring, scaled to touch. */
 const BADGE_SIZE = 13;
 const RING_WIDTH = 1.5;
+const UNKNOWN_R = 4.25;
+/** Seven dashes that tile the circle exactly, so the seam at 3 o'clock does not merge two of them. */
+const UNKNOWN_DASH = (2 * Math.PI * UNKNOWN_R) / 14;
 const SPIN_R = 4.75;
 const SPIN_CIRC = 2 * Math.PI * SPIN_R;
 /** A quarter turn of ink — the desktop's `border-top-color: currentColor`. */

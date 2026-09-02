@@ -78,7 +78,7 @@ function Item({ item, onOpen, afterDivider }: { item: AgentListItem; onOpen(agen
       return (
         <ListRow
           // The desktop's aria-label: the state is drawn, so it is spoken here.
-          accessibilityLabel={[item.title, STATE_WORDS[item.state], item.attention ? "needs you" : undefined, item.subtitle, item.agent.present ? undefined : "gone"].filter(Boolean).join(", ")}
+          accessibilityLabel={[item.title, item.agent.present ? STATE_WORDS[item.state] : "gone", item.attention ? "needs you" : undefined, item.subtitle].filter(Boolean).join(", ")}
           dimmed={!item.agent.present}
           // Unread blocked or completed: the mobile shape of the desktop's
           // "1" badge. The docked dot says blocked; the bar says *unread*.
@@ -122,23 +122,32 @@ function GroupHeading({ label, count, children, afterDivider }: { label: string;
   );
 }
 
-/** Priority | Workspace — the desktop's sort toggle, as a segmented control. */
+/**
+ * Priority | Workspace — the desktop's sort toggle, as a segmented control.
+ *
+ * Each segment's pressable is the full 48 dp touch target and the 32 dp pill
+ * sits inside it; the track is painted behind the row rather than wrapping
+ * it, because a hit slop never extends past the parent's bounds and a track
+ * that wrapped the pills would have capped the target at their height.
+ */
 function ModeToggle({ mode, onChange }: { mode: AgentListMode; onChange(mode: AgentListMode): void }) {
   return (
     <View style={styles.toggleRow}>
       <View accessibilityRole="tablist" style={styles.toggle}>
+        <View pointerEvents="none" style={styles.toggleTrack} />
         {AGENT_LIST_MODES.map((entry) => {
           const selected = entry.mode === mode;
           return (
             <Pressable
               accessibilityRole="tab"
               accessibilityState={{ selected }}
-              hitSlop={{ top: 8, bottom: 8 }}
               key={entry.mode}
               onPress={() => onChange(entry.mode)}
-              style={[styles.segment, selected && styles.segmentSelected]}
+              style={styles.segmentTarget}
             >
-              <Text style={[styles.segmentLabel, selected && styles.segmentLabelSelected]}>{entry.label}</Text>
+              <View style={[styles.segment, selected && styles.segmentSelected]}>
+                <Text style={[styles.segmentLabel, selected && styles.segmentLabelSelected]}>{entry.label}</Text>
+              </View>
             </Pressable>
           );
         })}
@@ -169,13 +178,11 @@ const styles = StyleSheet.create({
     fontSize: typeScale.meta,
     marginLeft: "auto",
   },
-  toggleRow: { alignItems: "flex-end", paddingHorizontal: 16, paddingTop: 12 },
-  toggle: {
-    backgroundColor: colors.chromeRaised,
-    borderRadius: radii.pill,
-    flexDirection: "row",
-    padding: 2,
-  },
+  toggleRow: { alignItems: "flex-end", paddingHorizontal: 16, paddingTop: 4 },
+  toggle: { flexDirection: "row" },
+  // 36 dp: the 32 dp pills plus the 2 dp inset the file viewer's track has.
+  toggleTrack: { backgroundColor: colors.chromeRaised, borderRadius: radii.pill, bottom: 6, left: 0, position: "absolute", right: 0, top: 6 },
+  segmentTarget: { paddingHorizontal: 2, paddingVertical: 8 },
   segment: { borderRadius: radii.pill - 2, minHeight: 32, justifyContent: "center", paddingHorizontal: 14 },
   // `accentWash` + `accent` is the app's "this segment is selected" treatment (files/ui/parts.tsx).
   segmentSelected: { backgroundColor: colors.accentWash },
