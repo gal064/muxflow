@@ -275,10 +275,16 @@ export function useAppConnectionController({
       // The hub outlives the connection it was built under, and a reseed is
       // for the pane on the *live* client — whose host can differ from the
       // pending connection's in the window between a switch and its bridge.
-      const currentClientId = clientIdRef.current;
+      // The host is known one render later than the client id; a reseed in
+      // that gap has nothing to forget, because the new bridge's epoch event
+      // clears its host's scope, and the seed request must still go out —
+      // the hub asks once per pane and waits for the answer.
       const liveHostProfileId = clientHostProfileIdRef.current;
-      if (!currentClientId || liveHostProfileId === undefined) return;
-      terminalStateCache.delete(terminalCacheKey(liveHostProfileId, paneId));
+      if (liveHostProfileId !== undefined) {
+        terminalStateCache.delete(terminalCacheKey(liveHostProfileId, paneId));
+      }
+      const currentClientId = clientIdRef.current;
+      if (!currentClientId) return;
       void requestTerminalSeed(currentClientId, paneId).catch((error) => {
         setStatus(`${reason}; seed request failed: ${String(error)}`);
       });
