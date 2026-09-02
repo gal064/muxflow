@@ -10,6 +10,7 @@ import { useAppConnectionController } from "./useAppConnectionController";
 const invokeMock = vi.hoisted(() => vi.fn());
 const startTerminalMock = vi.hoisted(() => vi.fn());
 const stopTerminalMock = vi.hoisted(() => vi.fn(async (_clientId: string) => undefined));
+const clipboardMock = vi.hoisted(() => vi.fn(async (_enabled: boolean, _text: string) => undefined));
 const resume = vi.hoisted(() => ({
   trigger: undefined as ((trigger: ResumeTrigger) => void) | undefined,
   outcome: "alive" as "alive" | "dead",
@@ -27,6 +28,7 @@ vi.mock("../features/terminal/api", async (importOriginal) => ({
   stopTerminal: stopTerminalMock,
   requestTerminalSeed: vi.fn(async () => undefined),
 }));
+vi.mock("../features/terminal/terminalTransferApi", () => ({ writeTerminalApplicationClipboard: clipboardMock }));
 // The resume detectors are not under test either; what a dead link costs is.
 vi.mock("../features/shell/useDesktopResumeRecovery", () => ({
   useDesktopResumeRecovery: (onResume: (trigger: ResumeTrigger) => void) => { resume.trigger = onResume; },
@@ -75,14 +77,17 @@ async function twoShownHosts() {
     return Promise.resolve(undefined);
   });
   const retireConnection = vi.fn();
-  const client = { publishWireEvent: vi.fn(), publishWireSnapshot: vi.fn(), retireConnection } as never;
+  const agentClient = { publishWireEvent: vi.fn(), publishWireSnapshot: vi.fn() };
+  const fileClient = { publishWireEvent: vi.fn(), retireConnection };
+  const gitClient = { publishWireEvent: vi.fn() };
+  const statuses: string[] = [];
   // Stable, like the shell's own `useState` setter: the controller keys its
   // profile load on it, and a fresh function per render re-runs that forever.
-  const setStatus = () => undefined;
+  const setStatus = (status: string) => { statuses.push(status); };
   let controller!: ReturnType<typeof useAppConnectionController>;
   function Harness() {
     controller = useAppConnectionController({
-      agentClient: client, fileClient: client, gitClient: client, setStatus,
+      agentClient: agentClient as never, fileClient: fileClient as never, gitClient: gitClient as never, setStatus,
     });
     return null;
   }
@@ -94,11 +99,15 @@ async function twoShownHosts() {
     return bridge;
   };
   return {
+    agentClient,
     bridges,
     bridgeFor,
     controller: () => controller,
+    fileClient,
+    gitClient,
     renderer,
     retireConnection,
+    statuses,
     unmount: () => act(async () => renderer.unmount()),
   };
 }
@@ -237,6 +246,80 @@ describe("one bridge per shown host", () => {
       detail: "qa-host: Connection refused",
     });
     expect(after.linkFor("remote-a")?.hostState.sessions.$1?.name).toBe("work");
+    await unmount();
+  });
+
+  it("keeps a peer's failures, clipboard, files and git off the screen", async () => {
+    const { agentClient, bridgeFor, fileClient, gitClient, statuses, unmount } = await twoShownHosts();
+    await act(async () => {
+      bridgeFor("local").publish(connected);
+      bridgeFor("remote-a").publish(connected);
+      statuses.length = 0;
+      bridgeFor("remote-a").publish({ kind: "error", message: "qa-host: Connection refused", sequence: 0 });
+      bridgeFor("remote-a").publish({ kind: "clipboardWrite", text: "from qa", sequence: 0 });
+      bridgeFor("remote-a").publish({ kind: "fileService", scope: "qa", event: { operationId: "op-qa" } as never, sequence: 0 });
+      bridgeFor("remote-a").publish({ kind: "gitService", scope: "qa", event: { rootToken: "root-qa" } as never, sequence: 0 });
+      bridgeFor("local").publish({ kind: "clipboardWrite", text: "from local", sequence: 0 });
+      bridgeFor("local").publish({ kind: "fileService", scope: "local", event: { operationId: "op-local" } as never, sequence: 0 });
+      bridgeFor("local").publish({ kind: "gitService", scope: "local", event: { rootToken: "root-local" } as never, sequence: 0 });
+    });
+    expect(statuses).toEqual([]);
+    expect(clipboardMock.mock.calls.map(([, text]) => text)).toEqual(["from local"]);
+    expect(fileClient.publishWireEvent.mock.calls).toEqual([[{ operationId: "op-local" }]]);
+    expect(gitClient.publishWireEvent.mock.calls).toEqual([[{ rootToken: "root-local" }]]);
+    expect(agentClient.publishWireEvent).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it("stamps a link's agent events with its own host, server and client", async () => {
+    const { agentClient, bridgeFor, unmount } = await twoShownHosts();
+    const agentSnapshot = { connectionEpoch: 3, agents: [] } as never;
+    await act(async () => {
+      bridgeFor("remote-a").publish({ kind: "generationEpoch", epoch: 3, sequence: 0 });
+      bridgeFor("remote-a").publish(world("srv-qa", [["$1", "build"]]));
+      bridgeFor("remote-a").publish({ kind: "agentService", scope: "snapshot", snapshot: agentSnapshot, sequence: 0 });
+      // A host that has not named its server yet has nothing to stamp with.
+      bridgeFor("local").publish({ kind: "agentService", scope: "snapshot", snapshot: agentSnapshot, sequence: 0 });
+    });
+    expect(agentClient.publishWireSnapshot.mock.calls).toEqual([[
+      { clientId: "client-2", hostProfileId: "remote-a", serverIdentity: "srv-qa", topologyGeneration: 0, connectionEpoch: 3 },
+      agentSnapshot,
+    ]]);
+    await unmount();
+  });
+
+  it("restarts only the stalled peer's bridge, and only once, on a flow stall", async () => {
+    const { bridgeFor, controller, unmount } = await twoShownHosts();
+    const localEpoch = controller().linkFor("local")?.connectionEpoch;
+    await act(async () => {
+      bridgeFor("remote-a").publish({ kind: "flowStalled", paneId: "%0", message: "stalled", sequence: 0 });
+      bridgeFor("remote-a").publish({ kind: "flowStalled", paneId: "%1", message: "stalled", sequence: 0 });
+    });
+    expect(stopTerminalMock.mock.calls).toEqual([["client-2"]]);
+    expect(startTerminalMock).toHaveBeenCalledTimes(3);
+    expect(bridgeFor("remote-a")).toMatchObject({ clientId: "client-3", attach: false });
+    expect(controller().linkFor("local")?.connectionEpoch).toBe(localEpoch);
+    expect(controller().linkFor("remote-a")?.detail).toBe("A terminal output stream stalled; reconnecting it now.");
+    expect(controller().connectionDetail).toBe("");
+    await unmount();
+  });
+
+  it("restarts exactly one bridge when the active host's address is corrected and connected", async () => {
+    const { bridgeFor, controller, unmount } = await twoShownHosts();
+    await act(async () => { controller().activateHost("remote-a"); });
+    // What Settings' Connect does after an edit: the new address and a new
+    // epoch, in one tick.
+    await act(async () => {
+      controller().setConnection({ mode: "ssh", profileId: "remote-a", target: "qa-host-2" });
+      controller().setConnectionEpoch((value) => value + 1);
+    });
+    expect(stopTerminalMock.mock.calls).toEqual([["client-2"]]);
+    expect(startTerminalMock).toHaveBeenCalledTimes(3);
+    expect(bridgeFor("remote-a")).toMatchObject({
+      clientId: "client-3", attach: true, connection: { mode: "ssh", profileId: "remote-a", target: "qa-host-2" },
+    });
+    expect(controller().linkFor("remote-a")?.connection).toEqual({ mode: "ssh", profileId: "remote-a", target: "qa-host-2" });
+    expect(controller().links.map((link) => link.profileId)).toEqual(["local", "remote-a"]);
     await unmount();
   });
 });

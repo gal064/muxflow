@@ -1,6 +1,5 @@
 import type { SetStateAction } from "react";
 import type { ConnectionSpec, HostProfile } from "../app/types";
-import { profileConnection } from "../features/shell/hostProfiles";
 import { resolveSelectedSession } from "../features/shell/model";
 import { hostProfileId } from "../features/shell/types";
 import { connectionReducer, initialHostState, type HostAction, type NormalizedHostState } from "./connectionReducer";
@@ -116,7 +115,12 @@ function bumpEpoch(state: HostLinksState, profileId: string): HostLinksState {
   };
 }
 
-function syncLinks(state: HostLinksState, hosts: readonly ShownHostProfile[]): HostLinksState {
+/**
+ * The link set made exactly `hosts`, in that order. Exported so a caller can
+ * tell, before dispatching, whether the sync would change anything: the state
+ * comes back untouched — the same object — when it would not.
+ */
+export function syncHostLinks(state: HostLinksState, hosts: readonly ShownHostProfile[]): HostLinksState {
   let next = state;
   const wanted = new Set(hosts.map((host) => host.profileId));
   for (const profileId of state.order) {
@@ -135,7 +139,7 @@ function syncLinks(state: HostLinksState, hosts: readonly ShownHostProfile[]): H
 export function hostLinksReducer(state: HostLinksState, action: HostLinksAction): HostLinksState {
   switch (action.type) {
     case "sync":
-      return syncLinks(state, action.hosts);
+      return syncHostLinks(state, action.hosts);
     case "add":
       return addLink(state, action.profileId, action.connection);
     case "remove":
@@ -184,7 +188,7 @@ export function shownHostProfiles(profiles: readonly HostProfile[], active: Conn
   const activeId = hostProfileId(active);
   const shown = profiles.flatMap((profile): ShownHostProfile[] => {
     if (profile.id === activeId) return [{ profileId: activeId, connection: active }];
-    return profile.shown ? [{ profileId: profile.id, connection: profileConnection(profile) }] : [];
+    return profile.shown ? [{ profileId: profile.id, connection: profile.connection }] : [];
   });
   return shown.some((host) => host.profileId === activeId)
     ? shown
