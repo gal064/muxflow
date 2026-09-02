@@ -126,6 +126,28 @@ describe("rows act on their own host", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("stops offering the pin, and takes the mutations, once the connection under the menu changes", async () => {
+    const onTogglePinnedWorkspace = vi.fn();
+    const element = (host: SidebarHost) => <WorkspaceSidebar {...props({ hosts: [host], onTogglePinnedWorkspace, rows: [row(host, "$0", "alpha")] })} />;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(element(local)); });
+    await act(async () => renderer.root.findByProps({ "data-workspace-index": 0 }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
+    expect(renderer.root.findAllByProps({ "data-menu-item": "pin" })).toHaveLength(1);
+    expect(renderer.root.findByProps({ "data-menu-item": "rename" }).props.disabled).toBe(false);
+
+    // Read-only now: the row is still this row, so the pin stays and the
+    // mutations go.
+    await act(async () => { renderer.update(element({ ...local, canMutate: false })); });
+    expect(renderer.root.findAllByProps({ "data-menu-item": "pin" })).toHaveLength(1);
+    expect(renderer.root.findByProps({ "data-menu-item": "rename" }).props.disabled).toBe(true);
+
+    // Reconnected to another server that reuses the id: not this row any more.
+    await act(async () => { renderer.update(element({ ...local, scope: { ...local.scope, connectionEpoch: 2, serverIdentity: "server-b" } })); });
+    expect(renderer.root.findAllByProps({ "data-menu-item": "pin" })).toHaveLength(0);
+    expect(onTogglePinnedWorkspace).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
   it("bounds a row's moves by its own host's list", async () => {
     const rows = [row(local, "$0", "alpha"), { ...row(local, "$1", "beta"), session: { ...session("$1", "beta"), order: 1 } }, row(peer, "$0", "delta")];
     let renderer!: ReturnType<typeof create>;

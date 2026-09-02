@@ -3,7 +3,7 @@ import type { TmuxSnapshot } from "../../app/types";
 import { agent } from "../agents/testFixtures";
 import { deriveAgentRollups } from "../agents/selectors";
 import type { HostScopeToken } from "../shell/hostScope";
-import { mergedWorkspaceRows, pinnedOnlyMergedRows, type HostRowSource } from "./mergedWorkspaceRows";
+import { hostWorkspaceRows, mergeHostRows, mergedWorkspaceRows, pinnedOnlyMergedRows, type HostRowSource } from "./mergedWorkspaceRows";
 import { workspaceRows } from "./workspaceRows";
 
 const scopeFor = (hostProfileId: string): HostScopeToken =>
@@ -59,6 +59,11 @@ describe("mergedWorkspaceRows", () => {
     expect(zeros.map((row) => row.canMutate)).toEqual([true, true]);
     // Active is the active host's business alone: `$0` on the peer is not it.
     expect(zeros.map((row) => row.active)).toEqual([false, true]);
+  });
+
+  it("merges per-host lists the caller built the same way it builds them", () => {
+    expect(mergeHostRows([hostWorkspaceRows(local, true), hostWorkspaceRows(peer, true)]))
+      .toEqual(mergedWorkspaceRows([local, peer], true));
   });
 
   it("carries the host letter only when asked to", () => {

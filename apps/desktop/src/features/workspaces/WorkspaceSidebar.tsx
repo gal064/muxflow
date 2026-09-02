@@ -150,9 +150,17 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
    * another client of the same tmux server can change while it is open: the
    * pin item both reads its label and sends its action from this row, so it
    * can never ask for the state it is already showing — and it is not offered
-   * at all once there is no row to read.
+   * at all once there is no row to read. A reconnect that hands the same id
+   * to another tmux server is a different row, not this one: its pin is not
+   * offered, and the captured items below go out with the scope they were
+   * opened on, which the receiver rejects.
    */
-  const menuRow = menu ? props.rows.find((row) => row.key === menu.row.key) : undefined;
+  const menuRow = menu
+    ? props.rows.find((row) => row.key === menu.row.key && sameHostConnection(row.scope, menu.row.scope))
+    : undefined;
+  // Read live while the row is there: a connection dropping to read-only
+  // with the menu open must take the mutations with it.
+  const menuCanMutate = (menuRow ?? menu?.row)?.canMutate ?? false;
   const priorityAgents = props.agentSort === "workspace" ? [] : groupAgentRowsByStatus(props.agents);
   // The flat position in `props.agents`, kept across every grouping: the roving
   // arrow keys walk `[data-agent-index]` in document order, and a per-group
@@ -295,7 +303,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       // The row lists up to three agents; the label names the loudest
       // and counts the rest. Reading every line back would make a busy
       // workspace four announcements long for one list item.
-      aria-label={rowLabel(row, row.letter ? hostFor(row.hostProfileId).label : undefined)}
+      aria-label={rowLabel(row, row.letter ? props.hosts.find((host) => host.profileId === row.hostProfileId)?.label : undefined)}
       className={["workspace-button", row.active ? "active" : undefined, props.compactWorkspaces ? "compact" : undefined].filter(Boolean).join(" ")}
       data-workspace-index={index}
       // Shift-click pins rather than selects, as it does in the tab
@@ -612,7 +620,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     {menu && <ContextMenu
       anchor={menu.anchor}
       items={[
-        { id: "rename", label: "Rename workspace…", disabled: !menu.row.canMutate, run: () => props.onWorkspaceCommand(menu.row, "session.rename") },
+        { id: "rename", label: "Rename workspace…", disabled: !menuCanMutate, run: () => props.onWorkspaceCommand(menu.row, "session.rename") },
         // Not gated on `canMutate`: a pin is host state rather than a tmux
         // mutation, and the action pipeline reports it if the connection
         // cannot carry it. Offered only while the list still holds the row,
@@ -625,10 +633,10 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             run: () => props.onTogglePinnedWorkspace(menuRow),
           }]
           : []),
-        { id: "up", label: "Move up", disabled: !menu.row.canMutate || moveIndex <= 0, run: () => props.onWorkspaceCommand(menu.row, "session.moveLeft") },
-        { id: "down", label: "Move down", disabled: !menu.row.canMutate || moveIndex < 0 || moveIndex === hostRows.length - 1, run: () => props.onWorkspaceCommand(menu.row, "session.moveRight") },
+        { id: "up", label: "Move up", disabled: !menuCanMutate || moveIndex <= 0, run: () => props.onWorkspaceCommand(menu.row, "session.moveLeft") },
+        { id: "down", label: "Move down", disabled: !menuCanMutate || moveIndex < 0 || moveIndex === hostRows.length - 1, run: () => props.onWorkspaceCommand(menu.row, "session.moveRight") },
         "separator",
-        { id: "close", label: "Close workspace…", destructive: true, disabled: !menu.row.canMutate, run: () => props.onWorkspaceCommand(menu.row, "session.close") },
+        { id: "close", label: "Close workspace…", destructive: true, disabled: !menuCanMutate, run: () => props.onWorkspaceCommand(menu.row, "session.close") },
       ]}
       label={`Actions for ${menu.row.session.name}`}
       onClose={() => setMenu(undefined)}

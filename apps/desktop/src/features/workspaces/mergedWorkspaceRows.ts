@@ -69,7 +69,15 @@ export function hostWorkspaceRows(source: HostRowSource, showLetters: boolean): 
  * list had, extended across hosts rather than repeated per host.
  */
 export function mergedWorkspaceRows(sources: readonly HostRowSource[], showLetters: boolean): MergedWorkspaceRow[] {
-  const perHost = sources.map((source) => hostWorkspaceRows(source, showLetters));
+  return mergeHostRows(sources.map((source) => hostWorkspaceRows(source, showLetters)));
+}
+
+/**
+ * The merge alone, over per-host lists the caller already built — so each
+ * host's `hostWorkspaceRows` can be memoized on its own inputs and one
+ * host's event never re-sorts another host's rows.
+ */
+export function mergeHostRows(perHost: readonly (readonly MergedWorkspaceRow[])[]): MergedWorkspaceRow[] {
   return [
     ...perHost.flatMap((rows) => rows.filter((row) => row.pinned)),
     ...perHost.flatMap((rows) => rows.filter((row) => !row.pinned)),
