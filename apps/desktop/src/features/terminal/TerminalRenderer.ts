@@ -194,6 +194,8 @@ export interface TerminalRenderer {
   readonly grid: TerminalSize;
   /** The visible rows as text and the cursor, as a test reads the screen. */
   screenText(): { rows: string[]; cursor: [number, number] };
+  /** The visible cells' background mode and value, as a parity test reads them. */
+  screenBackgrounds(): string[][];
   /**
    * Fires when a `setGrid` actually reflowed the buffer.
    *
@@ -649,7 +651,7 @@ export class XtermRenderer implements TerminalRenderer {
         }
         const kept = overlap === 0 ? captured : captured.slice(0, captured.length - overlap);
         const page = composeHistoryPage(kept, anchor.columns);
-        const screen = new TextEncoder().encode(this.#serializedScreenAtFullHeight());
+        const screen = new TextEncoder().encode(this.#serializedScreenForHistorySplice());
         const spliced = new Uint8Array(page.byteLength + HISTORY_SEPARATOR.byteLength + screen.byteLength);
         spliced.set(page);
         spliced.set(HISTORY_SEPARATOR, page.byteLength);
@@ -679,7 +681,7 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   /**
-   * The screen serialized so that it re-renders at exactly its own height.
+   * The screen serialized so that it re-renders exactly behind earlier rows.
    *
    * The serialize addon trims the blank rows below the last content of a buffer
    * that holds no scrollback, and puts the cursor back with moves relative to
@@ -688,24 +690,73 @@ export class XtermRenderer implements TerminalRenderer {
    * slide into the top of the viewport, everything the screen showed sits that
    * many rows too low, and the cursor is moved to match — so a program that
    * addresses rows absolutely, a TUI repainting its footer, paints over the
-   * wrong rows from then until its next full redraw. The trimmed rows go back
-   * here, and the cursor is placed absolutely.
+   * wrong rows from then until its next full redraw.
+   *
+   * The addon also omits blank cells carrying the default attributes.
+   * That is faithful on a clean screen, but not after history: a line feed at
+   * the bottom creates the next row with the current background (BCE), and an
+   * omitted default run leaves that inherited background in place. Codex's
+   * full-width input area followed by a short status line exposes it as a grey
+   * band after the status text. The trimmed rows and omitted cells go back
+   * here, before the cursor, pen and modes are restored.
    */
-  #serializedScreenAtFullHeight(): string {
+  #serializedScreenForHistorySplice(): string {
     const serialized = sanitizeSerializedScreen(this.serialize());
-    // With scrollback above it the addon emits every row, screen included.
-    if (this.scrollbackRows > 0) return serialized;
-    const missing = this.#terminal.rows - this.#serializedRows();
-    if (missing <= 0) return serialized;
+    // With scrollback above it the addon emits every row, screen included;
+    // without it, restore any blank rows trimmed from the foot of the screen.
+    const missing = this.scrollbackRows > 0 ? 0 : this.#terminal.rows - this.#serializedRows();
+    const defaultCells = this.#serializedDefaultCells();
+    if (missing <= 0 && defaultCells === "") return serialized;
     const buffer = this.#terminal.buffer.active;
     // The addon ends with relative cursor moves, the live pen, and then the
-    // modes it restores (`CSI ? n h`, `CSI n h`, `CSI ? 7 l`); the last two
-    // are kept and re-emitted after the absolute cursor.
+    // modes it restores (`CSI ? n h`, `CSI n h`, `CSI ? 7 l`). Apply the pen
+    // before saving it: when the pen already matches the final content the
+    // addon emits no SGR suffix, and the content's pen is the live pen.
     const tail = /(\u001b\[\d+[AB])?(\u001b\[\d+[CD])?(\u001b\[[0-9;]*m)?((?:\u001b\[\??\d+[hl])*)$/;
     const [, , , pen = "", modes = ""] = serialized.match(tail) ?? [];
     const content = serialized.replace(tail, "");
     const cursor = `\u001b[${buffer.cursorY + 1};${buffer.cursorX + 1}H`;
-    return `${content}\u001b[m${"\r\n".repeat(missing)}${cursor}${pen}${modes}`;
+    // `replace` begins with RIS, so this temporary save cannot overwrite an
+    // application's saved cursor. SGR 49 changes only the background; ECH
+    // itself writes default foreground/flags, and restore returns the exact
+    // live pen before queued output resumes.
+    return `${content}${pen}\u001b[s\u001b[49m${"\r\n".repeat(Math.max(0, missing))}`
+      + `${defaultCells}\u001b[u${cursor}${modes}`;
+  }
+
+  /**
+   * Explicitly clears default-attribute runs the serialize addon omits.
+   *
+   * Only null, single-width cells are safe to materialize: a width-zero cell
+   * may be the second half of a wide glyph, and a literal space remains real
+   * buffer content even when it looks blank. The caller sets the default
+   * background before these ECH operations and restores the live pen after.
+   */
+  #serializedDefaultCells(): string {
+    const buffer = this.#terminal.buffer.active;
+    const cell = buffer.getNullCell();
+    let clears = "";
+    for (let row = 0; row < this.#terminal.rows; row += 1) {
+      const line = buffer.getLine(buffer.baseY + row);
+      if (!line) continue;
+      let column = 0;
+      while (column < this.#terminal.cols) {
+        const current = line.getCell(column, cell);
+        if (!current || current.getWidth() !== 1 || current.getChars() !== "" || !current.isAttributeDefault()) {
+          column += 1;
+          continue;
+        }
+        const first = column;
+        do {
+          column += 1;
+          if (column >= this.#terminal.cols) break;
+          const next = line.getCell(column, cell);
+          if (!next || next.getWidth() !== 1 || next.getChars() !== "" || !next.isAttributeDefault()) break;
+        } while (true);
+        clears += `\u001b[${row + 1};${first + 1}H\u001b[${column - first}X`;
+      }
+    }
+    return clears;
   }
 
   /**
@@ -769,6 +820,17 @@ export class XtermRenderer implements TerminalRenderer {
       rows.push(buffer.getLine(buffer.baseY + y)?.translateToString(true) ?? "");
     }
     return { rows, cursor: [buffer.cursorX, buffer.cursorY] };
+  }
+
+  screenBackgrounds(): string[][] {
+    const buffer = this.#terminal.buffer.active;
+    return Array.from({ length: this.#terminal.rows }, (_, row) => {
+      const line = buffer.getLine(buffer.baseY + row);
+      return Array.from({ length: this.#terminal.cols }, (_, column) => {
+        const cell = line?.getCell(column);
+        return `${cell?.getBgColorMode()}:${cell?.getBgColor()}`;
+      });
+    });
   }
 
   get scrollbackRows(): number {

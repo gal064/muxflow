@@ -321,6 +321,76 @@ describe("stale cached restore", () => {
     renderer.dispose();
   });
 
+  /**
+   * A full-width coloured input area followed by a short default-background
+   * status line is the shape of Codex's bottom frame. The serialize addon may
+   * omit default cells between its positioned segments and after its text;
+   * once history is written before the snapshot, BCE otherwise creates those
+   * cells with the input area's background and leaves coloured bands behind.
+   */
+  it("keeps default background gaps when history is put above a coloured screen", async () => {
+    const renderer = new XtermRenderer({ paneId: "%18" });
+    renderer.open(document.createElement("div"));
+    renderer.setGrid({ columns: 20, rows: 5 });
+    renderer.write(
+      ownTerminalBytes(new TextEncoder().encode(
+        "\u001b[3;1H\u001b[48;2;65;69;76m\u001b[2K"
+        + "\u001b[4;1H\u001b[2K"
+        + "\u001b[0m\u001b[5;1Hstatus\u001b[5;13Hbranch"
+        + "\u001b[3;6H\u001b[48;2;65;69;76m",
+      )),
+      undefined,
+      1,
+    );
+    await waitFor(() => renderer.serialize().includes("status"), "the coloured screen to land");
+    const before = renderer.screenBackgrounds();
+    const beforeText = renderer.screenText();
+
+    await expect(
+      renderer.prependHistory(
+        ownTerminalBytes(new TextEncoder().encode("earlier output")),
+        anchoredAt(renderer, 0),
+      ),
+    ).resolves.toBe("applied");
+    await waitFor(() => renderer.serialize().includes("earlier output"), "the history to be spliced");
+
+    expect(renderer.screenBackgrounds()).toEqual(before);
+    expect(renderer.screenText()).toEqual(beforeText);
+
+    // The correction uses the default pen, then gives the live grey pen back:
+    // the next erase from the program must still paint with that live colour.
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("\u001b[1;1H\u001b[1X")), undefined, 2);
+    await waitFor(
+      () => renderer.screenBackgrounds()[0]?.[0] === before[2]?.[0],
+      "the live pen to paint after the splice",
+    );
+    renderer.dispose();
+  });
+
+  it("keeps a live pen that matches the final content through the background correction", async () => {
+    const renderer = new XtermRenderer({ paneId: "%19" });
+    renderer.open(document.createElement("div"));
+    renderer.setGrid({ columns: 20, rows: 5 });
+    renderer.write(
+      ownTerminalBytes(new TextEncoder().encode("\u001b[5;1H\u001b[31mstatus")),
+      undefined,
+      1,
+    );
+    await waitFor(() => renderer.serialize().includes("status"), "the red status to land");
+
+    await expect(
+      renderer.prependHistory(
+        ownTerminalBytes(new TextEncoder().encode("earlier output")),
+        anchoredAt(renderer, 0),
+      ),
+    ).resolves.toBe("applied");
+    renderer.write(ownTerminalBytes(new TextEncoder().encode("X")), undefined, 2);
+    await waitFor(() => renderer.serialize().includes("statusX"), "output with the restored pen to land");
+
+    expect(renderer.serialize()).toContain("\u001b[31mstatusX");
+    renderer.dispose();
+  });
+
   it("refuses a page a busy pane printed straight past", async () => {
     const renderer = new XtermRenderer({ paneId: "%15" });
     renderer.open(document.createElement("div"));
