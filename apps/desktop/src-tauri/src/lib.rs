@@ -219,6 +219,7 @@ pub fn run() {
             incidents::record_incident,
             connection::start_terminal,
             connection::stop_terminal,
+            connection::prewarm_terminal_bulk,
             connection::delivery_ack::acknowledge_terminal_delivery,
             perf_log::bridge::finalize_bridge_measurement,
             perf_log::bridge::bridge_final_totals,

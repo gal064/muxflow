@@ -773,6 +773,11 @@ export async function stopTerminal(clientId: string): Promise<void> {
   }
 }
 
+/** Best-effort warmup for the active host's file-transfer lane. */
+export function prewarmTerminalBulk(clientId: string): Promise<void> {
+  return invoke("prewarm_terminal_bulk", { clientId });
+}
+
 export function sendInput(clientId: string, paneId: string, data: string): Promise<void> {
   const byteLength = encoder.encode(data).byteLength;
   if (byteLength > MAX_HOST_TERMINAL_INPUT_BYTES) return oversizedTerminalInput(byteLength);

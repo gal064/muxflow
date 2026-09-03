@@ -11,6 +11,7 @@ import { useAppConnectionController } from "./useAppConnectionController";
 const invokeMock = vi.hoisted(() => vi.fn());
 const startTerminalMock = vi.hoisted(() => vi.fn());
 const stopTerminalMock = vi.hoisted(() => vi.fn(async (_clientId: string) => undefined));
+const prewarmTerminalBulkMock = vi.hoisted(() => vi.fn(async (_clientId: string) => undefined));
 const requestTerminalSeedMock = vi.hoisted(() => vi.fn(async (_clientId: string, _paneId: string) => undefined));
 const clipboardMock = vi.hoisted(() => vi.fn(async (_enabled: boolean, _text: string) => undefined));
 const resume = vi.hoisted(() => ({
@@ -28,6 +29,7 @@ vi.mock("../features/terminal/api", async (importOriginal) => ({
   ...await importOriginal<typeof import("../features/terminal/api")>(),
   startTerminal: startTerminalMock,
   stopTerminal: stopTerminalMock,
+  prewarmTerminalBulk: prewarmTerminalBulkMock,
   requestTerminalSeed: requestTerminalSeedMock,
 }));
 vi.mock("../features/terminal/terminalTransferApi", () => ({ writeTerminalApplicationClipboard: clipboardMock }));
@@ -131,6 +133,7 @@ describe("one bridge per shown host", () => {
     invokeMock.mockReset();
     startTerminalMock.mockReset();
     stopTerminalMock.mockClear();
+    prewarmTerminalBulkMock.mockClear();
     resume.trigger = undefined;
     resume.outcome = "alive";
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -149,6 +152,32 @@ describe("one bridge per shown host", () => {
     // Two hubs, one per host; the facade's is the active host's.
     expect(controller().hubFor("local")).toBe(controller().hub);
     expect(controller().hubFor("remote-a")).not.toBe(controller().hub);
+    await unmount();
+  });
+
+  it("prewarms bulk transport only for the active host and follows activation", async () => {
+    const { bridgeFor, controller, unmount } = await twoShownHosts();
+    await act(async () => {
+      bridgeFor("local").publish({ kind: "generationEpoch", epoch: 11, sequence: 0 });
+      bridgeFor("local").publish(connected);
+      bridgeFor("local").publish(world("srv-local", [["$0", "home"]]));
+      bridgeFor("remote-a").publish({ kind: "generationEpoch", epoch: 21, sequence: 0 });
+      bridgeFor("remote-a").publish(connected);
+      bridgeFor("remote-a").publish(world("srv-qa", [["$1", "build"]]));
+    });
+    expect(prewarmTerminalBulkMock.mock.calls).toEqual([["client-1"]]);
+
+    // A background reconnect changes the peer's epoch but does not consume a
+    // bulk-pool slot while Local remains active.
+    await act(async () => {
+      bridgeFor("remote-a").publish({ kind: "connectionState", state: "reconnecting", sequence: 0 });
+      bridgeFor("remote-a").publish({ kind: "generationEpoch", epoch: 22, sequence: 0 });
+      bridgeFor("remote-a").publish(connected);
+    });
+    expect(prewarmTerminalBulkMock.mock.calls).toEqual([["client-1"]]);
+
+    await act(async () => { controller().activateHost("remote-a"); });
+    expect(prewarmTerminalBulkMock.mock.calls).toEqual([["client-1"], ["client-2"]]);
     await unmount();
   });
 
