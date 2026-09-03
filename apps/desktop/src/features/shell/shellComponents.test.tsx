@@ -1849,8 +1849,8 @@ describe("pinning by Shift-click", () => {
     expect(html).toContain('<div class="list-block" role="presentation">');
   });
 
-  it("puts the pin immediately after the name of an agent whose tab is pinned, in both orderings", () => {
-    for (const agentSort of ["workspace", "status"] as const) {
+  it("puts the pin immediately after the name of an agent whose tab is pinned, in every ordering", () => {
+    for (const agentSort of ["workspace", "status", "pinned"] as const) {
       const agents = buildAgentRows(
         [agent({ id: "on-a-pinned-tab", displayName: "Codex one", windowName: "Ship it" }), agent({ id: "loose", windowId: "@2", paneId: "%2", displayName: "Codex two", windowName: "Later" })],
         (record) => ({

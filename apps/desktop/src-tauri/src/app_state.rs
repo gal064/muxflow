@@ -189,10 +189,11 @@ pub enum PanelSurface {
     Git,
 }
 
-/// The agents section's ordering: workspace order, or attention order.
+/// The agents section's ordering: workspace order, attention order, or
+/// attention order split into pinned and unpinned halves.
 ///
-/// The two orderings were named `grouped` and `priority` before they were
-/// named after what they sort by. An unknown variant is a hard deserialization
+/// The first two orderings were named `grouped` and `priority` before they
+/// were named after what they sort by. An unknown variant is a hard deserialization
 /// error, not a defaulted field, so both old names are still accepted here:
 /// without the aliases, a file written by the previous build would make every
 /// `load_app_state` fail — and, worse, `save_app_state` would have rejected the
@@ -205,6 +206,7 @@ pub enum AgentSortMode {
     #[default]
     #[serde(alias = "grouped")]
     Workspace,
+    Pinned,
 }
 
 // No `Eq`: the shell's sidebar width and agents-section ratio are fractions.
@@ -873,6 +875,9 @@ mod tests {
         assert_eq!(load("grouped"), AgentSortMode::Workspace);
         assert_eq!(load("status"), AgentSortMode::Status);
         assert_eq!(load("workspace"), AgentSortMode::Workspace);
+        // The third ordering was added under its own name; the frontend saves
+        // it as soon as the toggle reaches it, so this side must accept it.
+        assert_eq!(load("pinned"), AgentSortMode::Pinned);
         // And what is written back is the current name, never the old one.
         assert_eq!(
             serde_json::to_value(AgentSortMode::Status).unwrap(),
