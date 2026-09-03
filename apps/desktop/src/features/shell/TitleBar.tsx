@@ -15,7 +15,8 @@ interface TitleBarProps {
    * selected, and a bell that silently does nothing reads as broken.
    */
   canJump: boolean;
-  canMutate: boolean;
+  /** Whether at least one host offered by New workspace can create one. */
+  canCreateWorkspace: boolean;
   /** Whether Back / Forward have somewhere that still exists to go. */
   canGoBack: boolean;
   canGoForward: boolean;
@@ -97,7 +98,7 @@ export function TitleBar(props: TitleBarProps) {
     <button
       aria-label="New workspace"
       className="bar-button"
-      disabled={!props.canMutate}
+      disabled={!props.canCreateWorkspace}
       onClick={props.onNewWorkspace}
       type="button"
     ><Icon name="plus" /></button>

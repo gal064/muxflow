@@ -165,6 +165,16 @@ describe("per-host workspace defaults", () => {
     expect(shell("reader")).toBe("split");
     expect(shell(undefined)).toBe("split");
   });
+
+  it("retains the last host chosen for workspace creation without inventing one for old saves", () => {
+    const selected = (value: unknown) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: { newWorkspaceHostProfileId: value },
+    }).shell.newWorkspaceHostProfileId;
+    expect(selected("ssh-build")).toBe("ssh-build");
+    expect(selected("")).toBeUndefined();
+    expect(selected(42)).toBeUndefined();
+    expect(selected(undefined)).toBeUndefined();
+  });
 });
 
 describe("the right panel's stored width", () => {

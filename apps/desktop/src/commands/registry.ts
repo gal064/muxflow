@@ -2,6 +2,8 @@ export type Platform = "mac" | "linux";
 
 export interface CommandContext {
   canMutate: boolean;
+  /** Whether any host offered by the New workspace dialog can create one. */
+  canCreateWorkspace: boolean;
   hasSession: boolean;
   hasWindow: boolean;
   hasPane: boolean;
@@ -242,6 +244,10 @@ export function commandAvailable(command: CommandDefinition, context: CommandCon
   // is ever the thing to run; offering both would put a no-op in the palette.
   if (command.id === "workspaces.showPinnedOnly") return !context.pinnedOnly;
   if (command.id === "workspaces.showAll") return context.pinnedOnly;
+  // Unlike every other ambient mutation, workspace creation has an explicit
+  // host picker and is available when any shown host is writable, even if the
+  // host currently on screen is not.
+  if (command.id === "session.new") return context.canCreateWorkspace;
   if (command.mutates && !context.canMutate) return false;
   if (command.id === "window.close" && context.hasWindow && !context.canMutate) return false;
   if (command.requires === "session" && !context.hasSession) return false;

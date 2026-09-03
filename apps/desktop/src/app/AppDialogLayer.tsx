@@ -2,6 +2,7 @@ import { CommandPalette } from "../commands/CommandPalette";
 import { ConfirmationDialog } from "../commands/ConfirmationDialog";
 import { ShortcutEditorDialog } from "../commands/ShortcutEditorDialog";
 import { TextInputDialog, type PendingTextPrompt } from "../commands/TextInputDialog";
+import { NewWorkspaceDialog, type NewWorkspaceHostOption } from "../commands/NewWorkspaceDialog";
 import type { PendingTmuxConfirmation } from "../commands/destructiveConfirmation";
 import type { CommandContext, CommandId, Platform, ShortcutOverrides } from "../commands/registry";
 import type { HelperUpgradeState } from "../features/shell/helperUpgrade";
@@ -21,6 +22,7 @@ type AppDialogLayerProps = {
   shortcuts: ShortcutOverrides;
   shortcutEditorOpen: boolean;
   textPrompt?: PendingTextPrompt;
+  newWorkspace?: { hosts: readonly NewWorkspaceHostOption[]; selectedHostProfileId: string };
   commandContext: CommandContext;
   onAppRecoveryDiscardCancel(): void;
   onAppRecoveryDiscardConfirm(): void;
@@ -32,6 +34,9 @@ type AppDialogLayerProps = {
   onHelperConfirm(): void;
   onHostDeleteCancel(): void;
   onHostDeleteConfirm(profile: HostProfile): void;
+  onNewWorkspaceCancel(): void;
+  onNewWorkspaceHost(profileId: string): void;
+  onNewWorkspaceSubmit(name: string, hostProfileId: string): void;
   onPaletteClose(): void;
   onProfileResetCancel(): void;
   onProfileResetConfirm(): void;
@@ -44,13 +49,20 @@ type AppDialogLayerProps = {
 export function AppDialogLayer(props: AppDialogLayerProps) {
   const {
     appRecoveryDiscard, appStateResetConfirmation, commandContext, confirmation,
-    helperState, hostDelete, paletteOpen, platform, profileResetConfirmation,
+    helperState, hostDelete, newWorkspace, paletteOpen, platform, profileResetConfirmation,
     shortcuts, shortcutEditorOpen, textPrompt,
   } = props;
   return <>
     {paletteOpen && <CommandPalette context={commandContext} onClose={props.onPaletteClose} onInvoke={props.onRunCommand} platform={platform} shortcuts={shortcuts} />}
     {shortcutEditorOpen && <ShortcutEditorDialog onChange={props.onShortcutChange} onClose={props.onShortcutClose} overrides={shortcuts} platform={platform} />}
     {textPrompt && <TextInputDialog {...textPrompt} onCancel={props.onTextPromptCancel} />}
+    {newWorkspace && <NewWorkspaceDialog
+      hosts={newWorkspace.hosts}
+      onCancel={props.onNewWorkspaceCancel}
+      onHost={props.onNewWorkspaceHost}
+      onSubmit={props.onNewWorkspaceSubmit}
+      selectedHostProfileId={newWorkspace.selectedHostProfileId}
+    />}
     {confirmation && <ConfirmationDialog destructive detail={confirmation.detail} title={confirmation.title} onCancel={props.onConfirmationCancel} onConfirm={() => props.onConfirmationConfirm(confirmation)} />}
     {appStateResetConfirmation && <ConfirmationDialog
       confirmLabel="Preserve and reset"

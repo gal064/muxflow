@@ -90,7 +90,7 @@ async function run(
   const setConfirmation = vi.fn<Options["setConfirmation"]>();
   const setStatus = vi.fn<Options["setStatus"]>();
   const closeAppTab = vi.fn<Options["closeAppTab"]>();
-  const createSession = vi.fn<Options["createSession"]>();
+  const requestNewWorkspace = vi.fn<Options["requestNewWorkspace"]>();
   const createWindow = vi.fn<Options["createWindow"]>();
   const setAppState = vi.fn();
   const setTextPrompt = vi.fn<Options["setTextPrompt"]>();
@@ -100,7 +100,7 @@ async function run(
     const { runCommand } = useShellCommands({
       activePane: pane, activeSession: session, activeWindow: window,
       appState: { ...defaultAppState, appTabs: [appTab] },
-      canMutate: true, closeAppTab, combinedTabs: [], controllers: { current: new Map<string, TerminalPaneController>() },
+      canMutate: true, canCreateWorkspace: true, closeAppTab, combinedTabs: [], controllers: { current: new Map<string, TerminalPaneController>() },
       currentHostProfileId: "local", focusDirection: vi.fn(),
       hostScope, isHostScopeCurrent: () => true, jumpToUnreadAgent: vi.fn(),
       // The active host, and only it: a target from any other scope is stale.
@@ -111,7 +111,7 @@ async function run(
           isScopeCurrent: overrides.isHostScopeCurrent ?? (() => true),
         }
         : undefined,
-      requestHostProfileDelete: vi.fn(), rowCommands: [], createSession,
+      requestHostProfileDelete: vi.fn(), requestNewWorkspace, rowCommands: [],
       createWindow, selectRelativeTab: vi.fn(), selectTabByIndex: vi.fn(),
       selectWorkspaceByIndex: vi.fn(), serverIdentity: "server-a", setAppState,
       setConfirmation, setPaletteOpen: vi.fn(), setSettingsOpen: vi.fn(),
@@ -128,22 +128,15 @@ async function run(
   await act(async () => { renderer = create(<Harness />); });
   await act(async () => { await call!(commandId, target); });
   await act(async () => renderer.unmount());
-  return { closeAppTab, performAction, setConfirmation, setStatus, createSession, createWindow, setAppState, setTextPrompt };
+  return { closeAppTab, performAction, setConfirmation, setStatus, requestNewWorkspace, createWindow, setAppState, setTextPrompt };
 }
 
 describe("shell commands", () => {
-  it("creates and commits a workspace with one tmux request", async () => {
+  it("opens the dedicated New workspace dialog", async () => {
     const result = await run("session.new");
-    const prompt = result.setTextPrompt.mock.calls[0]?.[0];
-    expect(prompt).not.toBeTypeOf("function");
-    if (prompt && typeof prompt !== "function") {
-      await act(async () => {
-        prompt.submit("work");
-        await Promise.resolve();
-      });
-    }
     expect(result.performAction).not.toHaveBeenCalled();
-    expect(result.createSession).toHaveBeenCalledWith("work");
+    expect(result.setTextPrompt).not.toHaveBeenCalled();
+    expect(result.requestNewWorkspace).toHaveBeenCalledOnce();
   });
 
   it("prefills a rename with the raw tmux name", async () => {

@@ -72,7 +72,7 @@ const wireAgent = (lifecycle: "working" | "blocked", attentionGeneration: number
 });
 const calls = (command: string) => invokeMock.mock.calls.filter(([name]) => name === command).map(([, request]) => request);
 
-async function shell(profiles: HostProfile[]) {
+async function shell(profiles: HostProfile[], initialAppState = defaultAppState) {
   const bridges: Bridge[] = [];
   startTerminalMock.mockImplementation(async (
     _sessionId: string, _paneIds: string[], connection: ConnectionSpec, attach: boolean, onEvent: (event: TerminalEvent) => void,
@@ -83,9 +83,11 @@ async function shell(profiles: HostProfile[]) {
   });
   invokeMock.mockImplementation((command: string, request: Record<string, unknown>) => {
     switch (command) {
-      case "load_app_state": return Promise.resolve(defaultAppState);
+      case "load_app_state": return Promise.resolve(initialAppState);
       case "list_host_profiles": return Promise.resolve({ schemaVersion: 1, lastProfileId: "local", profiles });
-      case "tmux_action": return Promise.resolve({ topologyGeneration: 2 });
+      case "tmux_action": return Promise.resolve((request.action as { kind?: string })?.kind === "createSession"
+        ? { topologyGeneration: 2, sessionId: "$9", windowId: "@9", paneId: "%9" }
+        : { topologyGeneration: 2 });
       case "agent_request": {
         const { connectionEpoch } = request.command as { connectionEpoch: string };
         return Promise.resolve({ snapshot: {
@@ -202,6 +204,92 @@ describe("the shell over several hosts", () => {
     // No bridge was restarted for the switch.
     expect(app.bridges).toHaveLength(2);
     expect(stopTerminalMock).not.toHaveBeenCalled();
+    await app.unmount();
+  });
+
+  it("creates a workspace on the host picked in the dialog and remembers that host", async () => {
+    const state = {
+      ...defaultAppState,
+      shell: { ...defaultAppState.shell, newWorkspaceHostProfileId: "local" },
+      workspaceDefaults: {
+        "remote-a": { directory: "/srv/work", startupCommand: "git status" },
+      },
+    };
+    const app = await shell([LOCAL, REMOTE], state);
+    await act(async () => {
+      app.bridgeFor("local").publish(connected);
+      app.bridgeFor("local").publish(world("srv-local", [["$0", "home"]]));
+      app.bridgeFor("remote-a").publish(connected);
+      app.bridgeFor("remote-a").publish(world("srv-qa", [["$1", "build"]]));
+    });
+
+    const newWorkspaceButton = () => app.renderer.root.findByProps({ "aria-label": "New workspace" });
+    await act(async () => { newWorkspaceButton().props.onClick(); });
+    const picker = app.renderer.root.findByProps({ "aria-label": "Host: Local" });
+    await act(async () => {
+      picker.props.onClick({ currentTarget: { getBoundingClientRect: () => ({ left: 50, bottom: 100, width: 420 }) } });
+    });
+    await act(async () => { app.menuItem("new-workspace-host-remote-a").props.onClick(); });
+    expect(app.renderer.root.findByProps({ "aria-label": "Host: qa" })).toBeDefined();
+
+    const input = app.renderer.root.findByType("input");
+    await act(async () => { input.props.onChange({ target: { value: "release-checks" } }); });
+    await act(async () => {
+      app.renderer.root.findByType("form").props.onSubmit({ preventDefault() {} });
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 130));
+    });
+
+    expect(calls("set_last_profile_id")).toEqual([{ profileId: "remote-a" }]);
+    expect(calls("tmux_action")).toContainEqual(expect.objectContaining({
+      clientId: "client-2",
+      action: expect.objectContaining({ kind: "createSession", name: "release-checks", directory: "/srv/work" }),
+    }));
+    expect(calls("tmux_action").filter((request) => (request.action as { kind?: string }).kind === "createSession")).toHaveLength(1);
+    expect(calls("send_terminal_input")).toEqual([{ clientId: "client-2", paneId: "%9", data: "git status\n" }]);
+    expect(calls("save_app_state").some((request) => (
+      request.state as typeof state
+    ).shell.newWorkspaceHostProfileId === "remote-a")).toBe(true);
+
+    // Active-host navigation is not the preference owner; reopening starts on
+    // the host deliberately chosen in this dialog.
+    await act(async () => { newWorkspaceButton().props.onClick(); });
+    expect(app.renderer.root.findByProps({ "aria-label": "Host: qa" })).toBeDefined();
+    const secondInput = app.renderer.root.findByType("input");
+    await act(async () => {
+      secondInput.props.onChange({ target: { value: "must-not-create" } });
+      app.bridgeFor("remote-a").publish({ kind: "connectionState", state: "disconnected", sequence: 1 });
+    });
+    expect(app.renderer.root.findAllByType("button").find((button) => button.props.type === "submit")!.props.disabled).toBe(true);
+    await act(async () => { app.renderer.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
+    expect(calls("tmux_action").filter((request) => (request.action as { kind?: string }).kind === "createSession")).toHaveLength(1);
+    await app.unmount();
+  });
+
+  it("remembers a host picked in a cancelled create dialog without activating it", async () => {
+    const app = await shell([LOCAL, REMOTE]);
+    await act(async () => {
+      app.bridgeFor("local").publish(connected);
+      app.bridgeFor("local").publish(world("srv-local", [["$0", "home"]]));
+      app.bridgeFor("remote-a").publish(connected);
+      app.bridgeFor("remote-a").publish(world("srv-qa", [["$1", "build"]]));
+    });
+    const newWorkspaceButton = () => app.renderer.root.findByProps({ "aria-label": "New workspace" });
+    await act(async () => { newWorkspaceButton().props.onClick(); });
+    await act(async () => {
+      app.renderer.root.findByProps({ "aria-label": "Host: Local" }).props.onClick({
+        currentTarget: { getBoundingClientRect: () => ({ left: 50, bottom: 100, width: 420 }) },
+      });
+    });
+    await act(async () => { app.menuItem("new-workspace-host-remote-a").props.onClick(); });
+    const cancel = app.renderer.root.findAllByType("button").find((button) => button.props.children === "Cancel")!;
+    await act(async () => { cancel.props.onClick(); });
+
+    expect(calls("set_last_profile_id")).toEqual([]);
+    expect(calls("tmux_action")).toEqual([]);
+    expect(app.hostRow().props["aria-label"]).toContain("Host Local over local");
+    await act(async () => { newWorkspaceButton().props.onClick(); });
+    expect(app.renderer.root.findByProps({ "aria-label": "Host: qa" })).toBeDefined();
     await app.unmount();
   });
 

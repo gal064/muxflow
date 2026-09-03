@@ -118,6 +118,8 @@ export interface ShellState {
   terminalApplicationClipboard: boolean;
   /** Terminal text size in integer CSS pixels. */
   terminalFontSize: number;
+  /** The host most recently picked in the New workspace dialog. */
+  newWorkspaceHostProfileId?: string;
   /**
    * The mode a *newly opened* Markdown tab starts in.
    *
@@ -186,6 +188,7 @@ export const defaultShellState: ShellState = {
   cleanWrappedCommands: true,
   terminalApplicationClipboard: false,
   terminalFontSize: 13,
+  newWorkspaceHostProfileId: undefined,
   defaultMarkdownView: "split",
 };
 
@@ -238,6 +241,9 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
         : defaultShellState.cleanWrappedCommands,
       terminalApplicationClipboard: Boolean(shell?.terminalApplicationClipboard),
       terminalFontSize: clampedTerminalFontSize(shell?.terminalFontSize),
+      newWorkspaceHostProfileId: typeof shell?.newWorkspaceHostProfileId === "string" && shell.newWorkspaceHostProfileId.trim()
+        ? shell.newWorkspaceHostProfileId
+        : undefined,
       defaultMarkdownView: normalizedViewMode(shell?.defaultMarkdownView),
       ...(shell?.windowGeometry && validWindowGeometry(shell.windowGeometry)
         ? { windowGeometry: shell.windowGeometry } : {}),

@@ -1155,7 +1155,7 @@ describe("application shell accessibility contracts", () => {
 
   it("puts six controls and an unread count on the titlebar, and no more", () => {
     const html = renderToStaticMarkup(<TitleBar
-      canGoBack canGoForward={false} canJump canMutate onBack={noop} onBell={noop} onForward={noop}
+      canCreateWorkspace canGoBack canGoForward={false} canJump onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="mac" sidebarOpen unread={3} workspaceName="muxflow"
     />);
@@ -1173,7 +1173,7 @@ describe("application shell accessibility contracts", () => {
     expect(html).not.toMatch(/<button aria-label="Back"[^>]*disabled/u);
     expect(html).toMatch(/<button aria-label="Forward"[^>]*disabled/u);
     const quiet = renderToStaticMarkup(<TitleBar
-      canGoBack={false} canGoForward canJump={false} canMutate onBack={noop} onBell={noop} onForward={noop}
+      canCreateWorkspace canGoBack={false} canGoForward canJump={false} onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen={false} unread={0}
     />);
@@ -1188,7 +1188,7 @@ describe("application shell accessibility contracts", () => {
     const onBell = vi.fn();
     const bell = (canJump: boolean, unread: number) => {
       const html = renderToStaticMarkup(<TitleBar
-        canGoBack={false} canGoForward={false} canJump={canJump} canMutate onBack={noop} onBell={onBell}
+        canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell}
         onForward={noop} onNewWorkspace={noop} onTogglePanel={noop}
         onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={unread}
       />);
@@ -1224,7 +1224,7 @@ describe("application shell accessibility contracts", () => {
     const onBell = vi.fn();
     let renderer!: ReturnType<typeof create>;
     const bar = (canJump: boolean) => <TitleBar
-      canGoBack={false} canGoForward={false} canJump={canJump} canMutate onBack={noop} onBell={onBell} onForward={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell} onForward={noop} onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={2}
     />;
     act(() => { renderer = create(bar(false)); });
@@ -1239,7 +1239,7 @@ describe("application shell accessibility contracts", () => {
 
   it("reserves traffic-light room on macOS only, because only macOS overlays them", () => {
     const bar = (platform: "mac" | "linux") => renderToStaticMarkup(<TitleBar
-      canGoBack={false} canGoForward={false} canJump={false} canMutate onBack={noop} onBell={noop} onForward={noop}
+      canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform={platform} sidebarOpen unread={0}
     />);

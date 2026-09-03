@@ -29,6 +29,8 @@ export interface ContextMenuItem {
 export interface ContextMenuAnchor {
   x: number;
   y: number;
+  /** The opener's width, for combobox-style menus that match their field. */
+  width?: number;
 }
 
 /**
@@ -47,7 +49,7 @@ export function isContextMenuKey(event: Pick<KeyboardEvent, "key" | "shiftKey">)
 /** Where a keyboard-opened menu goes: under the row that has focus. */
 export function anchorForElement(element: Element): ContextMenuAnchor {
   const box = element.getBoundingClientRect();
-  return { x: Math.round(box.left + 8), y: Math.round(box.bottom) };
+  return { x: Math.round(box.left + 8), y: Math.round(box.bottom), width: Math.round(box.width) };
 }
 
 /**
@@ -72,6 +74,8 @@ interface ContextMenuProps {
   label: string;
   anchor: ContextMenuAnchor;
   items: readonly (ContextMenuItem | "separator")[];
+  /** Make the menu at least as wide as its opener, like a select popup. */
+  matchAnchorWidth?: boolean;
   onClose(): void;
   children?: ReactNode;
 }
@@ -100,6 +104,7 @@ export function ContextMenu(props: ContextMenuProps) {
   // Menus are as wide as their widest label, which no constant can know. The
   // first paint uses an estimate; this corrects it before the browser draws.
   const [size, setSize] = useState({ width: ESTIMATED_WIDTH, height: props.items.length * ROW_HEIGHT + 12 });
+  const anchorX = props.matchAnchorWidth ? props.anchor.x - 8 : props.anchor.x;
   useLayoutEffect(() => {
     const box = container.current?.getBoundingClientRect();
     if (!box) return;
@@ -170,7 +175,8 @@ export function ContextMenu(props: ContextMenuProps) {
     style={{
       // Kept inside the viewport rather than clipped by it; a menu opened near
       // the bottom-right of the window is the common case, not the exception.
-      left: Math.max(4, Math.min(props.anchor.x, window.innerWidth - size.width - 4)),
+      left: Math.max(4, Math.min(anchorX, window.innerWidth - size.width - 4)),
+      minWidth: props.matchAnchorWidth && props.anchor.width ? Math.max(180, props.anchor.width) : undefined,
       top: Math.max(4, Math.min(props.anchor.y, window.innerHeight - size.height - 4)),
     }}
   >
