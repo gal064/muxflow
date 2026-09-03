@@ -6,10 +6,16 @@
     "scheme": "muxflow",
     "orientation": "default",
     "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
     "backgroundColor": "#282c34",
     "newArchEnabled": true,
     "android": {
       "package": "dev.muxflow.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "monochromeImage": "./assets/adaptive-icon-monochrome.png",
+        "backgroundColor": "#12151a"
+      },
       "versionCode": 1,
       "backgroundColor": "#282c34",
       "predictiveBackGestureEnabled": false
