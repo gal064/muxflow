@@ -74,6 +74,16 @@ pub(super) fn snapshot_from_identity(
     server_identity: String,
 ) -> v1::Snapshot {
     let _ = super::agents::AgentRuntime::global().reconcile_topology(&value, &server_identity);
+    snapshot_from_reconciled_identity(value, generation, server_identity)
+}
+
+/// Converts a topology after its caller has already reconciled agent process
+/// state for the same observation.
+pub(super) fn snapshot_from_reconciled_identity(
+    value: TmuxSnapshot,
+    generation: u64,
+    server_identity: String,
+) -> v1::Snapshot {
     let agents = super::agents::AgentRuntime::global().snapshot_for(&server_identity);
     v1::Snapshot {
         server_identity,
