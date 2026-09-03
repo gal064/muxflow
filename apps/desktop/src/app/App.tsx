@@ -886,7 +886,6 @@ export function App() {
   const { onMeasurements, surfaceRef } = useClientResize({
     activeWindowId,
     actualSize: actualWindowSize,
-    appFocused,
     canMutate: hostState.canMutate,
     clientId,
     onStatus: setStatus,
