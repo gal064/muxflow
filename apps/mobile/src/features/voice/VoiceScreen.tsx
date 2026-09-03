@@ -3,15 +3,18 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { agentPillState } from "../agents/agentViews";
+import { agentStateLabel, agentTitle } from "../agents/agentViews";
+import { markState } from "../agents/agentListModel";
+import { AgentMark } from "../agents/ui/AgentMark";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { Dialog } from "../../ui/components/Dialog";
 import { EmptyState } from "../../ui/components/EmptyState";
-import { StatusPill } from "../../ui/components/StatusPill";
+import { BackIcon } from "../../ui/components/MediaIcons";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
+import { useAnimationsAllowed } from "../../ui/useAnimationsAllowed";
 import { createExpoFiles } from "./files";
 import { MicButton } from "./MicButton";
 import { createExpoPlayer } from "./player";
@@ -42,7 +45,10 @@ function sharedAudio() {
 export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const animateAgentState = useAnimationsAllowed();
   const agent = useSession((s) => s.agents[agentId]);
+  const windows = useSession((s) => s.windows);
+  const adapters = useSession((s) => s.adapters);
   const connected = useSession((s) => s.connection.state === "connected");
   const readiness = useVoice((s) => s.hostStatus.readiness);
   const recorderError = useVoice((s) => s.recorderError);
@@ -87,7 +93,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const phase = session?.phase ?? "idle";
   const newest = latestReply(session);
 
-  const title = agent?.displayName || "Agent";
+  const title = agent ? agentTitle({ windows, adapters }, agent) : "Agent";
   const gone = agent !== undefined && !agent.present;
   // One phrase per condition, matching the readiness card above the mic.
   const hint = !connected
@@ -119,10 +125,10 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
       <ConnectionStrip />
       <View style={styles.header}>
         <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={() => router.back()} style={styles.iconButton}>
-          <Text style={styles.backGlyph}>←</Text>
+          <BackIcon color={colors.chromeInkStrong} />
         </Pressable>
-        <Text accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
-        {agent ? <StatusPill state={agentPillState(agent)} /> : null}
+        {agent ? <AgentMark adapterId={agent.adapterId} animate={animateAgentState} ring={colors.chromeRaised} state={markState(agent)} surface={colors.chromeBg} /> : null}
+        <Text accessibilityLabel={agent ? `${title}, ${agentStateLabel(agent)}` : title} accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
         <Pressable accessibilityLabel="End session" accessibilityRole="button" onPress={() => setConfirmEnd(true)} style={styles.endButton}>
           <Text style={styles.endLabel}>End</Text>
         </Pressable>
@@ -204,7 +210,6 @@ const styles = StyleSheet.create({
   },
   /** 48 dp touch targets, matching the Terminal header. */
   iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
-  backGlyph: { color: colors.chromeInkStrong, fontSize: 26, fontWeight: "600", lineHeight: 30 },
   title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
   endButton: { alignItems: "center", height: 48, justifyContent: "center", paddingHorizontal: 12 },
   endLabel: { color: colors.dangerInk, fontSize: typeScale.body, fontWeight: "600" },

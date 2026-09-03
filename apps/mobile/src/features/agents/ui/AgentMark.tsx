@@ -24,11 +24,19 @@ import { RING_WIDTH, Spinner } from "./Spinner";
  * The mark is decorative: the row's accessibility label names the state.
  * `animate` is whether the working spinner may turn (see `Spinner`).
  */
-export function AgentMark({ adapterId, state, animate }: { adapterId: string; state: AgentDisplayState; animate: boolean }) {
+export function AgentMark({ adapterId, state, animate, surface = colors.chromeRaised, ring = colors.chromeBg }: {
+  adapterId: string;
+  state: AgentDisplayState;
+  animate: boolean;
+  /** Tile surface; headers invert the list's raised-on-background treatment. */
+  surface?: string;
+  /** Knockout around the state badge; should match the mark's parent surface. */
+  ring?: string;
+}) {
   return (
-    <View importantForAccessibility="no-hide-descendants" style={styles.avatar}>
+    <View importantForAccessibility="no-hide-descendants" style={[styles.avatar, { backgroundColor: surface }]}>
       <AgentIcon adapterId={adapterId} color={colors.chromeInk} size={ICON_SIZE} />
-      {state !== "idle" ? <View style={styles.dock}><StateBadge animate={animate} ring={colors.chromeBg} state={state} /></View> : null}
+      {state !== "idle" ? <View style={styles.dock}><StateBadge animate={animate} ring={ring} state={state} /></View> : null}
     </View>
   );
 }
@@ -76,7 +84,6 @@ const UNKNOWN_DASH = (2 * Math.PI * UNKNOWN_R) / 14;
 const styles = StyleSheet.create({
   avatar: {
     alignItems: "center",
-    backgroundColor: colors.chromeRaised,
     borderRadius: radii.card,
     height: metrics.agentAvatarSize,
     justifyContent: "center",

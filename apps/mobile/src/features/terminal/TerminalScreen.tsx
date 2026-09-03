@@ -4,17 +4,19 @@ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-
 import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { agentForPane, agentPillState } from "../agents/agentViews";
+import { agentForPane, agentStateLabel, agentTitle } from "../agents/agentViews";
 import { stripAgentStatusGlyphs } from "../agents/agentLabels";
+import { markState } from "../agents/agentListModel";
+import { AgentMark } from "../agents/ui/AgentMark";
 import { toRouteParam } from "../../navigation/routeParams";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
-import { FolderIcon, MicIcon } from "../../ui/components/MediaIcons";
-import { StatusPill } from "../../ui/components/StatusPill";
+import { BackIcon, FolderIcon, MicIcon, ShiftIcon } from "../../ui/components/MediaIcons";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
+import { useAnimationsAllowed } from "../../ui/useAnimationsAllowed";
 import { appForeground } from "./appForeground";
 import type { FromPageMessage } from "./bridgeMessages";
 import { KEY_CHIPS, SHIFT_CHIP, pressChip } from "./chips";
@@ -31,6 +33,7 @@ export interface TerminalScreenProps {
 export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const animateAgentState = useAnimationsAllowed();
   // Expo SDK 57 is edge-to-edge on Android, where adjustResize no longer
   // shrinks the window and RN's Keyboard events under-report the height.
   // Reanimated reads the IME inset itself; padding by it keeps the chips and
@@ -55,8 +58,9 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const agent = agentForPane(state, paneId);
   const session = state.sessions[sessionId];
   const window = pane ? state.windows[pane.windowId] : undefined;
-  const title = agent?.displayName
-    || `${stripAgentStatusGlyphs(session?.name ?? sessionId)} · ${stripAgentStatusGlyphs(window?.name ?? "")}`.replace(/ · $/, "");
+  const title = agent
+    ? agentTitle(state, agent)
+    : `${stripAgentStatusGlyphs(session?.name ?? sessionId)} · ${stripAgentStatusGlyphs(window?.name ?? "")}`.replace(/ · $/, "");
 
   // One controller per focus: hide on blur (Files, back), re-attach on focus (§7.6 steps 1, 4).
   useFocusEffect(useCallback(() => {
@@ -121,10 +125,10 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
       <ConnectionStrip />
       <View style={styles.header}>
         <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={() => router.back()} style={styles.iconButton}>
-          <Text style={styles.backGlyph}>←</Text>
+          <BackIcon color={colors.chromeInkStrong} />
         </Pressable>
-        <Text numberOfLines={1} style={styles.title}>{title}</Text>
-        {agent ? <StatusPill state={agentPillState(agent)} /> : null}
+        {agent ? <AgentMark adapterId={agent.adapterId} animate={animateAgentState} ring={colors.chromeRaised} state={markState(agent)} surface={colors.chromeBg} /> : null}
+        <Text accessibilityLabel={agent ? `${title}, ${agentStateLabel(agent)}` : title} accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
         {gone || !agent ? null : (
           <Pressable
             accessibilityLabel="Talk to this agent"
@@ -179,6 +183,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
             const armed = chip === SHIFT_CHIP && shiftArmed;
             return (
               <Pressable
+                accessibilityLabel={chip === SHIFT_CHIP ? "Shift" : chip.label}
                 accessibilityRole="button"
                 accessibilityState={chip === SHIFT_CHIP ? { selected: shiftArmed } : undefined}
                 disabled={!inputEnabled}
@@ -186,7 +191,9 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
                 onPress={() => onChip(chip)}
                 style={({ pressed }) => [styles.chip, armed && styles.chipArmed, pressed && styles.chipPressed, !inputEnabled && styles.disabled]}
               >
-                <Text style={[styles.chipLabel, chip.label.length === 1 && styles.chipGlyph, armed && styles.chipArmedLabel]}>{chip.label}</Text>
+                {chip === SHIFT_CHIP
+                  ? <ShiftIcon color={armed ? colors.accentInk : colors.chromeInkStrong} />
+                  : <Text style={[styles.chipLabel, chip.label.length === 1 && styles.chipGlyph]}>{chip.label}</Text>}
               </Pressable>
             );
           })}
@@ -228,7 +235,6 @@ const styles = StyleSheet.create({
   },
   /** 48 dp touch targets, matching the app bar's Material back arrow. */
   iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
-  backGlyph: { color: colors.chromeInkStrong, fontSize: 26, fontWeight: "600", lineHeight: 30 },
   title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
   terminalArea: { backgroundColor: colors.chromeBg, flex: 1 },
   banner: {
@@ -267,7 +273,6 @@ const styles = StyleSheet.create({
   chipPressed: { backgroundColor: colors.chromeBorder },
   /** The ⇧ chip while Shift is armed for the next chip. */
   chipArmed: { backgroundColor: colors.accent },
-  chipArmedLabel: { color: colors.accentInk },
   chipLabel: { color: colors.chromeInkStrong, fontSize: typeScale.rowSecondary, textAlign: "center" },
   /** Single-glyph chips (arrows, y, n) read lighter than words at 13 sp; bump them to match. */
   chipGlyph: { fontSize: 16, fontWeight: "600" },
