@@ -1,6 +1,6 @@
 use std::{
     io::Write,
-    process::Stdio,
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -12,11 +12,16 @@ use std::{
 use tmux_control::{HOST_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
 use uuid::Uuid;
 
-use super::super::snapshot::tmux_command;
 use super::capabilities::tmux_command_table;
 use super::{queue_input, validate_tmux_id};
 
 pub(super) type InputCompletion = (u64, Result<(), String>);
+
+/// Builds a fresh tmux client command aimed at the server the input goes to.
+/// Production passes `snapshot::tmux_command`; the real-tmux tests pass their
+/// fixture's private socket so the forked batch path lands where the sidecar
+/// is attached.
+pub(super) type TmuxCommandFactory = Arc<dyn Fn() -> anyhow::Result<Command> + Send + Sync>;
 
 /// Largest payload written in band through the already-open control client.
 ///
@@ -34,11 +39,44 @@ const INPUT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 // The fork path must remain reachable, or a real paste would have nowhere to go.
 const _: () = assert!(MAX_INPUT_REQUEST_BYTES > INBAND_INPUT_MAX_BYTES);
 
+/// How one input request reaches the pane.
+///
+/// `Keys` is the keystroke path: byte-exact, unbracketed, and free to be
+/// coalesced with neighbouring keys for the same pane. `Paste` goes through
+/// tmux's paste path, which wraps the bytes in bracketed-paste markers iff the
+/// pane's application asked for them (`#{bracket_paste_flag}`); only tmux
+/// knows that reliably. A paste is its own batch: the keys queued before or
+/// after it — typically the CR that submits it — stay separate writes, so a
+/// composer that tells a paste from a burst of typing sees exactly that.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum InputDelivery {
+    Keys,
+    Paste,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum InputPath {
+    /// One `send-keys -H` on the open control client.
+    InBand,
+    /// A forked `load-buffer` + `paste-buffer` pair.
+    Batch,
+}
+
+/// Keys small enough stay in band; a paste always takes the batch path,
+/// because `paste-buffer` is the only tmux command that brackets.
+fn input_path(len: usize, delivery: InputDelivery) -> InputPath {
+    match delivery {
+        InputDelivery::Keys if len <= INBAND_INPUT_MAX_BYTES => InputPath::InBand,
+        InputDelivery::Keys | InputDelivery::Paste => InputPath::Batch,
+    }
+}
+
 pub(super) enum InputDispatch {
     Bytes {
         input_id: u64,
         pane_id: String,
         data: Vec<u8>,
+        delivery: InputDelivery,
     },
     Barrier(mpsc::SyncSender<Result<(), String>>),
     Stop,
@@ -49,23 +87,26 @@ pub(super) fn run_input_dispatch<W: Write>(
     control_stdin: Arc<Mutex<W>>,
     input_completion: mpsc::Receiver<InputCompletion>,
     failed: Arc<AtomicBool>,
+    tmux: TmuxCommandFactory,
     report_failure: impl Fn(&str, &str),
 ) {
-    run_input_dispatch_with(receiver, move |input_id, pane_id, data| {
+    run_input_dispatch_with(receiver, move |input_id, pane_id, data, delivery| {
         if failed.load(Ordering::Acquire) {
             return Err("persistent terminal input client stopped before dispatch".into());
         }
-        if data.len() <= INBAND_INPUT_MAX_BYTES {
-            send_input_inband(&control_stdin, input_id, pane_id, data)?;
-            wait_for_input_completion(&input_completion, input_id, INPUT_COMPLETION_TIMEOUT)
-        } else {
+        match input_path(data.len(), delivery) {
+            InputPath::InBand => {
+                send_input_inband(&control_stdin, input_id, pane_id, data)?;
+                wait_for_input_completion(&input_completion, input_id, INPUT_COMPLETION_TIMEOUT)
+            }
             // Ordering against the in-band path is preserved because this
             // dispatch thread is the only writer of input: the previous
             // request's bytes were written and flushed to the control client's
             // socket before this call, so the tmux server has them in its
             // receive buffer before the `paste-buffer` client has even finished
-            // connecting.
-            send_input_batch(pane_id, data)
+            // connecting; and `paste-buffer` has exited before the next in-band
+            // write starts.
+            InputPath::Batch => send_input_batch(&*tmux, pane_id, data, delivery),
         }
         .inspect_err(|error| report_failure(pane_id, error))
     })
@@ -105,7 +146,7 @@ fn wait_for_input_completion(
 
 fn run_input_dispatch_with(
     receiver: mpsc::Receiver<InputDispatch>,
-    mut send_batch: impl FnMut(u64, &str, &[u8]) -> Result<(), String>,
+    mut send_batch: impl FnMut(u64, &str, &[u8], InputDelivery) -> Result<(), String>,
 ) {
     let mut deferred = None;
     let mut pending_error = None;
@@ -122,6 +163,7 @@ fn run_input_dispatch_with(
                 mut input_id,
                 pane_id,
                 mut data,
+                delivery,
             } => {
                 // The earliest per-batch point on this thread: the batch exists
                 // from the moment its first message leaves the queue, and the
@@ -129,12 +171,16 @@ fn run_input_dispatch_with(
                 // earlier would be `receiver.recv()`, which is where an idle
                 // dispatcher waits for work and would time the user's thinking.
                 let dequeued = Instant::now();
-                while data.len() < HOST_INPUT_COALESCE_BYTES {
+                // Only keys merge with keys: a paste is one batch on its own,
+                // in both directions, so the keystroke that follows it is
+                // delivered as a keystroke and never inside the paste.
+                while delivery == InputDelivery::Keys && data.len() < HOST_INPUT_COALESCE_BYTES {
                     match receiver.try_recv() {
                         Ok(InputDispatch::Bytes {
                             input_id: next_id,
                             pane_id: next_pane,
                             data: next_data,
+                            delivery: InputDelivery::Keys,
                         }) if next_pane == pane_id
                             && data.len().saturating_add(next_data.len())
                                 <= HOST_INPUT_COALESCE_BYTES =>
@@ -150,7 +196,7 @@ fn run_input_dispatch_with(
                         Err(mpsc::TryRecvError::Disconnected) => break,
                     }
                 }
-                let result = send_batch(input_id, &pane_id, &data);
+                let result = send_batch(input_id, &pane_id, &data, delivery);
                 // Only a committed batch has a leg to measure: a failed write
                 // times a failure, not a latency, and the failure is already
                 // reported through the barrier.
@@ -181,7 +227,8 @@ fn run_input_dispatch_with(
 /// `send-keys -H` takes one hex literal per byte, so the payload is byte-exact
 /// with no shell, no `vis(3)` sanitisation question, and no bracketed-paste or
 /// implicit-Enter behaviour of its own — identical on the wire to what
-/// `paste-buffer -d` (which never brackets) delivered before.
+/// `paste-buffer -d` without `-p` (which never brackets) delivers on the batch
+/// path. Only `InputDelivery::Keys` comes here; a paste needs `paste-buffer`.
 ///
 /// The request is preceded by a literal `__ADE_INPUT__` marker so an
 /// asynchronous `%error` — a pane that vanished between reconciles is the real
@@ -228,9 +275,20 @@ fn queue_input_marker(line: &mut String, input_id: u64, pane_id: &str) {
     line.push('\n');
 }
 
-fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
+/// Commits one request through a forked tmux client: `load-buffer` from
+/// stdin, then one `paste-buffer -d` — the terminal commit point — that
+/// delivers the buffer to the pane and deletes it. Keys arrive unbracketed;
+/// a `Paste` adds `-p`, so tmux brackets the bytes iff the pane's application
+/// asked for bracketed paste. Either way `paste-buffer`'s default LF→CR
+/// replacement applies, as it did for every batch before there were pastes.
+fn send_input_batch(
+    tmux: &dyn Fn() -> anyhow::Result<Command>,
+    pane_id: &str,
+    data: &[u8],
+    delivery: InputDelivery,
+) -> Result<(), String> {
     validate_tmux_id(pane_id, '%').map_err(|error| error.to_string())?;
-    let mut validate = tmux_command().map_err(|error| error.to_string())?;
+    let mut validate = tmux().map_err(|error| error.to_string())?;
     let output = validate
         .args(["display-message", "-p", "-t", pane_id, "#{pane_id}"])
         .output()
@@ -243,7 +301,7 @@ fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
     // partially commit a request. Loading through stdin keeps the request out
     // of ARG_MAX; the single paste-buffer command is the terminal commit point.
     let buffer_name = format!("ade-input-{}", Uuid::new_v4().simple());
-    let mut load = tmux_command().map_err(|error| error.to_string())?;
+    let mut load = tmux().map_err(|error| error.to_string())?;
     load.args(["load-buffer", "-b", &buffer_name, "-"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped());
@@ -259,19 +317,19 @@ fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
         .wait_with_output()
         .map_err(|error| format!("failed to wait for atomic tmux input: {error}"))?;
     if let Err(error) = write_result {
-        cleanup_buffer(&buffer_name);
+        cleanup_buffer(tmux, &buffer_name);
         return Err(format!(
             "atomic tmux input was not committed; accepted bytes: 0; loading failed: {error}"
         ));
     }
     if !output.status.success() {
-        cleanup_buffer(&buffer_name);
+        cleanup_buffer(tmux, &buffer_name);
         return Err(format!(
             "atomic tmux input was not committed; accepted bytes: 0: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let mut paste = tmux_command().map_err(|error| error.to_string())?;
+    let mut paste = tmux().map_err(|error| error.to_string())?;
     paste.args(["paste-buffer", "-d"]);
     // tmux 3.7 sanitizes control bytes with vis(3) unless -S is present.
     // Earlier supported releases do not expose -S and preserve them by
@@ -280,17 +338,20 @@ fn send_input_batch(pane_id: &str, data: &[u8]) -> Result<(), String> {
     if paste_buffer_needs_unsanitized_flag()? {
         paste.arg("-S");
     }
+    if delivery == InputDelivery::Paste {
+        paste.arg("-p");
+    }
     let output = paste
         .args(["-b", &buffer_name, "-t", pane_id])
         .output()
         .map_err(|error| {
-            cleanup_buffer(&buffer_name);
+            cleanup_buffer(tmux, &buffer_name);
             format!(
                 "outcome unknown: tmux input paste commit could not be observed; do not retry: {error}"
             )
         })?;
     if !output.status.success() {
-        cleanup_buffer(&buffer_name);
+        cleanup_buffer(tmux, &buffer_name);
         return Err(format!(
             "atomic tmux input was not committed; accepted bytes: 0: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -313,8 +374,8 @@ fn paste_buffer_supports_unsanitized_flag(output: &[u8]) -> bool {
     })
 }
 
-fn cleanup_buffer(buffer_name: &str) {
-    if let Ok(mut command) = tmux_command() {
+fn cleanup_buffer(tmux: &dyn Fn() -> anyhow::Result<Command>, buffer_name: &str) {
+    if let Ok(mut command) = tmux() {
         let _ = command.args(["delete-buffer", "-b", buffer_name]).status();
     }
 }
@@ -344,6 +405,7 @@ mod tests {
                 input_id: 1,
                 pane_id: "%1".into(),
                 data: b"a".to_vec(),
+                delivery: InputDelivery::Keys,
             })
             .unwrap();
         sender
@@ -351,6 +413,7 @@ mod tests {
                 input_id: 2,
                 pane_id: "%2".into(),
                 data: b"b".to_vec(),
+                delivery: InputDelivery::Keys,
             })
             .unwrap();
         let (first_barrier_tx, first_barrier_rx) = mpsc::sync_channel(1);
@@ -363,7 +426,7 @@ mod tests {
             .unwrap();
         sender.send(InputDispatch::Stop).unwrap();
         let mut calls = 0;
-        run_input_dispatch_with(receiver, |_, _, _| {
+        run_input_dispatch_with(receiver, |_, _, _, _| {
             calls += 1;
             if calls == 1 {
                 Err("injected writer failure".into())
@@ -386,6 +449,7 @@ mod tests {
                 input_id: 1,
                 pane_id: "%1".into(),
                 data: b"a".to_vec(),
+                delivery: InputDelivery::Keys,
             })
             .unwrap();
         let (abandoned_tx, abandoned_rx) = mpsc::sync_channel(1);
@@ -395,7 +459,7 @@ mod tests {
         sender.send(InputDispatch::Barrier(live_tx)).unwrap();
         sender.send(InputDispatch::Stop).unwrap();
 
-        run_input_dispatch_with(receiver, |_, _, _| Err("late tmux failure".into()));
+        run_input_dispatch_with(receiver, |_, _, _, _| Err("late tmux failure".into()));
 
         assert_eq!(live_rx.recv().unwrap(), Err("late tmux failure".into()));
     }
@@ -408,6 +472,7 @@ mod tests {
                 input_id: 2,
                 pane_id: "%1".into(),
                 data: b"a".to_vec(),
+                delivery: InputDelivery::Keys,
             })
             .unwrap();
         let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
@@ -425,6 +490,7 @@ mod tests {
             stdin,
             completion_rx,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(super::super::super::snapshot::tmux_command),
             |_, _| {},
         );
 
@@ -457,6 +523,7 @@ mod tests {
                 input_id: 1,
                 pane_id: "%1".into(),
                 data: b"accepted".to_vec(),
+                delivery: InputDelivery::Keys,
             })
             .unwrap();
         assert!(matches!(
@@ -464,11 +531,12 @@ mod tests {
                 input_id: 2,
                 pane_id: "%1".into(),
                 data: b"rejected".to_vec(),
+                delivery: InputDelivery::Keys,
             }),
             Err(mpsc::TrySendError::Full(_))
         ));
         drop(sender);
-        run_input_dispatch_with(receiver, |_, _, bytes| {
+        run_input_dispatch_with(receiver, |_, _, bytes, _| {
             assert_eq!(bytes, b"accepted");
             Ok(())
         });
@@ -482,6 +550,7 @@ mod tests {
                 input_id: 1,
                 pane_id: "%1".into(),
                 data: b"must not replay".to_vec(),
+                delivery: InputDelivery::Keys,
             })
             .unwrap();
         let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
@@ -494,6 +563,7 @@ mod tests {
             Arc::clone(&stdin),
             mpsc::channel().1,
             Arc::new(AtomicBool::new(true)),
+            Arc::new(super::super::super::snapshot::tmux_command),
             |_, _| {},
         );
 
@@ -517,6 +587,7 @@ mod tests {
                     input_id,
                     pane_id: pane_id.into(),
                     data: data.to_vec(),
+                    delivery: InputDelivery::Keys,
                 })
                 .unwrap();
         }
@@ -525,7 +596,7 @@ mod tests {
         sender.send(InputDispatch::Stop).unwrap();
         let mut observed = Vec::new();
 
-        run_input_dispatch_with(receiver, |input_id, pane_id, data| {
+        run_input_dispatch_with(receiver, |input_id, pane_id, data, _| {
             observed.push((input_id, pane_id.to_owned(), data.to_vec()));
             Ok(())
         });
@@ -550,13 +621,14 @@ mod tests {
                 input_id: 1,
                 pane_id: "%1".into(),
                 data: data.clone(),
+                delivery: InputDelivery::Keys,
             })
             .unwrap();
         let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
         sender.send(InputDispatch::Barrier(barrier_tx)).unwrap();
         sender.send(InputDispatch::Stop).unwrap();
         let mut commits = 0;
-        run_input_dispatch_with(receiver, |_, pane_id, bytes| {
+        run_input_dispatch_with(receiver, |_, pane_id, bytes, _| {
             commits += 1;
             assert_eq!(pane_id, "%1");
             assert_eq!(bytes, data);
@@ -567,6 +639,86 @@ mod tests {
             barrier_rx.recv().unwrap(),
             Err("injected commit-point failure; accepted bytes: 0".into())
         );
+    }
+
+    #[test]
+    fn a_paste_is_never_coalesced_with_the_keys_around_it() {
+        let (sender, receiver) = mpsc::channel();
+        for (input_id, data, delivery) in [
+            (1, b"a".as_slice(), InputDelivery::Keys),
+            (2, b"hello".as_slice(), InputDelivery::Paste),
+            (3, b"\r".as_slice(), InputDelivery::Keys),
+            (4, b"b".as_slice(), InputDelivery::Keys),
+        ] {
+            sender
+                .send(InputDispatch::Bytes {
+                    input_id,
+                    pane_id: "%1".into(),
+                    data: data.to_vec(),
+                    delivery,
+                })
+                .unwrap();
+        }
+        sender.send(InputDispatch::Stop).unwrap();
+        let mut observed = Vec::new();
+
+        run_input_dispatch_with(receiver, |input_id, _, data, delivery| {
+            observed.push((input_id, data.to_vec(), delivery));
+            Ok(())
+        });
+
+        assert_eq!(
+            observed,
+            [
+                (1, b"a".to_vec(), InputDelivery::Keys),
+                (2, b"hello".to_vec(), InputDelivery::Paste),
+                (4, b"\rb".to_vec(), InputDelivery::Keys),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_pastes_stay_two_batches() {
+        let (sender, receiver) = mpsc::channel();
+        for (input_id, data) in [(1, b"one".as_slice()), (2, b"two".as_slice())] {
+            sender
+                .send(InputDispatch::Bytes {
+                    input_id,
+                    pane_id: "%1".into(),
+                    data: data.to_vec(),
+                    delivery: InputDelivery::Paste,
+                })
+                .unwrap();
+        }
+        sender.send(InputDispatch::Stop).unwrap();
+        let mut observed = Vec::new();
+
+        run_input_dispatch_with(receiver, |input_id, _, data, delivery| {
+            observed.push((input_id, data.to_vec(), delivery));
+            Ok(())
+        });
+
+        assert_eq!(
+            observed,
+            [
+                (1, b"one".to_vec(), InputDelivery::Paste),
+                (2, b"two".to_vec(), InputDelivery::Paste),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_paste_always_takes_the_batch_path_and_small_keys_stay_in_band() {
+        assert_eq!(input_path(1, InputDelivery::Paste), InputPath::Batch);
+        assert_eq!(
+            input_path(INBAND_INPUT_MAX_BYTES, InputDelivery::Keys),
+            InputPath::InBand
+        );
+        assert_eq!(
+            input_path(INBAND_INPUT_MAX_BYTES + 1, InputDelivery::Keys),
+            InputPath::Batch
+        );
+        assert_eq!(INBAND_INPUT_MAX_BYTES, 4096);
     }
 
     #[test]

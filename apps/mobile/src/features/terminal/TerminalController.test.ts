@@ -5,7 +5,7 @@ import { EventKind, HostEventSchema, Operation, PaneResourceSchema, PaneResource
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../../protocol/testing/fakeTransport";
 import { createSessionStore } from "../../store/sessionStore";
 import type { ToPageMessage } from "./bridgeMessages";
-import { TerminalController, type TerminalSnapshot } from "./TerminalController";
+import { SUBMIT_DELAY_MS, TerminalController, type TerminalSnapshot } from "./TerminalController";
 import { TerminalRegistry } from "./terminalRegistry";
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -492,8 +492,72 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     if (frame?.payload.case !== "request") throw new Error("expected input");
     expect(frame.payload.value).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1" });
     expect(Array.from(frame.payload.value.data)).toEqual([0x03]);
+    expect(frame.payload.value.terminalInputPaste).toBe(false);
     t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
     await expect(pending).resolves.toBeUndefined();
+  });
+});
+
+describe("TerminalController Send (§9.5)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** The one request currently on the wire, or undefined. */
+  function inputFrame(t: FakeTransport): { request: Request; requestId: bigint } | undefined {
+    const [frame] = t.drain();
+    if (!frame) return undefined;
+    if (frame.payload.case !== "request") throw new Error(`expected a request, got ${frame.payload.case}`);
+    return { request: frame.payload.value, requestId: frame.requestId };
+  }
+
+  it("pastes the text, then after SUBMIT_DELAY_MS sends the CR as keys", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    const pending = h.controller.submitText("héllo");
+
+    const paste = inputFrame(t)!;
+    expect(paste.request).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1", terminalInputPaste: true });
+    expect(Array.from(paste.request.data)).toEqual(Array.from(new TextEncoder().encode("héllo")));
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: paste.requestId }));
+    await settle();
+    expect(inputFrame(t)).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(SUBMIT_DELAY_MS - 1);
+    expect(inputFrame(t)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    const cr = inputFrame(t)!;
+    expect(cr.request).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1", terminalInputPaste: false });
+    expect(Array.from(cr.request.data)).toEqual([0x0d]);
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: cr.requestId }));
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it("sends an empty Send as one bare CR with no delay", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    const pending = h.controller.submitText("");
+    const cr = inputFrame(t)!;
+    expect(cr.request).toMatchObject({ operation: Operation.TERMINAL_INPUT, terminalInputPaste: false });
+    expect(Array.from(cr.request.data)).toEqual([0x0d]);
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: cr.requestId }));
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it("sends no CR when the paste is refused", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    const pending = h.controller.submitText("hello");
+    const paste = inputFrame(t)!;
+    t.feed(hostEnvelope({
+      case: "response",
+      value: create(ResponseSchema, { ok: false, errorCode: "terminal_input_failed", displayMessage: "pane gone" }),
+    }, { requestId: paste.requestId }));
+    await expect(pending).rejects.toThrow("pane gone");
+    await vi.advanceTimersByTimeAsync(SUBMIT_DELAY_MS * 2);
+    expect(inputFrame(t)).toBeUndefined();
   });
 });
 

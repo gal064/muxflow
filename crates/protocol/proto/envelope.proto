@@ -195,6 +195,14 @@ message Request {
   // seed includes every row that has scrolled off since — rows the renderer
   // has, and would be given a second copy of. Read by no other operation.
   uint32 terminal_history_skip_lines = 18;
+  // TERMINAL_INPUT only: deliver `data` through tmux's paste path
+  // (`load-buffer` + `paste-buffer -p`) instead of as keys. tmux wraps the
+  // bytes in bracketed-paste markers iff the pane's application asked for
+  // them, so a composer that tells pasted text from typed text sees a paste,
+  // and a plain shell sees the bytes. A paste is never coalesced with the
+  // input queued around it: a CR sent as keys after it arrives as its own
+  // keystroke, which is what makes it submit rather than insert a newline.
+  bool terminal_input_paste = 19;
 }
 
 message Response {
