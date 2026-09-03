@@ -29,11 +29,17 @@ import java.util.concurrent.ConcurrentHashMap
  * the background never fires; `scheduleWake` runs the same delay on an Android [Handler], which
  * keeps going for as long as the process — kept alive by [ConnectionService] — does, and answers
  * with an `onWake` event carrying the caller's token.
+ *
+ * The third event, `onDisconnectRequested`, is the notification's Disconnect action. It is sent
+ * before any channel is closed and whether or not one is open: between reconnect attempts there is
+ * no channel to report `closedByClient`, and without the event JavaScript would keep re-dialling
+ * on its native timer with the service — and the notification — already gone.
  */
 class MuxflowSshModule : Module() {
   private companion object {
     const val EVENT_NAME = "onSshEvent"
     const val WAKE_EVENT_NAME = "onWake"
+    const val DISCONNECT_EVENT_NAME = "onDisconnectRequested"
 
     /** Exit status of a shell that could not find the command — §12 maps this to "helper missing". */
     const val EXIT_COMMAND_NOT_FOUND = 127
@@ -75,7 +81,7 @@ class MuxflowSshModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("MuxflowSsh")
 
-    Events(EVENT_NAME, WAKE_EVENT_NAME)
+    Events(EVENT_NAME, WAKE_EVENT_NAME, DISCONNECT_EVENT_NAME)
 
     OnCreate {
       SshSecurity.ensureBouncyCastle()
@@ -164,6 +170,17 @@ class MuxflowSshModule : Module() {
 
     AsyncFunction("stopForegroundService") { stopService() }
 
+    // The text of the ongoing notification (§6.3): kept for the next automatic start and, while
+    // the service is up, re-posted in place. No service start happens here — Android 12+ may
+    // refuse one from the background, and a connection reaching `connected` is often exactly there.
+    AsyncFunction("setServiceNotification") { title: String, body: String ->
+      serviceTitle = title
+      serviceBody = body
+      if (serviceRunning) {
+        ConnectionService.update(context, title, body)
+      }
+    }
+
     // Scheduling a token that is already pending replaces its deadline.
     AsyncFunction("scheduleWake") { token: String, delayMs: Double ->
       val runnable =
@@ -231,6 +248,7 @@ class MuxflowSshModule : Module() {
   }
 
   private fun disconnectFromNotification() {
+    runCatching { sendEvent(DISCONNECT_EVENT_NAME, mapOf<String, Any?>()) }
     closeAllChannels()
     stopService()
   }

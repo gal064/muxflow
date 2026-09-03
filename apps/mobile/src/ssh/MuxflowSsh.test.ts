@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createMuxflowSsh,
+  NATIVE_DISCONNECT_EVENT_NAME,
   NATIVE_EVENT_NAME,
   NATIVE_WAKE_EVENT_NAME,
   WRITE_CHUNK_BASE64_CHARS,
@@ -16,6 +17,8 @@ interface Harness {
   emit: (payload: unknown) => void;
   /** Pushes a raw `onWake` payload. */
   emitWake: (payload: unknown) => void;
+  /** The notification's Disconnect action. */
+  emitDisconnect: () => void;
   listenerCount: () => number;
   removeCalls: () => number;
   writes: Array<[string, string]>;
@@ -25,6 +28,7 @@ interface Harness {
 function harness(options: { deferWrites?: boolean } = {}): Harness {
   const nativeListeners = new Set<(payload: unknown) => void>();
   const wakeListeners = new Set<(payload: unknown) => void>();
+  const disconnectListeners = new Set<(payload: unknown) => void>();
   const writes: Array<[string, string]> = [];
   const pending: Array<() => void> = [];
   let removeCalls = 0;
@@ -44,11 +48,17 @@ function harness(options: { deferWrites?: boolean } = {}): Harness {
     close: vi.fn(async () => undefined),
     startForegroundService: vi.fn(async () => undefined),
     stopForegroundService: vi.fn(async () => undefined),
+    setServiceNotification: vi.fn(async () => undefined),
     scheduleWake: vi.fn(async () => undefined),
     cancelWake: vi.fn(async () => undefined),
     addListener: vi.fn((eventName, listener) => {
-      const set = eventName === NATIVE_WAKE_EVENT_NAME ? wakeListeners : nativeListeners;
-      expect([NATIVE_EVENT_NAME, NATIVE_WAKE_EVENT_NAME]).toContain(eventName);
+      const set =
+        eventName === NATIVE_WAKE_EVENT_NAME
+          ? wakeListeners
+          : eventName === NATIVE_DISCONNECT_EVENT_NAME
+            ? disconnectListeners
+            : nativeListeners;
+      expect([NATIVE_EVENT_NAME, NATIVE_WAKE_EVENT_NAME, NATIVE_DISCONNECT_EVENT_NAME]).toContain(eventName);
       set.add(listener);
       return {
         remove: () => {
@@ -69,6 +79,11 @@ function harness(options: { deferWrites?: boolean } = {}): Harness {
     emitWake: (payload) => {
       for (const listener of [...wakeListeners]) {
         listener(payload);
+      }
+    },
+    emitDisconnect: () => {
+      for (const listener of [...disconnectListeners]) {
+        listener({});
       }
     },
     listenerCount: () => nativeListeners.size,
@@ -186,6 +201,29 @@ describe("wake timer", () => {
     h.emitWake({ token: "8" });
     expect(tokens).toEqual(["7"]);
     removeSsh();
+  });
+});
+
+describe("foreground service notification", () => {
+  it("forwards setServiceNotification and fans out the Disconnect action", async () => {
+    const h = harness();
+    const ssh = createMuxflowSsh(h.native);
+    let taps = 0;
+    const unsubscribe = ssh.addDisconnectListener(() => {
+      taps += 1;
+    });
+
+    await ssh.setServiceNotification("Muxflow", "Connected to dev box");
+    expect(h.native.setServiceNotification).toHaveBeenCalledWith("Muxflow", "Connected to dev box");
+
+    h.emitDisconnect();
+    h.emitDisconnect();
+    expect(taps).toBe(2);
+
+    unsubscribe();
+    expect(h.removeCalls()).toBe(1);
+    h.emitDisconnect();
+    expect(taps).toBe(2);
   });
 });
 
