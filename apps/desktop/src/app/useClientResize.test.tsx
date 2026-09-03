@@ -339,6 +339,45 @@ describe("useClientResize", () => {
   });
 
   /**
+   * The surface moved a few milliseconds before a keystroke: the ordinary
+   * request goes out in the debounce, and the take that was due at the
+   * keystroke must notice it went and not repeat it.
+   */
+  it("does not repeat an ordinary request that went out while the take was pending", async () => {
+    const props = { clientId: "client-1" };
+    const { update } = await render({ ...props, actualSize: { columns: 121, rows: 46 } });
+    await update({ ...props, actualSize: { columns: 80, rows: 24 } });
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    await act(async () => {
+      setSurfaceBox({ width: 900, height: 800 });
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));
+    });
+    await settle();
+    await settle();
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-1", 109, 46]]);
+  });
+
+  /**
+   * The take is now the only route that hands the width back, so a bridge
+   * that refuses one must not switch takes off for the rest of the connection.
+   */
+  it("takes again after a take the bridge refused", async () => {
+    const props = { clientId: "client-1" };
+    const { update } = await render({ ...props, actualSize: { columns: 121, rows: 46 } });
+    await update({ ...props, actualSize: { columns: 80, rows: 24 } });
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    resizeClientMock.mockImplementation(async () => { throw new Error("visible session control client is detached"); });
+    await keydown();
+    await exhaustRetries();
+    expect(resizeClientMock).toHaveBeenCalledTimes(2 + CLIENT_RESIZE_RETRIES);
+    resizeClientMock.mockImplementation(async () => undefined);
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    await keydown();
+    expect(resizeClientMock).toHaveBeenCalledTimes(3 + CLIENT_RESIZE_RETRIES);
+    expect(resizeClientMock.mock.lastCall).toEqual(["client-1", 121, 46]);
+  });
+
+  /**
    * With an app tab showing there is no tiled surface to measure, so nothing
    * may be sent — and the app must still be able to take its size back when
    * the terminal comes back.

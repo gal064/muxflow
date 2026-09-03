@@ -226,27 +226,45 @@ export function useClientResize({
    * reconnect — a new tmux client has never been sized — so a laptop waking
    * up does take once with nobody at it; the phone takes back on its next
    * input, and the interval keeps it to one flip.
+   *
+   * All of this assumes tmux's default `window-size latest`, which the host
+   * relies on rather than sets. Under `largest` or `smallest` a take may never
+   * stick, and then it repeats once per interval for as long as the user
+   * types — a cost, not a fight, and bounded by the interval.
    */
-  const take = useCallback(() => {
-    const currentClientId = clientIdRef.current;
+  /**
+   * Whether a take is due: the surface's own size is not the one tmux's
+   * windows have, and the interval has passed. Measured against the snapshot
+   * rather than against `lastRequested`, so a request that failed every retry
+   * (and so cleared its record) is retaken by the next keystroke rather than
+   * never; and checked again when the timer fires, so an ordinary send that
+   * landed in between is not repeated.
+   */
+  const takeDue = useCallback((): boolean => {
     const actual = actualSizeRef.current;
-    const requested = lastRequested.current;
+    const element = surfaceRefValue.current;
     // `surface` because a request needs one: with an app tab showing there is
     // no tiled surface to measure, and `send` would return immediately.
-    if (!currentClientId || !canMutateRef.current || !actual || !surfaceRefValue.current) return;
-    if (!requested || requested.clientId !== currentClientId) return;
-    if (requested.columns === actual.columns && requested.rows === actual.rows) return;
+    if (!clientIdRef.current || !canMutateRef.current || !actual || !element) return false;
+    const rect = element.getBoundingClientRect();
+    const decision = clientSizeForSurface({ width: rect.width, height: rect.height }, measurementsRef.current);
+    if (decision.kind !== "size") return false;
+    if (decision.size.columns === actual.columns && decision.size.rows === actual.rows) return false;
     const sentAt = lastSentAt.current;
-    if (sentAt !== undefined && Date.now() - sentAt < CLIENT_RESIZE_TAKE_INTERVAL_MS) return;
-    if (takeTimer.current) return;
+    return sentAt === undefined || Date.now() - sentAt >= CLIENT_RESIZE_TAKE_INTERVAL_MS;
+  }, []);
+
+  const take = useCallback(() => {
+    if (takeTimer.current || !takeDue()) return;
     takeTimer.current = window.setTimeout(() => {
       takeTimer.current = 0;
+      if (!takeDue()) return;
       // Forgetting the record is what lets the identical computation through
       // the dedupe; `send` recomputes from the live surface either way.
       lastRequested.current = undefined;
       send();
     }, CLIENT_RESIZE_DEBOUNCE_MS);
-  }, [send]);
+  }, [send, takeDue]);
 
   // Capture phase, so xterm's own handlers cannot swallow the event first. An
   // unfocused window receives neither, which is the whole focus story.
