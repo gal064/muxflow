@@ -7,6 +7,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { PAGE_RECEIVE_FUNCTION, type FromPageMessage, type ToPageMessage } from "../../src/features/terminal/bridgeMessages";
 import { computeGrid, NOMINAL_CELL, TERMINAL_FONT_SIZE_PX, TERMINAL_LINE_HEIGHT, sameGrid, type Grid } from "../../src/features/terminal/sizing";
+import { TouchScrollController } from "../../src/features/terminal/touchScroll";
 import { terminalTheme } from "../../src/ui/tokens";
 
 declare global {
@@ -105,30 +106,28 @@ async function init(): Promise<void> {
   // Touch scrolling. xterm's own viewport is a scrollable div under the
   // screen layer, and inside this WebView a finger drag never reaches it (the
   // page is `overflow: hidden` and the screen layer takes the pointer), so
-  // the drag is turned into `scrollLines` here: one row per cell height, the
-  // remainder carried to the next move so slow drags still scroll.
-  let touchY: number | undefined;
-  let touchCarry = 0;
+  // the drag is turned into `scrollLines` here. The controller batches moves
+  // to one repaint per animation frame and adds the short decaying fling a
+  // native scrolling surface would normally provide.
   const el = root();
+  const touchScroll = new TouchScrollController(
+    (rows) => term?.scrollLines(rows),
+    { request: (callback) => requestAnimationFrame(callback), cancel: (id) => cancelAnimationFrame(id) },
+  );
   el.addEventListener("touchstart", (event) => {
-    touchY = event.touches[0]?.clientY;
-    touchCarry = 0;
+    const touch = event.touches[0];
+    if (touch) touchScroll.start(touch.clientY, event.timeStamp);
   }, { passive: true });
   el.addEventListener("touchmove", (event) => {
-    if (!term || touchY === undefined) return;
-    const y = event.touches[0]?.clientY;
-    if (y === undefined) return;
+    const touch = event.touches[0];
+    if (!term || !touch) return;
     const cellHeight = lastGrid ? el.clientHeight / lastGrid.rows : NOMINAL_CELL.height;
-    const delta = (touchY - y) / cellHeight + touchCarry;
-    const rows = Math.trunc(delta);
-    touchCarry = delta - rows;
-    touchY = y;
-    if (rows !== 0) term.scrollLines(rows);
-    event.preventDefault();
+    if (touchScroll.move(touch.clientY, event.timeStamp, cellHeight)) event.preventDefault();
   }, { passive: false });
-  el.addEventListener("touchend", () => {
-    touchY = undefined;
+  el.addEventListener("touchend", (event) => {
+    touchScroll.end(event.timeStamp);
   }, { passive: true });
+  el.addEventListener("touchcancel", () => touchScroll.cancel(), { passive: true });
   term.onScroll(() => {
     if (!term || term.buffer.active.type === "alternate") return;
     if (term.buffer.active.viewportY > 0) return;

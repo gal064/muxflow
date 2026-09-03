@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { colors, metrics, typeScale } from "../tokens";
+import { colors, fixedChromeText, metrics, typeScale } from "../tokens";
 
 export interface ListRowProps {
   title: string;
@@ -36,10 +36,10 @@ export function ListRow({ title, subtitle, height, edgeColor, accessibilityLabel
         {leading ? <View style={styles.leading}>{leading}</View> : null}
         <View style={styles.text}>
           <View style={styles.titleLine}>
-            <Text style={[styles.title, titleColor ? { color: titleColor } : null]} numberOfLines={1}>{title}</Text>
+            <Text {...fixedChromeText} style={[styles.title, titleColor ? { color: titleColor } : null]} numberOfLines={1}>{title}</Text>
             {titleAccessory ? <View style={styles.titleAccessory}>{titleAccessory}</View> : null}
           </View>
-          {subtitle ? <Text numberOfLines={1} style={styles.subtitle}>{subtitle}</Text> : null}
+          {subtitle ? <Text {...fixedChromeText} numberOfLines={1} style={styles.subtitle}>{subtitle}</Text> : null}
         </View>
         {trailing ? <View style={styles.trailing}>{trailing}</View> : null}
       </View>
@@ -64,8 +64,8 @@ const styles = StyleSheet.create({
   },
   dimmed: { opacity: 0.5 },
   leading: {},
-  text: { flex: 1, gap: 2 },
-  titleLine: { alignItems: "center", flexDirection: "row", gap: 6 },
+  text: { flex: 1, gap: 2, minWidth: 0 },
+  titleLine: { alignItems: "center", flexDirection: "row", gap: 6, minWidth: 0 },
   title: { color: colors.chromeInkStrong, flexShrink: 1, fontSize: typeScale.rowTitle },
   titleAccessory: { flexShrink: 0 },
   subtitle: { color: colors.chromeDim, flexShrink: 1, fontSize: typeScale.rowSecondary },

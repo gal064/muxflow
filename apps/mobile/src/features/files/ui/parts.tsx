@@ -3,17 +3,17 @@
 import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Animated, Easing, Pressable, StyleSheet, Text, View } from "react-native";
 
-import { colors, fonts, metrics, radii, typeScale } from "../../../ui/tokens";
+import { colors, fixedChromeText, fonts, metrics, radii, typeScale } from "../../../ui/tokens";
 
 /** The app-bar title block: title, and under it a single middle-ellipsised path. */
 export function TitleBlock({ title, subtitle }: { title: string; subtitle: string }) {
   return (
     <View style={styles.titleBlock}>
-      <Text style={styles.title} numberOfLines={1} ellipsizeMode="tail">
+      <Text {...fixedChromeText} style={styles.title} numberOfLines={1} ellipsizeMode="tail">
         {title}
       </Text>
       {subtitle ? (
-        <Text style={styles.subtitle} numberOfLines={1} ellipsizeMode="middle">
+        <Text {...fixedChromeText} style={styles.subtitle} numberOfLines={1} ellipsizeMode="middle">
           {subtitle}
         </Text>
       ) : null}
@@ -107,6 +107,7 @@ const PROGRESS_BAR_FRACTION = 0.4;
 const styles = StyleSheet.create({
   titleBlock: {
     justifyContent: "center",
+    minWidth: 0,
   },
   title: {
     color: colors.chromeInkStrong,
