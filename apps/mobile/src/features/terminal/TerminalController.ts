@@ -192,6 +192,9 @@ export class TerminalController {
    * plus `SUBMIT_DELAY_MS`, so a composer that treats an Enter inside a fast
    * burst as a newline sees the CR on its own and submits. A refused paste
    * sends no CR. Empty text is a bare CR with no delay.
+   *
+   * Deliberately not gated on `stopped`: a Back during the gap must still
+   * deliver the CR, or the pasted text sits unsubmitted in the composer.
    */
   async submitText(text: string): Promise<void> {
     const body = utf8Encode(text);
