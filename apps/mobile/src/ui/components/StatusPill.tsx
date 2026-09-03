@@ -1,7 +1,7 @@
 import { StyleSheet, Text, View } from "react-native";
 
 import type { AgentDisplayState } from "../../store/selectors";
-import { colors, radii, terminalTheme, typeScale } from "../tokens";
+import { colors, fixedChromeText, radii, terminalTheme, typeScale } from "../tokens";
 
 export type PillState = AgentDisplayState | "gone";
 
@@ -10,7 +10,7 @@ export function StatusPill({ state }: { state: PillState }) {
   const { background, ink, label } = PILLS[state];
   return (
     <View style={[styles.pill, { backgroundColor: background }]}>
-      <Text style={[styles.label, { color: ink }]}>{label}</Text>
+      <Text {...fixedChromeText} numberOfLines={1} style={[styles.label, { color: ink }]}>{label}</Text>
     </View>
   );
 }

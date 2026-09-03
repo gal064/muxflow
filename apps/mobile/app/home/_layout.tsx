@@ -7,7 +7,7 @@ import { waitingCount } from "../../src/store/selectors";
 import { ConnectionDot } from "../../src/features/hosts/ConnectionDot";
 import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
 import { useSession } from "../../src/ui/hooks";
-import { colors, metrics, typeScale } from "../../src/ui/tokens";
+import { colors, fixedChromeText, metrics, typeScale } from "../../src/ui/tokens";
 
 /** Home — design.md §9.3. Two tabs; Agents is the initial tab. */
 export default function HomeLayout() {
@@ -71,7 +71,7 @@ function TabHeader({ title }: { title: string; [key: string]: unknown }) {
   return (
     <View style={[styles.headerWrap, { paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle} numberOfLines={1}>{title}</Text>
+        <Text {...fixedChromeText} style={styles.headerTitle} numberOfLines={1}>{title}</Text>
         <ConnectionDot />
       </View>
       <ConnectionStrip />
@@ -93,5 +93,6 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: typeScale.appBarTitle,
     fontWeight: "600",
+    minWidth: 0,
   },
 });

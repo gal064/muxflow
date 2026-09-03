@@ -13,7 +13,7 @@ import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
 import { ListRow } from "../../src/ui/components/ListRow";
 import { StatusPill } from "../../src/ui/components/StatusPill";
 import { useSession } from "../../src/ui/hooks";
-import { colors, metrics, typeScale } from "../../src/ui/tokens";
+import { colors, fixedChromeText, metrics, typeScale } from "../../src/ui/tokens";
 
 /** How long the New-terminal row waits for the created pane to reach the topology before navigating. */
 const NEW_PANE_TOPOLOGY_WAIT_MS = 3_000;
@@ -107,8 +107,8 @@ function waitForPane(paneId: string): Promise<void> {
 function ActionRow({ glyph, label, onPress, disabled, busy }: { glyph: string; label: string; onPress: () => void; disabled?: boolean; busy?: boolean }) {
   return (
     <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.action, pressed && styles.pressed, disabled && !busy && styles.disabled]}>
-      <Text style={styles.actionGlyph}>{glyph}</Text>
-      <Text style={styles.actionLabel}>{label}</Text>
+      <Text {...fixedChromeText} numberOfLines={1} style={styles.actionGlyph}>{glyph}</Text>
+      <Text {...fixedChromeText} numberOfLines={1} style={styles.actionLabel}>{label}</Text>
       {busy ? <ActivityIndicator color={colors.accent} size="small" /> : null}
     </Pressable>
   );
