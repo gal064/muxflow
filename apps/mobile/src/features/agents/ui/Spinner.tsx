@@ -25,7 +25,9 @@ import { SPINNER_ARC_TURNS, SPINNER_TRACK_OPACITY, SPINNER_TURN_MS } from "../sp
  * next start begins the turn at 12 again.
  * `animate` false means nobody can see it (unfocused tab, backgrounded app)
  * or the user asked for reduced motion — a still arc is the desktop's
- * reduced-motion rendering too.
+ * reduced-motion rendering too. Reduced motion from launch rests at 12
+ * o'clock; switched on mid-turn it keeps that frame's angle, which is the
+ * price of not snapping on every screen push.
  */
 export function Spinner({ ink, ring, size, animate }: { ink: string; ring: string; size: number; animate: boolean }) {
   useEffect(() => (animate ? acquireClock() : undefined), [animate]);
