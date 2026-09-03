@@ -99,7 +99,7 @@ function Item({ item, items, index, onOpen, animate }: { item: AgentListItem; it
           // "1" badge, in the colour the Workspaces tab paints the same agent.
           edgeColor={item.waiting ? waitingColor(item.waiting) : undefined}
           // A one-line row (Workspace mode) takes the Workspaces tab's 64 dp rather than sit a title alone in 76.
-          height={item.subtitle ? metrics.agentRowHeight : metrics.windowRowHeight}
+          height={item.subtitle === undefined ? metrics.windowRowHeight : metrics.agentRowHeight}
           leading={<AgentMark adapterId={item.agent.adapterId} animate={animate} state={item.state} />}
           onPress={() => onOpen(item.agent)}
           subtitle={item.subtitle}
