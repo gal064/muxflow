@@ -347,14 +347,12 @@ async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection()
         state_generation: 42,
         occurred_at_unix_millis: 1_700_000_000_000,
     });
-    let message = tokio::time::timeout(Duration::from_secs(5), voice_rx.recv())
+    // The sink registry is process-wide, so a sibling test's broadcast (a
+    // filesystem or agent event) can land on either receiver: only reply
+    // events count here.
+    let event = tokio::time::timeout(Duration::from_secs(5), next_reply(&mut voice_rx))
         .await
-        .expect("the reply never reached the session connection")
-        .unwrap();
-    let SequencerControl::OrderedEvent(event) = message else {
-        panic!("expected an ordered event");
-    };
-    assert_eq!(event.kind, v1::EventKind::VoiceReply as i32);
+        .expect("the reply never reached the session connection");
     assert_eq!(event.scope, "agent-7");
     let reply = event.voice.unwrap().reply.unwrap();
     assert_eq!(reply.audio, b"MP3!!");
@@ -365,13 +363,38 @@ async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection()
     assert_eq!(reply.reply_at_unix_millis, 1_700_000_000_000);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
-        other_rx.try_recv().is_err(),
+        drain_replies(&mut other_rx).is_empty(),
         "the reply leaked to another connection"
     );
     assert!(
-        voice_rx.try_recv().is_err(),
+        drain_replies(&mut voice_rx).is_empty(),
         "an agent without a session produced a push"
     );
+}
+
+/// The next VOICE_REPLY on `rx`, skipping unrelated broadcasts.
+async fn next_reply(rx: &mut mpsc::Receiver<SequencerControl>) -> v1::HostEvent {
+    loop {
+        let SequencerControl::OrderedEvent(event) = rx.recv().await.expect("sink closed") else {
+            continue;
+        };
+        if event.kind == v1::EventKind::VoiceReply as i32 {
+            return event;
+        }
+    }
+}
+
+/// Every VOICE_REPLY already queued on `rx`, unrelated broadcasts dropped.
+fn drain_replies(rx: &mut mpsc::Receiver<SequencerControl>) -> Vec<v1::HostEvent> {
+    let mut replies = Vec::new();
+    while let Ok(message) = rx.try_recv() {
+        if let SequencerControl::OrderedEvent(event) = message
+            && event.kind == v1::EventKind::VoiceReply as i32
+        {
+            replies.push(event);
+        }
+    }
+    replies
 }
 
 /// A phone whose event queue is momentarily full is still there; only a
@@ -410,9 +433,10 @@ async fn a_full_queue_drops_the_reply_but_keeps_the_session() {
         service.session_connection("agent-full"),
         Some(registration.id)
     );
-    let _ = voice_rx.try_recv();
+    // The filler the test queued is the only OrderedEvent that may be there;
+    // a sibling test's broadcast is not a reply either.
     assert!(
-        voice_rx.try_recv().is_err(),
+        drain_replies(&mut voice_rx).is_empty(),
         "the dropped reply was queued after all"
     );
 }
@@ -439,14 +463,9 @@ async fn a_failed_synthesis_still_pushes_the_text_with_the_error_in_status() {
         state_generation: 3,
         occurred_at_unix_millis: 9,
     });
-    let SequencerControl::OrderedEvent(event) =
-        tokio::time::timeout(Duration::from_secs(5), voice_rx.recv())
-            .await
-            .unwrap()
-            .unwrap()
-    else {
-        panic!("expected an ordered event");
-    };
+    let event = tokio::time::timeout(Duration::from_secs(5), next_reply(&mut voice_rx))
+        .await
+        .unwrap();
     let voice = event.voice.unwrap();
     let reply = voice.reply.unwrap();
     assert!(reply.audio.is_empty());
