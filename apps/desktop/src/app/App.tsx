@@ -75,18 +75,27 @@ import {
 import { useContextMenusOpen } from "../ui/ContextMenu";
 import { useFocusHistoryNavigation } from "./useFocusHistoryNavigation";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
-import { mergedWorkspaceRows, pinnedOnlyMergedRows, type HostRowSource } from "../features/workspaces/mergedWorkspaceRows";
+import {
+  hostWorkspaceRows, mergeHostRows, pinnedOnlyMergedRows, type HostRowSource, type MergedWorkspaceRow,
+} from "../features/workspaces/mergedWorkspaceRows";
 import { WorkspaceSidebar, type SidebarHost } from "../features/workspaces/WorkspaceSidebar";
 import { WorkspaceSwitcher } from "../features/workspaces/WorkspaceSwitcher";
 import { inferHome } from "../features/workspaces/workspaceRows";
-import type { ConnectionSpec, HostProfile, Pane, Session } from "./types";
+import { hostLetter } from "../features/shell/hostProfiles";
+import type { CommandHost } from "../features/shell/useShellCommands";
+import { denormalizeSnapshot } from "../state/connectionReducer";
+import { hostLinkScope } from "../state/hostLinks";
+import type { AgentAttentionRollup, AgentRecord } from "../features/agents/types";
+import type { AgentAdapterDescriptor } from "../features/agents/types";
+import type { ConnectionSpec, HostProfile, Pane, TmuxSnapshot } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
+import { usePerHostMemo } from "./usePerHostMemo";
 import { useAppRecoveryController } from "./useAppRecoveryController";
 import { useClientResize } from "./useClientResize";
 import { useVisibleTerminalSession } from "./useVisibleTerminalSession";
 import { commitScopedAppTabClose, reportAnnouncedPaneResult, useShellNavigation } from "./useShellNavigation";
-import { useTmuxActionPerformer } from "./useTmuxActionPerformer";
+import { useTmuxActionPerformer, type TmuxActionTarget } from "./useTmuxActionPerformer";
 import { useWorkspaceCreate } from "./useWorkspaceCreate";
 import { windowCellSize } from "../features/terminal/clientSize";
 import { useWorkspaceDomainController } from "./useWorkspaceDomainController";
@@ -145,6 +154,34 @@ function appTabLayerKey(tab: AppOwnedTab): string {
   return tab.kind === "gitDiff"
     ? `${identity}\0${tab.gitRepositoryId}\0${tab.gitPath}\0${tab.gitTarget}`
     : `${identity}\0${tab.resource}`;
+}
+
+const NO_AGENTS: readonly AgentRecord[] = [];
+const NO_ADAPTERS: readonly AgentAdapterDescriptor[] = [];
+const NO_ATTENTION: ReadonlyMap<string, AgentAttentionRollup> = new Map();
+const NO_SNAPSHOT: TmuxSnapshot = { sessions: [], windows: [], panes: [] };
+
+/**
+ * The scope of a host with no link: a saved host that is not shown, or one
+ * whose link went while a menu over it stayed open. Nothing captured can
+ * match it, so every action checked against it is refused.
+ */
+function unlinkedScope(profileId: string): HostScopeToken {
+  return { hostProfileId: profileId, connectionKey: "", connectionEpoch: -1, generation: 0 };
+}
+
+/** What to call a host that has no saved profile to name it. */
+function connectionLabel(connection: ConnectionSpec): string {
+  return connection.mode === "local" ? "Local" : connection.target;
+}
+
+/** A row, agent or bell jump on another host, waiting for the facade to report that host. */
+interface PendingHostSelection {
+  profileId: string;
+  sessionId: string;
+  paneId?: string;
+  /** Who asked, for the announcement once the pane is on screen. */
+  source: string;
 }
 
 /**
@@ -219,7 +256,7 @@ export function App() {
   const {
     activateHost, activeSessionId, activeWindowId, appFocused, clientHostProfileId, clientId, clientIdRef, connection,
     connectionDetail, connectionEpoch, connectionMode, currentHostProfileId,
-    currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, inputLatencyReporter, links,
+    currentHostScope, dispatchHost, echoLagProbe, hostScopeRef, hostState, hub, inputLatencyReporter, linkFor, links,
     optimisticWindow, profileRecovery,
     profiles, selectedProfileId, setActiveSessionId, setActiveWindowId,
     setConnection, setConnectionDetail, setConnectionEpoch, setConnectionMode,
@@ -500,98 +537,169 @@ export function App() {
     terminalEpoch,
     topologyGeneration: hostState.generation,
   });
-  const recentIdleClock = useRecentIdleClock(
-    agentRuntime.agents,
-    appState.shell.agentSort === "status",
-  );
-
-  const home = useMemo(() => inferHome(snapshot.panes.map((pane) => pane.currentPath)), [snapshot.panes]);
-  // The one host this build shows: the merged list has a single source, so
-  // letters stay hidden and the rows come out in `workspaceRows` order.
-  const hostLetter = hostLabel.charAt(0).toUpperCase();
-  // `currentHostScope` is a fresh object every render; the rows that carry it
+  // Letters only once a second host is shown beside the first: one host has
+  // nothing to be told apart from.
+  const showLetters = links.length >= 2;
+  /**
+   * Each host's world as its rows read it, memoized on that host's state
+   * alone: a snapshot arriving on one host must not rebuild another host's
+   * rows. The active host's snapshot is the facade's own object.
+   */
+  const hostWorlds = usePerHostMemo(links.map((link) => ({
+    key: link.profileId,
+    deps: [link.hostState],
+    build: () => {
+      const world = link.profileId === currentHostProfileId ? snapshot : denormalizeSnapshot(link.hostState);
+      return { snapshot: world, home: inferHome(world.panes.map((pane) => pane.currentPath)) };
+    },
+  })));
+  // `hostLinkScope` is a fresh object every render; the rows that carry it
   // must only be rebuilt when what it says changes, or every status line and
   // latency sample would re-sort every workspace and agent row.
-  const { hostProfileId: scopeHostId, connectionKey: scopeKey, connectionEpoch: scopeEpoch, serverIdentity: scopeIdentity, generation: scopeGeneration } = currentHostScope;
-  const rowScope = useMemo<HostScopeToken>(
-    () => ({ hostProfileId: scopeHostId, connectionKey: scopeKey, connectionEpoch: scopeEpoch, serverIdentity: scopeIdentity, generation: scopeGeneration }),
-    [scopeEpoch, scopeGeneration, scopeHostId, scopeIdentity, scopeKey],
-  );
-  const hostSource = useMemo<HostRowSource>(() => ({
-    hostProfileId: currentHostProfileId,
-    letter: hostLetter,
-    label: hostLabel,
-    phase: hostState.phase,
-    canMutate: hostState.canMutate,
-    transport: connection.mode,
-    scope: rowScope,
-    snapshot,
-    activeSessionId,
-    agents: agentRuntime.agents,
-    adapters: agentRuntime.adapters,
-    attentionByWorkspace: agentRuntime.rollups.byWorkspace,
-    activeBranch: workspaceGit.status?.repository.headName,
-    home,
-  }), [
-    activeSessionId, agentRuntime.adapters, agentRuntime.agents, agentRuntime.rollups.byWorkspace, connection.mode,
-    currentHostProfileId, home, hostLabel, hostLetter, hostState.canMutate, hostState.phase, rowScope, snapshot, workspaceGit.status,
-  ]);
-  const sidebarHosts = useMemo<SidebarHost[]>(() => [{
-    profileId: currentHostProfileId,
-    letter: hostLetter,
-    label: hostLabel,
-    transport: connection.mode,
-    phase: hostState.phase,
-    canMutate: hostState.canMutate,
-    scope: rowScope,
-    active: true,
-    shown: true,
-    latencyMs: latency?.milliseconds,
-  }], [connection.mode, currentHostProfileId, hostLabel, hostLetter, hostState.canMutate, hostState.phase, latency?.milliseconds, rowScope]);
-  // Every workspace on this server, pinned first. ⌘P reads this whole; the
-  // sidebar, ⌘1–9 and the agents list read the narrowed version below.
-  const switcherRows = useMemo(() => mergedWorkspaceRows([hostSource], false), [hostSource]);
+  const hostScopes = usePerHostMemo(links.map((link) => {
+    const scope = hostLinkScope(link);
+    return {
+      key: link.profileId,
+      deps: [scope.hostProfileId, scope.connectionKey, scope.connectionEpoch, scope.serverIdentity, scope.generation],
+      build: () => scope,
+    };
+  }));
+  const hostSources = usePerHostMemo(links.map((link) => {
+    const active = link.profileId === currentHostProfileId;
+    const profile = profiles.find((item) => item.id === link.profileId);
+    const label = profile?.label ?? connectionLabel(link.connection);
+    const letter = hostLetter(profile ?? { id: link.profileId, label });
+    const world = hostWorlds.get(link.profileId)!;
+    const scope = hostScopes.get(link.profileId)!;
+    // The active host's agents are the runtime's own projection, which it
+    // keeps whether or not the host has a live agent scope; a peer's come
+    // from its slice, and a peer with no scope yet has none.
+    const agents = active ? agentRuntime : agentRuntime.byHost.get(link.profileId);
+    const { phase, canMutate } = link.hostState;
+    const transport = link.connection.mode;
+    const linkSessionId = active ? activeSessionId : undefined;
+    const activeBranch = active ? workspaceGit.status?.repository.headName : undefined;
+    return {
+      key: link.profileId,
+      deps: [letter, label, phase, canMutate, transport, scope, world, linkSessionId, agents?.agents, agents?.adapters, agents?.rollups.byWorkspace, activeBranch],
+      build: (): HostRowSource => ({
+        hostProfileId: link.profileId,
+        letter,
+        label,
+        phase,
+        canMutate,
+        transport,
+        scope,
+        snapshot: world.snapshot,
+        activeSessionId: linkSessionId,
+        agents: agents?.agents ?? NO_AGENTS,
+        adapters: agents?.adapters ?? NO_ADAPTERS,
+        attentionByWorkspace: agents?.rollups.byWorkspace ?? NO_ATTENTION,
+        activeBranch,
+        home: world.home,
+      }),
+    };
+  }));
+  const hostRows = usePerHostMemo(links.map((link) => {
+    const source = hostSources.get(link.profileId)!;
+    return { key: link.profileId, deps: [source, showLetters], build: () => hostWorkspaceRows(source, showLetters) };
+  }));
+  /**
+   * Every saved host in profile order, for the host menu; the ones with a
+   * link carry that link's phase and scope. The host on screen is always
+   * among them, saved or not — the render between Connect and its save, or
+   * the moment before the profiles have loaded.
+   */
+  const sidebarHosts = useMemo<SidebarHost[]>(() => {
+    const byProfileId = new Map(links.map((link) => [link.profileId, link]));
+    const hosts = profiles.map((profile): SidebarHost => {
+      const link = byProfileId.get(profile.id);
+      const active = profile.id === currentHostProfileId;
+      return {
+        profileId: profile.id,
+        letter: hostLetter(profile),
+        label: profile.label,
+        transport: profile.connection.mode,
+        phase: link?.hostState.phase ?? "disconnected",
+        canMutate: link?.hostState.canMutate ?? false,
+        scope: hostScopes.get(profile.id) ?? unlinkedScope(profile.id),
+        active,
+        shown: active || Boolean(profile.shown),
+        latencyMs: active ? latency?.milliseconds : undefined,
+      };
+    });
+    if (!hosts.some((host) => host.active)) {
+      const label = connectionLabel(connection);
+      hosts.push({
+        profileId: currentHostProfileId,
+        letter: hostLetter({ id: currentHostProfileId, label }),
+        label,
+        transport: connection.mode,
+        phase: hostState.phase,
+        canMutate: hostState.canMutate,
+        scope: hostScopes.get(currentHostProfileId) ?? unlinkedScope(currentHostProfileId),
+        active: true,
+        shown: true,
+        latencyMs: latency?.milliseconds,
+      });
+    }
+    return hosts;
+  }, [connection, currentHostProfileId, hostScopes, hostState.canMutate, hostState.phase, latency?.milliseconds, links, profiles]);
+  // Every workspace on every shown host, pinned first. ⌘P reads this whole;
+  // the sidebar, ⌘1–9 and the agents list read the narrowed version below.
+  const switcherRows = useMemo(() => mergeHostRows([...hostRows.values()]), [hostRows]);
   const sidebarRows = useMemo(
     () => appState.shell.pinnedOnly
       ? pinnedOnlyMergedRows(switcherRows, { hostProfileId: currentHostProfileId, sessionId: activeSessionId })
       : switcherRows,
     [activeSessionId, appState.shell.pinnedOnly, currentHostProfileId, switcherRows],
   );
+  // Every host's agents, in host order: the list, the bell and its count
+  // span every shown host, because "who needs me" is not a question about
+  // the machine that happens to be on screen.
+  const allAgents = useMemo(() => [...hostSources.values()].flatMap((source) => source.agents), [hostSources]);
+  const recentIdleClock = useRecentIdleClock(allAgents, appState.shell.agentSort === "status");
   const agentRows = useMemo(() => {
-    const orderBySession = new Map(sidebarRows.map((row, index) => [row.session.id, index]));
-    const windowIndexById = new Map(snapshot.windows.map((item) => [item.id, item.index]));
-    const paneIds = new Set(snapshot.panes.map((pane) => pane.id));
-    // Every window on this server, not just the workspace on screen: the agents
-    // list spans workspaces, so it needs the pins of tabs whose strip is not
-    // currently drawn.
-    const pinnedWindowIds = new Set(snapshot.windows.filter((item) => item.pinned).map((item) => item.id));
-    const pinnedSessionIds = new Set(snapshot.sessions.filter((item) => item.pinned).map((item) => item.id));
+    const orderByRowKey = new Map(sidebarRows.map((row, index) => [row.key, index]));
+    // Every window on each server, not just the workspace on screen: the
+    // agents list spans workspaces, so it needs the pins of tabs whose strip
+    // is not currently drawn.
+    const hosts = new Map([...hostSources.values()].map((source) => [source.hostProfileId, {
+      label: source.label,
+      letter: showLetters ? source.letter : "",
+      windowIndexById: new Map(source.snapshot.windows.map((item) => [item.id, item.index])),
+      paneIds: new Set(source.snapshot.panes.map((pane) => pane.id)),
+      pinnedWindowIds: new Set(source.snapshot.windows.filter((item) => item.pinned).map((item) => item.id)),
+      pinnedSessionIds: new Set(source.snapshot.sessions.filter((item) => item.pinned).map((item) => item.id)),
+    }]));
     return buildAgentRows(
-      agentRuntime.agents,
-      (record) => ({
-        workspaceOrder: orderBySession.get(record.sessionId) ?? Number.MAX_SAFE_INTEGER,
-        workspaceName: record.sessionName || "unknown workspace",
-        hostLabel,
-        // No letter until a second host can be shown beside this one.
-        hostLetter: "",
-        tabIndex: windowIndexById.get(record.windowId),
-        workspacePinned: pinnedSessionIds.has(record.sessionId),
-        tabPinned: pinnedWindowIds.has(record.windowId),
-      }),
-      (record) => Boolean(record.paneId) && paneIds.has(record.paneId),
+      allAgents,
+      (record) => {
+        const host = hosts.get(record.hostProfileId);
+        return {
+          workspaceOrder: orderByRowKey.get(`${record.hostProfileId}\0${record.sessionId}`) ?? Number.MAX_SAFE_INTEGER,
+          workspaceName: record.sessionName || "unknown workspace",
+          hostLabel: host?.label ?? record.hostProfileId,
+          hostLetter: host?.letter ?? "",
+          tabIndex: host?.windowIndexById.get(record.windowId),
+          workspacePinned: host?.pinnedSessionIds.has(record.sessionId) ?? false,
+          tabPinned: host?.pinnedWindowIds.has(record.windowId) ?? false,
+        };
+      },
+      (record) => Boolean(record.paneId) && Boolean(hosts.get(record.hostProfileId)?.paneIds.has(record.paneId)),
       appState.shell.agentSort,
       Date.now(),
     );
-  }, [agentRuntime.agents, appState.shell.agentSort, hostLabel, recentIdleClock, sidebarRows, snapshot.panes, snapshot.sessions, snapshot.windows]);
+  }, [allAgents, appState.shell.agentSort, hostSources, recentIdleClock, showLetters, sidebarRows]);
   // What the agents section lists, which under the filter is not everything
   // the shell knows about. Only the section is narrowed: the bell, its count
   // and ⌘⇧U keep reading the whole list, because "who needs me" is a question
-  // about every agent on the host and a filter over the sidebar is not an
+  // about every agent on every host and a filter over the sidebar is not an
   // instruction to stop counting the rest.
   const visibleAgentRows = useMemo(() => {
     if (!appState.shell.pinnedOnly) return agentRows;
-    const visible = new Set(sidebarRows.map((row) => row.session.id));
-    return agentRows.filter((row) => visible.has(row.agent.sessionId));
+    const visible = new Set(sidebarRows.map((row) => row.key));
+    return agentRows.filter((row) => visible.has(`${row.agent.hostProfileId}\0${row.agent.sessionId}`));
   }, [agentRows, appState.shell.pinnedOnly, sidebarRows]);
   const unread = useMemo(() => unreadCount(agentRows), [agentRows]);
   // The badge counts every waiting agent; the bell can only reach routable
@@ -704,6 +812,31 @@ export function App() {
     setStatus,
     windows: snapshot.windows,
   });
+  /** Whether a captured scope is still the live connection of the host it names, active or shown beside it. */
+  const scopeIsLive = useCallback((scope: HostScopeToken) => {
+    const link = linkFor(scope.hostProfileId);
+    return link !== undefined && sameHostConnection(scope, hostLinkScope(link));
+  }, [linkFor]);
+  /**
+   * How an action reaches a host shown beside the active one; nothing for
+   * the host on screen, whose path is the performer's default. The scope is
+   * read live from the link, so a connection that moves on under the
+   * request — or a host that stops being shown — discards the result.
+   */
+  const actionTargetFor = useCallback((hostProfileId: string): TmuxActionTarget | undefined => {
+    if (hostProfileId === hostScopeRef.current.hostProfileId) return undefined;
+    const link = linkFor(hostProfileId);
+    return {
+      clientId: link?.clientId,
+      canMutate: link?.hostState.canMutate ?? false,
+      scopeRef: {
+        get current() {
+          const now = linkFor(hostProfileId);
+          return now ? hostLinkScope(now) : unlinkedScope(hostProfileId);
+        },
+      },
+    };
+  }, [hostScopeRef, linkFor]);
   // Both pins are host state now, so both take the action pipeline: the pin
   // outlives this app, and every client of the same tmux server sees it. The
   // scope check is the same one every row action makes — a menu can outlive the
@@ -715,10 +848,16 @@ export function App() {
   // line and an incident, not an exception nobody is waiting for. The pin state
   // is read from the same live row or tab the menu label was drawn from, so the
   // action asks for the opposite of what the user was just shown.
-  const toggleWorkspacePin = useCallback((session: Session, scope: HostScopeToken) => {
-    if (!sameHostConnection(scope, hostScopeRef.current)) return;
-    void performAction({ kind: "setPinned", sessionId: session.id, pinned: !session.pinned });
-  }, [hostScopeRef, performAction]);
+  //
+  // A row on a host shown beside the active one carries that host's scope,
+  // and its pin goes to that host's client — the row is where the pin lives.
+  const toggleWorkspacePin = useCallback((row: MergedWorkspaceRow) => {
+    if (!scopeIsLive(row.scope)) return;
+    void performAction(
+      { kind: "setPinned", sessionId: row.session.id, pinned: !row.session.pinned },
+      undefined, undefined, actionTargetFor(row.hostProfileId),
+    );
+  }, [actionTargetFor, performAction, scopeIsLive]);
   const toggleTabPin = useCallback((tab: Extract<CombinedTab, { kind: "terminal" }>, scope: HostScopeToken) => {
     if (!activeSessionId || !sameHostConnection(scope, hostScopeRef.current)) return;
     void performAction({ kind: "setPinned", sessionId: activeSessionId, windowId: tab.id, pinned: !tab.pinned });
@@ -726,9 +865,63 @@ export function App() {
   // From the agents list the tab is named by the agent's own route, which
   // spans workspaces — no dependence on the session on screen.
   const toggleAgentTabPin = useCallback((row: AgentListRow, scope: HostScopeToken) => {
-    if (!sameHostConnection(scope, hostScopeRef.current)) return;
-    void performAction({ kind: "setPinned", sessionId: row.agent.sessionId, windowId: row.agent.windowId, pinned: !row.location.tabPinned });
-  }, [hostScopeRef, performAction]);
+    if (!scopeIsLive(scope)) return;
+    void performAction(
+      { kind: "setPinned", sessionId: row.agent.sessionId, windowId: row.agent.windowId, pinned: !row.location.tabPinned },
+      undefined, undefined, actionTargetFor(row.agent.hostProfileId),
+    );
+  }, [actionTargetFor, performAction, scopeIsLive]);
+  /**
+   * The host a targeted command runs on, by the scope its row captured. The
+   * active host answers with the facade's own state and action path; a peer
+   * answers with its link's snapshot and an action path aimed at its client.
+   * A scope that is no longer any shown host's live connection is nothing.
+   */
+  const commandHostForScope = useCallback((scope: HostScopeToken): CommandHost | undefined => {
+    if (!scopeIsLive(scope)) return undefined;
+    const target = actionTargetFor(scope.hostProfileId);
+    if (!target) {
+      return {
+        scope: hostScopeRef.current, snapshot: snapshotRef.current, serverIdentity: hostScopeRef.current.serverIdentity,
+        performAction, isScopeCurrent: scopeIsLive,
+      };
+    }
+    const linkScope = target.scopeRef.current;
+    return {
+      scope: linkScope,
+      snapshot: hostWorlds.get(scope.hostProfileId)?.snapshot ?? NO_SNAPSHOT,
+      serverIdentity: linkScope.serverIdentity,
+      performAction: (action, precondition) => performAction(action, precondition, undefined, target),
+      isScopeCurrent: scopeIsLive,
+    };
+  }, [actionTargetFor, hostScopeRef, hostWorlds, performAction, scopeIsLive, snapshotRef]);
+
+  /**
+   * A row on another host: the host becomes the one on screen first, and the
+   * row's session — and pane, for an agent — is selected once the facade
+   * reports that host. Bell jumps, ⌘1–9, ⌘P and agent rows all arrive here.
+   */
+  const [pendingHostSelection, setPendingHostSelection] = useState<PendingHostSelection>();
+  const selectOnHost = useCallback((selection: PendingHostSelection) => {
+    setPendingHostSelection(selection);
+    activateHost(selection.profileId);
+  }, [activateHost]);
+  const selectWorkspaceRow = useCallback((row: MergedWorkspaceRow) => {
+    if (row.hostProfileId === hostScopeRef.current.hostProfileId) return selectSession(row.session.id);
+    selectOnHost({ profileId: row.hostProfileId, sessionId: row.session.id, source: `Workspace ${row.session.name}` });
+  }, [hostScopeRef, selectOnHost, selectSession]);
+  useEffect(() => {
+    if (!pendingHostSelection || pendingHostSelection.profileId !== currentHostProfileId) return;
+    setPendingHostSelection(undefined);
+    const { paneId, sessionId, source } = pendingHostSelection;
+    const destination = paneId ? resolveTerminalDestination(snapshot.panes, paneId) : undefined;
+    if (destination?.kind === "target") {
+      void surfacePaneDestination(destination.pane, source).then((result) => reportAnnouncedPaneResult(result, setStatus));
+      return;
+    }
+    if (destination) setStatus(`${source}'s pane is no longer available: ${destination.reason}; opening its workspace.`);
+    selectSession(sessionId);
+  }, [currentHostProfileId, pendingHostSelection, selectSession, snapshot.panes, surfacePaneDestination]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     // A placeholder stands for a window that does not exist yet: there is
@@ -745,15 +938,42 @@ export function App() {
     }
   }, [activeSession, activeWindowId, hostState.serverIdentity, selectWindow, shellNavigation]);
 
-  const selectAgentRow = useCallback((row: AgentListRow, scope = hostScopeRef.current) => {
+  // From the list the row comes with its host's scope; the bell jump has
+  // none, and asks for whichever agent is loudest on whichever host.
+  const selectAgentRow = useCallback((row: AgentListRow, scope?: HostScopeToken) => {
     notificationActivation.clearNotificationFocusGuard();
-    if (!sameHostConnection(scope, hostScopeRef.current)) return;
+    if (scope && !scopeIsLive(scope)) return;
     if (!row.agent.paneId) return setStatus(`Agent ${row.agent.displayName} has no exact pane match; navigation is unavailable.`);
+    const source = `Agent ${row.agent.displayName}`;
+    if (row.agent.hostProfileId !== hostScopeRef.current.hostProfileId) {
+      return selectOnHost({ profileId: row.agent.hostProfileId, sessionId: row.agent.sessionId, paneId: row.agent.paneId, source });
+    }
     const destination = resolveTerminalDestination(snapshot.panes, row.agent.paneId);
     if (destination.kind === "unavailable") return setStatus(`Agent destination ${row.agent.displayName} is no longer available: ${destination.reason}.`);
-    void surfacePaneDestination(destination.pane, `Agent ${row.agent.displayName}`)
+    void surfacePaneDestination(destination.pane, source)
       .then((result) => reportAnnouncedPaneResult(result, setStatus));
-  }, [notificationActivation, snapshot.panes, surfacePaneDestination]);
+  }, [hostScopeRef, notificationActivation, scopeIsLive, selectOnHost, snapshot.panes, surfacePaneDestination]);
+
+  /**
+   * The picked host's mark and visibility, saved as typed. Saving does not
+   * move the last-profile pointer, and the controller derives its link set
+   * from `profiles`, so a host checked here gets its bridge — and one
+   * unchecked loses it — without anything else being told.
+   */
+  const saveProfileFields = useCallback((profileId: string, patch: Pick<HostProfile, "letter" | "shown">) => {
+    const profile = profiles.find((item) => item.id === profileId);
+    if (!profile) return;
+    const { letter, ...rest } = { ...profile, ...patch };
+    const next: HostProfile = letter ? { ...rest, letter } : rest;
+    setProfiles((current) => current.map((item) => (item.id === profileId ? next : item)));
+    void invoke("save_host_profile", { profile: next }).catch((error) => setStatus(String(error)));
+  }, [profiles, setProfiles]);
+  const toggleHostShown = useCallback((profileId: string) => {
+    const profile = profiles.find((item) => item.id === profileId);
+    // The host on screen is always shown; the menu disables its item.
+    if (!profile || profileId === currentHostProfileId) return;
+    saveProfileFields(profileId, { letter: profile.letter, shown: !profile.shown });
+  }, [currentHostProfileId, profiles, saveProfileFields]);
 
   // What the Explorer, Git and the agents list currently offer for the row the
   // user last pointed at — the palette's only way to name a row.
@@ -828,6 +1048,7 @@ export function App() {
     closeAppTab: closeWorkspaceAppTab,
     combinedTabs, controllers, currentHostProfileId, deletableHostProfile: deletableProfile,
     focusDirection, hostScope: currentHostScope,
+    hostForScope: commandHostForScope,
     isHostScopeCurrent: (scope) => sameHostConnection(scope, hostScopeRef.current),
     jumpToUnreadAgent: () => {
       const target = jumpTarget(agentRows);
@@ -853,7 +1074,7 @@ export function App() {
     },
     selectWorkspaceByIndex: (index) => {
       const row = sidebarRows[index];
-      if (row) selectSession(row.session.id);
+      if (row) selectWorkspaceRow(row);
     },
     serverIdentity: hostState.serverIdentity, setAppState, setConfirmation,
     setPaletteOpen, setSettingsOpen, setShortcutEditorOpen, setStatus, setTextPrompt,
@@ -1133,28 +1354,38 @@ export function App() {
         width={sidebarWidth}
         onLaunchAgent={agentWorkflow.launch}
         onOpenSettings={() => setSettingsOpen(true)}
+        // The rename names the agent where it lives, on the active host or
+        // beside it; the runtime routes it by the agent's own host.
         onRenameAgent={(agent, scope) => {
-          if (!sameHostConnection(scope, hostScopeRef.current)) return;
+          if (!scopeIsLive(scope)) return;
           setTextPrompt({
             title: "Rename agent",
             label: "Agent name",
             initialValue: agent.displayName,
             submit: (name) => {
               setTextPrompt(undefined);
-              if (sameHostConnection(scope, hostScopeRef.current)) agentWorkflow.rename(agent, name);
+              if (scopeIsLive(scope)) agentWorkflow.rename(agent, name);
             },
           });
         }}
+        // A resume opens a new pane beside the one on screen, under the
+        // active root the explorer has — both facts of the host on screen.
+        // An agent on another host is resumed from there, once it is.
         onResumeAgent={(agent, placement, scope) => {
-          if (sameHostConnection(scope, hostScopeRef.current)) agentWorkflow.resume(agent, placement);
+          if (!scopeIsLive(scope)) return;
+          if (agent.hostProfileId !== currentHostProfileId) {
+            const label = sidebarHosts.find((host) => host.profileId === agent.hostProfileId)?.label ?? agent.hostProfileId;
+            return setStatus(`Resume opens a pane on the host on screen; select a workspace on ${label} first.`);
+          }
+          agentWorkflow.resume(agent, placement);
         }}
         onReviewHooks={agentWorkflow.reviewHooks}
         onSelectAgent={selectAgentRow}
-        onSelectWorkspace={(row) => selectSession(row.session.id)}
+        onSelectWorkspace={selectWorkspaceRow}
         onTogglePinnedOnly={() => void runCommand(appState.shell.pinnedOnly ? "workspaces.showAll" : "workspaces.showPinnedOnly")}
         onTogglePinnedAgentTab={toggleAgentTabPin}
-        onTogglePinnedWorkspace={(row) => toggleWorkspacePin(row.session, row.scope)}
-        onToggleShown={() => setStatus("Host visibility is wired in the next step.")}
+        onTogglePinnedWorkspace={toggleWorkspacePin}
+        onToggleShown={toggleHostShown}
         onSortMode={(mode) => updateShell({ agentSort: mode })}
         onWorkspaceCommand={(row, commandId) => void runCommand(commandId, { kind: "session", id: row.session.id, scope: row.scope })}
         pinnedOnly={appState.shell.pinnedOnly}
@@ -1376,6 +1607,7 @@ export function App() {
       terminalTransferRegistry={terminalTransferRegistry}
     />
     {settingsOpen && <SettingsDialog
+      activeProfileId={currentHostProfileId}
       agentSetup={{
         available: agentHostSetup.offerable,
         connected: Boolean(agentScope),
@@ -1404,6 +1636,7 @@ export function App() {
       onTestNotification={emitTestNotification}
       onProbeHelper={() => void probeHelper()}
       onProfile={selectProfile}
+      onProfileFields={(patch) => saveProfileFields(selectedProfileId, patch)}
       onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}
       onShell={updateShell}
       onSounds={(preferences) => { setAgentSounds(preferences); saveAgentSoundPreferences(preferences); }}
@@ -1432,7 +1665,7 @@ export function App() {
     />}
     {workspaceSwitcherOpen && <WorkspaceSwitcher
       onClose={() => setWorkspaceSwitcherOpen(false)}
-      onSelect={(row) => selectSession(row.session.id)}
+      onSelect={selectWorkspaceRow}
       // Every workspace, filtered or not. The filter is a way to quieten the
       // list, not a way to make a workspace unreachable; leaving the switcher
       // narrowed would mean the only way back to an unpinned workspace is to
@@ -1457,7 +1690,11 @@ export function App() {
       onConfirmationCancel={() => setConfirmation(undefined)}
       onConfirmationConfirm={(pending) => {
         setConfirmation(undefined);
-        void performAction(pending.action, pending.precondition);
+        // Against the host the row named, which need not be the one on
+        // screen by the time the dialog is answered.
+        const host = commandHostForScope(pending.scope);
+        if (!host) return setStatus(`Closing ${pending.targetLabel} was cancelled because its host connection changed.`);
+        void host.performAction(pending.action, pending.precondition);
       }}
       onHelperCancel={() => dispatchHelper({ type: "cancelUpgrade" })}
       onHelperConfirm={() => {

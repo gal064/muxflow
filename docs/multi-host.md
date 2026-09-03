@@ -183,9 +183,17 @@ Launch, rename, resume and hook actions use the active host's scope.
   then `selectSession(sessionId)` once the facade reports that host (an effect
   keyed on a pending `{ profileId, sessionId, paneId? }`).
 - Bell jump and notification click use the same path.
-- Row mutations (pin, rename, move, close, agent pin/rename/resume) run against
-  the row's host: `useTmuxActionPerformer` accepts an optional target
-  `{ clientId, scopeRef }`, resolved from the row's `hostProfileId`.
+- Row mutations (pin, rename, move, close, agent tab pin, agent rename) run
+  against the row's host: `useTmuxActionPerformer` accepts an optional target
+  `{ clientId, canMutate, scopeRef }`, resolved from the row's `hostProfileId`
+  via `linkFor`; `useShellCommands` resolves a targeted command's host through
+  `hostForScope(scope)`, and a close confirmation carries the scope it was
+  opened for. An agent resume opens a new pane beside the one on screen under
+  the explorer's active root — facts of the active host — so a peer's agent is
+  resumed after its host is activated; the row says so.
+- Settings › Connection's "Letter" and "Show in sidebar" edit the picked saved
+  host and save on change (`save_host_profile`), without Connect. The host on
+  screen cannot be un-shown from either place.
 - Focus history is scoped to the active host and cleared on a host switch.
 - `DisconnectedStrip` reports the active host only; peer phases show as the
   dot in the host menu and as dimmed rows.

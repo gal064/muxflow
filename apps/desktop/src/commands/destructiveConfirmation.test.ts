@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createTmuxConfirmation } from "./destructiveConfirmation";
+import type { HostScopeToken } from "../features/shell/hostScope";
 import type { TmuxAction } from "../features/tmux/actions";
+
+const scope: HostScopeToken = { hostProfileId: "local", connectionKey: "local", connectionEpoch: 1, serverIdentity: "tmux:before", generation: 17 };
 
 describe("destructive tmux confirmation identity", () => {
   const cases: Array<{
@@ -41,6 +44,7 @@ describe("destructive tmux confirmation identity", () => {
         value.label,
         { ...value.action, confirmed: true },
         { serverIdentity: "tmux:before", generation: 17 },
+        scope,
       );
 
       // These represent authoritative focus/topology changing while the dialog is open.
@@ -60,6 +64,7 @@ describe("destructive tmux confirmation identity", () => {
       "terminal tab “api”",
       { kind: "reorderWindow", sessionId: "$1", windowId: "@2", targetWindowId: "@1", relativePosition: "before", confirmed: true },
       { serverIdentity: "tmux:one", generation: 1 },
+      scope,
     )).toThrow("destructive");
   });
 
@@ -73,6 +78,7 @@ describe("destructive tmux confirmation identity", () => {
       "terminal tab “api”",
       { kind: "closeWindow", sessionId: "$1", windowId: "@2" },
       { serverIdentity: "tmux:one", generation: 1 },
+      scope,
     )).toThrow("confirmed");
   });
 });

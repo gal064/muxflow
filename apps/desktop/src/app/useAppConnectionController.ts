@@ -28,6 +28,7 @@ import { terminalCacheKey, terminalStateCache } from "../features/terminal/Termi
 import { denormalizeSnapshot, type ConnectionPhase, type HostAction } from "../state/connectionReducer";
 import {
   emptyHostLink,
+  hostLinkScope,
   hostLinksReducer,
   initialHostLinksState,
   shownHostProfiles,
@@ -206,13 +207,7 @@ export function useAppConnectionController({
    * a client at all — kept because the agent controller still asks.
    */
   const clientHostProfileId = clientId === undefined ? undefined : activeProfileId;
-  const currentHostScope: HostScopeToken = {
-    hostProfileId: activeProfileId,
-    connectionKey: helperConnectionKey(connection),
-    connectionEpoch,
-    serverIdentity: hostState.serverIdentity,
-    generation: hostState.generation,
-  };
+  const currentHostScope: HostScopeToken = hostLinkScope(activeLink);
   const hostScopeRef = useRef(currentHostScope);
   hostScopeRef.current = currentHostScope;
   /**

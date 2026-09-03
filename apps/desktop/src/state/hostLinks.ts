@@ -1,5 +1,7 @@
 import type { SetStateAction } from "react";
 import type { ConnectionSpec, HostProfile } from "../app/types";
+import { helperConnectionKey } from "../features/shell/helperUpgrade";
+import type { HostScopeToken } from "../features/shell/hostScope";
 import { resolveSelectedSession } from "../features/shell/model";
 import { hostProfileId } from "../features/shell/types";
 import { connectionReducer, initialHostState, type HostAction, type NormalizedHostState } from "./connectionReducer";
@@ -64,6 +66,21 @@ export const initialHostLinksState: HostLinksState = { order: [], byProfileId: {
 
 export function emptyHostLink(profileId: string, connection: ConnectionSpec, connectionEpoch: number): HostLink {
   return { profileId, connection, connectionEpoch, terminalEpoch: 0, hostState: initialHostState, detail: "" };
+}
+
+/**
+ * The scope token a link's rows and actions carry: the same five facts for
+ * every host, so a token captured by a menu can be checked against whichever
+ * link it names rather than only against the host on screen.
+ */
+export function hostLinkScope(link: HostLink): HostScopeToken {
+  return {
+    hostProfileId: link.profileId,
+    connectionKey: helperConnectionKey(link.connection),
+    connectionEpoch: link.connectionEpoch,
+    serverIdentity: link.hostState.serverIdentity,
+    generation: link.hostState.generation,
+  };
 }
 
 function sameConnection(left: ConnectionSpec, right: ConnectionSpec): boolean {

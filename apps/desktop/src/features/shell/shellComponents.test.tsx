@@ -1337,6 +1337,7 @@ describe("saved host picker", () => {
   ] as const;
 
   const settings = (overrides: Partial<Parameters<typeof SettingsDialog>[0]> = {}) => <SettingsDialog
+    activeProfileId="local"
     agentSetup={{ available: false, connected: true, reports: true, onSetUp: noop }}
     connectionMode="local"
     helper={{ phase: "idle" }}
@@ -1347,6 +1348,7 @@ describe("saved host picker", () => {
     onDeleteProfile={noop}
     onProbeHelper={noop}
     onProfile={noop}
+    onProfileFields={noop}
     onRequestHelperInstall={noop}
     onNotificationStatus={async () => "authorized"}
     onShell={noop}

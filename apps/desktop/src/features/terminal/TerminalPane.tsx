@@ -48,7 +48,9 @@ import { armPanePaint, notePanePainted } from "./panePaintGate";
 export { paneRecoveryPlan } from "./PaneRecovery";
 
 // A pane may remount while its prior renderer is still draining. Serializing
-// visibility ownership keeps a late hide from overtaking the new reveal.
+// visibility ownership keeps a late hide from overtaking the new reveal. Keyed
+// by `terminalCacheKey`, like the screen cache: pane ids repeat across hosts,
+// and one host's `%0` draining must not hold another host's `%0` back.
 const pendingPaneHandoffs = new Map<string, Promise<void>>();
 const paneLifecycleVersions = new Map<string, number>();
 let nextTransferRenderLifetime = 0;
@@ -450,8 +452,8 @@ export function TerminalPane({
     // fallback armed at the end of this effect is not a fallback for any of
     // that: the pane would stay hidden with no timer to rescue it.
     const revealFallback = setTimeout(revealTerminal, 300);
-    const lifecycle = (paneLifecycleVersions.get(pane.id) ?? 0) + 1;
-    paneLifecycleVersions.set(pane.id, lifecycle);
+    const lifecycle = (paneLifecycleVersions.get(cacheKey) ?? 0) + 1;
+    paneLifecycleVersions.set(cacheKey, lifecycle);
     const initialPaint = createPaintTicket([], lifecycle);
     let rendererActive = true;
     let rendererEpoch: number | undefined;
@@ -544,7 +546,7 @@ export function TerminalPane({
       // and the reveal checkpoint (hub counter) describe different cutoffs —
       // the stale-splice half of P12-U003.3. A superseded lifecycle is a
       // different pane instance and must stay silent.
-      if (paneLifecycleVersions.get(pane.id) !== lifecycle) return false;
+      if (paneLifecycleVersions.get(cacheKey) !== lifecycle) return false;
       hub.markRendered(pane.id, generation, terminalEpoch);
       return true;
     };
@@ -571,13 +573,13 @@ export function TerminalPane({
       // pixels are still this pane's": a superseded or torn-down instance
       // never painted what it parsed, and its successor reports instead.
       afterNextPaint(() => {
-        if (!rendererActive || paneLifecycleVersions.get(pane.id) !== lifecycle) return;
+        if (!rendererActive || paneLifecycleVersions.get(cacheKey) !== lifecycle) return;
         closePanePaintSpans(clientIdRef.current, pane.id);
       });
       initialPaint.afterPaint(
         (ticket) => ticket.lifecycleGeneration === lifecycle
           && rendererActive
-          && paneLifecycleVersions.get(pane.id) === lifecycle,
+          && paneLifecycleVersions.get(cacheKey) === lifecycle,
         () => {
           recordPerfMilestone("startup.terminalPaint");
         },
@@ -1146,7 +1148,7 @@ export function TerminalPane({
       const handoff = (async () => {
         try {
           const drained = await renderer.drainAndSerialize();
-          if (paneLifecycleVersions.get(pane.id) !== lifecycle) return;
+          if (paneLifecycleVersions.get(cacheKey) !== lifecycle) return;
           const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
           if (!currentCheckpoint) return;
           const snapshotMatchesEpoch = rendererEpoch === currentCheckpoint.terminalEpoch;
@@ -1205,19 +1207,19 @@ export function TerminalPane({
           if (rendererRef.current === renderer) rendererRef.current = undefined;
         }
       })();
-      pendingPaneHandoffs.set(pane.id, handoff);
+      pendingPaneHandoffs.set(cacheKey, handoff);
       void handoff.then(
         () => {
-          if (pendingPaneHandoffs.get(pane.id) === handoff) pendingPaneHandoffs.delete(pane.id);
-          if (paneLifecycleVersions.get(pane.id) === lifecycle) paneLifecycleVersions.delete(pane.id);
+          if (pendingPaneHandoffs.get(cacheKey) === handoff) pendingPaneHandoffs.delete(cacheKey);
+          if (paneLifecycleVersions.get(cacheKey) === lifecycle) paneLifecycleVersions.delete(cacheKey);
         },
         () => {
-          if (pendingPaneHandoffs.get(pane.id) === handoff) pendingPaneHandoffs.delete(pane.id);
-          if (paneLifecycleVersions.get(pane.id) === lifecycle) paneLifecycleVersions.delete(pane.id);
+          if (pendingPaneHandoffs.get(cacheKey) === handoff) pendingPaneHandoffs.delete(cacheKey);
+          if (paneLifecycleVersions.get(cacheKey) === lifecycle) paneLifecycleVersions.delete(cacheKey);
         },
       );
     };
-  }, [hub, pane.id]);
+  }, [cacheKey, hub, pane.id]);
 
   // Undebounced deliberately. A font size change re-measures the face and
   // reflows the whole scrollback, which is lossy on a shrink, so it must not
@@ -1286,25 +1288,25 @@ export function TerminalPane({
       revealKey: string,
       retriesUsed: number,
     ) => {
-      const handoff = pendingPaneHandoffs.get(pane.id);
+      const handoff = pendingPaneHandoffs.get(cacheKey);
       if (handoff && (await awaitWithin(handoff, PANE_HANDOFF_TIMEOUT_MS)) === "timeout") {
         // Proceeding is safe, and waiting longer is not. A pending handoff
         // belongs to a *previous* instance of this pane — it is created by the
         // mount effect's cleanup, and React runs that cleanup before the new
         // instance's effects — so its own guard
-        // (`paneLifecycleVersions.get(pane.id) !== lifecycle`) already makes
+        // (`paneLifecycleVersions.get(cacheKey) !== lifecycle`) already makes
         // everything it does after the drain a no-op: it writes no
         // `terminalStateCache` entry and sends no hide. That guard is what
         // rules out the two things this wait was protecting against, a late
         // hide overtaking this reveal and a stale serialize landing in the
-        // cache under this pane's id — the cache is keyed by pane id alone,
-        // with the epoch only carried as a field, so a stale `set` would be
+        // cache under this pane's key — the cache is keyed by host and pane
+        // id, with the epoch only carried as a field, so a stale `set` would be
         // indistinguishable from a fresh one if it ever ran. The one case
         // where the handoff is still current is a pane that really did go
         // away, and then `active` is false and this reveal stops below.
         // Dropping the map entry keeps the *next* reveal from queueing behind
         // the same wedged promise.
-        if (pendingPaneHandoffs.get(pane.id) === handoff) pendingPaneHandoffs.delete(pane.id);
+        if (pendingPaneHandoffs.get(cacheKey) === handoff) pendingPaneHandoffs.delete(cacheKey);
         recordPerfCounter("terminal.pane.handoffTimeouts");
       }
       if (!active || lastRevealKeyRef.current !== revealKey) return;
@@ -1498,7 +1500,7 @@ export function TerminalPane({
       reassertVisibilityRef.current = undefined;
       unsubscribe();
     };
-  }, [clientId, hub, pane.id]);
+  }, [cacheKey, clientId, hub, pane.id]);
 
   useEffect(() => {
     if (pane.active) rendererRef.current?.focus();
