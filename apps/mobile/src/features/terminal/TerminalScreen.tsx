@@ -14,6 +14,7 @@ import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { StatusPill } from "../../ui/components/StatusPill";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
+import { appForeground } from "./appForeground";
 import type { FromPageMessage } from "./bridgeMessages";
 import { KEY_CHIPS, SHIFT_CHIP, pressChip } from "./chips";
 import { TerminalController, type TerminalSnapshot } from "./TerminalController";
@@ -68,6 +69,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
       page: { send: (message) => webview.current?.send(message) },
       onChange: setSnapshot,
       log,
+      foreground: appForeground,
     });
     controller.current = instance;
     instance.start();

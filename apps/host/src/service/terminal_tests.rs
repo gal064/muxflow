@@ -166,6 +166,90 @@ fn session_snapshot(attached_clients: u32) -> tmux_control::TmuxSnapshot {
     }
 }
 
+/// `session_snapshot` with the session's one window at `size`.
+fn session_snapshot_with_window(
+    attached_clients: u32,
+    size: (u16, u16),
+) -> tmux_control::TmuxSnapshot {
+    let mut snapshot = session_snapshot(attached_clients);
+    snapshot.windows.push(tmux_control::Window {
+        id: "@1".into(),
+        session_id: "$1".into(),
+        index: 0,
+        name: "fixture".into(),
+        active: true,
+        layout: String::new(),
+        zoomed: false,
+        pinned: false,
+    });
+    snapshot.panes.push(tmux_control::Pane {
+        id: "%1".into(),
+        session_id: "$1".into(),
+        window_id: "@1".into(),
+        index: 0,
+        active: true,
+        width: size.0,
+        height: size.1,
+        left: 0,
+        top: 0,
+        current_path: "/".into(),
+        current_command: "bash".into(),
+        pane_pid: 1,
+        start_command: String::new(),
+    });
+    snapshot
+}
+
+/// A remembered size is only as good as the window it describes. The phone
+/// took this session's window while the desktop was showing another one; when
+/// the desktop comes back, its client still holds the right size and tmux
+/// still has the phone's, so the selection must re-state it — and a selection
+/// of a window already at that size must stay free, as before.
+#[test]
+fn selecting_a_session_whose_window_is_at_another_size_re_sends_the_size() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    clients.reconcile(&session_snapshot_with_window(1, (120, 40)));
+    clients.last_size = Some((120, 40));
+
+    // The first selection sizes a client that has never been sized.
+    clients.select_session("$1").unwrap();
+    recorded.fence(&mut clients, 2);
+    assert_eq!(
+        recorded
+            .written()
+            .matches("refresh-client -C 120,40")
+            .count(),
+        1
+    );
+
+    // Same remembered size, window at the phone's: re-stated.
+    clients.reconcile(&session_snapshot_with_window(2, (50, 30)));
+    clients.select_session("$1").unwrap();
+    recorded.fence(&mut clients, 3);
+    assert_eq!(
+        recorded
+            .written()
+            .matches("refresh-client -C 120,40")
+            .count(),
+        2,
+        "a window at another size was taken at the client's word: {}",
+        recorded.written()
+    );
+
+    // Window back at the desktop's size: nothing to say.
+    clients.reconcile(&session_snapshot_with_window(2, (120, 40)));
+    clients.select_session("$1").unwrap();
+    recorded.fence(&mut clients, 4);
+    assert_eq!(
+        recorded.written().matches("refresh-client -C").count(),
+        2,
+        "a window already at the size was re-sized: {}",
+        recorded.written()
+    );
+    clients.stop();
+}
+
 /// The bug, in one test: a plain terminal the user typed into owns `w->latest`,
 /// so the size this daemon asserts is discarded unless it takes the pointer
 /// back. The order is the whole fix — the claim recomputes the windows from the

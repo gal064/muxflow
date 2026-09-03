@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PixelBox, TerminalMeasurements, TerminalSize } from "../features/terminal/TerminalRenderer";
-import { CLIENT_RESIZE_DEBOUNCE_MS, CLIENT_RESIZE_REASSERTS, CLIENT_RESIZE_RETRIES, CLIENT_RESIZE_RETRY_MS, useClientResize } from "./useClientResize";
+import { CLIENT_RESIZE_DEBOUNCE_MS, CLIENT_RESIZE_RETRIES, CLIENT_RESIZE_RETRY_MS, CLIENT_RESIZE_TAKE_INTERVAL_MS, useClientResize } from "./useClientResize";
 
 const resizeClientMock = vi.hoisted(() => vi.fn(async (_clientId: string, _columns: number, _rows: number) => undefined));
 vi.mock("../features/terminal/api", () => ({ resizeClient: resizeClientMock }));
@@ -44,7 +44,6 @@ function setSurfaceBox(box: PixelBox) {
 interface HarnessProps {
   activeWindowId?: string;
   actualSize?: TerminalSize;
-  appFocused?: boolean;
   canMutate?: boolean;
   clientId?: string;
   measurements?: TerminalMeasurements;
@@ -56,7 +55,6 @@ function Harness(props: HarnessProps) {
   const { onMeasurements, surfaceRef } = useClientResize({
     activeWindowId: props.activeWindowId,
     actualSize: props.actualSize,
-    appFocused: props.appFocused ?? true,
     canMutate: props.canMutate ?? true,
     clientId: props.clientId,
     onStatus: props.onStatus ?? (() => undefined),
@@ -66,9 +64,13 @@ function Harness(props: HarnessProps) {
   return props.surfaceMounted === false ? null : <div ref={surfaceRef} />;
 }
 
+/** Every hook the file mounts listens on the one jsdom `window`; each test unmounts its own. */
+const mounted: ReactTestRenderer[] = [];
+
 async function render(props: HarnessProps, box: PixelBox = { width: 1000, height: 800 }) {
   let renderer!: ReactTestRenderer;
   await act(async () => { renderer = create(<Harness {...props} />, { createNodeMock: () => document.createElement("div") }); });
+  mounted.push(renderer);
   await act(async () => { setSurfaceBox(box); });
   await settle();
   return {
@@ -89,6 +91,21 @@ async function exhaustRetries() {
   await act(async () => { await vi.advanceTimersByTimeAsync(CLIENT_RESIZE_RETRY_MS * (CLIENT_RESIZE_RETRIES + 1)); });
 }
 
+/** What a person does in the app: a keystroke, then the debounce. */
+async function keydown() {
+  await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" })); });
+  await settle();
+}
+
+async function pointerdown() {
+  await act(async () => { window.dispatchEvent(new Event("pointerdown")); });
+  await settle();
+}
+
+async function idle(ms: number) {
+  await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+}
+
 describe("useClientResize", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -97,7 +114,8 @@ describe("useClientResize", () => {
     observed.clear();
     vi.stubGlobal("ResizeObserver", StubResizeObserver);
   });
-  afterEach(() => {
+  afterEach(async () => {
+    for (const renderer of mounted.splice(0)) await act(async () => renderer.unmount());
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -213,71 +231,110 @@ describe("useClientResize", () => {
     expect(statuses).toHaveLength(1);
   });
 
+
   /**
-   * Under `window-size latest`, a plain terminal on the same session takes the
-   * windows to its own size the moment anything happens in it. The app's
-   * surface has not moved, so the ordinary path recomputes the same answer and
-   * the dedupe drops it — which is how a pane stays letterboxed for the rest of
-   * the session.
+   * Under `window-size latest`, another client on the same session — a plain
+   * terminal, or the phone — takes the windows to its own size the moment it
+   * is used. The app's surface has not moved, so the ordinary path recomputes
+   * the same answer and the dedupe drops it — which is how a pane stays
+   * letterboxed for the rest of the session. A keystroke here is what takes
+   * it back.
    */
-  it("re-asserts the size when tmux's windows are not the size that was asked for", async () => {
-    const props = { appFocused: true, clientId: "client-1" };
+  it("takes the size back on a keystroke when tmux's windows are not the size that was asked for", async () => {
+    const props = { clientId: "client-1" };
     const { update } = await render({ ...props, actualSize: { columns: 121, rows: 46 } });
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
-    // Another terminal shrank the shared windows.
+    // The phone shrank the shared windows; nothing happens until the user does something.
     await update({ ...props, actualSize: { columns: 80, rows: 24 } });
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    await keydown();
     expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-1", 121, 46]]);
+  });
+
+  it("takes on a pointer-down as well", async () => {
+    const props = { clientId: "client-1" };
+    const { update } = await render({ ...props, actualSize: { columns: 121, rows: 46 } });
+    await update({ ...props, actualSize: { columns: 80, rows: 24 } });
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    await pointerdown();
+    expect(resizeClientMock).toHaveBeenCalledTimes(2);
   });
 
   /**
    * Two clients that each answer the other's size resize a real person's
-   * windows back and forth for as long as both are attached, so the app gets a
-   * bounded number of attempts and then stops. Returning to the window is what
-   * restores them.
+   * windows back and forth for as long as both are used, so a take is allowed
+   * once per interval and no more — the flicker while two people type at once
+   * is slow, and stops the moment one of them does.
    */
-  it("stops re-asserting once the budget is spent, and gets it back on focus", async () => {
-    const props = { appFocused: true, clientId: "client-1" };
+  it("takes at most once per interval, however much is typed", async () => {
+    const props = { clientId: "client-1" };
     const { update } = await render({ ...props, actualSize: { columns: 121, rows: 46 } });
-    // Something else answers every reassertion with a size of its own.
-    for (let round = 0; round < CLIENT_RESIZE_REASSERTS + 2; round += 1) {
-      await update({ ...props, actualSize: { columns: 80, rows: 24 + round } });
-    }
-    expect(resizeClientMock).toHaveBeenCalledTimes(1 + CLIENT_RESIZE_REASSERTS);
-    await update({ ...props, appFocused: false, actualSize: { columns: 80, rows: 24 } });
-    await update({ ...props, actualSize: { columns: 80, rows: 30 } });
-    expect(resizeClientMock).toHaveBeenCalledTimes(2 + CLIENT_RESIZE_REASSERTS);
+    await update({ ...props, actualSize: { columns: 80, rows: 24 } });
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    await keydown();
+    expect(resizeClientMock).toHaveBeenCalledTimes(2);
+    // The other side answers with its own size again; typing inside the
+    // interval changes nothing.
+    await update({ ...props, actualSize: { columns: 80, rows: 25 } });
+    await keydown();
+    await keydown();
+    expect(resizeClientMock).toHaveBeenCalledTimes(2);
+    // Past the interval, the next keystroke takes again.
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    await keydown();
+    expect(resizeClientMock).toHaveBeenCalledTimes(3);
   });
 
   /**
-   * The asymmetry is the whole anti-resize-war policy: an unfocused app is one
-   * the user has left in order to work in that other terminal, and taking the
-   * size back from under them is P12-U006's class of harm.
+   * The whole anti-resize-war policy: an app nobody is using never takes,
+   * however often the other side moves the windows. Focus is not use — an
+   * app left open beside a phone in use must stay quiet.
    */
-  it("never takes the size back while the app is not focused", async () => {
-    const props = { appFocused: false, clientId: "client-1" };
+  it("never takes without an interaction, however many times tmux's answer changes", async () => {
+    const props = { clientId: "client-1" };
     const { update } = await render({ ...props, actualSize: { columns: 121, rows: 46 } });
-    // The first request still goes out — that is this app stating its own
-    // geometry, not fighting over anyone's.
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
-    await update({ ...props, actualSize: { columns: 80, rows: 24 } });
+    for (let round = 0; round < 4; round += 1) {
+      await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+      await update({ ...props, actualSize: { columns: 80, rows: 24 + round } });
+    }
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
-    await update({ ...props, appFocused: true, actualSize: { columns: 80, rows: 24 } });
-    expect(resizeClientMock).toHaveBeenCalledTimes(2);
   });
 
-  it("re-asserts nothing while tmux has the size that was asked for", async () => {
-    const props = { appFocused: true, clientId: "client-1", actualSize: { columns: 121, rows: 46 } };
-    const { update } = await render(props);
-    await update({ ...props, appFocused: false });
-    await update(props);
+  it("takes nothing while tmux has the size that was asked for", async () => {
+    const props = { clientId: "client-1", actualSize: { columns: 121, rows: 46 } };
+    await render(props);
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    await keydown();
+    await pointerdown();
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
   });
 
   /** A window the snapshot cannot describe is not a window at 0x0. */
-  it("re-asserts nothing when the snapshot reports no size at all", async () => {
-    const props = { appFocused: true, clientId: "client-1" };
+  it("takes nothing when the snapshot reports no size at all", async () => {
+    const props = { clientId: "client-1" };
     const { update } = await render({ ...props, actualSize: { columns: 121, rows: 46 } });
     await update({ ...props, actualSize: undefined });
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    await keydown();
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The ordinary path is the same rate limit's other half: the first request
+   * after a connection is a send too, so a keystroke right behind it — while
+   * the snapshot still shows the size from before — does not double it.
+   */
+  it("counts the ordinary request against the interval", async () => {
+    const props = { clientId: "client-1" };
+    const { update } = await render({ ...props, actualSize: { columns: 80, rows: 24 } });
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+    await keydown();
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+    await update({ ...props, actualSize: { columns: 121, rows: 46 } });
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    await keydown();
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
   });
 
@@ -285,34 +342,27 @@ describe("useClientResize", () => {
    * With an app tab showing there is no tiled surface to measure, so nothing
    * may be sent — and the app must still be able to take its size back when
    * the terminal comes back.
-   *
-   * Scope, honestly: this covers the behaviour, not the `!surface` guard that
-   * implements half of it. Removing that guard leaves this green, because the
-   * ordinary path re-sends on remount anyway and the budget it wasted only
-   * shows up in a longer sequence than a unit harness can hold steady. The
-   * guard is argued at its definition instead.
    */
   it("sends nothing while no terminal surface is mounted, and recovers after", async () => {
-    const props = { appFocused: true, clientId: "client-1" };
+    const props = { clientId: "client-1" };
     const { update } = await render({ ...props, actualSize: { columns: 121, rows: 46 } });
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
 
     // The user opens a file: the surface unmounts, and tmux is meanwhile taken
-    // to someone else's size, twice — the whole budget, if it were spendable.
+    // to someone else's size. Typing into the file is not a take.
     await update({ ...props, surfaceMounted: false, actualSize: { columns: 80, rows: 24 } });
-    await update({ ...props, surfaceMounted: false, actualSize: { columns: 80, rows: 25 } });
+    await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
+    await keydown();
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
 
     // Back to the terminal. The remounted surface needs its box again — jsdom
-    // lays nothing out, and a surface with no measurable box produces no
-    // request whatever the budget says.
-    await update({ ...props, actualSize: { columns: 80, rows: 25 } });
+    // lays nothing out. Its size is the one already asked for, so the ordinary
+    // path repeats nothing; the next keystroke is what takes the size back.
+    await update({ ...props, actualSize: { columns: 80, rows: 24 } });
     await act(async () => { setSurfaceBox({ width: 1000, height: 800 }); });
     await settle();
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+    await keydown();
     expect(resizeClientMock).toHaveBeenCalledTimes(2);
-
-    // And the budget is still there to answer the next one.
-    await update({ ...props, actualSize: { columns: 80, rows: 26 } });
-    expect(resizeClientMock).toHaveBeenCalledTimes(3);
   });
 });
