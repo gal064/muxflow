@@ -97,7 +97,7 @@ describe.skipIf(!availability.available)(`live terminal (${availability.reason ?
     expect(pageText(page, before)).not.toContain("\x1b[200~");
     say("Send `echo phone-$((40+5))` → paste + CR → output contained phone-45, no paste markers");
     const ctrlC = KEY_CHIPS.find((c) => c.label === "Ctrl-C")!;
-    await controller.sendInput(ctrlC.bytes);
+    await controller.sendInput(ctrlC.bytes!);
     await waitFor("^C prompt", () => (pageText(page, before).includes("^C") ? true : undefined), 5_000).catch(() => undefined);
     say(`Ctrl-C chip → ok (bash printed ^C: ${pageText(page, before).includes("^C")})`);
 
