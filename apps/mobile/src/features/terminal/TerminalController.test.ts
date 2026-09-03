@@ -749,30 +749,23 @@ describe("TerminalController sizing takes (D6)", () => {
     return ops;
   }
 
-  it("a reconnect in the background re-attaches without a resize; the return to the foreground sends it", async () => {
+  it("a reconnect in the background sends nothing; the return to the foreground runs step 1", async () => {
     const foreground = fakeForeground();
     const h = await seeded({ foreground: foreground.dep });
     foreground.set(false);
     const t = await reconnect(h);
-    const ops = [await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
-    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
-    expect(t.drain()).toHaveLength(0);
+    // Not even the select: it would take the host's unsized control client
+    // out of `ignore-size`, and tmux would size the windows from 80x24.
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(t.drain()).toHaveLength(0);
+    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
     foreground.set(true);
-    await vi.advanceTimersByTimeAsync(149);
-    expect(t.drain()).toHaveLength(0);
-    await vi.advanceTimersByTimeAsync(1);
-    const [resize] = t.drain();
-    if (resize?.payload.case !== "request") throw new Error("expected the withheld resize");
-    expect(resize.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 40, rows: 30 });
-    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: resize.requestId }));
-    await settle();
+    const ops = [await answerNext(t), await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
+    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
     // Once, not on every foreground transition.
     foreground.set(false);
     foreground.set(true);
     await vi.advanceTimersByTimeAsync(200);
-    expect(t.drain()).toHaveLength(0);
+    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
   });
 
   it("a reconnect in the foreground still resizes, as before", async () => {

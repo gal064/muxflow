@@ -5,7 +5,9 @@ import { AppState } from "react-native";
 import type { AppForeground } from "./TerminalController";
 
 export const appForeground: AppForeground = {
-  inForeground: () => AppState.currentState === "active",
+  // Not `=== "active"`: before the first native read `currentState` can be
+  // `unknown`, and a screen that attaches then must still be sized.
+  inForeground: () => AppState.currentState !== "background",
   onForeground: (listener) => {
     const subscription = AppState.addEventListener("change", (next) => {
       if (next === "active") listener();
