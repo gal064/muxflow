@@ -155,12 +155,12 @@ impl TerminalAttachment {
     /// events each on a real link.
     ///
     /// `window` is the size the session's current window actually has, from
-    /// the last snapshot. A client that remembers the right size while the
+    /// the last snapshot. A client can remember the right size while the
     /// window is at another one — the phone took it, then the user switched
-    /// the desktop here — is not sized: under `window-size latest` a size only
-    /// counts on the client the window follows, and re-stating it is what makes
-    /// the desktop that client again. An unknown window (no panes in the
-    /// snapshot yet) is taken at the client's word.
+    /// the desktop here — because under `window-size latest` a size only
+    /// counts on the client the window follows. That case is re-sent: stating
+    /// the size again is what makes the desktop that client. An unknown window
+    /// (no panes in the snapshot yet) is taken at the client's word.
     fn ensure_size(
         &mut self,
         columns: u32,

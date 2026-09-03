@@ -11,7 +11,7 @@ import { createSessionStore, type SessionStore } from "../../store/sessionStore"
 import type { ToPageMessage } from "./bridgeMessages";
 import { utf8Encode } from "./bytes";
 import { windowGrid } from "./sizing";
-import { TAKE_INTERVAL_MS, TerminalController } from "./TerminalController";
+import { TAKE_INTERVAL_MS, TerminalController, type AppForeground } from "./TerminalController";
 import { TerminalRegistry } from "./terminalRegistry";
 
 const availability = liveHostAvailability();
@@ -81,6 +81,15 @@ describe.skipIf(!availability.available)(`live sizing (${availability.reason ?? 
 
     // The phone opens the pane: select → resize → attach, and the window follows.
     const page: ToPageMessage[] = [];
+    let inForeground = true;
+    const foregroundListeners = new Set<() => void>();
+    const foreground: AppForeground = {
+      inForeground: () => inForeground,
+      onForeground: (listener) => {
+        foregroundListeners.add(listener);
+        return () => foregroundListeners.delete(listener);
+      },
+    };
     const controller = new TerminalController({
       paneId,
       sessionId,
@@ -89,6 +98,7 @@ describe.skipIf(!availability.available)(`live sizing (${availability.reason ?? 
       getConnection: () => phone.connection,
       page: { send: (m) => page.push(m) },
       log: (line) => log.push(line),
+      foreground,
     });
     controller.start();
     controller.onPageMessage({ t: "size", cols: 50, rows: 30 });
@@ -123,6 +133,24 @@ describe.skipIf(!availability.available)(`live sizing (${availability.reason ?? 
     await laptopTakes();
     await waitFor("window at the laptop's size once more", windowIs("160x48"), 5_000);
     say(`laptop resize 160x48 → window ${windowSize()}`);
+
+    // The phone goes into a pocket with the screen mounted and its link
+    // flaps: the reconnect must not touch the window (§7.6 step 5) — not
+    // even select, which alone would size it from tmux's 80x24 default.
+    inForeground = false;
+    const attachedBefore = log.filter((line) => line.includes(" attached ")).length;
+    phone.connection.disconnect();
+    phone.connection.connect();
+    await waitFor("phone reconnected", () => (phone.store.getState().connection.state === "connected" ? true : undefined));
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(windowSize()).toBe("160x48");
+    expect(log.filter((line) => line.includes(" attached ")).length).toBe(attachedBefore);
+    say(`phone reconnect in the background → window ${windowSize()}, no attach`);
+    // Out of the pocket: step 1 runs and the phone takes.
+    inForeground = true;
+    for (const listener of foregroundListeners) listener();
+    await waitFor("window at the phone's size after the foreground return", windowIs("50x30"), 5_000);
+    say(`phone to the foreground → window ${windowSize()}`);
 
     await controller.stop();
   }, 90_000);

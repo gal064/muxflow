@@ -123,6 +123,8 @@ export class TerminalController {
   private attachFailures = 0;
   /** When the last RESIZE_TERMINAL went out, for the take interval. */
   private lastResizeAt: number | undefined;
+  /** An attach asked for while the app was in the background; runs on the return to the foreground. */
+  private attachOnForeground = false;
   private unsubscribeForeground: (() => void) | undefined;
   // ---- §7.6.1 history paging state, reset by every seed ----
   /** Everything handed to xterm since the seed (the seed first); a splice replays it above nothing but history. */
@@ -173,10 +175,16 @@ export class TerminalController {
       onConnected: () => this.onConnected(),
     });
     this.options.store.getState().setFocusedPane(this.paneId);
-    // A size withheld while the app was in the background (see attach and
-    // resizeNow) is sent when a person is looking again.
+    // Step 1 or a size withheld while the app was in the background (see
+    // attach and resizeNow) runs when a person is looking again.
     this.unsubscribeForeground = this.foreground.onForeground(() => {
-      if (!this.stopped) this.scheduleResize();
+      if (this.stopped) return;
+      if (this.attachOnForeground) {
+        this.attachOnForeground = false;
+        void this.attach();
+      } else {
+        this.scheduleResize();
+      }
     });
     this.options.page.send({ t: "init" });
   }
@@ -220,7 +228,9 @@ export class TerminalController {
    * desktop takes it back; when the topology shows the window at another size
    * than this controller asked for, the next input here takes it again — at
    * most once per `TAKE_INTERVAL_MS`, and never a size the window already has.
-   * The request goes out ahead of the input on the same connection.
+   * The request leaves ahead of the input on the same connection; the host
+   * writes them to different tmux clients, so tmux may apply either first,
+   * and the redraw follows the size either way.
    */
   private takeSizeIfLost(): void {
     if (!this.attached || this.attaching || this.resizeTimer !== undefined || !this.grid) return;
@@ -463,6 +473,15 @@ export class TerminalController {
       this.reattachWanted = true;
       return;
     }
+    // Only while a person can be looking (D6, §7.6 step 5). The whole of step
+    // 1 waits, not just the resize: selecting the session takes the host's
+    // control client out of `ignore-size`, and one that has never been sent a
+    // size would size the windows from tmux's 80x24 default. A reconnect with
+    // the screen left open in a pocket must not touch the laptop's windows.
+    if (!this.foreground.inForeground()) {
+      this.attachOnForeground = true;
+      return;
+    }
     // A pending retry would otherwise re-run select → resize → attach on top
     // of this one, and every extra ATTACH resets the page with a new seed.
     if (this.attachRetryTimer !== undefined) {
@@ -482,15 +501,10 @@ export class TerminalController {
       this.options.store.getState().setFocusedPane(this.paneId);
       await connection.request(selectTerminalSession(this.sessionId));
       if (this.stopped) return; // left before the reveal: nothing to hide
-      // Only while a person can be looking (D6): a reconnect with the screen
-      // left open in a pocket must not shrink the laptop's windows. The size
-      // is sent when the app comes to the foreground (see start).
-      if (this.foreground.inForeground()) {
-        this.lastResizeAt = Date.now();
-        await connection.request(resizeTerminal(grid.cols, grid.rows));
-        this.sentGrid = grid;
-        if (this.stopped) return;
-      }
+      this.lastResizeAt = Date.now();
+      await connection.request(resizeTerminal(grid.cols, grid.rows));
+      this.sentGrid = grid;
+      if (this.stopped) return;
       await connection.request(attachTerminal(this.sessionId, this.paneId));
       this.attached = true;
       this.attachFailures = 0;

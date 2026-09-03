@@ -223,18 +223,22 @@ fn selecting_a_session_whose_window_is_at_another_size_re_sends_the_size() {
         1
     );
 
-    // Same remembered size, window at the phone's: re-stated.
+    // Same remembered size, window at the phone's: re-stated, and — the phone
+    // being the other attached client — claimed, size first.
     clients.reconcile(&session_snapshot_with_window(2, (50, 30)));
     clients.select_session("$1").unwrap();
+    recorded.wait_for(1, "switch-client");
     recorded.fence(&mut clients, 3);
+    let written = recorded.written();
     assert_eq!(
-        recorded
-            .written()
-            .matches("refresh-client -C 120,40")
-            .count(),
+        written.matches("refresh-client -C 120,40").count(),
         2,
-        "a window at another size was taken at the client's word: {}",
-        recorded.written()
+        "a window at another size was taken at the client's word: {written}"
+    );
+    assert!(
+        written.rfind("refresh-client -C 120,40").unwrap()
+            < written.find("switch-client -E -t $1").unwrap(),
+        "the claim must follow the re-stated size: {written}"
     );
 
     // Window back at the desktop's size: nothing to say.
