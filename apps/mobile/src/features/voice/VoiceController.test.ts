@@ -20,6 +20,7 @@ function harness(agentId = "agent-a", paneId = "%3") {
   let foreground = true;
   const toasts: string[] = [];
   const controller = new VoiceController({
+    tailHoldMs: 0,
     agentId,
     paneId,
     sessionId: "$1",
@@ -170,6 +171,7 @@ describe("VoiceController", () => {
   it("two sessions receive their own replies and share the one player", async () => {
     const a = harness("agent-a", "%3");
     const b = new VoiceController({
+    tailHoldMs: 0,
       agentId: "agent-b",
       paneId: "%4",
       sessionId: "$1",
@@ -390,6 +392,7 @@ describe("VoiceController against a host that is not set up (review round 1)", (
   it("talking stops another session's playback; ending a session leaves another's playback alone", async () => {
     const a = harness("agent-a", "%3");
     const b = new VoiceController({
+    tailHoldMs: 0,
       agentId: "agent-b",
       paneId: "%4",
       sessionId: "$1",
@@ -427,6 +430,7 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
   function pair() {
     const a = harness("agent-a", "%3");
     const b = new VoiceController({
+    tailHoldMs: 0,
       agentId: "agent-b",
       paneId: "%4",
       sessionId: "$1",

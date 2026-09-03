@@ -30,11 +30,20 @@ export interface VoiceControllerOptions {
   now?: () => number;
   /** The host holds a 10-minute TTL on a session; the phone refreshes it every 5 (§4.3). */
   sessionRefreshMs?: number;
+  /** Test seam for `TAIL_HOLD_MS`; 0 stops the recorder the moment the press ends. */
+  tailHoldMs?: number;
 }
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
 /** Releases shorter than this are a mis-tap, not an utterance (§5.2). */
 export const MIN_UTTERANCE_MS = 300;
+/**
+ * How long the recorder keeps running after the finger lifts. Android's
+ * MediaRecorder drops the audio still in its encoder pipeline when stopped
+ * (the phone's clips came out ~200 ms shorter than the hold), and a speaker
+ * lets go on the last syllable, so an immediate stop loses the final word.
+ */
+export const TAIL_HOLD_MS = 350;
 /** A warm host answers in ~1 s; a cold sidecar may take up to 120 s to load (§4.3). */
 export const TRANSCRIBE_TIMEOUT_MS = 70_000;
 export const SPEAK_TIMEOUT_MS = 60_000;
@@ -72,6 +81,7 @@ export class VoiceController {
   private readonly unsubscribePlayer: () => void;
   private readonly now: () => number;
   private readonly sessionRefreshMs: number;
+  private readonly tailHoldMs: number;
 
   constructor(private readonly options: VoiceControllerOptions) {
     this.agentId = options.agentId;
@@ -79,6 +89,7 @@ export class VoiceController {
     this.sessionId = options.sessionId;
     this.now = options.now ?? Date.now;
     this.sessionRefreshMs = options.sessionRefreshMs ?? SESSION_REFRESH_MS;
+    this.tailHoldMs = options.tailHoldMs ?? TAIL_HOLD_MS;
     options.store.getState().ensureSession(options.agentId, options.paneId, options.sessionId, this.now());
     this.unsubscribePlayer = options.player.onStatus((status) => this.onPlayerStatus(status));
   }
@@ -257,6 +268,9 @@ export class VoiceController {
     const { recorder, files } = this.options;
     // The press may still be waiting for the recorder (see beginUtterance).
     await (this.arming ?? Promise.resolve()).catch(() => undefined);
+    // Let the last syllable land before the encoder is stopped (TAIL_HOLD_MS).
+    if (this.tailHoldMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, this.tailHoldMs));
+    if (this.disposed) return;
     let uri: string | null = null;
     let durationMs = 0;
     try {
