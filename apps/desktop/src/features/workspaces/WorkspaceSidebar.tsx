@@ -6,7 +6,7 @@ import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor
 import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
 import { Icon } from "../../ui/Icon";
 import {
-  groupAgentRows, groupAgentRowsByStatus, needsAttention, nextSortMode, selectedAgentIdForPane, sortModeLabel,
+  groupAgentRows, groupAgentRowsByPin, groupAgentRowsByStatus, needsAttention, nextSortMode, selectedAgentIdForPane, sortModeLabel,
   type AgentListRow, type AgentSortMode, type AgentWorkspaceGroup,
 } from "../agents/agentsList";
 import { AgentMark } from "../agents/AgentIdentity";
@@ -127,7 +127,8 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
    * at all once there is no row to read.
    */
   const menuRow = menu ? props.rows.find((row) => row.session.id === menu.session.id) : undefined;
-  const priorityAgents = props.agentSort === "workspace" ? [] : groupAgentRowsByStatus(props.agents);
+  const priorityAgents = props.agentSort === "status" ? groupAgentRowsByStatus(props.agents) : [];
+  const pinnedAgents = props.agentSort === "pinned" ? groupAgentRowsByPin(props.agents) : [];
   // The flat position in `props.agents`, kept across every grouping: the roving
   // arrow keys walk `[data-agent-index]` in document order, and a per-group
   // index would restart the walk at every heading.
@@ -470,7 +471,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       <div className="section-head">
         <span className="section-label" id="sidebar-agents-label">Agents</span>
         <button
-          aria-label={`Agent ordering: ${sortModeLabel(props.agentSort)}. Switch to ${sortModeLabel(nextSortMode(props.agentSort))}.`}
+          aria-label={`Agent ordering: ${sortModeLabel(props.agentSort)}. Next: ${sortModeLabel(nextSortMode(props.agentSort))}.`}
           className="sort-toggle"
           onClick={() => props.onSortMode(nextSortMode(props.agentSort))}
           // The section's launch and hook actions are on its context menu; this
@@ -517,10 +518,25 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                 {block.groups.map(renderAgentGroup)}
               </div>)
               : groupedAgents.map(renderAgentGroup)
-            // Priority: the same clustering, keyed on what the agent is doing
-            // rather than where it lives. The rows already carry the workspace
-            // name in their detail line whenever the sort is not by workspace.
-            : priorityAgents.map((group) => {
+            : props.agentSort === "pinned"
+              // Pinned: the same two dividers the workspace mode draws, over
+              // the rows themselves. Each half is the priority queue with no
+              // status headings inside it — the rows' own dots carry the
+              // state. The inner wrapper is the class the other two modes'
+              // group sections carry: it is where the rows' side inset and the
+              // gap under a block come from, and it is presentational for the
+              // same reason the block is.
+              ? pinnedAgents.map((group) => <div className="list-block" key={group.key} role="presentation">
+                <h3 className="list-divider">{group.label}</h3>
+                <div className="agent-workspace-group" role="presentation">
+                  {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
+                </div>
+              </div>)
+              // Priority: the same clustering, keyed on what the agent is
+              // doing rather than where it lives. The rows already carry the
+              // workspace name in their detail line whenever the sort is not
+              // by workspace.
+              : priorityAgents.map((group) => {
               const headingId = `agent-status-${group.key}`;
               return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
                 <h3 className="agent-workspace-heading" id={headingId}>

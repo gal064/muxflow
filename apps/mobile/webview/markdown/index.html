@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <meta name="color-scheme" content="dark" />
+    <!--
+      The desktop runs this same sanitised HTML behind Tauri's CSP; the phone's
+      WebView has no such backstop, so the page carries its own. `default-src
+      'none'` is what stops a sub-resource the sanitiser does not inspect —
+      `srcset`, `poster` — from turning a Markdown file somebody else wrote into
+      an outbound request. Script and style are inline because the whole bundle
+      is inlined at build time (§10.3).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src data:; media-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Markdown</title>
+    <style>/* STYLES */</style>
+  </head>
+  <body>
+    <article id="content"></article>
+    <script>/* SCRIPT */</script>
+  </body>
+</html>

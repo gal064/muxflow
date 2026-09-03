@@ -29,6 +29,7 @@ use degradation::{pane_resource_event, report_pane_degradations};
 mod flow_control;
 use flow_control::{FlowControl, resume_command, take_injected_rejection};
 mod input;
+pub(crate) use input::InputDelivery;
 mod input_client;
 use input_client::PersistentInputClient;
 mod output_credit;
@@ -768,7 +769,12 @@ impl TerminalClients {
         outcome
     }
 
-    pub(super) fn send_input(&mut self, pane_id: &str, data: &[u8]) -> anyhow::Result<()> {
+    pub(super) fn send_input(
+        &mut self,
+        pane_id: &str,
+        data: &[u8],
+        delivery: InputDelivery,
+    ) -> anyhow::Result<()> {
         self.clients
             .values_mut()
             .find(|client| client.contains_pane(pane_id))
@@ -776,7 +782,7 @@ impl TerminalClients {
         self.input
             .as_mut()
             .context("persistent terminal input client is not attached")?
-            .send_input(pane_id, data)
+            .send_input(pane_id, data, delivery)
     }
 
     pub(super) fn flush_input(&mut self) -> anyhow::Result<()> {

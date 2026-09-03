@@ -209,6 +209,7 @@ describe("reading state the previous build wrote", () => {
     expect(saved({ agentSort: "grouped" }).shell.agentSort).toBe("workspace");
     expect(saved({ agentSort: "status" }).shell.agentSort).toBe("status");
     expect(saved({ agentSort: "workspace" }).shell.agentSort).toBe("workspace");
+    expect(saved({ agentSort: "pinned" }).shell.agentSort).toBe("pinned");
     // Anything else is still a value this build refuses to trust.
     expect(saved({ agentSort: "inbox" }).shell.agentSort).toBe(defaultShellState.agentSort);
     expect(saved({}).shell.agentSort).toBe(defaultShellState.agentSort);

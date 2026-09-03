@@ -35,6 +35,7 @@ pub(crate) enum Handler {
     Filesystem,
     Git,
     Agent,
+    Voice,
     Daemon,
     Test,
 }
@@ -252,6 +253,26 @@ impl OperationPolicy {
                 Scheduling::Inline,
                 Handler::Agent,
             ),
+            // A readiness probe and a session registration touch in-memory
+            // state only, so they answer inline like the agent operations.
+            v1::Operation::VoiceStatus | v1::Operation::VoiceSession => (
+                Access::ReadOnly,
+                Lane::Control,
+                Scheduling::Inline,
+                Handler::Voice,
+            ),
+            // Detached: each spawns a process and writes the cache directory,
+            // and none may hold the reader loop — a transcription is seconds
+            // long and its own Cancel arrives on this connection. Mutation, so
+            // a read-only host never starts a download.
+            v1::Operation::VoiceProvision
+            | v1::Operation::VoiceTranscribe
+            | v1::Operation::VoiceSpeak => (
+                Access::Mutation,
+                Lane::Control,
+                Scheduling::Detached,
+                Handler::Voice,
+            ),
             v1::Operation::TestDelay
             | v1::Operation::TestInjectGap
             | v1::Operation::TestOverflow => (
@@ -337,6 +358,7 @@ mod tests {
         use Handler::{
             ActiveRoot as AR, Agent as AH, Daemon as DH, Filesystem as FH, Git as GH,
             Snapshot as SH, Terminal as TH, Test as XH, TmuxAction as MH, Unsupported as UH,
+            Voice as VH,
         };
         use Lane::{Bulk as B, Control as C, Either as E};
         use Scheduling::{Detached as Dd, Inline as I};
@@ -397,6 +419,11 @@ mod tests {
             (ReconcileTerminalUpload, R, B, I, FH),
             (AgentHostNaming, M, C, I, AH),
             (SelectTerminalSession, M, C, I, TH),
+            (VoiceStatus, R, C, I, VH),
+            (VoiceProvision, M, C, Dd, VH),
+            (VoiceTranscribe, M, C, Dd, VH),
+            (VoiceSpeak, M, C, Dd, VH),
+            (VoiceSession, R, C, I, VH),
             (TestDelay, R, C, I, XH),
             (TestInjectGap, R, C, I, XH),
             (TestOverflow, R, C, I, XH),
@@ -483,6 +510,20 @@ mod tests {
         assert_eq!(
             shutdown.admission_error(true, false),
             Some(AdmissionError::ReadOnlyMutation)
+        );
+
+        // A read-only host must not start a ~487 MB download, but may still say
+        // whether voice is set up.
+        let provision = OperationPolicy::for_raw(v1::Operation::VoiceProvision.into());
+        assert_eq!(
+            provision.admission_error(true, false),
+            Some(AdmissionError::ReadOnlyMutation)
+        );
+        let status = OperationPolicy::for_raw(v1::Operation::VoiceStatus.into());
+        assert_eq!(status.admission_error(true, false), None);
+        assert_eq!(
+            status.admission_error(false, true),
+            Some(AdmissionError::ControlConnectionRequired)
         );
     }
 

@@ -305,6 +305,7 @@ export function usableWorkspaceDefault(value: unknown): string | undefined {
 function migratedAgentSort(value: unknown): AgentSortMode {
   if (value === "priority") return "status";
   if (value === "grouped") return "workspace";
+  // `pinned` was added under its own name, so it needs no migration arm.
   return isAgentSortMode(value) ? value : defaultShellState.agentSort;
 }
 
