@@ -10,6 +10,19 @@ export function agentPillState(agent: Agent): PillState {
   return agent.present ? displayState(agent) : "gone";
 }
 
+/** The state word paired with a decorative agent mark for assistive technology. */
+export function agentStateLabel(agent: Agent): string {
+  const state = agentPillState(agent);
+  switch (state) {
+    case "blocked": return "blocked";
+    case "working": return "working";
+    case "done": return "finished";
+    case "idle": return "idle";
+    case "unknown": return "status unknown";
+    case "gone": return "gone";
+  }
+}
+
 /**
  * The row's name (§9.3.1): the tmux tab, the desktop's `agentSessionLabel` —
  * status glyphs stripped, a generic or UUID-like name passed over for the

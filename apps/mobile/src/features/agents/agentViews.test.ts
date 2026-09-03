@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Agent } from "../../store/sessionStore";
 import { colors } from "../../ui/tokens";
-import { agentDisplayName, agentTitle, waitingColor, waitingInSession, waitingLabel } from "./agentViews";
+import { agentDisplayName, agentStateLabel, agentTitle, waitingColor, waitingInSession, waitingLabel } from "./agentViews";
 
 function agent(overrides: Partial<Agent> & { id: string; sessionId: string }): Agent {
   const { sessionId, ...rest } = overrides;
@@ -78,5 +78,16 @@ describe("agentDisplayName (§9.4 line 2: who, when the row is already the windo
     expect(agentDisplayName({ adapters }, agent({ id: "a", sessionId: "$1", displayName: "Nightly triage" }))).toBe("Nightly triage");
     expect(agentDisplayName({ adapters }, agent({ id: "a", sessionId: "$1", displayName: " " }))).toBe("Codex CLI");
     expect(agentDisplayName({ adapters: [] }, agent({ id: "a", sessionId: "$1", displayName: "" }))).toBe("codex");
+  });
+});
+
+describe("agentStateLabel", () => {
+  it("speaks every visual mark and treats retained state as gone", () => {
+    expect(agentStateLabel(agent({ id: "blocked", sessionId: "$1", lifecycle: "blocked" }))).toBe("blocked");
+    expect(agentStateLabel(agent({ id: "working", sessionId: "$1", lifecycle: "working" }))).toBe("working");
+    expect(agentStateLabel(agent({ id: "done", sessionId: "$1", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 2n, seenGeneration: 1n }))).toBe("finished");
+    expect(agentStateLabel(agent({ id: "idle", sessionId: "$1", lifecycle: "idle" }))).toBe("idle");
+    expect(agentStateLabel(agent({ id: "unknown", sessionId: "$1", lifecycle: "unknown" }))).toBe("status unknown");
+    expect(agentStateLabel(agent({ id: "gone", sessionId: "$1", lifecycle: "working", present: false }))).toBe("gone");
   });
 });

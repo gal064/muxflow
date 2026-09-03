@@ -1,10 +1,27 @@
 import Svg, { Path, Rect } from "react-native-svg";
 
 /**
- * Microphone and transport marks drawn as SVG so they take token colours and
- * render the same on every device (an emoji or a dingbat glyph does neither).
- * `size` is the box in dp; every path is designed on a 24-unit grid.
+ * UI marks drawn as SVG so they take token colours and render the same on
+ * every device (an emoji or a font glyph does neither). `size` is the box in
+ * dp; every path is designed on a 24-unit grid.
  */
+export function BackIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M19 12H5M11 6l-6 6 6 6" fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+    </Svg>
+  );
+}
+
+/** The conventional outlined Shift mark, centred independently of font metrics. */
+export function ShiftIcon({ size = 18, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M12 3 4 11h4v9h8v-9h4z" fill="none" stroke={color} strokeLinejoin="round" strokeWidth="2" />
+    </Svg>
+  );
+}
+
 export function MicIcon({ size = 24, color }: { size?: number; color: string }) {
   return (
     <Svg height={size} viewBox="0 0 24 24" width={size}>
