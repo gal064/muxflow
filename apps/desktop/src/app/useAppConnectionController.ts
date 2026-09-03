@@ -16,6 +16,7 @@ import { createInputLatencyReporter } from "../features/terminal/inputLatencySta
 import {
   fetchInputLatencyStats,
   fetchLinkStats,
+  prewarmTerminalBulk,
   requestTerminalSeed,
   selectTerminalSession,
   startTerminal,
@@ -493,6 +494,18 @@ export function useAppConnectionController({
     }, LINK_STATS_POLL_MS);
     return () => clearInterval(timer);
   }, [applyLinkQuality, clientId, hostState.phase, linkQuality]);
+
+  /**
+   * File transfer is a second helper connection. Warm it only for the host on
+   * screen: shown peers keep their topology and agent bridges, but do not spend
+   * an idle bulk-pool slot or evict the active host's. Native deduplicates this
+   * by terminal epoch, so returning to a host is free and an active reconnect
+   * earns exactly one new warmup.
+   */
+  useEffect(() => {
+    if (hostState.phase !== "connected" || !hostState.canMutate || !clientId || terminalEpoch === 0) return;
+    void prewarmTerminalBulk(clientId).catch(() => undefined);
+  }, [clientId, hostState.canMutate, hostState.phase, terminalEpoch]);
 
   /** Only time ends an episode, and only an episode pays for the timer. */
   useEffect(() => {

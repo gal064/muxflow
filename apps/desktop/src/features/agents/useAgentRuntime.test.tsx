@@ -465,4 +465,22 @@ describe("useAgentRuntime across hosts", () => {
     expect(after.get("local")?.agents[0].displayName).toBe("Local renamed");
     await act(async () => renderer.unmount());
   });
+
+  it("keeps back-to-back wire events that arrive before React renders", async () => {
+    const client = twoHosts();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MultiHost client={client} focused={false} />); });
+    await act(async () => {
+      client.publish({
+        kind: "upsert", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1,
+        sequence: agentGeneration(4), record: agent({ displayName: "First", lifecycleGeneration: 4 }),
+      });
+      client.publish({
+        kind: "upsert", hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1,
+        sequence: agentGeneration(5), record: agent({ displayName: "Second", lifecycleGeneration: 5 }),
+      });
+    });
+    expect(renderer.root.findByType("output").props["data-local"]).toBe("agent-1:Second");
+    await act(async () => renderer.unmount());
+  });
 });
