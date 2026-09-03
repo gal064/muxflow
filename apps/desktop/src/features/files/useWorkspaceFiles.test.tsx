@@ -9,6 +9,7 @@ import {
   PANE_PAINT_TIMEOUT_MS,
   resetPanePaintGate,
 } from "../terminal/panePaintGate";
+import { terminalCacheKey } from "../terminal/TerminalStateCache";
 import { enablePerfProbe, perfSummary, resetPerfProbe } from "../../perf/probe";
 import { ACTIVE_ROOT_SETTLED_MULTIPLIER, ACTIVE_ROOT_STABLE_PROBES, useWorkspaceFiles } from "./useWorkspaceFiles";
 
@@ -1279,7 +1280,7 @@ describe("useWorkspaceFiles", () => {
     const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
     let current: ReturnType<typeof useWorkspaceFiles> | undefined;
     function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
-    armPanePaint("%1");
+    armPanePaint(terminalCacheKey("local", "%1"));
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
@@ -1288,7 +1289,7 @@ describe("useWorkspaceFiles", () => {
       "the Explorer asked for a root ahead of the pane's own screen",
     ).not.toHaveBeenCalled();
 
-    await act(async () => { notePanePainted("%1"); await Promise.resolve(); });
+    await act(async () => { notePanePainted(terminalCacheKey("local", "%1")); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
     expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(1);
     expect(current?.root).toEqual(root);
@@ -1310,18 +1311,18 @@ describe("useWorkspaceFiles", () => {
       useWorkspaceFiles(fixture.client, scope, keyForScope(scope), panePath);
       return null;
     }
-    armPanePaint("%1");
+    armPanePaint(terminalCacheKey("local", "%1"));
     let renderer!: ReturnType<typeof create>;
     await act(async () => {
       renderer = create(<Harness scope={BASE_SCOPE} panePath="/repo" />);
       await Promise.resolve();
     });
-    await act(async () => { notePanePainted("%1"); await Promise.resolve(); });
+    await act(async () => { notePanePainted(terminalCacheKey("local", "%1")); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
     expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(1);
 
     const switched: FileWorkspaceScope = { ...BASE_SCOPE, sessionId: "$2", paneId: "%2" };
-    armPanePaint("%2");
+    armPanePaint(terminalCacheKey("local", "%2"));
     await act(async () => {
       renderer.update(<Harness scope={switched} panePath="/elsewhere" />);
       await Promise.resolve();
@@ -1332,7 +1333,7 @@ describe("useWorkspaceFiles", () => {
       "the pane's cwd change probed ahead of the pane's own screen",
     ).toHaveBeenCalledTimes(1);
 
-    await act(async () => { notePanePainted("%2"); await Promise.resolve(); });
+    await act(async () => { notePanePainted(terminalCacheKey("local", "%2")); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
     expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(2);
     await act(async () => { renderer.unmount(); });
@@ -1350,7 +1351,7 @@ describe("useWorkspaceFiles", () => {
     const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
     let current: ReturnType<typeof useWorkspaceFiles> | undefined;
     function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
-    armPanePaint("%1");
+    armPanePaint(terminalCacheKey("local", "%1"));
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
     // The switch's own probe is behind the pane, where it belongs.
@@ -1364,14 +1365,14 @@ describe("useWorkspaceFiles", () => {
       "the person's own Refresh waited out the pane's paint budget",
     ).toHaveBeenCalledTimes(1);
 
-    await act(async () => { notePanePainted("%1"); await Promise.resolve(); });
+    await act(async () => { notePanePainted(terminalCacheKey("local", "%1")); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
     expect(current?.root).toEqual(root);
     const afterSwitch = vi.mocked(fixture.client.resolveActiveRoot).mock.calls.length;
 
     // And again on the painted path, where the press also reads a directory:
     // a fresh arm (the next switch) does not hold the gesture either.
-    armPanePaint("%1");
+    armPanePaint(terminalCacheKey("local", "%1"));
     await act(async () => { current?.refresh(); await Promise.resolve(); });
     expect(fixture.client.resolveActiveRoot).toHaveBeenCalledTimes(afterSwitch + 1);
     await act(async () => { renderer.unmount(); });
@@ -1385,7 +1386,7 @@ describe("useWorkspaceFiles", () => {
     const fixture = watchingClient(new Map([["/repo", [entry("/repo/a.txt")]]]), root);
     let current: ReturnType<typeof useWorkspaceFiles> | undefined;
     function Harness() { current = useWorkspaceFiles(fixture.client, BASE_SCOPE); return null; }
-    armPanePaint("%1");
+    armPanePaint(terminalCacheKey("local", "%1"));
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<Harness />); await Promise.resolve(); });
     await act(async () => { await vi.advanceTimersByTimeAsync(PANE_PAINT_TIMEOUT_MS - 1); });

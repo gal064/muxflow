@@ -49,6 +49,9 @@ interface PanedPaint {
   waiters: Set<() => void>;
 }
 
+// Keyed by `terminalCacheKey(scope, paneId)`, never by the bare pane id: `%1`
+// exists on every tmux server, and a waiter on one host's pane must not be
+// released by — or held behind — another host's.
 const panePaints = new Map<string, PanedPaint>();
 
 function stateFor(paneId: string): PanedPaint {

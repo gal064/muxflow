@@ -89,7 +89,10 @@ async function shell(profiles: HostProfile[]) {
       case "agent_request": {
         const { connectionEpoch } = request.command as { connectionEpoch: string };
         return Promise.resolve({ snapshot: {
-          generation: "1", acceptedGeneration: "1", authoritative: true, connectionEpoch, adapters: [],
+          generation: "1", acceptedGeneration: "1", authoritative: true, connectionEpoch,
+          adapters: request.clientId === "client-2"
+            ? [{ adapter: "codex", id: "codex", displayName: "Codex", supportsLaunch: true, supportsResume: true }]
+            : [],
           agents: request.clientId === "client-2" ? [wireAgent("working", 0)] : [],
         } });
       }
@@ -222,6 +225,63 @@ describe("the shell over several hosts", () => {
       action: expect.objectContaining({ kind: "renameSession", session_id: "$2", name: "work-renamed" }),
     })]);
     expect(app.hostRow().props["aria-label"]).toContain("Host Local over local");
+    await app.unmount();
+  });
+
+  it("closes a peer's workspace on the peer's client once confirmed, and cancels if that host went away", async () => {
+    const app = await shell([LOCAL, REMOTE]);
+    await act(async () => {
+      app.bridgeFor("local").publish(connected);
+      app.bridgeFor("local").publish(world("srv-local", [["$0", "home"]]));
+      app.bridgeFor("remote-a").publish(connected);
+      app.bridgeFor("remote-a").publish(world("srv-qa", [["$1", "build"], ["$2", "work"]]));
+    });
+    const askToClose = async (name: string) => {
+      await act(async () => { app.workspaceButton(name).props.onContextMenu({ preventDefault() {}, clientX: 10, clientY: 10 }); });
+      await act(async () => { app.menuItem("close").props.onClick(); });
+      return app.renderer.root.findAllByType("button").find((button) => button.props.className === "danger")!;
+    };
+    const confirmWork = await askToClose("work");
+    await act(async () => { confirmWork.props.onClick(); });
+    expect(calls("tmux_action")).toEqual([expect.objectContaining({
+      clientId: "client-2",
+      action: expect.objectContaining({ kind: "closeSession", session_id: "$2", confirmed: true, expected_server_identity: "srv-qa" }),
+    })]);
+
+    // The dialog outlives the host: unchecked in the meantime, the close has
+    // nowhere to go and says so rather than landing on the host on screen.
+    const confirm = await askToClose("build");
+    await app.openHostMenu();
+    await act(async () => { app.menuItem("host-remote-a").props.onClick(); });
+    await act(async () => { confirm.props.onClick(); });
+    expect(calls("tmux_action")).toHaveLength(1);
+    expect(app.renderer.root.findAllByProps({ role: "alert" }).length + app.renderer.root.findAllByProps({ role: "status" }).length).toBeGreaterThan(0);
+    await app.unmount();
+  });
+
+  it("renames a peer's agent on the peer, and offers no resume for it until that host is on screen", async () => {
+    const app = await shell([LOCAL, REMOTE]);
+    await act(async () => {
+      app.bridgeFor("local").publish(connected);
+      app.bridgeFor("local").publish(world("srv-local", [["$0", "home"]]));
+      app.bridgeFor("remote-a").publish({ kind: "generationEpoch", epoch: 3, sequence: 0 });
+      app.bridgeFor("remote-a").publish(connected);
+      app.bridgeFor("remote-a").publish(world("srv-qa", [["$1", "build"], ["$2", "work"]]));
+    });
+    await act(async () => { await Promise.resolve(); });
+    const agentButton = () => app.renderer.root.findAllByType("button")
+      .find((button) => String(button.props.title ?? "").includes("Codex on qa"))!;
+    await act(async () => { agentButton().props.onContextMenu({ preventDefault() {}, clientX: 10, clientY: 10 }); });
+    expect(app.renderer.root.findAllByProps({ "data-menu-item": "resume-window" }).map((item) => item.props.disabled)).toEqual([true]);
+    await act(async () => { app.menuItem("rename").props.onClick(); });
+    const input = app.renderer.root.findAllByType("input").find((node) => node.props.value === "Codex on qa")!;
+    await act(async () => { input.props.onChange({ target: { value: "Codex two" } }); });
+    await act(async () => { app.renderer.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
+    const renames = calls("agent_request").filter((request) => (request.command as { operation: string }).operation === "rename");
+    expect(renames).toEqual([expect.objectContaining({
+      clientId: "client-2",
+      command: expect.objectContaining({ operation: "rename", agentId: "agent-qa", displayName: "Codex two", hostProfileId: "remote-a" }),
+    })]);
     await app.unmount();
   });
 

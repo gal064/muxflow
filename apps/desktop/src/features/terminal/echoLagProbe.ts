@@ -248,15 +248,14 @@ export function createEchoLagProbe({
           }
         });
     },
-    reset() {
-      this.dispose();
-    },
-    dispose() {
-      for (const open of pending.values()) clearTimeout(open.timer);
-      pending.clear();
-      lastIncidentAt.clear();
-      lastKeyAt.clear();
-      lastSampleAt.clear();
-    },
+    reset: forget,
+    dispose: forget,
   };
+  function forget() {
+    for (const open of pending.values()) clearTimeout(open.timer);
+    pending.clear();
+    lastIncidentAt.clear();
+    lastKeyAt.clear();
+    lastSampleAt.clear();
+  }
 }

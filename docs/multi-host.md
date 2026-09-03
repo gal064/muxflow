@@ -194,7 +194,12 @@ the agent's own host, which is where the name lives.
   resumed after its host is activated; the row says so.
 - Settings › Connection's "Letter" and "Show in sidebar" edit the picked saved
   host and save on change (`save_host_profile`), without Connect. The host on
-  screen cannot be un-shown from either place.
+  screen cannot be un-shown from either place. The picker follows a host
+  switch, so after a row click Settings is editing the host on screen.
+- Telemetry stays the active link's: a peer's tmux round trips are not
+  measured for the latency readout, and the echo-lag probe forgets its open
+  round trips on a host switch. `panePaintGate` is keyed by
+  `terminalCacheKey(scope, paneId)` like the screen cache.
 - Focus history is scoped to the active host and cleared on a host switch.
 - `DisconnectedStrip` reports the active host only; peer phases show as the
   dot in the host menu and as dimmed rows.

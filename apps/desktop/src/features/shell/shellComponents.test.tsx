@@ -150,6 +150,7 @@ type SidebarProps = Parameters<typeof WorkspaceSidebar>[0];
 
 const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
   adapters: [],
+  hostAdapters: overrides.adapters ?? [],
   agents: buildAgentRows([agent({ displayName: "Codex one", windowName: "Review auth flow", lifecycle: "blocked" })], () => ({ workspaceOrder: 0, workspaceName: "work", hostLabel: "remote-linux", tabIndex: 1 }), () => true, "workspace"),
   agentSort: "workspace",
   agentsRatio: 0.4,

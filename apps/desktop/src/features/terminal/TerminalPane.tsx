@@ -563,7 +563,7 @@ export function TerminalPane({
       // probe is off, so the reveal cannot live inside them either.
       revealTerminal();
       if (!commitRendered(generation, terminalEpoch, establishesEpoch)) return;
-      notePanePainted(pane.id);
+      notePanePainted(cacheKey);
       // The perceived-latency spans (create.*, window.switch, pane.split) end
       // at the frame that shows this pane's content, so they are closed apart
       // from the startup ticket below: that ticket publishes once per mount,
@@ -1458,7 +1458,7 @@ export function TerminalPane({
       if (!checkpoint) return;
       const revealKey = `${clientId}:${checkpoint.terminalEpoch}:${revealAttemptRef.current}`;
       if (lastRevealKeyRef.current === revealKey) return;
-      armPanePaint(pane.id);
+      armPanePaint(cacheKey);
       lastRevealKeyRef.current = revealKey;
       // Whatever was still queued to retry belongs to the key this supersedes,
       // and so does whatever void watch the superseded reveal armed: this
