@@ -137,7 +137,7 @@ export function useClientResize({
         lastRequested.current = undefined;
       }
       // And retry, because nothing else will: the triggers are a window change,
-      // a surface change and a reconnect. A bridge that rejects the first
+      // a surface change, a reconnect and a take. A bridge that rejects the first
       // resize after connect — the likeliest moment for one — would otherwise
       // leave the client at whatever size the other terminals on that session
       // set, for the whole session, on a desktop nobody resizes.
@@ -222,7 +222,10 @@ export function useClientResize({
    *
    * The ordinary path above is deliberately *not* gated on interaction: a
    * surface that changed size is this app's own geometry changing, which is a
-   * new fact to state rather than a size to fight over.
+   * new fact to state rather than a size to fight over. That includes a
+   * reconnect — a new tmux client has never been sized — so a laptop waking
+   * up does take once with nobody at it; the phone takes back on its next
+   * input, and the interval keeps it to one flip.
    */
   const take = useCallback(() => {
     const currentClientId = clientIdRef.current;
