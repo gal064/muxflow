@@ -129,6 +129,7 @@ async function shell(profiles: HostProfile[]) {
 describe("the shell over several hosts", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    listenMock.mockClear();
     startTerminalMock.mockReset();
     stopTerminalMock.mockClear();
     Object.assign(globalThis, {
@@ -262,6 +263,31 @@ describe("the shell over several hosts", () => {
     expect(shown.props.checked).toBe(true);
     expect(calls("set_last_profile_id")).toEqual([]);
     expect(app.bridges).toHaveLength(2);
+    await app.unmount();
+  });
+
+  it("resolves a clicked notification from a peer on that peer, after activating it", async () => {
+    const app = await shell([LOCAL, REMOTE]);
+    await act(async () => {
+      app.bridgeFor("local").publish(connected);
+      app.bridgeFor("local").publish(world("srv-local", [["$0", "home"]]));
+      app.bridgeFor("remote-a").publish(connected);
+      app.bridgeFor("remote-a").publish(world("srv-qa", [["$1", "build"], ["$2", "work"]]));
+    });
+    const activation = (listenMock.mock.calls as unknown as Array<[string, (event: { payload: unknown }) => void]>)
+      .find(([event]) => event === "notification-activated");
+    expect(activation).toBeDefined();
+    await act(async () => {
+      activation?.[1]({ payload: {
+        hostProfile: "remote-a", serverIdentity: "srv-qa", sessionId: "$2", sessionName: "work",
+        windowId: "@1", windowName: "work", paneId: "%1", agentId: "agent-qa", attentionGeneration: "1",
+      } });
+    });
+    expect(calls("set_last_profile_id")).toEqual([{ profileId: "remote-a" }]);
+    expect(app.hostRow().props["aria-label"]).toContain("Host qa over ssh");
+    expect(calls("resolve_notification_route")).toEqual([expect.objectContaining({
+      route: expect.objectContaining({ hostProfile: "remote-a", paneId: "%1" }),
+    })]);
     await app.unmount();
   });
 

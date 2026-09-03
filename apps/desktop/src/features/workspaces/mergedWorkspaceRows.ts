@@ -37,6 +37,8 @@ export interface MergedWorkspaceRow extends WorkspaceRowModel {
   /** "" when letters are hidden — one shown host has nothing to tell apart. */
   letter: string;
   scope: HostScopeToken;
+  /** The host's link phase; a row whose host is not connected is drawn dimmed. */
+  phase: ConnectionPhase;
   canMutate: boolean;
 }
 
@@ -56,6 +58,7 @@ export function hostWorkspaceRows(source: HostRowSource, showLetters: boolean): 
     hostProfileId: source.hostProfileId,
     letter: showLetters ? source.letter : "",
     scope: source.scope,
+    phase: source.phase,
     canMutate: source.canMutate,
   }));
 }

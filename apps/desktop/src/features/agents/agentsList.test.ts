@@ -338,10 +338,14 @@ describe("active pane agent selection", () => {
     const activeIdle = agent({ id: "active-idle", paneId: "%7", lifecycle: "idle" });
     const elsewhere = agent({ id: "elsewhere", paneId: "%8", lifecycle: "working" });
     const rows = rowsForSelection([elsewhere, activeIdle]);
-    expect(selectedAgentIdForPane(rows, "%7")).toBe("active-idle");
-    expect(selectedAgentIdForPane(rows, "%missing")).toBeUndefined();
-    expect(selectedAgentIdForPane(rows, undefined)).toBeUndefined();
-    expect(selectedAgentIdForPane(rowsForSelection([activeIdle], () => false), "%7")).toBeUndefined();
+    expect(selectedAgentIdForPane(rows, "%7", "local")).toBe("active-idle");
+    expect(selectedAgentIdForPane(rows, "%missing", "local")).toBeUndefined();
+    expect(selectedAgentIdForPane(rows, undefined, "local")).toBeUndefined();
+    expect(selectedAgentIdForPane(rowsForSelection([activeIdle], () => false), "%7", "local")).toBeUndefined();
+    // Another host's `%7` is another pane, however it sorts.
+    const peer = agent({ id: "peer-seven", hostProfileId: "peer", paneId: "%7", lifecycle: "working", updatedAt: 999 });
+    expect(selectedAgentIdForPane(rowsForSelection([peer, activeIdle]), "%7", "local")).toBe("active-idle");
+    expect(selectedAgentIdForPane(rowsForSelection([peer]), "%7", "local")).toBeUndefined();
   });
 
   it("resolves a defensive duplicate to native, then newest, then stable id", () => {
@@ -357,8 +361,8 @@ describe("active pane agent selection", () => {
     const nativeNewA = agent({
       id: "native-a", paneId: "%7", detectedManually: false, nativeSessionId: "session-a", updatedAt: 20,
     });
-    expect(selectedAgentIdForPane(rowsForSelection([manual, nativeOld]), "%7")).toBe("native-old");
-    expect(selectedAgentIdForPane(rowsForSelection([nativeOld, nativeNewB]), "%7")).toBe("native-b");
-    expect(selectedAgentIdForPane(rowsForSelection([nativeNewB, nativeNewA]), "%7")).toBe("native-a");
+    expect(selectedAgentIdForPane(rowsForSelection([manual, nativeOld]), "%7", "local")).toBe("native-old");
+    expect(selectedAgentIdForPane(rowsForSelection([nativeOld, nativeNewB]), "%7", "local")).toBe("native-b");
+    expect(selectedAgentIdForPane(rowsForSelection([nativeNewB, nativeNewA]), "%7", "local")).toBe("native-a");
   });
 });

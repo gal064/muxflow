@@ -175,7 +175,8 @@ client) plus the active `focus`, requests one snapshot per scope, decides
 notifications and sounds for every host, and acknowledges seen only for the
 focused pane on the active host. It returns the active host's `agents`,
 `adapters`, `rollups` as today plus `byHost: ReadonlyMap<string, { agents; adapters; rollups }>`.
-Launch, rename, resume and hook actions use the active host's scope.
+Launch, resume and hook actions use the active host's scope; a rename uses
+the agent's own host, which is where the name lives.
 
 ## Cross-host actions
 

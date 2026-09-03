@@ -501,12 +501,13 @@ export function useAppConnectionController({
     return () => clearInterval(timer);
   }, [applyLinkQuality, linkQuality, linkQualityVerdict]);
 
-  /** A different machine's link is a different link; nothing carries over. */
+  /** A different machine's link is a different link; nothing carries over — not a verdict, and not a keystroke still waiting for its echo. */
   useEffect(() => {
     linkQuality.reset();
+    echoLagProbe.reset();
     linkQualityVerdictRef.current = "";
     setLinkQualityVerdict("");
-  }, [activeProfileId, linkQuality]);
+  }, [activeProfileId, echoLagProbe, linkQuality]);
 
   useEffect(() => {
     void invoke<PersistedProfiles>("list_host_profiles").then((saved) => {

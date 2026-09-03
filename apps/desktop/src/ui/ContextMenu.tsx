@@ -18,6 +18,11 @@ export interface ContextMenuItem {
    * and nothing about its markup changes.
    */
   checked?: boolean;
+  /**
+   * A connection phase drawn as a dot before the label — the host menu's way
+   * of showing how each shown host is doing without a row for each.
+   */
+  dot?: string;
   run(): void;
 }
 
@@ -190,6 +195,7 @@ export function ContextMenu(props: ContextMenuProps) {
           // labels under the pointer.
           : <span className="menu-item-label">
             <span aria-hidden="true" className="menu-item-check">{item.checked ? <Icon name="check" size={11} /> : null}</span>
+            {item.dot && <span aria-hidden="true" className={`link-dot ${item.dot}`} />}
             {item.label}
           </span>}
         {item.shortcut && <kbd aria-label={item.shortcutLabel}>{item.shortcut}</kbd>}

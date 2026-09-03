@@ -33,7 +33,7 @@ const remoteHost: SidebarHost = {
 };
 /** Rows as the sidebar takes them: tagged with the one host these tests render. */
 const merged = (models: readonly WorkspaceRowModel[], scope = commandScope): MergedWorkspaceRow[] => models.map((row) => ({
-  ...row, key: `remote\0${row.session.id}`, hostProfileId: "remote", letter: "", scope, canMutate: true,
+  ...row, key: `remote\0${row.session.id}`, hostProfileId: "remote", letter: "", scope, phase: "connected", canMutate: true,
 }));
 const rows: MergedWorkspaceRow[] = merged([{
   session, active: true, attention: "blocked", unread: 2, working: true, pinned: false,
