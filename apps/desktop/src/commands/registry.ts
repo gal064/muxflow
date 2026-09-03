@@ -144,7 +144,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "focus.back", title: "Back", group: "View", defaults: { mac: "Meta+[", linux: "Ctrl+[" } },
   { id: "focus.forward", title: "Forward", group: "View", defaults: { mac: "Meta+]", linux: "Ctrl+]" } },
   { id: "agents.jumpUnread", title: "Jump to the agent that needs you", group: "Agents", defaults: { mac: "Meta+Shift+U", linux: "Ctrl+Shift+U" } },
-  { id: "agents.toggleSort", title: "Cycle agent ordering (workspace → priority → pinned)", group: "Agents" },
+  { id: "agents.toggleSort", title: "Cycle agent ordering (priority → workspace → pinned)", group: "Agents" },
   // Kept adjacent to the rest of the Agents group: the palette prints a group
   // heading whenever the group changes down the list, so a group split across
   // two places in this array would print its heading twice.
