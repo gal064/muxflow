@@ -88,7 +88,7 @@ describe("mergedWorkspaceRows", () => {
     };
     const plain = workspaceRows(inputs);
     const merged = mergedWorkspaceRows([{ ...local, ...inputs }], false);
-    expect(merged.map(({ key: _key, hostProfileId: _host, letter: _letter, scope: _scope, canMutate: _canMutate, ...row }) => row)).toEqual(plain);
+    expect(merged.map(({ key: _key, hostProfileId: _host, letter: _letter, scope: _scope, phase: _phase, canMutate: _canMutate, ...row }) => row)).toEqual(plain);
     expect(merged[0].attention).toBe("none");
     expect(merged[2].agents.map((item) => item.name)).toEqual(["claude"]);
   });

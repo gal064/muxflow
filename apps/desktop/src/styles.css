@@ -280,6 +280,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .workspace-button:hover:not(.active) { background: var(--chrome-hover); }
 .workspace-button.active { background: var(--accent); }
+/* The host behind the row is not connected: still listed, still selectable, not live. */
+.workspace-button.offline:not(.active) { opacity: 0.55; }
 /* Compact rows are one line, so the row is a line: name on the left, the
    agent cluster and any unread count pushed to the right edge. ~24px is the
    Explorer's row budget, which is what makes a long workspace list scannable

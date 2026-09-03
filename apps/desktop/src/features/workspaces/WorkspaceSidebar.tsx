@@ -160,13 +160,15 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     : undefined;
   // Read live while the row is there: a connection dropping to read-only
   // with the menu open must take the mutations with it.
-  const menuCanMutate = (menuRow ?? menu?.row)?.canMutate ?? false;
+  // A row the list no longer holds can be mutated by nobody: the captured
+  // row's answer was true for a connection that is gone.
+  const menuCanMutate = menuRow?.canMutate ?? false;
   const priorityAgents = props.agentSort === "workspace" ? [] : groupAgentRowsByStatus(props.agents);
   // The flat position in `props.agents`, kept across every grouping: the roving
   // arrow keys walk `[data-agent-index]` in document order, and a per-group
   // index would restart the walk at every heading.
   const agentIndexes = new Map(props.agents.map((row, index) => [row, index]));
-  const selectedAgentId = selectedAgentIdForPane(props.agents, props.activePaneId);
+  const selectedAgentId = selectedAgentIdForPane(props.agents, props.activePaneId, activeHost.profileId);
 
   // Resolved against the live list every render: an agent whose pane closed
   // drops out of `props.agents`, and the palette must stop offering to focus it
@@ -304,7 +306,14 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       // and counts the rest. Reading every line back would make a busy
       // workspace four announcements long for one list item.
       aria-label={rowLabel(row, row.letter ? props.hosts.find((host) => host.profileId === row.hostProfileId)?.label : undefined)}
-      className={["workspace-button", row.active ? "active" : undefined, props.compactWorkspaces ? "compact" : undefined].filter(Boolean).join(" ")}
+      className={[
+        "workspace-button",
+        row.active ? "active" : undefined,
+        props.compactWorkspaces ? "compact" : undefined,
+        // Dimmed while its host's link is down: the row is the last thing the
+        // host said, and a mutation asked of it will be refused.
+        rowOffline(row) ? "offline" : undefined,
+      ].filter(Boolean).join(" ")}
       data-workspace-index={index}
       // Shift-click pins rather than selects, as it does in the tab
       // strip. Pinning a workspace must not navigate to it: the row
@@ -608,6 +617,8 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           label: `${host.letter} ${host.label}`,
           checked: host.shown,
           disabled: host.active,
+          // Only a shown host has a link to report on.
+          dot: host.shown ? host.phase : undefined,
           run: () => props.onToggleShown(host.profileId),
         })),
         "separator" as const,
@@ -743,6 +754,11 @@ function workspaceIndicatorState(row: WorkspaceRowModel): AgentDisplayState | un
   }
 }
 
+/** Whether the row's host has no live link behind it. Read-only is a live link that refuses writes, not an absence. */
+function rowOffline(row: MergedWorkspaceRow): boolean {
+  return row.phase !== "connected" && row.phase !== "readOnly";
+}
+
 /** One agent's line, written the same way for the eye and for the label. */
 function agentLine(agent: WorkspaceRowModel["agents"][number]): string {
   return `${agent.name} · ${activityWord(agent.state)}`;
@@ -755,11 +771,12 @@ function agentLine(agent: WorkspaceRowModel["agents"][number]): string {
  * lines: a busy workspace is one list item, and four announcements for one
  * item is how a list stops being navigable.
  */
-function rowLabel(row: WorkspaceRowModel, hostLabel: string | undefined): string {
+function rowLabel(row: MergedWorkspaceRow, hostLabel: string | undefined): string {
   const total = row.agents.length + row.agentOverflow;
   return [
     row.session.name,
     hostLabel && `on ${hostLabel}`,
+    rowOffline(row) ? `host ${row.phase}` : undefined,
     row.pinned ? "pinned" : undefined,
     row.agents[0] && agentLine(row.agents[0]),
     total > 1 ? `${total} agents` : undefined,

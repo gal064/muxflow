@@ -131,6 +131,12 @@ export interface EchoLagProbe {
   noteInput(paneId: string): void;
   /** Output, a seed, or restored content was delivered to `paneId`. */
   noteOutput(paneId: string): void;
+  /**
+   * Forgets every open measurement and every per-pane memory. Pane ids repeat
+   * across hosts, so a host switch must not let the new host's `%1` painting
+   * close a round trip the old host's `%1` started.
+   */
+  reset(): void;
   dispose(): void;
 }
 
@@ -241,6 +247,9 @@ export function createEchoLagProbe({
             report({ kind: "input.echoLag", paneId, lagMs, inputCount: open.inputCount, ...counters });
           }
         });
+    },
+    reset() {
+      this.dispose();
     },
     dispose() {
       for (const open of pending.values()) clearTimeout(open.timer);

@@ -545,14 +545,17 @@ export function App() {
    * alone: a snapshot arriving on one host must not rebuild another host's
    * rows. The active host's snapshot is the facade's own object.
    */
-  const hostWorlds = usePerHostMemo(links.map((link) => ({
-    key: link.profileId,
-    deps: [link.hostState],
-    build: () => {
-      const world = link.profileId === currentHostProfileId ? snapshot : denormalizeSnapshot(link.hostState);
-      return { snapshot: world, home: inferHome(world.panes.map((pane) => pane.currentPath)) };
-    },
-  })));
+  const hostWorlds = usePerHostMemo(links.map((link) => {
+    const own = link.profileId === currentHostProfileId ? snapshot : undefined;
+    return {
+      key: link.profileId,
+      deps: [link.hostState, own],
+      build: () => {
+        const world = own ?? denormalizeSnapshot(link.hostState);
+        return { snapshot: world, home: inferHome(world.panes.map((pane) => pane.currentPath)) };
+      },
+    };
+  }));
   // `hostLinkScope` is a fresh object every render; the rows that carry it
   // must only be rebuilt when what it says changes, or every status line and
   // latency sample would re-sort every workspace and agent row.
@@ -658,6 +661,13 @@ export function App() {
   // span every shown host, because "who needs me" is not a question about
   // the machine that happens to be on screen.
   const allAgents = useMemo(() => [...hostSources.values()].flatMap((source) => source.agents), [hostSources]);
+  // Every host's adapters, one entry per id: the list names a peer's agent
+  // by an adapter the active host need not have installed.
+  const allAdapters = useMemo(() => {
+    const byId = new Map<string, AgentAdapterDescriptor>();
+    for (const source of hostSources.values()) for (const adapter of source.adapters) byId.set(adapter.id, byId.get(adapter.id) ?? adapter);
+    return [...byId.values()];
+  }, [hostSources]);
   const recentIdleClock = useRecentIdleClock(allAgents, appState.shell.agentSort === "status");
   const agentRows = useMemo(() => {
     const orderByRowKey = new Map(sidebarRows.map((row, index) => [row.key, index]));
@@ -825,10 +835,12 @@ export function App() {
    */
   const actionTargetFor = useCallback((hostProfileId: string): TmuxActionTarget | undefined => {
     if (hostProfileId === hostScopeRef.current.hostProfileId) return undefined;
-    const link = linkFor(hostProfileId);
+    // Every fact read at dispatch, like the active host's own: a prompt can
+    // stand open while the peer's bridge drops, and the answer to "may this
+    // host be written now" has to be the one from now.
     return {
-      clientId: link?.clientId,
-      canMutate: link?.hostState.canMutate ?? false,
+      get clientId() { return linkFor(hostProfileId)?.clientId; },
+      get canMutate() { return linkFor(hostProfileId)?.hostState.canMutate ?? false; },
       scopeRef: {
         get current() {
           const now = linkFor(hostProfileId);
@@ -880,10 +892,16 @@ export function App() {
   const commandHostForScope = useCallback((scope: HostScopeToken): CommandHost | undefined => {
     if (!scopeIsLive(scope)) return undefined;
     const target = actionTargetFor(scope.hostProfileId);
+    // The target is resolved again when the action is dispatched, not when
+    // the command was captured: a prompt opened over the active host's row
+    // may be answered after another host has been activated under it, and
+    // the action still belongs to the row's host.
+    const run: CommandHost["performAction"] = (action, precondition) =>
+      performAction(action, precondition, undefined, actionTargetFor(scope.hostProfileId));
     if (!target) {
       return {
         scope: hostScopeRef.current, snapshot: snapshotRef.current, serverIdentity: hostScopeRef.current.serverIdentity,
-        performAction, isScopeCurrent: scopeIsLive,
+        performAction: run, isScopeCurrent: scopeIsLive,
       };
     }
     const linkScope = target.scopeRef.current;
@@ -891,7 +909,7 @@ export function App() {
       scope: linkScope,
       snapshot: hostWorlds.get(scope.hostProfileId)?.snapshot ?? NO_SNAPSHOT,
       serverIdentity: linkScope.serverIdentity,
-      performAction: (action, precondition) => performAction(action, precondition, undefined, target),
+      performAction: run,
       isScopeCurrent: scopeIsLive,
     };
   }, [actionTargetFor, hostScopeRef, hostWorlds, performAction, scopeIsLive, snapshotRef]);
@@ -903,15 +921,24 @@ export function App() {
    */
   const [pendingHostSelection, setPendingHostSelection] = useState<PendingHostSelection>();
   const selectOnHost = useCallback((selection: PendingHostSelection) => {
+    // Only a host that can be activated is waited for; one that cannot
+    // would leave a selection behind to fire on some later visit.
+    if (!linkFor(selection.profileId) && !profiles.some((profile) => profile.id === selection.profileId)) return;
     setPendingHostSelection(selection);
     activateHost(selection.profileId);
-  }, [activateHost]);
+  }, [activateHost, linkFor, profiles]);
   const selectWorkspaceRow = useCallback((row: MergedWorkspaceRow) => {
     if (row.hostProfileId === hostScopeRef.current.hostProfileId) return selectSession(row.session.id);
     selectOnHost({ profileId: row.hostProfileId, sessionId: row.session.id, source: `Workspace ${row.session.name}` });
   }, [hostScopeRef, selectOnHost, selectSession]);
   useEffect(() => {
-    if (!pendingHostSelection || pendingHostSelection.profileId !== currentHostProfileId) return;
+    if (!pendingHostSelection) return;
+    // The pointer moves in the same commit as the selection is recorded, so
+    // a different host here is the app having gone somewhere else since.
+    if (pendingHostSelection.profileId !== currentHostProfileId) return setPendingHostSelection(undefined);
+    // A host activated before it has spoken has nothing to select on yet;
+    // its snapshot lands the link on a session, and this runs again then.
+    if (!hostState.serverIdentity) return;
     setPendingHostSelection(undefined);
     const { paneId, sessionId, source } = pendingHostSelection;
     const destination = paneId ? resolveTerminalDestination(snapshot.panes, paneId) : undefined;
@@ -921,7 +948,7 @@ export function App() {
     }
     if (destination) setStatus(`${source}'s pane is no longer available: ${destination.reason}; opening its workspace.`);
     selectSession(sessionId);
-  }, [currentHostProfileId, pendingHostSelection, selectSession, snapshot.panes, surfacePaneDestination]);
+  }, [currentHostProfileId, hostState.serverIdentity, pendingHostSelection, selectSession, snapshot.panes, surfacePaneDestination]);
 
   const selectCombinedTab = useCallback((tab: CombinedTab) => {
     // A placeholder stands for a window that does not exist yet: there is
@@ -963,11 +990,13 @@ export function App() {
   const saveProfileFields = useCallback((profileId: string, patch: Pick<HostProfile, "letter" | "shown">) => {
     const profile = profiles.find((item) => item.id === profileId);
     if (!profile) return;
+    // The host on screen is always shown, whoever asks.
+    if (profileId === currentHostProfileId) patch = { ...patch, shown: true };
     const { letter, ...rest } = { ...profile, ...patch };
     const next: HostProfile = letter ? { ...rest, letter } : rest;
     setProfiles((current) => current.map((item) => (item.id === profileId ? next : item)));
     void invoke("save_host_profile", { profile: next }).catch((error) => setStatus(String(error)));
-  }, [profiles, setProfiles]);
+  }, [currentHostProfileId, profiles, setProfiles]);
   const toggleHostShown = useCallback((profileId: string) => {
     const profile = profiles.find((item) => item.id === profileId);
     // The host on screen is always shown; the menu disables its item.
@@ -1340,7 +1369,7 @@ export function App() {
       />
       {sidebarOpen && <WorkspaceSidebar
         activePaneId={activePane?.id}
-        adapters={agentRuntime.adapters}
+        adapters={allAdapters}
         agents={visibleAgentRows}
         agentSort={appState.shell.agentSort}
         agentsRatio={appState.shell.agentsSectionRatio}

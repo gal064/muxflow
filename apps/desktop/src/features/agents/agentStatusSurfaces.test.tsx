@@ -30,7 +30,7 @@ const remoteHost: SidebarHost = {
   scope: commandScope, active: true, shown: true, latencyMs: 41,
 };
 const mergedRow = (row: WorkspaceRowModel): MergedWorkspaceRow => ({
-  ...row, key: `remote\0${row.session.id}`, hostProfileId: "remote", letter: "", scope: commandScope, canMutate: true,
+  ...row, key: `remote\0${row.session.id}`, hostProfileId: "remote", letter: "", scope: commandScope, phase: "connected", canMutate: true,
 });
 
 const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
@@ -198,8 +198,10 @@ describe("one derivation, three surfaces", () => {
 describe("active agent row", () => {
   it("marks exactly the active pane's row as the current navigation destination", () => {
     const rows = rowsFor([
-      agent({ id: "active", paneId: "%7", displayName: "active agent" }),
-      agent({ id: "other", paneId: "%8", displayName: "other agent" }),
+      agent({ id: "active", hostProfileId: "remote", paneId: "%7", displayName: "active agent" }),
+      agent({ id: "other", hostProfileId: "remote", paneId: "%8", displayName: "other agent" }),
+      // The same pane id on another host is another pane.
+      agent({ id: "elsewhere", hostProfileId: "local", paneId: "%7", displayName: "elsewhere agent" }),
     ]);
     const html = sidebar({ agents: rows, activePaneId: "%7" });
     expect(html).toContain(String.raw`aria-current="true" class="agent-button selected"`);

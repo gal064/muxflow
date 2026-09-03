@@ -34,7 +34,7 @@ const session = (id: string, name: string): Session => ({ id, name, windowCount:
 const row = (host: SidebarHost, id: string, name: string, letter = host.letter): MergedWorkspaceRow => ({
   session: session(id, name), active: host.active && id === "$0", attention: "none", unread: 0, working: false, pinned: false,
   agents: [], agentOverflow: 0,
-  key: `${host.profileId}\0${id}`, hostProfileId: host.profileId, letter, scope: host.scope, canMutate: host.canMutate,
+  key: `${host.profileId}\0${id}`, hostProfileId: host.profileId, letter, scope: host.scope, phase: host.phase, canMutate: host.canMutate,
 });
 
 const props = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}): Parameters<typeof WorkspaceSidebar>[0] => ({
@@ -56,7 +56,8 @@ describe("the host letter", () => {
     expect(html).toContain(`<span class="workspace-title"><span aria-hidden="true" class="workspace-shortcut-index">1</span>${LETTER("L")}`);
     expect(html).toContain(`<span aria-hidden="true" class="workspace-shortcut-index">2</span>${LETTER("P")}`);
     expect(html).toContain('aria-label="alpha, on Local"');
-    expect(html).toContain('aria-label="delta, on peer-box"');
+    // The peer is reconnecting: its row says so, and is drawn dimmed.
+    expect(html).toContain('aria-label="delta, on peer-box, host reconnecting" class="workspace-button offline"');
     // Two rows with the same session id on two hosts are two list items.
     expect(html.match(/class="workspace-row"/g)).toHaveLength(2);
   });
@@ -143,9 +144,12 @@ describe("rows act on their own host", () => {
     expect(renderer.root.findAllByProps({ "data-menu-item": "pin" })).toHaveLength(1);
     expect(renderer.root.findByProps({ "data-menu-item": "rename" }).props.disabled).toBe(true);
 
-    // Reconnected to another server that reuses the id: not this row any more.
+    // Reconnected to another server that reuses the id: not this row any more,
+    // and nothing can be asked of a row that is not there.
     await act(async () => { renderer.update(element({ ...local, scope: { ...local.scope, connectionEpoch: 2, serverIdentity: "server-b" } })); });
     expect(renderer.root.findAllByProps({ "data-menu-item": "pin" })).toHaveLength(0);
+    expect(renderer.root.findByProps({ "data-menu-item": "rename" }).props.disabled).toBe(true);
+    expect(renderer.root.findByProps({ "data-menu-item": "close" }).props.disabled).toBe(true);
     expect(onTogglePinnedWorkspace).not.toHaveBeenCalled();
     await act(async () => renderer.unmount());
   });
