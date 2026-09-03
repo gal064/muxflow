@@ -13,6 +13,7 @@ import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
+import { log as diagnosticsLog } from "../hosts/logBuffer";
 import { BackIcon, FolderIcon, MicIcon, ShiftIcon } from "../../ui/components/MediaIcons";
 import { useSession } from "../../ui/hooks";
 import { colors, fixedChromeText, metrics, radii, typeScale } from "../../ui/tokens";
@@ -86,8 +87,14 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   }, [gone, pageLoaded, paneId, sessionId]));
 
   const onPageMessage = useCallback((message: FromPageMessage) => {
+    // WebView diagnostics belong in the copyable in-app log. Keep the
+    // controller's log arm for non-UI harnesses, but avoid double logging here.
+    if (message.t === "log") {
+      diagnosticsLog(`terminal ${paneId}: ${message.line}`);
+      return;
+    }
     controller.current?.onPageMessage(message);
-  }, []);
+  }, [paneId]);
 
   const toastError = (error: unknown) => toast(error instanceof Error ? error.message : String(error));
 
