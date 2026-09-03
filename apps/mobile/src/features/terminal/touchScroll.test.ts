@@ -64,7 +64,7 @@ describe("TouchScrollController", () => {
 
     h.controller.move(82, 48, 16);
     h.frame(48);
-    expect(h.calls).toEqual([1]);
+    expect(h.calls).toEqual([1, 1]);
   });
 
   it("continues a quick drag with a decaying fling", () => {
