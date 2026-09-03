@@ -73,7 +73,10 @@ export function MicButton({ phase, disabled, hint, onPressIn, onPressOut }: MicB
 }
 
 const styles = StyleSheet.create({
-  root: { alignItems: "center", alignSelf: "stretch", flex: 1, gap: 8, justifyContent: "center", paddingBottom: 12, paddingTop: 8 },
+  // Grow-only: in the pane's natural mode (no fixed height) the surface sizes to
+  // its content; a `flex: 1` there means basis 0 and a clipped disc. In the
+  // large mode the fixed-height pane hands it the remaining height.
+  root: { alignItems: "center", alignSelf: "stretch", flexGrow: 1, flexShrink: 0, gap: 8, justifyContent: "center", paddingBottom: 12, paddingTop: 8 },
   /** The pane shows the press the way the disc used to, so a thumb at its edge still sees an answer. */
   rootPressed: { backgroundColor: colors.accentWash },
   stage: { alignItems: "center", height: SIZE + 24, justifyContent: "center", width: SIZE + 24 },
