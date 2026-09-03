@@ -9,17 +9,17 @@ export const CLIENT_RESIZE_DEBOUNCE_MS = 60;
 export const CLIENT_RESIZE_RETRY_MS = 500;
 export const CLIENT_RESIZE_RETRIES = 4;
 /**
- * How many times the app may take the client size back from another terminal
- * between one focus gain and the next.
+ * The least time between two requests that take the client size back from
+ * another terminal.
  *
- * A budget rather than a rule about *which* mismatch, because the failure this
- * bounds is a fight and not a repetition: two clients that each re-assert on
- * seeing the other's size resize the user's real windows back and forth for as
- * long as both are attached. Two attempts is enough to win against a terminal
- * that moved the windows once and went quiet, and few enough that losing is
- * quiet too — the user's next return to the app buys two more.
+ * A rate rather than a budget, because the failure this bounds is a fight and
+ * not a repetition: two clients that each re-assert on seeing the other's size
+ * resize the user's real windows back and forth for as long as both are
+ * attached. A take happens only on a keystroke or a pointer-down here (see
+ * the re-assert below), so the fight needs a person on each side, and this
+ * keeps it to one flip every couple of seconds while it lasts.
  */
-export const CLIENT_RESIZE_REASSERTS = 2;
+export const CLIENT_RESIZE_TAKE_INTERVAL_MS = 2000;
 
 interface ClientResizeOptions {
   /** Recomputes when the workspace shows a different tmux window. */
@@ -30,11 +30,6 @@ interface ClientResizeOptions {
    * window to describe.
    */
   actualSize?: TerminalSize;
-  /**
-   * Whether the app's own OS window has focus, which decides whether it may
-   * take the client size back from another terminal.
-   */
-  appFocused: boolean;
   canMutate: boolean;
   clientId?: string;
   onStatus(message: string): void;
@@ -68,7 +63,6 @@ interface ClientResize {
 export function useClientResize({
   activeWindowId,
   actualSize,
-  appFocused,
   canMutate,
   clientId,
   onStatus,
@@ -81,16 +75,19 @@ export function useClientResize({
   const measurementsRef = useRef(measurements);
   const clientIdRef = useRef(clientId);
   const canMutateRef = useRef(canMutate);
+  const actualSizeRef = useRef(actualSize);
   const lastRequested = useRef<{ clientId: string; columns: number; rows: number } | undefined>(undefined);
   const lastReported = useRef<string | undefined>(undefined);
   const pending = useRef<{ timer: number; attempt: number }>({ timer: 0, attempt: 0 });
-  /** Reassertions spent since the app last gained focus. */
-  const reasserted = useRef(0);
+  /** When the last request went out, for the take interval. */
+  const lastSentAt = useRef<number | undefined>(undefined);
+  const takeTimer = useRef(0);
   statusRef.current = onStatus;
   surfaceRefValue.current = surface;
   measurementsRef.current = measurements;
   clientIdRef.current = clientId;
   canMutateRef.current = canMutate;
+  actualSizeRef.current = actualSize;
 
   const send = useCallback(() => {
     const element = surfaceRefValue.current;
@@ -123,6 +120,7 @@ export function useClientResize({
     if (previous && previous.clientId === currentClientId && previous.columns === columns && previous.rows === rows) return;
     lastRequested.current = { clientId: currentClientId, columns, rows };
     lastReported.current = undefined;
+    lastSentAt.current = Date.now();
     void resizeClient(currentClientId, columns, rows).then(() => {
       // The retry budget is per *failure run*, not per connection. Counting it
       // across the whole connection meant four transient failures early on left
@@ -139,7 +137,7 @@ export function useClientResize({
         lastRequested.current = undefined;
       }
       // And retry, because nothing else will: the triggers are a window change,
-      // a surface change and a reconnect. A bridge that rejects the first
+      // a surface change, a reconnect and a take. A bridge that rejects the first
       // resize after connect — the likeliest moment for one — would otherwise
       // leave the client at whatever size the other terminals on that session
       // set, for the whole session, on a desktop nobody resizes.
@@ -184,7 +182,7 @@ export function useClientResize({
   useEffect(() => {
     lastRequested.current = undefined;
     lastReported.current = undefined;
-    reasserted.current = 0;
+    lastSentAt.current = undefined;
     pending.current.attempt = 0;
     window.clearTimeout(pending.current.timer);
   }, [clientId]);
@@ -195,66 +193,91 @@ export function useClientResize({
     return () => window.clearTimeout(timer);
   }, [activeWindowId, box, canMutate, clientId, measurements, send, surface]);
 
-  // Coming back to the app is a fresh opportunity, and the one moment under
-  // `window-size latest` semantics when this app should be the sizing client.
-  // Declared before the reconciliation so that on the render where focus
-  // returns, the budget is restored before it is read.
-  useEffect(() => {
-    if (appFocused) reasserted.current = 0;
-  }, [appFocused]);
-
   /**
-   * Re-asserts the size when tmux's answer is not the one that was asked for.
+   * Takes the size back when tmux's answer is not the one that was asked for,
+   * and only when the user does something here.
    *
    * The dedupe above compares each computation against *what this hook last
    * requested*, which is only the same thing as what tmux has for as long as
    * nothing else moves the windows. Under `window-size latest` something else
-   * routinely does: a plain terminal attached to the same session, whose own
-   * activity makes it the latest client. The app then letterboxes and has
-   * nothing to notice it with — its surface never moved, so it never recomputes
-   * a different answer, and input through a control client does not make that
-   * client the latest either. Comparing against the snapshot is what turns the
-   * dedupe from "what I last asked" into "what tmux actually has".
+   * routinely does: a plain terminal attached to the same session, or the
+   * phone app, whose own take makes it the latest client. The app then
+   * letterboxes and has nothing to notice it with — its surface never moved,
+   * so it never recomputes a different answer. Comparing against the snapshot
+   * is what turns the dedupe from "what I last asked" into "what tmux actually
+   * has".
    *
-   * Only while the app has focus. The asymmetry is the whole anti-resize-war
-   * policy: an unfocused app is one the user has deliberately left to work in
-   * that other terminal, and resizing its windows out from under them is
-   * P12-U006's class of harm. Focused, the user is here, and here is where the
-   * size should come from.
+   * The anti-resize-war policy is: a side takes only while a person is using
+   * it, and nobody ever releases. Verified against tmux 3.5a with two control
+   * clients on one session: a size request alone does not make a control
+   * client the latest, typing through one does not either, a `refresh-client
+   * -C` followed by `switch-client -E` (what the host sends for a resize when
+   * another client shares the session) wins against a silent attached client,
+   * and a killed client releases on its own. So the take here is gated on a
+   * keystroke or a pointer-down in this window — not on focus, not on a
+   * topology change, and never while idle. An app left open beside a phone in
+   * use therefore never takes, and the one the user types into always does,
+   * at most once per `CLIENT_RESIZE_TAKE_INTERVAL_MS`: the interval is what
+   * keeps two people typing at once down to a slow flicker rather than a war.
    *
-   * The ordinary path above is deliberately *not* gated on focus: a surface
-   * that changed size is this app's own geometry changing, which is a new fact
-   * to state rather than a size to fight over.
+   * The ordinary path above is deliberately *not* gated on interaction: a
+   * surface that changed size is this app's own geometry changing, which is a
+   * new fact to state rather than a size to fight over. That includes a
+   * reconnect — a new tmux client has never been sized — so a laptop waking
+   * up does take once with nobody at it; the phone takes back on its next
+   * input, and the interval keeps it to one flip.
    *
-   * This runs only when tmux's answer *changes*, because that is what the
-   * dependencies are, so a size tmux simply never takes costs one attempt and
-   * then nothing. The budget is there for the other shape: another client that
-   * answers every reassertion with its own, which without a bound is two
-   * programs resizing a real person's windows at each other indefinitely.
+   * All of this assumes tmux's default `window-size latest`, which the host
+   * relies on rather than sets. Under `largest` or `smallest` a take may never
+   * stick, and then it repeats once per interval for as long as the user
+   * types — a cost, not a fight, and bounded by the interval.
    */
-  useEffect(() => {
+  /**
+   * Whether a take is due: the surface's own size is not the one tmux's
+   * windows have, and the interval has passed. Measured against the snapshot
+   * rather than against `lastRequested`, so a request that failed every retry
+   * (and so cleared its record) is retaken by the next keystroke rather than
+   * never; and checked again when the timer fires, so an ordinary send that
+   * landed in between is not repeated.
+   */
+  const takeDue = useCallback((): boolean => {
+    const actual = actualSizeRef.current;
+    const element = surfaceRefValue.current;
     // `surface` because a request needs one: with an app tab showing there is
-    // no tiled surface to measure, `send` returns immediately, and spending a
-    // reassertion on a request that cannot be built would leave the budget
-    // gone when the terminal comes back.
-    if (!appFocused || !clientId || !canMutate || !actualSize || !surface) return;
-    const requested = lastRequested.current;
-    if (!requested || requested.clientId !== clientId) return;
-    if (requested.columns === actualSize.columns && requested.rows === actualSize.rows) return;
-    if (reasserted.current >= CLIENT_RESIZE_REASSERTS) return;
-    const timer = window.setTimeout(() => {
-      // Both of these happen here rather than above so that an effect re-run
-      // cancelling this timer leaves nothing half-applied: the budget is spent
-      // only on an attempt actually made, and the record `lastRequested` holds
-      // is the one the next run needs to recognise the mismatch at all.
-      // Forgetting it is what lets the identical computation through the
-      // dedupe; `send` recomputes from the live surface either way.
-      reasserted.current += 1;
+    // no tiled surface to measure, and `send` would return immediately.
+    if (!clientIdRef.current || !canMutateRef.current || !actual || !element) return false;
+    const rect = element.getBoundingClientRect();
+    const decision = clientSizeForSurface({ width: rect.width, height: rect.height }, measurementsRef.current);
+    if (decision.kind !== "size") return false;
+    if (decision.size.columns === actual.columns && decision.size.rows === actual.rows) return false;
+    const sentAt = lastSentAt.current;
+    return sentAt === undefined || Date.now() - sentAt >= CLIENT_RESIZE_TAKE_INTERVAL_MS;
+  }, []);
+
+  const take = useCallback(() => {
+    if (takeTimer.current || !takeDue()) return;
+    takeTimer.current = window.setTimeout(() => {
+      takeTimer.current = 0;
+      if (!takeDue()) return;
+      // Forgetting the record is what lets the identical computation through
+      // the dedupe; `send` recomputes from the live surface either way.
       lastRequested.current = undefined;
       send();
     }, CLIENT_RESIZE_DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
-  }, [actualSize?.columns, actualSize?.rows, appFocused, canMutate, clientId, send, surface]);
+  }, [send, takeDue]);
+
+  // Capture phase, so xterm's own handlers cannot swallow the event first. An
+  // unfocused window receives neither, which is the whole focus story.
+  useEffect(() => {
+    window.addEventListener("keydown", take, true);
+    window.addEventListener("pointerdown", take, true);
+    return () => {
+      window.removeEventListener("keydown", take, true);
+      window.removeEventListener("pointerdown", take, true);
+      window.clearTimeout(takeTimer.current);
+      takeTimer.current = 0;
+    };
+  }, [take]);
 
   // The retry timer is the one thing that outlives an effect; only unmounting
   // ends it.

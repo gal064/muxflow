@@ -51,6 +51,9 @@ export interface Pane {
   active: boolean;
   width: number;
   height: number;
+  /** Cell offset inside the window, so the window's own size can be read off its panes (D6). */
+  left: number;
+  top: number;
   currentPath: string;
   currentCommand: string;
 }
@@ -207,6 +210,8 @@ export function createSessionStore(): SessionStore {
           active: pane.active,
           width: pane.width,
           height: pane.height,
+          left: pane.left,
+          top: pane.top,
           currentPath: pane.currentPath,
           currentCommand: pane.currentCommand,
         };

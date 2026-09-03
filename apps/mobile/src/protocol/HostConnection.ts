@@ -22,6 +22,7 @@ import {
   type VoiceResponse,
 } from "./gen/envelope_pb";
 import { requestTerminalSeed, subscribeFull } from "./requests";
+import { jsBackgroundTimer, type BackgroundTimer, type BackgroundTimerHandle } from "./backgroundTimer";
 import { TransportDialError, type Transport, type TransportClose, type TransportCloseReason } from "./Transport";
 import type { AgentTransition, ConnectionState, SavedHostRef, SessionStore } from "../store/sessionStore";
 
@@ -142,6 +143,18 @@ export interface HostConnectionOptions {
   /** Fires on every transition to `connected`; open terminals re-attach here (§7.6 step 5). */
   onConnected?: () => void;
   log?: (line: string) => void;
+  /**
+   * Runs the §7.2 backoff, the handshake deadline and the 60 s stable timer.
+   * The app passes the native timer (`backgroundTimer()`): React Native
+   * freezes JS timers while the activity is paused, and a reconnect is exactly
+   * the delay that has to elapse with the app in the background — as is the
+   * deadline on the handshake that reconnect starts, and the stability window
+   * that resets the exponent (a stable timer frozen in the background never
+   * fires at all, so a phone flapping there climbs to the cap and stays).
+   * Defaults to `setTimeout`. The request timers stay on `setTimeout` on
+   * purpose: one bridge call per request is not worth it.
+   */
+  reconnectTimer?: BackgroundTimer;
   requestTimeoutMs?: number;
   fileStreamTimeoutMs?: number;
   stableAfterMs?: number;
@@ -173,7 +186,7 @@ interface Attempt {
   pending: Map<bigint, PendingRequest>;
   credit?: OutputCreditLedger;
   connectionEpoch: bigint;
-  handshakeTimer?: ReturnType<typeof setTimeout> | undefined;
+  handshakeTimer?: BackgroundTimerHandle | undefined;
   /** Requests that missed their deadline since the host last answered one. */
   unansweredRequests: number;
   /** When the host last answered a request — or when this lane started, so a fresh lane is owed the full silence. */
@@ -188,9 +201,10 @@ export class HostConnection {
   /** Cancels the dial in flight, if any, when the user disconnects before it produced a transport. */
   private dialAbort: AbortController | undefined;
   private reconnectAttempt = 0;
-  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-  private stableTimer: ReturnType<typeof setTimeout> | undefined;
+  private reconnectTimer: BackgroundTimerHandle | undefined;
+  private stableTimer: BackgroundTimerHandle | undefined;
   private wantConnected = false;
+  private readonly timer: BackgroundTimer;
   private readonly requestTimeoutMs: number;
   private readonly fileStreamTimeoutMs: number;
   private readonly stableAfterMs: number;
@@ -198,6 +212,7 @@ export class HostConnection {
   private readonly handshakeTimeoutMs: number;
 
   constructor(private readonly options: HostConnectionOptions) {
+    this.timer = options.reconnectTimer ?? jsBackgroundTimer;
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.fileStreamTimeoutMs = options.fileStreamTimeoutMs ?? FILE_STREAM_TIMEOUT_MS;
     this.stableAfterMs = options.stableAfterMs ?? STABLE_AFTER_MS;
@@ -339,13 +354,16 @@ export class HostConnection {
       if (this.attempt === attempt) this.onClosed(attempt, close);
     });
     this.options.store.getState().setConnection({ state: "handshaking" });
-    attempt.handshakeTimer = setTimeout(() => {
+    // On the background timer too: a reconnect fired from the background
+    // dials natively, and a bridge that never answers would otherwise hold
+    // `handshaking` until the app is next opened.
+    attempt.handshakeTimer = this.timer.set(this.handshakeTimeoutMs, () => {
       attempt.handshakeTimer = undefined;
       if (this.attempt === attempt && attempt.phase !== "live") {
         this.log(`handshake.timeout phase=${attempt.phase}`);
         this.reconnectNow(attempt, "handshake timed out");
       }
-    }, this.handshakeTimeoutMs);
+    });
     try {
       this.sendHandshake(attempt);
     } catch (error) {
@@ -481,10 +499,10 @@ export class HostConnection {
     this.clearStableTimer();
     // The backoff exponent resets only after 60 s of stability (§7.2); the
     // store's `attempt` is a display value and is 0 whenever connected.
-    this.stableTimer = setTimeout(() => {
+    this.stableTimer = this.timer.set(this.stableAfterMs, () => {
       this.stableTimer = undefined;
       if (this.attempt === attempt) this.reconnectAttempt = 0;
-    }, this.stableAfterMs);
+    });
     // A snapshot barrier already incorporates every ordered event at or below
     // its accepted sequence; replaying one would read as a gap. Mirrors
     // `event_follows_snapshot_barrier` in the desktop bridge.
@@ -509,7 +527,7 @@ export class HostConnection {
   private goLive(attempt: Attempt): void {
     attempt.phase = "live";
     if (attempt.handshakeTimer !== undefined) {
-      clearTimeout(attempt.handshakeTimer);
+      this.timer.clear(attempt.handshakeTimer);
       attempt.handshakeTimer = undefined;
     }
     this.options.store.getState().setConnection({ state: "connected", message: undefined, attempt: 0 });
@@ -713,7 +731,7 @@ export class HostConnection {
   private teardown(attempt: Attempt, error: Error): void {
     if (this.attempt === attempt) this.attempt = undefined;
     if (attempt.handshakeTimer !== undefined) {
-      clearTimeout(attempt.handshakeTimer);
+      this.timer.clear(attempt.handshakeTimer);
       attempt.handshakeTimer = undefined;
     }
     attempt.credit?.close();
@@ -748,24 +766,24 @@ export class HostConnection {
     this.reconnectAttempt = n + 1;
     this.options.store.getState().setConnection({ state: "reconnecting", attempt: n + 1, message, retryAtMs: Date.now() + delayMs });
     this.log(`reconnect.scheduled attempt=${n + 1} delayMs=${delayMs} reason=${message}`);
-    this.reconnectTimer = setTimeout(() => {
+    this.reconnectTimer = this.timer.set(delayMs, () => {
       this.reconnectTimer = undefined;
       if (!this.wantConnected) return;
       this.options.store.getState().setConnection({ state: "sshConnecting" });
       void this.open();
-    }, delayMs);
+    });
   }
 
   private clearReconnectTimer(): void {
     if (this.reconnectTimer !== undefined) {
-      clearTimeout(this.reconnectTimer);
+      this.timer.clear(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
   }
 
   private clearStableTimer(): void {
     if (this.stableTimer !== undefined) {
-      clearTimeout(this.stableTimer);
+      this.timer.clear(this.stableTimer);
       this.stableTimer = undefined;
     }
   }

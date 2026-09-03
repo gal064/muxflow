@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildAgentRows, groupAgentRows, groupAgentRowsByStatus, jumpTarget, needsAttention, nextSortMode,
+  buildAgentRows, groupAgentRows, groupAgentRowsByPin, groupAgentRowsByStatus, jumpTarget, needsAttention, nextSortMode,
   RECENT_IDLE_WINDOW_MILLIS, selectedAgentIdForPane, sortModeLabel, unreadCount, type AgentLocation,
 } from "./agentsList";
 import { agent } from "./testFixtures";
@@ -64,13 +64,15 @@ describe("agents section ordering", () => {
     expect(needsAttention("blocked")).toBe(true);
   });
 
-  it("toggles between exactly two orderings", () => {
-    expect(nextSortMode("workspace")).toBe("status");
+  it("cycles through exactly three orderings", () => {
     expect(nextSortMode("status")).toBe("workspace");
+    expect(nextSortMode("workspace")).toBe("pinned");
+    expect(nextSortMode("pinned")).toBe("status");
     // The persisted value is `status` — it is in the app-state contract and two
     // migrations point at it — but the button says what the mode does.
     expect(sortModeLabel("status")).toBe("priority");
     expect(sortModeLabel("workspace")).toBe("workspace");
+    expect(sortModeLabel("pinned")).toBe("pinned");
   });
 
   it("buckets the priority order without a separate Done group", () => {
@@ -311,6 +313,38 @@ describe("agent pins stay local to their workspace or status", () => {
       .toEqual(["blocked", "working", "done", "idle"]);
     expect(buildAgentRows([idle, working, done, blocked], plain, () => true, "workspace").map((row) => row.pinned))
       .toEqual([false, false, false, false]);
+    // With nothing pinned the pinned ordering is the priority ordering under
+    // one Unpinned divider.
+    const groups = groupAgentRowsByPin(buildAgentRows([idle, working, done, blocked], plain, () => true, "pinned"));
+    expect(groups.map((group) => [group.label, group.rows.map((row) => row.agent.id)]))
+      .toEqual([["Unpinned", ["blocked", "working", "done", "idle"]]]);
+  });
+
+  it("puts everything pinned by tab or by workspace above everything else in the pinned ordering", () => {
+    // `stray` is a pinned tab in the unpinned workspace; `idle-here` is an
+    // unpinned tab in the pinned workspace. Both count as pinned, and the
+    // blocked agent in the plain workspace does not, however loud it is.
+    const strayPinnedTab = agent({ id: "stray", displayName: "d", sessionId: "$plain", windowId: "@pinned", lifecycle: "idle", updatedAt: 50, lifecycleChangedAt: 50 });
+    const workingElsewhere = agent({ id: "working-away", displayName: "e", sessionId: "$plain", lifecycle: "working", updatedAt: 60, lifecycleChangedAt: 60 });
+    const rows = buildAgentRows([...all, strayPinnedTab, workingElsewhere], place, () => true, "pinned");
+    // Inside each half the priority queue holds: status first, then the tab
+    // pin, then lifecycle recency — the same order the status mode draws.
+    expect(rows.map((row) => row.agent.id)).toEqual([
+      "pinned-tab", "stray", "idle-here",
+      "blocked-away", "working-away",
+    ]);
+    const groups = groupAgentRowsByPin(rows);
+    expect(groups.map((group) => [group.key, group.label, group.rows.map((row) => row.agent.id)])).toEqual([
+      ["pinned", "Pinned", ["pinned-tab", "stray", "idle-here"]],
+      ["unpinned", "Unpinned", ["blocked-away", "working-away"]],
+    ]);
+    expect(groups.flatMap((group) => group.rows)).toHaveLength(rows.length);
+  });
+
+  it("omits an empty pinned half rather than drawing an empty heading", () => {
+    const rows = buildAgentRows([idleHere, idleHerePinnedTab], place, () => true, "pinned");
+    expect(groupAgentRowsByPin(rows).map((group) => group.key)).toEqual(["pinned"]);
+    expect(groupAgentRowsByPin([])).toEqual([]);
   });
 });
 

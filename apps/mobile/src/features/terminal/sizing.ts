@@ -28,3 +28,23 @@ export function computeGrid(viewport: { width: number; height: number }, cell: C
 export function sameGrid(a: Grid | undefined, b: Grid | undefined): boolean {
   return a !== undefined && b !== undefined && a.cols === b.cols && a.rows === b.rows;
 }
+
+/**
+ * The window's grid as tmux has it, read off the topology's panes: the far
+ * edge of the pane furthest right and the one furthest down. A window whose
+ * panes are missing from the snapshot is unknown, not 0x0 — the caller
+ * compares this against the grid it asked for.
+ */
+export function windowGrid(
+  panes: Iterable<{ windowId: string; left: number; top: number; width: number; height: number }>,
+  windowId: string,
+): Grid | undefined {
+  let cols = 0;
+  let rows = 0;
+  for (const pane of panes) {
+    if (pane.windowId !== windowId) continue;
+    cols = Math.max(cols, pane.left + pane.width);
+    rows = Math.max(rows, pane.top + pane.height);
+  }
+  return cols > 0 && rows > 0 ? { cols, rows } : undefined;
+}

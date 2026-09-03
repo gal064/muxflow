@@ -5,13 +5,13 @@ import { EventKind, HostEventSchema, Operation, PaneResourceSchema, PaneResource
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../../protocol/testing/fakeTransport";
 import { createSessionStore } from "../../store/sessionStore";
 import type { ToPageMessage } from "./bridgeMessages";
-import { TerminalController, type TerminalSnapshot } from "./TerminalController";
+import { SUBMIT_DELAY_MS, TAKE_INTERVAL_MS, TerminalController, type AppForeground, type TerminalControllerOptions, type TerminalSnapshot } from "./TerminalController";
 import { TerminalRegistry } from "./terminalRegistry";
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
 const SEED = new TextEncoder().encode("\x1b[2J$ ");
 
-function harness() {
+function harness(extra: Partial<TerminalControllerOptions> = {}) {
   const store = createSessionStore();
   const registry = new TerminalRegistry();
   const transports: FakeTransport[] = [];
@@ -39,6 +39,7 @@ function harness() {
     getConnection: () => connection,
     page: { send: (m) => page.push(m) },
     onChange: (s) => snapshots.push(s),
+    ...extra,
   });
   const connect = async () => {
     connection.connect();
@@ -492,8 +493,72 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     if (frame?.payload.case !== "request") throw new Error("expected input");
     expect(frame.payload.value).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1" });
     expect(Array.from(frame.payload.value.data)).toEqual([0x03]);
+    expect(frame.payload.value.terminalInputPaste).toBe(false);
     t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
     await expect(pending).resolves.toBeUndefined();
+  });
+});
+
+describe("TerminalController Send (§9.5)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** The one request currently on the wire, or undefined. */
+  function inputFrame(t: FakeTransport): { request: Request; requestId: bigint } | undefined {
+    const [frame] = t.drain();
+    if (!frame) return undefined;
+    if (frame.payload.case !== "request") throw new Error(`expected a request, got ${frame.payload.case}`);
+    return { request: frame.payload.value, requestId: frame.requestId };
+  }
+
+  it("pastes the text, then after SUBMIT_DELAY_MS sends the CR as keys", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    const pending = h.controller.submitText("héllo");
+
+    const paste = inputFrame(t)!;
+    expect(paste.request).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1", terminalInputPaste: true });
+    expect(Array.from(paste.request.data)).toEqual(Array.from(new TextEncoder().encode("héllo")));
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: paste.requestId }));
+    await settle();
+    expect(inputFrame(t)).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(SUBMIT_DELAY_MS - 1);
+    expect(inputFrame(t)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    const cr = inputFrame(t)!;
+    expect(cr.request).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1", terminalInputPaste: false });
+    expect(Array.from(cr.request.data)).toEqual([0x0d]);
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: cr.requestId }));
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it("sends an empty Send as one bare CR with no delay", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    const pending = h.controller.submitText("");
+    const cr = inputFrame(t)!;
+    expect(cr.request).toMatchObject({ operation: Operation.TERMINAL_INPUT, terminalInputPaste: false });
+    expect(Array.from(cr.request.data)).toEqual([0x0d]);
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: cr.requestId }));
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it("sends no CR when the paste is refused", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    const pending = h.controller.submitText("hello");
+    const paste = inputFrame(t)!;
+    t.feed(hostEnvelope({
+      case: "response",
+      value: create(ResponseSchema, { ok: false, errorCode: "terminal_input_failed", displayMessage: "pane gone" }),
+    }, { requestId: paste.requestId }));
+    await expect(pending).rejects.toThrow("pane gone");
+    await vi.advanceTimersByTimeAsync(SUBMIT_DELAY_MS * 2);
+    expect(inputFrame(t)).toBeUndefined();
   });
 });
 
@@ -619,5 +684,175 @@ describe("TerminalController successor and reconnect", () => {
     t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 2n));
     await settle();
     expect(h.page.map((m) => m.t)).toContain("seed");
+  });
+});
+
+/** `AppState` as the tests drive it. */
+function fakeForeground(active = true) {
+  const listeners = new Set<() => void>();
+  const dep: AppForeground = {
+    inForeground: () => active,
+    onForeground: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  return {
+    dep,
+    set(next: boolean) {
+      active = next;
+      if (next) for (const listener of listeners) listener();
+    },
+  };
+}
+
+describe("TerminalController sizing takes (D6)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** Attached and seeded on the first connection, at 40x30 unless said otherwise. */
+  async function seeded(extra: Partial<TerminalControllerOptions> = {}, grid = { cols: 40, rows: 30 }) {
+    const h = harness(extra);
+    const t = await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", ...grid });
+    await answerNext(t); // select
+    await answerNext(t); // resize
+    await answerNext(t); // attach
+    await answerNext(t); // seed request
+    t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 1n));
+    await settle();
+    return h;
+  }
+
+  async function reconnect(h: ReturnType<typeof harness>) {
+    h.transport().closeFromRemote({ reason: "networkLost" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const t = h.transport();
+    t.drain(); // ClientHello + Subscribe
+    t.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: 2n, terminalOutputWindowBytes: 1000n }) }, { requestId: 1n }));
+    t.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
+    return t;
+  }
+
+  /** Ops on the wire right now, answered ok. */
+  async function answerAll(t: FakeTransport): Promise<Operation[]> {
+    await settle();
+    const frames = t.drain();
+    const ops: Operation[] = [];
+    for (const frame of frames) {
+      if (frame.payload.case !== "request") continue;
+      ops.push(frame.payload.value.operation);
+      t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
+    }
+    await settle();
+    return ops;
+  }
+
+  it("a reconnect in the background sends nothing; the return to the foreground runs step 1", async () => {
+    const foreground = fakeForeground();
+    const h = await seeded({ foreground: foreground.dep });
+    foreground.set(false);
+    const t = await reconnect(h);
+    // Not even the select: it would take the host's unsized control client
+    // out of `ignore-size`, and tmux would size the windows from 80x24.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+    foreground.set(true);
+    const ops = [await answerNext(t), await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
+    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
+    // Once, not on every foreground transition.
+    foreground.set(false);
+    foreground.set(true);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+  });
+
+  it("a reconnect in the foreground still resizes, as before", async () => {
+    const foreground = fakeForeground();
+    const h = await seeded({ foreground: foreground.dep });
+    const t = await reconnect(h);
+    const ops = [await answerNext(t), await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
+    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
+  });
+
+  it("a size change while in the background waits for the foreground", async () => {
+    const foreground = fakeForeground();
+    const h = await seeded({ foreground: foreground.dep });
+    foreground.set(false);
+    // The keyboard hides as the app goes to the background.
+    h.controller.onPageMessage({ t: "size", cols: 40, rows: 44 });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(h.transport().drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+    foreground.set(true);
+    await vi.advanceTimersByTimeAsync(150);
+    const [resize] = h.transport().drain().filter((f) => f.payload.case === "request");
+    if (resize?.payload.case !== "request") throw new Error("expected the withheld resize");
+    expect(resize.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 40, rows: 44 });
+  });
+
+  it("the return to the foreground alone takes nothing — the next input does; a stopped controller ignores it", async () => {
+    const foreground = fakeForeground();
+    const h = await seeded({ foreground: foreground.dep }, { cols: 80, rows: 24 });
+    const t = h.transport();
+    await vi.advanceTimersByTimeAsync(TAKE_INTERVAL_MS);
+    // Phone on the desk, connection alive, screen locked; the laptop took the window.
+    foreground.set(false);
+    h.store.getState().applySnapshot(topologySnapshot({
+      panes: [{ id: "%1", sessionId: "$1", windowId: "@1", index: 0, active: true, width: 160, height: 48, left: 0, top: 0, currentPath: "/", currentCommand: "bash" }],
+    }));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+    // Unlocked to read a message: an app left open does not take.
+    foreground.set(true);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+    // Used: it does.
+    const pending = h.controller.sendInput(Uint8Array.of(0x61));
+    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL, Operation.TERMINAL_INPUT]);
+    await pending;
+    // After stop, a foreground event is nobody's business.
+    void h.controller.stop();
+    await answerAll(t); // the hide
+    foreground.set(false);
+    foreground.set(true);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+  });
+
+  it("input takes the window back when the topology shows it at another size, at most once per interval", async () => {
+    // The fixture snapshot has the window at 80x24: attached at that size, nothing is amiss.
+    const h = await seeded({}, { cols: 80, rows: 24 });
+    const t = h.transport();
+    await vi.advanceTimersByTimeAsync(TAKE_INTERVAL_MS);
+    // The snapshot agrees with what was sent: input only.
+    let pending = h.controller.sendInput(Uint8Array.of(0x61));
+    expect(await answerAll(t)).toEqual([Operation.TERMINAL_INPUT]);
+    await pending;
+    // The laptop took the window (two panes side by side, 160 wide).
+    h.store.getState().applySnapshot(topologySnapshot({
+      panes: [
+        { id: "%1", sessionId: "$1", windowId: "@1", index: 0, active: true, width: 79, height: 48, left: 0, top: 0, currentPath: "/", currentCommand: "bash" },
+        { id: "%2", sessionId: "$1", windowId: "@1", index: 1, active: false, width: 80, height: 48, left: 80, top: 0, currentPath: "/", currentCommand: "bash" },
+      ],
+    }));
+    pending = h.controller.sendInput(Uint8Array.of(0x62));
+    await settle();
+    const frames = t.drain().filter((f) => f.payload.case === "request");
+    expect(frames.map((f) => f.payload.case === "request" ? f.payload.value.operation : undefined)).toEqual([Operation.RESIZE_TERMINAL, Operation.TERMINAL_INPUT]);
+    const resize = frames[0]!;
+    if (resize.payload.case !== "request") throw new Error("unreachable");
+    expect(resize.payload.value).toMatchObject({ columns: 80, rows: 24 });
+    for (const frame of frames) t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
+    await pending;
+    // Still not at the phone's size (the snapshot lags, or the laptop answered): inside the interval, input only.
+    pending = h.controller.sendInput(Uint8Array.of(0x63));
+    expect(await answerAll(t)).toEqual([Operation.TERMINAL_INPUT]);
+    await pending;
+    // Past it, the next input takes again.
+    await vi.advanceTimersByTimeAsync(TAKE_INTERVAL_MS);
+    pending = h.controller.sendInput(Uint8Array.of(0x64));
+    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL, Operation.TERMINAL_INPUT]);
+    await pending;
   });
 });

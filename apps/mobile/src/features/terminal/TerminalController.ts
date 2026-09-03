@@ -15,8 +15,9 @@ import {
 } from "../../protocol/requests";
 import type { SessionStore } from "../../store/sessionStore";
 import type { FromPageMessage, ToPageMessage } from "./bridgeMessages";
-import { toBase64 } from "./bytes";
-import { sameGrid, type Grid } from "./sizing";
+import { toBase64, utf8Encode } from "./bytes";
+import { CR } from "./chips";
+import { sameGrid, windowGrid, type Grid } from "./sizing";
 import type { TerminalRegistry } from "./terminalRegistry";
 
 /** §9.5 states, as the screen renders them. */
@@ -43,6 +44,19 @@ export interface TerminalPage {
   send(message: ToPageMessage): void;
 }
 
+/** Whether a person can be looking at the app; `appForeground.ts` reads it off `AppState`. */
+export interface AppForeground {
+  inForeground(): boolean;
+  /** Calls `listener` each time the app comes to the foreground; returns the unsubscribe. */
+  onForeground(listener: () => void): () => void;
+}
+
+/** A controller built without one is always in the foreground (tests, the live harness). */
+const ALWAYS_FOREGROUND: AppForeground = { inForeground: () => true, onForeground: () => () => undefined };
+
+/** Gap between Send's paste and the CR that submits it. */
+export const SUBMIT_DELAY_MS = 100;
+
 export interface TerminalControllerOptions {
   paneId: string;
   sessionId: string;
@@ -56,6 +70,7 @@ export interface TerminalControllerOptions {
   seedTimeoutMs?: number;
   /** §7.6 step 6: 150 ms. */
   resizeDebounceMs?: number;
+  foreground?: AppForeground;
 }
 
 export const SEED_TIMEOUT_MS = 5_000;
@@ -63,6 +78,13 @@ export const RESIZE_DEBOUNCE_MS = 150;
 /** A failed select/resize/attach is retried after this, up to ATTACH_RETRY_LIMIT times. */
 export const ATTACH_RETRY_MS = 2_000;
 export const ATTACH_RETRY_LIMIT = 3;
+/**
+ * The least time between two sizes this controller sends (D6). The desktop
+ * takes the window back on its user's keystrokes at the same rate, so two
+ * people typing at once flip the window at most once every couple of seconds
+ * rather than on every key.
+ */
+export const TAKE_INTERVAL_MS = 2_000;
 
 // §7.6.1 scrollback paging: a screen-only seed carries nothing above the
 // screen; reaching the top of the buffer fetches the history above it. The
@@ -99,6 +121,11 @@ export class TerminalController {
   private resizeTimer: ReturnType<typeof setTimeout> | undefined;
   private attachRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private attachFailures = 0;
+  /** When the last RESIZE_TERMINAL went out, for the take interval. */
+  private lastResizeAt: number | undefined;
+  /** An attach asked for while the app was in the background; runs on the return to the foreground. */
+  private attachOnForeground = false;
+  private unsubscribeForeground: (() => void) | undefined;
   // ---- §7.6.1 history paging state, reset by every seed ----
   /** Everything handed to xterm since the seed (the seed first); a splice replays it above nothing but history. */
   private retained: Uint8Array[] = [];
@@ -117,12 +144,14 @@ export class TerminalController {
   private historyDone = false;
   private readonly seedTimeoutMs: number;
   private readonly resizeDebounceMs: number;
+  private readonly foreground: AppForeground;
 
   constructor(private readonly options: TerminalControllerOptions) {
     this.paneId = options.paneId;
     this.sessionId = options.sessionId;
     this.seedTimeoutMs = options.seedTimeoutMs ?? SEED_TIMEOUT_MS;
     this.resizeDebounceMs = options.resizeDebounceMs ?? RESIZE_DEBOUNCE_MS;
+    this.foreground = options.foreground ?? ALWAYS_FOREGROUND;
   }
 
   get snapshot(): TerminalSnapshot {
@@ -146,6 +175,20 @@ export class TerminalController {
       onConnected: () => this.onConnected(),
     });
     this.options.store.getState().setFocusedPane(this.paneId);
+    // Step 1 or a size withheld while the app was in the background (see
+    // attach and resizeNow) runs when a person is looking again. Nothing more:
+    // a window the laptop took meanwhile is taken back by the next input, not
+    // by the unlock — a phone unlocked to read a message with this screen in
+    // front is an app left open, the phone's window focus.
+    this.unsubscribeForeground = this.foreground.onForeground(() => {
+      if (this.stopped) return;
+      if (this.attachOnForeground) {
+        this.attachOnForeground = false;
+        void this.attach();
+      } else {
+        this.scheduleResize();
+      }
+    });
     this.options.page.send({ t: "init" });
   }
 
@@ -175,10 +218,57 @@ export class TerminalController {
   }
 
   /** Every tap and every Send: one TERMINAL_INPUT, immediately (§7.6). */
-  async sendInput(bytes: Uint8Array): Promise<void> {
+  async sendInput(bytes: Uint8Array, options?: { paste?: boolean }): Promise<void> {
     const connection = this.liveConnection();
     if (!connection) throw new Error("not connected");
-    await connection.request(terminalInput(this.paneId, bytes));
+    this.takeSizeIfLost();
+    await connection.request(terminalInput(this.paneId, bytes, options));
+  }
+
+  /**
+   * D6: typing here is using the phone, so the window follows the phone. tmux
+   * sizes a window from whichever client took it last, and a keystroke on the
+   * desktop takes it back; when the topology shows the window at another size
+   * than this controller asked for, the next input here takes it again — at
+   * most once per `TAKE_INTERVAL_MS`, and never a size the window already has.
+   * The request leaves ahead of the input on the same connection; the host
+   * writes them to different tmux clients, so tmux may apply either first,
+   * and the redraw follows the size either way.
+   */
+  private takeSizeIfLost(): void {
+    if (!this.attached || this.attaching || this.resizeTimer !== undefined || !this.grid) return;
+    const actual = this.actualWindowGrid();
+    if (!actual || sameGrid(actual, this.grid)) return;
+    if (this.lastResizeAt !== undefined && Date.now() - this.lastResizeAt < TAKE_INTERVAL_MS) return;
+    this.log(`take: window is ${actual.cols}x${actual.rows}`);
+    void this.resizeNow(true);
+  }
+
+  /** The grid tmux has for this pane's window, from the topology snapshot. */
+  private actualWindowGrid(): Grid | undefined {
+    const state = this.options.store.getState();
+    const windowId = state.panes[this.paneId]?.windowId;
+    return windowId === undefined ? undefined : windowGrid(Object.values(state.panes), windowId);
+  }
+
+  /**
+   * The input bar's Send (§9.5): the text as one paste, then a CR as a
+   * keystroke. The two are separate requests because the host never merges a
+   * paste with its neighbours, and the CR waits until the paste is acknowledged
+   * plus `SUBMIT_DELAY_MS`, so a composer that treats an Enter inside a fast
+   * burst as a newline sees the CR on its own and submits. A refused paste
+   * sends no CR. Empty text is a bare CR with no delay.
+   *
+   * Deliberately not gated on `stopped`: a Back during the gap must still
+   * deliver the CR, or the pasted text sits unsubmitted in the composer.
+   */
+  async submitText(text: string): Promise<void> {
+    const body = utf8Encode(text);
+    if (body.length > 0) {
+      await this.sendInput(body, { paste: true });
+      await new Promise<void>((resolve) => setTimeout(resolve, SUBMIT_DELAY_MS));
+    }
+    await this.sendInput(CR);
   }
 
   /**
@@ -200,6 +290,8 @@ export class TerminalController {
     }
     this.unregister?.();
     this.unregister = undefined;
+    this.unsubscribeForeground?.();
+    this.unsubscribeForeground = undefined;
     const store = this.options.store.getState();
     if (store.focusedPaneId === this.paneId) store.setFocusedPane(undefined);
     const connection = this.liveConnection();
@@ -382,6 +474,15 @@ export class TerminalController {
       this.reattachWanted = true;
       return;
     }
+    // Only while a person can be looking (D6, §7.6 step 5). The whole of step
+    // 1 waits, not just the resize: selecting the session takes the host's
+    // control client out of `ignore-size`, and one that has never been sent a
+    // size would size the windows from tmux's 80x24 default. A reconnect with
+    // the screen left open in a pocket must not touch the laptop's windows.
+    if (!this.foreground.inForeground()) {
+      this.attachOnForeground = true;
+      return;
+    }
     // A pending retry would otherwise re-run select → resize → attach on top
     // of this one, and every extra ATTACH resets the page with a new seed.
     if (this.attachRetryTimer !== undefined) {
@@ -401,6 +502,7 @@ export class TerminalController {
       this.options.store.getState().setFocusedPane(this.paneId);
       await connection.request(selectTerminalSession(this.sessionId));
       if (this.stopped) return; // left before the reveal: nothing to hide
+      this.lastResizeAt = Date.now();
       await connection.request(resizeTerminal(grid.cols, grid.rows));
       this.sentGrid = grid;
       if (this.stopped) return;
@@ -481,12 +583,17 @@ export class TerminalController {
     }, this.resizeDebounceMs);
   }
 
-  private async resizeNow(): Promise<void> {
+  /** `take`: the grid was sent before, but the window is not at it (D6). */
+  private async resizeNow(take = false): Promise<void> {
     const connection = this.liveConnection();
     const grid = this.grid;
     if (!connection || !grid || this.stopped || !this.attached || this.attaching) return;
-    if (sameGrid(grid, this.sentGrid)) return;
+    if (!take && sameGrid(grid, this.sentGrid)) return;
+    // Nobody is looking: the keyboard hiding as the app goes to the background
+    // is not the phone being used. Sent on the return to the foreground.
+    if (!this.foreground.inForeground()) return;
     this.sentGrid = grid;
+    this.lastResizeAt = Date.now();
     try {
       await connection.request(resizeTerminal(grid.cols, grid.rows));
       this.log(`resize ${grid.cols}x${grid.rows} → ok`);

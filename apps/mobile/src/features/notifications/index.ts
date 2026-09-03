@@ -13,6 +13,7 @@ import type { TapTarget } from "./payload";
 import { createPermissionFlow } from "./permissionFlow";
 import { notificationsUiStore } from "./permissionStore";
 import { connectionMarkSeenSink, createTapMarkSeen, terminalRoute } from "./taps";
+import { backgroundSleep } from "../../session/backgroundTimer";
 import { onAgentTransition } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
@@ -33,6 +34,10 @@ export function startNotifications(): void {
     subscribe: (listener) => sessionStore.subscribe(listener),
     onAgentTransition,
     appInForeground: () => AppState.currentState === "active",
+    // The post-settle wait runs in the background too — a cancel for an agent
+    // seen on the desktop must take the notification down without the app
+    // being opened — and a JS timer would not (see `backgroundTimer.ts`).
+    sleep: backgroundSleep,
     log,
   }).start();
 
