@@ -153,23 +153,8 @@ impl TerminalAttachment {
     /// session on every switch and every reconnect, and the remote-linux lane
     /// measured identical `refresh-client -C` requests at 15 topology-dirty
     /// events each on a real link.
-    ///
-    /// `window` is the size the session's current window actually has, from
-    /// the last snapshot. A client can remember the right size while the
-    /// window is at another one — the phone took it, then the user switched
-    /// the desktop here — because under `window-size latest` a size only
-    /// counts on the client the window follows. That case is re-sent: stating
-    /// the size again is what makes the desktop that client. An unknown window
-    /// (no panes in the snapshot yet) is taken at the client's word.
-    fn ensure_size(
-        &mut self,
-        columns: u32,
-        rows: u32,
-        window: Option<(u32, u32)>,
-    ) -> anyhow::Result<()> {
-        if self.last_size == Some((columns, rows))
-            && window.is_none_or(|size| size == (columns, rows))
-        {
+    fn ensure_size(&mut self, columns: u32, rows: u32) -> anyhow::Result<()> {
+        if self.last_size == Some((columns, rows)) {
             return Ok(());
         }
         self.resize(columns, rows)
@@ -467,10 +452,6 @@ pub(super) struct TerminalClients {
     /// conservative direction — a missed claim letterboxes a pane until the next
     /// selection, an unwarranted one churns topology for every connection.
     session_attached: HashMap<String, u32>,
-    /// The size of each session's current window, from the same snapshot:
-    /// what [`TerminalAttachment::ensure_size`] checks a remembered size
-    /// against, so selecting a session another client shrank re-states it.
-    session_window_size: HashMap<String, (u32, u32)>,
     resources: Arc<Mutex<PaneResourceStore>>,
     generation: Arc<AtomicU64>,
     input: Option<PersistentInputClient>,
@@ -515,7 +496,6 @@ impl TerminalClients {
             visible_session: None,
             last_size: None,
             session_attached: HashMap::new(),
-            session_window_size: HashMap::new(),
             input_session: None,
             // A hidden pane costs its tail and nothing else now, so the whole
             // hidden-pane store is 512 KB instead of 16 MB.
@@ -751,7 +731,6 @@ impl TerminalClients {
         let last_size = self.last_size;
         let previous = self.visible_session.clone();
         let claim = self.foreign_client_shares(session_id);
-        let window = self.session_window_size.get(session_id).copied();
         let outcome = (|| -> anyhow::Result<()> {
             // Nobody participates until the flag lands. Cleared first rather
             // than on each failure path, so every way out of the two lines
@@ -770,7 +749,7 @@ impl TerminalClients {
                 .clients
                 .get_mut(session_id)
                 .context("selected session control client is detached")?;
-            client.ensure_size(columns, rows, window)?;
+            client.ensure_size(columns, rows)?;
             // Size first, claim second, and only for a session somebody else is
             // in: the claim recomputes the windows from the size this client
             // holds, so it is only ever correct once that size has landed.
@@ -1078,7 +1057,6 @@ impl TerminalClients {
             .iter()
             .map(|item| (item.id.clone(), item.attached_clients))
             .collect();
-        self.session_window_size = current_window_sizes(snapshot);
         let sessions: HashSet<_> = snapshot
             .sessions
             .iter()
@@ -1134,29 +1112,6 @@ impl TerminalClients {
     pub(super) fn stop(&mut self) {
         drop(self.signal_stop());
     }
-}
-
-/// Each session's current window, sized from the far edges of its panes — the
-/// same reading the desktop takes of the snapshot. A window with no panes in
-/// the snapshot is left out rather than reported as 0x0.
-fn current_window_sizes(snapshot: &tmux_control::TmuxSnapshot) -> HashMap<String, (u32, u32)> {
-    let mut sizes = HashMap::new();
-    for window in snapshot.windows.iter().filter(|window| window.active) {
-        let (columns, rows) = snapshot
-            .panes
-            .iter()
-            .filter(|pane| pane.window_id == window.id)
-            .fold((0, 0), |(columns, rows): (u32, u32), pane| {
-                (
-                    columns.max(u32::from(pane.left) + u32::from(pane.width)),
-                    rows.max(u32::from(pane.top) + u32::from(pane.height)),
-                )
-            });
-        if columns > 0 && rows > 0 {
-            sizes.insert(window.session_id.clone(), (columns, rows));
-        }
-    }
-    sizes
 }
 
 /// The joinable remains of a stopped connection's terminal clients.

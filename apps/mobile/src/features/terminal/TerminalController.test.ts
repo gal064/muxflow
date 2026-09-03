@@ -791,6 +791,32 @@ describe("TerminalController sizing takes (D6)", () => {
     expect(resize.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 40, rows: 44 });
   });
 
+  it("the return to the foreground takes the window back too, and a stopped controller ignores it", async () => {
+    const foreground = fakeForeground();
+    const h = await seeded({ foreground: foreground.dep }, { cols: 80, rows: 24 });
+    const t = h.transport();
+    await vi.advanceTimersByTimeAsync(TAKE_INTERVAL_MS);
+    // Phone in a pocket, connection alive; the laptop took the window.
+    foreground.set(false);
+    h.store.getState().applySnapshot(topologySnapshot({
+      panes: [{ id: "%1", sessionId: "$1", windowId: "@1", index: 0, active: true, width: 160, height: 48, left: 0, top: 0, currentPath: "/", currentCommand: "bash" }],
+    }));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+    // The user looks at the phone again: the terminal is shown at phone size.
+    foreground.set(true);
+    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+    // After stop, a foreground event is nobody's business.
+    void h.controller.stop();
+    await answerAll(t); // the hide
+    foreground.set(false);
+    foreground.set(true);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+  });
+
   it("input takes the window back when the topology shows it at another size, at most once per interval", async () => {
     // The fixture snapshot has the window at 80x24: attached at that size, nothing is amiss.
     const h = await seeded({}, { cols: 80, rows: 24 });
