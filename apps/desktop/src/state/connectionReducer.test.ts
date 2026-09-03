@@ -54,41 +54,6 @@ describe("connectionReducer", () => {
     expect(connectionReducer(jumped, { type: "orderedEvent", sequence: 9 })).toBe(jumped);
   });
 
-  it("remembers every agent-routing change, including a return to an earlier shape", () => {
-    const first = connectionReducer(initialHostState, {
-      type: "snapshot", snapshot: populated, sequence: 1, generation: 9, serverIdentity: "server-a",
-    });
-    const cosmetic = connectionReducer(first, {
-      type: "snapshot",
-      snapshot: {
-        ...populated,
-        windows: [{ ...populated.windows[0], name: "⠋ animated", active: false, layout: "resized" }],
-        panes: [{ ...populated.panes[0], active: false, width: 120, currentPath: "/elsewhere" }],
-      },
-      sequence: 2,
-      generation: 10,
-      serverIdentity: "server-a",
-    });
-    expect(cosmetic.agentRoutingFingerprint).toBe(first.agentRoutingFingerprint);
-    expect(cosmetic.agentRoutingChangedAtGeneration).toBe(9);
-
-    const moved = connectionReducer(cosmetic, {
-      type: "snapshot",
-      snapshot: { ...populated, panes: [{ ...populated.panes[0], windowId: "@other" }] },
-      sequence: 3,
-      generation: 11,
-      serverIdentity: "server-a",
-    });
-    expect(moved.agentRoutingFingerprint).not.toBe(first.agentRoutingFingerprint);
-    expect(moved.agentRoutingChangedAtGeneration).toBe(11);
-
-    const returned = connectionReducer(moved, {
-      type: "snapshot", snapshot: populated, sequence: 4, generation: 12, serverIdentity: "server-a",
-    });
-    expect(returned.agentRoutingFingerprint).toBe(first.agentRoutingFingerprint);
-    expect(returned.agentRoutingChangedAtGeneration).toBe(12);
-  });
-
   it("advances sequence watermarks for non-snapshot terminal events", () => {
     const state = connectionReducer(initialHostState, {
       type: "snapshot", snapshot: populated, sequence: 7, serverIdentity: "server-a",

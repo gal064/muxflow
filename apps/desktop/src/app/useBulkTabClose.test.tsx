@@ -23,7 +23,6 @@ const scope: HostScopeToken = {
 };
 const authority = {
   hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, topologyGeneration: 8,
-  routingFingerprint: "routes", routingChangedAtGeneration: 8,
 };
 const covering = { ...authority, coveredWindowIds: new Set(["@1", "@2"]) };
 
