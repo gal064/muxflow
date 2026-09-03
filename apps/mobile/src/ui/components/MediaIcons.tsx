@@ -14,6 +14,15 @@ export function MicIcon({ size = 24, color }: { size?: number; color: string }) 
   );
 }
 
+/** The app bar's back arrow: a stroke on the same grid as the transport marks, so it centres on the title's line. */
+export function BackIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M19 12H5.5M11.5 6l-6 6 6 6" fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.2" />
+    </Svg>
+  );
+}
+
 export function PlayIcon({ size = 24, color }: { size?: number; color: string }) {
   return (
     <Svg height={size} viewBox="0 0 24 24" width={size}>

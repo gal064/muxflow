@@ -11,7 +11,7 @@ import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
-import { FolderIcon, MicIcon } from "../../ui/components/MediaIcons";
+import { BackIcon, FolderIcon, MicIcon } from "../../ui/components/MediaIcons";
 import { StatusPill } from "../../ui/components/StatusPill";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
@@ -121,7 +121,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
       <ConnectionStrip />
       <View style={styles.header}>
         <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={() => router.back()} style={styles.iconButton}>
-          <Text style={styles.backGlyph}>←</Text>
+          <BackIcon color={colors.chromeInkStrong} size={24} />
         </Pressable>
         <Text numberOfLines={1} style={styles.title}>{title}</Text>
         {agent ? <StatusPill state={agentPillState(agent)} /> : null}
@@ -228,7 +228,6 @@ const styles = StyleSheet.create({
   },
   /** 48 dp touch targets, matching the app bar's Material back arrow. */
   iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
-  backGlyph: { color: colors.chromeInkStrong, fontSize: 26, fontWeight: "600", lineHeight: 30 },
   title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
   terminalArea: { backgroundColor: colors.chromeBg, flex: 1 },
   banner: {
