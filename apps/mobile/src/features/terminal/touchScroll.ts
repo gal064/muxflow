@@ -78,6 +78,7 @@ const FLING_STOP_ROWS_PER_MS = 0.0025;
 const FLING_TIME_CONSTANT_MS = 325;
 const VELOCITY_SAMPLE_MAX_AGE_MS = 80;
 const VELOCITY_BLEND = 0.35;
+const TOUCH_SCROLL_SENSITIVITY = 1.5;
 const MAX_FRAME_MS = 34;
 const SLOW_FRAME_WAIT_MS = 25;
 
@@ -129,7 +130,8 @@ export class TouchScrollController {
   move(y: number, timeMs: number, cellHeight: number): boolean {
     if (this.touchY === undefined || this.touchTimeMs === undefined || !Number.isFinite(cellHeight) || cellHeight <= 0) return false;
 
-    const deltaRows = (this.touchY - y) / cellHeight;
+    const fingerDeltaRows = (this.touchY - y) / cellHeight;
+    const deltaRows = fingerDeltaRows * TOUCH_SCROLL_SENSITIVITY;
     const elapsedMs = timeMs - this.touchTimeMs;
     if (elapsedMs > 0 && elapsedMs <= VELOCITY_SAMPLE_MAX_AGE_MS) {
       const sampled = clamp(deltaRows / elapsedMs, -MAX_VELOCITY_ROWS_PER_MS, MAX_VELOCITY_ROWS_PER_MS);
@@ -142,7 +144,7 @@ export class TouchScrollController {
 
     if (this.gesture) {
       this.gesture.moveEvents += 1;
-      this.gesture.dragDistanceRows += Math.abs(deltaRows);
+      this.gesture.dragDistanceRows += Math.abs(fingerDeltaRows);
     }
     this.touchY = y;
     this.touchTimeMs = timeMs;
