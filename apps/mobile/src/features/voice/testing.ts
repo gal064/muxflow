@@ -107,6 +107,11 @@ export class FakePlayer implements VoicePlayer {
     this.positionMs = positionMs;
     this.calls.push(`seek ${positionMs}`);
   }
+  rate = 1;
+  setRate(rate: number): void {
+    this.rate = rate;
+    this.calls.push(`rate ${rate}`);
+  }
   onStatus(listener: (status: PlayerStatus) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

@@ -13,6 +13,13 @@ export const PLAYER_UPDATE_INTERVAL_MS = 250;
 
 export function createExpoPlayer(): VoicePlayer {
   let player: AudioPlayer | undefined;
+  let rate = 1;
+  // A source swap resets the rate on the native side, so it is applied per load.
+  const applyRate = (): void => {
+    if (!player) return;
+    player.shouldCorrectPitch = true;
+    player.setPlaybackRate(rate, "high");
+  };
   const listeners = new Set<(status: PlayerStatus) => void>();
   const ensure = (): AudioPlayer => {
     if (player) return player;
@@ -31,6 +38,7 @@ export function createExpoPlayer(): VoicePlayer {
   return {
     load(uri) {
       ensure().replace({ uri });
+      applyRate();
     },
     play() {
       ensure().play();
@@ -45,6 +53,10 @@ export function createExpoPlayer(): VoicePlayer {
     },
     seek(positionMs) {
       player?.seekTo(Math.max(0, positionMs) / 1000).catch(() => undefined);
+    },
+    setRate(next) {
+      rate = next;
+      applyRate();
     },
     onStatus(listener) {
       listeners.add(listener);

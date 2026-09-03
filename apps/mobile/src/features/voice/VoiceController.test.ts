@@ -2,6 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HostError } from "../../protocol/HostConnection";
 import { Operation, ResponseSchema, VoiceReadiness, VoiceResponseSchema, VoiceSpeechSchema, type VoiceSpeech } from "../../protocol/gen/envelope_pb";
+import type { VoiceHaptics } from "./haptics";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, speechResponse, statusResponse, transcriptResponse } from "./testing";
 import { MIN_UTTERANCE_MS, SESSION_REFRESH_MS, VoiceController } from "./VoiceController";
 import { createVoiceStore, latestReply } from "./voiceStore";
@@ -9,7 +10,16 @@ import { createVoiceStore, latestReply } from "./voiceStore";
 const settle = () => vi.advanceTimersByTimeAsync(0);
 const MP3 = new TextEncoder().encode("mp3-bytes");
 
+class FakeHaptics implements VoiceHaptics {
+  readonly calls: string[] = [];
+  listening() { this.calls.push("listening"); }
+  sent() { this.calls.push("sent"); }
+  working() { this.calls.push("working"); }
+  failed() { this.calls.push("failed"); }
+}
+
 function harness(agentId = "agent-a", paneId = "%3") {
+  const haptics = new FakeHaptics();
   const store = createVoiceStore();
   const connection = new FakeConnection();
   connection.answer(Operation.VOICE_STATUS, () => statusResponse(VoiceReadiness.READY));
@@ -31,10 +41,11 @@ function harness(agentId = "agent-a", paneId = "%3") {
     player,
     files,
     appInForeground: () => foreground,
+    haptics,
     toast: (message) => toasts.push(message),
     now: () => Date.now(),
   });
-  return { store, connection, recorder, player, files, controller, toasts, setForeground: (value: boolean) => { foreground = value; } };
+  return { store, connection, recorder, player, files, haptics, controller, toasts, setForeground: (value: boolean) => { foreground = value; } };
 }
 
 function reply(agentId: string, text: string, audio: Uint8Array = MP3, generation = 0n): VoiceSpeech {
@@ -677,5 +688,99 @@ describe("VoiceController recorder release races (QA fix review)", () => {
     await settle();
     expect(h.recorder.released).toBe(1);
     expect(h.recorder.prepared).toBe(0);
+  });
+});
+
+describe("VoiceController acknowledgements and playback speed", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  async function speak(h: ReturnType<typeof harness>) {
+    h.controller.beginUtterance();
+    await settle();
+    await h.controller.endUtterance();
+  }
+
+  it("buzzes when recording starts and again when the host accepts the transcript", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    await speak(h);
+    expect(h.haptics.calls).toEqual(["listening", "sent"]);
+  });
+
+  it("gives the error pattern when the input is refused, and the empty transcript no pattern at all", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.connection.answer(Operation.TERMINAL_INPUT, () => {
+      throw new HostError("pane_not_found", "pane gone", create(VoiceResponseSchema, { operationId: "x", retryable: false }));
+    });
+    await speak(h);
+    expect(h.haptics.calls).toEqual(["listening", "failed"]);
+
+    h.haptics.calls.length = 0;
+    h.files.files.set("file:///cache/rec-1.m4a", new TextEncoder().encode("aac-bytes")); // the first read consumed it
+    h.connection.answer(Operation.TERMINAL_INPUT, () => create(ResponseSchema, { ok: true }));
+    h.connection.answer(Operation.VOICE_TRANSCRIBE, () => transcriptResponse("   "));
+    await speak(h);
+    expect(h.haptics.calls).toEqual(["listening"]);
+  });
+
+  it("acknowledges the agent picking the utterance up exactly once, on the edge into working", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    // The screen reports the lifecycle it opened on: no buzz for an agent already mid-turn.
+    h.controller.onAgentLifecycle("working");
+    expect(h.haptics.calls).toEqual([]);
+    h.controller.onAgentLifecycle("idle");
+    await speak(h);
+    h.haptics.calls.length = 0;
+    h.controller.onAgentLifecycle("working");
+    h.controller.onAgentLifecycle("working");
+    expect(h.haptics.calls).toEqual(["working"]);
+    // Idle and back to working without a new utterance: the reply is what is awaited, not another pickup.
+    h.controller.onAgentLifecycle("idle");
+    h.controller.onAgentLifecycle("working");
+    expect(h.haptics.calls).toEqual(["working"]);
+    // A reply lands: the next turn is the agent's, so a later working edge is not for us.
+    h.controller.onVoiceReply(reply("agent-a", "Done."));
+    h.controller.onAgentLifecycle("idle");
+    h.controller.onAgentLifecycle("working");
+    expect(h.haptics.calls).toEqual(["working"]);
+  });
+
+  it("no pickup buzz when the agent was already working as the utterance went out", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onAgentLifecycle("idle");
+    h.controller.onAgentLifecycle("working");
+    await speak(h);
+    h.haptics.calls.length = 0;
+    h.controller.onAgentLifecycle("working");
+    expect(h.haptics.calls).toEqual([]);
+    // It finishes the earlier turn and starts ours.
+    h.controller.onAgentLifecycle("idle");
+    h.controller.onAgentLifecycle("working");
+    expect(h.haptics.calls).toEqual(["working"]);
+  });
+
+  it("applies the playback speed to each loaded reply and live to the one playing", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.setPlaybackRate(1.5);
+    h.controller.onVoiceReply(reply("agent-a", "First."));
+    expect(h.player.calls.filter((call) => call.startsWith("rate"))).toEqual(["rate 1.5"]);
+    expect(h.player.rate).toBe(1.5);
+    h.controller.setPlaybackRate(2);
+    expect(h.player.rate).toBe(2);
+    // The same speed again is not re-applied.
+    h.controller.setPlaybackRate(2);
+    expect(h.player.calls.filter((call) => call.startsWith("rate"))).toEqual(["rate 1.5", "rate 2"]);
+    h.controller.onVoiceReply(reply("agent-a", "Second.", MP3, 2n));
+    expect(h.player.calls.filter((call) => call.startsWith("rate"))).toEqual(["rate 1.5", "rate 2", "rate 2"]);
   });
 });
