@@ -3,7 +3,8 @@
  *
  * The native side emits one `onSshEvent` event discriminated by `type`; this module fans that out
  * into the `SshEvent` union, keeps writes ordered and chunked, and is the only place that knows the
- * native module exists.
+ * native module exists. The module's second event, `onWake`, answers `scheduleWake` — the native
+ * clock `src/session/backgroundTimer.ts` builds on.
  */
 
 export interface SshTarget {
@@ -54,6 +55,15 @@ export interface MuxflowSsh {
   startForegroundService(title: string, body: string): Promise<void>;
   stopForegroundService(): Promise<void>;
   addListener(listener: (event: SshEvent) => void): () => void;
+  /**
+   * Hands `token` back through `addWakeListener` after `delayMs` on a native `Handler`, which keeps
+   * running while React Native has the JS timers frozen in the background. Scheduling a pending
+   * token again replaces its deadline.
+   */
+  scheduleWake(token: string, delayMs: number): Promise<void>;
+  /** A token that is not pending is a no-op. */
+  cancelWake(token: string): Promise<void>;
+  addWakeListener(listener: (token: string) => void): () => void;
 }
 
 export interface NativeSubscription {
@@ -76,13 +86,16 @@ export interface NativeMuxflowSshModule {
   close(connectionId: string): Promise<void>;
   startForegroundService(title: string, body: string): Promise<void>;
   stopForegroundService(): Promise<void>;
+  scheduleWake(token: string, delayMs: number): Promise<void>;
+  cancelWake(token: string): Promise<void>;
   addListener(
-    eventName: "onSshEvent",
+    eventName: typeof NATIVE_EVENT_NAME | typeof NATIVE_WAKE_EVENT_NAME,
     listener: (payload: unknown) => void,
   ): NativeSubscription;
 }
 
 export const NATIVE_EVENT_NAME = "onSshEvent";
+export const NATIVE_WAKE_EVENT_NAME = "onWake";
 
 /**
  * Longest base64 payload handed to a single native `write`. A multiple of 4 so every chunk decodes
@@ -165,14 +178,28 @@ export function chunkBase64(base64: string): string[] {
   return chunks;
 }
 
-export function createMuxflowSsh(native: NativeMuxflowSshModule): MuxflowSsh {
-  const listeners = new Set<(event: SshEvent) => void>();
+/** The `onWake` payload is nothing but the token `scheduleWake` was given. */
+export function normalizeWakeToken(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const token = (payload as Record<string, unknown>).token;
+  return typeof token === "string" ? token : null;
+}
+
+/**
+ * Fans one native event out to any number of listeners, holding the native subscription only
+ * while someone is listening.
+ */
+function fanOut<T>(
+  subscribe: (deliver: (payload: unknown) => void) => NativeSubscription,
+  normalize: (payload: unknown) => T | null,
+): (listener: (event: T) => void) => () => void {
+  const listeners = new Set<(event: T) => void>();
   let subscription: NativeSubscription | null = null;
-  // One promise chain per connection keeps writes ordered with at most one in flight (§6.2).
-  const writeTails = new Map<string, Promise<unknown>>();
 
   const deliver = (payload: unknown): void => {
-    const event = normalizeSshEvent(payload);
+    const event = normalize(payload);
     if (event === null) {
       return;
     }
@@ -180,6 +207,27 @@ export function createMuxflowSsh(native: NativeMuxflowSshModule): MuxflowSsh {
       listener(event);
     }
   };
+
+  return (listener) => {
+    listeners.add(listener);
+    if (subscription === null) {
+      subscription = subscribe(deliver);
+    }
+    return () => {
+      if (!listeners.delete(listener)) {
+        return;
+      }
+      if (listeners.size === 0 && subscription !== null) {
+        subscription.remove();
+        subscription = null;
+      }
+    };
+  };
+}
+
+export function createMuxflowSsh(native: NativeMuxflowSshModule): MuxflowSsh {
+  // One promise chain per connection keeps writes ordered with at most one in flight (§6.2).
+  const writeTails = new Map<string, Promise<unknown>>();
 
   const enqueueWrite = (connectionId: string, task: () => Promise<void>): Promise<void> => {
     const previous = writeTails.get(connectionId) ?? Promise.resolve();
@@ -214,21 +262,13 @@ export function createMuxflowSsh(native: NativeMuxflowSshModule): MuxflowSsh {
     close: (connectionId) => native.close(connectionId),
     startForegroundService: (title, body) => native.startForegroundService(title, body),
     stopForegroundService: () => native.stopForegroundService(),
-    addListener: (listener) => {
-      listeners.add(listener);
-      if (subscription === null) {
-        subscription = native.addListener(NATIVE_EVENT_NAME, deliver);
-      }
-      return () => {
-        if (!listeners.delete(listener)) {
-          return;
-        }
-        if (listeners.size === 0 && subscription !== null) {
-          subscription.remove();
-          subscription = null;
-        }
-      };
-    },
+    addListener: fanOut((deliver) => native.addListener(NATIVE_EVENT_NAME, deliver), normalizeSshEvent),
+    scheduleWake: (token, delayMs) => native.scheduleWake(token, delayMs),
+    cancelWake: (token) => native.cancelWake(token),
+    addWakeListener: fanOut(
+      (deliver) => native.addListener(NATIVE_WAKE_EVENT_NAME, deliver),
+      normalizeWakeToken,
+    ),
   };
 }
 

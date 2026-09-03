@@ -385,6 +385,76 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
     expect(h.store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1 });
   });
 
+  it("runs the backoff on the injected background timer and clears it on disconnect()", async () => {
+    // A fake timer that fires only when told to: the reconnect must not lean on setTimeout.
+    const armed: Array<{ delayMs: number; fn: () => void; token: string }> = [];
+    const cleared: string[] = [];
+    let tokens = 0;
+    const timer = {
+      set: (delayMs: number, fn: () => void) => {
+        const token = `w${++tokens}`;
+        armed.push({ delayMs, fn, token });
+        return { token };
+      },
+      clear: (handle: { token: string }) => {
+        cleared.push(handle.token);
+      },
+    };
+    const store = createSessionStore();
+    const h = harness();
+    const connection = new HostConnection({
+      dial: async () => {
+        h.dials += 1;
+        const transport = new FakeTransport();
+        h.transports.push(transport);
+        return transport;
+      },
+      appVersion: "0.1.0-test",
+      nextConnectionEpoch: () => (h.epoch += 1),
+      store,
+      host: { id: "h", label: "Dev box", host: "dev.local", port: 22, user: "dev" },
+      log: () => undefined,
+      reconnectTimer: timer,
+    });
+    connection.connect();
+    await settle();
+    // The handshake deadline is on the same clock and is cleared once the handshake completes.
+    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000]);
+    let transport = h.transports[0]!;
+    transport.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n }));
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
+    expect(store.getState().connection.state).toBe("connected");
+    expect(cleared).toEqual(["w1"]);
+
+    transport.closeFromRemote({ reason: "networkLost" });
+    expect(store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1 });
+    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 1000]);
+    // The JS clock advancing does nothing on its own.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.dials).toBe(1);
+
+    armed[1]!.fn();
+    await settle();
+    expect(h.dials).toBe(2);
+    expect(store.getState().connection.state).toBe("handshaking");
+    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 1000, 20_000]);
+    transport = h.transports[1]!;
+    transport.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n }));
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
+    expect(store.getState().connection.state).toBe("connected");
+    expect(cleared).toEqual(["w1", "w3"]);
+
+    transport.closeFromRemote({ reason: "networkLost" });
+    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 1000, 20_000, 2000]);
+    connection.disconnect();
+    expect(cleared).toEqual(["w1", "w3", "w4"]);
+    expect(store.getState().connection.state).toBe("idle");
+    // A wake the native side had already sent by the time it was cancelled is ignored.
+    armed[3]!.fn();
+    await settle();
+    expect(h.dials).toBe(2);
+  });
+
   it("does not retry after auth failure or exit code 127", async () => {
     const h = harness();
     const transport = await connectHappily(h);
