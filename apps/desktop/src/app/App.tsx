@@ -482,7 +482,9 @@ export function App() {
   });
   const recentIdleClock = useRecentIdleClock(
     agentRuntime.agents,
-    appState.shell.agentSort === "status",
+    // Both the priority and the pinned orderings move rows at the Recent →
+    // Idle boundary; only the workspace ordering ignores the clock.
+    appState.shell.agentSort !== "workspace",
   );
 
   const home = useMemo(() => inferHome(snapshot.panes.map((pane) => pane.currentPath)), [snapshot.panes]);
