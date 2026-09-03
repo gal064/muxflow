@@ -13,6 +13,7 @@ import { hostsStore, type SavedHost } from "../store/hostsStore";
 import { createSessionStore, sessionStore, type AgentTransition, type ConnectionState, type SessionStore } from "../store/sessionStore";
 import { terminalRegistry } from "../features/terminal/terminalRegistry";
 import { filesStore } from "../features/files/filesStore";
+import { backgroundTimer } from "./backgroundTimer";
 import { log } from "./log";
 
 export type Lane = "control" | "bulk";
@@ -98,6 +99,7 @@ export async function connectHost(host: SavedHost): Promise<void> {
     onFileEvent: (event) => filesStore.getState().applyFileEvent(event),
     onToast: toast,
     log,
+    reconnectTimer: backgroundTimer(),
   });
   control = connection;
   const settled = waitForState(sessionStore, (state) => state === "connected" ? "ok" : state === "failed" || state === "incompatible" ? "bad" : state === "idle" ? "cancelled" : undefined);
@@ -134,6 +136,7 @@ export function openBulkConnection(): Promise<HostConnection> {
     store,
     bulk: { expectedServerIdentity: connection.serverIdentity, connectionEpoch: epoch },
     log: (line) => log(`bulk ${line}`),
+    reconnectTimer: backgroundTimer(),
   });
   const ready = waitForState(store, (state) => state === "connected" ? "ok" : state === "failed" || state === "incompatible" || state === "idle" || state === "reconnecting" ? "bad" : undefined)
     .then((outcome) => {

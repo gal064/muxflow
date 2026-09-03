@@ -37,6 +37,9 @@ function fakeSsh() {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    scheduleWake: vi.fn(async () => undefined),
+    cancelWake: vi.fn(async () => undefined),
+    addWakeListener: () => () => undefined,
   };
   const emit = (event: SshEvent) => {
     for (const listener of [...listeners]) listener(event);
