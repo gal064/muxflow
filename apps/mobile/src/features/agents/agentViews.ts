@@ -4,18 +4,37 @@ import { displayState, summarizeWaiting, type WaitingState, type WaitingSummary 
 import type { Agent, SessionState } from "../../store/sessionStore";
 import type { PillState } from "../../ui/components/StatusPill";
 import { colors } from "../../ui/tokens";
+import { agentSessionLabel, withoutStatusGlyphs } from "./agentLabels";
 
 export function agentPillState(agent: Agent): PillState {
   return agent.present ? displayState(agent) : "gone";
 }
 
-/** displayName, then the window name, then "{adapter} in pane {index}" (§9.3.1). */
+/**
+ * The row's name (§9.3.1): the tmux tab, the desktop's `agentSessionLabel` —
+ * status glyphs stripped, a generic or UUID-like name passed over for the
+ * assigned name, then the adapter's. The adapter itself is the icon's job.
+ * An agent with neither a window nor a name (gone, its window closed, or a
+ * title that is only a ticker frame) says "{adapter} in pane {index}" so the
+ * row still points somewhere.
+ */
 export function agentTitle(state: Pick<SessionState, "windows" | "adapters">, agent: Agent): string {
-  if (agent.displayName) return agent.displayName;
   const windowName = state.windows[agent.route.windowId]?.name ?? agent.route.windowNameFallback;
-  if (windowName) return windowName;
-  const adapter = state.adapters.find((a) => a.id === agent.adapterId)?.displayName ?? agent.adapterId;
-  return `${adapter} in pane ${agent.route.paneIndexFallback}`;
+  if (!withoutStatusGlyphs(windowName) && !agent.displayName.trim()) return `${adapterDisplayName(state, agent)} in pane ${agent.route.paneIndexFallback}`;
+  return agentSessionLabel({ windowName, displayName: agent.displayName, adapterId: agent.adapterId }, state.adapters);
+}
+
+/**
+ * Who an agent is, apart from where it sits (§9.4's line 2, where the row's
+ * title is already the window): the assigned name — the adapter's unless the
+ * user renamed it — or the adapter's own.
+ */
+export function agentDisplayName(state: Pick<SessionState, "adapters">, agent: Agent): string {
+  return agent.displayName.trim() || adapterDisplayName(state, agent);
+}
+
+function adapterDisplayName(state: Pick<SessionState, "adapters">, agent: Agent): string {
+  return state.adapters.find((a) => a.id === agent.adapterId)?.displayName ?? agent.adapterId;
 }
 
 export function agentsInWindow(state: Pick<SessionState, "agents">, windowId: string): Agent[] {

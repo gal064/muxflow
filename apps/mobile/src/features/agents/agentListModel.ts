@@ -5,7 +5,7 @@
 // without a renderer.
 
 import {
-  agentWindowName,
+  agentPinned,
   agentWorkspaceName,
   displayState,
   isRecentIdle,
@@ -19,19 +19,21 @@ import type { Agent, SessionState } from "../../store/sessionStore";
 import { agentTitle } from "./agentViews";
 
 /**
- * The two orders the list can be in. `priority` is the desktop's `status`
- * sort — blocked, working, recent, idle, headed — and `workspace` follows the
- * Workspaces tab, one group per workspace under the Pinned / Others dividers.
+ * The three orders the list can be in. `priority` is the desktop's `status`
+ * sort — blocked, working, recent, idle, headed; `workspace` follows the
+ * Workspaces tab, one group per workspace under the Pinned / Others dividers;
+ * `pinned` is the priority order cut in two, the pinned rows above the rest.
  */
-export type AgentListMode = "priority" | "workspace";
+export type AgentListMode = "priority" | "workspace" | "pinned";
 
 export const AGENT_LIST_MODES: readonly { mode: AgentListMode; label: string }[] = [
   { mode: "priority", label: "Priority" },
   { mode: "workspace", label: "Workspace" },
+  { mode: "pinned", label: "Pinned" },
 ];
 
 export function isAgentListMode(value: unknown): value is AgentListMode {
-  return value === "priority" || value === "workspace";
+  return AGENT_LIST_MODES.some((entry) => entry.mode === value);
 }
 
 export type AgentPriorityBucket = "blocked" | "working" | "recent" | "idle";
@@ -106,19 +108,17 @@ export interface AgentRowItem {
   /** The window (tab) is pinned: a pin after the title, the desktop's row pin. */
   windowPinned: boolean;
   /**
-   * The workspace is pinned and this row is where that shows: a small pin
-   * before the workspace's name in the subtitle. Only priority mode sets it —
-   * there is no divider in that order, so its rows are the one place a
-   * workspace pin is visible. Workspace mode's group heading carries the pin
-   * instead, and its rows leave this false.
+   * The workspace is pinned. No row draws it — a second pin beside the
+   * workspace's name read as a second pinned thing — but Pinned mode sorts
+   * by it, and the spoken label names it.
    */
   workspacePinned: boolean;
+  /** The tab's name (`agentTitle`): the adapter is the icon's job. */
   title: string;
-  /** Line 2 as one string: what is spoken, and what is drawn when no glyph interrupts it. */
-  subtitle: string;
-  /** Line 2's parts, for a row that draws the workspace pin between them. */
+  /** Line 2: the workspace, or nothing where the heading already names it (Workspace mode). */
+  subtitle: string | undefined;
+  /** Always spoken, whether or not line 2 draws it: a screen reader reads rows, not headings, in passing. */
   workspaceName: string;
-  windowName: string;
 }
 
 export interface PrioritySectionItem {
@@ -150,14 +150,32 @@ export type AgentListItem = AgentRowItem | PrioritySectionItem | WorkspaceGroupI
 type ListState = Pick<SessionState, "agents" | "sessions" | "windows" | "adapters">;
 
 export function buildAgentListItems(state: ListState, mode: AgentListMode, now = Date.now()): AgentListItem[] {
-  return mode === "workspace" ? workspaceItems(state) : priorityItems(state, now);
+  switch (mode) {
+    case "workspace": return workspaceItems(state);
+    case "pinned": return pinnedItems(state, now);
+    case "priority": return priorityItems(state, now);
+  }
 }
 
-/** Between the workspace and the window on line 2. */
-export const SUBTITLE_SEPARATOR = " · ";
-
-function rowKey(agent: Agent): string {
-  return `agent:${agent.id}`;
+/**
+ * One row. Line 1 is the tab's name and line 2 the workspace's — the desktop
+ * row's `agent-session-label` over `agent-detail`; the adapter shows only in
+ * the icon. Workspace mode's rows sit under a heading that already names the
+ * workspace, so they get no line 2 at all.
+ */
+function agentRow(state: ListState, agent: Agent, subtitle: "workspace" | "none"): AgentRowItem {
+  return {
+    kind: "agent",
+    key: `agent:${agent.id}`,
+    agent,
+    state: markState(agent),
+    waiting: waitingState(agent),
+    windowPinned: Boolean(state.windows[agent.route.windowId]?.pinned),
+    workspacePinned: Boolean(state.sessions[agent.route.sessionId]?.pinned),
+    title: agentTitle(state, agent),
+    subtitle: subtitle === "workspace" ? agentWorkspaceName(state, agent) : undefined,
+    workspaceName: agentWorkspaceName(state, agent),
+  };
 }
 
 /** Buckets `sortedAgents`' order without re-sorting it, so the two agree. */
@@ -168,21 +186,30 @@ function priorityItems(state: ListState, now: number): AgentListItem[] {
     const rows = agents.filter((agent) => priorityBucket(agent, now) === section.bucket);
     if (rows.length === 0) continue;
     items.push({ kind: "section", key: `section:${section.bucket}`, bucket: section.bucket, label: section.label, state: section.state, count: rows.length });
-    for (const agent of rows) {
-      items.push({
-        kind: "agent",
-        key: rowKey(agent),
-        agent,
-        state: markState(agent),
-        waiting: waitingState(agent),
-        windowPinned: Boolean(state.windows[agent.route.windowId]?.pinned),
-        workspacePinned: Boolean(state.sessions[agent.route.sessionId]?.pinned),
-        title: agentTitle(state, agent),
-        subtitle: `${agentWorkspaceName(state, agent)}${SUBTITLE_SEPARATOR}${agentWindowName(state, agent)}`,
-        workspaceName: agentWorkspaceName(state, agent),
-        windowName: agentWindowName(state, agent),
-      });
-    }
+    for (const agent of rows) items.push(agentRow(state, agent, "workspace"));
+  }
+  return items;
+}
+
+/**
+ * The priority order cut in two: every row whose window or workspace is
+ * pinned (`agentPinned`, the same predicate that leads pinned rows inside a
+ * priority heading) under a Pinned divider, the rest under Unpinned. Neither
+ * block has headings inside it — what is working still comes first, then
+ * what has a dot, then the rest, exactly as `sortedAgents` orders them — and
+ * an empty block is left out rather than drawn as a divider over nothing.
+ */
+function pinnedItems(state: ListState, now: number): AgentListItem[] {
+  const agents = sortedAgents(state, now);
+  const blocks = [
+    { key: "pinned", label: "Pinned", agents: agents.filter((agent) => agentPinned(state, agent)) },
+    { key: "unpinned", label: "Unpinned", agents: agents.filter((agent) => !agentPinned(state, agent)) },
+  ];
+  const items: AgentListItem[] = [];
+  for (const block of blocks) {
+    if (block.agents.length === 0) continue;
+    items.push({ kind: "divider", key: `divider:${block.key}`, label: block.label });
+    for (const agent of block.agents) items.push(agentRow(state, agent, "workspace"));
   }
   return items;
 }
@@ -253,22 +280,7 @@ function workspaceItems(state: ListState): AgentListItem[] {
     if (block.label) items.push({ kind: "divider", key: `divider:${block.key}`, label: block.label });
     for (const group of block.groups) {
       items.push({ kind: "group", key: `group:${group.sessionId}`, sessionId: group.sessionId, workspaceName: group.workspaceName, pinned: group.pinned, count: group.agents.length });
-      for (const agent of group.agents) {
-        items.push({
-          kind: "agent",
-          key: rowKey(agent),
-          agent,
-          state: markState(agent),
-          waiting: waitingState(agent),
-          windowPinned: Boolean(state.windows[agent.route.windowId]?.pinned),
-          workspacePinned: false,
-          title: agentTitle(state, agent),
-          // The group heading already names the workspace.
-          subtitle: agentWindowName(state, agent),
-          workspaceName: agentWorkspaceName(state, agent),
-          windowName: agentWindowName(state, agent),
-        });
-      }
+      for (const agent of group.agents) items.push(agentRow(state, agent, "none"));
     }
   }
   return items;
