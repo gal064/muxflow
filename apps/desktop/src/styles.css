@@ -280,6 +280,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .workspace-button:hover:not(.active) { background: var(--chrome-hover); }
 .workspace-button.active { background: var(--accent); }
+/* The host behind the row is not connected: still listed, still selectable, not live. */
+.workspace-button.offline:not(.active) { opacity: 0.55; }
 /* Compact rows are one line, so the row is a line: name on the left, the
    agent cluster and any unread count pushed to the right edge. ~24px is the
    Explorer's row budget, which is what makes a long workspace list scannable
@@ -341,6 +343,16 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
   font-variant-numeric: tabular-nums; text-align: center;
 }
+/* The host mark, on workspace rows, agent rows and ⌘P rows alike: the same
+   fixed mono slot as the shortcut index, one step darker than it so a letter
+   reads as an address and not as a second digit. Drawn only when two or more
+   hosts are shown, so a single-host list is exactly what it was. */
+.host-letter {
+  width: 12px; flex: 0 0 auto;
+  font-family: var(--font-mono); font-size: var(--type-meta); font-weight: 600; color: var(--chrome-dim);
+  text-align: center; text-transform: uppercase;
+}
+.workspace-button.active .host-letter { color: var(--accent-ink); }
 /* The compact row's workspace-level state, beside the name. It takes the plain
    8px `.state-dot`, and the rule below brings the spinner to the same 8px, so
    the indicator is one size in both modes and a size larger than the 6px
@@ -1207,6 +1219,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .palette-row.selected:not([data-unavailable]) { background: var(--accent); color: var(--accent-ink); }
 .palette-row.selected:not([data-unavailable]) kbd,
 .palette-row.selected:not([data-unavailable]) .palette-meta { color: color-mix(in srgb, var(--accent-ink) 80%, transparent); }
+/* The host letter flips with the row, as it does on the active workspace row. */
+.palette-row.selected:not([data-unavailable]) .host-letter { color: var(--accent-ink); }
 .palette-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-meta {
   margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1225,11 +1239,29 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .confirmation { padding: 20px; }
 .confirmation h2 { margin: 0 0 10px; font-size: 16px; }
 .confirmation p { color: var(--chrome-dim); line-height: 1.5; }
-.text-input-dialog form, .text-input-dialog label { display: grid; gap: 8px; }
+.text-input-dialog form, .text-input-dialog label,
+.new-workspace-dialog form, .new-workspace-dialog label { display: grid; gap: 8px; }
 .text-input-dialog input, .file-dialog input:not([type="checkbox"]) {
   width: 100%; padding: 7px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
   background: var(--chrome-bg); color: var(--chrome-ink);
 }
+.new-workspace-dialog input {
+  width: 100%; padding: 7px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
+  background: var(--chrome-bg); color: var(--chrome-ink);
+}
+.new-workspace-dialog form { gap: 12px; }
+.new-workspace-host-picker {
+  display: flex; align-items: center; gap: 7px; width: 100%; min-height: 30px; padding: 6px !important;
+  border: 1px solid var(--chrome-border) !important; border-radius: var(--radius-control);
+  background: var(--chrome-bg) !important; color: var(--chrome-ink) !important; text-align: left;
+}
+.new-workspace-host-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.new-workspace-host-phase { margin-left: auto; color: var(--chrome-faint); font-size: var(--type-secondary); }
+.new-workspace-host-caret {
+  width: 0; height: 0; margin: 0 5px 0 auto;
+  border: 4px solid transparent; border-top-color: var(--chrome-dim); transform: translateY(2px);
+}
+.new-workspace-host-phase + .new-workspace-host-caret { margin-left: 1px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 /* Every button inside a dialog, rather than an allow-list of the surfaces that
    happened to have one when this rule was written. The list version silently

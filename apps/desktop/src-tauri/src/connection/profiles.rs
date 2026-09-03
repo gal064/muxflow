@@ -12,6 +12,12 @@ pub struct HostProfile {
     pub id: String,
     pub label: String,
     pub connection: ConnectionSpec,
+    /// The one-character host mark. Absent means "derive from the label".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub letter: Option<String>,
+    /// Checked in the sidebar's host chooser.
+    #[serde(default)]
+    pub shown: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +36,8 @@ impl Default for PersistedProfiles {
                 id: "local".into(),
                 label: "Local".into(),
                 connection: ConnectionSpec::Local,
+                letter: None,
+                shown: true,
             }],
             last_profile_id: Some("local".into()),
         }
@@ -140,10 +148,23 @@ impl ProfileStore {
         if let Some(existing) = next.profiles.iter_mut().find(|item| item.id == profile.id) {
             *existing = profile.clone();
         } else {
-            next.profiles.push(profile.clone());
+            next.profiles.push(profile);
         }
-        next.last_profile_id = Some(profile.id);
         normalize_and_validate(&mut next)?;
+        self.persist(&next)?;
+        *self.value.lock().unwrap() = next;
+        Ok(())
+    }
+
+    fn set_last_profile_id_transactionally(&self, profile_id: &str) -> Result<(), String> {
+        let mut next = self.value.lock().unwrap().clone();
+        if !next.profiles.iter().any(|item| item.id == profile_id) {
+            return Err(format!("host profile {profile_id} does not exist"));
+        }
+        if next.last_profile_id.as_deref() == Some(profile_id) {
+            return Ok(());
+        }
+        next.last_profile_id = Some(profile_id.to_owned());
         self.persist(&next)?;
         *self.value.lock().unwrap() = next;
         Ok(())
@@ -187,6 +208,7 @@ fn normalize_and_validate(value: &mut PersistedProfiles) -> Result<(), String> {
         if profile.label.trim().is_empty() {
             return Err(format!("host profile {} has an empty label", profile.id));
         }
+        profile.letter = normalize_letter(profile.letter.take())?;
         if let ConnectionSpec::Ssh { profile_id, .. } = &mut profile.connection {
             if profile_id.is_empty() {
                 *profile_id = profile.id.clone();
@@ -208,6 +230,19 @@ fn normalize_and_validate(value: &mut PersistedProfiles) -> Result<(), String> {
     Ok(())
 }
 
+/// A blank letter is no letter; anything else is exactly one character.
+fn normalize_letter(letter: Option<String>) -> Result<Option<String>, String> {
+    let Some(letter) = letter else {
+        return Ok(None);
+    };
+    let letter = letter.trim();
+    match letter.chars().count() {
+        0 => Ok(None),
+        1 => Ok(Some(letter.to_owned())),
+        _ => Err("host letter must be a single character".into()),
+    }
+}
+
 #[tauri::command]
 pub fn list_host_profiles(store: State<'_, ProfileStore>) -> Result<serde_json::Value, String> {
     let value = store.value.lock().unwrap().clone();
@@ -227,7 +262,7 @@ pub fn reset_host_profiles(store: State<'_, ProfileStore>) -> Result<(), String>
 
 #[tauri::command]
 pub fn save_host_profile(
-    profile: HostProfile,
+    mut profile: HostProfile,
     store: State<'_, ProfileStore>,
 ) -> Result<(), String> {
     profile.connection.validate()?;
@@ -235,7 +270,19 @@ pub fn save_host_profile(
     if profile.label.trim().is_empty() {
         return Err("profile label cannot be empty".into());
     }
+    profile.letter = normalize_letter(profile.letter)?;
     store.save_profile_transactionally(profile)
+}
+
+/// Names the host a restart reconnects to. Saving a profile no longer moves
+/// this pointer: several hosts can be saved and shown while one stays active.
+#[tauri::command]
+pub fn set_last_profile_id(
+    profile_id: String,
+    store: State<'_, ProfileStore>,
+) -> Result<(), String> {
+    validate_profile_id(&profile_id)?;
+    store.set_last_profile_id_transactionally(&profile_id)
 }
 
 #[tauri::command]
@@ -288,6 +335,8 @@ mod tests {
                     target: "workbox".into(),
                     config_path: Some("/tmp/ssh-config".into()),
                 },
+                letter: Some("W".into()),
+                shown: true,
             });
             value.last_profile_id = Some("ssh-work".into());
         }
@@ -308,6 +357,8 @@ mod tests {
                         target: "workbox".into(),
                         config_path: Some("/tmp/ssh-config".into()),
                     }
+                && profile.letter.as_deref() == Some("W")
+                && profile.shown
         }));
         drop(value);
         fs::remove_dir_all(root).unwrap();
@@ -327,7 +378,12 @@ mod tests {
                     target: "remote-linux".into(),
                     config_path: None,
                 },
+                letter: None,
+                shown: false,
             })
+            .unwrap();
+        store
+            .set_last_profile_id_transactionally("ssh-remote-linux")
             .unwrap();
 
         // The deleted profile was also the last one used, so the pointer has to
@@ -358,6 +414,81 @@ mod tests {
                 .delete_profile_transactionally("local")
                 .unwrap_err()
                 .contains("last host profile")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn ssh_profile(id: &str, letter: Option<&str>, shown: bool) -> HostProfile {
+        HostProfile {
+            id: id.into(),
+            label: id.into(),
+            connection: ConnectionSpec::Ssh {
+                profile_id: id.into(),
+                target: id.into(),
+                config_path: None,
+            },
+            letter: letter.map(str::to_owned),
+            shown,
+        }
+    }
+
+    #[test]
+    fn letter_is_one_trimmed_character_or_absent() {
+        let root = std::env::temp_dir().join(format!("ade-profiles-letter-{}", Uuid::new_v4()));
+        let path = root.join("profiles.json");
+        let store = ProfileStore::load(path.clone()).unwrap();
+        for invalid in ["ab", "W ork"] {
+            assert!(
+                store
+                    .save_profile_transactionally(ssh_profile("ssh-work", Some(invalid), true))
+                    .unwrap_err()
+                    .contains("single character")
+            );
+        }
+        store
+            .save_profile_transactionally(ssh_profile("ssh-work", Some("  "), true))
+            .unwrap();
+        store
+            .save_profile_transactionally(ssh_profile("ssh-lab", Some(" é "), false))
+            .unwrap();
+
+        let reloaded = ProfileStore::load(path).unwrap();
+        let value = reloaded.value.lock().unwrap();
+        let by_id = |id: &str| value.profiles.iter().find(|item| item.id == id).unwrap();
+        assert_eq!(by_id("ssh-work").letter, None);
+        assert!(by_id("ssh-work").shown);
+        assert_eq!(by_id("ssh-lab").letter.as_deref(), Some("é"));
+        assert!(!by_id("ssh-lab").shown);
+        drop(value);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saving_a_profile_leaves_the_last_profile_where_it_was() {
+        let root = std::env::temp_dir().join(format!("ade-profiles-last-{}", Uuid::new_v4()));
+        let path = root.join("profiles.json");
+        let store = ProfileStore::load(path.clone()).unwrap();
+        store
+            .save_profile_transactionally(ssh_profile("ssh-work", None, true))
+            .unwrap();
+        assert_eq!(
+            store.value.lock().unwrap().last_profile_id.as_deref(),
+            Some("local")
+        );
+
+        assert!(
+            store
+                .set_last_profile_id_transactionally("ssh-missing")
+                .unwrap_err()
+                .contains("does not exist")
+        );
+        store
+            .set_last_profile_id_transactionally("ssh-work")
+            .unwrap();
+        let reloaded = ProfileStore::load(path).unwrap();
+        assert_eq!(
+            reloaded.value.lock().unwrap().last_profile_id.as_deref(),
+            Some("ssh-work")
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -406,6 +537,8 @@ mod tests {
                     id: "work".into(),
                     label: "Work".into(),
                     connection: ConnectionSpec::Local,
+                    letter: None,
+                    shown: false,
                 })
                 .is_err()
         );

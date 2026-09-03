@@ -146,6 +146,8 @@ export function requestTmuxAction(
   clientId: string,
   action: TmuxAction,
   precondition: AuthoritativePrecondition,
+  /** Off for a host shown beside the active one: the readout is the active link's. */
+  measureLatency = true,
 ): Promise<TmuxActionResult> {
   // Timed on the way past: this is a real host round-trip the app was making
   // anyway, which is where the sidebar's latency readout comes from without
@@ -154,7 +156,8 @@ export function requestTmuxAction(
   const boundary = { clientId, action: wire };
   recordPerfCounter(`tmux.action.${action.kind}.requests`);
   return measurePerfRequest(`tmux.action.${action.kind}`, "tmux", boundary, async (request) => {
-    const result = await measureHostRoundTrip(invoke<TmuxActionResult>("tmux_action", request));
+    const invoked = invoke<TmuxActionResult>("tmux_action", request);
+    const result = await (measureLatency ? measureHostRoundTrip(invoked) : invoked);
     if (!result || !Number.isSafeInteger(result.topologyGeneration) || result.topologyGeneration < 0) {
       throw new Error("Native tmux action returned invalid topology metadata.");
     }

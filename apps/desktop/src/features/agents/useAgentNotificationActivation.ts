@@ -93,7 +93,7 @@ export function useAgentNotificationActivation(options: ActivationOptions) {
       }
       queueForFreshConnection(payload, retryUsed);
       current.switchHostProfile(targetProfile);
-      current.setStatus(`Connecting to ${targetProfile.label} before resolving the notification…`);
+      current.setStatus(`Switching to ${targetProfile.label} before resolving the notification…`);
       return false;
     }
     if (!current.connected || !current.agentScope) {

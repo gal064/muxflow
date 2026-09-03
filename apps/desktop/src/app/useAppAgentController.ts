@@ -1,7 +1,7 @@
 import { useMemo, type Dispatch, type SetStateAction } from "react";
 import { useAgentWorkflow } from "../features/agents/AgentHookWorkflow";
 import type { AgentClient } from "../features/agents/api";
-import { agentHostIdentity, type AgentSoundPreferences } from "../features/agents/types";
+import { agentHostIdentity, type AgentRuntimeScope, type AgentSoundPreferences } from "../features/agents/types";
 import { useAgentHostSetup } from "../features/agents/useAgentHostSetup";
 import { useAgentNotificationActivation } from "../features/agents/useAgentNotificationActivation";
 import { useAgentRuntime } from "../features/agents/useAgentRuntime";
@@ -34,6 +34,8 @@ interface AppAgentControllerOptions {
   /** False while another host-level consent question owns the modal lane. */
   hostSetupAllowed?: boolean;
   hostLabel: string;
+  /** Every other shown host with a live, mutable client, each with its own topology windows. */
+  peerScopes: readonly AgentRuntimeScope[];
   profiles: readonly HostProfile[];
   recordDecision(hostProfileId: string, decision: HostSetupDecision): void;
   requestReconnect(): void;
@@ -41,6 +43,8 @@ interface AppAgentControllerOptions {
   serverIdentity?: string;
   setAgentModalOpen: Dispatch<SetStateAction<boolean>>;
   setStatus(message: string): void;
+  /** Every host with a bridge, the active one included; a host that leaves loses its agent records. */
+  shownHostIds: readonly string[];
   snapshot: TmuxSnapshot;
   soundPreferences: AgentSoundPreferences;
   surfacePaneDestination(
@@ -97,11 +101,12 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
     options.activeWindowId, options.appFocused, options.currentHostProfileId,
     options.selectedAppTab, options.serverIdentity,
   ]);
+  const active = scope && { scope, topologyWindowIds: options.snapshot.windows.map((window) => window.id) };
   const runtime = useAgentRuntime({
     client: options.agentClient,
-    scope,
+    scopes: active ? [active, ...options.peerScopes] : options.peerScopes,
+    shownHostIds: options.shownHostIds,
     focus,
-    topologyWindowIds: options.snapshot.windows.map((window) => window.id),
     soundPreferences: options.soundPreferences,
     onStatus: options.setStatus,
   });
@@ -122,7 +127,7 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
       : undefined,
     host,
     onHooksChanged: (action, hostProfileId, hostIdentity) => {
-      runtime.refreshSnapshot();
+      runtime.refreshSnapshot(hostProfileId);
       options.recordDecision(hostProfileId, action === "install" ? "accepted" : "declined");
       if (action === "uninstall") {
         void runtime.removeHostNaming(hostIdentity).catch((cause) => options.setStatus(String(cause)));

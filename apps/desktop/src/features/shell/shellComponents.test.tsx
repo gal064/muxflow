@@ -11,8 +11,9 @@ import { agent } from "../agents/testFixtures";
 import type { AgentAdapterDescriptor, AgentDisplayState, AgentRecord } from "../agents/types";
 import { buildAgentRows } from "../agents/agentsList";
 import { HookReviewDialog } from "../agents/HookReviewDialog";
-import { WorkspaceSidebar } from "../workspaces/WorkspaceSidebar";
+import { WorkspaceSidebar, type SidebarHost } from "../workspaces/WorkspaceSidebar";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../workspaces/TabStrip";
+import type { MergedWorkspaceRow } from "../workspaces/mergedWorkspaceRows";
 import { workspaceRows, type WorkspaceRowModel } from "../workspaces/workspaceRows";
 import { deriveAgentRollups } from "../agents/selectors";
 import { DisconnectedStrip, STRIP_APPEAR_DELAY_MS } from "./DisconnectedStrip";
@@ -26,11 +27,19 @@ import { TitleBar } from "./TitleBar";
 const noop = vi.fn();
 const commandScope = { hostProfileId: "remote", connectionKey: "ssh:remote", connectionEpoch: 1, serverIdentity: "server-a", generation: 1 };
 const session: Session = { id: "$1", name: "A very long workspace name", windowCount: 3, attachedClients: 1, order: 0 };
-const rows: WorkspaceRowModel[] = [{
+const remoteHost: SidebarHost = {
+  profileId: "remote", letter: "R", label: "remote-linux", transport: "ssh", phase: "connected", canMutate: true,
+  scope: commandScope, active: true, shown: true, latencyMs: 41,
+};
+/** Rows as the sidebar takes them: tagged with the one host these tests render. */
+const merged = (models: readonly WorkspaceRowModel[], scope = commandScope): MergedWorkspaceRow[] => models.map((row) => ({
+  ...row, key: `remote\0${row.session.id}`, hostProfileId: "remote", letter: "", scope, phase: "connected", canMutate: true,
+}));
+const rows: MergedWorkspaceRow[] = merged([{
   session, active: true, attention: "blocked", unread: 2, working: true, pinned: false,
   agents: [{ id: "a1", adapterId: "codex", name: "codex", state: "blocked" }], agentOverflow: 0,
   branch: "main*", path: "~/dev/muxflow",
-}];
+}]);
 
 /**
  * A strip holding one of everything the tab model can be, including two tabs
@@ -98,19 +107,19 @@ function menuRowLabel(row: ReactTestInstance): string {
 }
 
 /** One workspace holding exactly these agent states, through the real builder. */
-function workspaceOf(...states: AgentDisplayState[]): WorkspaceRowModel[] {
+function workspaceOf(...states: AgentDisplayState[]): MergedWorkspaceRow[] {
   const agents = states.map((state, index) => agent({
     id: `a${index}`, sessionId: "$1", displayName: `agent ${index}`, updatedAt: states.length - index,
     ...(state === "done"
       ? { lifecycle: "idle" as const, attentionKind: "completed" as const, attentionGeneration: 4, seenGeneration: 1 }
       : { lifecycle: state }),
   }));
-  return workspaceRows({
+  return merged(workspaceRows({
     snapshot: { sessions: [session], windows: [], panes: [] },
     activeSessionId: session.id,
     agents,
     attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
-  });
+  }));
 }
 
 /** What a compact row draws between its shortcut number and its name. */
@@ -120,7 +129,7 @@ function workspaceTitleIndicator(html: string): string {
 }
 
 /** One workspace holding five agents, through the real row builder. */
-function fiveAgentRows(): WorkspaceRowModel[] {
+function fiveAgentRows(): MergedWorkspaceRow[] {
   const agents = [
     agent({ id: "a1", sessionId: "$1", displayName: "codex", lifecycle: "blocked", updatedAt: 5 }),
     agent({ id: "a2", sessionId: "$1", displayName: "claude", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 4, seenGeneration: 1, updatedAt: 4 }),
@@ -128,27 +137,25 @@ function fiveAgentRows(): WorkspaceRowModel[] {
     agent({ id: "a4", sessionId: "$1", displayName: "quiet one", lifecycle: "idle", updatedAt: 2 }),
     agent({ id: "a5", sessionId: "$1", displayName: "quiet two", lifecycle: "idle", updatedAt: 1 }),
   ];
-  return workspaceRows({
+  return merged(workspaceRows({
     snapshot: { sessions: [session], windows: [], panes: [] },
     activeSessionId: session.id,
     agents,
     attentionByWorkspace: deriveAgentRollups(agents).byWorkspace,
     activeBranch: "main*",
-  });
+  }));
 }
 
 type SidebarProps = Parameters<typeof WorkspaceSidebar>[0];
 
 const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
   adapters: [],
+  hostAdapters: overrides.adapters ?? [],
   agents: buildAgentRows([agent({ displayName: "Codex one", windowName: "Review auth flow", lifecycle: "blocked" })], () => ({ workspaceOrder: 0, workspaceName: "work", hostLabel: "remote-linux", tabIndex: 1 }), () => true, "workspace"),
   agentSort: "workspace",
   agentsRatio: 0.4,
   compactWorkspaces: false,
-  canMutate: true,
-  commandScope,
-  hostLabel: "remote-linux",
-  latencyMs: 41,
+  hosts: [remoteHost],
   onAgentsRatio: noop,
   onLaunchAgent: noop,
   onOpenSettings: noop,
@@ -160,15 +167,14 @@ const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
   onSortMode: noop,
   onTogglePinnedWorkspace: noop,
   onTogglePinnedAgentTab: noop,
+  onToggleShown: noop,
   onWorkspaceCommand: noop,
   pinnedOnly: false,
   onTogglePinnedOnly: noop,
-  phase: "connected",
   rows,
   maxWidth: 426,
   onWidth: noop,
   stateGlyphs: false,
-  transport: "ssh",
   width: 240,
   ...overrides,
 });
@@ -238,8 +244,9 @@ describe("application shell accessibility contracts", () => {
     // The persisted mode is still `status`; the word on the button is what the
     // mode does — blocked first, then working, then recent, then idle.
     expect(html).toContain("Agent ordering: workspace. Next: pinned.");
-    // The only resting connection indicator, and it is the way into settings.
-    expect(html).toContain("Host remote-linux over ssh, connected. Open connection settings.");
+    // The only resting connection indicator, and it is the way into the host
+    // menu — where the other hosts and connection settings live.
+    expect(html).toContain("Host remote-linux over ssh, connected. Open the host menu.");
     expect(html).toContain("41 ms");
   });
 
@@ -512,6 +519,7 @@ describe("application shell accessibility contracts", () => {
     const host = await mountSidebar({
       rows: [0, 1, 2].map((index) => ({
         ...rows[0],
+        key: `remote\0$${index + 1}`,
         session: { ...session, id: `$${index + 1}`, name: `work ${index + 1}`, order: index },
         active: index === 0,
       })),
@@ -540,12 +548,8 @@ describe("application shell accessibility contracts", () => {
       hookEvents: [], placements: ["window", "split"], hookWiring: "wired", hookWiringDetail: "", hookSetupRecommended: false,
     }];
     let renderer!: ReturnType<typeof create>;
-    const element = (rows: typeof agents, canMutate = true) => <WorkspaceSidebar
-      adapters={adapters} agents={rows} agentSort="workspace" agentsRatio={0.4} canMutate={canMutate} commandScope={commandScope} compactWorkspaces={false}
-      hostLabel="remote-linux" latencyMs={41} maxWidth={426} phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
-      onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={onRenameAgent}
-      onResumeAgent={onResumeAgent} onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop}
-      onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
+    const element = (rows: typeof agents) => <WorkspaceSidebar
+      {...sidebarProps({ adapters, agents: rows, onRenameAgent, onResumeAgent, onSelectAgent, rows: [] })}
     />;
     await act(async () => { renderer = create(element(agents)); });
     // No agent focused: nothing to act on.
@@ -678,8 +682,9 @@ describe("application shell accessibility contracts", () => {
   });
 
   it("shows positional shortcut numbers on only the first nine workspaces and tabs", () => {
-    const manyRows = Array.from({ length: 10 }, (_, index): WorkspaceRowModel => ({
+    const manyRows = Array.from({ length: 10 }, (_, index): MergedWorkspaceRow => ({
       ...rows[0],
+      key: `remote\0$${index + 1}`,
       session: { ...session, id: `$${index + 1}`, name: `workspace-${index + 1}`, order: index },
       active: index === 0,
       attention: "none",
@@ -1128,19 +1133,16 @@ describe("application shell accessibility contracts", () => {
   it("keeps a workspace menu command bound to the connection scope that opened it", async () => {
     const onWorkspaceCommand = vi.fn();
     const replacementScope = { ...commandScope, connectionEpoch: 2, serverIdentity: "server-b" };
+    // The row carries its host's scope, so the rows are what a reconnect replaces.
     const element = (scope: typeof commandScope) => <WorkspaceSidebar
-      adapters={[]} agents={[]} agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} compactWorkspaces={false}
-      hostLabel="remote-linux" maxWidth={426} phase="connected" rows={rows} stateGlyphs={false} transport="ssh" width={240}
-      onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
-      onReviewHooks={noop} onSelectAgent={noop} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onSortMode={noop} onWidth={noop}
-      onWorkspaceCommand={onWorkspaceCommand} pinnedOnly={false} onTogglePinnedOnly={noop}
+      {...sidebarProps({ agents: [], hosts: [{ ...remoteHost, scope }], onWorkspaceCommand, rows: merged(rows, scope) })}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope)); });
     await act(async () => renderer.root.findByProps({ "data-workspace-index": 0 }).props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 }));
     await act(async () => { renderer.update(element(replacementScope)); });
     await act(async () => renderer.root.findByProps({ "data-menu-item": "rename" }).props.onClick());
-    expect(onWorkspaceCommand).toHaveBeenCalledWith(session, "session.rename", commandScope);
+    expect(onWorkspaceCommand).toHaveBeenCalledWith(expect.objectContaining({ session, scope: commandScope }), "session.rename");
     await act(async () => renderer.unmount());
   });
 
@@ -1154,12 +1156,10 @@ describe("application shell accessibility contracts", () => {
       "workspace",
     );
     const element = (scope: typeof commandScope, displayName: string) => <WorkspaceSidebar
-      adapters={[]} agents={agentRows.map((row) => ({ ...row, agent: { ...row.agent, displayName } }))}
-      agentSort="workspace" agentsRatio={0.4} canMutate commandScope={scope} compactWorkspaces={false} hostLabel="remote-linux" maxWidth={426}
-      phase="connected" rows={[]} stateGlyphs={false} transport="ssh" width={240}
-      onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop} onRenameAgent={noop} onResumeAgent={noop}
-      onReviewHooks={noop} onSelectAgent={onSelectAgent} onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onSortMode={noop} onWidth={noop}
-      onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
+      {...sidebarProps({
+        agents: agentRows.map((row) => ({ ...row, agent: { ...row.agent, displayName } })),
+        hosts: [{ ...remoteHost, scope }], onSelectAgent, rows: [],
+      })}
     />;
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(element(commandScope, "Old agent")); });
@@ -1194,7 +1194,7 @@ describe("application shell accessibility contracts", () => {
 
   it("puts six controls and an unread count on the titlebar, and no more", () => {
     const html = renderToStaticMarkup(<TitleBar
-      canGoBack canGoForward={false} canJump canMutate onBack={noop} onBell={noop} onForward={noop}
+      canCreateWorkspace canGoBack canGoForward={false} canJump onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="mac" sidebarOpen unread={3} workspaceName="muxflow"
     />);
@@ -1212,7 +1212,7 @@ describe("application shell accessibility contracts", () => {
     expect(html).not.toMatch(/<button aria-label="Back"[^>]*disabled/u);
     expect(html).toMatch(/<button aria-label="Forward"[^>]*disabled/u);
     const quiet = renderToStaticMarkup(<TitleBar
-      canGoBack={false} canGoForward canJump={false} canMutate onBack={noop} onBell={noop} onForward={noop}
+      canCreateWorkspace canGoBack={false} canGoForward canJump={false} onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen={false} unread={0}
     />);
@@ -1227,7 +1227,7 @@ describe("application shell accessibility contracts", () => {
     const onBell = vi.fn();
     const bell = (canJump: boolean, unread: number) => {
       const html = renderToStaticMarkup(<TitleBar
-        canGoBack={false} canGoForward={false} canJump={canJump} canMutate onBack={noop} onBell={onBell}
+        canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell}
         onForward={noop} onNewWorkspace={noop} onTogglePanel={noop}
         onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={unread}
       />);
@@ -1263,7 +1263,7 @@ describe("application shell accessibility contracts", () => {
     const onBell = vi.fn();
     let renderer!: ReturnType<typeof create>;
     const bar = (canJump: boolean) => <TitleBar
-      canGoBack={false} canGoForward={false} canJump={canJump} canMutate onBack={noop} onBell={onBell} onForward={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell} onForward={noop} onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={2}
     />;
     act(() => { renderer = create(bar(false)); });
@@ -1278,7 +1278,7 @@ describe("application shell accessibility contracts", () => {
 
   it("reserves traffic-light room on macOS only, because only macOS overlays them", () => {
     const bar = (platform: "mac" | "linux") => renderToStaticMarkup(<TitleBar
-      canGoBack={false} canGoForward={false} canJump={false} canMutate onBack={noop} onBell={noop} onForward={noop}
+      canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop}
       onToggleSidebar={noop} panelOpen={false} platform={platform} sidebarOpen unread={0}
     />);
@@ -1377,6 +1377,7 @@ describe("saved host picker", () => {
   ] as const;
 
   const settings = (overrides: Partial<Parameters<typeof SettingsDialog>[0]> = {}) => <SettingsDialog
+    activeProfileId="local"
     agentSetup={{ available: false, connected: true, reports: true, onSetUp: noop }}
     connectionMode="local"
     helper={{ phase: "idle" }}
@@ -1387,6 +1388,7 @@ describe("saved host picker", () => {
     onDeleteProfile={noop}
     onProbeHelper={noop}
     onProfile={noop}
+    onProfileFields={noop}
     onRequestHelperInstall={noop}
     onNotificationStatus={async () => "authorized"}
     onShell={noop}
@@ -1740,11 +1742,11 @@ describe("pinning by Shift-click", () => {
     });
     const row = renderer.root.findByProps({ className: "workspace-button active" });
     await act(async () => row.props.onClick({ shiftKey: false }));
-    expect(onSelectWorkspace).toHaveBeenCalledWith(session.id);
+    expect(onSelectWorkspace).toHaveBeenCalledWith(rows[0]);
     expect(onTogglePinnedWorkspace).not.toHaveBeenCalled();
 
     await act(async () => row.props.onClick({ shiftKey: true }));
-    expect(onTogglePinnedWorkspace).toHaveBeenCalledWith(session, commandScope);
+    expect(onTogglePinnedWorkspace).toHaveBeenCalledWith(rows[0]);
     expect(onSelectWorkspace).toHaveBeenCalledTimes(1);
     await act(async () => renderer.unmount());
   });
@@ -1777,8 +1779,9 @@ describe("pinning by Shift-click", () => {
     expect(plain).not.toContain("list-divider");
     expect(plain).not.toContain("workspace-pin");
 
-    const other: WorkspaceRowModel = {
+    const other: MergedWorkspaceRow = {
       ...rows[0],
+      key: "remote\0$2",
       session: { ...session, id: "$2", name: "other", order: 1 },
       active: false,
     };

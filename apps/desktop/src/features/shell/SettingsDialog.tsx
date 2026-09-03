@@ -5,6 +5,7 @@ import type { HostProfile } from "../../app/types";
 import type { NotificationPermissionStatus } from "../agents/notifications";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
+import { hostLetter } from "./hostProfiles";
 import {
   clampedTerminalFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN,
   type AppTabViewMode, type ShellState, type WorkspaceDefaults,
@@ -15,6 +16,8 @@ interface SettingsDialogProps {
   profiles: readonly HostProfile[];
   /** The saved host the form is editing; empty is the unsaved new host. */
   selectedProfileId: string;
+  /** The host on screen. It is always shown, so its checkbox cannot be cleared. */
+  activeProfileId: string;
   /** The saved host Delete would remove, or undefined while there is none. */
   deletableProfile?: HostProfile;
   sshTarget: string;
@@ -30,6 +33,12 @@ interface SettingsDialogProps {
   onConnectionMode(mode: "local" | "ssh"): void;
   onDeleteProfile(): void;
   onProfile(profile: HostProfile | undefined): void;
+  /**
+   * Edits the picked saved host's mark and visibility. Saved as typed, with
+   * no Connect: these describe how the host appears beside the others, and
+   * a host is shown beside the active one far more often than it becomes it.
+   */
+  onProfileFields(patch: Pick<HostProfile, "letter" | "shown">): void;
   onSshTarget(value: string): void;
   onSshConfigPath(value: string): void;
   onProbeHelper(): void;
@@ -88,6 +97,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const titleId = useId();
   const settingsPanelId = useId();
   const dialog = useModalDialog<HTMLElement>(props.onClose);
+  const selectedProfile = props.profiles.find((profile) => profile.id === props.selectedProfileId);
+  const selectedIsActive = selectedProfile?.id === props.activeProfileId;
 
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
     if (event.currentTarget === event.target) props.onClose();
@@ -186,6 +197,32 @@ export function SettingsDialog(props: SettingsDialogProps) {
           {props.connectionMode === "ssh" && <>
             <label>SSH host<input onChange={(event) => props.onSshTarget(event.target.value)} placeholder="Host or config alias" value={props.sshTarget} /></label>
             <label>SSH config<input onChange={(event) => props.onSshConfigPath(event.target.value)} placeholder="Optional path" value={props.sshConfigPath} /></label>
+          </>}
+          {/* Only for a saved host: an unsaved one has nothing to write these
+              onto, and Connect saves it shown with a letter derived from its
+              label, which is what these two fields then correct. */}
+          {selectedProfile && <>
+            <label>Letter
+              <input
+                aria-label="Host letter"
+                maxLength={1}
+                onChange={(event) => props.onProfileFields({ letter: event.target.value.trim().slice(0, 1) || undefined, shown: selectedProfile.shown })}
+                placeholder={hostLetter({ ...selectedProfile, letter: undefined })}
+                value={selectedProfile.letter ?? ""}
+              />
+            </label>
+            <span className="settings-hint">Drawn before this host’s workspaces and agents when more than one host is shown. Empty uses the first letter of the label.</span>
+            <label className="settings-check">
+              <input
+                checked={selectedIsActive || Boolean(selectedProfile.shown)}
+                disabled={selectedIsActive}
+                onChange={(event) => props.onProfileFields({ letter: selectedProfile.letter, shown: event.target.checked })}
+                type="checkbox"
+              /> Show in sidebar
+            </label>
+            <span className="settings-hint">{selectedIsActive
+              ? "The host on screen is always shown."
+              : "Keeps a live connection and lists this host’s workspaces and agents beside the active host’s."}</span>
           </>}
           {props.remote && <div className="settings-helper">
             <button disabled={props.helper.phase === "probing" || props.helper.phase === "upgrading"} onClick={props.onProbeHelper} type="button">

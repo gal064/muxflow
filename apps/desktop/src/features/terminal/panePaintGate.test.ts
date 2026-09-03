@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { terminalCacheKey } from "./TerminalStateCache";
 import {
   armPanePaint,
   awaitPanePaint,
@@ -95,5 +96,23 @@ describe("panePaintGate", () => {
     for (let index = 0; index < 200; index += 1) armPanePaint(`%${index}`);
     await Promise.resolve();
     expect(waiting()).toBe(true);
+  });
+
+  it("keeps one host's pane apart from the same pane id on another host", async () => {
+    armPanePaint(terminalCacheKey("a", "%1"));
+    // The other host's `%1` was never armed, so nothing is waited for there.
+    let otherSettled = false;
+    void awaitPanePaint(terminalCacheKey("b", "%1")).then(() => { otherSettled = true; });
+    await Promise.resolve();
+    expect(otherSettled).toBe(true);
+    // And its paint releases nobody on the first host.
+    let settled = false;
+    void awaitPanePaint(terminalCacheKey("a", "%1"), 10_000).then(() => { settled = true; });
+    notePanePainted(terminalCacheKey("b", "%1"));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    notePanePainted(terminalCacheKey("a", "%1"));
+    await Promise.resolve();
+    expect(settled).toBe(true);
   });
 });

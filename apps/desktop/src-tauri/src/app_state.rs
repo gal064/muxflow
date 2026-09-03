@@ -139,6 +139,9 @@ pub struct ShellPreferences {
     pub terminal_application_clipboard: bool,
     #[serde(default)]
     pub terminal_font_size: Option<u8>,
+    /// The host most recently picked in the New workspace dialog.
+    #[serde(default)]
+    pub new_workspace_host_profile_id: Option<String>,
     /// The mode a newly opened Markdown tab starts in. `None` is a save written
     /// before the setting existed, which is the same thing as "split".
     #[serde(default)]
@@ -333,6 +336,9 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
     }
     if value.commands.shortcut_overrides.len() > 256 {
         return Err("too many keyboard shortcut overrides".into());
+    }
+    if let Some(profile_id) = value.shell.new_workspace_host_profile_id.as_deref() {
+        validate_text("new workspace host profile ID", profile_id, false)?;
     }
     for (command, binding) in &value.commands.shortcut_overrides {
         validate_text("shortcut command", command, false)?;
@@ -587,6 +593,7 @@ mod tests {
                 clean_wrapped_commands: Some(false),
                 terminal_application_clipboard: false,
                 terminal_font_size: Some(13),
+                new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
                 window_geometry: Some(WindowGeometry {
                     x: 20,
@@ -741,6 +748,10 @@ mod tests {
         assert_eq!(value.shell.panel_width, Some(320.0));
         assert_eq!(value.shell.agents_section_ratio, Some(0.42));
         assert_eq!(value.shell.terminal_font_size, Some(17));
+        assert_eq!(
+            value.shell.new_workspace_host_profile_id.as_deref(),
+            Some("ssh-remote-linux")
+        );
         assert!(value.shell.sidebar_collapsed && value.shell.panel_open);
         assert!(
             value.shell.agent_state_glyphs
@@ -851,6 +862,7 @@ mod tests {
         assert_eq!(value.shell.agent_sort, AgentSortMode::Workspace);
         assert!(!value.shell.sidebar_collapsed);
         assert_eq!(value.shell.clean_wrapped_commands, None);
+        assert_eq!(value.shell.new_workspace_host_profile_id, None);
         assert_eq!(value.shell.window_geometry.unwrap().width, 900);
     }
 

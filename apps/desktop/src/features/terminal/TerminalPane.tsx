@@ -14,7 +14,7 @@ import {
   type TerminalSize,
   type TerminalViewportState,
 } from "./TerminalRenderer";
-import { terminalStateCache } from "./TerminalStateCache";
+import { terminalCacheKey, terminalStateCache } from "./TerminalStateCache";
 import { readAtlasInvalidationCount } from "./atlasStaleProbe";
 import { notePaint, startLongTaskTracker } from "./paintTailProbe";
 import { createGridMismatchProbe, type GridMismatchProbe } from "./gridMismatchProbe";
@@ -48,7 +48,9 @@ import { armPanePaint, notePanePainted } from "./panePaintGate";
 export { paneRecoveryPlan } from "./PaneRecovery";
 
 // A pane may remount while its prior renderer is still draining. Serializing
-// visibility ownership keeps a late hide from overtaking the new reveal.
+// visibility ownership keeps a late hide from overtaking the new reveal. Keyed
+// by `terminalCacheKey`, like the screen cache: pane ids repeat across hosts,
+// and one host's `%0` draining must not hold another host's `%0` back.
 const pendingPaneHandoffs = new Map<string, Promise<void>>();
 const paneLifecycleVersions = new Map<string, number>();
 let nextTransferRenderLifetime = 0;
@@ -247,6 +249,12 @@ export interface TerminalPaneController {
 interface Props {
   appFocused?: boolean;
   clientId?: string;
+  /**
+   * Which host this pane belongs to; pane ids repeat across tmux servers.
+   * Fixed for the lifetime of a mount — the surface remounts panes on a host
+   * switch, and the effects here capture the key they mounted with.
+   */
+  cacheScope: string;
   pane: Pane;
   hub: TerminalEventHub;
   onInput: (paneId: string, input: TerminalInput) => void;
@@ -289,6 +297,7 @@ interface Props {
 export function TerminalPane({
   appFocused = true,
   clientId,
+  cacheScope,
   pane,
   hub,
   onInput,
@@ -308,6 +317,7 @@ export function TerminalPane({
   transferRegistry,
   transferScope,
 }: Props) {
+  const cacheKey = terminalCacheKey(cacheScope, pane.id);
   const container = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<TerminalRenderer | undefined>(undefined);
   const transferControllerRef = useRef<TerminalTransferSurfaceController | undefined>(undefined);
@@ -442,8 +452,8 @@ export function TerminalPane({
     // fallback armed at the end of this effect is not a fallback for any of
     // that: the pane would stay hidden with no timer to rescue it.
     const revealFallback = setTimeout(revealTerminal, 300);
-    const lifecycle = (paneLifecycleVersions.get(pane.id) ?? 0) + 1;
-    paneLifecycleVersions.set(pane.id, lifecycle);
+    const lifecycle = (paneLifecycleVersions.get(cacheKey) ?? 0) + 1;
+    paneLifecycleVersions.set(cacheKey, lifecycle);
     const initialPaint = createPaintTicket([], lifecycle);
     let rendererActive = true;
     let rendererEpoch: number | undefined;
@@ -479,7 +489,7 @@ export function TerminalPane({
         // The renderer asks once and then latches. Record it so the pane keeps
         // asking on a bound if that one request produces nothing.
         watchdogRef.current?.note("rendererReseed");
-        terminalStateCache.delete(pane.id);
+        terminalStateCache.delete(cacheKey);
         const currentClientId = clientIdRef.current;
         if (!currentClientId) throw new Error(`${reason} No connection to request a seed through.`);
         try {
@@ -514,7 +524,7 @@ export function TerminalPane({
       // existing bounded recovery queue rather than written onto a stale base.
       revealStateRef.current = { ready: false, hasLocalState: false };
       deferredOutputRef.current.reset();
-      terminalStateCache.delete(pane.id);
+      terminalStateCache.delete(cacheKey);
       watchdogRef.current?.note("rendererReseed");
       requestFreshSeed(reason);
     };
@@ -536,7 +546,7 @@ export function TerminalPane({
       // and the reveal checkpoint (hub counter) describe different cutoffs —
       // the stale-splice half of P12-U003.3. A superseded lifecycle is a
       // different pane instance and must stay silent.
-      if (paneLifecycleVersions.get(pane.id) !== lifecycle) return false;
+      if (paneLifecycleVersions.get(cacheKey) !== lifecycle) return false;
       hub.markRendered(pane.id, generation, terminalEpoch);
       return true;
     };
@@ -553,7 +563,7 @@ export function TerminalPane({
       // probe is off, so the reveal cannot live inside them either.
       revealTerminal();
       if (!commitRendered(generation, terminalEpoch, establishesEpoch)) return;
-      notePanePainted(pane.id);
+      notePanePainted(cacheKey);
       // The perceived-latency spans (create.*, window.switch, pane.split) end
       // at the frame that shows this pane's content, so they are closed apart
       // from the startup ticket below: that ticket publishes once per mount,
@@ -563,13 +573,13 @@ export function TerminalPane({
       // pixels are still this pane's": a superseded or torn-down instance
       // never painted what it parsed, and its successor reports instead.
       afterNextPaint(() => {
-        if (!rendererActive || paneLifecycleVersions.get(pane.id) !== lifecycle) return;
+        if (!rendererActive || paneLifecycleVersions.get(cacheKey) !== lifecycle) return;
         closePanePaintSpans(clientIdRef.current, pane.id);
       });
       initialPaint.afterPaint(
         (ticket) => ticket.lifecycleGeneration === lifecycle
           && rendererActive
-          && paneLifecycleVersions.get(pane.id) === lifecycle,
+          && paneLifecycleVersions.get(cacheKey) === lifecycle,
         () => {
           recordPerfMilestone("startup.terminalPaint");
         },
@@ -661,7 +671,7 @@ export function TerminalPane({
       }
       return true;
     };
-    const cached = terminalStateCache.get(pane.id);
+    const cached = terminalStateCache.get(cacheKey);
     const currentCached = cached?.terminalEpoch !== undefined && cached.terminalEpoch === hub.generationEpoch
       ? cached
       : undefined;
@@ -681,9 +691,9 @@ export function TerminalPane({
         // nothing above it, and putting it back on a fresh xterm does not give
         // it a history.
         historyPager.restore(currentCached);
-      } else terminalStateCache.delete(pane.id);
+      } else terminalStateCache.delete(cacheKey);
     } else if (cached) {
-      terminalStateCache.delete(pane.id);
+      terminalStateCache.delete(cacheKey);
     }
     rendererEpochRef.current = undefined;
     revealStateRef.current = { ready: false, hasLocalState: Boolean(currentCached) };
@@ -822,7 +832,7 @@ export function TerminalPane({
       if (effect.kind === "seed") {
         readingState = readingStateForAuthoritativeScreen();
         authoritativeScreenPending = true;
-        terminalStateCache.delete(pane.id);
+        terminalStateCache.delete(cacheKey);
         clearDeferredOutput();
         // A seed is the visible grid and nothing above it, so this pane's
         // scrollback is once again something to fetch rather than something it
@@ -920,7 +930,7 @@ export function TerminalPane({
         }
       } else if (effect.kind === "awaitSeed") {
         readingState = readingStateForAuthoritativeScreen();
-        terminalStateCache.delete(pane.id);
+        terminalStateCache.delete(cacheKey);
         clearDeferredOutput();
         screenOnDisplay = undefined;
         // Nothing is on the terminal to splice above; the seed this is waiting
@@ -959,7 +969,7 @@ export function TerminalPane({
         if (!holdingTheVerifiedScreen) {
           readingState = readingStateForAuthoritativeScreen();
           revealStateRef.current = { ready: false, hasLocalState: false };
-          terminalStateCache.delete(pane.id);
+          terminalStateCache.delete(cacheKey);
           clearDeferredOutput();
           screenOnDisplay = undefined;
           // The screen is about to be blanked and reseeded, exactly as in the
@@ -1138,7 +1148,7 @@ export function TerminalPane({
       const handoff = (async () => {
         try {
           const drained = await renderer.drainAndSerialize();
-          if (paneLifecycleVersions.get(pane.id) !== lifecycle) return;
+          if (paneLifecycleVersions.get(cacheKey) !== lifecycle) return;
           const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
           if (!currentCheckpoint) return;
           const snapshotMatchesEpoch = rendererEpoch === currentCheckpoint.terminalEpoch;
@@ -1157,18 +1167,18 @@ export function TerminalPane({
           // does — and a pane that already reached the top of tmux's history
           // must not go asking for it again.
           if (snapshotMatchesEpoch && snapshotIsCurrent) {
-            terminalStateCache.set(pane.id, drained.serialized, {
+            terminalStateCache.set(cacheKey, drained.serialized, {
               checkpoint,
               history: historyPager.snapshot(),
               viewport: drained.viewport,
             });
-          } else terminalStateCache.delete(pane.id);
+          } else terminalStateCache.delete(cacheKey);
           // A cache that declined the screen (too large for its budget) leaves
           // nothing to resume from, and saying so is what makes the reveal ask
           // for a seed instead of a tail.
           const rendererHoldsSnapshot = snapshotMatchesEpoch
             && snapshotIsCurrent
-            && terminalStateCache.get(pane.id) !== undefined;
+            && terminalStateCache.get(cacheKey) !== undefined;
           if (!currentClientId || clientIdRef.current !== currentClientId) return;
           try {
             await setTerminalVisibility(
@@ -1197,19 +1207,19 @@ export function TerminalPane({
           if (rendererRef.current === renderer) rendererRef.current = undefined;
         }
       })();
-      pendingPaneHandoffs.set(pane.id, handoff);
+      pendingPaneHandoffs.set(cacheKey, handoff);
       void handoff.then(
         () => {
-          if (pendingPaneHandoffs.get(pane.id) === handoff) pendingPaneHandoffs.delete(pane.id);
-          if (paneLifecycleVersions.get(pane.id) === lifecycle) paneLifecycleVersions.delete(pane.id);
+          if (pendingPaneHandoffs.get(cacheKey) === handoff) pendingPaneHandoffs.delete(cacheKey);
+          if (paneLifecycleVersions.get(cacheKey) === lifecycle) paneLifecycleVersions.delete(cacheKey);
         },
         () => {
-          if (pendingPaneHandoffs.get(pane.id) === handoff) pendingPaneHandoffs.delete(pane.id);
-          if (paneLifecycleVersions.get(pane.id) === lifecycle) paneLifecycleVersions.delete(pane.id);
+          if (pendingPaneHandoffs.get(cacheKey) === handoff) pendingPaneHandoffs.delete(cacheKey);
+          if (paneLifecycleVersions.get(cacheKey) === lifecycle) paneLifecycleVersions.delete(cacheKey);
         },
       );
     };
-  }, [hub, pane.id]);
+  }, [cacheKey, hub, pane.id]);
 
   // Undebounced deliberately. A font size change re-measures the face and
   // reflows the whole scrollback, which is lossy on a shrink, so it must not
@@ -1278,25 +1288,25 @@ export function TerminalPane({
       revealKey: string,
       retriesUsed: number,
     ) => {
-      const handoff = pendingPaneHandoffs.get(pane.id);
+      const handoff = pendingPaneHandoffs.get(cacheKey);
       if (handoff && (await awaitWithin(handoff, PANE_HANDOFF_TIMEOUT_MS)) === "timeout") {
         // Proceeding is safe, and waiting longer is not. A pending handoff
         // belongs to a *previous* instance of this pane — it is created by the
         // mount effect's cleanup, and React runs that cleanup before the new
         // instance's effects — so its own guard
-        // (`paneLifecycleVersions.get(pane.id) !== lifecycle`) already makes
+        // (`paneLifecycleVersions.get(cacheKey) !== lifecycle`) already makes
         // everything it does after the drain a no-op: it writes no
         // `terminalStateCache` entry and sends no hide. That guard is what
         // rules out the two things this wait was protecting against, a late
         // hide overtaking this reveal and a stale serialize landing in the
-        // cache under this pane's id — the cache is keyed by pane id alone,
-        // with the epoch only carried as a field, so a stale `set` would be
+        // cache under this pane's key — the cache is keyed by host and pane
+        // id, with the epoch only carried as a field, so a stale `set` would be
         // indistinguishable from a fresh one if it ever ran. The one case
         // where the handoff is still current is a pane that really did go
         // away, and then `active` is false and this reveal stops below.
         // Dropping the map entry keeps the *next* reveal from queueing behind
         // the same wedged promise.
-        if (pendingPaneHandoffs.get(pane.id) === handoff) pendingPaneHandoffs.delete(pane.id);
+        if (pendingPaneHandoffs.get(cacheKey) === handoff) pendingPaneHandoffs.delete(cacheKey);
         recordPerfCounter("terminal.pane.handoffTimeouts");
       }
       if (!active || lastRevealKeyRef.current !== revealKey) return;
@@ -1311,7 +1321,7 @@ export function TerminalPane({
       // against. `rendererEpochRef` cannot answer this: it is set from a paint
       // callback that has not necessarily run yet, and a reveal that waited for
       // a frame would be a switch that waited for a frame.
-      const held = terminalStateCache.get(pane.id);
+      const held = terminalStateCache.get(cacheKey);
       const holdsHandoffScreen = held !== undefined
         && held.terminalEpoch === currentCheckpoint.terminalEpoch;
       revealStateRef.current = {
@@ -1366,7 +1376,7 @@ export function TerminalPane({
           // The cached screen was serialized under the same superseded epoch, so
           // a remount must not restore it as if it were current. Nothing already
           // painted is touched: this only invalidates the *next* mount's base.
-          terminalStateCache.delete(pane.id);
+          terminalStateCache.delete(cacheKey);
           // hubEpoch dates the frontend's knowledge at rejection time: a fresh
           // hub epoch here means a stale checkpoint outlived the epoch frame; a
           // stale one means the frame itself was late (blank-panes.md, 04:38).
@@ -1448,7 +1458,7 @@ export function TerminalPane({
       if (!checkpoint) return;
       const revealKey = `${clientId}:${checkpoint.terminalEpoch}:${revealAttemptRef.current}`;
       if (lastRevealKeyRef.current === revealKey) return;
-      armPanePaint(pane.id);
+      armPanePaint(cacheKey);
       lastRevealKeyRef.current = revealKey;
       // Whatever was still queued to retry belongs to the key this supersedes,
       // and so does whatever void watch the superseded reveal armed: this
@@ -1468,7 +1478,7 @@ export function TerminalPane({
     };
     revealForCurrentEpoch();
     const unsubscribe = hub.subscribeEpoch(() => {
-      terminalStateCache.delete(pane.id);
+      terminalStateCache.delete(cacheKey);
       deferredOutputRef.current.reset();
       rendererEpochRef.current = undefined;
       revealStateRef.current = { ready: false, hasLocalState: false };
@@ -1490,7 +1500,7 @@ export function TerminalPane({
       reassertVisibilityRef.current = undefined;
       unsubscribe();
     };
-  }, [clientId, hub, pane.id]);
+  }, [cacheKey, clientId, hub, pane.id]);
 
   useEffect(() => {
     if (pane.active) rendererRef.current?.focus();

@@ -55,6 +55,16 @@ export interface CachedHistoryState {
   historyNextPageLines: number;
 }
 
+/**
+ * The key one pane's screen is kept under.
+ *
+ * Pane ids repeat across tmux servers — `%0` exists on every host — so a key
+ * has to name the host too. `scope` is the host profile id.
+ */
+export function terminalCacheKey(scope: string, paneId: string): string {
+  return `${scope}\0${paneId}`;
+}
+
 export class TerminalStateCache {
   readonly #states = new Map<string, CachedTerminalState>();
   #retainedBytes = 0;
@@ -98,11 +108,11 @@ export class TerminalStateCache {
    * back to. It is on the read rather than only on the write because a reveal
    * reads this entry and does not necessarily write one.
    */
-  get(paneId: string): CachedTerminalState | undefined {
-    const value = this.#states.get(paneId);
+  get(key: string): CachedTerminalState | undefined {
+    const value = this.#states.get(key);
     if (!value) return undefined;
-    this.#states.delete(paneId);
-    this.#states.set(paneId, value);
+    this.#states.delete(key);
+    this.#states.set(key, value);
     return value;
   }
 
@@ -117,7 +127,7 @@ export class TerminalStateCache {
    * sentence about it.
    */
   set(
-    paneId: string,
+    key: string,
     serialized: string,
     options: {
       checkpoint?: { terminalEpoch: number; outputGeneration: number };
@@ -127,11 +137,11 @@ export class TerminalStateCache {
   ): void {
     const byteLength = serialized ? encoder.encode(serialized).byteLength : 0;
     if (!serialized || byteLength > this.maxSerializedBytes || byteLength > this.maxTotalBytes) {
-      this.delete(paneId);
+      this.delete(key);
       return;
     }
-    this.delete(paneId);
-    this.#states.set(paneId, {
+    this.delete(key);
+    this.#states.set(key, {
       serialized,
       savedAt: Date.now(),
       byteLength,
@@ -150,15 +160,23 @@ export class TerminalStateCache {
     }
   }
 
-  delete(paneId: string): void {
-    const value = this.#states.get(paneId);
+  delete(key: string): void {
+    const value = this.#states.get(key);
     if (value) this.#retainedBytes -= value.byteLength;
-    this.#states.delete(paneId);
+    this.#states.delete(key);
   }
 
   clear(): void {
     this.#states.clear();
     this.#retainedBytes = 0;
+  }
+
+  /** Forgets every screen kept under `terminalCacheKey(scope, …)`. */
+  clearScope(scope: string): void {
+    const prefix = terminalCacheKey(scope, "");
+    for (const key of [...this.#states.keys()]) {
+      if (key.startsWith(prefix)) this.delete(key);
+    }
   }
 
   get size(): number {

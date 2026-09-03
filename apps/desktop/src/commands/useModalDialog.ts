@@ -45,10 +45,16 @@ function isolateModalSiblings(dialog: HTMLElement): () => void {
 }
 
 /** Shared Escape, focus trap, and focus-return behavior for native app modals. */
-export function useModalDialog<T extends HTMLElement>(onCancel: () => void, enabled = true) {
+export function useModalDialog<T extends HTMLElement>(
+  onCancel: () => void,
+  enabled = true,
+  keyboardEnabled = true,
+) {
   const dialog = useRef<T>(null);
   const cancel = useRef(onCancel);
+  const keyboard = useRef(keyboardEnabled);
   cancel.current = onCancel;
+  keyboard.current = keyboardEnabled;
   useEffect(() => {
     if (!enabled) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
@@ -61,6 +67,9 @@ export function useModalDialog<T extends HTMLElement>(onCancel: () => void, enab
       (currentDialog.querySelector<HTMLElement>("[autofocus], " + FOCUSABLE) ?? currentDialog).focus();
     });
     const handleKey = (event: KeyboardEvent) => {
+      // A nested menu owns Escape and Tab while it is open. Modal isolation
+      // remains installed; only this parent keyboard handler stands aside.
+      if (!keyboard.current) return;
       if (keyboardEventIsComposing(event)) return;
       if (event.key === "Escape") { event.preventDefault(); cancel.current(); return; }
       if (event.key !== "Tab" || !dialog.current) return;

@@ -1,5 +1,5 @@
 import { useCallback, type MutableRefObject } from "react";
-import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
+import { requestTmuxAction, type TmuxAction, type TmuxActionResult } from "../features/tmux/actions";
 import {
   requestReconciledTmuxAction,
   type ReconciledTmuxActionOptions,
@@ -39,23 +39,41 @@ interface Options {
   setStatus(status: string): void;
 }
 
+/**
+ * A host other than the one on screen, for an action a row on that host
+ * asked for. The scope is read live, like the active host's ref: the
+ * result is discarded if that host's connection moved on under the request.
+ * A missing client means the host has no live bridge, and the action is
+ * refused the way it is on the active host before its bridge is up.
+ */
+export interface TmuxActionTarget {
+  clientId?: string;
+  canMutate: boolean;
+  scopeRef: { readonly current: HostScopeToken };
+}
+
 /** Scope-safe action execution and its explicit UI/performance reporting policy. */
 export function useTmuxActionPerformer(options: Options) {
   return useCallback(async (
     action: TmuxAction,
     capturedPrecondition?: { serverIdentity: string; generation: number },
     execution?: TmuxActionExecution,
+    target?: TmuxActionTarget,
   ): Promise<TmuxActionResult | undefined> => {
     const reportStatus = execution?.kind !== "navigation" || execution.feedback === "visible";
-    if (!options.clientId || !options.canMutate || !options.serverIdentity) {
+    const clientId = target ? target.clientId : options.clientId;
+    const canMutate = target ? target.canMutate : options.canMutate;
+    const scopeRef = target ? target.scopeRef : options.hostScopeRef;
+    const serverIdentity = target ? scopeRef.current.serverIdentity : options.serverIdentity;
+    if (!clientId || !canMutate || !serverIdentity) {
       if (reportStatus) options.setStatus("This action is unavailable until the authoritative connection is live.");
       return undefined;
     }
-    const initialScope = options.hostScopeRef.current;
+    const initialScope = scopeRef.current;
     const paneSpan = execution?.kind === "navigation" && !execution.measurePanePaint
       ? undefined
       : INTERACTION_SPAN_BY_ACTION[action.kind];
-    const paneSpanHandle = paneSpan ? openPanePaintSpan(paneSpan, options.clientId) : undefined;
+    const paneSpanHandle = paneSpan ? openPanePaintSpan(paneSpan, clientId) : undefined;
     // The renderer's two ends of the switch timeline. Recorded for every
     // action, not only slow ones: the question being asked is how a switch on a
     // fast link differs from one on a slow one, and that needs the fast
@@ -68,12 +86,17 @@ export function useTmuxActionPerformer(options: Options) {
     const sentAt = performance.now();
     try {
       const result = await (options.requestAction ?? requestReconciledTmuxAction)({
-        clientId: options.clientId,
+        clientId,
         action,
         capturedPrecondition,
         initialScope,
-        currentScope: () => options.hostScopeRef.current,
+        currentScope: () => scopeRef.current,
         ...options.reconciliation,
+        // A peer's round trip says nothing about the link the user types
+        // over, so it is not measured as if it did.
+        ...(target && !options.reconciliation?.request
+          ? { request: (id: string, act: TmuxAction, precondition: { serverIdentity: string; generation: number }) => requestTmuxAction(id, act, precondition, false) }
+          : {}),
       });
       recordPerfRecord("perf.timeline", {
         action: action.kind,
@@ -89,7 +112,7 @@ export function useTmuxActionPerformer(options: Options) {
         elapsedMs: Math.round(performance.now() - sentAt),
         ok: true,
       });
-      if (!sameHostConnection(initialScope, options.hostScopeRef.current)) {
+      if (!sameHostConnection(initialScope, scopeRef.current)) {
         abandonPanePaintSpan(paneSpanHandle);
         return undefined;
       }
@@ -114,7 +137,7 @@ export function useTmuxActionPerformer(options: Options) {
         ok: false,
         code: String(error).slice(0, 120),
       });
-      if (reportStatus && sameHostConnection(initialScope, options.hostScopeRef.current)) options.setStatus(String(error));
+      if (reportStatus && sameHostConnection(initialScope, scopeRef.current)) options.setStatus(String(error));
       if (execution?.kind === "navigation") throw error;
       return undefined;
     }

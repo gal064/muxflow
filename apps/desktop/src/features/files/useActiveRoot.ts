@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { keyForScope, sameRoot } from "./api";
 import { createPaintTicket } from "../../perf/paintTicket";
 import { awaitPanePaint } from "../terminal/panePaintGate";
+import { terminalCacheKey } from "../terminal/TerminalStateCache";
 import { useCommittedRef } from "../../commands/useCommittedRef";
 import type { ActiveRoot, FileWorkspaceClient, FileWorkspaceScope } from "./types";
 
@@ -183,7 +184,8 @@ export function useActiveRoot(options: Options): {
      * goes through `rearmNow` and calls `resolve` directly: see its note.
      */
     const resolveBehindPaint = () => {
-      const painting = latest.current.scope()?.paneId;
+      const scope = latest.current.scope();
+      const painting = scope && terminalCacheKey(scope.hostProfileId, scope.paneId);
       void (painting === undefined ? Promise.resolve() : awaitPanePaint(painting)).then(resolve);
     };
     resolveBehindPaint();

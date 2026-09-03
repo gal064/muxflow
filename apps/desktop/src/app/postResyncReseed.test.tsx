@@ -28,7 +28,7 @@ const connectionState = (state: "connecting" | "connected" | "reconnecting" | "r
 async function connected() {
   let publish!: (event: TerminalEvent) => void;
   startTerminalMock.mockImplementation(async (
-    _sessionId: string, _paneIds: string[], _connection: ConnectionSpec, onEvent: (event: TerminalEvent) => void,
+    _sessionId: string, _paneIds: string[], _connection: ConnectionSpec, _attach: boolean, onEvent: (event: TerminalEvent) => void,
   ) => {
     publish = onEvent;
     return "client-1";
@@ -43,7 +43,7 @@ async function connected() {
     }
     return Promise.resolve(undefined);
   });
-  const client = { publishWireEvent: vi.fn(), publishWireSnapshot: vi.fn() } as never;
+  const client = { publishWireEvent: vi.fn(), publishWireSnapshot: vi.fn(), retireConnection: vi.fn() } as never;
   // Stable, like the shell's own `useState` setter: the controller keys its
   // profile load on it, and a fresh function per render re-runs that forever.
   const setStatus = () => undefined;
