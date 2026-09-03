@@ -9,8 +9,9 @@
 // native→JS delivery still carries in the background.
 //
 // The delays that matter here are the ones nothing else would wake up for: the
-// §7.2 reconnect backoff, the handshake deadline and the notifier's
-// post-settle wait. Per-request timeouts stay on `setTimeout`.
+// §7.2 reconnect backoff and the 60 s stable timer that resets its exponent,
+// the handshake deadline and the notifier's post-settle wait. Per-request
+// timeouts stay on `setTimeout`.
 
 import { jsBackgroundTimer, type BackgroundTimer } from "../protocol/backgroundTimer";
 import { muxflowSsh, type MuxflowSsh } from "../ssh/MuxflowSsh";

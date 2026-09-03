@@ -136,14 +136,15 @@ export interface HostConnectionOptions {
   onConnected?: () => void;
   log?: (line: string) => void;
   /**
-   * Runs the §7.2 backoff and the handshake deadline. The app passes the
-   * native timer (`backgroundTimer()`): React Native freezes JS timers while
-   * the activity is paused, and a reconnect is exactly the delay that has to
-   * elapse with the app in the background — as is the deadline on the
-   * handshake that reconnect starts. Defaults to `setTimeout`. The request and
-   * stable timers stay on `setTimeout` on purpose: one bridge call per request
-   * is not worth it, and a stable timer that fires late only keeps the backoff
-   * exponent a little longer.
+   * Runs the §7.2 backoff, the handshake deadline and the 60 s stable timer.
+   * The app passes the native timer (`backgroundTimer()`): React Native
+   * freezes JS timers while the activity is paused, and a reconnect is exactly
+   * the delay that has to elapse with the app in the background — as is the
+   * deadline on the handshake that reconnect starts, and the stability window
+   * that resets the exponent (a stable timer frozen in the background never
+   * fires at all, so a phone flapping there climbs to the cap and stays).
+   * Defaults to `setTimeout`. The request timers stay on `setTimeout` on
+   * purpose: one bridge call per request is not worth it.
    */
   reconnectTimer?: BackgroundTimer;
   requestTimeoutMs?: number;
@@ -193,7 +194,7 @@ export class HostConnection {
   private dialAbort: AbortController | undefined;
   private reconnectAttempt = 0;
   private reconnectTimer: BackgroundTimerHandle | undefined;
-  private stableTimer: ReturnType<typeof setTimeout> | undefined;
+  private stableTimer: BackgroundTimerHandle | undefined;
   private wantConnected = false;
   private readonly timer: BackgroundTimer;
   private readonly requestTimeoutMs: number;
@@ -490,10 +491,10 @@ export class HostConnection {
     this.clearStableTimer();
     // The backoff exponent resets only after 60 s of stability (§7.2); the
     // store's `attempt` is a display value and is 0 whenever connected.
-    this.stableTimer = setTimeout(() => {
+    this.stableTimer = this.timer.set(this.stableAfterMs, () => {
       this.stableTimer = undefined;
       if (this.attempt === attempt) this.reconnectAttempt = 0;
-    }, this.stableAfterMs);
+    });
     // A snapshot barrier already incorporates every ordered event at or below
     // its accepted sequence; replaying one would read as a gap. Mirrors
     // `event_follows_snapshot_barrier` in the desktop bridge.
@@ -770,7 +771,7 @@ export class HostConnection {
 
   private clearStableTimer(): void {
     if (this.stableTimer !== undefined) {
-      clearTimeout(this.stableTimer);
+      this.timer.clear(this.stableTimer);
       this.stableTimer = undefined;
     }
   }

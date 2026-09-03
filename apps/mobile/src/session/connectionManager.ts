@@ -6,22 +6,30 @@
 //   openBulkConnection()     the bulk lane bound to the current control epoch (§11.1)
 //   disconnectHost()         user-initiated: no reconnect
 //   setTransportFactory(f)   how a lane is dialled (the SSH module, or a dev pipe)
+//   setForegroundService(s)  the §6.3 notification: its text, and its Disconnect action
 
 import { HostConnection } from "../protocol/HostConnection";
 import type { Transport } from "../protocol/Transport";
-import { hostsStore, type SavedHost } from "../store/hostsStore";
+import { hostLabel, hostsStore, type SavedHost } from "../store/hostsStore";
 import { createSessionStore, sessionStore, type AgentTransition, type ConnectionState, type SessionStore } from "../store/sessionStore";
 import { terminalRegistry } from "../features/terminal/terminalRegistry";
 import { filesStore } from "../features/files/filesStore";
+import { connectedNotificationText, reconnectingNotificationText } from "../features/hosts/connectionLabels";
+import type { MuxflowSsh } from "../ssh/MuxflowSsh";
 import { backgroundTimer } from "./backgroundTimer";
 import { log } from "./log";
 
 export type Lane = "control" | "bulk";
 export type TransportFactory = (host: SavedHost, lane: Lane, signal?: AbortSignal) => Promise<Transport>;
+export type ForegroundService = Pick<MuxflowSsh, "setServiceNotification" | "addDisconnectListener">;
 
 export const APP_VERSION = "0.1.0";
+/** §6.3: the ongoing notification's title. */
+export const SERVICE_NOTIFICATION_TITLE = "Muxflow";
 
 let factory: TransportFactory | undefined;
+let service: ForegroundService | undefined;
+let unwireService: (() => void) | undefined;
 let control: HostConnection | null = null;
 let controlHost: SavedHost | null = null;
 let bulk: { epoch: bigint; connection: HostConnection; store: SessionStore; ready: Promise<HostConnection> } | null = null;
@@ -31,6 +39,45 @@ const toasts = new Set<(message: string) => void>();
 /** The SSH module (§6.1) plugs in here; QA uses a dev TCP pipe. */
 export function setTransportFactory(f: TransportFactory): void {
   factory = f;
+}
+
+/**
+ * The foreground service's notification (§6.3). Its Disconnect action is the
+ * user disconnecting: it goes through `disconnectHost`, which also cancels a
+ * pending backoff — the `closed` event an open channel reports on that tap
+ * cannot cover the gap between attempts, when there is no channel. The body
+ * follows the control connection: "Connected to …" / "Reconnecting to …".
+ */
+export function setForegroundService(next: ForegroundService | undefined): void {
+  unwireService?.();
+  unwireService = undefined;
+  service = next;
+  if (!next) return;
+  const offDisconnect = next.addDisconnectListener(() => {
+    log("disconnect.requested source=notification");
+    void disconnectHost();
+  });
+  let previous = sessionStore.getState().connection.state;
+  const offStore = sessionStore.subscribe((state) => {
+    const current = state.connection.state;
+    if (current === previous) return;
+    previous = current;
+    if (controlHost && (current === "connected" || current === "reconnecting")) {
+      postServiceNotification(current, controlHost);
+    }
+  });
+  unwireService = () => {
+    offDisconnect();
+    offStore();
+  };
+}
+
+function postServiceNotification(state: "connected" | "reconnecting", host: SavedHost): void {
+  const label = hostLabel(host);
+  const body = state === "connected" ? connectedNotificationText(label) : reconnectingNotificationText(label);
+  service?.setServiceNotification(SERVICE_NOTIFICATION_TITLE, body).catch((error: unknown) => {
+    log(`service.notification failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
 }
 
 export function getConnection(): HostConnection | null {
@@ -103,6 +150,9 @@ export async function connectHost(host: SavedHost): Promise<void> {
   });
   control = connection;
   const settled = waitForState(sessionStore, (state) => state === "connected" ? "ok" : state === "failed" || state === "incompatible" ? "bad" : state === "idle" ? "cancelled" : undefined);
+  // Stored before the dial: the native side starts the service on its own when
+  // the channel reaches `connected`, with whatever text it was last given.
+  postServiceNotification("connected", host);
   connection.connect();
   const outcome = await settled;
   if (outcome === "cancelled") throw new Error("disconnected");

@@ -11,7 +11,8 @@ import {
   TerminalBytesSchema,
   type Envelope,
 } from "./gen/envelope_pb";
-import { HostConnection, HostError } from "./HostConnection";
+import { HostConnection, HostError, type HostConnectionOptions } from "./HostConnection";
+import { jsBackgroundTimer } from "./backgroundTimer";
 import { terminalInput } from "./requests";
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "./testing/fakeTransport";
 import { createSessionStore, type SessionStore } from "../store/sessionStore";
@@ -27,7 +28,7 @@ interface Harness {
   epoch: number;
 }
 
-function harness(): Harness {
+function harness(overrides: Partial<HostConnectionOptions> = {}): Harness {
   const store = createSessionStore();
   const state: Harness = {
     connection: undefined as unknown as HostConnection,
@@ -55,6 +56,7 @@ function harness(): Harness {
       output: (paneId, bytes, generation) => state.outputs.push({ paneId, bytes, generation }),
     },
     log: (line) => state.log.push(line),
+    ...overrides,
   });
   return state;
 }
@@ -355,8 +357,20 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
   });
 
   it("reconnects with exponential backoff on network loss and resets after 60 s connected", async () => {
-    const h = harness();
+    // The stable timer has to run on the injected clock too: frozen in the
+    // background, it would never reset the exponent there. Record what is armed.
+    const armed: number[] = [];
+    const h = harness({
+      reconnectTimer: {
+        set: (delayMs, fn) => {
+          armed.push(delayMs);
+          return jsBackgroundTimer.set(delayMs, fn);
+        },
+        clear: (handle) => jsBackgroundTimer.clear(handle),
+      },
+    });
     let transport = await connectHappily(h);
+    expect(armed).toEqual([20_000, 60_000]);
     transport.closeFromRemote({ reason: "networkLost" });
     expect(h.store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1, message: "Connection lost." });
     await vi.advanceTimersByTimeAsync(1000);
@@ -383,6 +397,7 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
     transport.closeFromRemote({ reason: "networkLost" });
     // After 60 s connected the exponent is back to 0: 1 s again.
     expect(h.store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1 });
+    expect(armed.filter((delayMs) => delayMs === 60_000)).toHaveLength(3);
   });
 
   it("runs the backoff on the injected background timer and clears it on disconnect()", async () => {
@@ -425,32 +440,39 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
     transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
     expect(store.getState().connection.state).toBe("connected");
     expect(cleared).toEqual(["w1"]);
+    // The stable timer is armed on the same clock and cleared with the connection.
+    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 60_000]);
 
     transport.closeFromRemote({ reason: "networkLost" });
     expect(store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1 });
-    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 1000]);
+    expect(cleared).toEqual(["w1", "w2"]);
+    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 60_000, 1000]);
     // The JS clock advancing does nothing on its own.
     await vi.advanceTimersByTimeAsync(60_000);
     expect(h.dials).toBe(1);
 
-    armed[1]!.fn();
+    armed[2]!.fn();
     await settle();
     expect(h.dials).toBe(2);
     expect(store.getState().connection.state).toBe("handshaking");
-    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 1000, 20_000]);
+    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 60_000, 1000, 20_000]);
     transport = h.transports[1]!;
     transport.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n }));
     transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
     expect(store.getState().connection.state).toBe("connected");
-    expect(cleared).toEqual(["w1", "w3"]);
+    expect(cleared).toEqual(["w1", "w2", "w4"]);
+    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 60_000, 1000, 20_000, 60_000]);
 
+    // The stable wake arriving resets the exponent: the next backoff is 1 s again, not 2 s.
+    armed[4]!.fn();
     transport.closeFromRemote({ reason: "networkLost" });
-    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 1000, 20_000, 2000]);
+    expect(store.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1 });
+    expect(armed.map((entry) => entry.delayMs)).toEqual([20_000, 60_000, 1000, 20_000, 60_000, 1000]);
     connection.disconnect();
-    expect(cleared).toEqual(["w1", "w3", "w4"]);
+    expect(cleared).toEqual(["w1", "w2", "w4", "w6"]);
     expect(store.getState().connection.state).toBe("idle");
     // A wake the native side had already sent by the time it was cancelled is ignored.
-    armed[3]!.fn();
+    armed[5]!.fn();
     await settle();
     expect(h.dials).toBe(2);
   });

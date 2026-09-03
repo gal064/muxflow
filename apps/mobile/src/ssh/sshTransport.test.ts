@@ -33,6 +33,8 @@ function fakeSsh() {
     }),
     startForegroundService: vi.fn(async () => undefined),
     stopForegroundService: vi.fn(async () => undefined),
+    setServiceNotification: vi.fn(async () => undefined),
+    addDisconnectListener: () => () => undefined,
     addListener: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);

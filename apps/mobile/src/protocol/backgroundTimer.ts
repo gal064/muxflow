@@ -2,7 +2,8 @@
 //
 // React Native Android freezes every JavaScript timer while the host activity
 // is paused, so the delays that have to elapse with the app in the background
-// — the §7.2 backoff and the handshake deadline — go through this interface.
+// — the §7.2 backoff, the handshake deadline and the stable timer that resets
+// its exponent — go through this interface.
 // The app supplies a native clock (`src/session/backgroundTimer.ts`); the
 // default, and what every unit test uses, is `setTimeout`.
 

@@ -46,6 +46,15 @@ export function reconnectingStripText(secondsLeft: number, reason: string = CONN
   return `${why} Reconnecting in ${secondsLeft}s…`;
 }
 
+/** §6.3: the body of the ongoing notification while the host is up, and while it is being re-dialled. */
+export function connectedNotificationText(label: string): string {
+  return `Connected to ${label}`;
+}
+
+export function reconnectingNotificationText(label: string): string {
+  return `Reconnecting to ${label}`;
+}
+
 /** §7.2's backoff, so the strip can count the same seconds down. */
 export function backoffSeconds(attempt: number): number {
   return Math.min(2 ** Math.max(0, attempt - 1), 30);
