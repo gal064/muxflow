@@ -16,7 +16,12 @@ export interface MicButtonProps {
 
 const SIZE = 96;
 
-/** The press-and-hold mic (design.md §9.11): pulsing ring while recording, spinner while the host works. */
+/**
+ * The press-and-hold surface (design.md §9.11). The whole pane it fills is the
+ * target: a thumb anywhere below the controls row starts recording, so the
+ * screen works without looking at it. The disc is the visual anchor (pulsing
+ * ring while recording, spinner while the host works), not the hit area.
+ */
 export function MicButton({ phase, disabled, hint, onPressIn, onPressOut }: MicButtonProps) {
   const pulse = useRef(new Animated.Value(0)).current;
   const recording = phase === "recording";
@@ -40,40 +45,46 @@ export function MicButton({ phase, disabled, hint, onPressIn, onPressOut }: MicB
     opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] }),
     transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.6] }) }],
   };
-  const label = recording ? "Listening…" : phase === "transcribing" ? "Transcribing…" : phase === "sending" ? "Sending…" : "Hold to talk";
+  const label = recording ? "Listening…" : phase === "transcribing" ? "Transcribing…" : phase === "sending" ? "Sending…" : "Hold anywhere here to talk";
 
   return (
-    <View style={styles.root}>
+    <Pressable
+      accessibilityHint="Press and hold, speak, then release to send"
+      accessibilityLabel={label}
+      accessibilityRole="button"
+      accessibilityState={{ disabled: disabled || busy, busy }}
+      disabled={disabled || busy}
+      onPressIn={onPressIn}
+      onPressOut={onPressOut}
+      // A thumb drifting well outside the pane mid-sentence must not count as a release.
+      pressRetentionOffset={160}
+      style={({ pressed }) => [styles.root, pressed && !disabled && !busy && styles.rootPressed]}
+    >
       <View style={styles.stage}>
         {recording ? <Animated.View pointerEvents="none" style={[styles.ring, ringStyle]} /> : null}
-        <Pressable
-          accessibilityHint="Press and hold, speak, then release to send"
-          accessibilityLabel={label}
-          accessibilityRole="button"
-          accessibilityState={{ disabled: disabled || busy, busy }}
-          disabled={disabled || busy}
-          onPressIn={onPressIn}
-          onPressOut={onPressOut}
-          // A thumb drifting off the disc mid-sentence must not count as a release.
-          pressRetentionOffset={64}
-          style={[styles.button, recording && styles.buttonRecording, disabled && styles.buttonDisabled]}
-        >
+        <View style={[styles.disc, recording && styles.discRecording, disabled && styles.discDisabled]}>
           {busy ? <ActivityIndicator color={colors.accentInk} size="large" /> : <MicIcon color={colors.accentInk} size={44} />}
-        </Pressable>
+        </View>
       </View>
       <Text accessibilityLiveRegion="polite" style={styles.label}>{label}</Text>
       {disabled && hint ? <Text style={styles.hint}>{hint}</Text> : null}
-    </View>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { alignItems: "center", gap: 8, paddingBottom: 12, paddingTop: 8 },
+  // Grow-only: in the pane's natural mode (no fixed height) the surface sizes to
+  // its content; a `flex: 1` there means basis 0 and a clipped disc. In the
+  // large mode the fixed-height pane hands it the remaining height.
+  // One step off the page so "hold anywhere here" has a visible edge; the controls row above stays on the page.
+  root: { alignItems: "center", alignSelf: "stretch", backgroundColor: colors.chromeRaised, flexGrow: 1, flexShrink: 0, gap: 8, justifyContent: "center", paddingBottom: 12, paddingTop: 12 },
+  /** The whole slab shows the press, so a thumb at its edge still sees an answer. */
+  rootPressed: { backgroundColor: colors.accentWash },
   stage: { alignItems: "center", height: SIZE + 24, justifyContent: "center", width: SIZE + 24 },
   ring: { backgroundColor: colors.danger, borderRadius: SIZE / 2, height: SIZE, position: "absolute", width: SIZE },
-  button: { alignItems: "center", backgroundColor: colors.accent, borderRadius: SIZE / 2, height: SIZE, justifyContent: "center", width: SIZE },
-  buttonRecording: { backgroundColor: colors.danger },
-  buttonDisabled: { opacity: 0.4 },
+  disc: { alignItems: "center", backgroundColor: colors.accent, borderRadius: SIZE / 2, height: SIZE, justifyContent: "center", width: SIZE },
+  discRecording: { backgroundColor: colors.danger },
+  discDisabled: { opacity: 0.4 },
   label: { color: colors.chromeInkStrong, fontSize: typeScale.rowTitle, fontWeight: "600" },
   hint: { color: colors.chromeDim, fontSize: typeScale.rowSecondary, paddingHorizontal: 24, textAlign: "center" },
 });

@@ -5,14 +5,6 @@ import Svg, { Path, Rect } from "react-native-svg";
  * every device (an emoji or a font glyph does neither). `size` is the box in
  * dp; every path is designed on a 24-unit grid.
  */
-export function BackIcon({ size = 24, color }: { size?: number; color: string }) {
-  return (
-    <Svg height={size} viewBox="0 0 24 24" width={size}>
-      <Path d="M19 12H5M11 6l-6 6 6 6" fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
-    </Svg>
-  );
-}
-
 /** The conventional outlined Shift mark, centred independently of font metrics. */
 export function ShiftIcon({ size = 18, color }: { size?: number; color: string }) {
   return (
@@ -27,6 +19,15 @@ export function MicIcon({ size = 24, color }: { size?: number; color: string }) 
     <Svg height={size} viewBox="0 0 24 24" width={size}>
       <Rect fill={color} height="12" rx="3.5" width="7" x="8.5" y="2.5" />
       <Path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3.5M8.5 21.5h7" fill="none" stroke={color} strokeLinecap="round" strokeWidth="2" />
+    </Svg>
+  );
+}
+
+/** The app bar's back arrow: a stroke on the same grid as the transport marks, so it centres on the title's line. */
+export function BackIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M19 12H5.5M11.5 6l-6 6 6 6" fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.2" />
     </Svg>
   );
 }

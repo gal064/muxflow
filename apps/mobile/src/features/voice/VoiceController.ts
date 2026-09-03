@@ -11,7 +11,10 @@ import { newOperationId, terminalInput, voiceProvision, voiceSession, voiceSpeak
 import { utf8Encode } from "../terminal/bytes";
 import { CR } from "../terminal/chips";
 import { SUBMIT_DELAY_MS } from "../terminal/TerminalController";
+import type { AgentLifecycle } from "../../store/sessionStore";
 import { RECORDING_MIME, type PlayerStatus, type VoiceFiles, type VoicePlayer, type VoiceRecorder } from "./audioPorts";
+import type { VoiceHaptics } from "./haptics";
+import type { VoiceTones } from "./tones";
 import { describeVoiceError, STATUS_CHANGING_CODES } from "./voiceErrors";
 import { latestReply, type VoiceMessage, type VoiceReadinessState, type VoiceStore } from "./voiceStore";
 
@@ -26,6 +29,12 @@ export interface VoiceControllerOptions {
   files: VoiceFiles;
   /** `AppState.currentState === "active"`: nothing auto-plays in the background (§1). */
   appInForeground: () => boolean;
+  /** Tactile acknowledgements for the steps the user cannot see; absent in tests that do not care. */
+  haptics?: VoiceHaptics;
+  /** Short tones for the same steps, all but the press (a sound there would be recorded). */
+  tones?: VoiceTones;
+  /** Initial reply playback speed; `setPlaybackRate` follows the preference afterwards. */
+  playbackRate?: number;
   toast?: (message: string) => void;
   log?: (line: string) => void;
   now?: () => number;
@@ -38,6 +47,8 @@ export interface VoiceControllerOptions {
 }
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
+/** The steps between press and pane whose failure loses the utterance; each gets the error haptic. */
+const UTTERANCE_STEPS = new Set(["record", "recorder.stop", "transcribe", "input"]);
 /** Releases shorter than this are a mis-tap, not an utterance (§5.2). */
 export const MIN_UTTERANCE_MS = 300;
 /**
@@ -86,6 +97,11 @@ export class VoiceController {
   private readonly sessionRefreshMs: number;
   private readonly tailHoldMs: number;
   private readonly submitDelayMs: number;
+  private playbackRate: number;
+  /** The agent lifecycle last reported by the screen; the working acknowledgement fires on the edge into `working`. */
+  private lastLifecycle: AgentLifecycle | undefined;
+  /** The "you" message whose pickup by the agent was already acknowledged. */
+  private workingAckedFor: string | undefined;
 
   constructor(private readonly options: VoiceControllerOptions) {
     this.agentId = options.agentId;
@@ -95,6 +111,7 @@ export class VoiceController {
     this.sessionRefreshMs = options.sessionRefreshMs ?? SESSION_REFRESH_MS;
     this.tailHoldMs = options.tailHoldMs ?? TAIL_HOLD_MS;
     this.submitDelayMs = options.submitDelayMs ?? SUBMIT_DELAY_MS;
+    this.playbackRate = options.playbackRate ?? 1;
     options.store.getState().ensureSession(options.agentId, options.paneId, options.sessionId, this.now());
     this.unsubscribePlayer = options.player.onStatus((status) => this.onPlayerStatus(status));
   }
@@ -135,6 +152,9 @@ export class VoiceController {
   /** The screen left (Back, Files); the session and its registration stay. */
   blur(): void {
     this.focused = false;
+    // The next mount re-baselines the lifecycle: an edge that happened while
+    // another screen was up is not acknowledged late, or for the wrong turn.
+    this.lastLifecycle = undefined;
     this.disarm();
   }
 
@@ -257,6 +277,7 @@ export class VoiceController {
       if (this.disposed || this.options.store.getState().sessions[this.agentId]?.phase !== "recording") return;
       try {
         this.options.recorder.record();
+        this.options.haptics?.listening();
       } catch (error) {
         this.fail("record", error);
         this.setPhaseIfAlive("idle");
@@ -337,10 +358,33 @@ export class VoiceController {
       if (this.submitDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, this.submitDelayMs));
       await connection.request(terminalInput(this.paneId, CR));
       this.log(`input ${body.byteLength} bytes as paste + CR → ok in ${this.now() - startedAt} ms`);
+      this.options.haptics?.sent();
+      this.options.tones?.sent();
     } catch (error) {
       this.fail("input", error);
     }
     this.setPhaseIfAlive("idle");
+  }
+
+  /**
+   * The agent's lifecycle as the screen sees it. The edge into `working`
+   * while the last turn is the user's is the agent picking the utterance up:
+   * one haptic per utterance, none when the agent was already working (it has
+   * not reached this message yet) and none for a screen that opens onto an
+   * agent mid-turn (each mount re-baselines, see `blur`). Delivered only while
+   * a Voice screen for this agent is mounted: that is where lifecycles are
+   * reported from, and where the user is waiting without looking.
+   */
+  onAgentLifecycle(lifecycle: AgentLifecycle): void {
+    const previous = this.lastLifecycle;
+    this.lastLifecycle = lifecycle;
+    if (this.disposed || lifecycle !== "working" || previous === undefined || previous === "working") return;
+    const last = this.options.store.getState().sessions[this.agentId]?.messages.at(-1);
+    if (!last || last.kind !== "you" || this.workingAckedFor === last.id) return;
+    this.workingAckedFor = last.id;
+    this.log(`working.ack ${last.id}`);
+    this.options.haptics?.working();
+    this.options.tones?.working();
   }
 
   // ---- replies ----------------------------------------------------------------
@@ -419,6 +463,7 @@ export class VoiceController {
     const current = store.playback;
     if (this.loadedMessageId !== messageId || current?.messageId !== messageId) {
       this.options.player.load(message.fileUri);
+      this.options.player.setRate(this.playbackRate);
       this.loadedMessageId = messageId;
       store.setPlayback({ messageId, state: "playing", positionMs: 0, durationMs: 0 });
     } else {
@@ -427,6 +472,13 @@ export class VoiceController {
     this.options.player.play();
     store.markPlayed(this.agentId, messageId);
     this.log(`play ${messageId}`);
+  }
+
+  /** The preference changed: the reply playing now and every later one take the new speed. */
+  setPlaybackRate(rate: number): void {
+    if (this.playbackRate === rate) return;
+    this.playbackRate = rate;
+    if (this.loadedMessageId !== undefined) this.options.player.setRate(rate);
   }
 
   pause(): void {
@@ -636,6 +688,10 @@ export class VoiceController {
     if (message === undefined || this.disposed) return;
     this.options.store.getState().setLastError(message);
     this.options.toast?.(message);
+    if (UTTERANCE_STEPS.has(what)) {
+      this.options.haptics?.failed();
+      this.options.tones?.failed();
+    }
     const code = (error as { code?: unknown }).code;
     if (typeof code === "string" && STATUS_CHANGING_CODES.has(code) && what !== "status") void this.refreshStatus(false);
   }
