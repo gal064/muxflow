@@ -7,7 +7,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { PAGE_RECEIVE_FUNCTION, type FromPageMessage, type ToPageMessage } from "../../src/features/terminal/bridgeMessages";
 import { computeGrid, NOMINAL_CELL, TERMINAL_FONT_SIZE_PX, TERMINAL_LINE_HEIGHT, sameGrid, type Grid } from "../../src/features/terminal/sizing";
-import { TouchScrollController } from "../../src/features/terminal/touchScroll";
+import { formatTouchScrollMetrics, TouchScrollController } from "../../src/features/terminal/touchScroll";
 import { terminalTheme } from "../../src/ui/tokens";
 
 declare global {
@@ -112,7 +112,12 @@ async function init(): Promise<void> {
   const el = root();
   const touchScroll = new TouchScrollController(
     (rows) => term?.scrollLines(rows),
-    { request: (callback) => requestAnimationFrame(callback), cancel: (id) => cancelAnimationFrame(id) },
+    {
+      request: (callback) => requestAnimationFrame(callback),
+      cancel: (id) => cancelAnimationFrame(id),
+      now: () => performance.now(),
+    },
+    (metrics) => post({ t: "log", line: formatTouchScrollMetrics(metrics) }),
   );
   el.addEventListener("touchstart", (event) => {
     const touch = event.touches[0];
