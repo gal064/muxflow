@@ -15,8 +15,7 @@ import { StatusPill } from "../../ui/components/StatusPill";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
 import type { FromPageMessage } from "./bridgeMessages";
-import { CR, KEY_CHIPS } from "./chips";
-import { utf8Encode } from "./bytes";
+import { KEY_CHIPS, SHIFT_CHIP, pressChip } from "./chips";
 import { TerminalController, type TerminalSnapshot } from "./TerminalController";
 import { terminalRegistry } from "./terminalRegistry";
 import { TerminalWebView, type TerminalWebViewHandle } from "./TerminalWebView";
@@ -43,6 +42,8 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const [snapshot, setSnapshot] = useState<TerminalSnapshot>({ phase: "preparing", grid: undefined, lastError: undefined });
   const [pageLoaded, setPageLoaded] = useState(false);
   const [text, setText] = useState("");
+  // §9.5: the ⇧ chip arms Shift for the next chip only; Send also disarms it.
+  const [shiftArmed, setShiftArmed] = useState(false);
   const pane = state.panes[paneId];
   const connected = state.connection.state === "connected";
   // §9.5: the pane left the topology (window closed elsewhere), or never was
@@ -81,20 +82,30 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
     controller.current?.onPageMessage(message);
   }, []);
 
+  const toastError = (error: unknown) => toast(error instanceof Error ? error.message : String(error));
+
   const send = useCallback((bytes: Uint8Array) => {
     const instance = controller.current;
     if (!instance) return;
-    instance.sendInput(bytes).catch((error: unknown) => toast(error instanceof Error ? error.message : String(error)));
+    instance.sendInput(bytes).catch(toastError);
   }, []);
 
+  // Clear the field before the submit round trip so a second Send cannot
+  // resend the same text; the controller pastes the body, then sends the CR.
   const sendText = useCallback(() => {
-    const body = utf8Encode(text);
-    const bytes = new Uint8Array(body.length + 1);
-    bytes.set(body);
-    bytes[body.length] = CR[0]!;
-    send(bytes);
+    const instance = controller.current;
+    if (!instance) return;
+    const body = text;
     setText("");
-  }, [send, text]);
+    setShiftArmed(false);
+    instance.submitText(body).catch(toastError);
+  }, [text]);
+
+  const onChip = useCallback((chip: (typeof KEY_CHIPS)[number]) => {
+    const press = pressChip(chip, shiftArmed);
+    setShiftArmed(press.shiftArmed);
+    if (press.send) send(press.send);
+  }, [send, shiftArmed]);
 
   useEffect(() => {
     if (snapshot.lastError) toast(snapshot.lastError);
@@ -151,17 +162,21 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
       {gone ? null : (
         <>
         <ScrollView contentContainerStyle={styles.chips} horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} style={styles.chipRow}>
-          {KEY_CHIPS.map((chip) => (
-            <Pressable
-              accessibilityRole="button"
-              disabled={!inputEnabled}
-              key={chip.label}
-              onPress={() => send(chip.bytes)}
-              style={({ pressed }) => [styles.chip, pressed && styles.chipPressed, !inputEnabled && styles.disabled]}
-            >
-              <Text style={[styles.chipLabel, chip.label.length === 1 && styles.chipGlyph]}>{chip.label}</Text>
-            </Pressable>
-          ))}
+          {KEY_CHIPS.map((chip) => {
+            const armed = chip === SHIFT_CHIP && shiftArmed;
+            return (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={chip === SHIFT_CHIP ? { selected: shiftArmed } : undefined}
+                disabled={!inputEnabled}
+                key={chip.label}
+                onPress={() => onChip(chip)}
+                style={({ pressed }) => [styles.chip, armed && styles.chipArmed, pressed && styles.chipPressed, !inputEnabled && styles.disabled]}
+              >
+                <Text style={[styles.chipLabel, chip.label.length === 1 && styles.chipGlyph, armed && styles.chipArmedLabel]}>{chip.label}</Text>
+              </Pressable>
+            );
+          })}
         </ScrollView>
 
         <View style={styles.inputBar}>
@@ -238,6 +253,9 @@ const styles = StyleSheet.create({
     height: 28,
   },
   chipPressed: { backgroundColor: colors.chromeBorder },
+  /** The ⇧ chip while Shift is armed for the next chip. */
+  chipArmed: { backgroundColor: colors.accent },
+  chipArmedLabel: { color: colors.accentInk },
   chipLabel: { color: colors.chromeInkStrong, fontSize: typeScale.rowSecondary, textAlign: "center" },
   /** Single-glyph chips (arrows, y, n) read lighter than words at 13 sp; bump them to match. */
   chipGlyph: { fontSize: 16, fontWeight: "600" },

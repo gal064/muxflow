@@ -15,7 +15,8 @@ import {
 } from "../../protocol/requests";
 import type { SessionStore } from "../../store/sessionStore";
 import type { FromPageMessage, ToPageMessage } from "./bridgeMessages";
-import { toBase64 } from "./bytes";
+import { toBase64, utf8Encode } from "./bytes";
+import { CR } from "./chips";
 import { sameGrid, type Grid } from "./sizing";
 import type { TerminalRegistry } from "./terminalRegistry";
 
@@ -42,6 +43,9 @@ export interface TerminalSnapshot {
 export interface TerminalPage {
   send(message: ToPageMessage): void;
 }
+
+/** Gap between Send's paste and the CR that submits it. */
+export const SUBMIT_DELAY_MS = 100;
 
 export interface TerminalControllerOptions {
   paneId: string;
@@ -175,10 +179,30 @@ export class TerminalController {
   }
 
   /** Every tap and every Send: one TERMINAL_INPUT, immediately (§7.6). */
-  async sendInput(bytes: Uint8Array): Promise<void> {
+  async sendInput(bytes: Uint8Array, options?: { paste?: boolean }): Promise<void> {
     const connection = this.liveConnection();
     if (!connection) throw new Error("not connected");
-    await connection.request(terminalInput(this.paneId, bytes));
+    await connection.request(terminalInput(this.paneId, bytes, options));
+  }
+
+  /**
+   * The input bar's Send (§9.5): the text as one paste, then a CR as a
+   * keystroke. The two are separate requests because the host never merges a
+   * paste with its neighbours, and the CR waits until the paste is acknowledged
+   * plus `SUBMIT_DELAY_MS`, so a composer that treats an Enter inside a fast
+   * burst as a newline sees the CR on its own and submits. A refused paste
+   * sends no CR. Empty text is a bare CR with no delay.
+   *
+   * Deliberately not gated on `stopped`: a Back during the gap must still
+   * deliver the CR, or the pasted text sits unsubmitted in the composer.
+   */
+  async submitText(text: string): Promise<void> {
+    const body = utf8Encode(text);
+    if (body.length > 0) {
+      await this.sendInput(body, { paste: true });
+      await new Promise<void>((resolve) => setTimeout(resolve, SUBMIT_DELAY_MS));
+    }
+    await this.sendInput(CR);
   }
 
   /**
