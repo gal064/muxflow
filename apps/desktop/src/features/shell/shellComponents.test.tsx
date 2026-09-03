@@ -446,6 +446,9 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('<h3 class="list-divider">Unpinned</h3>');
     expect(html).not.toContain("agent-status-");
     expect(html.indexOf(">Pinned<")).toBeLessThan(html.indexOf(">Unpinned<"));
+    // The rows sit inside the same inset wrapper the other modes' group
+    // sections carry, so switching modes does not change the rows' width.
+    expect(html.match(/class="agent-workspace-group" role="presentation"/g)).toHaveLength(2);
 
     const host = await mountSidebar({ agentSort: "pinned", agents });
     const walkRows = [...host.querySelectorAll<HTMLElement>("[data-agent-index]")];

@@ -518,17 +518,24 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                 {block.groups.map(renderAgentGroup)}
               </div>)
               : groupedAgents.map(renderAgentGroup)
-            // Pinned: the same two dividers the workspace mode draws, over the
-            // rows themselves. Each half is the priority queue with no status
-            // headings inside it — the rows' own dots carry the state.
             : props.agentSort === "pinned"
+              // Pinned: the same two dividers the workspace mode draws, over
+              // the rows themselves. Each half is the priority queue with no
+              // status headings inside it — the rows' own dots carry the
+              // state. The inner wrapper is the class the other two modes'
+              // group sections carry: it is where the rows' side inset and the
+              // gap under a block come from, and it is presentational for the
+              // same reason the block is.
               ? pinnedAgents.map((group) => <div className="list-block" key={group.key} role="presentation">
                 <h3 className="list-divider">{group.label}</h3>
-                {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
+                <div className="agent-workspace-group" role="presentation">
+                  {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
+                </div>
               </div>)
-            // Priority: the same clustering, keyed on what the agent is doing
-            // rather than where it lives. The rows already carry the workspace
-            // name in their detail line whenever the sort is not by workspace.
+              // Priority: the same clustering, keyed on what the agent is
+              // doing rather than where it lives. The rows already carry the
+              // workspace name in their detail line whenever the sort is not
+              // by workspace.
               : priorityAgents.map((group) => {
               const headingId = `agent-status-${group.key}`;
               return <section aria-labelledby={headingId} className="agent-workspace-group" key={group.key} role="group">
