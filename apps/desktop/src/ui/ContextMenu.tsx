@@ -22,7 +22,7 @@ export interface ContextMenuItem {
    * A connection phase drawn as a dot before the label — the host menu's way
    * of showing how each shown host is doing without a row for each.
    */
-  dot?: string;
+  dot?: "connected" | "connecting" | "reconnecting" | "resyncing" | "disconnected" | "readOnly";
   run(): void;
 }
 
