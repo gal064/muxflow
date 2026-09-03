@@ -163,7 +163,10 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
 
       <View style={[styles.pane, bigPane && { height: bigPaneHeight(windowHeight, insets.top, insets.bottom, metrics.terminalHeaderHeight) }]}>
         <View style={styles.paneControls}>
-          <SpeedPicker onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
+          <View style={styles.speedGroup}>
+            <Text style={styles.speedCaption}>Speed</Text>
+            <SpeedPicker onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
+          </View>
           <Pressable
             accessibilityLabel={bigPane ? "Smaller talk pane" : "Larger talk pane"}
             accessibilityRole="button"
@@ -261,8 +264,11 @@ const styles = StyleSheet.create({
   stampYou: { textAlign: "right" },
   /** The talk pane: a hairline above, the controls row, then the hold surface filling the rest. */
   pane: { borderTopColor: colors.chromeBorder, borderTopWidth: metrics.hairlineWidth },
-  paneControls: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", paddingHorizontal: 12, paddingTop: 8 },
-  paneToggle: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", paddingHorizontal: 14 },
+  paneControls: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", paddingBottom: 8, paddingHorizontal: 12, paddingTop: 8 },
+  speedGroup: { alignItems: "center", flexDirection: "row", gap: 8 },
+  speedCaption: { color: colors.chromeDim, fontSize: typeScale.rowSecondary },
+  /** Wide enough for "Smaller", so the pill's left edge does not jump when the label changes. */
+  paneToggle: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", minWidth: 96, paddingHorizontal: 14 },
   paneToggleLabel: { color: colors.chromeInk, fontSize: typeScale.rowSecondary, fontWeight: "600" },
   pressed: { opacity: 0.75 },
 });
