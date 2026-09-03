@@ -10,6 +10,7 @@ import type { VoiceSpeech } from "../../protocol/gen/envelope_pb";
 import { newOperationId, terminalInput, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "../../protocol/requests";
 import { utf8Encode } from "../terminal/bytes";
 import { CR } from "../terminal/chips";
+import { SUBMIT_DELAY_MS } from "../terminal/TerminalController";
 import { RECORDING_MIME, type PlayerStatus, type VoiceFiles, type VoicePlayer, type VoiceRecorder } from "./audioPorts";
 import { describeVoiceError, STATUS_CHANGING_CODES } from "./voiceErrors";
 import { latestReply, type VoiceMessage, type VoiceReadinessState, type VoiceStore } from "./voiceStore";
@@ -32,6 +33,8 @@ export interface VoiceControllerOptions {
   sessionRefreshMs?: number;
   /** Test seam for `TAIL_HOLD_MS`; 0 stops the recorder the moment the press ends. */
   tailHoldMs?: number;
+  /** Gap between the transcript paste and the CR that submits it (`SUBMIT_DELAY_MS`); tests pass 0. */
+  submitDelayMs?: number;
 }
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
@@ -82,6 +85,7 @@ export class VoiceController {
   private readonly now: () => number;
   private readonly sessionRefreshMs: number;
   private readonly tailHoldMs: number;
+  private readonly submitDelayMs: number;
 
   constructor(private readonly options: VoiceControllerOptions) {
     this.agentId = options.agentId;
@@ -90,6 +94,7 @@ export class VoiceController {
     this.now = options.now ?? Date.now;
     this.sessionRefreshMs = options.sessionRefreshMs ?? SESSION_REFRESH_MS;
     this.tailHoldMs = options.tailHoldMs ?? TAIL_HOLD_MS;
+    this.submitDelayMs = options.submitDelayMs ?? SUBMIT_DELAY_MS;
     options.store.getState().ensureSession(options.agentId, options.paneId, options.sessionId, this.now());
     this.unsubscribePlayer = options.player.onStatus((status) => this.onPlayerStatus(status));
   }
@@ -259,7 +264,7 @@ export class VoiceController {
     });
   }
 
-  /** Press-out: stop → read → VOICE_TRANSCRIBE → TERMINAL_INPUT of `transcript + CR`. */
+  /** Press-out: stop → read → VOICE_TRANSCRIBE → TERMINAL_INPUT of the transcript as a paste, then a CR on its own. */
   async endUtterance(): Promise<void> {
     if (this.disposed) return;
     const store = this.options.store.getState();
@@ -322,12 +327,16 @@ export class VoiceController {
     try {
       const connection = this.liveConnection();
       if (!connection) throw new Error("Not connected.");
+      // The terminal Send's shape (`TerminalController.submitText`): the text as
+      // one paste, which the host never coalesces with its neighbours and tmux
+      // brackets when the composer asked for it, then the CR as a keystroke after
+      // a gap. Claude Code and Codex both read an Enter inside a fast burst as a
+      // pasted newline; on its own it submits. A refused paste sends no CR.
       const body = utf8Encode(text);
-      const bytes = new Uint8Array(body.length + 1);
-      bytes.set(body);
-      bytes[body.length] = CR[0]!;
-      await connection.request(terminalInput(this.paneId, bytes));
-      this.log(`input ${bytes.byteLength} bytes → ok in ${this.now() - startedAt} ms`);
+      await connection.request(terminalInput(this.paneId, body, { paste: true }));
+      if (this.submitDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, this.submitDelayMs));
+      await connection.request(terminalInput(this.paneId, CR));
+      this.log(`input ${body.byteLength} bytes as paste + CR → ok in ${this.now() - startedAt} ms`);
     } catch (error) {
       this.fail("input", error);
     }

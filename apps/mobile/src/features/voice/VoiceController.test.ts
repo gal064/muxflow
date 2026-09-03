@@ -21,6 +21,7 @@ function harness(agentId = "agent-a", paneId = "%3") {
   const toasts: string[] = [];
   const controller = new VoiceController({
     tailHoldMs: 0,
+    submitDelayMs: 0,
     agentId,
     paneId,
     sessionId: "$1",
@@ -56,7 +57,7 @@ describe("VoiceController", () => {
     expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.agentId)).toEqual(["agent-a"]);
     expect(h.recorder.prepared).toBe(1);
 
-    // Hold / release → transcript → TERMINAL_INPUT of utf8(text) + CR.
+    // Hold / release → transcript → TERMINAL_INPUT of utf8(text) as a paste, then a CR keystroke.
     h.controller.beginUtterance();
     expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recording");
     await settle();
@@ -67,10 +68,12 @@ describe("VoiceController", () => {
     expect(transcribe[0]!.voice?.audioMime).toBe("audio/mp4");
     expect(new TextDecoder().decode(transcribe[0]!.voice?.audio)).toBe("aac-bytes");
     const input = h.connection.of(Operation.TERMINAL_INPUT);
-    expect(input).toHaveLength(1);
-    expect(input[0]!.scope).toBe("%3");
-    expect(new TextDecoder().decode(input[0]!.data)).toBe("list the files in this directory\r");
-    expect(input[0]!.data.at(-1)).toBe(0x0d);
+    expect(input).toHaveLength(2);
+    expect(input.map((r) => r.scope)).toEqual(["%3", "%3"]);
+    expect(new TextDecoder().decode(input[0]!.data)).toBe("list the files in this directory");
+    expect(input[0]!.terminalInputPaste).toBe(true);
+    expect(Array.from(input[1]!.data)).toEqual([0x0d]);
+    expect(input[1]!.terminalInputPaste).toBe(false);
     const session = h.store.getState().sessions["agent-a"]!;
     expect(session.phase).toBe("idle");
     expect(session.messages.map((m) => [m.kind, m.text])).toEqual([["you", "list the files in this directory"]]);
@@ -172,6 +175,7 @@ describe("VoiceController", () => {
     const a = harness("agent-a", "%3");
     const b = new VoiceController({
     tailHoldMs: 0,
+    submitDelayMs: 0,
       agentId: "agent-b",
       paneId: "%4",
       sessionId: "$1",
@@ -393,6 +397,7 @@ describe("VoiceController against a host that is not set up (review round 1)", (
     const a = harness("agent-a", "%3");
     const b = new VoiceController({
     tailHoldMs: 0,
+    submitDelayMs: 0,
       agentId: "agent-b",
       paneId: "%4",
       sessionId: "$1",
@@ -431,6 +436,7 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
     const a = harness("agent-a", "%3");
     const b = new VoiceController({
     tailHoldMs: 0,
+    submitDelayMs: 0,
       agentId: "agent-b",
       paneId: "%4",
       sessionId: "$1",
@@ -521,9 +527,10 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
     h.controller.beginUtterance();
     await settle(); // the record() runs once the recorder is armed
     await h.controller.endUtterance();
-    const input = h.connection.of(Operation.TERMINAL_INPUT)[0]!;
-    expect(input.scope).toBe("%9");
-    expect(new TextDecoder().decode(input.data)).toBe("first line second line\r");
+    const input = h.connection.of(Operation.TERMINAL_INPUT);
+    expect(input.map((r) => r.scope)).toEqual(["%9", "%9"]);
+    expect(new TextDecoder().decode(input[0]!.data)).toBe("first line second line");
+    expect(Array.from(input[1]!.data)).toEqual([0x0d]);
   });
 });
 
