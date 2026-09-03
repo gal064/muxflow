@@ -15,6 +15,7 @@ import { BackIcon } from "../../ui/components/MediaIcons";
 import { StatusPill } from "../../ui/components/StatusPill";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
+import { createExpoCues } from "./cues";
 import { createExpoFiles } from "./files";
 import { createExpoHaptics } from "./haptics";
 import { MicButton } from "./MicButton";
@@ -38,9 +39,9 @@ export interface VoiceScreenProps {
 
 // The one recorder, player, file and haptics adapter for the app, created when
 // the first Voice screen renders (§2c: nothing audio-related loads before that).
-let audio: { recorder: ReturnType<typeof createExpoRecorder>; player: ReturnType<typeof createExpoPlayer>; files: ReturnType<typeof createExpoFiles>; haptics: ReturnType<typeof createExpoHaptics> } | undefined;
+let audio: { recorder: ReturnType<typeof createExpoRecorder>; player: ReturnType<typeof createExpoPlayer>; files: ReturnType<typeof createExpoFiles>; haptics: ReturnType<typeof createExpoHaptics>; cues: ReturnType<typeof createExpoCues> } | undefined;
 function sharedAudio() {
-  audio ??= { recorder: createExpoRecorder(), player: createExpoPlayer(), files: createExpoFiles(), haptics: createExpoHaptics() };
+  audio ??= { recorder: createExpoRecorder(), player: createExpoPlayer(), files: createExpoFiles(), haptics: createExpoHaptics(), cues: createExpoCues() };
   return audio;
 }
 
