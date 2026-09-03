@@ -261,7 +261,7 @@ impl AgentRuntime {
         &self,
         topology: &tmux_control::TmuxSnapshot,
         identity: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let mut state = self.state.lock().unwrap();
         let original = state.clone();
         let result = reconcile::topology(&mut state, topology, identity, now_millis());
@@ -271,7 +271,7 @@ impl AgentRuntime {
             *state = original;
             return Err(error);
         }
-        Ok(())
+        Ok(result.changed)
     }
 
     pub(super) fn mark_seen(
