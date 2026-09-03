@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot } from "react-dom/client";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { HostProfile, Session, Window as TmuxWindow } from "../../app/types";
+import type { HostProfile, Session } from "../../app/types";
 import { rowCommandRegistry } from "../../commands/rowCommands";
 import { agent } from "../agents/testFixtures";
 import type { AgentAdapterDescriptor, AgentDisplayState, AgentRecord } from "../agents/types";
@@ -18,7 +18,7 @@ import { deriveAgentRollups } from "../agents/selectors";
 import { DisconnectedStrip, STRIP_APPEAR_DELAY_MS } from "./DisconnectedStrip";
 import type { ConnectionPhase } from "../../state/connectionReducer";
 import { RightPanel } from "./RightPanel";
-import { combineWorkspaceTabs, type CombinedTab } from "./model";
+import type { CombinedTab } from "./model";
 import { defaultShellState, type ShellState } from "./types";
 import { SettingsDialog } from "./SettingsDialog";
 import { TitleBar } from "./TitleBar";
@@ -951,59 +951,6 @@ describe("application shell accessibility contracts", () => {
     expect(onCloseOthers).toHaveBeenCalledWith(mixedStrip[2], commandScope);
     await act(async () => button("Close all non-agent tabs").props.onClick());
     expect(onCloseNonAgent).toHaveBeenCalledWith(commandScope);
-    await act(async () => renderer.unmount());
-  });
-
-  it("keeps close-non-agent enabled through title-only topology generations", async () => {
-    const windows: TmuxWindow[] = [
-      { id: "@1", sessionId: "$1", index: 1, name: "⠋ Working", active: true, layout: "" },
-      { id: "@2", sessionId: "$1", index: 2, name: "shell", active: false, layout: "" },
-    ];
-    const rollups = deriveAgentRollups([agent({ windowId: "@1", lifecycle: "working" })]);
-    const current = {
-      hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1,
-      topologyGeneration: 9, routingFingerprint: "routes", routingChangedAtGeneration: 9,
-    };
-    const accepted = { ...current, coveredWindowIds: new Set(["@1", "@2"]) };
-    const tabsAt = (topologyGeneration: number, routingFingerprint = "routes", routingChangedAtGeneration = 9) => combineWorkspaceTabs(
-      windows, [], rollups.byWindow, undefined,
-      { accepted, current: { ...current, topologyGeneration, routingFingerprint, routingChangedAtGeneration } },
-    );
-    let renderer!: ReturnType<typeof create>;
-    await act(async () => {
-      renderer = create(tabStripOver(tabsAt(9), { activeKey: "terminal:@1" }));
-    });
-    const button = () => renderer.root.findByProps({ "aria-label": "Close all non-agent tabs", type: "button" });
-    expect(button().props.disabled).toBe(false);
-
-    for (const generation of [10, 11, 12]) {
-      windows[0] = { ...windows[0], name: `${String.fromCodePoint(0x2800 + generation)} Working` };
-      await act(async () => {
-        renderer.update(tabStripOver(tabsAt(generation), { activeKey: "terminal:@1" }));
-      });
-      expect(button().props.disabled).toBe(false);
-    }
-
-    await act(async () => {
-      renderer.update(tabStripOver(tabsAt(13, "pane-moved", 13), { activeKey: "terminal:@1" }));
-    });
-    expect(button().props.disabled).toBe(true);
-
-    // Returning to the old shape is still a structural change. The generation
-    // at which routing last changed prevents the generation-9 proof from
-    // becoming valid again merely because the fingerprint looks familiar.
-    await act(async () => {
-      renderer.update(tabStripOver(tabsAt(14, "routes", 14), { activeKey: "terminal:@1" }));
-    });
-    expect(button().props.disabled).toBe(true);
-
-    const refreshed = { ...current, topologyGeneration: 14, routingChangedAtGeneration: 14, coveredWindowIds: new Set(["@1", "@2"]) };
-    await act(async () => {
-      renderer.update(tabStripOver(combineWorkspaceTabs(
-        windows, [], rollups.byWindow, undefined, { accepted: refreshed, current: refreshed },
-      ), { activeKey: "terminal:@1" }));
-    });
-    expect(button().props.disabled).toBe(false);
     await act(async () => renderer.unmount());
   });
 

@@ -91,10 +91,6 @@ export interface AgentTopologyAuthority {
   serverIdentity: string;
   connectionEpoch: number;
   topologyGeneration: number;
-  /** Agent-relevant structure, stable across title/layout/focus-only changes. */
-  routingFingerprint: string;
-  /** Latest topology generation that changed `routingFingerprint`. */
-  routingChangedAtGeneration: number;
   coveredWindowIds: ReadonlySet<string>;
 }
 

@@ -1,5 +1,4 @@
 import type { TmuxSnapshot } from "../app/types";
-import { agentRoutingFingerprint } from "../features/agents/topologyAuthority";
 
 export type ConnectionPhase =
   | "disconnected"
@@ -14,10 +13,6 @@ export interface NormalizedHostState {
   canMutate: boolean;
   serverIdentity?: string;
   generation: number;
-  /** Latest topology generation that changed agent ownership or detection. */
-  agentRoutingChangedAtGeneration: number;
-  /** Current agent-relevant structure, excluding cosmetic topology fields. */
-  agentRoutingFingerprint: string;
   /**
    * Whether `generation` was stamped by the connection that is live now.
    *
@@ -64,8 +59,6 @@ export const initialHostState: NormalizedHostState = {
   phase: "disconnected",
   canMutate: false,
   generation: 0,
-  agentRoutingChangedAtGeneration: 0,
-  agentRoutingFingerprint: agentRoutingFingerprint({ sessions: [], windows: [], panes: [] }),
   generationBaselined: false,
   lastSequence: 0,
   resyncRequested: false,
@@ -133,19 +126,10 @@ function replaceSnapshot(
       : state.generation;
     return { ...state, generation, lastSequence: action.sequence };
   }
-  const generation = action.generation ?? state.generation + 1;
-  const routingFingerprint = agentRoutingFingerprint(action.snapshot);
-  const newGenerationBaseline = !state.generationBaselined
-    || action.serverIdentity !== state.serverIdentity;
   return {
     ...state,
     serverIdentity: action.serverIdentity,
-    generation,
-    agentRoutingChangedAtGeneration: newGenerationBaseline
-      || routingFingerprint !== state.agentRoutingFingerprint
-      ? generation
-      : state.agentRoutingChangedAtGeneration,
-    agentRoutingFingerprint: routingFingerprint,
+    generation: action.generation ?? state.generation + 1,
     generationBaselined: true,
     lastSequence: action.sequence,
     resyncRequested: false,
