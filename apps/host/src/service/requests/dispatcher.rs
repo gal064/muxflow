@@ -23,6 +23,7 @@ pub(crate) async fn handle_request(
         bulk_connection,
         bulk_available,
         connection_epoch,
+        connection_id,
         closed,
     } = context;
     let control_tx = &control_tx;
@@ -114,6 +115,21 @@ pub(crate) async fn handle_request(
                 generation,
                 topology_baseline,
                 &cancellation,
+            )
+            .await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
+        (Handler::Voice, Some(operation)) => {
+            super::voice_dispatch::handle(
+                request_id,
+                operation,
+                request,
+                control_tx,
+                connection_id,
+                &cancellation,
+                &closed,
             )
             .await;
             pending.lock().unwrap().remove(&request_id);

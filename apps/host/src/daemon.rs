@@ -139,6 +139,9 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
     }
     hook_retry.abort();
     drop(listener);
+    // A hot voice sidecar holds ~1 GB; kill it here rather than let
+    // `kill_on_drop` race the runtime's teardown.
+    service::voice::shutdown().await;
     // Flush coalesced operational counters before cooperative shutdown. This
     // is ordered against the background writer and never runs on hot paths.
     let _ = diagnostics.flush();

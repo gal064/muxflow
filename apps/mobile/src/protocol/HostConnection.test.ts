@@ -9,11 +9,16 @@ import {
   HostEventSchema,
   Operation,
   TerminalBytesSchema,
+  VoiceEventSchema,
+  VoiceProvisionProgressSchema,
+  VoiceResponseSchema,
+  VoiceSpeechSchema,
   type Envelope,
+  type HostEvent,
 } from "./gen/envelope_pb";
 import { HostConnection, HostError, type HostConnectionOptions } from "./HostConnection";
 import { jsBackgroundTimer } from "./backgroundTimer";
-import { terminalInput } from "./requests";
+import { terminalInput, voiceTranscribe } from "./requests";
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "./testing/fakeTransport";
 import { createSessionStore, type SessionStore } from "../store/sessionStore";
 
@@ -268,6 +273,54 @@ describe("ordered events (§7.4)", () => {
     expect(h.store.getState().agents["a1"]?.lifecycle).toBe("blocked");
     transport.feed(event(EventKind.RESYNC_REQUIRED, 3n));
     expect(h.store.getState().connection.state).toBe("reconnecting");
+  });
+
+  it("routes VOICE_PROVISION and VOICE_REPLY to onVoiceEvent with their payloads intact", async () => {
+    const received: HostEvent[] = [];
+    const h = harness({ onVoiceEvent: (event) => received.push(event) });
+    const transport = await connectHappily(h);
+    transport.feed(event(EventKind.VOICE_PROVISION, 1n, {
+      scope: "voice",
+      voice: create(VoiceEventSchema, {
+        provision: create(VoiceProvisionProgressSchema, { operationId: "prov-1", phase: "downloading", transferredBytes: 1024n, totalBytes: 671088640n }),
+      }),
+    }));
+    transport.feed(event(EventKind.VOICE_REPLY, 2n, {
+      voice: create(VoiceEventSchema, {
+        reply: create(VoiceSpeechSchema, { agentId: "a1", text: "Done.", audio: new Uint8Array([0xff, 0xfb]), audioMime: "audio/mpeg", stateGeneration: 4n }),
+      }),
+    }));
+    expect(received.map((e) => e.kind)).toEqual([EventKind.VOICE_PROVISION, EventKind.VOICE_REPLY]);
+    expect(received[0]?.voice?.provision?.phase).toBe("downloading");
+    expect(received[0]?.voice?.provision?.totalBytes).toBe(671088640n);
+    expect(received[1]?.voice?.reply?.agentId).toBe("a1");
+    expect(received[1]?.voice?.reply?.audio).toEqual(new Uint8Array([0xff, 0xfb]));
+    // Neither is a file or agent event, and neither is logged as ignored.
+    expect(h.log.some((line) => line.startsWith("event.ignored"))).toBe(false);
+    expect(h.store.getState().agents["a1"]).toBeUndefined();
+  });
+
+  it("carries Response.voice on a refused voice request, so the caller can read operationId and retryable", async () => {
+    const h = harness();
+    const transport = await connectHappily(h);
+    transport.drain();
+    const refused = h.connection.request(voiceTranscribe("utt-1", new Uint8Array([1, 2, 3]), "audio/mp4"));
+    const [sent] = transport.drain();
+    expect(sent?.requestId).toBe(3n);
+    transport.feed(hostEnvelope({
+      case: "response",
+      value: okResponse({
+        ok: false,
+        errorCode: "voice_model_missing",
+        displayMessage: "Voice is not set up on this host yet",
+        voice: create(VoiceResponseSchema, { operationId: "utt-1", retryable: false }),
+      }),
+    }, { requestId: 3n }));
+    const error = await refused.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(HostError);
+    expect((error as HostError).code).toBe("voice_model_missing");
+    expect((error as HostError).voice?.operationId).toBe("utt-1");
+    expect((error as HostError).voice?.retryable).toBe(false);
   });
 
   it("answers TERMINAL_RESNAPSHOT_REQUIRED with a scoped REQUEST_TERMINAL_SEED", async () => {
