@@ -6,7 +6,7 @@ import type { CommandId, CommandTarget } from "../../commands/registry";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
 import type { TmuxActionResult } from "../tmux/actions";
 import { requestReconciledTmuxAction } from "../tmux/actionReconciliation";
-import type { HostScopeToken } from "./hostScope";
+import { sameHostConnection, type HostScopeToken } from "./hostScope";
 import { editorFlushRegistry } from "../files/editorFlushRegistry";
 import { defaultAppState, type PersistedAppState } from "./types";
 import { resolveCommandTarget, useShellCommands } from "./useShellCommands";
@@ -103,6 +103,14 @@ async function run(
       canMutate: true, closeAppTab, combinedTabs: [], controllers: { current: new Map<string, TerminalPaneController>() },
       currentHostProfileId: "local", focusDirection: vi.fn(),
       hostScope, isHostScopeCurrent: () => true, jumpToUnreadAgent: vi.fn(),
+      // The active host, and only it: a target from any other scope is stale.
+      hostForScope: (scope) => sameHostConnection(scope, overrides.hostScope ?? hostScope)
+        ? {
+          scope: overrides.hostScope ?? hostScope, snapshot: overrides.snapshot ?? snapshot,
+          serverIdentity: overrides.serverIdentity ?? "server-a", performAction,
+          isScopeCurrent: overrides.isHostScopeCurrent ?? (() => true),
+        }
+        : undefined,
       requestHostProfileDelete: vi.fn(), rowCommands: [], createSession,
       createWindow, selectRelativeTab: vi.fn(), selectTabByIndex: vi.fn(),
       selectWorkspaceByIndex: vi.fn(), serverIdentity: "server-a", setAppState,

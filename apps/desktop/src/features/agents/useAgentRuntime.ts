@@ -265,8 +265,12 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     if (!scope) return Promise.reject(new Error("Agent launch requires a live authoritative host."));
     return optionsRef.current.client.launch(scope, request);
   }, []);
+  // A rename is the one row mutation that reaches a peer: it names the agent
+  // where it lives. Launch and resume place a new pane, and the only place
+  // known well enough for that — an active root under a live pane — is on
+  // the host on screen.
   const rename = useCallback((agent: AgentRecord, displayName: string) => {
-    const scope = activeScope(optionsRef.current);
+    const scope = agentScope(optionsRef.current, agent);
     if (!scope) return Promise.reject(new Error("Agent rename requires a live authoritative host."));
     return optionsRef.current.client.rename(scope, agent.id, displayName);
   }, []);
@@ -316,6 +320,11 @@ export type AgentRuntime = ReturnType<typeof useAgentRuntime>;
 
 function activeScope(options: AgentRuntimeOptions): AgentRequestScope | undefined {
   return options.scopes.find((entry) => entry.scope.hostProfileId === options.focus.hostProfileId)?.scope;
+}
+
+/** The live scope of the host an agent was reported from, active or shown beside it. */
+function agentScope(options: AgentRuntimeOptions, agent: AgentRecord): AgentRequestScope | undefined {
+  return options.scopes.find((entry) => entry.scope.hostProfileId === agent.hostProfileId)?.scope;
 }
 
 /**

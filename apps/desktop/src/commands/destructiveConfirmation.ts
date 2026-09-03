@@ -1,3 +1,4 @@
+import type { HostScopeToken } from "../features/shell/hostScope";
 import type { AuthoritativePrecondition, TmuxAction } from "../features/tmux/actions";
 import { isDestructiveTmuxAction } from "../features/tmux/actions";
 import type { CommandId } from "./registry";
@@ -9,6 +10,8 @@ export interface PendingTmuxConfirmation {
   targetLabel: string;
   action: TmuxAction;
   precondition: AuthoritativePrecondition;
+  /** The host the target lives on; the confirmed action runs against it, not against whichever host is on screen by then. */
+  scope: HostScopeToken;
 }
 
 /**
@@ -26,6 +29,7 @@ export function createTmuxConfirmation(
   targetLabel: string,
   action: TmuxAction,
   precondition: AuthoritativePrecondition,
+  scope: HostScopeToken,
 ): PendingTmuxConfirmation {
   if (!isDestructiveTmuxAction(action)) throw new Error("confirmation requires a destructive tmux action");
   if (!action.confirmed) throw new Error("confirmation requires an action already marked confirmed");
@@ -36,5 +40,6 @@ export function createTmuxConfirmation(
     targetLabel,
     action: { ...action },
     precondition: { ...precondition },
+    scope: { ...scope },
   };
 }

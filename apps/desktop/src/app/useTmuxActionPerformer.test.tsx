@@ -115,3 +115,51 @@ describe("tmux action execution feedback boundary", () => {
     await act(async () => renderer.unmount());
   });
 });
+
+describe("a target host beside the active one", () => {
+  const peer: HostScopeToken = {
+    hostProfileId: "peer", connectionKey: "ssh:peer", connectionEpoch: 4,
+    serverIdentity: "server-peer", generation: 7,
+  };
+
+  it("sends the action to the target's client under the target's scope, and keeps its result", async () => {
+    const requestAction = vi.fn<NonNullable<Parameters<typeof useTmuxActionPerformer>[0]["requestAction"]>>(
+      async () => ({ topologyGeneration: 8 }),
+    );
+    const harness = await performer(requestAction);
+    let result: unknown;
+    await act(async () => {
+      result = await harness.perform({ kind: "setPinned", sessionId: "$1", pinned: true }, undefined, undefined, {
+        clientId: "peer-client", canMutate: true, scopeRef: { current: peer },
+      });
+    });
+    expect(requestAction).toHaveBeenCalledWith(expect.objectContaining({ clientId: "peer-client", initialScope: peer }));
+    expect(requestAction.mock.calls[0]?.[0].currentScope()).toEqual(peer);
+    expect(result).toEqual({ topologyGeneration: 8 });
+    await act(async () => harness.renderer.unmount());
+  });
+
+  it("refuses a target with no live client, and discards a result once the target's scope moved on", async () => {
+    const requestAction = vi.fn(async () => ({ topologyGeneration: 8 }));
+    const harness = await performer(requestAction);
+    await act(async () => {
+      await harness.perform({ kind: "setPinned", sessionId: "$1", pinned: true }, undefined, undefined, {
+        clientId: undefined, canMutate: true, scopeRef: { current: peer },
+      });
+    });
+    expect(requestAction).not.toHaveBeenCalled();
+    expect(harness.setStatus).toHaveBeenCalledWith("This action is unavailable until the authoritative connection is live.");
+
+    const scopeRef = { current: peer };
+    let result: unknown = "unset";
+    await act(async () => {
+      const pending = harness.perform({ kind: "setPinned", sessionId: "$1", pinned: true }, undefined, undefined, {
+        clientId: "peer-client", canMutate: true, scopeRef,
+      });
+      scopeRef.current = { ...peer, connectionEpoch: 5 };
+      result = await pending;
+    });
+    expect(result).toBeUndefined();
+    await act(async () => harness.renderer.unmount());
+  });
+});
