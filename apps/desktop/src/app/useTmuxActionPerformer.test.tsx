@@ -3,9 +3,14 @@ import { act, create } from "react-test-renderer";
 import { describe, expect, it, vi } from "vitest";
 import type { HostScopeToken } from "../features/shell/hostScope";
 import { recordIncident } from "../diagnostics/incidents";
+import { requestTmuxAction } from "../features/tmux/actions";
 import { useTmuxActionPerformer } from "./useTmuxActionPerformer";
 
 vi.mock("../diagnostics/incidents", () => ({ recordIncident: vi.fn() }));
+vi.mock("../features/tmux/actions", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../features/tmux/actions")>(),
+  requestTmuxAction: vi.fn(async () => ({ topologyGeneration: 3 })),
+}));
 const incidents = vi.mocked(recordIncident);
 
 const scope: HostScopeToken = {
@@ -13,7 +18,7 @@ const scope: HostScopeToken = {
   serverIdentity: "server-a", generation: 1,
 };
 
-async function performer(requestAction: NonNullable<Parameters<typeof useTmuxActionPerformer>[0]["requestAction"]>) {
+async function performer(requestAction?: Parameters<typeof useTmuxActionPerformer>[0]["requestAction"]) {
   const setStatus = vi.fn();
   let perform!: ReturnType<typeof useTmuxActionPerformer>;
   function Harness() {
@@ -160,6 +165,23 @@ describe("a target host beside the active one", () => {
       result = await pending;
     });
     expect(result).toBeUndefined();
+    await act(async () => harness.renderer.unmount());
+  });
+
+  it("does not measure a peer's round trip into the active host's latency", async () => {
+    const request = vi.mocked(requestTmuxAction);
+    request.mockClear();
+    const harness = await performer();
+    await act(async () => {
+      await harness.perform({ kind: "setPinned", sessionId: "$1", pinned: true }, undefined, undefined, {
+        clientId: "peer-client", canMutate: true, scopeRef: { current: peer },
+      });
+      await harness.perform({ kind: "setPinned", sessionId: "$1", pinned: true });
+    });
+    expect(request.mock.calls.map(([clientId, , , measureLatency]) => [clientId, measureLatency])).toEqual([
+      ["peer-client", false],
+      ["client", undefined],
+    ]);
     await act(async () => harness.renderer.unmount());
   });
 });

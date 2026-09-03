@@ -127,8 +127,12 @@ interface MergedWorkspaceRow extends WorkspaceRowModel {
   hostProfileId: string;
   letter: string;         // "" when letters are hidden
   scope: HostScopeToken;
+  phase: ConnectionPhase; // the host's link phase; not connected draws dimmed
   canMutate: boolean;
 }
+function hostWorkspaceRows(source: HostRowSource, showLetters: boolean): MergedWorkspaceRow[];
+function mergeHostRows(perHost: readonly (readonly MergedWorkspaceRow[])[]): MergedWorkspaceRow[];
+/** The two above composed; the caller memoizes `hostWorkspaceRows` per host and merges. */
 function mergedWorkspaceRows(sources: readonly HostRowSource[], showLetters: boolean): MergedWorkspaceRow[];
 function pinnedOnlyMergedRows(rows, active: { hostProfileId: string; sessionId?: string }): MergedWorkspaceRow[];
 ```

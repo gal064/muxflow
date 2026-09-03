@@ -190,9 +190,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     const ids: CommandId[] = [];
     if (focusedAgent.routable) ids.push("agents.focusRow");
     if (focusedAgentCanMutate) ids.push("agents.renameRow");
-    if (focusedAgent && canResume(focusedAgent) && focusedAgentResume) ids.push("agents.resumeRow");
+    if (canResume(focusedAgent) && focusedAgentResume) ids.push("agents.resumeRow");
     return ids;
-  }, [focusedAgent, focusedAgentCanMutate, focusedAgentResume]);
+    // `canResume` reads the hosts: a switch that leaves the row's identity
+    // alone must still take the resume away.
+  }, [focusedAgent, focusedAgentCanMutate, focusedAgentResume, props.hosts]);
   const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
   runRowCommand.current = (commandId) => {
     if (!focusedAgent) return;
@@ -626,7 +628,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           id: `host-${host.profileId}`,
           // The dot is decorative; a shown host that is not connected says
           // so in words too.
-          label: host.shown && host.phase !== "connected" ? `${host.letter} ${host.label} · ${host.phase}` : `${host.letter} ${host.label}`,
+          label: host.shown && host.phase !== "connected" ? `${host.letter} ${host.label} · ${phaseWord(host.phase)}` : `${host.letter} ${host.label}`,
           checked: host.shown,
           disabled: host.active,
           // Only a shown host has a link to report on.
@@ -766,6 +768,11 @@ function workspaceIndicatorState(row: WorkspaceRowModel): AgentDisplayState | un
   }
 }
 
+/** A phase as a word in a label; only read-only is not already one. */
+function phaseWord(phase: ConnectionPhase): string {
+  return phase === "readOnly" ? "read-only" : phase;
+}
+
 /** Whether the row's host has no live link behind it. Read-only is a live link that refuses writes, not an absence. */
 function rowOffline(row: MergedWorkspaceRow): boolean {
   return row.phase !== "connected" && row.phase !== "readOnly";
@@ -788,7 +795,7 @@ function rowLabel(row: MergedWorkspaceRow, hostLabel: string | undefined): strin
   return [
     row.session.name,
     hostLabel && `on ${hostLabel}`,
-    rowOffline(row) ? `host ${row.phase}` : undefined,
+    rowOffline(row) ? `host ${phaseWord(row.phase)}` : undefined,
     row.pinned ? "pinned" : undefined,
     row.agents[0] && agentLine(row.agents[0]),
     total > 1 ? `${total} agents` : undefined,

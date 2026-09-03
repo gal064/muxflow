@@ -471,7 +471,13 @@ export function App() {
   // Settings' connection form follows the host on screen: a row click, the
   // bell or a notification moves the pointer without going through the
   // picker, and Letter, Show in sidebar and Delete edit the picked host.
+  //
+  // Not while Settings is open: a switch from a notification then would throw
+  // away a host being typed in. The form catches up when it closes.
+  const pickerSyncedTo = useRef<string | undefined>(undefined);
   useEffect(() => {
+    if (settingsOpen || pickerSyncedTo.current === currentHostProfileId) return;
+    pickerSyncedTo.current = currentHostProfileId;
     const profile = profiles.find((item) => item.id === currentHostProfileId);
     if (!profile) return;
     setSelectedProfileId(profile.id);
@@ -482,7 +488,7 @@ export function App() {
     }
     // On the switch only: the picker is its own state between switches.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentHostProfileId]);
+  }, [currentHostProfileId, settingsOpen]);
   // Every host with a bridge, the active one included. A host that leaves the
   // list loses its agent records.
   const shownHostIds = useMemo(() => links.map((link) => link.profileId), [links]);
@@ -1021,7 +1027,8 @@ export function App() {
     // Optimistic, because the link set follows `profiles` at once; a store
     // that refuses puts the saved shape back so the app and the store agree.
     void invoke("save_host_profile", { profile: next }).catch((error) => {
-      setProfiles((current) => current.map((item) => (item.id === profileId ? profile : item)));
+      // Only the shape this write put there; a later edit has moved on.
+      setProfiles((current) => current.map((item) => (item === next ? profile : item)));
       setStatus(String(error));
     });
   }, [currentHostProfileId, profiles, setProfiles]);
