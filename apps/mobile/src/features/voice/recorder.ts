@@ -6,6 +6,8 @@
 import { AudioModule, AudioQuality, IOSOutputFormat, requestRecordingPermissionsAsync, setAudioModeAsync, type RecordingOptions } from "expo-audio";
 import type { AudioRecorder } from "expo-audio";
 import { Directory, File, Paths } from "expo-file-system";
+import { Platform } from "react-native";
+import { nativeRecordingOptions } from "./recordingOptions";
 import type { VoiceRecorder } from "./audioPorts";
 
 export type { VoiceRecorder } from "./audioPorts";
@@ -53,7 +55,7 @@ export function createExpoRecorder(): VoiceRecorder {
       swept = true;
       sweepRecordings();
     }
-    recorder ??= new AudioModule.AudioRecorder(RECORDING_PRESET);
+    recorder ??= new AudioModule.AudioRecorder(nativeRecordingOptions(RECORDING_PRESET, Platform.OS));
     await recorder.prepareToRecordAsync();
     prepared = true;
     preparedUri = recorder.uri;
