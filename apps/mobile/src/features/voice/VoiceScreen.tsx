@@ -20,6 +20,7 @@ import { ReplyPlayer } from "./ReplyPlayer";
 import type { VoiceController } from "./VoiceController";
 import { useVoice } from "./voiceHooks";
 import { voiceRegistry } from "./voiceRegistry";
+import { WorkingIndicator } from "./WorkingIndicator";
 import { VoiceStatusCard } from "./VoiceStatusCard";
 import { latestReply, type VoiceMessage } from "./voiceStore";
 
@@ -134,6 +135,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         {messages.map((message) => (
           <MessageBubble controller={message.id === newest?.id ? controller : undefined} key={message.id} message={message} />
         ))}
+        <WorkingIndicator agentId={agentId} />
       </ScrollView>
 
       <VoiceStatusCard connected={connected} controller={controller} />

@@ -282,3 +282,12 @@ export function latestReply(session: VoiceSession | undefined): VoiceMessage | u
   }
   return undefined;
 }
+
+/**
+ * An utterance has been typed into the pane and no reply has come back yet:
+ * the last turn is the user's. With the agent's lifecycle `working` this is
+ * when the conversation shows the working indicator (design.md §9.11).
+ */
+export function awaitingReply(session: VoiceSession | undefined): boolean {
+  return session?.messages.at(-1)?.kind === "you";
+}
