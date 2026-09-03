@@ -11,7 +11,7 @@ import { sessionStore } from "../src/store/sessionStore";
 import { Button, Hairline } from "../src/ui/components/Button";
 import { Dialog } from "../src/ui/components/Dialog";
 import { Sheet } from "../src/ui/components/Sheet";
-import { colors, metrics, typeScale } from "../src/ui/tokens";
+import { colors, fixedChromeText, metrics, typeScale } from "../src/ui/tokens";
 
 /** Hosts — design.md §9.1. The first screen when no host is connected. */
 export default function HostsScreen() {
@@ -119,14 +119,14 @@ function HostRow({
       style={({ pressed }) => [styles.row, pressed ? styles.rowPressed : null]}
     >
       <View style={styles.rowText}>
-        <Text style={styles.rowTitle} numberOfLines={1}>
+        <Text {...fixedChromeText} style={styles.rowTitle} numberOfLines={1}>
           {host.label}
         </Text>
-        <Text style={styles.rowSubtitle} numberOfLines={1}>
+        <Text {...fixedChromeText} style={styles.rowSubtitle} numberOfLines={1}>
           {hostAddress(host)}
         </Text>
       </View>
-      <Text style={styles.chevron}>{"›"}</Text>
+      <Text {...fixedChromeText} style={styles.chevron}>{"›"}</Text>
     </Pressable>
   );
 }
@@ -195,7 +195,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   rowPressed: { backgroundColor: colors.chromeHover },
-  rowText: { flex: 1, gap: 2 },
+  rowText: { flex: 1, gap: 2, minWidth: 0 },
   rowTitle: { color: colors.chromeInkStrong, fontSize: typeScale.rowTitle },
   rowSubtitle: { color: colors.chromeDim, fontSize: typeScale.rowSecondary },
   chevron: { color: colors.chromeFaint, fontSize: 22 },

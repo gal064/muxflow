@@ -122,6 +122,14 @@ export const typeScale = {
   terminal: 13,
 } as const;
 
+/**
+ * Text inside fixed-height chrome may follow Android's font scale up to 1.3×.
+ * Beyond that, a 28–56 dp control cannot grow with its label, so React Native
+ * clips or paints the label into the neighbouring row. Reading surfaces and
+ * dialog copy remain uncapped.
+ */
+export const fixedChromeText = { maxFontSizeMultiplier: 1.3 } as const;
+
 export const tokens = {
   colors,
   terminalTheme,
@@ -130,6 +138,7 @@ export const tokens = {
   metrics,
   radii,
   typeScale,
+  fixedChromeText,
 } as const;
 
 export default tokens;
