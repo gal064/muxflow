@@ -2,7 +2,6 @@ import { create } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HostError } from "../../protocol/HostConnection";
 import { Operation, ResponseSchema, VoiceReadiness, VoiceResponseSchema, VoiceSpeechSchema, type VoiceSpeech } from "../../protocol/gen/envelope_pb";
-import type { VoiceCues } from "./cues";
 import type { VoiceHaptics } from "./haptics";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, speechResponse, statusResponse, transcriptResponse } from "./testing";
 import { MIN_UTTERANCE_MS, SESSION_REFRESH_MS, VoiceController } from "./VoiceController";
@@ -19,16 +18,8 @@ class FakeHaptics implements VoiceHaptics {
   failed() { this.calls.push("failed"); }
 }
 
-class FakeCues implements VoiceCues {
-  readonly calls: string[] = [];
-  sent() { this.calls.push("sent"); }
-  working() { this.calls.push("working"); }
-  failed() { this.calls.push("failed"); }
-}
-
 function harness(agentId = "agent-a", paneId = "%3") {
   const haptics = new FakeHaptics();
-  const cues = new FakeCues();
   const store = createVoiceStore();
   const connection = new FakeConnection();
   connection.answer(Operation.VOICE_STATUS, () => statusResponse(VoiceReadiness.READY));
@@ -51,11 +42,10 @@ function harness(agentId = "agent-a", paneId = "%3") {
     files,
     appInForeground: () => foreground,
     haptics,
-    cues,
     toast: (message) => toasts.push(message),
     now: () => Date.now(),
   });
-  return { store, connection, recorder, player, files, haptics, cues, controller, toasts, setForeground: (value: boolean) => { foreground = value; } };
+  return { store, connection, recorder, player, files, haptics, controller, toasts, setForeground: (value: boolean) => { foreground = value; } };
 }
 
 function reply(agentId: string, text: string, audio: Uint8Array = MP3, generation = 0n): VoiceSpeech {
@@ -717,8 +707,6 @@ describe("VoiceController acknowledgements and playback speed", () => {
     await settle();
     await speak(h);
     expect(h.haptics.calls).toEqual(["listening", "sent"]);
-    // Spoken too, except the press: a voice saying "listening" would be recorded.
-    expect(h.cues.calls).toEqual(["sent"]);
   });
 
   it("gives the error pattern when the input is refused, and the empty transcript no pattern at all", async () => {
@@ -730,7 +718,6 @@ describe("VoiceController acknowledgements and playback speed", () => {
     });
     await speak(h);
     expect(h.haptics.calls).toEqual(["listening", "failed"]);
-    expect(h.cues.calls).toEqual(["failed"]);
 
     h.haptics.calls.length = 0;
     h.files.files.set("file:///cache/rec-1.m4a", new TextEncoder().encode("aac-bytes")); // the first read consumed it
@@ -753,7 +740,6 @@ describe("VoiceController acknowledgements and playback speed", () => {
     h.controller.onAgentLifecycle("working");
     h.controller.onAgentLifecycle("working");
     expect(h.haptics.calls).toEqual(["working"]);
-    expect(h.cues.calls).toEqual(["sent", "working"]);
     // Idle and back to working without a new utterance: the reply is what is awaited, not another pickup.
     h.controller.onAgentLifecycle("idle");
     h.controller.onAgentLifecycle("working");

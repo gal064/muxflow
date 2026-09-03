@@ -13,7 +13,6 @@ import { CR } from "../terminal/chips";
 import { SUBMIT_DELAY_MS } from "../terminal/TerminalController";
 import type { AgentLifecycle } from "../../store/sessionStore";
 import { RECORDING_MIME, type PlayerStatus, type VoiceFiles, type VoicePlayer, type VoiceRecorder } from "./audioPorts";
-import type { VoiceCues } from "./cues";
 import type { VoiceHaptics } from "./haptics";
 import { describeVoiceError, STATUS_CHANGING_CODES } from "./voiceErrors";
 import { latestReply, type VoiceMessage, type VoiceReadinessState, type VoiceStore } from "./voiceStore";
@@ -31,8 +30,6 @@ export interface VoiceControllerOptions {
   appInForeground: () => boolean;
   /** Tactile acknowledgements for the steps the user cannot see; absent in tests that do not care. */
   haptics?: VoiceHaptics;
-  /** Spoken acknowledgements for the same steps (all but the press, which would be recorded). */
-  cues?: VoiceCues;
   /** Initial reply playback speed; `setPlaybackRate` follows the preference afterwards. */
   playbackRate?: number;
   toast?: (message: string) => void;
@@ -359,7 +356,6 @@ export class VoiceController {
       await connection.request(terminalInput(this.paneId, CR));
       this.log(`input ${body.byteLength} bytes as paste + CR → ok in ${this.now() - startedAt} ms`);
       this.options.haptics?.sent();
-      this.options.cues?.sent();
     } catch (error) {
       this.fail("input", error);
     }
@@ -384,7 +380,6 @@ export class VoiceController {
     this.workingAckedFor = last.id;
     this.log(`working.ack ${last.id}`);
     this.options.haptics?.working();
-    this.options.cues?.working();
   }
 
   // ---- replies ----------------------------------------------------------------
@@ -688,10 +683,7 @@ export class VoiceController {
     if (message === undefined || this.disposed) return;
     this.options.store.getState().setLastError(message);
     this.options.toast?.(message);
-    if (UTTERANCE_STEPS.has(what)) {
-      this.options.haptics?.failed();
-      this.options.cues?.failed();
-    }
+    if (UTTERANCE_STEPS.has(what)) this.options.haptics?.failed();
     const code = (error as { code?: unknown }).code;
     if (typeof code === "string" && STATUS_CHANGING_CODES.has(code) && what !== "status") void this.refreshStatus(false);
   }
