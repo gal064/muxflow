@@ -791,23 +791,26 @@ describe("TerminalController sizing takes (D6)", () => {
     expect(resize.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 40, rows: 44 });
   });
 
-  it("the return to the foreground takes the window back too, and a stopped controller ignores it", async () => {
+  it("the return to the foreground alone takes nothing — the next input does; a stopped controller ignores it", async () => {
     const foreground = fakeForeground();
     const h = await seeded({ foreground: foreground.dep }, { cols: 80, rows: 24 });
     const t = h.transport();
     await vi.advanceTimersByTimeAsync(TAKE_INTERVAL_MS);
-    // Phone in a pocket, connection alive; the laptop took the window.
+    // Phone on the desk, connection alive, screen locked; the laptop took the window.
     foreground.set(false);
     h.store.getState().applySnapshot(topologySnapshot({
       panes: [{ id: "%1", sessionId: "$1", windowId: "@1", index: 0, active: true, width: 160, height: 48, left: 0, top: 0, currentPath: "/", currentCommand: "bash" }],
     }));
     await vi.advanceTimersByTimeAsync(300);
     expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
-    // The user looks at the phone again: the terminal is shown at phone size.
+    // Unlocked to read a message: an app left open does not take.
     foreground.set(true);
-    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL]);
     await vi.advanceTimersByTimeAsync(200);
     expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+    // Used: it does.
+    const pending = h.controller.sendInput(Uint8Array.of(0x61));
+    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL, Operation.TERMINAL_INPUT]);
+    await pending;
     // After stop, a foreground event is nobody's business.
     void h.controller.stop();
     await answerAll(t); // the hide

@@ -175,17 +175,17 @@ export class TerminalController {
       onConnected: () => this.onConnected(),
     });
     this.options.store.getState().setFocusedPane(this.paneId);
-    // A person is looking again: step 1 or a size withheld while the app was
-    // in the background (see attach and resizeNow) runs now, and a window the
-    // laptop took meanwhile is taken back — the screen is being opened, as
-    // far as the user is concerned.
+    // Step 1 or a size withheld while the app was in the background (see
+    // attach and resizeNow) runs when a person is looking again. Nothing more:
+    // a window the laptop took meanwhile is taken back by the next input, not
+    // by the unlock — a phone unlocked to read a message with this screen in
+    // front is an app left open, the phone's window focus.
     this.unsubscribeForeground = this.foreground.onForeground(() => {
       if (this.stopped) return;
       if (this.attachOnForeground) {
         this.attachOnForeground = false;
         void this.attach();
       } else {
-        this.takeSizeIfLost();
         this.scheduleResize();
       }
     });
@@ -226,12 +226,11 @@ export class TerminalController {
   }
 
   /**
-   * D6: typing here, or coming back to the screen, is using the phone, so the
-   * window follows the phone. tmux sizes a window from whichever client took
-   * it last, and a keystroke on the desktop takes it back; when the topology
-   * shows the window at another size than this controller asked for, the next
-   * input here (or the return to the foreground) takes it again — at most
-   * once per `TAKE_INTERVAL_MS`, and never a size the window already has.
+   * D6: typing here is using the phone, so the window follows the phone. tmux
+   * sizes a window from whichever client took it last, and a keystroke on the
+   * desktop takes it back; when the topology shows the window at another size
+   * than this controller asked for, the next input here takes it again — at
+   * most once per `TAKE_INTERVAL_MS`, and never a size the window already has.
    * The request leaves ahead of the input on the same connection; the host
    * writes them to different tmux clients, so tmux may apply either first,
    * and the redraw follows the size either way.
@@ -242,9 +241,7 @@ export class TerminalController {
     if (!actual || sameGrid(actual, this.grid)) return;
     if (this.lastResizeAt !== undefined && Date.now() - this.lastResizeAt < TAKE_INTERVAL_MS) return;
     this.log(`take: window is ${actual.cols}x${actual.rows}`);
-    // Forgetting what was sent is what lets the same grid through resizeNow's dedupe.
-    this.sentGrid = undefined;
-    void this.resizeNow();
+    void this.resizeNow(true);
   }
 
   /** The grid tmux has for this pane's window, from the topology snapshot. */
@@ -586,11 +583,12 @@ export class TerminalController {
     }, this.resizeDebounceMs);
   }
 
-  private async resizeNow(): Promise<void> {
+  /** `take`: the grid was sent before, but the window is not at it (D6). */
+  private async resizeNow(take = false): Promise<void> {
     const connection = this.liveConnection();
     const grid = this.grid;
     if (!connection || !grid || this.stopped || !this.attached || this.attaching) return;
-    if (sameGrid(grid, this.sentGrid)) return;
+    if (!take && sameGrid(grid, this.sentGrid)) return;
     // Nobody is looking: the keyboard hiding as the app goes to the background
     // is not the phone being used. Sent on the return to the foreground.
     if (!this.foreground.inForeground()) return;
