@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { colors, metrics, typeScale } from "../../ui/tokens";
+import { colors, fixedChromeText, metrics, typeScale } from "../../ui/tokens";
 import { backoffSeconds, connectingStripText, reconnectingStripText } from "./connectionLabels";
 import { describeConnectionFailure } from "./errorMatrix";
 import { useConnectionSheet } from "./ConnectionSheet";
@@ -31,11 +31,11 @@ export function ConnectionStrip() {
     if (failure.presentation === "fullScreen") return null;
     return (
       <View style={[styles.strip, styles.danger]}>
-        <Text style={[styles.text, styles.dangerText]} numberOfLines={1}>
+        <Text {...fixedChromeText} style={[styles.text, styles.dangerText]} numberOfLines={1}>
           {failure.message}
         </Text>
         <Pressable onPress={sheet.open} hitSlop={8} accessibilityRole="button">
-          <Text style={[styles.text, styles.details]}>Details</Text>
+          <Text {...fixedChromeText} numberOfLines={1} style={[styles.text, styles.details]}>Details</Text>
         </Pressable>
       </View>
     );
@@ -46,7 +46,7 @@ export function ConnectionStrip() {
       // Only a close carries §12 copy; the state machine also reconnects for
       // reasons of its own ("sequence gap"), which §12 keeps out of the UI.
       <View style={[styles.strip, styles.warn]}>
-        <Text style={[styles.text, styles.warnText]} numberOfLines={1}>
+        <Text {...fixedChromeText} style={[styles.text, styles.warnText]} numberOfLines={1}>
           {reconnectingStripText(secondsLeft, lastClose?.message)}
         </Text>
       </View>
@@ -55,7 +55,7 @@ export function ConnectionStrip() {
 
   return (
     <View style={[styles.strip, styles.quiet]}>
-      <Text style={[styles.text, styles.quietText]} numberOfLines={1}>
+      <Text {...fixedChromeText} style={[styles.text, styles.quietText]} numberOfLines={1}>
         {connectingStripText(connection.host?.label ?? "the host")}
       </Text>
     </View>

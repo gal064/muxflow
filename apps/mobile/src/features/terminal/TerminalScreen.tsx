@@ -15,7 +15,7 @@ import { sessionStore } from "../../store/sessionStore";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { BackIcon, FolderIcon, MicIcon, ShiftIcon } from "../../ui/components/MediaIcons";
 import { useSession } from "../../ui/hooks";
-import { colors, metrics, radii, typeScale } from "../../ui/tokens";
+import { colors, fixedChromeText, metrics, radii, typeScale } from "../../ui/tokens";
 import { useAnimationsAllowed } from "../../ui/useAnimationsAllowed";
 import { appForeground } from "./appForeground";
 import type { FromPageMessage } from "./bridgeMessages";
@@ -128,7 +128,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
           <BackIcon color={colors.chromeInkStrong} />
         </Pressable>
         {agent ? <AgentMark adapterId={agent.adapterId} animate={animateAgentState} ring={colors.chromeRaised} state={markState(agent)} surface={colors.chromeBg} /> : null}
-        <Text accessibilityLabel={agent ? `${title}, ${agentStateLabel(agent)}` : title} accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
+        <Text {...fixedChromeText} accessibilityLabel={agent ? `${title}, ${agentStateLabel(agent)}` : title} accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
         {gone || !agent ? null : (
           <Pressable
             accessibilityLabel="Talk to this agent"
@@ -193,7 +193,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
               >
                 {chip === SHIFT_CHIP
                   ? <ShiftIcon color={armed ? colors.accentInk : colors.chromeInkStrong} />
-                  : <Text style={[styles.chipLabel, chip.label.length === 1 && styles.chipGlyph]}>{chip.label}</Text>}
+                  : <Text {...fixedChromeText} numberOfLines={1} style={[styles.chipLabel, chip.label.length === 1 && styles.chipGlyph]}>{chip.label}</Text>}
               </Pressable>
             );
           })}
@@ -204,6 +204,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
             autoCapitalize="none"
             autoCorrect={false}
             editable={inputEnabled}
+            maxFontSizeMultiplier={fixedChromeText.maxFontSizeMultiplier}
             onChangeText={setText}
             onSubmitEditing={sendText}
             placeholder="Type, then Send"
@@ -214,7 +215,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
             value={text}
           />
           <Pressable accessibilityRole="button" disabled={!inputEnabled} onPress={sendText} style={[styles.sendButton, !inputEnabled && styles.disabled]}>
-            <Text style={styles.sendLabel}>Send</Text>
+            <Text {...fixedChromeText} numberOfLines={1} style={styles.sendLabel}>Send</Text>
           </Pressable>
         </View>
         </>
@@ -235,7 +236,7 @@ const styles = StyleSheet.create({
   },
   /** 48 dp touch targets, matching the app bar's Material back arrow. */
   iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
-  title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
+  title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600", minWidth: 0 },
   terminalArea: { backgroundColor: colors.chromeBg, flex: 1 },
   banner: {
     backgroundColor: colors.chromeSelected,

@@ -15,7 +15,7 @@ import { Dialog } from "../../ui/components/Dialog";
 import { EmptyState } from "../../ui/components/EmptyState";
 import { BackIcon } from "../../ui/components/MediaIcons";
 import { useSession } from "../../ui/hooks";
-import { colors, metrics, radii, typeScale } from "../../ui/tokens";
+import { colors, fixedChromeText, metrics, radii, typeScale } from "../../ui/tokens";
 import { useAnimationsAllowed } from "../../ui/useAnimationsAllowed";
 import { createExpoFiles } from "./files";
 import { createExpoHaptics } from "./haptics";
@@ -148,9 +148,9 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
           <BackIcon color={colors.chromeInkStrong} />
         </Pressable>
         {agent ? <AgentMark adapterId={agent.adapterId} animate={animateAgentState} ring={colors.chromeRaised} state={markState(agent)} surface={colors.chromeBg} /> : null}
-        <Text accessibilityLabel={agent ? `${title}, ${agentStateLabel(agent)}` : title} accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
+        <Text {...fixedChromeText} accessibilityLabel={agent ? `${title}, ${agentStateLabel(agent)}` : title} accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
         <Pressable accessibilityLabel="End session" accessibilityRole="button" onPress={() => setConfirmEnd(true)} style={styles.endButton}>
-          <Text style={styles.endLabel}>End</Text>
+          <Text {...fixedChromeText} numberOfLines={1} style={styles.endLabel}>End</Text>
         </Pressable>
       </View>
 
@@ -170,7 +170,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
       <View style={[styles.pane, bigPane && { height: bigPaneHeight(windowHeight, insets.top, insets.bottom, metrics.terminalHeaderHeight) }]}>
         <View style={styles.paneControls}>
           <View style={styles.speedGroup}>
-            <Text style={styles.speedCaption}>Speed</Text>
+            <Text {...fixedChromeText} numberOfLines={1} style={styles.speedCaption}>Speed</Text>
             <SpeedPicker onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
           </View>
           <Pressable
@@ -181,7 +181,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
             onPress={() => prefsStore.getState().setVoiceBigPane(!bigPane)}
             style={({ pressed }) => [styles.paneToggle, pressed && styles.pressed]}
           >
-            <Text style={styles.paneToggleLabel}>{bigPane ? "Smaller" : "Bigger"}</Text>
+            <Text {...fixedChromeText} numberOfLines={1} style={styles.paneToggleLabel}>{bigPane ? "Smaller" : "Bigger"}</Text>
           </Pressable>
         </View>
         <MicButton
@@ -249,7 +249,7 @@ const styles = StyleSheet.create({
   },
   /** 48 dp touch targets, matching the Terminal header. */
   iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
-  title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
+  title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600", minWidth: 0 },
   endButton: { alignItems: "center", height: 48, justifyContent: "center", paddingHorizontal: 12 },
   endLabel: { color: colors.dangerInk, fontSize: typeScale.body, fontWeight: "600" },
   list: { flex: 1 },
