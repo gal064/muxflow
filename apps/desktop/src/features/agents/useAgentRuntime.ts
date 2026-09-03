@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentClient } from "./api";
 import { compareAgentGenerations, generationIsAfter, zeroGeneration } from "./generation";
 import { emitNativeAgentNotification, decideAgentNotification } from "./notifications";
@@ -53,15 +53,23 @@ interface SnapshotRequest {
 }
 
 export function useAgentRuntime(options: AgentRuntimeOptions) {
-  const [state, dispatch] = useReducer(agentReducer, initialAgentState);
+  const [state, setState] = useState(initialAgentState);
   const [topologyAuthorities, setTopologyAuthorities] = useState<Readonly<Record<string, AgentTopologyAuthority>>>({});
   const stateRef = useRef(state);
-  stateRef.current = state;
-  // `accept` reduces against the ref before React renders, so every dispatch
-  // has to move the ref too or a live event lands on a slice already gone.
+  // The wire stream can deliver several events before React renders. Reduce
+  // once against the authoritative synchronous ref, then commit that exact
+  // state. Only this path writes the ref: a render React later discards must
+  // not roll it back to the older state that render began with. Asking a
+  // React reducer to repeat the action made every multi-host event rebuild its
+  // host slice a second time (and `accept` had already done a third reduction
+  // to inspect the transition).
   const apply = useCallback((action: AgentAction) => {
-    stateRef.current = agentReducer(stateRef.current, action);
-    dispatch(action);
+    const previousState = stateRef.current;
+    const nextState = agentReducer(previousState, action);
+    if (nextState === previousState) return undefined;
+    stateRef.current = nextState;
+    setState(nextState);
+    return { previousState, nextState };
   }, []);
   const optionsRef = useRef(options);
   optionsRef.current = options;
@@ -106,10 +114,9 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     // A straggler from a bridge that is being torn down must not resurrect
     // the slice the request effect just dropped.
     if (!optionsRef.current.shownHostIds.includes(hostProfileId)) return;
-    const previousState = stateRef.current;
-    const nextState = agentReducer(previousState, { type: "wire", event });
-    if (nextState === previousState) return;
-    apply({ type: "wire", event });
+    const applied = apply({ type: "wire", event });
+    if (!applied) return;
+    const { previousState, nextState } = applied;
     const previousHost = previousState.byHost[hostProfileId];
     const nextHost = nextState.byHost[hostProfileId];
     if (event.kind === "snapshot") {
