@@ -23,6 +23,7 @@ import { createExpoPlayer } from "./player";
 import { createExpoRecorder } from "./recorder";
 import { ReplyPlayer } from "./ReplyPlayer";
 import { SpeedPicker } from "./SpeedPicker";
+import { createExpoTones } from "./tones";
 import type { VoiceController } from "./VoiceController";
 import { useVoice } from "./voiceHooks";
 import { voiceRegistry } from "./voiceRegistry";
@@ -38,9 +39,9 @@ export interface VoiceScreenProps {
 
 // The one recorder, player, file and haptics adapter for the app, created when
 // the first Voice screen renders (§2c: nothing audio-related loads before that).
-let audio: { recorder: ReturnType<typeof createExpoRecorder>; player: ReturnType<typeof createExpoPlayer>; files: ReturnType<typeof createExpoFiles>; haptics: ReturnType<typeof createExpoHaptics> } | undefined;
+let audio: { recorder: ReturnType<typeof createExpoRecorder>; player: ReturnType<typeof createExpoPlayer>; files: ReturnType<typeof createExpoFiles>; haptics: ReturnType<typeof createExpoHaptics>; tones: ReturnType<typeof createExpoTones> } | undefined;
 function sharedAudio() {
-  audio ??= { recorder: createExpoRecorder(), player: createExpoPlayer(), files: createExpoFiles(), haptics: createExpoHaptics() };
+  audio ??= { recorder: createExpoRecorder(), player: createExpoPlayer(), files: createExpoFiles(), haptics: createExpoHaptics(), tones: createExpoTones() };
   return audio;
 }
 
