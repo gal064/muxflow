@@ -22,11 +22,11 @@ import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 import { settleWithin } from "./timeBound";
 import { recordPerfCounter } from "../../perf/probe";
 import { recordIncident } from "../../diagnostics/incidents";
-import { isTerminalFileLinkActivation, terminalFileLinkCellRange, terminalFileLinks } from "./terminalFilePaths";
+import { isTerminalFileLinkActivation } from "./terminalFilePaths";
 import type { Platform } from "../../commands/registry";
 import { installOsc52ClipboardWrite } from "./osc52Clipboard";
 import { captureTerminalSelection, type TerminalSelectionSnapshot } from "./terminalSelection";
-import { terminalWebLinks } from "./terminalWebLinks";
+import { terminalLinksForBufferLine } from "./terminalLinks";
 import {
   captureTerminalViewport,
   resizeTerminalPreservingViewport,
@@ -1252,43 +1252,30 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   #linksForLine(bufferLineNumber: number): ILink[] | undefined {
-    const bufferLine = this.#terminal.buffer.active.getLine(bufferLineNumber - 1);
-    const line = bufferLine?.translateToString(true);
-    if (!line || !bufferLine) return undefined;
     const links: ILink[] = [];
-    for (const link of terminalWebLinks(line)) {
-      links.push({
-        text: link.text,
-        range: {
-          start: { x: link.start + 1, y: bufferLineNumber },
-          // xterm's range is inclusive at both ends; one past the text
-          // would make the cell after the URL a live link.
-          end: { x: link.end, y: bufferLineNumber },
-        },
-        activate: (event) => this.#activateLink(event, link.text),
-      });
-    }
-    if (this.#options.onOpenFilePath) {
-      for (const link of terminalFileLinks(line)) {
-        const cells = terminalFileLinkCellRange(bufferLine, link.start, link.end);
-        if (!cells) continue;
-        // A URL provider has already claimed this range. File-path recognition
-        // deliberately excludes schemes, but keep the ownership explicit if
-        // that vocabulary changes later.
-        if (links.some((existing) => existing.range.start.x - 1 === cells.start)) continue;
+    for (const link of terminalLinksForBufferLine(
+      this.#terminal.buffer.active,
+      this.#terminal.cols,
+      bufferLineNumber,
+    )) {
+      if (link.kind === "web") {
         links.push({
           text: link.text,
-          range: {
-            start: { x: cells.start + 1, y: bufferLineNumber },
-            end: { x: cells.end + 1, y: bufferLineNumber },
-          },
-          activate: (event) => {
-            if (isTerminalFileLinkActivation(event, this.#options.platform ?? "linux")) {
-              this.#options.onOpenFilePath?.(link.text);
-            }
-          },
+          range: link.range,
+          activate: (event) => this.#activateLink(event, link.text),
         });
+        continue;
       }
+      if (!this.#options.onOpenFilePath) continue;
+      links.push({
+        text: link.text,
+        range: link.range,
+        activate: (event) => {
+          if (isTerminalFileLinkActivation(event, this.#options.platform ?? "linux")) {
+            this.#options.onOpenFilePath?.(link.text);
+          }
+        },
+      });
     }
     return links.length ? links : undefined;
   }
