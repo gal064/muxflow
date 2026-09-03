@@ -15,8 +15,7 @@ import { StatusPill } from "../../ui/components/StatusPill";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
 import type { FromPageMessage } from "./bridgeMessages";
-import { CR, KEY_CHIPS } from "./chips";
-import { utf8Encode } from "./bytes";
+import { KEY_CHIPS } from "./chips";
 import { TerminalController, type TerminalSnapshot } from "./TerminalController";
 import { terminalRegistry } from "./terminalRegistry";
 import { TerminalWebView, type TerminalWebViewHandle } from "./TerminalWebView";
@@ -81,20 +80,23 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
     controller.current?.onPageMessage(message);
   }, []);
 
+  const toastError = (error: unknown) => toast(error instanceof Error ? error.message : String(error));
+
   const send = useCallback((bytes: Uint8Array) => {
     const instance = controller.current;
     if (!instance) return;
-    instance.sendInput(bytes).catch((error: unknown) => toast(error instanceof Error ? error.message : String(error)));
+    instance.sendInput(bytes).catch(toastError);
   }, []);
 
+  // Clear the field before the submit round trip so a second Send cannot
+  // resend the same text; the controller pastes the body, then sends the CR.
   const sendText = useCallback(() => {
-    const body = utf8Encode(text);
-    const bytes = new Uint8Array(body.length + 1);
-    bytes.set(body);
-    bytes[body.length] = CR[0]!;
-    send(bytes);
+    const instance = controller.current;
+    if (!instance) return;
+    const body = text;
     setText("");
-  }, [send, text]);
+    instance.submitText(body).catch(toastError);
+  }, [text]);
 
   useEffect(() => {
     if (snapshot.lastError) toast(snapshot.lastError);

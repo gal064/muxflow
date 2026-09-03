@@ -80,8 +80,18 @@ export function requestTerminalHistory(paneId: string, lines: number, skip: numb
   });
 }
 
-export function terminalInput(paneId: string, data: Uint8Array): Request {
-  return create(RequestSchema, { operation: Operation.TERMINAL_INPUT, scope: paneId, data });
+/**
+ * `paste` delivers the bytes through tmux's paste path, which brackets them
+ * iff the pane's application asked for bracketed paste, and is never
+ * coalesced with the input around it; the default is keystrokes.
+ */
+export function terminalInput(paneId: string, data: Uint8Array, options: { paste?: boolean } = {}): Request {
+  return create(RequestSchema, {
+    operation: Operation.TERMINAL_INPUT,
+    scope: paneId,
+    data,
+    terminalInputPaste: options.paste === true,
+  });
 }
 
 export function agentSnapshot(expectedServerIdentity: string): Request {
