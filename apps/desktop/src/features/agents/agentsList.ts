@@ -8,15 +8,17 @@ import type { AgentDisplayState, AgentRecord } from "./types";
  * `workspace` follows the workspace list above it, so the two halves of the
  * sidebar read as one thing. `status` is the visual queue: blocked, working,
  * recent, then older idle. Rows inside each state follow their
- * last real lifecycle transition rather than every hook update.
+ * last real lifecycle transition rather than every hook update. `pinned` is
+ * the same queue split in two: everything pinned — by tab or by workspace —
+ * above everything that is not, with no status headings inside either half.
  *
- * The two modes were called `grouped` and `priority`, which named neither the
- * thing sorted nor — in `grouped`'s case — what it does, since neither mode
- * has ever drawn a group heading. The orders themselves did not change; the
- * button now says what each one is. Persisted values from before the rename
- * migrate in `features/shell/types.ts`.
+ * The first two modes were called `grouped` and `priority`, which named
+ * neither the thing sorted nor — in `grouped`'s case — what it does, since
+ * neither mode drew a group heading then. The orders themselves did not
+ * change; the button now says what each one is. Persisted values from before
+ * the rename migrate in `features/shell/types.ts`.
  */
-export type AgentSortMode = "status" | "workspace";
+export type AgentSortMode = "status" | "workspace" | "pinned";
 
 /** How long an acknowledged completed agent stays near the active work. */
 export const RECENT_IDLE_WINDOW_MILLIS = 4 * 60 * 60 * 1_000;
@@ -24,11 +26,14 @@ export const RECENT_IDLE_WINDOW_MILLIS = 4 * 60 * 60 * 1_000;
 export type AgentPriorityBucket = "blocked" | "working" | "recent" | "idle";
 
 export function isAgentSortMode(value: unknown): value is AgentSortMode {
-  return value === "status" || value === "workspace";
+  return value === "status" || value === "workspace" || value === "pinned";
 }
 
+/** The toggle's cycle: status → workspace → pinned → status. */
 export function nextSortMode(mode: AgentSortMode): AgentSortMode {
-  return mode === "workspace" ? "status" : "workspace";
+  if (mode === "status") return "workspace";
+  if (mode === "workspace") return "pinned";
+  return "status";
 }
 
 /**
@@ -41,7 +46,7 @@ export function nextSortMode(mode: AgentSortMode): AgentSortMode {
  * That is a priority, so the button says priority.
  */
 export function sortModeLabel(mode: AgentSortMode): string {
-  return mode === "status" ? "priority" : "workspace";
+  return mode === "status" ? "priority" : mode;
 }
 
 /** Where a row sits in the workspace list and in its workspace's tab strip. */
@@ -141,6 +146,35 @@ export interface AgentStatusGroup {
 }
 
 /**
+ * Whether the row counts as pinned for the pinned ordering: its own tab pin,
+ * or its workspace's. `row.pinned` alone is the tab pin, which is what the
+ * status ordering ranks inside a bucket; a pinned workspace's agents already
+ * lead the workspace ordering through `workspaceOrder`, so this is the one
+ * place both pins have to be read together.
+ */
+export function isPinnedRow(row: AgentListRow): boolean {
+  return row.pinned || Boolean(row.location.workspacePinned);
+}
+
+export interface AgentPinGroup {
+  key: "pinned" | "unpinned";
+  label: "Pinned" | "Unpinned";
+  rows: AgentListRow[];
+}
+
+/**
+ * Splits an already pin-ordered list under the sidebar's two dividers without
+ * re-sorting its rows. An empty half is absent, not an empty heading.
+ */
+export function groupAgentRowsByPin(rows: readonly AgentListRow[]): AgentPinGroup[] {
+  const groups: AgentPinGroup[] = [
+    { key: "pinned", label: "Pinned", rows: rows.filter(isPinnedRow) },
+    { key: "unpinned", label: "Unpinned", rows: rows.filter((row) => !isPinnedRow(row)) },
+  ];
+  return groups.filter((group) => group.rows.length > 0);
+}
+
+/**
  * Buckets an already status-ordered list without re-sorting its rows.
  *
  * `buildAgentRows` assigns the bucket once and sorts with the same bucket
@@ -185,7 +219,12 @@ export function buildAgentRows(
       pinned: Boolean(location.tabPinned),
     };
   });
-  return rows.sort(mode === "status" ? byStatus : byWorkspace);
+  return rows.sort(mode === "status" ? byStatus : mode === "pinned" ? byPin : byWorkspace);
+}
+
+/** Pinned rows first, then the status queue inside each half. */
+function byPin(left: AgentListRow, right: AgentListRow): number {
+  return Number(isPinnedRow(right)) - Number(isPinnedRow(left)) || byStatus(left, right);
 }
 
 function byStatus(left: AgentListRow, right: AgentListRow): number {

@@ -23,6 +23,7 @@ pub(crate) async fn handle_request(
         bulk_connection,
         bulk_available,
         connection_epoch,
+        connection_id,
         closed,
     } = context;
     let control_tx = &control_tx;
@@ -114,6 +115,21 @@ pub(crate) async fn handle_request(
                 generation,
                 topology_baseline,
                 &cancellation,
+            )
+            .await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
+        (Handler::Voice, Some(operation)) => {
+            super::voice_dispatch::handle(
+                request_id,
+                operation,
+                request,
+                control_tx,
+                connection_id,
+                &cancellation,
+                &closed,
             )
             .await;
             pending.lock().unwrap().remove(&request_id);
@@ -272,10 +288,16 @@ pub(crate) async fn handle_request(
             // could be served while it was. The commit point callers actually
             // depend on is the input barrier that every tmux action and resize
             // already takes before it runs.
-            let result = terminal
-                .lock()
-                .unwrap()
-                .send_input(&request.scope, &request.data);
+            let delivery = if request.terminal_input_paste {
+                super::super::terminal::InputDelivery::Paste
+            } else {
+                super::super::terminal::InputDelivery::Keys
+            };
+            let result =
+                terminal
+                    .lock()
+                    .unwrap()
+                    .send_input(&request.scope, &request.data, delivery);
             // A malformed scope has no pane to recover, and an unscoped
             // resnapshot event would escalate to a whole-connection reconnect.
             if let Err(error) = &result

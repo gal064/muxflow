@@ -237,65 +237,54 @@ fn install(connection: &SshControl, options: &Options) -> anyhow::Result<()> {
         .rsplit_once('/')
         .map(|(parent, _)| parent)
         .context("remote helper path has no parent")?;
-    connection.command(&format!(
-        "set -eu; install -d -m 0700 {parent}; umask 077; : > {partial}"
-    ))?;
-    if let Err(error) = connection.upload_independent(artifact, &partial) {
-        let _ = connection.command(&format!("rm -f {partial}"));
-        return Err(error);
-    }
-    let remote_digest =
-        String::from_utf8(connection.command(&format!("sha256sum {partial} | cut -d' ' -f1"))?)?
-            .trim()
-            .to_owned();
-    if remote_digest != expected_digest {
-        let _ = connection.command(&format!("rm -f {partial}"));
-        bail!("uploaded helper digest mismatch; existing helper was not replaced");
-    }
-    let metadata = String::from_utf8(
-        connection.command(&format!("chmod 0700 {partial}; {partial} version"))?,
-    )?;
-    let value: serde_json::Value = serde_json::from_str(metadata.trim())
-        .context("uploaded helper failed version verification")?;
-    if value.get("architecture").and_then(|value| value.as_str()) != Some(artifact_arch) {
-        let _ = connection.command(&format!("rm -f {partial}"));
-        bail!("uploaded helper reported unexpected architecture");
-    }
-    // Uploads happen outside the critical section: they are private UUID paths
-    // and cannot affect the installed helper. Serialize the fresh direction
-    // check and replacement so two desktops cannot both approve an old helper,
-    // then let the older one overwrite what the newer one just installed.
-    let _install_lock = match RemoteInstallLock::acquire(connection, &final_path) {
-        Ok(lock) => lock,
-        Err(error) => {
-            let _ = connection.command(&format!("rm -f {partial}"));
-            return Err(error);
+    let staged = (|| {
+        connection.command(&format!(
+            "set -eu; install -d -m 0700 {parent}; umask 077; : > {partial}"
+        ))?;
+        connection.upload_independent(artifact, &partial)?;
+        let remote_digest = String::from_utf8(
+            connection.command(&format!("sha256sum {partial} | cut -d' ' -f1"))?,
+        )?
+        .trim()
+        .to_owned();
+        if remote_digest != expected_digest {
+            bail!("uploaded helper digest mismatch; existing helper was not replaced");
         }
-    };
-    let current = match probe(connection, &options.remote_path) {
-        Ok(current) => current,
-        Err(error) => {
-            let _ = connection.command(&format!("rm -f {partial}"));
-            return Err(error);
+        let metadata = String::from_utf8(
+            connection.command(&format!("chmod 0700 {partial}; {partial} version"))?,
+        )?;
+        let value: serde_json::Value = serde_json::from_str(metadata.trim())
+            .context("uploaded helper failed version verification")?;
+        if value.get("architecture").and_then(|value| value.as_str()) != Some(artifact_arch) {
+            bail!("uploaded helper reported unexpected architecture");
         }
-    };
-    if current.installed
-        && helper_is_newer(
-            current.helper_version.as_deref(),
-            options.expected_version.as_deref(),
-        )
-    {
+        // Uploads happen outside the critical section: they are private UUID paths
+        // and cannot affect the installed helper. Serialize the fresh direction
+        // check and replacement so two desktops cannot both approve an old helper,
+        // then let the older one overwrite what the newer one just installed.
+        let install_lock = RemoteInstallLock::acquire(connection, &final_path)?;
+        let current = probe(connection, &options.remote_path)?;
+        if current.installed
+            && helper_is_newer(
+                current.helper_version.as_deref(),
+                options.expected_version.as_deref(),
+            )
+        {
+            bail!(
+                "remote helper {} is newer than this app expects {}; refusing downgrade",
+                current.helper_version.as_deref().unwrap_or("unknown"),
+                options.expected_version.as_deref().unwrap_or("unknown"),
+            );
+        }
+        let backup = format!("{final_path}.{}.previous", Uuid::new_v4());
+        connection.command(&format!(
+            "set -eu; chmod 0755 {partial}; if [ -e {final_path} ]; then cp -p {final_path} {backup}; fi; mv -f {partial} {final_path}"
+        ))?;
+        Ok((install_lock, backup))
+    })();
+    let (_install_lock, backup) = cleanup_remote_partial_on_error(staged, || {
         let _ = connection.command(&format!("rm -f {partial}"));
-        bail!(
-            "remote helper {} is newer than this app expects {}; refusing downgrade",
-            current.helper_version.as_deref().unwrap_or("unknown"),
-            options.expected_version.as_deref().unwrap_or("unknown"),
-        );
-    }
-    let backup = format!("{final_path}.{}.previous", Uuid::new_v4());
-    connection.command(&format!(
-        "set -eu; chmod 0755 {partial}; if [ -e {final_path} ]; then cp -p {final_path} {backup}; fi; mv -f {partial} {final_path}"
-    ))?;
+    })?;
     if let Err(error) =
         restart_remote_daemon(connection, &final_path, options.test_fail_after_shutdown)
     {
@@ -317,6 +306,19 @@ fn install(connection: &SshControl, options: &Options) -> anyhow::Result<()> {
         options.remote_path
     );
     Ok(())
+}
+
+/// Runs cleanup for every error while an upload is still owned by its private
+/// staging path. Once the caller returns success, the partial has been moved to
+/// its final path and must no longer be removed by this transaction.
+fn cleanup_remote_partial_on_error<T>(
+    result: anyhow::Result<T>,
+    cleanup: impl FnOnce(),
+) -> anyhow::Result<T> {
+    if result.is_err() {
+        cleanup();
+    }
+    result
 }
 
 struct RemoteInstallLock<'a> {
@@ -753,9 +755,31 @@ fn helper_is_newer(installed: Option<&str>, expected: Option<&str>) -> bool {
 mod tests {
     use super::*;
     use std::{
+        cell::Cell,
         os::unix::{fs::PermissionsExt, net::UnixListener},
         sync::mpsc,
     };
+
+    #[test]
+    fn remote_partial_cleanup_runs_only_when_staging_fails() {
+        let cleaned = Cell::new(false);
+        let failure = cleanup_remote_partial_on_error::<()>(
+            Err(anyhow::anyhow!(
+                "uploaded helper failed version verification"
+            )),
+            || cleaned.set(true),
+        );
+        assert!(failure.is_err());
+        assert!(cleaned.get(), "a failed staging transaction must clean up");
+
+        cleaned.set(false);
+        let success = cleanup_remote_partial_on_error(Ok(7), || cleaned.set(true));
+        assert_eq!(success.unwrap(), 7);
+        assert!(
+            !cleaned.get(),
+            "a published helper must not be removed as a partial"
+        );
+    }
 
     #[test]
     fn rejects_unsafe_targets_and_paths() {

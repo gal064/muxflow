@@ -155,6 +155,21 @@ enum Operation {
   // scrolling to the top of a pane, so it is not part of the output stream:
   // the answer is one TERMINAL_HISTORY event and it moves no generation.
   OPERATION_REQUEST_TERMINAL_HISTORY = 48;
+  // Voice mode (docs/mobile/voice-mode-plan.md). All five ride the control
+  // lane with `Request.voice` / `Response.voice`; the mobile app is the only
+  // caller today.
+  // Readiness probe; never spawns anything. `warm` may pre-load the sidecar.
+  OPERATION_VOICE_STATUS = 49;
+  // Consent-gated ~640 MB model download; progress arrives by VOICE_PROVISION
+  // events, and the response is the READY status.
+  OPERATION_VOICE_PROVISION = 50;
+  // Audio bytes -> one-line transcript. The phone types it into the pane.
+  OPERATION_VOICE_TRANSCRIBE = 51;
+  // Text -> mp3 bytes (replay, or arbitrary text).
+  OPERATION_VOICE_SPEAK = 52;
+  // Register or clear the agent whose replies this connection wants pushed as
+  // VOICE_REPLY events.
+  OPERATION_VOICE_SESSION = 53;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -195,6 +210,16 @@ message Request {
   // seed includes every row that has scrolled off since — rows the renderer
   // has, and would be given a second copy of. Read by no other operation.
   uint32 terminal_history_skip_lines = 18;
+  // TERMINAL_INPUT only: deliver `data` through tmux's paste path
+  // (`load-buffer` + `paste-buffer -p`) instead of as keys. tmux wraps the
+  // bytes in bracketed-paste markers iff the pane's application asked for
+  // them, so a composer that tells pasted text from typed text sees a paste,
+  // and a plain shell sees the bytes. A paste is never coalesced with the
+  // input queued around it: a CR sent as keys after it arrives as its own
+  // keystroke, which is what makes it submit rather than insert a newline.
+  bool terminal_input_paste = 19;
+  // Every OPERATION_VOICE_* payload. NEXT FREE FIELD = 21.
+  VoiceRequest voice = 20;
 }
 
 message Response {
@@ -210,6 +235,9 @@ message Response {
   PublicationOutcome publication_outcome = 10;
   bool cleanup_failed = 11;
   HookIngestDisposition hook_ingest_disposition = 12;
+  // Set on every OPERATION_VOICE_* answer, error responses included: Response
+  // has no retryable flag, so VoiceResponse carries one.
+  VoiceResponse voice = 13;
 }
 
 enum HookIngestDisposition {
@@ -268,6 +296,12 @@ enum EventKind {
   // generation, replaces no screen, and repairs no seed debt — the renderer
   // splices it above what it is already showing, or discards it.
   EVENT_KIND_TERMINAL_HISTORY = 19;
+  // One progress tick of an OPERATION_VOICE_PROVISION download, in
+  // `voice.provision`, scoped "voice", to every subscribed connection.
+  EVENT_KIND_VOICE_PROVISION = 20;
+  // A spoken agent reply, in `voice.reply`, pushed only to the connection that
+  // registered a VOICE_SESSION for that agent. Nothing is kept on the host.
+  EVENT_KIND_VOICE_REPLY = 21;
 }
 
 message HostEvent {
@@ -288,6 +322,8 @@ message HostEvent {
   // server; the desktop closes its reconciliation state and keeps the
   // entities it already holds. Zero on every other event.
   uint64 topology_generation = 12;
+  // VOICE_PROVISION and VOICE_REPLY payloads; unset on every other event.
+  VoiceEvent voice = 13;
 }
 
 message Cancel {
@@ -1128,6 +1164,122 @@ message AgentEvent {
   bool notify = 3;
   string reason = 4;
   repeated string retired_agent_ids = 5;
+}
+
+// Voice mode: speech-to-text and text-to-speech run on the host (a Python
+// sidecar the host spawns with uv); the phone only records and plays. Audio
+// crosses the wire as one payload, never chunked. See
+// docs/mobile/voice-mode-plan.md.
+enum VoiceProvider {
+  VOICE_PROVIDER_UNSPECIFIED = 0;
+  // Microsoft Edge TTS, the only provider in v1. The field exists so a keyed
+  // provider (ElevenLabs) can be added later without protocol churn.
+  VOICE_PROVIDER_EDGE_TTS = 1;
+}
+
+enum VoiceReadiness {
+  VOICE_READINESS_UNSPECIFIED = 0;
+  // uv is not on the host; VoiceStatus.detail carries the install hint.
+  VOICE_READINESS_UV_MISSING = 1;
+  // uv found; the model must be provisioned before anything else works.
+  VOICE_READINESS_MODEL_MISSING = 2;
+  // A provision is running; VoiceStatus.provision carries its progress.
+  VOICE_READINESS_PROVISIONING = 3;
+  VOICE_READINESS_READY = 4;
+}
+
+message VoiceRequest {
+  // Client correlation, echoed back in VoiceResponse.operation_id.
+  string operation_id = 1;
+  // TRANSCRIBE: the recorded utterance.
+  bytes audio = 2;
+  // TRANSCRIBE: audio/mp4 (expo-audio); also audio/x-m4a, audio/aac.
+  string audio_mime = 3;
+  // TRANSCRIBE: BCP-47, validated and passed through (parakeet v3 auto-detects).
+  string language_hint = 4;
+  // SPEAK: text to synthesize (replay, or arbitrary text).
+  string text = 5;
+  // SESSION: agent whose replies this connection wants spoken; "" clears.
+  string agent_id = 6;
+  reserved 7;
+  // SPEAK: unspecified means EDGE_TTS.
+  VoiceProvider provider = 8;
+  // SPEAK: validated voice identifier; "" means the host default
+  // ("en-US-AvaNeural").
+  string voice = 9;
+  // PROVISION: consent to the download; refused without it.
+  bool confirmed = 10;
+  // STATUS: if READY, spawn and load the sidecar in a detached task.
+  bool warm = 11;
+}
+
+message VoiceProvisionProgress {
+  string operation_id = 1;
+  // installing_runtime | downloading | extracting | verifying | ready | failed
+  string phase = 2;
+  uint64 transferred_bytes = 3;
+  // 0 while unknown (uv's own install has no byte count).
+  uint64 total_bytes = 4;
+  string error = 5;
+}
+
+message VoiceStatus {
+  VoiceReadiness readiness = 1;
+  string uv_path = 2;
+  string model_dir = 3;
+  // For the consent copy (~640 MB).
+  uint64 model_download_bytes = 4;
+  // Install hint when UV_MISSING; the last sidecar error otherwise.
+  string detail = 5;
+  // The model is currently hot.
+  bool sidecar_running = 6;
+  // Set while PROVISIONING so a reconnecting phone resumes the progress bar.
+  VoiceProvisionProgress provision = 7;
+}
+
+message VoiceTranscript {
+  // One line: every control character mapped to a space, runs collapsed.
+  // Empty when nothing was recognized; that is not an error.
+  string text = 1;
+  uint32 audio_millis = 2;
+  uint32 decode_millis = 3;
+}
+
+message VoiceSpeech {
+  // audio/mpeg; empty when synthesis failed and only `text` could be pushed.
+  bytes audio = 1;
+  string audio_mime = 2;
+  // Exactly what was synthesized (after markdown strip and cap).
+  string text = 3;
+  bool truncated = 4;
+  string voice = 5;
+  VoiceProvider provider = 6;
+  // VOICE_REPLY: the agent whose turn ended; empty for a SPEAK answer.
+  string agent_id = 7;
+  // VOICE_REPLY: the AgentRecord.state_generation the reply belongs to.
+  uint64 state_generation = 8;
+  int64 reply_at_unix_millis = 9;
+}
+
+message VoiceResponse {
+  string operation_id = 1;
+  // STATUS / PROVISION.
+  VoiceStatus status = 2;
+  // TRANSCRIBE.
+  VoiceTranscript transcript = 3;
+  // SPEAK.
+  VoiceSpeech speech = 4;
+  // Set on error responses; Response itself has no retryable flag.
+  bool retryable = 5;
+}
+
+message VoiceEvent {
+  // EVENT_KIND_VOICE_PROVISION.
+  VoiceProvisionProgress provision = 1;
+  // Readiness at the time of the event, when the host has it to hand.
+  VoiceStatus status = 2;
+  // EVENT_KIND_VOICE_REPLY.
+  VoiceSpeech reply = 3;
 }
 
 message Error {

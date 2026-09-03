@@ -1,0 +1,32 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'dev.muxflow.ssh'
+version = '0.1.0'
+
+android {
+  namespace "dev.muxflow.ssh"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+
+  // Versions per design doc §5. sshj 0.40.0 implements ed25519 through Bouncy Castle
+  // (net.schmizz.sshj.common.Ed25519KeyFactory), so the net.i2p.crypto:eddsa dependency the design
+  // doc lists is no longer part of this release and is deliberately not added.
+  implementation 'com.hierynomus:sshj:0.40.0'
+  implementation 'org.bouncycastle:bcprov-jdk18on:1.80'
+  implementation 'org.bouncycastle:bcpkix-jdk18on:1.80'
+
+  // sshj logs through SLF4J 2.x; without a binding every SSH diagnostic is silently dropped.
+  implementation 'uk.uuid.slf4j:slf4j-android:2.0.17-0'
+
+  // EncryptedSharedPreferences for the private key (design doc §6.2, §14).
+  implementation 'androidx.security:security-crypto:1.1.0'
+}
