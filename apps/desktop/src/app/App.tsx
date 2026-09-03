@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { PendingTextPrompt } from "../commands/TextInputDialog";
+import {
+  defaultNewWorkspaceHostId, type NewWorkspaceHostOption,
+} from "../commands/NewWorkspaceDialog";
 import { ConfirmationDialog } from "../commands/ConfirmationDialog";
 import type { PendingTmuxConfirmation } from "../commands/destructiveConfirmation";
 import {
@@ -283,6 +286,12 @@ export function App() {
   const [shortcutEditorOpen, setShortcutEditorOpen] = useState(false);
   const [confirmation, setConfirmation] = useState<PendingTmuxConfirmation>();
   const [textPrompt, setTextPrompt] = useState<PendingTextPrompt>();
+  const [newWorkspaceDialog, setNewWorkspaceDialog] = useState<{ selectedHostProfileId: string }>();
+  const [pendingWorkspaceCreate, setPendingWorkspaceCreate] = useState<{
+    hostProfileId: string;
+    name: string;
+    scope: HostScopeToken;
+  }>();
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
   const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
@@ -668,6 +677,10 @@ export function App() {
     }
     return hosts;
   }, [connection, currentHostProfileId, hostScopes, hostState.canMutate, hostState.phase, latency?.milliseconds, links, profiles]);
+  const newWorkspaceHosts = useMemo<NewWorkspaceHostOption[]>(() => sidebarHosts
+    .filter((host) => host.shown)
+    .map(({ profileId, label, letter, phase, canMutate }) => ({ profileId, label, letter, phase, canMutate })), [sidebarHosts]);
+  const canCreateWorkspace = newWorkspaceHosts.some((host) => host.canMutate);
   // Every workspace on every shown host, pinned first. ⌘P reads this whole;
   // the sidebar, ⌘1–9 and the agents list read the narrowed version below.
   const switcherRows = useMemo(() => mergeHostRows([...hostRows.values()]), [hostRows]);
@@ -1109,8 +1122,78 @@ export function App() {
     sendInput,
     setStatus,
   });
+  const requestNewWorkspace = useCallback(() => {
+    const selectedHostProfileId = defaultNewWorkspaceHostId(
+      newWorkspaceHosts,
+      appState.shell.newWorkspaceHostProfileId,
+      currentHostProfileId,
+    );
+    if (!selectedHostProfileId) {
+      setStatus("No shown host is available for workspace creation.");
+      return;
+    }
+    // Repair a removed or hidden remembered host as soon as the dialog has a
+    // real replacement to show. Merely navigating among workspaces never
+    // changes this preference; it belongs to this picker alone.
+    if (selectedHostProfileId !== appState.shell.newWorkspaceHostProfileId) {
+      setAppState((current) => ({
+        ...current,
+        shell: { ...current.shell, newWorkspaceHostProfileId: selectedHostProfileId },
+      }));
+    }
+    setNewWorkspaceDialog({ selectedHostProfileId });
+  }, [appState.shell.newWorkspaceHostProfileId, currentHostProfileId, newWorkspaceHosts, setAppState, setStatus]);
+  const selectNewWorkspaceHost = useCallback((profileId: string) => {
+    if (!newWorkspaceHosts.some((host) => host.profileId === profileId)) return;
+    setNewWorkspaceDialog((current) => current ? { selectedHostProfileId: profileId } : current);
+    // Selection is the preference, even if the user cancels the name prompt:
+    // reopening the dialog starts where they last deliberately put it.
+    setAppState((current) => current.shell.newWorkspaceHostProfileId === profileId ? current : ({
+      ...current,
+      shell: { ...current.shell, newWorkspaceHostProfileId: profileId },
+    }));
+  }, [newWorkspaceHosts, setAppState]);
+  const submitNewWorkspace = useCallback((name: string, profileId: string) => {
+    const target = newWorkspaceHosts.find((host) => host.profileId === profileId);
+    const scopedTarget = sidebarHosts.find((host) => host.profileId === profileId && host.shown);
+    if (!target?.canMutate || !scopedTarget?.canMutate) {
+      setStatus("This action is unavailable until the selected host's authoritative connection is live.");
+      return;
+    }
+    setNewWorkspaceDialog(undefined);
+    if (profileId === currentHostProfileId) {
+      if (!sameHostConnection(scopedTarget.scope, currentHostScope)) {
+        setStatus("Workspace creation was cancelled because its host connection changed.");
+        return;
+      }
+      createWorkspace(name);
+      return;
+    }
+    // `newWorkspaceHosts` is presentation-only and deliberately omits scope;
+    // capture the corresponding live sidebar host before moving the active
+    // pointer, then require that same connection after the switch.
+    setPendingWorkspaceCreate({ hostProfileId: profileId, name, scope: scopedTarget.scope });
+    activateHost(profileId);
+  }, [activateHost, createWorkspace, currentHostProfileId, currentHostScope, newWorkspaceHosts, setStatus, sidebarHosts]);
+  useEffect(() => {
+    const pending = pendingWorkspaceCreate;
+    if (!pending) return;
+    // Another activation won before this handoff committed. Never leave the
+    // request armed to fire on a later, unrelated visit to its host.
+    if (pending.hostProfileId !== currentHostProfileId) {
+      setPendingWorkspaceCreate(undefined);
+      setStatus("Workspace creation was cancelled because another host was selected.");
+      return;
+    }
+    setPendingWorkspaceCreate(undefined);
+    if (!sameHostConnection(pending.scope, currentHostScope) || !hostState.canMutate) {
+      setStatus("Workspace creation was cancelled because its host connection changed.");
+      return;
+    }
+    createWorkspace(pending.name);
+  }, [createWorkspace, currentHostProfileId, currentHostScope, hostState.canMutate, pendingWorkspaceCreate, setStatus]);
   const { commandContext, runCommand } = useShellCommands({
-    activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate,
+    activePane, activeSession, activeWindow, appState, canMutate: hostState.canMutate, canCreateWorkspace,
 
     closeAppTab: closeWorkspaceAppTab,
     combinedTabs, controllers, currentHostProfileId, deletableHostProfile: deletableProfile,
@@ -1122,8 +1205,7 @@ export function App() {
       if (!target) return setStatus("No agent is waiting on you.");
       selectAgentRow(target);
     },
-    performAction, requestHostProfileDelete: setHostDeleteConfirmation, rowCommands, selectedAppTab,
-    createSession: createWorkspace,
+    performAction, requestHostProfileDelete: setHostDeleteConfirmation, requestNewWorkspace, rowCommands, selectedAppTab,
     createWindow: (sessionId) => {
       notificationActivation.clearNotificationFocusGuard();
       shellNavigation.createWindow(sessionId);
@@ -1153,7 +1235,7 @@ export function App() {
   // close the tab behind it.
   const contextMenuOpen = useContextMenusOpen();
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
-    || Boolean(confirmation) || Boolean(textPrompt)
+    || Boolean(confirmation) || Boolean(textPrompt) || Boolean(newWorkspaceDialog)
     || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecovery.modalOpen
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
@@ -1376,7 +1458,7 @@ export function App() {
       canJump={canJump}
       canGoBack={focusNavigation.canGoBack}
       canGoForward={focusNavigation.canGoForward}
-      canMutate={hostState.canMutate}
+      canCreateWorkspace={canCreateWorkspace}
       onBack={() => void runCommand("focus.back")}
       onBell={() => void runCommand("agents.jumpUnread")}
       onForward={() => void runCommand("focus.forward")}
@@ -1748,6 +1830,7 @@ export function App() {
       confirmation={confirmation}
       helperState={helperState}
       hostDelete={hostDeleteConfirmation}
+      newWorkspace={newWorkspaceDialog ? { hosts: newWorkspaceHosts, selectedHostProfileId: newWorkspaceDialog.selectedHostProfileId } : undefined}
       onAppRecoveryDiscardCancel={appRecovery.cancelDiscard}
       onAppRecoveryDiscardConfirm={appRecovery.confirmDiscard}
       onAppStateResetCancel={() => setAppStateResetConfirmation(false)}
@@ -1780,6 +1863,9 @@ export function App() {
         setHostDeleteConfirmation(undefined);
         deleteSelectedProfile(profile);
       }}
+      onNewWorkspaceCancel={() => setNewWorkspaceDialog(undefined)}
+      onNewWorkspaceHost={selectNewWorkspaceHost}
+      onNewWorkspaceSubmit={submitNewWorkspace}
       onPaletteClose={() => setPaletteOpen(false)}
       onProfileResetCancel={() => setProfileResetConfirmation(false)}
       onProfileResetConfirm={() => {

@@ -51,6 +51,7 @@ interface ShellCommandOptions {
   activeWindow?: TmuxWindow;
   appState: PersistedAppState;
   canMutate: boolean;
+  canCreateWorkspace: boolean;
   closeAppTab(tab: AppOwnedTab, scope: HostScopeToken): void;
   combinedTabs: readonly CombinedTab[];
   /** The saved host Settings has picked, when it is one that can be deleted. */
@@ -73,7 +74,7 @@ interface ShellCommandOptions {
   /** Live subscription to what the row surfaces currently offer. */
   rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
-  createSession(name: string): void;
+  requestNewWorkspace(): void;
   createWindow(sessionId: string): void;
   serverIdentity?: string;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
@@ -325,12 +326,7 @@ export function useShellCommands(options: ShellCommandOptions): {
       case "tab.previous": options.selectRelativeTab(-1); return;
       case "tab.next": options.selectRelativeTab(1); return;
       case "session.new": {
-        const scope = options.hostScope;
-        options.setTextPrompt({ title: "New workspace", label: "Workspace name", submit: (name) => {
-          options.setTextPrompt(undefined);
-          if (!options.isHostScopeCurrent(scope)) return options.setStatus("Workspace creation was cancelled because its host scope changed.");
-          options.createSession(name);
-        } });
+        options.requestNewWorkspace();
         return;
       }
       case "session.rename": {
@@ -406,6 +402,7 @@ export function useShellCommands(options: ShellCommandOptions): {
 
   const commandContext: CommandContext = useMemo(() => ({
     canMutate: options.canMutate,
+    canCreateWorkspace: options.canCreateWorkspace,
     hasSession: Boolean(options.activeSession),
     hasWindow: Boolean(options.activeWindow && !options.selectedAppTab),
     hasPane: Boolean(options.activePane && !options.selectedAppTab),
