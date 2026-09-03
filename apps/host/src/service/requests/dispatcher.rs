@@ -272,10 +272,16 @@ pub(crate) async fn handle_request(
             // could be served while it was. The commit point callers actually
             // depend on is the input barrier that every tmux action and resize
             // already takes before it runs.
-            let result = terminal
-                .lock()
-                .unwrap()
-                .send_input(&request.scope, &request.data);
+            let delivery = if request.terminal_input_paste {
+                super::super::terminal::InputDelivery::Paste
+            } else {
+                super::super::terminal::InputDelivery::Keys
+            };
+            let result =
+                terminal
+                    .lock()
+                    .unwrap()
+                    .send_input(&request.scope, &request.data, delivery);
             // A malformed scope has no pane to recover, and an unscoped
             // resnapshot event would escalate to a whole-connection reconnect.
             if let Err(error) = &result

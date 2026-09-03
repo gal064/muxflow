@@ -5,6 +5,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { liveHostAvailability, startHostHarness, type HostHarness } from "../../../scripts/host-harness";
 import { HostConnection } from "../../protocol/HostConnection";
+import { terminalInput } from "../../protocol/requests";
 import { createSessionStore } from "../../store/sessionStore";
 import type { ToPageMessage } from "./bridgeMessages";
 import { createTerminalWindow } from "./createWindow";
@@ -89,12 +90,12 @@ describe.skipIf(!availability.available)(`live terminal (${availability.reason ?
     await waitFor("resize applied", () => (harness.tmux(["display-message", "-p", "-t", created.paneId, "#{pane_height}"]) === "18" ? true : undefined));
     say("size 46x18 (keyboard) → RESIZE_TERMINAL → pane_height=18");
 
-    // Input bar: text + CR, then a chip.
+    // Input bar Send: the text as a paste, then a CR as keys; then a chip.
     const before = page.length;
-    const text = utf8Encode("echo phone-$((40+3))");
-    await controller.sendInput(Uint8Array.from([...text, 0x0d]));
-    await waitFor("`phone-43` echoed", () => (pageText(page, before).includes("phone-43") ? true : undefined));
-    say("input bar `echo phone-$((40+3))` + Enter → output contained phone-43");
+    await controller.submitText("echo phone-$((40+5))");
+    await waitFor("`phone-45` echoed", () => (pageText(page, before).includes("phone-45") ? true : undefined));
+    expect(pageText(page, before)).not.toContain("\x1b[200~");
+    say("Send `echo phone-$((40+5))` → paste + CR → output contained phone-45, no paste markers");
     const ctrlC = KEY_CHIPS.find((c) => c.label === "Ctrl-C")!;
     await controller.sendInput(ctrlC.bytes);
     await waitFor("^C prompt", () => (pageText(page, before).includes("^C") ? true : undefined), 5_000).catch(() => undefined);
@@ -132,5 +133,18 @@ describe.skipIf(!availability.available)(`live terminal (${availability.reason ?
     say(`reveal → reseed ${pageText(page2).length} chars, contains hidden-44`);
     await again.stop();
     expect(store.getState().connection.state).toBe("connected");
+
+    // A pane whose application asked for bracketed paste sees the markers.
+    const catPane = harness.tmux(["new-window", "-d", "-t", sessionId, "-P", "-F", "#{pane_id}", "sh -c \"printf '\\033[?2004h'; exec cat -v\""]);
+    // The host accepts input for a pane once its session client has
+    // reconciled the pane, which is also when the pane reaches the topology.
+    await waitFor("cat pane in topology", () => store.getState().panes[catPane]);
+    await waitFor("cat pane in bracketed-paste mode", () => (harness.tmux(["display-message", "-p", "-t", catPane, "#{bracket_paste_flag}"]) === "1" ? true : undefined));
+    await connection.request(terminalInput(catPane, utf8Encode("phone-paste"), { paste: true }));
+    const capture = await waitFor("bracketed paste on screen", () => {
+      const screen = harness.tmux(["capture-pane", "-p", "-t", catPane]);
+      return screen.includes("^[[200~phone-paste^[[201~") ? screen : undefined;
+    });
+    say(`paste into a cat -v pane with ?2004h → ${capture.trim().split("\n")[0]}`);
   }, 60_000);
 });

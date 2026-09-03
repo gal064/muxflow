@@ -8,7 +8,7 @@
 
 use std::{
     io::{BufReader, Read},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 
 use super::{
     correlation::{MarkerBlock, classify_marker_block, error_reason, wants_error_line},
-    input::{InputDispatch, run_input_dispatch},
+    input::{InputDelivery, InputDispatch, TmuxCommandFactory, run_input_dispatch},
     startup::{ProcessStartup, join_workers, stop_process},
     validate_tmux_id,
 };
@@ -61,17 +61,19 @@ impl PersistentInputClient {
         event_tx: mpsc::Sender<SequencerControl>,
         overflowed: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
-        Self::start_with_command(session_id, event_tx, overflowed, tmux_command()?)
+        Self::start_with_tmux(session_id, event_tx, overflowed, Arc::new(tmux_command))
     }
 
-    fn start_with_command(
+    /// `tmux` builds every tmux client this sidecar runs: the attached control
+    /// client and each forked batch (`load-buffer` / `paste-buffer`) commit.
+    fn start_with_tmux(
         session_id: &str,
         event_tx: mpsc::Sender<SequencerControl>,
         overflowed: Arc<AtomicBool>,
-        mut command: Command,
+        tmux: TmuxCommandFactory,
     ) -> anyhow::Result<Self> {
         validate_tmux_id(session_id, '$')?;
-        let child = command
+        let child = tmux()?
             .args([
                 "-C",
                 "attach-session",
@@ -120,6 +122,7 @@ impl PersistentInputClient {
                     stdin,
                     completion_rx,
                     dispatch_failed,
+                    tmux,
                     |pane_id, error| {
                         emit_event(
                             &event_tx,
@@ -152,7 +155,12 @@ impl PersistentInputClient {
         !self.failed.load(Ordering::Acquire)
     }
 
-    pub(super) fn send_input(&mut self, pane_id: &str, data: &[u8]) -> anyhow::Result<()> {
+    pub(super) fn send_input(
+        &mut self,
+        pane_id: &str,
+        data: &[u8],
+        delivery: InputDelivery,
+    ) -> anyhow::Result<()> {
         validate_tmux_id(pane_id, '%')?;
         if !self.is_ready() {
             bail!("persistent terminal input client is unavailable");
@@ -172,6 +180,7 @@ impl PersistentInputClient {
                 input_id: self.next_input_id,
                 pane_id: pane_id.to_owned(),
                 data: data.to_vec(),
+                delivery,
             })
             .map_err(|error| match error {
                 std_mpsc::TrySendError::Full(_) => {
@@ -389,7 +398,11 @@ fn abort_input(
 
 #[cfg(test)]
 mod tests {
-    use std::{process::Output, sync::atomic::AtomicU64, time::Instant};
+    use std::{
+        process::{Command, Output},
+        sync::atomic::AtomicU64,
+        time::Instant,
+    };
 
     use super::*;
 
@@ -445,10 +458,13 @@ mod tests {
             .to_owned()
         }
 
-        fn input_command(&self) -> Command {
-            let mut command = Command::new("tmux");
-            command.args(["-L", &self.socket, "-f", "/dev/null"]);
-            command
+        fn tmux(&self) -> TmuxCommandFactory {
+            let socket = self.socket.clone();
+            Arc::new(move || {
+                let mut command = Command::new("tmux");
+                command.args(["-L", &socket, "-f", "/dev/null"]);
+                Ok(command)
+            })
         }
 
         fn output_client(&self, target: &str) -> Child {
@@ -488,6 +504,25 @@ mod tests {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains(needle)
         }
 
+        fn capture(&self, pane_id: &str) -> String {
+            String::from_utf8_lossy(
+                &self
+                    .successful(&["capture-pane", "-p", "-t", pane_id])
+                    .stdout,
+            )
+            .into_owned()
+        }
+
+        fn format(&self, pane_id: &str, format: &str) -> String {
+            String::from_utf8_lossy(
+                &self
+                    .successful(&["display-message", "-p", "-t", pane_id, format])
+                    .stdout,
+            )
+            .trim()
+            .to_owned()
+        }
+
         fn capture_occurrences(&self, pane_id: &str, needle: &str) -> usize {
             let output = self.run(&["capture-pane", "-p", "-t", pane_id]);
             if !output.status.success() {
@@ -500,7 +535,11 @@ mod tests {
 
         fn send_and_observe(&self, client: &mut PersistentInputClient, pane_id: &str, token: &str) {
             client
-                .send_input(pane_id, format!("printf '{token}\\n'\r").as_bytes())
+                .send_input(
+                    pane_id,
+                    format!("printf '{token}\\n'\r").as_bytes(),
+                    InputDelivery::Keys,
+                )
                 .unwrap();
             client.fence().unwrap();
             self.wait_until(|| self.capture_contains(pane_id, token));
@@ -515,11 +554,11 @@ mod tests {
 
     fn start_fixture_client(fixture: &TmuxFixture, session_id: &str) -> PersistentInputClient {
         let (events, _event_receiver) = mpsc::channel(32);
-        PersistentInputClient::start_with_command(
+        PersistentInputClient::start_with_tmux(
             session_id,
             events,
             Arc::new(AtomicBool::new(false)),
-            fixture.input_command(),
+            fixture.tmux(),
         )
         .unwrap()
     }
@@ -545,11 +584,11 @@ mod tests {
         for stage in [1, 2] {
             let (events, _receiver) = mpsc::channel(8);
             let result = with_worker_spawn_failure(stage, || {
-                PersistentInputClient::start_with_command(
+                PersistentInputClient::start_with_tmux(
                     "$1",
                     events,
                     Arc::new(AtomicBool::new(false)),
-                    long_lived_startup_command(),
+                    Arc::new(|| Ok(long_lived_startup_command())),
                 )
             });
             assert!(result.is_err(), "worker stage {stage} unexpectedly started");
@@ -557,11 +596,11 @@ mod tests {
         }
 
         let (events, _receiver) = mpsc::channel(8);
-        let mut retry = PersistentInputClient::start_with_command(
+        let mut retry = PersistentInputClient::start_with_tmux(
             "$1",
             events,
             Arc::new(AtomicBool::new(false)),
-            long_lived_startup_command(),
+            Arc::new(|| Ok(long_lived_startup_command())),
         )
         .unwrap();
         retry.stop();
@@ -754,7 +793,11 @@ mod tests {
                 .success()
         );
         input
-            .send_input(&pane, b"printf 'ADE_MUST_NOT_REPLAY\\n'\r")
+            .send_input(
+                &pane,
+                b"printf 'ADE_MUST_NOT_REPLAY\\n'\r",
+                InputDelivery::Keys,
+            )
             .unwrap();
         std::thread::sleep(Duration::from_millis(20));
         assert!(
@@ -783,5 +826,66 @@ mod tests {
             "a replacement client must never replay an input with unknown outcome"
         );
         fixture.send_and_observe(&mut replacement, &pane, "ADE_REPLACEMENT_ONLY");
+    }
+
+    /// A pane running `cat -v` shows every byte it is fed, and the pane's
+    /// application decides — through `\x1b[?2004h` — whether tmux brackets a
+    /// paste. The same `Paste` delivery must therefore bracket in one pane and
+    /// not in the other; nothing on the host side knows or guesses the mode.
+    #[test]
+    fn a_paste_is_bracketed_only_in_a_pane_whose_application_asked() {
+        let fixture = TmuxFixture::new();
+        fixture.successful(&[
+            "new-session",
+            "-d",
+            "-s",
+            "bracketed",
+            "sh -c \"printf '\\033[?2004h'; exec cat -v\"",
+        ]);
+        fixture.successful(&["new-session", "-d", "-s", "plain", "exec cat -v"]);
+        let session = fixture.id("session", "bracketed");
+        let bracketed = fixture.id("pane", "bracketed");
+        let plain = fixture.id("pane", "plain");
+        fixture.wait_until(|| fixture.format(&bracketed, "#{bracket_paste_flag}") == "1");
+        assert_eq!(fixture.format(&plain, "#{bracket_paste_flag}"), "0");
+        let mut input = start_fixture_client(&fixture, &session);
+
+        input
+            .send_input(&bracketed, b"ADE_BRACKETED", InputDelivery::Paste)
+            .unwrap();
+        input
+            .send_input(&plain, b"ADE_PLAIN", InputDelivery::Paste)
+            .unwrap();
+        input.fence().unwrap();
+
+        fixture.wait_until(|| fixture.capture_contains(&bracketed, "^[[200~ADE_BRACKETED^[[201~"));
+        fixture.wait_until(|| fixture.capture_contains(&plain, "ADE_PLAIN"));
+        assert!(
+            !fixture.capture(&plain).contains("200~"),
+            "a pane that never asked for bracketed paste received markers"
+        );
+    }
+
+    /// The phone's Send: the body as a paste, then a CR as keys. In a shell
+    /// the two land as one command line that runs; the markers never reach
+    /// the screen.
+    #[test]
+    fn a_paste_followed_by_keys_cr_runs_as_one_command_line() {
+        let fixture = TmuxFixture::new();
+        fixture.successful(&["new-session", "-d", "-s", "one", "exec bash --norc"]);
+        let session = fixture.id("session", "one");
+        let pane = fixture.id("pane", "one");
+        let mut input = start_fixture_client(&fixture, &session);
+        fixture.send_and_observe(&mut input, &pane, "ADE_SHELL_READY");
+
+        input
+            .send_input(&pane, b"printf 'ADE_PASTE_SUBMIT\\n'", InputDelivery::Paste)
+            .unwrap();
+        input.send_input(&pane, b"\r", InputDelivery::Keys).unwrap();
+        input.fence().unwrap();
+
+        // The command line echoes the token once; running it prints it again.
+        fixture.wait_until(|| fixture.capture_occurrences(&pane, "ADE_PASTE_SUBMIT") >= 2);
+        assert!(!fixture.capture(&pane).contains("200~"));
     }
 }
