@@ -2,13 +2,50 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../protocol/testing/fakeTransport";
 import { sessionStore } from "../store/sessionStore";
 import type { SavedHost } from "../store/hostsStore";
-import { connectHost, disconnectHost, getConnection, openBulkConnection, setTransportFactory } from "./connectionManager";
+import { createMuxflowSsh, type NativeMuxflowSshModule } from "../ssh/MuxflowSsh";
+import { connectHost, disconnectHost, getConnection, openBulkConnection, setForegroundService, setTransportFactory } from "./connectionManager";
 
 const host: SavedHost = { id: "h1", label: "Dev box", host: "dev.local", port: 22, user: "dev", trustedHostKeyFingerprint: null, connectionEpoch: 0, lastConnectedAtMs: null };
 const settle = () => vi.advanceTimersByTimeAsync(0);
 
+/** The Kotlin module's notification surface: records the text it was given, taps Disconnect on demand. */
+function fakeNative() {
+  const disconnectListeners = new Set<(payload: unknown) => void>();
+  const notifications: Array<[string, string]> = [];
+  const unsupported = () => Promise.reject(new Error("not part of this fake"));
+  const native: NativeMuxflowSshModule = {
+    generateKeyPair: unsupported,
+    getPublicKey: unsupported,
+    deleteKeyPair: unsupported,
+    connect: unsupported,
+    trustHostKey: unsupported,
+    write: unsupported,
+    close: unsupported,
+    startForegroundService: unsupported,
+    stopForegroundService: unsupported,
+    setServiceNotification: vi.fn(async (title: string, body: string) => {
+      notifications.push([title, body]);
+    }),
+    scheduleWake: unsupported,
+    cancelWake: unsupported,
+    addListener: vi.fn((eventName, listener) => {
+      if (eventName !== "onDisconnectRequested") throw new Error(`unexpected subscription to ${eventName}`);
+      disconnectListeners.add(listener);
+      return { remove: () => disconnectListeners.delete(listener) };
+    }),
+  };
+  return {
+    native,
+    notifications,
+    tapDisconnect: () => {
+      for (const listener of [...disconnectListeners]) listener({});
+    },
+  };
+}
+
 describe("connectionManager", () => {
   const dials: Array<{ lane: string; transport: FakeTransport }> = [];
+  let fake: ReturnType<typeof fakeNative>;
   beforeEach(() => {
     vi.useFakeTimers();
     dials.length = 0;
@@ -17,9 +54,12 @@ describe("connectionManager", () => {
       dials.push({ lane, transport });
       return transport;
     });
+    fake = fakeNative();
+    setForegroundService(createMuxflowSsh(fake.native));
   });
   afterEach(async () => {
     await disconnectHost();
+    setForegroundService(undefined);
     vi.useRealTimers();
   });
 
@@ -84,6 +124,44 @@ describe("connectionManager", () => {
     expect(hello.payload.value.connectionEpoch).toBe(epoch2);
     dials[3]!.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: epoch2 }) }, { requestId: 1n }));
     await second;
+  });
+
+  it("treats Disconnect on the notification as the user disconnecting, even between attempts", async () => {
+    const { control } = await connectControl();
+    control.closeFromRemote({ reason: "networkLost" });
+    expect(sessionStore.getState().connection).toMatchObject({ state: "reconnecting", attempt: 1 });
+    // The tap lands while the backoff is pending: no channel is open to report `closedByClient`.
+    fake.tapDisconnect();
+    await settle();
+    expect(sessionStore.getState().connection.state).toBe("idle");
+    expect(getConnection()).toBeNull();
+    // The pending backoff went with it: nothing dials, however long the clock runs.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(dials).toHaveLength(1);
+  });
+
+  it("keeps the notification text on the control connection's state", async () => {
+    const { control, epoch } = await connectControl();
+    await settle();
+    // Once before the dial, for the automatic service start on `connected`, and once on `connected` itself.
+    expect(fake.notifications).toEqual([
+      ["Muxflow", "Connected to Dev box"],
+      ["Muxflow", "Connected to Dev box"],
+    ]);
+    control.closeFromRemote({ reason: "networkLost" });
+    await settle();
+    expect(fake.notifications.at(-1)).toEqual(["Muxflow", "Reconnecting to Dev box"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    // The re-dial itself (`sshConnecting`, `handshaking`) posts nothing.
+    expect(fake.notifications).toHaveLength(3);
+    const control2 = dials[1]!.transport;
+    const epoch2 = getConnection()!.connectionEpoch;
+    expect(epoch2).toBe(epoch + 1n);
+    control2.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: epoch2 }) }, { requestId: 1n }));
+    control2.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
+    await settle();
+    expect(fake.notifications.at(-1)).toEqual(["Muxflow", "Connected to Dev box"]);
+    expect(fake.notifications).toHaveLength(4);
   });
 
   it("rejects connectHost on a fatal close and disconnectHost returns the store to idle", async () => {

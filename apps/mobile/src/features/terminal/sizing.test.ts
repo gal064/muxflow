@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeGrid, MIN_COLS, MIN_ROWS, NOMINAL_CELL, sameGrid } from "./sizing";
+import { computeGrid, MIN_COLS, MIN_ROWS, NOMINAL_CELL, sameGrid, windowGrid } from "./sizing";
 
 describe("sizing rule (§9.5, D6)", () => {
   it("floors the viewport to whole cells: ≈ 46 × 40 on a 390 dp phone with the keyboard hidden", () => {
@@ -22,5 +22,17 @@ describe("sizing rule (§9.5, D6)", () => {
     expect(sameGrid({ cols: 1, rows: 2 }, { cols: 1, rows: 2 })).toBe(true);
     expect(sameGrid({ cols: 1, rows: 2 }, { cols: 1, rows: 3 })).toBe(false);
     expect(sameGrid(undefined, { cols: 1, rows: 2 })).toBe(false);
+  });
+
+  it("windowGrid reads the window's size off the far edges of its panes, and knows nothing of an empty window", () => {
+    const panes = [
+      { windowId: "@1", left: 0, top: 0, width: 79, height: 47 },
+      { windowId: "@1", left: 80, top: 0, width: 80, height: 23 },
+      { windowId: "@1", left: 80, top: 24, width: 80, height: 23 },
+      { windowId: "@2", left: 0, top: 0, width: 50, height: 30 },
+    ];
+    expect(windowGrid(panes, "@1")).toEqual({ cols: 160, rows: 47 });
+    expect(windowGrid(panes, "@2")).toEqual({ cols: 50, rows: 30 });
+    expect(windowGrid(panes, "@3")).toBeUndefined();
   });
 });

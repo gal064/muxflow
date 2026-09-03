@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createMuxflowSsh,
+  NATIVE_DISCONNECT_EVENT_NAME,
   NATIVE_EVENT_NAME,
+  NATIVE_WAKE_EVENT_NAME,
   WRITE_CHUNK_BASE64_CHARS,
   type NativeMuxflowSshModule,
   type SshCloseReason,
@@ -13,6 +15,10 @@ interface Harness {
   native: NativeMuxflowSshModule;
   /** Pushes a raw payload the way the Kotlin module would. */
   emit: (payload: unknown) => void;
+  /** Pushes a raw `onWake` payload. */
+  emitWake: (payload: unknown) => void;
+  /** The notification's Disconnect action. */
+  emitDisconnect: () => void;
   listenerCount: () => number;
   removeCalls: () => number;
   writes: Array<[string, string]>;
@@ -21,6 +27,8 @@ interface Harness {
 
 function harness(options: { deferWrites?: boolean } = {}): Harness {
   const nativeListeners = new Set<(payload: unknown) => void>();
+  const wakeListeners = new Set<(payload: unknown) => void>();
+  const disconnectListeners = new Set<(payload: unknown) => void>();
   const writes: Array<[string, string]> = [];
   const pending: Array<() => void> = [];
   let removeCalls = 0;
@@ -40,13 +48,22 @@ function harness(options: { deferWrites?: boolean } = {}): Harness {
     close: vi.fn(async () => undefined),
     startForegroundService: vi.fn(async () => undefined),
     stopForegroundService: vi.fn(async () => undefined),
+    setServiceNotification: vi.fn(async () => undefined),
+    scheduleWake: vi.fn(async () => undefined),
+    cancelWake: vi.fn(async () => undefined),
     addListener: vi.fn((eventName, listener) => {
-      expect(eventName).toBe(NATIVE_EVENT_NAME);
-      nativeListeners.add(listener);
+      const set =
+        eventName === NATIVE_WAKE_EVENT_NAME
+          ? wakeListeners
+          : eventName === NATIVE_DISCONNECT_EVENT_NAME
+            ? disconnectListeners
+            : nativeListeners;
+      expect([NATIVE_EVENT_NAME, NATIVE_WAKE_EVENT_NAME, NATIVE_DISCONNECT_EVENT_NAME]).toContain(eventName);
+      set.add(listener);
       return {
         remove: () => {
           removeCalls += 1;
-          nativeListeners.delete(listener);
+          set.delete(listener);
         },
       };
     }),
@@ -57,6 +74,16 @@ function harness(options: { deferWrites?: boolean } = {}): Harness {
     emit: (payload) => {
       for (const listener of [...nativeListeners]) {
         listener(payload);
+      }
+    },
+    emitWake: (payload) => {
+      for (const listener of [...wakeListeners]) {
+        listener(payload);
+      }
+    },
+    emitDisconnect: () => {
+      for (const listener of [...disconnectListeners]) {
+        listener({});
       }
     },
     listenerCount: () => nativeListeners.size,
@@ -146,6 +173,57 @@ describe("event mapping", () => {
     removeSecond();
     expect(h.removeCalls()).toBe(1);
     expect(h.listenerCount()).toBe(0);
+  });
+});
+
+describe("wake timer", () => {
+  it("forwards scheduleWake and cancelWake, and delivers the token of an onWake event", async () => {
+    const h = harness();
+    const ssh = createMuxflowSsh(h.native);
+    const tokens: string[] = [];
+    const unsubscribe = ssh.addWakeListener((token) => tokens.push(token));
+
+    await ssh.scheduleWake("7", 1000);
+    await ssh.cancelWake("7");
+    expect(h.native.scheduleWake).toHaveBeenCalledWith("7", 1000);
+    expect(h.native.cancelWake).toHaveBeenCalledWith("7");
+
+    h.emitWake({ token: "7" });
+    h.emitWake({ token: 7 });
+    h.emitWake(null);
+    expect(tokens).toEqual(["7"]);
+
+    // Its own native subscription: dropping the last wake listener leaves ssh listeners alone.
+    const removeSsh = ssh.addListener(() => undefined);
+    unsubscribe();
+    expect(h.removeCalls()).toBe(1);
+    expect(h.listenerCount()).toBe(1);
+    h.emitWake({ token: "8" });
+    expect(tokens).toEqual(["7"]);
+    removeSsh();
+  });
+});
+
+describe("foreground service notification", () => {
+  it("forwards setServiceNotification and fans out the Disconnect action", async () => {
+    const h = harness();
+    const ssh = createMuxflowSsh(h.native);
+    let taps = 0;
+    const unsubscribe = ssh.addDisconnectListener(() => {
+      taps += 1;
+    });
+
+    await ssh.setServiceNotification("Muxflow", "Connected to dev box");
+    expect(h.native.setServiceNotification).toHaveBeenCalledWith("Muxflow", "Connected to dev box");
+
+    h.emitDisconnect();
+    h.emitDisconnect();
+    expect(taps).toBe(2);
+
+    unsubscribe();
+    expect(h.removeCalls()).toBe(1);
+    h.emitDisconnect();
+    expect(taps).toBe(2);
   });
 });
 

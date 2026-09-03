@@ -1,6 +1,8 @@
 package dev.muxflow.ssh
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.exception.Exceptions
@@ -21,10 +23,23 @@ import java.util.concurrent.ConcurrentHashMap
  * Several `connectionId`s may address the same `user@host:port`; they share one authenticated
  * [SshTransport] and get one exec channel each, so the client's second "bulk" bridge costs no extra
  * login. Channels close independently; the transport goes away with the last of them.
+ *
+ * It also lends JavaScript a clock. React Native freezes every JS timer while the host activity is
+ * paused (`JavaTimerManager.onHostPause`), so a reconnect backoff scheduled with `setTimeout` from
+ * the background never fires; `scheduleWake` runs the same delay on an Android [Handler], which
+ * keeps going for as long as the process — kept alive by [ConnectionService] — does, and answers
+ * with an `onWake` event carrying the caller's token.
+ *
+ * The third event, `onDisconnectRequested`, is the notification's Disconnect action. It is sent
+ * before any channel is closed and whether or not one is open: between reconnect attempts there is
+ * no channel to report `closedByClient`, and without the event JavaScript would keep re-dialling
+ * on its native timer with the service — and the notification — already gone.
  */
 class MuxflowSshModule : Module() {
   private companion object {
     const val EVENT_NAME = "onSshEvent"
+    const val WAKE_EVENT_NAME = "onWake"
+    const val DISCONNECT_EVENT_NAME = "onDisconnectRequested"
 
     /** Exit status of a shell that could not find the command — §12 maps this to "helper missing". */
     const val EXIT_COMMAND_NOT_FOUND = 127
@@ -49,6 +64,13 @@ class MuxflowSshModule : Module() {
   private val transports = HashMap<String, SshTransport>()
   private val channels = ConcurrentHashMap<String, SshChannel>()
 
+  /**
+   * Pending wakes by token. The main looper is used only as a clock: the runnable does nothing but
+   * hand the token back to JavaScript, so it never keeps the UI thread busy.
+   */
+  private val wakeHandler = Handler(Looper.getMainLooper())
+  private val wakes = HashMap<String, Runnable>()
+
   @Volatile private var serviceTitle: String? = null
   @Volatile private var serviceBody: String = ""
   @Volatile private var serviceRunning = false
@@ -59,7 +81,7 @@ class MuxflowSshModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("MuxflowSsh")
 
-    Events(EVENT_NAME)
+    Events(EVENT_NAME, WAKE_EVENT_NAME, DISCONNECT_EVENT_NAME)
 
     OnCreate {
       SshSecurity.ensureBouncyCastle()
@@ -148,11 +170,47 @@ class MuxflowSshModule : Module() {
 
     AsyncFunction("stopForegroundService") { stopService() }
 
+    // The text of the ongoing notification (§6.3): kept for the next automatic start and, while
+    // the service is up, re-posted in place. No service start happens here — Android 12+ may
+    // refuse one from the background, and a connection reaching `connected` is often exactly there.
+    AsyncFunction("setServiceNotification") { title: String, body: String ->
+      serviceTitle = title
+      serviceBody = body
+      if (serviceRunning) {
+        ConnectionService.update(context, title, body)
+      }
+    }
+
+    // Scheduling a token that is already pending replaces its deadline.
+    AsyncFunction("scheduleWake") { token: String, delayMs: Double ->
+      val runnable =
+        object : Runnable {
+          override fun run() {
+            // Only the runnable still registered for the token fires: a reschedule that raced
+            // this one on the way out of the queue has replaced it.
+            if (synchronized(wakes) { wakes.remove(token, this) }) {
+              runCatching { sendEvent(WAKE_EVENT_NAME, mapOf("token" to token)) }
+            }
+          }
+        }
+      synchronized(wakes) { wakes.put(token, runnable)?.let(wakeHandler::removeCallbacks) }
+      wakeHandler.postDelayed(runnable, delayMs.toLong().coerceAtLeast(0))
+      Unit
+    }
+
+    // A token that is not pending — already fired, or never scheduled — is a no-op.
+    AsyncFunction("cancelWake") { token: String ->
+      synchronized(wakes) { wakes.remove(token) }?.let(wakeHandler::removeCallbacks)
+      Unit
+    }
+
     OnDestroy {
       ConnectionService.onDisconnectRequested = null
       ConnectionService.onStopped = null
       closeAllChannels()
       stopService()
+      synchronized(wakes) { wakes.clear() }
+      wakeHandler.removeCallbacksAndMessages(null)
     }
   }
 
@@ -190,6 +248,7 @@ class MuxflowSshModule : Module() {
   }
 
   private fun disconnectFromNotification() {
+    runCatching { sendEvent(DISCONNECT_EVENT_NAME, mapOf<String, Any?>()) }
     closeAllChannels()
     stopService()
   }

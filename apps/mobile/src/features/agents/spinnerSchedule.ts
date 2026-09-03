@@ -1,22 +1,8 @@
 // The working spinner's clock and proportions (design.md §9.3.1), as data so
-// the cost is a number a test can hold still and the QA agent can measure.
+// a test can hold the numbers still.
 
-/**
- * One turn is drawn as this many discrete frames rather than a continuous
- * rotation. A continuous spin repaints the whole tab every vsync for as long
- * as one agent is working; twelve 30° steps read as motion at reading
- * distance and cost ten repaints a second instead of sixty.
- */
-export const SPINNER_STEPS = 12;
-
-/** How long each frame holds. */
-export const SPINNER_STEP_MS = 100;
-
-/** One revolution. The desktop turns in 0.9 s; the steps want a round 100 ms. */
-export const SPINNER_TURN_MS = SPINNER_STEPS * SPINNER_STEP_MS;
-
-/** Degrees per frame. */
-export const SPINNER_STEP_DEGREES = 360 / SPINNER_STEPS;
+/** One revolution: the desktop `.spinner`'s `.9s linear infinite`. */
+export const SPINNER_TURN_MS = 900;
 
 /**
  * How much of the ring the moving arc covers. The desktop's `.spinner` paints
@@ -28,6 +14,3 @@ export const SPINNER_ARC_TURNS = 0.3;
 
 /** Track opacity, the desktop's 35 %: in the heading's `--chrome-dim` a fainter track vanished on `--chrome-bg`. */
 export const SPINNER_TRACK_OPACITY = 0.35;
-
-/** The upper bound on repaints per second one visible spinner causes. */
-export const SPINNER_REPAINTS_PER_SECOND = 1000 / SPINNER_STEP_MS;

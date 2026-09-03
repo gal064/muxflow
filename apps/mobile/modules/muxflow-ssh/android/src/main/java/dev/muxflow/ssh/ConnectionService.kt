@@ -1,5 +1,6 @@
 package dev.muxflow.ssh
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,9 +10,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 
@@ -21,8 +25,10 @@ import androidx.core.content.ContextCompat
  * (design doc §6.3 / D9).
  *
  * There is deliberately no protocol logic here. The service only holds a wake lock and shows the
- * notification; its "Disconnect" action calls back into [MuxflowSshModule], which closes the
- * connections so JavaScript sees a normal `closed` event.
+ * notification; its "Disconnect" action calls back into [MuxflowSshModule], which tells JavaScript
+ * (`onDisconnectRequested`) and then closes the connections so each open one also sees a normal
+ * `closed` event. The text is JavaScript's: [MuxflowSshModule] hands it in at start and [update]s
+ * it in place as the connection comes and goes.
  */
 class ConnectionService : Service() {
   companion object {
@@ -34,8 +40,6 @@ class ConnectionService : Service() {
     private const val ACTION_START = "dev.muxflow.ssh.action.START"
     private const val ACTION_STOP = "dev.muxflow.ssh.action.STOP"
     const val ACTION_DISCONNECT = "dev.muxflow.ssh.action.DISCONNECT"
-    private const val EXTRA_TITLE = "title"
-    private const val EXTRA_BODY = "body"
     private const val WAKE_LOCK_TAG = "muxflow:ssh-connection"
 
     /** Set by [MuxflowSshModule] while it is alive; invoked by the notification's Disconnect action. */
@@ -44,14 +48,96 @@ class ConnectionService : Service() {
     /** Invoked whenever the service goes away, including when the system stops it on its own. */
     @Volatile var onStopped: (() -> Unit)? = null
 
+    /**
+     * True from `startForeground` in a START until `onDestroy`. [MuxflowSshModule]'s own flag flips
+     * when it *sends* a start or a stop, which is before either has run; [update] needs the truth,
+     * or it would post on a channel that does not exist yet (dropped) or after the notification was
+     * removed (an orphan with no service behind it). Read and written on the main thread only.
+     */
+    private var live = false
+
+    /**
+     * The notification's text, shared by [start] and [update] rather than carried in the START
+     * intent: an update that lands between the intent being sent and `onStartCommand` running
+     * would otherwise be lost, and the start would draw the text it had superseded.
+     */
+    @Volatile private var title: String? = null
+    @Volatile private var body: String = ""
+
+    private val main = Handler(Looper.getMainLooper())
+
     fun start(context: Context, title: String, body: String) {
-      val intent =
-        Intent(context, ConnectionService::class.java).apply {
-          action = ACTION_START
-          putExtra(EXTRA_TITLE, title)
-          putExtra(EXTRA_BODY, body)
-        }
+      this.title = title
+      this.body = body
+      val intent = Intent(context, ConnectionService::class.java).setAction(ACTION_START)
       ContextCompat.startForegroundService(context, intent)
+    }
+
+    /**
+     * Replaces the text of the notification a running service already shows. Posting under the
+     * service's own id updates it in place — no service start, so unlike [start] this is always
+     * allowed from the background. Runs on the main thread, where `onStartCommand` and `onDestroy`
+     * also run, so it cannot slip in between the notification being removed and [live] noticing.
+     * When the service is not up, the text is only kept for its next start.
+     */
+    fun update(context: Context, title: String, body: String) {
+      this.title = title
+      this.body = body
+      main.post { if (live) post(context.applicationContext) }
+    }
+
+    // The permission is declared and requested (§13); without it Android hides the whole
+    // foreground-service notification anyway, so the update has nothing to be dropped from.
+    @SuppressLint("MissingPermission")
+    private fun post(context: Context) {
+      createChannel(context)
+      val notification = buildNotification(context, title ?: serviceLabel(context), body)
+      NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun createChannel(context: Context) {
+      val manager = context.getSystemService(NotificationManager::class.java) ?: return
+      if (manager.getNotificationChannel(CHANNEL_ID) != null) {
+        return
+      }
+      val channel =
+        NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW).apply {
+          setShowBadge(false)
+          setSound(null, null)
+          enableVibration(false)
+        }
+      manager.createNotificationChannel(channel)
+    }
+
+    private fun serviceLabel(context: Context): String =
+      context.applicationInfo.loadLabel(context.packageManager).toString()
+
+    /** The one place the notification is built, so a start and an [update] cannot drift apart. */
+    private fun buildNotification(context: Context, title: String, body: String): Notification {
+      val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+      val disconnectIntent =
+        PendingIntent.getService(
+          context,
+          1,
+          Intent(context, ConnectionService::class.java).setAction(ACTION_DISCONNECT),
+          flags,
+        )
+      val builder =
+        NotificationCompat.Builder(context, CHANNEL_ID)
+          .setSmallIcon(context.applicationInfo.icon)
+          .setContentTitle(title)
+          .setContentText(body)
+          .setOngoing(true)
+          .setSilent(true)
+          .setShowWhen(false)
+          .setCategory(NotificationCompat.CATEGORY_SERVICE)
+          .setPriority(NotificationCompat.PRIORITY_LOW)
+          .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+          .addAction(0, "Disconnect", disconnectIntent)
+      context.packageManager.getLaunchIntentForPackage(context.packageName)?.let { launch ->
+        builder.setContentIntent(PendingIntent.getActivity(context, 0, launch, flags))
+      }
+      return builder.build()
     }
 
     /**
@@ -90,27 +176,25 @@ class ConnectionService : Service() {
     if (intent?.action == ACTION_STOP) {
       // Enter the foreground before leaving it: see [stop]. `onDestroy` takes the notification
       // down again in the same main-thread turn, so nothing is drawn.
-      createChannel()
-      startInForeground(buildNotification(serviceLabel(), ""))
+      createChannel(this)
+      startInForeground(buildNotification(this, serviceLabel(this), ""))
       stopSelf()
       return START_NOT_STICKY
     }
-    val title = intent?.getStringExtra(EXTRA_TITLE) ?: serviceLabel()
-    val body = intent?.getStringExtra(EXTRA_BODY).orEmpty()
-    createChannel()
-    startInForeground(buildNotification(title, body))
+    createChannel(this)
+    startInForeground(buildNotification(this, title ?: serviceLabel(this), body))
+    live = true
     acquireWakeLock()
     return START_NOT_STICKY
   }
 
   override fun onDestroy() {
+    live = false
     onStopped?.invoke()
     releaseWakeLock()
     ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     super.onDestroy()
   }
-
-  private fun serviceLabel(): String = applicationInfo.loadLabel(packageManager).toString()
 
   private fun startInForeground(notification: Notification) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -118,47 +202,6 @@ class ConnectionService : Service() {
     } else {
       startForeground(NOTIFICATION_ID, notification)
     }
-  }
-
-  private fun createChannel() {
-    val manager = getSystemService(NotificationManager::class.java) ?: return
-    if (manager.getNotificationChannel(CHANNEL_ID) != null) {
-      return
-    }
-    val channel =
-      NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW).apply {
-        setShowBadge(false)
-        setSound(null, null)
-        enableVibration(false)
-      }
-    manager.createNotificationChannel(channel)
-  }
-
-  private fun buildNotification(title: String, body: String): Notification {
-    val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    val disconnectIntent =
-      PendingIntent.getService(
-        this,
-        1,
-        Intent(this, ConnectionService::class.java).setAction(ACTION_DISCONNECT),
-        flags,
-      )
-    val builder =
-      NotificationCompat.Builder(this, CHANNEL_ID)
-        .setSmallIcon(applicationInfo.icon)
-        .setContentTitle(title)
-        .setContentText(body)
-        .setOngoing(true)
-        .setSilent(true)
-        .setShowWhen(false)
-        .setCategory(NotificationCompat.CATEGORY_SERVICE)
-        .setPriority(NotificationCompat.PRIORITY_LOW)
-        .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-        .addAction(0, "Disconnect", disconnectIntent)
-    packageManager.getLaunchIntentForPackage(packageName)?.let { launch ->
-      builder.setContentIntent(PendingIntent.getActivity(this, 0, launch, flags))
-    }
-    return builder.build()
   }
 
   private fun acquireWakeLock() {

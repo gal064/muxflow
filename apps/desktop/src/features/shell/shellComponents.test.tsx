@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HostProfile, Session } from "../../app/types";
 import { rowCommandRegistry } from "../../commands/rowCommands";
 import { agent } from "../agents/testFixtures";
-import type { AgentAdapterDescriptor, AgentDisplayState } from "../agents/types";
+import type { AgentAdapterDescriptor, AgentDisplayState, AgentRecord } from "../agents/types";
 import { buildAgentRows } from "../agents/agentsList";
 import { HookReviewDialog } from "../agents/HookReviewDialog";
 import { WorkspaceSidebar } from "../workspaces/WorkspaceSidebar";
@@ -237,7 +237,7 @@ describe("application shell accessibility contracts", () => {
     // The one control in the agents header names both its state and its effect.
     // The persisted mode is still `status`; the word on the button is what the
     // mode does — blocked first, then working, then recent, then idle.
-    expect(html).toContain("Agent ordering: workspace. Switch to priority.");
+    expect(html).toContain("Agent ordering: workspace. Next: pinned.");
     // The only resting connection indicator, and it is the way into settings.
     expect(html).toContain("Host remote-linux over ssh, connected. Open connection settings.");
     expect(html).toContain("41 ms");
@@ -422,6 +422,45 @@ describe("application shell accessibility contracts", () => {
     // One flat index across every group — a per-group index would restart the
     // roving walk at every heading.
     expect([...html.matchAll(/data-agent-index="(\d+)"/g)].map((match) => match[1])).toEqual(["0", "1", "2", "3", "4"]);
+  });
+
+  it("draws the pinned order as two dividers over the flat priority queue", async () => {
+    // Pinned by tab or by workspace above everything else; inside each half
+    // the priority order, with no status headings.
+    const place = (record: AgentRecord) => ({
+      workspaceOrder: record.sessionId === "$1" ? 0 : 1,
+      workspaceName: record.sessionName,
+      workspacePinned: record.sessionId === "$1",
+      tabPinned: record.windowId === "@pinned",
+    });
+    const agents = buildAgentRows([
+      agent({ id: "b", windowName: "Fix the build", sessionId: "$2", sessionName: "web", lifecycle: "blocked", updatedAt: 5, lifecycleChangedAt: 5 }),
+      agent({ id: "w", windowName: "Run the suite", sessionId: "$2", sessionName: "web", windowId: "@pinned", lifecycle: "working", updatedAt: 4, lifecycleChangedAt: 4 }),
+      agent({ id: "i", windowName: "Nothing doing", sessionId: "$1", sessionName: "api", lifecycle: "idle", updatedAt: 1, lifecycleChangedAt: 1 }),
+      agent({ id: "d", windowName: "Ship the patch", sessionId: "$2", sessionName: "web", lifecycle: "idle", attentionKind: "completed", attentionGeneration: 4, seenGeneration: 1, updatedAt: 3, lifecycleChangedAt: 3 }),
+    ], place, () => true, "pinned");
+    const html = sidebar({ agentSort: "pinned", agents });
+    expect(html).toContain(">pinned</button>");
+    expect(html).toContain("Agent ordering: pinned. Next: priority.");
+    expect(html).toContain('<h3 class="list-divider">Pinned</h3>');
+    expect(html).toContain('<h3 class="list-divider">Unpinned</h3>');
+    expect(html).not.toContain("agent-status-");
+    expect(html.indexOf(">Pinned<")).toBeLessThan(html.indexOf(">Unpinned<"));
+    // The rows sit inside the same inset wrapper the other modes' group
+    // sections carry, so switching modes does not change the rows' width.
+    expect(html.match(/class="agent-workspace-group" role="presentation"/g)).toHaveLength(2);
+
+    const host = await mountSidebar({ agentSort: "pinned", agents });
+    const walkRows = [...host.querySelectorAll<HTMLElement>("[data-agent-index]")];
+    // The pinned working tab and the pinned workspace's idle agent, then the
+    // rest in priority order — the reading order and the keyboard order.
+    expect(walkRows.map((row) => row.querySelector(".agent-session-label")?.textContent))
+      .toEqual(["Run the suite", "Nothing doing", "Fix the build", "Ship the patch"]);
+    expect(walkRows.map((row) => row.dataset.agentIndex)).toEqual(["0", "1", "2", "3"]);
+    walkRows[0].focus();
+    const down = [document.activeElement];
+    for (let step = 1; step < walkRows.length; step += 1) { await pressArrow("ArrowDown"); down.push(document.activeElement); }
+    expect(down).toEqual(walkRows);
   });
 
   it("draws recently idle agents in their own group with the idle indicator", () => {
@@ -1813,8 +1852,8 @@ describe("pinning by Shift-click", () => {
     expect(html).toContain('<div class="list-block" role="presentation">');
   });
 
-  it("puts the pin immediately after the name of an agent whose tab is pinned, in both orderings", () => {
-    for (const agentSort of ["workspace", "status"] as const) {
+  it("puts the pin immediately after the name of an agent whose tab is pinned, in every ordering", () => {
+    for (const agentSort of ["workspace", "status", "pinned"] as const) {
       const agents = buildAgentRows(
         [agent({ id: "on-a-pinned-tab", displayName: "Codex one", windowName: "Ship it" }), agent({ id: "loose", windowId: "@2", paneId: "%2", displayName: "Codex two", windowName: "Later" })],
         (record) => ({
