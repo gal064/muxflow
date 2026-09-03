@@ -180,7 +180,12 @@ export class VoiceController {
 
   async refreshStatus(warm = false): Promise<void> {
     const connection = this.liveConnection();
-    if (!connection) return;
+    if (!connection) {
+      // Nothing to ask yet; `onConnected` asks again once the lane is live.
+      this.log(`status.skipped warm=${warm} connection=${this.options.getConnection()?.state ?? "none"}`);
+      return;
+    }
+    this.log(`status.request warm=${warm}`);
     try {
       const response = await connection.request(voiceStatus(newOperationId(), warm));
       if (this.disposed) return;
@@ -530,6 +535,10 @@ export class VoiceController {
       this.everRegistered = true;
       this.log("session.registered");
       this.refreshTimer ??= setInterval(() => void this.registerSession(), this.sessionRefreshMs);
+      // The host just answered on this lane, so a status probe that never
+      // settled (or was skipped) is not the host's fault: ask once more rather
+      // than leave the card at "Checking voice on the host…".
+      if (this.options.store.getState().hostStatus.readiness === "unknown") void this.refreshStatus(false);
     } catch (error) {
       // A host that is not set up cannot hold a session; the readiness card
       // says so, and the loop restarts once STATUS reports ready.
