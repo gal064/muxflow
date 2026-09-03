@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn bulk_prewarm_is_claimed_once_per_nonzero_terminal_epoch() {
+    let live = AtomicU64::new(7);
+    let claimed = AtomicU64::new(0);
+    assert!(!claim_bulk_prewarm_epoch(&live, &claimed, 0));
+    assert!(claim_bulk_prewarm_epoch(&live, &claimed, 7));
+    assert!(!claim_bulk_prewarm_epoch(&live, &claimed, 7));
+
+    live.store(9, Ordering::Release);
+    // A delayed command that captured the old epoch cannot move the gate
+    // backwards after the reconnect has published a new live epoch.
+    assert!(!claim_bulk_prewarm_epoch(&live, &claimed, 7));
+    assert_eq!(claimed.load(Ordering::Acquire), 7);
+    assert!(claim_bulk_prewarm_epoch(&live, &claimed, 9));
+    assert!(!claim_bulk_prewarm_epoch(&live, &claimed, 9));
+}
+
+#[test]
 fn incompatible_or_disconnected_client_rejects_mutation_without_queueing() {
     let client = TerminalClient::new();
     let error = client
