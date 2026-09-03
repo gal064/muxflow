@@ -115,8 +115,10 @@ export interface AgentRowItem {
   workspacePinned: boolean;
   /** The tab's name (`agentTitle`): the adapter is the icon's job. */
   title: string;
-  /** The workspace, or nothing where the heading already names it (Workspace mode). */
+  /** Line 2: the workspace, or nothing where the heading already names it (Workspace mode). */
   subtitle: string | undefined;
+  /** Always spoken, whether or not line 2 draws it: a screen reader reads rows, not headings, in passing. */
+  workspaceName: string;
 }
 
 export interface PrioritySectionItem {
@@ -172,6 +174,7 @@ function agentRow(state: ListState, agent: Agent, subtitle: "workspace" | "none"
     workspacePinned: Boolean(state.sessions[agent.route.sessionId]?.pinned),
     title: agentTitle(state, agent),
     subtitle: subtitle === "workspace" ? agentWorkspaceName(state, agent) : undefined,
+    workspaceName: agentWorkspaceName(state, agent),
   };
 }
 

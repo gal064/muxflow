@@ -67,6 +67,8 @@ describe("agentTitle (§9.3.1 line 1: the tab, the desktop's agentSessionLabel)"
     const bare = routed({ displayName: "", present: false, route: { ...routed().route, windowNameFallback: "" } });
     expect(agentTitle({ windows: {}, adapters }, bare)).toBe("Codex CLI in pane 3");
     expect(agentTitle({ windows: {}, adapters: [] }, bare)).toBe("codex in pane 3");
+    // A retained title that was only the spinner frame is no name either.
+    expect(agentTitle({ windows: {}, adapters }, { ...bare, route: { ...bare.route, windowNameFallback: "⠋" } })).toBe("Codex CLI in pane 3");
   });
 });
 

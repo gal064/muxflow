@@ -68,7 +68,7 @@ function Item({ item, items, index, onOpen, animate }: { item: AgentListItem; it
   const afterDivider = items[index - 1]?.kind === "divider";
   switch (item.kind) {
     case "divider":
-      return <ListDivider afterRow={items[index - 1]?.kind === "agent"} label={item.label} />;
+      return <ListDivider afterRow={items[index - 1]?.kind === "agent"} first={index === 0} label={item.label} />;
     case "section":
       return (
         <GroupHeading afterDivider={afterDivider} count={item.count} label={item.label}>
@@ -91,13 +91,15 @@ function Item({ item, items, index, onOpen, animate }: { item: AgentListItem; it
             item.waiting ? "waiting" : undefined,
             item.windowPinned ? "pinned window" : undefined,
             item.workspacePinned ? "pinned workspace" : undefined,
-            item.subtitle,
+            // The desktop's label always names the workspace, even where the heading draws it.
+            item.workspaceName,
           ].filter(Boolean).join(", ")}
           dimmed={!item.agent.present}
           // Blocked, or done and unseen: the mobile shape of the desktop's
           // "1" badge, in the colour the Workspaces tab paints the same agent.
           edgeColor={item.waiting ? waitingColor(item.waiting) : undefined}
-          height={metrics.agentRowHeight}
+          // A one-line row (Workspace mode) takes the Workspaces tab's 64 dp rather than sit a title alone in 76.
+          height={item.subtitle ? metrics.agentRowHeight : metrics.windowRowHeight}
           leading={<AgentMark adapterId={item.agent.adapterId} animate={animate} state={item.state} />}
           onPress={() => onOpen(item.agent)}
           subtitle={item.subtitle}
@@ -133,7 +135,12 @@ const STATE_WORDS: Record<AgentDisplayState, string> = {
  */
 function GroupHeading({ label, count, children, afterDivider }: { label: string; count: number; children?: React.ReactNode; afterDivider: boolean }) {
   return (
-    <View style={[styles.heading, afterDivider && styles.headingAfterDivider]}>
+    <View
+      // The desktop's <h3>: reachable by heading navigation, the count spoken as a count.
+      accessibilityLabel={`${label}, ${count === 1 ? "1 agent" : `${count} agents`}`}
+      accessibilityRole="header"
+      style={[styles.heading, afterDivider && styles.headingAfterDivider]}
+    >
       <View style={styles.headingMark}>{children}</View>
       <View style={styles.headingText}>
         <Text numberOfLines={1} style={styles.headingLabel}>{label}</Text>
@@ -178,7 +185,7 @@ function ModeToggle({ mode, onChange }: { mode: AgentListMode; onChange(mode: Ag
             >
               <View style={styles.segment}>
                 <View pointerEvents="none" style={[StyleSheet.absoluteFill, styles.segmentFill, { opacity: selected ? 1 : 0 }]} />
-                <Text style={[styles.segmentLabel, selected && styles.segmentLabelSelected]}>{entry.label}</Text>
+                <Text maxFontSizeMultiplier={1.3} numberOfLines={1} style={[styles.segmentLabel, selected && styles.segmentLabelSelected]}>{entry.label}</Text>
               </View>
             </Pressable>
           );
@@ -219,7 +226,9 @@ const styles = StyleSheet.create({
   // 36 dp: the 32 dp pills plus the 2 dp inset the file viewer's track has.
   toggleTrack: { backgroundColor: colors.chromeRaised, borderRadius: radii.pill + TOGGLE_INSET, bottom: 6, left: 0, position: "absolute", right: 0, top: 6 },
   segmentTarget: { flex: 1, paddingHorizontal: TOGGLE_INSET, paddingVertical: 8 },
-  segment: { alignItems: "center", borderRadius: radii.pill, minHeight: 32, justifyContent: "center", paddingHorizontal: 14 },
+  // 8 dp of pill padding leaves ~89 dp for the label in a third of a 360 dp phone's track; `Workspace` at 13 sp 600 is ~64,
+  // and the label caps its font scaling at 1.3× and never wraps, so the pill cannot grow past the track.
+  segment: { alignItems: "center", borderRadius: radii.pill, minHeight: 32, justifyContent: "center", paddingHorizontal: 8 },
   // The selected wash is a fill layer mounted from the first frame and shown by opacity.
   // Adding a background to an already-mounted rounded view made Android redraw it with
   // square corners (QA row 43); a view that mounts with both keeps its arcs, and

@@ -19,8 +19,10 @@ import { SPINNER_ARC_TURNS, SPINNER_TRACK_OPACITY, SPINNER_TURN_MS } from "../sp
  *
  * Every spinner reads one module-wide clock rather than owning a timer, so
  * five working rows turn on the same frame and cost what one does; the clock
- * runs while any spinner with `animate` is mounted and stops, resting the
- * arcs at 12 o'clock, when the last one leaves.
+ * runs while any spinner with `animate` is mounted and freezes where it is
+ * when the last one leaves (the list is still on screen for a moment as the
+ * Terminal screen pushes over it, and a snap to 12 o'clock would show). The
+ * next start begins the turn at 12 again.
  * `animate` false means nobody can see it (unfocused tab, backgrounded app)
  * or the user asked for reduced motion — a still arc is the desktop's
  * reduced-motion rendering too.
@@ -57,8 +59,8 @@ const clock = makeMutable(0);
 let clockUsers = 0;
 
 /**
- * Counts a spinner in; the first one starts the clock and the last one out
- * stops it and rests it at 0. `ReduceMotion.System` is reanimated's own
+ * Counts a spinner in; the first one starts the clock from 0 and the last one
+ * out stops it where it is. `ReduceMotion.System` is reanimated's own
  * synchronous read of the OS setting: the caller's `animate` (read from
  * `AccessibilityInfo` asynchronously) catches later changes, this catches the
  * first frames before that promise settles.
@@ -77,10 +79,7 @@ function acquireClock(): () => void {
   }
   return () => {
     clockUsers -= 1;
-    if (clockUsers === 0) {
-      cancelAnimation(clock);
-      clock.value = 0;
-    }
+    if (clockUsers === 0) cancelAnimation(clock);
   };
 }
 
