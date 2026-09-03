@@ -180,6 +180,48 @@ fn rename_returns_a_canonical_published_event_generation() {
 }
 
 #[test]
+fn title_animation_does_not_churn_routes_but_process_changes_still_reconcile() {
+    let runtime = runtime("title-animation-reconciliation");
+    let mut first = topology("codex");
+    first.windows[0].name = "✳ Fix tests".into();
+    assert!(runtime.reconcile_topology(&first, "server-a").unwrap());
+    let initial = runtime.snapshot_for("server-a");
+    assert_eq!(initial.agents.len(), 1);
+    let initial_generation = initial.generation;
+    let initial_route = initial.agents[0].route.as_ref().unwrap().clone();
+
+    let mut animated = first.clone();
+    animated.windows[0].name = "⠋ Fix tests".into();
+    assert!(!runtime.reconcile_topology(&animated, "server-a").unwrap());
+    let after_animation = runtime.snapshot_for("server-a");
+    assert_eq!(after_animation.generation, initial_generation);
+    assert_eq!(
+        after_animation.agents[0].route.as_ref(),
+        Some(&initial_route)
+    );
+
+    let mut renamed = animated.clone();
+    renamed.windows[0].name = "✓ Ship tests".into();
+    assert!(runtime.reconcile_topology(&renamed, "server-a").unwrap());
+    let after_rename = runtime.snapshot_for("server-a");
+    assert!(after_rename.generation > initial_generation);
+    assert_eq!(
+        after_rename.agents[0]
+            .route
+            .as_ref()
+            .unwrap()
+            .window_name_fallback,
+        "✓ Ship tests"
+    );
+
+    let mut departed = renamed;
+    departed.windows[0].name = "⠦ Ship tests".into();
+    departed.panes[0].current_command = "bash".into();
+    assert!(runtime.reconcile_topology(&departed, "server-a").unwrap());
+    assert!(runtime.snapshot_for("server-a").agents.is_empty());
+}
+
+#[test]
 fn persist_failure_rolls_back_runtime_mutations() {
     let seeded = runtime("transaction-seed");
     let topology_snapshot = topology("codex");

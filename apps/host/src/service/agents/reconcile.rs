@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use tmux_agent_protocol::v1;
 
-use super::{StoredAgent, StoredState, identity};
+use super::{StoredAgent, StoredRoute, StoredState, identity};
 
 #[derive(Debug, Default)]
 pub(super) struct ReconcileResult {
@@ -76,7 +76,7 @@ pub(super) fn topology(
         if let Some(existing_id) = existing_id {
             let fresh_route = identity::direct_route(snapshot, server_identity, &pane_id)
                 .expect("detected pane belongs to snapshot");
-            if state.agents[&existing_id].route != fresh_route {
+            if !same_route_for_reconciliation(&state.agents[&existing_id].route, &fresh_route) {
                 state.generation = state.generation.saturating_add(1);
                 let generation = state.generation;
                 let record = state.agents.get_mut(&existing_id).unwrap();
@@ -131,4 +131,22 @@ pub(super) fn topology(
         state.generation = state.generation.saturating_add(1);
     }
     ReconcileResult { changed }
+}
+
+/// Agent route fallbacks follow the same title semantics as topology
+/// publication. Persisting every animation glyph would make agent generation
+/// churn even after the topology generation stopped doing so; every routing
+/// identity and non-title fallback remains exact.
+fn same_route_for_reconciliation(previous: &StoredRoute, current: &StoredRoute) -> bool {
+    previous.host_profile_id == current.host_profile_id
+        && previous.server_identity == current.server_identity
+        && previous.session_id == current.session_id
+        && previous.session_name_fallback == current.session_name_fallback
+        && previous.window_id == current.window_id
+        && super::super::topology::equivalent_agent_title(
+            &previous.window_name_fallback,
+            &current.window_name_fallback,
+        )
+        && previous.pane_id == current.pane_id
+        && previous.pane_index_fallback == current.pane_index_fallback
 }
