@@ -9,9 +9,95 @@ use tmux_agent_protocol::v1;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::sleep;
 
-use super::snapshot::{discover_authoritative, snapshot_from_identity};
+use super::snapshot::{discover_authoritative, snapshot_from_reconciled_identity};
 use super::terminal::TerminalClients;
 use super::{SequencerControl, emit_event, reconcile_terminal_clients_if_open};
+
+/// Whether two authoritative snapshots describe the same publishable topology.
+///
+/// Agent CLIs animate a recognized status marker at the start of the tmux
+/// window title. Those frames remain visible to discovery, but changing only
+/// the marker does not change the topology consumers act on.
+fn same_publishable_topology(
+    previous: &tmux_control::TmuxSnapshot,
+    current: &tmux_control::TmuxSnapshot,
+) -> bool {
+    previous.sessions == current.sessions
+        && previous.panes == current.panes
+        && previous.windows.len() == current.windows.len()
+        && previous
+            .windows
+            .iter()
+            .zip(&current.windows)
+            .all(|(previous, current)| {
+                previous.id == current.id
+                    && previous.session_id == current.session_id
+                    && previous.index == current.index
+                    && equivalent_agent_title(&previous.name, &current.name)
+                    && previous.active == current.active
+                    && previous.layout == current.layout
+                    && previous.zoomed == current.zoomed
+                    && previous.pinned == current.pinned
+            })
+}
+
+pub(super) fn equivalent_agent_title(previous: &str, current: &str) -> bool {
+    previous == current
+        || matches!(
+            (agent_title_suffix(previous), agent_title_suffix(current)),
+            (Some(previous), Some(current)) if previous == current
+        )
+}
+
+/// Returns the meaningful suffix of a title beginning with one or more known
+/// Claude Code or Codex status markers.
+fn agent_title_suffix(title: &str) -> Option<&str> {
+    let mut remaining = title;
+    let mut marked = false;
+
+    loop {
+        let (after_marker, accepts_variation_selector) =
+            if let Some(after) = remaining.strip_prefix("[ . ]") {
+                (after, false)
+            } else if let Some(after) = remaining.strip_prefix("[ ! ]") {
+                (after, false)
+            } else {
+                let Some(marker) = remaining.chars().next() else {
+                    break;
+                };
+                if !is_agent_status_glyph(marker) {
+                    break;
+                }
+                (&remaining[marker.len_utf8()..], true)
+            };
+
+        marked = true;
+        remaining = after_marker;
+        if accepts_variation_selector
+            && (remaining.starts_with('\u{fe0e}') || remaining.starts_with('\u{fe0f}'))
+        {
+            remaining = &remaining['\u{fe0e}'.len_utf8()..];
+        }
+        remaining = remaining.trim_start_matches(char::is_whitespace);
+    }
+
+    marked.then(|| remaining.trim())
+}
+
+fn is_agent_status_glyph(value: char) -> bool {
+    matches!(
+        value,
+        '\u{00b7}'
+            | '\u{2713}'..='\u{2718}'
+            | '\u{2722}'
+            | '\u{2733}'
+            | '\u{2736}'
+            | '\u{273b}'
+            | '\u{273d}'
+            | '\u{25d0}'..='\u{25d3}'
+            | '\u{2800}'..='\u{28ff}'
+    )
+}
 
 /// Backstop for a tmux notification the reader never saw.
 ///
@@ -179,62 +265,18 @@ impl TopologyActor {
                 match discovered {
                     Ok((current, identity)) => {
                         discovery_failed = false;
-                        let changed = self.baseline.lock().unwrap().as_ref().is_none_or(
-                            |(value, value_identity)| {
-                                value != &current || value_identity != &identity
-                            },
-                        );
-                        if changed {
-                            *self.baseline.lock().unwrap() =
-                                Some((current.clone(), identity.clone()));
-                            let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-                            let _ = self
-                                .sender
-                                .send(SequencerControl::OrderedEvent(v1::HostEvent {
-                                    kind: v1::EventKind::TopologySnapshot.into(),
-                                    scope: "topology".into(),
-                                    snapshot: Some(snapshot_from_identity(
-                                        current.clone(),
-                                        generation,
-                                        identity,
-                                    )),
-                                    ..Default::default()
-                                }))
-                                .await;
-                        } else if notified {
-                            // A tmux notification can describe a transient
-                            // change that has already settled back to the
-                            // authoritative baseline. Close the frontend's
-                            // reconciliation state even when no generation
-                            // change is needed.
-                            //
-                            // Nothing moved, so nothing is described: the
-                            // acknowledgement carries the generation it
-                            // reconciled and no snapshot at all. It used to
-                            // resend the whole server to say "unchanged",
-                            // which on a busy tree is 7–39 KB ahead of the
-                            // switch the same notification burst belongs to —
-                            // paid several times per switch, for a payload the
-                            // desktop already holds byte for byte.
-                            let generation = self.generation.load(Ordering::Acquire);
-                            let _ = self
-                                .sender
-                                .send(SequencerControl::OrderedEvent(v1::HostEvent {
-                                    kind: v1::EventKind::TopologySnapshot.into(),
-                                    scope: "topology".into(),
-                                    detail: "topology reconciliation completed".into(),
-                                    topology_generation: generation,
-                                    ..Default::default()
-                                }))
-                                .await;
+                        if !self
+                            .reconcile_observation(current, identity, notified)
+                            .await
+                        {
+                            // Agent persistence rolled its observation back.
+                            // Leave this epoch unreconciled and wait for the
+                            // next notification or safety pass to retry; a
+                            // tight retry loop would turn an unwritable store
+                            // into a discovery storm.
+                            drop(guard);
+                            break;
                         }
-                        reconcile_terminal_clients_if_open(
-                            &self.closed,
-                            &self.terminal,
-                            &current,
-                            &self.sender,
-                            &self.overflowed,
-                        );
                     }
                     Err(_) if !discovery_failed => {
                         discovery_failed = true;
@@ -269,6 +311,92 @@ impl TopologyActor {
                 }
             }
         }
+    }
+
+    async fn reconcile_observation(
+        &self,
+        current: tmux_control::TmuxSnapshot,
+        identity: String,
+        notified: bool,
+    ) -> bool {
+        let topology_changed =
+            self.baseline
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_none_or(|(value, value_identity)| {
+                    value_identity != &identity || !same_publishable_topology(value, &current)
+                });
+        // Agent detection is an observation of the pane's live process tree,
+        // not of whether this tmux snapshot needs publishing. Keep running it
+        // for equivalent title frames: a shell-hosted agent can start or stop
+        // without changing pane_current_command, and suppressing that frame
+        // must not suppress the resulting agent-state refresh.
+        let agent_changed = match crate::service::agents::AgentRuntime::global()
+            .reconcile_topology(&current, &identity)
+        {
+            Ok(changed) => changed,
+            Err(_) => {
+                // Persistence rollback means the process observation was not
+                // reconciled. Never answer that failure with the ordinary
+                // unchanged acknowledgement: it would tell the desktop its
+                // current agent protection is authoritative when it is not.
+                reconcile_terminal_clients_if_open(
+                    &self.closed,
+                    &self.terminal,
+                    &current,
+                    &self.sender,
+                    &self.overflowed,
+                );
+                return false;
+            }
+        };
+        let changed = topology_changed || agent_changed;
+        if changed {
+            *self.baseline.lock().unwrap() = Some((current.clone(), identity.clone()));
+            let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            let _ = self
+                .sender
+                .send(SequencerControl::OrderedEvent(v1::HostEvent {
+                    kind: v1::EventKind::TopologySnapshot.into(),
+                    scope: "topology".into(),
+                    snapshot: Some(snapshot_from_reconciled_identity(
+                        current.clone(),
+                        generation,
+                        identity,
+                    )),
+                    ..Default::default()
+                }))
+                .await;
+        } else if notified {
+            // A tmux notification can describe a transient change that has
+            // already settled back to the authoritative baseline, or one
+            // animation frame replacing another without changing the title's
+            // meaningful suffix. Close the frontend's reconciliation state
+            // even when no generation change is needed.
+            //
+            // Nothing moved, so nothing is described: the acknowledgement
+            // carries the generation it reconciled and no snapshot at all.
+            let generation = self.generation.load(Ordering::Acquire);
+            let _ = self
+                .sender
+                .send(SequencerControl::OrderedEvent(v1::HostEvent {
+                    kind: v1::EventKind::TopologySnapshot.into(),
+                    scope: "topology".into(),
+                    detail: "topology reconciliation completed".into(),
+                    topology_generation: generation,
+                    ..Default::default()
+                }))
+                .await;
+        }
+        reconcile_terminal_clients_if_open(
+            &self.closed,
+            &self.terminal,
+            &current,
+            &self.sender,
+            &self.overflowed,
+        );
+        true
     }
 
     /// Sleeps until `deadline`. Returns false if the connection closed, which
@@ -547,6 +675,189 @@ mod tests {
             windows: Vec::new(),
             panes: Vec::new(),
         }
+    }
+
+    fn titled_server(title: &str) -> tmux_control::TmuxSnapshot {
+        tmux_control::TmuxSnapshot {
+            sessions: one_session_server().sessions,
+            windows: vec![tmux_control::Window {
+                id: "@1".into(),
+                session_id: "$1".into(),
+                index: 0,
+                name: title.into(),
+                active: true,
+                layout: "layout".into(),
+                zoomed: false,
+                pinned: false,
+            }],
+            panes: vec![tmux_control::Pane {
+                id: "%1".into(),
+                session_id: "$1".into(),
+                window_id: "@1".into(),
+                index: 0,
+                active: true,
+                width: 80,
+                height: 24,
+                left: 0,
+                top: 0,
+                current_path: "/work".into(),
+                current_command: "bash".into(),
+                pane_pid: 42,
+                start_command: "bash".into(),
+            }],
+        }
+    }
+
+    fn observation_actor() -> (
+        TopologyActor,
+        Arc<AtomicU64>,
+        mpsc::Receiver<SequencerControl>,
+    ) {
+        let generation = Arc::new(AtomicU64::new(0));
+        let (sender, events) = mpsc::channel(64);
+        (
+            TopologyActor {
+                closed: Arc::new(AtomicBool::new(false)),
+                subscribed: Arc::new(AtomicBool::new(true)),
+                generation: Arc::clone(&generation),
+                overflowed: Arc::new(AtomicBool::new(false)),
+                lock: Arc::new(tokio::sync::Mutex::new(())),
+                baseline: Arc::new(Mutex::new(None)),
+                terminal: Arc::new(Mutex::new(TerminalClients::new(
+                    Arc::new(OutputCredit::negotiated(false)),
+                    TopologyOutputTrigger::default(),
+                ))),
+                sender,
+                signal: TopologySignal::default(),
+            },
+            generation,
+            events,
+        )
+    }
+
+    #[test]
+    fn agent_title_parser_matches_the_desktop_marker_set() {
+        for marker in [
+            "·", "✢", "✳", "✶", "✻", "✽", "◐", "◓", "◑", "◒", "⠀", "⠋", "⣿", "✓", "✔", "✕", "✘",
+            "[ . ]", "[ ! ]",
+        ] {
+            assert_eq!(
+                agent_title_suffix(&format!("{marker} Fix tests")),
+                Some("Fix tests"),
+                "marker {marker:?}"
+            );
+        }
+        assert_eq!(agent_title_suffix("✳️ Fix tests"), Some("Fix tests"));
+        assert_eq!(agent_title_suffix("✳︎ Fix tests"), Some("Fix tests"));
+        assert_eq!(
+            agent_title_suffix("✳ ✶ ⠋ [ ! ] Fix tests"),
+            Some("Fix tests")
+        );
+        assert_eq!(agent_title_suffix("⠋"), Some(""));
+        assert_eq!(agent_title_suffix("[ . ]   "), Some(""));
+
+        assert_eq!(agent_title_suffix("🚀 deploy"), None);
+        assert_eq!(agent_title_suffix("Fix tests"), None);
+        assert_eq!(agent_title_suffix("release ✳ notes"), None);
+        assert_eq!(agent_title_suffix("Action [ ! ] required"), None);
+    }
+
+    #[test]
+    fn agent_title_equivalence_requires_both_titles_to_be_marked() {
+        assert!(equivalent_agent_title("✳ Fix tests", "⠋ Fix tests"));
+        assert!(equivalent_agent_title("✳", "[ . ]"));
+        assert!(!equivalent_agent_title("Fix tests", "✳ Fix tests"));
+        assert!(!equivalent_agent_title("✳ Fix tests", "⠋ Ship tests"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_title_frames_do_not_publish_but_real_changes_still_do() {
+        let (actor, generation, mut events) = observation_actor();
+
+        actor
+            .reconcile_observation(titled_server("Fix tests"), "tmux:stable".into(), true)
+            .await;
+        let initial = next_topology_snapshot_event(&mut events).await;
+        assert_eq!(initial.snapshot.unwrap().generation, 1);
+
+        actor
+            .reconcile_observation(titled_server("✳ Fix tests"), "tmux:stable".into(), true)
+            .await;
+        let entered = next_topology_snapshot_event(&mut events).await;
+        let entered_snapshot = entered
+            .snapshot
+            .expect("entering the marked agent state must publish");
+        assert_eq!(entered_snapshot.generation, 2);
+        assert_eq!(entered_snapshot.windows[0].name, "✳ Fix tests");
+
+        let frames = [
+            "·", "✢", "✳", "✶", "✻", "✽", "◐", "◓", "◑", "◒", "⠦", "⠋", "⣷", "✓", "✗", "[ . ]",
+            "[ ! ]",
+        ];
+        for index in 0..48 {
+            let title = format!("{} Fix tests", frames[index % frames.len()]);
+            actor
+                .reconcile_observation(titled_server(&title), "tmux:stable".into(), true)
+                .await;
+            let animation = next_topology_snapshot_event(&mut events).await;
+            assert!(
+                animation.snapshot.is_none(),
+                "animation frame {index} published a full snapshot"
+            );
+            assert_eq!(animation.topology_generation, 2);
+            assert_eq!(generation.load(Ordering::Acquire), 2);
+        }
+
+        actor
+            .reconcile_observation(titled_server("✓ Ship tests"), "tmux:stable".into(), true)
+            .await;
+        let renamed = next_topology_snapshot_event(&mut events).await;
+        let renamed_snapshot = renamed
+            .snapshot
+            .expect("a meaningful title suffix change must publish");
+        assert_eq!(renamed_snapshot.generation, 3);
+        assert_eq!(renamed_snapshot.windows[0].name, "✓ Ship tests");
+
+        actor
+            .reconcile_observation(titled_server("Ship tests"), "tmux:stable".into(), true)
+            .await;
+        let left = next_topology_snapshot_event(&mut events).await;
+        assert_eq!(
+            left.snapshot
+                .expect("leaving the marked agent state must publish")
+                .generation,
+            4
+        );
+
+        let mut structurally_changed = titled_server("Ship tests");
+        structurally_changed.panes[0].width = 120;
+        actor
+            .reconcile_observation(structurally_changed, "tmux:stable".into(), true)
+            .await;
+        let structural = next_topology_snapshot_event(&mut events).await;
+        assert_eq!(
+            structural
+                .snapshot
+                .expect("a structural pane change must publish")
+                .generation,
+            5
+        );
+
+        let mut window_changed = titled_server("Ship tests");
+        window_changed.panes[0].width = 120;
+        window_changed.windows[0].zoomed = true;
+        actor
+            .reconcile_observation(window_changed, "tmux:stable".into(), true)
+            .await;
+        let window_structural = next_topology_snapshot_event(&mut events).await;
+        assert_eq!(
+            window_structural
+                .snapshot
+                .expect("a structural window change must publish")
+                .generation,
+            6
+        );
+        assert_eq!(generation.load(Ordering::Acquire), 6);
     }
 
     async fn next_topology_snapshot_event(
