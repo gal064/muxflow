@@ -1,7 +1,8 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { AppState, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useStore } from "zustand";
 
 import { agentStateLabel, agentTitle } from "../agents/agentViews";
 import { markState } from "../agents/agentListModel";
@@ -9,6 +10,7 @@ import { AgentMark } from "../agents/ui/AgentMark";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
+import { prefsStore } from "../../store/prefsStore";
 import { Dialog } from "../../ui/components/Dialog";
 import { EmptyState } from "../../ui/components/EmptyState";
 import { BackIcon } from "../../ui/components/MediaIcons";
@@ -16,10 +18,14 @@ import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
 import { useAnimationsAllowed } from "../../ui/useAnimationsAllowed";
 import { createExpoFiles } from "./files";
+import { createExpoHaptics } from "./haptics";
 import { MicButton } from "./MicButton";
+import { bigPaneHeight } from "./paneLayout";
 import { createExpoPlayer } from "./player";
 import { createExpoRecorder } from "./recorder";
 import { ReplyPlayer } from "./ReplyPlayer";
+import { SpeedPicker } from "./SpeedPicker";
+import { createExpoTones } from "./tones";
 import type { VoiceController } from "./VoiceController";
 import { useVoice } from "./voiceHooks";
 import { voiceRegistry } from "./voiceRegistry";
@@ -33,26 +39,30 @@ export interface VoiceScreenProps {
   sessionId: string;
 }
 
-// The one recorder, player and file adapter for the app, created when the
-// first Voice screen renders (§2c: nothing audio-related loads before that).
-let audio: { recorder: ReturnType<typeof createExpoRecorder>; player: ReturnType<typeof createExpoPlayer>; files: ReturnType<typeof createExpoFiles> } | undefined;
+// The one recorder, player, file and haptics adapter for the app, created when
+// the first Voice screen renders (§2c: nothing audio-related loads before that).
+let audio: { recorder: ReturnType<typeof createExpoRecorder>; player: ReturnType<typeof createExpoPlayer>; files: ReturnType<typeof createExpoFiles>; haptics: ReturnType<typeof createExpoHaptics>; tones: ReturnType<typeof createExpoTones> } | undefined;
 function sharedAudio() {
-  audio ??= { recorder: createExpoRecorder(), player: createExpoPlayer(), files: createExpoFiles() };
+  audio ??= { recorder: createExpoRecorder(), player: createExpoPlayer(), files: createExpoFiles(), haptics: createExpoHaptics(), tones: createExpoTones() };
   return audio;
 }
 
-/** Voice — design.md §9.11. Header, message list, readiness card, hold-to-talk. */
+/** Voice — design.md §9.11. Header, message list, readiness card, the talk pane. */
 export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const animateAgentState = useAnimationsAllowed();
+  const { height: windowHeight } = useWindowDimensions();
   const agent = useSession((s) => s.agents[agentId]);
+  const lifecycle = agent?.lifecycle;
   const windows = useSession((s) => s.windows);
   const adapters = useSession((s) => s.adapters);
   const connected = useSession((s) => s.connection.state === "connected");
   const readiness = useVoice((s) => s.hostStatus.readiness);
   const recorderError = useVoice((s) => s.recorderError);
   const session = useVoice((s) => s.sessions[agentId]);
+  const playbackRate = useStore(prefsStore, (s) => s.voicePlaybackRate);
+  const bigPane = useStore(prefsStore, (s) => s.voiceBigPane);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const list = useRef<ScrollView>(null);
 
@@ -63,6 +73,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     getConnection,
     ...sharedAudio(),
     appInForeground: () => AppState.currentState === "active",
+    playbackRate: prefsStore.getState().voicePlaybackRate,
     toast,
     log,
   }), [agentId, paneId, sessionId]);
@@ -88,6 +99,13 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     });
     return () => subscription.remove();
   }, [controller]);
+
+  // The speed applies to the reply that is playing as well as the next one.
+  useEffect(() => controller.setPlaybackRate(playbackRate), [controller, playbackRate]);
+  // The agent picking up the utterance is a haptic, not only the working bubble.
+  useEffect(() => {
+    if (lifecycle) controller.onAgentLifecycle(lifecycle);
+  }, [controller, lifecycle]);
 
   const messages = session?.messages ?? [];
   const phase = session?.phase ?? "idle";
@@ -120,6 +138,8 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     router.back();
   }, [agentId, router]);
 
+  const scrollToEnd = useCallback((animated: boolean) => list.current?.scrollToEnd({ animated }), []);
+
   return (
     <View style={[styles.root, { paddingBottom: insets.bottom, paddingTop: insets.top }]}>
       <ConnectionStrip />
@@ -134,9 +154,10 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         </Pressable>
       </View>
 
-      <ScrollView contentContainerStyle={styles.listContent} onContentSizeChange={() => list.current?.scrollToEnd({ animated: true })} ref={list} style={styles.list}>
+      {/* The list re-pins to its end when it grows and when the pane below changes size, so the newest turn stays in view. */}
+      <ScrollView contentContainerStyle={styles.listContent} onContentSizeChange={() => scrollToEnd(true)} onLayout={() => scrollToEnd(false)} ref={list} style={styles.list}>
         {messages.length === 0 ? (
-          <EmptyState heading={`Talk to ${title}`} lines={["Hold the button, say what you want typed into the agent's terminal, and let go.", "The agent's next reply is read back to you here."]} />
+          <EmptyState heading={`Talk to ${title}`} lines={["Hold anywhere on the pane below, say what you want typed into the agent's terminal, and let go.", "The agent's next reply is read back to you here."]} />
         ) : null}
         {messages.map((message) => (
           <MessageBubble controller={message.id === newest?.id ? controller : undefined} key={message.id} message={message} />
@@ -146,13 +167,31 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
 
       <VoiceStatusCard connected={connected} controller={controller} />
 
-      <MicButton
-        disabled={micDisabled}
-        hint={hint}
-        onPressIn={() => controller.beginUtterance()}
-        onPressOut={() => void controller.endUtterance()}
-        phase={phase}
-      />
+      <View style={[styles.pane, bigPane && { height: bigPaneHeight(windowHeight, insets.top, insets.bottom, metrics.terminalHeaderHeight) }]}>
+        <View style={styles.paneControls}>
+          <View style={styles.speedGroup}>
+            <Text style={styles.speedCaption}>Speed</Text>
+            <SpeedPicker onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
+          </View>
+          <Pressable
+            accessibilityLabel={bigPane ? "Smaller talk pane" : "Larger talk pane"}
+            accessibilityRole="button"
+            accessibilityState={{ selected: bigPane }}
+            hitSlop={{ top: 6, bottom: 6 }}
+            onPress={() => prefsStore.getState().setVoiceBigPane(!bigPane)}
+            style={({ pressed }) => [styles.paneToggle, pressed && styles.pressed]}
+          >
+            <Text style={styles.paneToggleLabel}>{bigPane ? "Smaller" : "Bigger"}</Text>
+          </Pressable>
+        </View>
+        <MicButton
+          disabled={micDisabled}
+          hint={hint}
+          onPressIn={() => controller.beginUtterance()}
+          onPressOut={() => void controller.endUtterance()}
+          phase={phase}
+        />
+      </View>
 
       <Dialog
         actions={[
@@ -229,4 +268,13 @@ const styles = StyleSheet.create({
   truncatedNote: { color: colors.chromeDim, fontSize: typeScale.meta, fontStyle: "italic" },
   stamp: { color: colors.chromeDim, fontSize: typeScale.meta },
   stampYou: { textAlign: "right" },
+  /** The talk pane: a hairline above, the controls row, then the hold surface filling the rest. */
+  pane: { borderTopColor: colors.chromeBorder, borderTopWidth: metrics.hairlineWidth },
+  paneControls: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", paddingBottom: 8, paddingHorizontal: 12, paddingTop: 8 },
+  speedGroup: { alignItems: "center", flexDirection: "row", gap: 8 },
+  speedCaption: { color: colors.chromeDim, fontSize: typeScale.rowSecondary },
+  /** Wide enough for "Smaller", so the pill's left edge does not jump when the label changes. */
+  paneToggle: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", minWidth: 96, paddingHorizontal: 14 },
+  paneToggleLabel: { color: colors.chromeInk, fontSize: typeScale.rowSecondary, fontWeight: "600" },
+  pressed: { opacity: 0.75 },
 });

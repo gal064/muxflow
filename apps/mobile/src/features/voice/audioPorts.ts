@@ -31,6 +31,8 @@ export interface VoicePlayer {
   /** Pauses and rewinds. */
   stop(): void;
   seek(positionMs: number): void;
+  /** Playback speed for the current and every later source (1 = natural), pitch kept. */
+  setRate(rate: number): void;
   onStatus(listener: (status: PlayerStatus) => void): () => void;
   release(): void;
 }

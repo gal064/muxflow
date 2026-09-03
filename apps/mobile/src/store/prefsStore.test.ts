@@ -33,7 +33,17 @@ describe("parsePersistedPrefs", () => {
     ['{"agentListMode":"Pinned"}', "priority"],
     ['{"agentListMode":"priority"}', "priority"],
   ])("%j → %s", (raw, mode) => {
-    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode });
+    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, voicePlaybackRate: 1, voiceBigPane: false });
+  });
+
+  it.each<[string, number, boolean]>([
+    ['{"voicePlaybackRate":1.5,"voiceBigPane":true}', 1.5, true],
+    ['{"voicePlaybackRate":2}', 2, false],
+    // Unknown speeds and non-boolean flags fall back; a persisted value never disables the screen.
+    ['{"voicePlaybackRate":3,"voiceBigPane":"yes"}', 1, false],
+    ['{"voicePlaybackRate":"1.5","voiceBigPane":1}', 1, false],
+  ])("voice fields %j → %s× big=%s", (raw, rate, big) => {
+    expect(parsePersistedPrefs(raw)).toMatchObject({ voicePlaybackRate: rate, voiceBigPane: big });
   });
 });
 
@@ -53,7 +63,7 @@ describe("prefsStore", () => {
     store.getState().setAgentListMode("workspace");
     expect(store.getState().agentListMode).toBe("workspace");
     await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(1));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace" });
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", voicePlaybackRate: 1, voiceBigPane: false });
 
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
@@ -64,6 +74,21 @@ describe("prefsStore", () => {
     const again = createPrefsStore(storage);
     await again.getState().hydrate();
     expect(again.getState().agentListMode).toBe("pinned");
+  });
+
+  it("persists the voice speed and pane size alongside the list mode", async () => {
+    const { storage, values, setItem } = fakeStore({ [PREFS_STORAGE_KEY]: '{"agentListMode":"pinned"}' });
+    const store = createPrefsStore(storage);
+    await store.getState().hydrate();
+    store.getState().setVoicePlaybackRate(2);
+    store.getState().setVoiceBigPane(true);
+    // Setting the value already held writes nothing.
+    store.getState().setVoiceBigPane(true);
+    await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(2));
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", voicePlaybackRate: 2, voiceBigPane: true });
+    const restarted = createPrefsStore(storage);
+    await restarted.getState().hydrate();
+    expect(restarted.getState()).toMatchObject({ agentListMode: "pinned", voicePlaybackRate: 2, voiceBigPane: true });
   });
 
   it("hydrates once: repeated calls share the read", async () => {
