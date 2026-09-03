@@ -45,7 +45,7 @@ export interface VoiceControllerOptions {
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
 /** The steps between press and pane whose failure loses the utterance; each gets the error haptic. */
-const UTTERANCE_STEPS = new Set(["record", "transcribe", "input"]);
+const UTTERANCE_STEPS = new Set(["record", "recorder.stop", "transcribe", "input"]);
 /** Releases shorter than this are a mis-tap, not an utterance (§5.2). */
 export const MIN_UTTERANCE_MS = 300;
 /**
@@ -149,6 +149,9 @@ export class VoiceController {
   /** The screen left (Back, Files); the session and its registration stay. */
   blur(): void {
     this.focused = false;
+    // The next mount re-baselines the lifecycle: an edge that happened while
+    // another screen was up is not acknowledged late, or for the wrong turn.
+    this.lastLifecycle = undefined;
     this.disarm();
   }
 
@@ -364,7 +367,9 @@ export class VoiceController {
    * while the last turn is the user's is the agent picking the utterance up:
    * one haptic per utterance, none when the agent was already working (it has
    * not reached this message yet) and none for a screen that opens onto an
-   * agent mid-turn.
+   * agent mid-turn (each mount re-baselines, see `blur`). Delivered only while
+   * a Voice screen for this agent is mounted: that is where lifecycles are
+   * reported from, and where the user is waiting without looking.
    */
   onAgentLifecycle(lifecycle: AgentLifecycle): void {
     const previous = this.lastLifecycle;

@@ -767,6 +767,37 @@ describe("VoiceController acknowledgements and playback speed", () => {
     expect(h.haptics.calls).toEqual(["working"]);
   });
 
+  it("re-baselines the lifecycle on blur so a re-opened screen does not acknowledge a stale edge", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onAgentLifecycle("idle");
+    await speak(h);
+    h.haptics.calls.length = 0;
+    h.controller.blur();
+    // While the Terminal screen was up the agent went working for its own reasons; the Voice screen reopens onto it.
+    h.controller.focus();
+    await settle();
+    h.controller.onAgentLifecycle("working");
+    expect(h.haptics.calls).toEqual([]);
+    // A fresh edge seen by this mount still counts.
+    h.controller.onAgentLifecycle("idle");
+    h.controller.onAgentLifecycle("working");
+    expect(h.haptics.calls).toEqual(["working"]);
+  });
+
+  it("gives the error pattern when the recorder fails to stop", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.recorder.stop = async () => {
+      throw new Error("MediaRecorder stop failed");
+    };
+    await speak(h);
+    expect(h.haptics.calls).toEqual(["listening", "failed"]);
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+  });
+
   it("applies the playback speed to each loaded reply and live to the one playing", async () => {
     const h = harness();
     h.controller.focus();
