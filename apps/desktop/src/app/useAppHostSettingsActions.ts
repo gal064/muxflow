@@ -6,6 +6,8 @@ import type { HostScopeToken } from "../features/shell/hostScope";
 import type { ConnectionSpec, HostProfile, PersistedProfiles } from "./types";
 
 interface HostSettingsActionsOptions {
+  /** Makes a saved host the one on screen; see `useAppConnectionController`. */
+  activateHost(profileId: string): void;
   clearActiveSelection(): void;
   connection: ConnectionSpec;
   connectionMode: ConnectionSpec["mode"];
@@ -85,15 +87,36 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
     }
   }, [options]);
 
+  /**
+   * Saves the host and makes it the one a restart reconnects to. Saving alone
+   * no longer moves that pointer: hosts are saved to be shown beside the
+   * active one as often as to become it.
+   */
+  const saveActiveProfile = useCallback((profile: HostProfile) => invoke("save_host_profile", { profile })
+    .then(() => invoke("set_last_profile_id", { profileId: profile.id }))
+    .catch((error) => options.setStatus(String(error))), [options]);
+
+  /**
+   * Connects to the host the form describes and makes it the one on screen,
+   * on a fresh bridge. The connection moves first: the reset, the cleared
+   * selection and the new epoch all land on the host being connected to,
+   * which is the point — a host shown beside it keeps everything it holds.
+   */
   const connect = useCallback(() => {
-    options.resetHost();
-    options.clearActiveSelection();
     if (options.connectionMode === "local") {
-      const profile: HostProfile = { id: "local", label: "Local", connection: { mode: "local" } };
+      const profile: HostProfile = {
+        ...options.profiles.find((item) => item.id === "local"),
+        id: "local", label: "Local", connection: { mode: "local" }, shown: true,
+      };
       options.setConnection(profile.connection);
+      options.resetHost();
+      options.clearActiveSelection();
       options.setSelectedProfileId(profile.id);
       options.setConnectionEpoch((value) => value + 1);
-      void invoke("save_host_profile", { profile });
+      options.setProfiles((current) => current.some((item) => item.id === profile.id)
+        ? current.map((item) => item.id === profile.id ? profile : item)
+        : [profile, ...current]);
+      void saveActiveProfile(profile);
       options.setStatus("Discovering local tmux…");
       return;
     }
@@ -118,8 +141,10 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
     const connection: ConnectionSpec = {
       mode: "ssh", profileId, target, ...(configPath ? { configPath } : {}),
     };
-    const profile: HostProfile = { id: profileId, label: target, connection };
+    const profile: HostProfile = { ...edited, id: profileId, label: target, connection, shown: true };
     options.setConnection(connection);
+    options.resetHost();
+    options.clearActiveSelection();
     options.setConnectionEpoch((value) => value + 1);
     options.setSelectedProfileId(profile.id);
     // An edit keeps its place in the list, exactly as the store keeps it: the
@@ -128,21 +153,22 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
     options.setProfiles((current) => edited
       ? current.map((item) => item.id === profile.id ? profile : item)
       : [...current.filter((item) => item.id !== profile.id), profile]);
-    void invoke("save_host_profile", { profile }).catch((error) => options.setStatus(String(error)));
+    void saveActiveProfile(profile);
     options.setStatus(`Connecting to ${target}…`);
-  }, [options]);
+  }, [options, saveActiveProfile]);
 
+  /**
+   * Moves the app onto a saved host and shows it in the form. The host's own
+   * link keeps whatever it already holds — a host shown beside the active one
+   * has a live bridge, and switching to it must neither restart that bridge
+   * nor wipe what it has said.
+   */
   const switchHostProfile = useCallback((profile: HostProfile) => {
-    const connection: ConnectionSpec = profile.connection.mode === "ssh"
-      ? { ...profile.connection, profileId: profile.connection.profileId || profile.id }
-      : profile.connection;
-    options.resetHost();
-    options.clearActiveSelection();
-    options.setConnection(connection);
-    options.setConnectionMode(connection.mode);
-    if (connection.mode === "ssh") {
-      options.setSshTarget(connection.target);
-      options.setSshConfigPath(connection.configPath ?? "");
+    options.activateHost(profile.id);
+    options.setConnectionMode(profile.connection.mode);
+    if (profile.connection.mode === "ssh") {
+      options.setSshTarget(profile.connection.target);
+      options.setSshConfigPath(profile.connection.configPath ?? "");
     }
   }, [options]);
 

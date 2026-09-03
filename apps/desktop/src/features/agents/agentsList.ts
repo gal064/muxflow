@@ -55,6 +55,8 @@ export interface AgentLocation {
   workspaceName: string;
   /** User-facing host identity, needed when workspace names collide. */
   hostLabel?: string;
+  /** The host mark drawn before the name; absent or "" draws none. */
+  hostLetter?: string;
   tabIndex?: number;
   /**
    * Whether this agent's workspace and tab are pinned, as the host reports
@@ -313,10 +315,12 @@ export function unreadCount(rows: readonly AgentListRow[]): number {
 export function selectedAgentIdForPane(
   rows: readonly AgentListRow[],
   activePaneId: string | undefined,
+  /** The host the active pane is on: `%1` exists on every tmux server, and only this host's counts. */
+  activeHostProfileId: string | undefined,
 ): string | undefined {
-  if (!activePaneId) return undefined;
+  if (!activePaneId || !activeHostProfileId) return undefined;
   return rows
-    .filter((row) => row.routable && row.agent.paneId === activePaneId)
+    .filter((row) => row.routable && row.agent.hostProfileId === activeHostProfileId && row.agent.paneId === activePaneId)
     .sort((left, right) => {
       const leftNative = !left.agent.detectedManually && left.agent.nativeSessionId.trim() !== "";
       const rightNative = !right.agent.detectedManually && right.agent.nativeSessionId.trim() !== "";

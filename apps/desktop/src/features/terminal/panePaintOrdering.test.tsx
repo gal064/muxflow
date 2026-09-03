@@ -197,6 +197,7 @@ describe("the paint gate in the real tree", () => {
     useWorkspaceFiles(client, scopeFor(pane.id, pane.sessionId));
     return <TerminalPane
       appFocused
+      cacheScope="local"
       clientId="client-a"
       pane={pane}
       hub={hub.asHub()}

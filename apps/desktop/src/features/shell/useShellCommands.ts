@@ -32,12 +32,26 @@ type PerformAction = (
   precondition?: { serverIdentity: string; generation: number },
 ) => Promise<TmuxActionResult | undefined>;
 
+/**
+ * The host a targeted command runs on: what it knows, how it is identified,
+ * and the action path that reaches it. The active host is one of these; a
+ * host shown beside it is another, with its own snapshot and its own client.
+ */
+export interface CommandHost {
+  scope: HostScopeToken;
+  snapshot: TmuxSnapshot;
+  serverIdentity?: string;
+  performAction: PerformAction;
+  isScopeCurrent(scope: HostScopeToken): boolean;
+}
+
 interface ShellCommandOptions {
   activePane?: Pane;
   activeSession?: Session;
   activeWindow?: TmuxWindow;
   appState: PersistedAppState;
   canMutate: boolean;
+  canCreateWorkspace: boolean;
   closeAppTab(tab: AppOwnedTab, scope: HostScopeToken): void;
   combinedTabs: readonly CombinedTab[];
   /** The saved host Settings has picked, when it is one that can be deleted. */
@@ -50,11 +64,17 @@ interface ShellCommandOptions {
   focusDirection(direction: "left" | "right" | "up" | "down"): void;
   hostScope: HostScopeToken;
   isHostScopeCurrent(scope: HostScopeToken): boolean;
+  /**
+   * The host a target's scope names — the active one or a peer — while that
+   * scope is still the host's live connection. A stale scope, or a host no
+   * longer shown, resolves to nothing, and the command finds no subject.
+   */
+  hostForScope(scope: HostScopeToken): CommandHost | undefined;
   performAction: PerformAction;
   /** Live subscription to what the row surfaces currently offer. */
   rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
-  createSession(name: string): void;
+  requestNewWorkspace(): void;
   createWindow(sessionId: string): void;
   serverIdentity?: string;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
@@ -208,7 +228,16 @@ export function useShellCommands(options: ShellCommandOptions): {
       if (!outcome.ran) options.setStatus(`${definition.title.replace(/…$/, "")} is unavailable: nothing is selected in that panel any more.`);
       return;
     }
-    const resolvedTarget = resolveCommandTarget(options, target);
+    // Ambient commands act on the host on screen; a targeted one acts on the
+    // host its row came from, which may be shown beside the active one. A
+    // target whose host cannot be found resolves against the active host and
+    // fails its scope check there, so it finds no subject.
+    const activeHost: CommandHost = {
+      scope: options.hostScope, snapshot: options.snapshot, serverIdentity: options.serverIdentity,
+      performAction: options.performAction, isScopeCurrent: options.isHostScopeCurrent,
+    };
+    const host = (target && options.hostForScope(target.scope)) ?? activeHost;
+    const resolvedTarget = resolveCommandTarget({ ...options, hostScope: host.scope, snapshot: host.snapshot }, target);
     const targetSession = resolvedTarget.kind === "session" ? resolvedTarget.value
       : resolvedTarget.kind === "ambient" ? resolvedTarget.session : undefined;
     const targetWindow = resolvedTarget.kind === "terminalTab" ? resolvedTarget.value
@@ -222,11 +251,11 @@ export function useShellCommands(options: ShellCommandOptions): {
     const targetWindows = resolvedTarget.kind === "terminalTab" || resolvedTarget.kind === "ambient"
       ? resolvedTarget.windows : [];
     if (commandId === "window.close" && targetAppTab) {
-      const closeScope = target?.scope ?? options.hostScope;
+      const closeScope = target?.scope ?? host.scope;
       try {
         await editorFlushRegistry.flushAll();
       } catch (error) {
-        if (options.isHostScopeCurrent(closeScope)) {
+        if (host.isScopeCurrent(closeScope)) {
           options.setStatus(`Could not close ${targetAppTab.title} because its editor did not save: ${String(error)}`);
         }
         return;
@@ -234,12 +263,12 @@ export function useShellCommands(options: ShellCommandOptions): {
       // No toast: the tab is gone from the strip, which is the whole message.
       // Status is for what the user cannot see or must act on — the failure
       // branch above is exactly that, and stays.
-      if (!options.isHostScopeCurrent(closeScope)) return;
+      if (!host.isScopeCurrent(closeScope)) return;
       options.closeAppTab(targetAppTab, closeScope);
       return;
     }
     if (definition.destructive) {
-      if (!options.serverIdentity) return;
+      if (!host.serverIdentity) return;
       // The ambient Close command (keyboard, palette or application menu)
       // closes the focused pane while a terminal tab is split. An explicit tab
       // target is the tab context menu's "Close tab" and remains whole-tab.
@@ -247,7 +276,7 @@ export function useShellCommands(options: ShellCommandOptions): {
         && (resolvedTarget.kind === "ambient" || resolvedTarget.kind === "focusedSurface")
         && targetWindow
         && targetPane
-        && options.snapshot.panes.filter((pane) => pane.windowId === targetWindow.id).length > 1;
+        && host.snapshot.panes.filter((pane) => pane.windowId === targetWindow.id).length > 1;
       const close = closeTarget(paneFirst ? "pane.close" : commandId, { targetSession, targetWindow, targetPane });
       if (!close) return;
       // One dispatch, so `confirmed: true` and the authoritative precondition
@@ -255,11 +284,11 @@ export function useShellCommands(options: ShellCommandOptions): {
       // Whether a close *asks* is data — `confirmLabel` — not a second branch
       // of control flow above this one.
       const action: TmuxAction = { ...close.action, confirmed: true };
-      const precondition = closePrecondition(options.serverIdentity);
+      const precondition = closePrecondition(host.serverIdentity);
       if (close.confirmLabel) {
-        options.setConfirmation(createTmuxConfirmation(commandId, definition.title, close.confirmLabel, action, precondition));
+        options.setConfirmation(createTmuxConfirmation(commandId, definition.title, close.confirmLabel, action, precondition, host.scope));
       } else {
-        await options.performAction(action, precondition);
+        await host.performAction(action, precondition);
       }
       return;
     }
@@ -297,29 +326,24 @@ export function useShellCommands(options: ShellCommandOptions): {
       case "tab.previous": options.selectRelativeTab(-1); return;
       case "tab.next": options.selectRelativeTab(1); return;
       case "session.new": {
-        const scope = options.hostScope;
-        options.setTextPrompt({ title: "New workspace", label: "Workspace name", submit: (name) => {
-          options.setTextPrompt(undefined);
-          if (!options.isHostScopeCurrent(scope)) return options.setStatus("Workspace creation was cancelled because its host scope changed.");
-          options.createSession(name);
-        } });
+        options.requestNewWorkspace();
         return;
       }
       case "session.rename": {
-        const scope = options.hostScope;
+        const scope = host.scope;
         if (targetSession) options.setTextPrompt({ title: "Rename workspace", label: "Workspace name", initialValue: targetSession.name, submit: (name) => {
           options.setTextPrompt(undefined);
-          if (!options.isHostScopeCurrent(scope)) return options.setStatus("Workspace rename was cancelled because its host scope changed.");
-          void options.performAction({ kind: "renameSession", sessionId: targetSession.id, name });
+          if (!host.isScopeCurrent(scope)) return options.setStatus("Workspace rename was cancelled because its host scope changed.");
+          void host.performAction({ kind: "renameSession", sessionId: targetSession.id, name });
         } });
         return;
       }
       case "session.moveLeft": case "session.moveRight": {
         if (!targetSession) return;
-        const ordered = [...options.snapshot.sessions].sort((left, right) => (left.order ?? 0) - (right.order ?? 0));
+        const ordered = [...host.snapshot.sessions].sort((left, right) => (left.order ?? 0) - (right.order ?? 0));
         const current = ordered.findIndex((session) => session.id === targetSession.id);
         const index = current + (commandId === "session.moveLeft" ? -1 : 1);
-        if (current >= 0 && index >= 0 && index < ordered.length) await options.performAction({ kind: "reorderSession", sessionId: targetSession.id, index });
+        if (current >= 0 && index >= 0 && index < ordered.length) await host.performAction({ kind: "reorderSession", sessionId: targetSession.id, index });
         return;
       }
       case "workspaces.showPinnedOnly": case "workspaces.showAll":
@@ -334,40 +358,40 @@ export function useShellCommands(options: ShellCommandOptions): {
         return;
       }
       case "window.rename": {
-        const scope = options.hostScope;
+        const scope = host.scope;
         // Display-only normalization must not rewrite the stored tmux name.
         if (targetWindow) options.setTextPrompt({ title: "Rename terminal tab", label: "Tab name", initialValue: targetWindow.name, submit: (name) => {
           options.setTextPrompt(undefined);
-          if (!options.isHostScopeCurrent(scope)) return options.setStatus("Terminal-tab rename was cancelled because its host scope changed.");
-          void options.performAction({ kind: "renameWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id, name });
+          if (!host.isScopeCurrent(scope)) return options.setStatus("Terminal-tab rename was cancelled because its host scope changed.");
+          void host.performAction({ kind: "renameWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id, name });
         } });
         return;
       }
       case "window.moveLeft": case "window.moveRight": {
         if (targetAppTab) {
-          const session = options.snapshot.sessions.find((item) => item.id === targetAppTab.sessionId);
+          const session = host.snapshot.sessions.find((item) => item.id === targetAppTab.sessionId);
           if (session) options.setAppState((current) => reorderAppTab(current, options.currentHostProfileId, options.serverIdentity, session, targetAppTab.id, commandId.endsWith("Left") ? "left" : "right"));
           return;
         }
         if (!targetWindow) return;
         const action = relativeWindowReorderAction(targetWindows, targetWindow.id, commandId.endsWith("Left") ? "left" : "right");
-        if (action) await options.performAction(action);
+        if (action) await host.performAction(action);
         return;
       }
-      case "pane.splitRight": case "pane.splitDown": if (targetPane) await options.performAction({ kind: commandId === "pane.splitRight" ? "splitPaneRight" : "splitPaneDown", sessionId: targetPane.sessionId, windowId: targetPane.windowId, paneId: targetPane.id, splitSize: 50 }); return;
+      case "pane.splitRight": case "pane.splitDown": if (targetPane) await host.performAction({ kind: commandId === "pane.splitRight" ? "splitPaneRight" : "splitPaneDown", sessionId: targetPane.sessionId, windowId: targetPane.windowId, paneId: targetPane.id, splitSize: 50 }); return;
       case "pane.focusLeft": options.focusDirection("left"); return;
       case "pane.focusRight": options.focusDirection("right"); return;
       case "pane.focusUp": options.focusDirection("up"); return;
       case "pane.focusDown": options.focusDirection("down"); return;
-      case "pane.resizeLeft": case "pane.resizeRight": case "pane.resizeUp": case "pane.resizeDown": if (targetPane) await options.performAction({ kind: ({
+      case "pane.resizeLeft": case "pane.resizeRight": case "pane.resizeUp": case "pane.resizeDown": if (targetPane) await host.performAction({ kind: ({
         "pane.resizeLeft": "resizePaneLeft", "pane.resizeRight": "resizePaneRight",
         "pane.resizeUp": "resizePaneUp", "pane.resizeDown": "resizePaneDown",
       } as const)[commandId], paneId: targetPane.id, resizeCells: 2 }); return;
-      case "pane.zoom": if (targetPane) await options.performAction({
+      case "pane.zoom": if (targetPane) await host.performAction({
         kind: "zoomPane",
         paneId: targetPane.id,
         windowId: targetPane.windowId,
-        zoomed: !options.snapshot.windows.find((item) => item.id === targetPane.windowId)?.zoomed,
+        zoomed: !host.snapshot.windows.find((item) => item.id === targetPane.windowId)?.zoomed,
       }); return;
       case "terminal.copy": await options.controllers.current.get(targetPane?.id ?? "")?.copy(); return;
       case "terminal.paste": await options.controllers.current.get(targetPane?.id ?? "")?.paste(); return;
@@ -378,6 +402,7 @@ export function useShellCommands(options: ShellCommandOptions): {
 
   const commandContext: CommandContext = useMemo(() => ({
     canMutate: options.canMutate,
+    canCreateWorkspace: options.canCreateWorkspace,
     hasSession: Boolean(options.activeSession),
     hasWindow: Boolean(options.activeWindow && !options.selectedAppTab),
     hasPane: Boolean(options.activePane && !options.selectedAppTab),

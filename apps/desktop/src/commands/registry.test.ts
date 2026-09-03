@@ -21,7 +21,7 @@ import {
 const DIGITS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
 
 const context = (overrides: Partial<CommandContext> = {}): CommandContext => ({
-  canMutate: true, hasPane: true, hasSession: true, hasWindow: true, hasTab: true,
+  canMutate: true, canCreateWorkspace: true, hasPane: true, hasSession: true, hasWindow: true, hasTab: true,
   canMoveSessionUp: true, canMoveSessionDown: true,
   canMoveTabLeft: true, canMoveTabRight: true,
   hasHostProfile: true,
@@ -38,6 +38,12 @@ describe("command registry", () => {
       key: "d", ctrlKey: true, shiftKey: true, altKey: false, metaKey: false,
     } as KeyboardEvent;
     expect(commandForKeyboardEvent(event, "linux", {})?.id).toBe("pane.splitRight");
+  });
+
+  it("offers New workspace when any shown host can create, independently of the active host", () => {
+    const create = commandRegistry.find((command) => command.id === "session.new")!;
+    expect(commandAvailable(create, context({ canMutate: false, canCreateWorkspace: true }))).toBe(true);
+    expect(commandAvailable(create, context({ canMutate: true, canCreateWorkspace: false }))).toBe(false);
   });
 
   it("never invokes application shortcuts while an IME composition is active or committing", () => {

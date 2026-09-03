@@ -49,16 +49,19 @@ interface PanedPaint {
   waiters: Set<() => void>;
 }
 
+// Keyed by `terminalCacheKey(scope, paneId)`, never by the bare pane id: `%1`
+// exists on every tmux server, and a waiter on one host's pane must not be
+// released by — or held behind — another host's.
 const panePaints = new Map<string, PanedPaint>();
 
-function stateFor(paneId: string): PanedPaint {
-  const existing = panePaints.get(paneId);
+function stateFor(key: string): PanedPaint {
+  const existing = panePaints.get(key);
   if (existing) return existing;
   const created: PanedPaint = { painted: false, waiters: new Set() };
-  panePaints.set(paneId, created);
+  panePaints.set(key, created);
   while (panePaints.size > MAX_TRACKED_PANES) {
     const oldest = panePaints.keys().next().value as string | undefined;
-    if (oldest === undefined || oldest === paneId) break;
+    if (oldest === undefined || oldest === key) break;
     // Waiters on an evicted pane are released rather than stranded: the
     // eviction says nothing about that pane's screen, and a promise nobody
     // will ever settle is the one failure this module must not have.
@@ -76,14 +79,14 @@ function stateFor(paneId: string): PanedPaint {
  * request whose answer the paint is: a pane whose reveal is superseded or
  * never issued arms nothing and gates nobody.
  */
-export function armPanePaint(paneId: string): void {
-  const state = stateFor(paneId);
+export function armPanePaint(key: string): void {
+  const state = stateFor(key);
   state.painted = false;
 }
 
 /** This pane's content reached the DOM. Releases whatever waited for it. */
-export function notePanePainted(paneId: string): void {
-  const state = stateFor(paneId);
+export function notePanePainted(key: string): void {
+  const state = stateFor(key);
   state.painted = true;
   const waiters = [...state.waiters];
   state.waiters.clear();
@@ -96,8 +99,8 @@ export function notePanePainted(paneId: string): void {
  * Never rejects and never waits forever: the caller is being ordered behind
  * the pane, not made conditional on it.
  */
-export function awaitPanePaint(paneId: string, timeoutMs = PANE_PAINT_TIMEOUT_MS): Promise<void> {
-  const state = panePaints.get(paneId);
+export function awaitPanePaint(key: string, timeoutMs = PANE_PAINT_TIMEOUT_MS): Promise<void> {
+  const state = panePaints.get(key);
   // Unknown or already painted: nothing is pending, so nothing is waited for.
   // The synchronous return matters — an armed pane that painted before this
   // call must not cost the caller a turn of the event loop, let alone a

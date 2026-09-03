@@ -344,7 +344,7 @@ describe("binary terminal IPC", () => {
       if (command === "start_terminal") return "client-credit";
       return undefined;
     });
-    const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+    const clientId = await startTerminal("", [], { mode: "local" }, true, () => undefined);
     channels[0].onmessage?.(frame(10, "terminal", 0, u64(91)));
     channels[0].onmessage?.(frame(2, "%1", 1, Uint8Array.from([...u64(1), 120])));
     await vi.waitFor(() => {
@@ -364,7 +364,7 @@ describe("binary terminal IPC", () => {
       if (command === "start_terminal") return "client-rejected-frame";
       return undefined;
     });
-    await startTerminal("", [], { mode: "local" }, (event) => {
+    await startTerminal("", [], { mode: "local" }, true, (event) => {
       if (event.kind === "output" && event.sequence === 1) {
         throw new Error("injected hub admission failure");
       }
@@ -404,7 +404,7 @@ describe("binary terminal IPC", () => {
       return undefined;
     });
     const events: TerminalEvent[] = [];
-    const clientId = await startTerminal("", [], { mode: "local" }, (event) => events.push(event));
+    const clientId = await startTerminal("", [], { mode: "local" }, true, (event) => events.push(event));
     const epoch = frame(10, "terminal", 0, u64(23));
     const before = frame(2, "%1", 1, Uint8Array.from([...u64(1), 120]));
     const malformed = Uint8Array.from([1, 0, 4, 37]).buffer;
@@ -448,7 +448,7 @@ describe("binary terminal IPC", () => {
     const epoch = frame(10, "terminal", 0, u64(17));
     const rejected = frame(2, "%1", 1, Uint8Array.from([...u64(1), 120]));
     const heldForSeed = frame(2, "%1", 2, Uint8Array.from([...u64(2), 121]));
-    const clientId = await startTerminal("", [], { mode: "local" }, (event) => hub.publish(event));
+    const clientId = await startTerminal("", [], { mode: "local" }, true, (event) => hub.publish(event));
     channels[0].onmessage?.(epoch);
     channels[0].onmessage?.(rejected);
     channels[0].onmessage?.(heldForSeed);
@@ -476,7 +476,7 @@ describe("binary terminal IPC", () => {
       }
       return Promise.resolve(undefined);
     });
-    await startTerminal("", [], { mode: "local" }, () => undefined);
+    await startTerminal("", [], { mode: "local" }, true, () => undefined);
     channels[0].onmessage?.(frame(10, "terminal", 0, u64(91)));
     await vi.waitFor(() => expect(rejectOldAck).toBeTypeOf("function"));
 
@@ -561,7 +561,7 @@ describe("binary terminal IPC", () => {
       return undefined;
     });
     try {
-      const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+      const clientId = await startTerminal("", [], { mode: "local" }, true, () => undefined);
       channels[0].onmessage?.(frame(6, "connected", 0));
       await vi.advanceTimersByTimeAsync(20);
       await stopTerminal(clientId);
@@ -597,7 +597,7 @@ describe("binary terminal IPC", () => {
     });
     try {
       const events: TerminalEvent[] = [];
-      const clientId = await startTerminal("", [], { mode: "local" }, (event) => events.push(event));
+      const clientId = await startTerminal("", [], { mode: "local" }, true, (event) => events.push(event));
       const stopping = stopTerminal(clientId);
       await vi.advanceTimersByTimeAsync(10);
       await stopping;
@@ -628,7 +628,7 @@ describe("binary terminal IPC", () => {
       return undefined;
     });
     try {
-      const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+      const clientId = await startTerminal("", [], { mode: "local" }, true, () => undefined);
       const stopping = stopTerminal(clientId);
       await vi.advanceTimersByTimeAsync(FINAL_BRIDGE_DELIVERY_WAIT_MS);
       await stopping;
@@ -660,7 +660,7 @@ describe("binary terminal IPC", () => {
       return Promise.resolve(undefined);
     });
     try {
-      const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+      const clientId = await startTerminal("", [], { mode: "local" }, true, () => undefined);
       channels[0].onmessage?.(frame(6, "connected", 0));
       const stopping = stopTerminal(clientId);
       await vi.advanceTimersByTimeAsync(0);
@@ -687,7 +687,7 @@ describe("binary terminal IPC", () => {
       return Promise.resolve(undefined);
     });
     try {
-      const clientId = await startTerminal("", [], { mode: "local" }, () => undefined);
+      const clientId = await startTerminal("", [], { mode: "local" }, true, () => undefined);
       const stopping = stopTerminal(clientId);
       let settled = false;
       void stopping.then(() => { settled = true; });

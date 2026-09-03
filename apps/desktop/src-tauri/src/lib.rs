@@ -206,6 +206,7 @@ pub fn run() {
             connection::profiles::save_host_profile,
             connection::profiles::reset_host_profiles,
             connection::profiles::delete_host_profile,
+            connection::profiles::set_last_profile_id,
             app_state::load_app_state,
             app_state::save_app_state,
             app_state::reset_app_state,
