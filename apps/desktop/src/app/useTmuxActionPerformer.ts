@@ -1,5 +1,5 @@
 import { useCallback, type MutableRefObject } from "react";
-import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
+import { requestTmuxAction, type TmuxAction, type TmuxActionResult } from "../features/tmux/actions";
 import {
   requestReconciledTmuxAction,
   type ReconciledTmuxActionOptions,
@@ -92,6 +92,11 @@ export function useTmuxActionPerformer(options: Options) {
         initialScope,
         currentScope: () => scopeRef.current,
         ...options.reconciliation,
+        // A peer's round trip says nothing about the link the user types
+        // over, so it is not measured as if it did.
+        ...(target && !options.reconciliation?.request
+          ? { request: (id: string, act: TmuxAction, precondition: { serverIdentity: string; generation: number }) => requestTmuxAction(id, act, precondition, false) }
+          : {}),
       });
       recordPerfRecord("perf.timeline", {
         action: action.kind,

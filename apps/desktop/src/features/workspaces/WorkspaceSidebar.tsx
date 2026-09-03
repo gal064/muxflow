@@ -43,7 +43,10 @@ interface WorkspaceSidebarProps {
   agents: readonly AgentListRow[];
   /** Agent selection is derived from the shell's authoritative terminal pane. */
   activePaneId?: string;
+  /** Every shown host's adapters, one per id: what names a row's agent and offers its resume placements. */
   adapters: readonly AgentAdapterDescriptor[];
+  /** The active host's own adapters: what the section menu can launch and wire hooks for, there. */
+  hostAdapters: readonly AgentAdapterDescriptor[];
   agentSort: AgentSortMode;
   /** Omits the per-agent detail lines inside each workspace summary. */
   compactWorkspaces: boolean;
@@ -179,12 +182,15 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     : undefined;
   const focusedAgentResume = focusedAgent ? resumePlacements(props.adapters, focusedAgent.agent)[0] : undefined;
   const focusedAgentCanMutate = focusedAgent ? agentHost(focusedAgent).canMutate : false;
+  // A resume opens a new pane beside the one on screen, under the active
+  // root — both facts of the host on screen — so only its agents offer it.
+  const canResume = (row: AgentListRow) => agentHost(row).canMutate && agentHost(row).active;
   const rowActions = useMemo<readonly CommandId[]>(() => {
     if (!focusedAgent) return [];
     const ids: CommandId[] = [];
     if (focusedAgent.routable) ids.push("agents.focusRow");
     if (focusedAgentCanMutate) ids.push("agents.renameRow");
-    if (focusedAgentCanMutate && focusedAgentResume) ids.push("agents.resumeRow");
+    if (focusedAgent && canResume(focusedAgent) && focusedAgentResume) ids.push("agents.resumeRow");
     return ids;
   }, [focusedAgent, focusedAgentCanMutate, focusedAgentResume]);
   const runRowCommand = useRef<(commandId: CommandId) => void>(() => undefined);
@@ -235,7 +241,9 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   };
 
   const renderAgentRow = (row: AgentListRow, index: number, key = row.agent.id) => {
-    const selected = row.agent.id === selectedAgentId;
+    // Agent ids are minted from the tmux server's identity, which two saved
+    // profiles for one machine share: the host qualifies the match.
+    const selected = row.agent.id === selectedAgentId && row.agent.hostProfileId === activeHost.profileId;
     const sessionLabel = agentSessionLabel(row.agent, props.adapters);
     const scope = agentHost(row).scope;
     return <div className="agent-row" key={key} role="listitem">
@@ -461,7 +469,9 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             there is nothing to pin, and telling someone to Shift-click a
             workspace they do not have is worse than saying so. */}
         {props.rows.length === 0
-          && <p className="quiet-empty">No tmux sessions on this host yet.</p>}
+          && <p className="quiet-empty">{props.hosts.filter((host) => host.shown).length > 1
+            ? "No tmux sessions on the shown hosts yet."
+            : "No tmux sessions on this host yet."}</p>}
         {/* Otherwise, said whenever the filter is on with nothing pinned —
             not only when the list came out empty. The ordinary way to meet
             this state is the selected workspace sitting there alone, and the
@@ -581,7 +591,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
                   <span>{group.label}</span>
                   <span aria-hidden="true" className="agent-group-count">{group.rows.length}</span>
                 </h3>
-                {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.id}`))}
+                {group.rows.map((row) => renderAgentRow(row, agentIndexes.get(row)!, `${group.key}\0${row.agent.hostProfileId}\0${row.agent.id}`))}
               </section>;
             })}
       </div>
@@ -614,7 +624,9 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         // disabled-checked says so without hiding where it sits in the list.
         ...props.hosts.map((host) => ({
           id: `host-${host.profileId}`,
-          label: `${host.letter} ${host.label}`,
+          // The dot is decorative; a shown host that is not connected says
+          // so in words too.
+          label: host.shown && host.phase !== "connected" ? `${host.letter} ${host.label} · ${host.phase}` : `${host.letter} ${host.label}`,
           checked: host.shown,
           disabled: host.active,
           // Only a shown host has a link to report on.
@@ -689,12 +701,12 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           { id: "rename", label: "Rename agent…", disabled: !agentHost(agentMenu.row).canMutate, run: () => props.onRenameAgent(agentMenu.row!.agent, agentMenu.scope) },
           ...resumePlacements(props.adapters, agentMenu.row.agent).map((placement) => ({
             id: `resume-${placement}`,
-            label: `Resume in new ${placement}`,
-            disabled: !agentHost(agentMenu.row!).canMutate,
+            label: agentHost(agentMenu.row!).active ? `Resume in new ${placement}` : `Resume in new ${placement} (open ${agentHost(agentMenu.row!).label} first)`,
+            disabled: !canResume(agentMenu.row!),
             run: () => props.onResumeAgent(agentMenu.row!.agent, placement, agentMenu.scope),
           })),
         ]
-        : launchItems(props.adapters, activeHost.canMutate, props.onLaunchAgent, props.onReviewHooks, props.onSetUpHost)}
+        : launchItems(props.hostAdapters, activeHost.canMutate, props.onLaunchAgent, props.onReviewHooks, props.onSetUpHost)}
       label={agentMenu.row ? `Actions for ${agentMenu.row.agent.displayName}` : "Agent actions"}
       onClose={() => setAgentMenu(undefined)}
     />}

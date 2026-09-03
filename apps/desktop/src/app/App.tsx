@@ -85,8 +85,7 @@ import { hostLetter } from "../features/shell/hostProfiles";
 import type { CommandHost } from "../features/shell/useShellCommands";
 import { denormalizeSnapshot } from "../state/connectionReducer";
 import { hostLinkScope } from "../state/hostLinks";
-import type { AgentAttentionRollup, AgentRecord } from "../features/agents/types";
-import type { AgentAdapterDescriptor } from "../features/agents/types";
+import type { AgentAdapterDescriptor, AgentAttentionRollup, AgentRecord } from "../features/agents/types";
 import type { ConnectionSpec, HostProfile, Pane, TmuxSnapshot } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
@@ -469,6 +468,21 @@ export function App() {
     }));
   }, [setAppState]);
   const hostLabel = connection.mode === "local" ? "local" : connection.target;
+  // Settings' connection form follows the host on screen: a row click, the
+  // bell or a notification moves the pointer without going through the
+  // picker, and Letter, Show in sidebar and Delete edit the picked host.
+  useEffect(() => {
+    const profile = profiles.find((item) => item.id === currentHostProfileId);
+    if (!profile) return;
+    setSelectedProfileId(profile.id);
+    setConnectionMode(profile.connection.mode);
+    if (profile.connection.mode === "ssh") {
+      setSshTarget(profile.connection.target);
+      setSshConfigPath(profile.connection.configPath ?? "");
+    }
+    // On the switch only: the picker is its own state between switches.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentHostProfileId]);
   // Every host with a bridge, the active one included. A host that leaves the
   // list loses its agent records.
   const shownHostIds = useMemo(() => links.map((link) => link.profileId), [links]);
@@ -669,19 +683,28 @@ export function App() {
     return [...byId.values()];
   }, [hostSources]);
   const recentIdleClock = useRecentIdleClock(allAgents, appState.shell.agentSort === "status");
+  // Where each host's agents sit: every window on each server, not just the
+  // workspace on screen, because the list spans workspaces and needs the
+  // pins of tabs whose strip is not drawn. Per host, on that host's snapshot
+  // alone, so a peer's event does not re-index the active host's panes.
+  const hostAgentIndexes = usePerHostMemo(links.map((link) => {
+    const source = hostSources.get(link.profileId)!;
+    return {
+      key: link.profileId,
+      deps: [source.snapshot, source.label, source.letter, showLetters],
+      build: () => ({
+        label: source.label,
+        letter: showLetters ? source.letter : "",
+        windowIndexById: new Map(source.snapshot.windows.map((item) => [item.id, item.index])),
+        paneIds: new Set(source.snapshot.panes.map((pane) => pane.id)),
+        pinnedWindowIds: new Set(source.snapshot.windows.filter((item) => item.pinned).map((item) => item.id)),
+        pinnedSessionIds: new Set(source.snapshot.sessions.filter((item) => item.pinned).map((item) => item.id)),
+      }),
+    };
+  }));
   const agentRows = useMemo(() => {
     const orderByRowKey = new Map(sidebarRows.map((row, index) => [row.key, index]));
-    // Every window on each server, not just the workspace on screen: the
-    // agents list spans workspaces, so it needs the pins of tabs whose strip
-    // is not currently drawn.
-    const hosts = new Map([...hostSources.values()].map((source) => [source.hostProfileId, {
-      label: source.label,
-      letter: showLetters ? source.letter : "",
-      windowIndexById: new Map(source.snapshot.windows.map((item) => [item.id, item.index])),
-      paneIds: new Set(source.snapshot.panes.map((pane) => pane.id)),
-      pinnedWindowIds: new Set(source.snapshot.windows.filter((item) => item.pinned).map((item) => item.id)),
-      pinnedSessionIds: new Set(source.snapshot.sessions.filter((item) => item.pinned).map((item) => item.id)),
-    }]));
+    const hosts = hostAgentIndexes;
     return buildAgentRows(
       allAgents,
       (record) => {
@@ -700,7 +723,7 @@ export function App() {
       appState.shell.agentSort,
       Date.now(),
     );
-  }, [allAgents, appState.shell.agentSort, hostSources, recentIdleClock, showLetters, sidebarRows]);
+  }, [allAgents, appState.shell.agentSort, hostAgentIndexes, recentIdleClock, sidebarRows]);
   // What the agents section lists, which under the filter is not everything
   // the shell knows about. Only the section is narrowed: the bell, its count
   // and ⌘⇧U keep reading the whole list, because "who needs me" is a question
@@ -995,7 +1018,12 @@ export function App() {
     const { letter, ...rest } = { ...profile, ...patch };
     const next: HostProfile = letter ? { ...rest, letter } : rest;
     setProfiles((current) => current.map((item) => (item.id === profileId ? next : item)));
-    void invoke("save_host_profile", { profile: next }).catch((error) => setStatus(String(error)));
+    // Optimistic, because the link set follows `profiles` at once; a store
+    // that refuses puts the saved shape back so the app and the store agree.
+    void invoke("save_host_profile", { profile: next }).catch((error) => {
+      setProfiles((current) => current.map((item) => (item.id === profileId ? profile : item)));
+      setStatus(String(error));
+    });
   }, [currentHostProfileId, profiles, setProfiles]);
   const toggleHostShown = useCallback((profileId: string) => {
     const profile = profiles.find((item) => item.id === profileId);
@@ -1062,6 +1090,9 @@ export function App() {
     setStatus,
     snapshotRef,
   });
+  // Stable, or the memo on the surface below is defeated on every render —
+  // and with peers relaying topology, that is most renders.
+  const openFilePathFromPane = useCallback((paneId: string, path: string) => { void openTerminalFilePath(paneId, path); }, [openTerminalFilePath]);
   const createWorkspace = useWorkspaceCreate({
     appStateRef,
     clientIdRef,
@@ -1371,6 +1402,7 @@ export function App() {
         activePaneId={activePane?.id}
         adapters={allAdapters}
         agents={visibleAgentRows}
+        hostAdapters={agentRuntime.adapters}
         agentSort={appState.shell.agentSort}
         agentsRatio={appState.shell.agentsSectionRatio}
         compactWorkspaces={appState.shell.compactWorkspaces}
@@ -1504,7 +1536,7 @@ export function App() {
               controllers={controllers}
               focusPane={focusTerminalPane}
               onMeasurements={onMeasurements}
-              onOpenFilePath={(paneId, path) => { void openTerminalFilePath(paneId, path); }}
+              onOpenFilePath={openFilePathFromPane}
               grid={grid}
               handleInput={handleInput}
               handleKeyActivity={handleKeyActivity}

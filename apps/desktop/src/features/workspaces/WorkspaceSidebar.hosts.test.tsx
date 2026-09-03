@@ -38,7 +38,7 @@ const row = (host: SidebarHost, id: string, name: string, letter = host.letter):
 });
 
 const props = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}): Parameters<typeof WorkspaceSidebar>[0] => ({
-  adapters: [], agents: [], agentSort: "workspace", agentsRatio: 0.4, compactWorkspaces: false, hosts: [local, peer, hidden],
+  adapters: [], agents: [], hostAdapters: [], agentSort: "workspace", agentsRatio: 0.4, compactWorkspaces: false, hosts: [local, peer, hidden],
   maxWidth: 426, onAgentsRatio: noop, onLaunchAgent: noop, onOpenSettings: noop, onRenameAgent: noop, onResumeAgent: noop,
   onReviewHooks: noop, onSelectAgent: noop, onSelectWorkspace: noop, onSortMode: noop, onTogglePinnedAgentTab: noop,
   onTogglePinnedOnly: noop, onTogglePinnedWorkspace: noop, onToggleShown: noop, onWidth: noop, onWorkspaceCommand: noop,
@@ -216,7 +216,7 @@ describe("the host row", () => {
     // The active host is always shown: checked, and not offered for unchecking.
     expect(items.map((item) => item.props.disabled)).toEqual([true, false, false]);
     const labels = items.map((item) => item.findByProps({ className: "menu-item-label" }).children.at(-1));
-    expect(labels).toEqual(["L Local", "P peer-box", "S spare"]);
+    expect(labels).toEqual(["L Local", "P peer-box · reconnecting", "S spare"]);
 
     await act(async () => items[2].props.onClick());
     expect(onToggleShown).toHaveBeenCalledWith("spare");
