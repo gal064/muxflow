@@ -2,7 +2,7 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useState } from "react";
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 
-import { agentTitle, agentsInWindow, loudestPill } from "../../src/features/agents/agentViews";
+import { agentDisplayName, agentsInWindow, loudestPill } from "../../src/features/agents/agentViews";
 import { stripAgentStatusGlyphs } from "../../src/features/agents/agentLabels";
 import { createTerminalWindow } from "../../src/features/terminal/createWindow";
 import { activePaneForWindow } from "../../src/features/terminal/panes";
@@ -68,7 +68,7 @@ export default function WorkspaceScreen() {
         renderItem={({ item }) => {
           const agents = agentsInWindow(state, item.id);
           const pane = activePaneForWindow(state, item.id);
-          const subtitle = agents.length > 0 ? agents.map((a) => agentTitle(state, a)).join(", ") : pane?.currentCommand ?? "";
+          const subtitle = agents.length > 0 ? agents.map((a) => agentDisplayName(state, a)).join(", ") : pane?.currentCommand ?? "";
           const pill = loudestPill(agents);
           return (
             <ListRow

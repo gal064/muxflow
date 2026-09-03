@@ -1,6 +1,9 @@
-// Ported from apps/desktop/src/features/agents/agentLabels.ts (§8.2). Only the
-// glyph stripping is needed on the phone.
+// Ported from apps/desktop/src/features/agents/agentLabels.ts (§8.2, §9.3.1).
 
+import type { Agent, AgentAdapterDescriptor } from "../../store/sessionStore";
+
+const UUID_LIKE = /^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{24,})$/i;
+const GENERIC_TAB_NAME = /^(?:agent|codex|claude(?:-code)?)$/i;
 /* Claude Code and Codex prefix their tmux window titles with a status marker:
    Claude's asterisk frames (U+00B7, U+2722, U+2733, U+2736, U+273B, U+273D),
    Codex's braille spinner frames (U+2800-U+28FF), quarter circles
@@ -21,6 +24,26 @@ function withoutStatusGlyphs(title: string): string {
 /** A tmux window title with any leading agent status ticker removed. */
 export function stripAgentStatusGlyphs(title: string): string {
   // A title that is nothing but the ticker keeps it: a tab with a blank name
-  // is worse than one showing a frame.
+  // is worse than one showing a frame. Callers with a fallback of their own
+  // use `withoutStatusGlyphs` and let the empty string fall through instead.
   return withoutStatusGlyphs(title) || title.trim();
+}
+
+/** What `agentSessionLabel` reads: the desktop's `AgentRecord` carries `windowName` itself; here the caller resolves it from the topology. */
+export type SessionLabelInput = Pick<Agent, "displayName" | "adapterId"> & { windowName: string };
+
+/** The live tmux tab name, unless it is only a generic or machine identifier. */
+export function agentSessionLabel(agent: SessionLabelInput, adapters: readonly Pick<AgentAdapterDescriptor, "id" | "displayName">[]): string {
+  const tabName = withoutStatusGlyphs(agent.windowName);
+  if (tabName && !UUID_LIKE.test(tabName) && !GENERIC_TAB_NAME.test(tabName)) return tabName;
+  const assignedName = agent.displayName.trim();
+  if (assignedName && !UUID_LIKE.test(assignedName)) return assignedName;
+  return adapters.find((adapter) => adapter.id === agent.adapterId)?.displayName
+    || adapterFallback(agent.adapterId);
+}
+
+function adapterFallback(adapterId: string): string {
+  if (adapterId === "codex") return "Codex";
+  if (adapterId === "claude-code" || adapterId === "claude") return "Claude";
+  return "Agent";
 }

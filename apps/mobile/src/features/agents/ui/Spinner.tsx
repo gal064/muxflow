@@ -3,7 +3,7 @@ import { StyleSheet, View } from "react-native";
 import Animated, { cancelAnimation, Easing, makeMutable, ReduceMotion, useAnimatedStyle, withRepeat, withTiming } from "react-native-reanimated";
 import Svg, { Circle } from "react-native-svg";
 
-import { SPINNER_ARC_TURNS, SPINNER_STEPS, SPINNER_TRACK_OPACITY, SPINNER_TURN_MS } from "../spinnerSchedule";
+import { SPINNER_ARC_TURNS, SPINNER_TRACK_OPACITY, SPINNER_TURN_MS } from "../spinnerSchedule";
 
 /**
  * The one "running" mark, shared by the docked row badge and the Working
@@ -11,18 +11,16 @@ import { SPINNER_ARC_TURNS, SPINNER_STEPS, SPINNER_TRACK_OPACITY, SPINNER_TURN_M
  * the desktop's `.spinner`, whose 1.5 px border on a 9 px ring is the
  * stroke-to-size proportion kept here.
  *
- * The turn is stepped, not continuous. A continuous rotation asks for a
- * repaint every vsync for as long as one agent is working anywhere on the
- * list; `SPINNER_STEPS` discrete angles per turn repaint the screen ten times
- * a second instead of sixty and still read as motion. The stepping happens on
- * the UI thread (reanimated), so the JS thread never wakes for it, and the
- * arc is a hardware-textured layer, so each step is a transform of a cached
- * bitmap rather than a redraw of the SVG.
+ * The turn is continuous — the desktop's `.9s linear infinite` — and runs on
+ * the UI thread (reanimated), so the JS thread never wakes for it; the arc is
+ * a hardware-textured layer, so each frame is a transform of a cached bitmap
+ * rather than a redraw of the SVG. (A stepped turn was tried to save repaints
+ * on the software-rendered emulator; on a phone it read as lag.)
  *
  * Every spinner reads one module-wide clock rather than owning a timer, so
- * five working rows step on the same frame and cost the same ten repaints a
- * second as one; the clock runs while any spinner with `animate` is mounted
- * and stops, resting the arcs at 12 o'clock, when the last one leaves.
+ * five working rows turn on the same frame and cost what one does; the clock
+ * runs while any spinner with `animate` is mounted and stops, resting the
+ * arcs at 12 o'clock, when the last one leaves.
  * `animate` false means nobody can see it (unfocused tab, backgrounded app)
  * or the user asked for reduced motion — a still arc is the desktop's
  * reduced-motion rendering too.
@@ -70,7 +68,7 @@ function acquireClock(): () => void {
   if (clockUsers === 1) {
     clock.value = 0;
     clock.value = withRepeat(
-      withTiming(360, { duration: SPINNER_TURN_MS, easing: Easing.steps(SPINNER_STEPS, false), reduceMotion: ReduceMotion.System }),
+      withTiming(360, { duration: SPINNER_TURN_MS, easing: Easing.linear, reduceMotion: ReduceMotion.System }),
       -1,
       false,
       undefined,
