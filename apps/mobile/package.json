@@ -6,11 +6,14 @@
   "scripts": {
     "android": "expo run:android",
     "apk": "bash scripts/build-apk.sh",
+    "apk:release": "bash scripts/build-apk.sh release",
     "check": "tsc --noEmit",
     "dev": "expo start --dev-client",
     "prebuild": "expo prebuild --platform android",
     "protocol:check": "pnpm run protocol:gen && git diff --exit-code -- src/protocol/gen && test -z \"$(git ls-files --others --exclude-standard -- src/protocol/gen)\"",
     "protocol:gen": "buf generate",
+    "sideload": "bash scripts/install-apk.sh",
+    "sideload:release": "bash scripts/install-apk.sh release",
     "test": "vitest run",
     "webview:build": "node scripts/build-webview.mjs",
     "webview:check": "pnpm run webview:build && git diff --exit-code -- src/webview src/features/terminal/terminalHtml.ts assets/webview && test -z \"$(git ls-files --others --exclude-standard -- src/webview src/features/terminal/terminalHtml.ts assets/webview)\""
