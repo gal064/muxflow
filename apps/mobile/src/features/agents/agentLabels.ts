@@ -17,7 +17,8 @@ const AGENT_STATUS_GLYPHS = new RegExp(
   "^(?:(?:\\[ [.!] \\]|[\\u00B7\\u2713-\\u2718\\u2722\\u2733\\u2736\\u273B\\u273D\\u25D0-\\u25D3\\u2800-\\u28FF][\\uFE0E\\uFE0F]?)\\s*)+",
 );
 
-function withoutStatusGlyphs(title: string): string {
+/** `stripAgentStatusGlyphs` without its keep-the-frame rule: empty when the title was only a ticker, for callers with a fallback of their own. */
+export function withoutStatusGlyphs(title: string): string {
   return title.replace(AGENT_STATUS_GLYPHS, "").trim();
 }
 

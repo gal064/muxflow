@@ -4,7 +4,7 @@ import { displayState, summarizeWaiting, type WaitingState, type WaitingSummary 
 import type { Agent, SessionState } from "../../store/sessionStore";
 import type { PillState } from "../../ui/components/StatusPill";
 import { colors } from "../../ui/tokens";
-import { agentSessionLabel } from "./agentLabels";
+import { agentSessionLabel, withoutStatusGlyphs } from "./agentLabels";
 
 export function agentPillState(agent: Agent): PillState {
   return agent.present ? displayState(agent) : "gone";
@@ -14,12 +14,13 @@ export function agentPillState(agent: Agent): PillState {
  * The row's name (§9.3.1): the tmux tab, the desktop's `agentSessionLabel` —
  * status glyphs stripped, a generic or UUID-like name passed over for the
  * assigned name, then the adapter's. The adapter itself is the icon's job.
- * An agent with neither a window nor a name (gone, its window closed) says
- * "{adapter} in pane {index}" so the row still points somewhere.
+ * An agent with neither a window nor a name (gone, its window closed, or a
+ * title that is only a ticker frame) says "{adapter} in pane {index}" so the
+ * row still points somewhere.
  */
 export function agentTitle(state: Pick<SessionState, "windows" | "adapters">, agent: Agent): string {
   const windowName = state.windows[agent.route.windowId]?.name ?? agent.route.windowNameFallback;
-  if (!windowName && !agent.displayName.trim()) return `${adapterDisplayName(state, agent)} in pane ${agent.route.paneIndexFallback}`;
+  if (!withoutStatusGlyphs(windowName) && !agent.displayName.trim()) return `${adapterDisplayName(state, agent)} in pane ${agent.route.paneIndexFallback}`;
   return agentSessionLabel({ windowName, displayName: agent.displayName, adapterId: agent.adapterId }, state.adapters);
 }
 

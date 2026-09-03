@@ -231,6 +231,7 @@ describe("priority mode", () => {
       working("unnamed", { windowId: "@generic", displayName: "Codex" }),
     ], undefined, windows), "priority", NOW);
     const rows = items.filter((i) => i.kind === "agent") as Extract<AgentListItem, { kind: "agent" }>[];
+    expect(rows.every((r) => r.workspaceName === r.subtitle)).toBe(true);
     expect(Object.fromEntries(rows.map((r) => [r.agent.id, [r.title, r.subtitle, r.waiting, r.state]]))).toEqual({
       b: ["Fix tests", "alpha", "blocked", "blocked"],
       named: ["Nightly triage", "alpha", undefined, "working"],
@@ -320,11 +321,12 @@ describe("workspace mode", () => {
     // No pinned workspace has agents, so no divider is drawn.
     expect(trace(items)).toEqual([">charlie(5)", "c1", "c0-a", "c0-a-twin", "c0-z", "c0-gone"]);
     const rows = items.filter((i) => i.kind === "agent") as Extract<AgentListItem, { kind: "agent" }>[];
-    // The heading names the workspace, so a row is the tab alone: no line 2.
+    // The heading names the workspace, so a row is the tab alone: no line 2 — but the workspace is still there to be spoken.
     expect(rows.map((r) => [r.agent.id, r.windowPinned, r.title, r.subtitle])).toEqual([
       ["c1", true, "c-pinned", undefined], ["c0-a", false, "c-first", undefined], ["c0-a-twin", false, "c-first", undefined],
       ["c0-z", false, "c-first", undefined], ["c0-gone", false, "c-first", undefined],
     ]);
+    expect(new Set(rows.map((r) => r.workspaceName))).toEqual(new Set(["charlie"]));
   });
 
   it("puts the workspace pin on the group heading and still reports it on the rows", () => {
