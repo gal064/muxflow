@@ -48,7 +48,12 @@ pub(crate) struct AgentRuntime {
     /// What this host's agent configuration was last observed to do with
     /// lifecycle events. Re-read only when a configuration file changed.
     wiring: Mutex<hooks::WiringCache>,
+    /// Where a `Stop` hands the agent's final message. Voice mode in
+    /// production; a recorder in tests, so no test needs the voice service.
+    reply_sink: ReplySink,
 }
+
+type ReplySink = Box<dyn Fn(super::voice::AgentReply) + Send + Sync>;
 
 static GLOBAL: OnceLock<Arc<AgentRuntime>> = OnceLock::new();
 
@@ -62,17 +67,27 @@ impl AgentRuntime {
     }
 
     fn load(state_path: PathBuf) -> Self {
+        Self::load_with_sink(state_path, Box::new(super::voice::on_agent_reply))
+    }
+
+    fn load_with_sink(state_path: PathBuf, reply_sink: ReplySink) -> Self {
         let state = store::load(&state_path);
         Self {
             state_path,
             state: Mutex::new(state),
             wiring: Mutex::new(hooks::WiringCache::default()),
+            reply_sink,
         }
     }
 
     #[cfg(test)]
     fn isolated(state_path: PathBuf) -> Self {
         Self::load(state_path)
+    }
+
+    #[cfg(test)]
+    fn isolated_with_sink(state_path: PathBuf, reply_sink: ReplySink) -> Self {
+        Self::load_with_sink(state_path, reply_sink)
     }
 
     pub(super) fn snapshot(&self) -> v1::AgentSnapshot {

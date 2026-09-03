@@ -28,6 +28,9 @@ mod codex_transcript;
 const MAX_VENDOR_HOOK_BYTES: usize = 64 * 1024 * 1024;
 const MAX_LIFECYCLE_FIELD_BYTES: usize = 16 * 1024;
 const MAX_NORMALIZED_HOOK_BYTES: usize = 256 * 1024;
+/// How much of `last_assistant_message` a `Stop` forwards for voice mode.
+/// Cut rather than rejected: a long reply must never cost the `Stop` itself.
+const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
 #[derive(Debug)]
 struct VendorHookPayload {
@@ -39,6 +42,7 @@ struct VendorHookPayload {
     turn_id: Option<String>,
     transcript_path: Option<String>,
     has_running_subagent: bool,
+    last_assistant_message: Option<TruncatedString>,
 }
 
 #[derive(Clone, Copy)]
@@ -60,6 +64,8 @@ enum HookField {
     TranscriptPath,
     TranscriptPathCamel,
     BackgroundTasks,
+    LastAssistantMessage,
+    LastAssistantMessageCamel,
     Unknown,
 }
 
@@ -103,6 +109,8 @@ impl Visitor<'_> for HookFieldVisitor {
             "transcript_path" => HookField::TranscriptPath,
             "transcriptPath" => HookField::TranscriptPathCamel,
             "background_tasks" => HookField::BackgroundTasks,
+            "last_assistant_message" => HookField::LastAssistantMessage,
+            "lastAssistantMessage" => HookField::LastAssistantMessageCamel,
             _ => HookField::Unknown,
         })
     }
@@ -193,6 +201,105 @@ impl<'de> Visitor<'de> for BoundedStringVisitor {
     }
 }
 
+/// A string kept up to [`MAX_ASSISTANT_MESSAGE_BYTES`], cut on a character
+/// boundary with the cut recorded, instead of failing the whole hook the way
+/// [`BoundedString`] does: the reply is a payload, not an identifier, and its
+/// length says nothing about the event's validity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TruncatedString {
+    text: String,
+    truncated: bool,
+}
+
+impl TruncatedString {
+    fn cut(value: &str) -> Self {
+        if value.len() <= MAX_ASSISTANT_MESSAGE_BYTES {
+            return Self {
+                text: value.to_owned(),
+                truncated: false,
+            };
+        }
+        let mut end = MAX_ASSISTANT_MESSAGE_BYTES;
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self {
+            text: value[..end].to_owned(),
+            truncated: true,
+        }
+    }
+}
+
+struct OptionalTruncatedString(Option<TruncatedString>);
+
+impl<'de> Deserialize<'de> for OptionalTruncatedString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(TruncatedStringVisitor)
+    }
+}
+
+struct TruncatedStringVisitor;
+
+impl<'de> Visitor<'de> for TruncatedStringVisitor {
+    type Value = OptionalTruncatedString;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("a message string, truncated past its bound, or an ignored malformed value")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(OptionalTruncatedString(Some(TruncatedString::cut(value))))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(OptionalTruncatedString(Some(TruncatedString::cut(&value))))
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(OptionalTruncatedString(None))
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(OptionalTruncatedString(None))
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(OptionalTruncatedString(None))
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(OptionalTruncatedString(None))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(OptionalTruncatedString(None))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(OptionalTruncatedString(None))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(OptionalTruncatedString(None))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(OptionalTruncatedString(None))
+    }
+}
+
 impl<'de> Deserialize<'de> for VendorHookPayload {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -232,6 +339,8 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
         let mut transcript_path = None;
         let mut transcript_path_camel = None;
         let mut has_running_subagent = false;
+        let mut last_assistant_message = None;
+        let mut last_assistant_message_camel = None;
 
         while let Some(field) = map.next_key::<HookField>()? {
             match field {
@@ -264,6 +373,12 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
                 HookField::BackgroundTasks => {
                     has_running_subagent = map.next_value::<RunningSubagent>()?.0
                 }
+                HookField::LastAssistantMessage => {
+                    last_assistant_message = map.next_value::<OptionalTruncatedString>()?.0
+                }
+                HookField::LastAssistantMessageCamel => {
+                    last_assistant_message_camel = map.next_value::<OptionalTruncatedString>()?.0
+                }
                 HookField::Unknown => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -279,6 +394,7 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
             turn_id: turn_id.or(turn_id_camel),
             transcript_path: transcript_path.or(transcript_path_camel),
             has_running_subagent,
+            last_assistant_message: last_assistant_message.or(last_assistant_message_camel),
         })
     }
 }
@@ -891,6 +1007,10 @@ fn build_event_from_payload(
         adapter == v1::AgentAdapterKind::Codex && event_name == "PermissionRequest";
     let codex_pre_tool = adapter == v1::AgentAdapterKind::Codex && event_name == "PreToolUse";
     let claude_stop = adapter == v1::AgentAdapterKind::ClaudeCode && event_name == "Stop";
+    // Both adapters send the final message on `Stop`; nothing else forwards
+    // it, and `StopFailure` forwards nothing. The daemon hands it to voice mode
+    // and keeps nothing (docs/mobile/voice-mode-plan.md §4.5).
+    let stop = event_name == "Stop";
     let notification_type = payload.notification_type.clone().unwrap_or_default();
     let mut normalized = serde_json::Map::new();
     normalized.insert("hook_event_name".into(), event_name.into());
@@ -905,6 +1025,23 @@ fn build_event_from_payload(
             crate::service::agents::adapters::CLAUDE_HAS_RUNNING_SUBAGENT_FIELD.into(),
             payload.has_running_subagent.into(),
         );
+    }
+    if stop
+        && let Some(message) = payload
+            .last_assistant_message
+            .as_ref()
+            .filter(|message| !message.text.trim().is_empty())
+    {
+        normalized.insert(
+            crate::service::agents::adapters::LAST_ASSISTANT_MESSAGE_FIELD.into(),
+            message.text.clone().into(),
+        );
+        if message.truncated {
+            normalized.insert(
+                crate::service::agents::adapters::LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD.into(),
+                true.into(),
+            );
+        }
     }
     if codex_pre_tool {
         let tool_name = payload.tool_name.clone().unwrap_or_default();
@@ -1526,6 +1663,136 @@ mod tests {
             "prompt",
         ] {
             assert!(!serialized.contains(private));
+        }
+    }
+
+    /// Voice mode's one hook change (docs/mobile/voice-mode-plan.md §4.7):
+    /// the final message rides `Stop` for both adapters, is cut on a char
+    /// boundary past 32 KiB without failing the hook, and rides nothing else.
+    #[test]
+    fn stop_forwards_the_last_assistant_message_for_both_adapters() {
+        for adapter in [
+            v1::AgentAdapterKind::ClaudeCode,
+            v1::AgentAdapterKind::Codex,
+        ] {
+            let event = build_event(
+                adapter,
+                br#"{"hook_event_name":"Stop","session_id":"s","last_assistant_message":"All done.\n\nSee `x`."}"#.to_vec(),
+                "%12",
+                "tmux:server-a",
+                7,
+                None,
+            )
+            .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+            assert_eq!(
+                payload[crate::service::agents::adapters::LAST_ASSISTANT_MESSAGE_FIELD],
+                "All done.\n\nSee `x`."
+            );
+            assert!(
+                payload
+                    .get(crate::service::agents::adapters::LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD)
+                    .is_none()
+            );
+        }
+        let camel = build_event(
+            v1::AgentAdapterKind::Codex,
+            br#"{"hook_event_name":"Stop","lastAssistantMessage":"camel"}"#.to_vec(),
+            "%12",
+            "tmux:server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&camel.payload_json).unwrap();
+        assert_eq!(
+            payload[crate::service::agents::adapters::LAST_ASSISTANT_MESSAGE_FIELD],
+            "camel"
+        );
+    }
+
+    #[test]
+    fn a_forty_kib_message_is_truncated_on_a_char_boundary_and_the_stop_survives() {
+        // 'é' is two bytes; the 32 KiB bound falls inside one of them, and the
+        // cut must land before it, not through it.
+        let message = "é".repeat(20 * 1024);
+        assert!(message.len() > 40 * 1024 - 1024);
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "s",
+            "last_assistant_message": message,
+        }))
+        .unwrap();
+        let event = build_event(
+            v1::AgentAdapterKind::ClaudeCode,
+            raw,
+            "%12",
+            "tmux:server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+        let forwarded = payload[crate::service::agents::adapters::LAST_ASSISTANT_MESSAGE_FIELD]
+            .as_str()
+            .unwrap();
+        assert_eq!(forwarded.len(), MAX_ASSISTANT_MESSAGE_BYTES);
+        assert!(forwarded.chars().all(|c| c == 'é'));
+        assert_eq!(
+            payload[crate::service::agents::adapters::LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD],
+            true
+        );
+        assert!(event.payload_json.len() <= MAX_NORMALIZED_HOOK_BYTES);
+    }
+
+    #[test]
+    fn the_message_rides_only_stop_and_a_blank_or_malformed_one_is_dropped() {
+        for (event_name, adapter) in [
+            ("StopFailure", v1::AgentAdapterKind::ClaudeCode),
+            ("UserPromptSubmit", v1::AgentAdapterKind::Codex),
+            ("PostToolUse", v1::AgentAdapterKind::ClaudeCode),
+            ("SubagentStop", v1::AgentAdapterKind::Codex),
+        ] {
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": event_name,
+                "session_id": "s",
+                "last_assistant_message": "private reply",
+            }))
+            .unwrap();
+            let event = build_event(adapter, raw, "%12", "tmux:server-a", 7, None).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&event.payload_json).contains("private reply"),
+                "{event_name} forwarded the message"
+            );
+        }
+        for value in [
+            serde_json::json!("   "),
+            serde_json::json!(7),
+            serde_json::json!(null),
+            serde_json::json!({"text": "nested"}),
+            serde_json::json!(["list"]),
+        ] {
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": "Stop",
+                "last_assistant_message": value,
+            }))
+            .unwrap();
+            let event = build_event(
+                v1::AgentAdapterKind::ClaudeCode,
+                raw,
+                "%12",
+                "tmux:server-a",
+                7,
+                None,
+            )
+            .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+            assert!(
+                payload
+                    .get(crate::service::agents::adapters::LAST_ASSISTANT_MESSAGE_FIELD)
+                    .is_none(),
+                "{value}"
+            );
         }
     }
 

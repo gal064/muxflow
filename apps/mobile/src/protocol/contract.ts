@@ -7,7 +7,7 @@ import type { ServerHello } from "./gen/envelope_pb";
 export const PROTOCOL_MAJOR = 2;
 export const PROTOCOL_MINOR = 0;
 
-/** Every required capability, with the name a refusal reports it by (bits 0..16). */
+/** Every required capability, with the name a refusal reports it by (bits 0..18). */
 export const CAPABILITY_NAMES: ReadonlyArray<readonly [bigint, string]> = [
   [1n << 0n, "snapshots"],
   [1n << 1n, "orderedEvents"],
@@ -26,9 +26,11 @@ export const CAPABILITY_NAMES: ReadonlyArray<readonly [bigint, string]> = [
   [1n << 14n, "terminalOutputCredit"],
   [1n << 15n, "fileStream"],
   [1n << 16n, "terminalFileResolution"],
+  [1n << 17n, "tmuxExecutableResolution"],
+  [1n << 18n, "voice"],
 ];
 
-/** `HOST_CAPABILITIES` in crates/protocol/src/lib.rs: bits 0..16 all set (0x1FFFF = 131071). */
+/** `HOST_CAPABILITIES` in crates/protocol/src/lib.rs: bits 0..18 all set (0x7FFFF = 524287). */
 export const HOST_CAPABILITIES: bigint = CAPABILITY_NAMES.reduce((all, [bit]) => all | bit, 0n);
 
 export function missingHostCapabilities(advertised: bigint): bigint {

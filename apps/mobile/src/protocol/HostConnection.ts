@@ -19,6 +19,7 @@ import {
   type Request,
   type Response,
   type ServerHello,
+  type VoiceResponse,
 } from "./gen/envelope_pb";
 import { requestTerminalSeed, subscribeFull } from "./requests";
 import { jsBackgroundTimer, type BackgroundTimer, type BackgroundTimerHandle } from "./backgroundTimer";
@@ -48,7 +49,12 @@ const FATAL_CLOSE_REASONS: ReadonlySet<TransportCloseReason> = new Set(["authFai
 const HELPER_MISSING_EXIT_CODE = 127;
 
 export class HostError extends Error {
-  constructor(readonly code: string, message: string) {
+  /**
+   * `Response.voice` of a refused voice operation: the echoed `operationId`
+   * and `retryable`, which live there because `Response` has no retry flag
+   * (docs/mobile/voice-mode-plan.md §3). Undefined for every other refusal.
+   */
+  constructor(readonly code: string, message: string, readonly voice?: VoiceResponse) {
     super(message);
     this.name = "HostError";
   }
@@ -131,6 +137,8 @@ export interface HostConnectionOptions {
   onAgentTransition?: (transition: AgentTransition) => void;
   /** ACTIVE_ROOT, DIRECTORY_SNAPSHOT, FILE_CHANGED (§11). */
   onFileEvent?: (event: HostEvent) => void;
+  /** VOICE_PROVISION, VOICE_REPLY (docs/mobile/voice-mode-plan.md); payload in `event.voice`. */
+  onVoiceEvent?: (event: HostEvent) => void;
   onToast?: (message: string) => void;
   /** Fires on every transition to `connected`; open terminals re-attach here (§7.6 step 5). */
   onConnected?: () => void;
@@ -539,7 +547,7 @@ export class HostConnection {
         this.noteAnswer(attempt);
         const response = payload.value;
         if (response.ok) pending.resolve(response);
-        else pending.reject(new HostError(response.errorCode, response.displayMessage));
+        else pending.reject(new HostError(response.errorCode, response.displayMessage, response.voice));
         return;
       }
       case "fileStream": {
@@ -650,6 +658,10 @@ export class HostConnection {
       case EventKind.DIRECTORY_SNAPSHOT:
       case EventKind.FILE_CHANGED:
         this.options.onFileEvent?.(event);
+        break;
+      case EventKind.VOICE_PROVISION:
+      case EventKind.VOICE_REPLY:
+        this.options.onVoiceEvent?.(event);
         break;
       case EventKind.TERMINAL_CLIPBOARD_WRITE:
         break;

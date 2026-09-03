@@ -197,6 +197,7 @@ fn persist_failure_rolls_back_runtime_mutations() {
         state_path: blocker.join("agents.json"),
         state: Mutex::new(baseline_state.clone()),
         wiring: Mutex::new(hooks::WiringCache::default()),
+        reply_sink: Box::new(|_| {}),
     };
     let agent_id = baseline_state.agents.keys().next().unwrap().clone();
 
@@ -643,4 +644,167 @@ fn completed_phase_survives_runtime_reload_before_late_fallback() {
         runtime.snapshot_for("server-a").agents[0].lifecycle,
         v1::AgentLifecycleState::Idle as i32
     );
+}
+
+/// Voice mode (docs/mobile/voice-mode-plan.md §4.7): the final message is
+/// handed on exactly when a `Stop` lands the agent in Idle, and nothing the
+/// runtime emits or persists carries it.
+#[test]
+fn a_stop_landing_in_idle_hands_the_reply_on_once_and_stores_none_of_it() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("phase6-agent-reply-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&replies);
+    let runtime = AgentRuntime::isolated_with_sink(
+        path.clone(),
+        Box::new(move |reply| sink.lock().unwrap().push(reply)),
+    );
+    let topology = topology("claude");
+    let claude = |id: &str, name: &str, extra: serde_json::Value| {
+        let mut event = event(id, 0, name);
+        event.adapter = v1::AgentAdapterKind::ClaudeCode.into();
+        let mut payload = serde_json::json!({"hook_event_name": name});
+        for (key, value) in extra.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        event.payload_json = serde_json::to_vec(&payload).unwrap();
+        event
+    };
+    let secret = "The private final reply. Nothing stores me.";
+
+    runtime
+        .ingest_hook_with_context(
+            &claude("prompt", "UserPromptSubmit", serde_json::json!({})),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    // Claude's Stop while a subagent still runs keeps the lifecycle Working:
+    // no reply yet.
+    let mid_turn = runtime
+        .ingest_hook_with_context(
+            &claude(
+                "stop-subagent",
+                "Stop",
+                serde_json::json!({
+                    adapters::CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: true,
+                    adapters::LAST_ASSISTANT_MESSAGE_FIELD: "interim",
+                }),
+            ),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert_eq!(
+        mid_turn.agent.as_ref().unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    assert!(replies.lock().unwrap().is_empty());
+
+    let done = runtime
+        .ingest_hook_with_context(
+            &claude(
+                "stop-final",
+                "Stop",
+                serde_json::json!({
+                    adapters::LAST_ASSISTANT_MESSAGE_FIELD: secret,
+                    adapters::LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD: true,
+                }),
+            ),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let handed = replies.lock().unwrap().clone();
+    assert_eq!(handed.len(), 1);
+    assert_eq!(handed[0].text, secret);
+    assert!(handed[0].truncated);
+    assert_eq!(handed[0].agent_id, done.agent.as_ref().unwrap().agent_id);
+    assert_eq!(handed[0].state_generation, done.generation);
+    assert_eq!(
+        handed[0].occurred_at_unix_millis,
+        done.agent.as_ref().unwrap().updated_at_unix_millis
+    );
+
+    // Nothing outside the sink saw the text.
+    let event_bytes = serde_json::to_string(&format!("{done:?}")).unwrap();
+    assert!(!event_bytes.contains(secret));
+    let snapshot = format!("{:?}", runtime.snapshot_for("server-a"));
+    assert!(!snapshot.contains(secret));
+    let persisted = fs::read_to_string(&path).unwrap();
+    assert!(!persisted.contains(secret));
+    assert!(!persisted.contains("interim"));
+    assert!(!persisted.contains(adapters::LAST_ASSISTANT_MESSAGE_FIELD));
+
+    // A Stop without a message, and a duplicate Stop, hand nothing on.
+    runtime
+        .ingest_hook_with_context(
+            &claude("stop-silent", "Stop", serde_json::json!({})),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(
+        runtime
+            .ingest_hook_with_context(
+                &claude(
+                    "stop-final",
+                    "Stop",
+                    serde_json::json!({ adapters::LAST_ASSISTANT_MESSAGE_FIELD: secret })
+                ),
+                "server-a",
+                Some(&topology),
+            )
+            .is_err()
+    );
+    assert_eq!(replies.lock().unwrap().len(), 1);
+}
+
+/// `agents.json` is shaped by the lifecycle alone: a Stop that carries a
+/// message persists exactly what the same Stop without one persists.
+#[test]
+fn agents_json_is_byte_identical_with_and_without_a_reply_message() {
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("phase6-agent-identical-{}", uuid::Uuid::new_v4()));
+    let topology = topology("codex");
+    let occurred = now_millis();
+    let run = |name: &str, message: Option<&str>| {
+        let runtime =
+            AgentRuntime::isolated_with_sink(root.join(name).join("agents.json"), Box::new(|_| {}));
+        let mut stop = event("stop", 0, "Stop");
+        stop.occurred_at_unix_millis = occurred;
+        let mut payload = serde_json::json!({"hook_event_name": "Stop"});
+        if let Some(message) = message {
+            payload[adapters::LAST_ASSISTANT_MESSAGE_FIELD] = message.into();
+        }
+        stop.payload_json = serde_json::to_vec(&payload).unwrap();
+        runtime
+            .ingest_hook_with_context(&stop, "server-a", Some(&topology))
+            .unwrap();
+        // The wall-clock observation fields are the only legitimate
+        // difference between two runs; pin them before comparing.
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join(name).join("agents.json")).unwrap())
+                .unwrap();
+        for agent in state["agents"].as_object_mut().unwrap().values_mut() {
+            for field in [
+                "hook_authority_expires_at_unix_millis",
+                "lifecycle_observed_at_unix_millis",
+                "lifecycle_changed_at_unix_millis",
+            ] {
+                agent[field] = 0.into();
+            }
+        }
+        state
+    };
+    let without = run("without", None);
+    let with = run("with", Some("a reply that must not be persisted"));
+    assert_eq!(with, without);
+    assert!(!with.to_string().contains("must not be persisted"));
+    fs::remove_dir_all(root).unwrap();
 }

@@ -54,6 +54,55 @@ pub(super) fn register_control_event_sink(
     ControlEventRegistration { id }
 }
 
+/// Whether the connection registered under `connection_id` is still open.
+pub(crate) fn control_sink_alive(connection_id: u64) -> bool {
+    CONTROL_EVENT_HUB.get().is_some_and(|hub| {
+        hub.lock()
+            .unwrap()
+            .iter()
+            .any(|sink| sink.id == connection_id && !sink.sender.is_closed())
+    })
+}
+
+/// What became of an event addressed to one connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    Sent,
+    /// The connection is open but its queue is full; the event was dropped.
+    Full,
+    /// No open connection has this id.
+    Gone,
+}
+
+/// Queues one ordered event for exactly one connection.
+///
+/// The hub otherwise fans every event out to every connection, which is right
+/// for topology and agent state and wrong for a spoken agent reply: that
+/// belongs to the one phone that registered a voice session for the agent
+/// (docs/mobile/voice-mode-plan.md §4.3). A full queue is not retried: the
+/// reply is several hundred kilobytes the phone can ask for again, not a state
+/// change it must see — but it is reported apart from a departed connection,
+/// which is the one case the caller should forget about.
+pub(crate) fn send_control_event_to(connection_id: u64, event: v1::HostEvent) -> Delivery {
+    let Some(hub) = CONTROL_EVENT_HUB.get() else {
+        return Delivery::Gone;
+    };
+    let sender = hub
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|sink| sink.id == connection_id)
+        .map(|sink| sink.sender.clone());
+    match sender {
+        None => Delivery::Gone,
+        Some(sender) => match sender.try_send(SequencerControl::OrderedEvent(event)) {
+            Ok(()) => Delivery::Sent,
+            Err(mpsc::error::TrySendError::Full(_)) => Delivery::Full,
+            Err(mpsc::error::TrySendError::Closed(_)) => Delivery::Gone,
+        },
+    }
+}
+
 pub(crate) fn broadcast_control_event(event: v1::HostEvent) {
     let Some(hub) = CONTROL_EVENT_HUB.get() else {
         return;

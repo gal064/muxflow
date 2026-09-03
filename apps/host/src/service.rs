@@ -33,6 +33,7 @@ use terminal::TerminalClients;
 use terminal::{OUTPUT_WINDOW_BYTES, OUTPUT_WINDOW_RECORDS, OutputCharge, OutputCredit};
 mod tmux_actions;
 mod tmux_config;
+pub(crate) mod voice;
 pub(crate) use tmux_config::{
     apply_recommended_naming as apply_recommended_tmux_naming,
     remove_recommended_naming as remove_recommended_tmux_naming,
@@ -46,10 +47,10 @@ use topology_output_trigger::TopologyOutputTrigger;
 mod events;
 #[cfg(test)]
 use events::CONTROL_EVENT_HUB;
-pub(crate) use events::broadcast_control_event;
 use events::{
     ConnectionTaskGuard, ProtocolSequencer, SequencerControl, register_control_event_sink,
 };
+pub(crate) use events::{broadcast_control_event, control_sink_alive, send_control_event_to};
 
 /// Depth of the ordered host-event queue.
 ///
@@ -454,6 +455,11 @@ async fn serve_connection(
     let (control_tx, mut control_rx) = mpsc::channel::<SequencerControl>(EVENT_QUEUE);
     let mut event_registration =
         (!client_hello.bulk_connection).then(|| register_control_event_sink(control_tx.clone()));
+    // What a voice session records so a spoken reply can find this connection
+    // again; zero for a bulk lane, which never carries a voice request.
+    let connection_id = event_registration
+        .as_ref()
+        .map_or(0, |registration| registration.id);
     let closed = Arc::new(AtomicBool::new(false));
     let _connection_task_guard = ConnectionTaskGuard(Arc::clone(&closed));
     let topology_signal = TopologySignal::default();
@@ -799,6 +805,7 @@ async fn serve_connection(
                     bulk_available: !read_only
                         && client_hello.requested_capabilities & CAP_BULK_DOWNLOAD != 0,
                     connection_epoch: client_hello.connection_epoch,
+                    connection_id,
                     closed: Arc::clone(&closed),
                 };
                 if detached_work {

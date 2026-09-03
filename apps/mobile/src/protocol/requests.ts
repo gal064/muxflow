@@ -15,6 +15,7 @@ import {
   RequestSchema,
   TmuxActionKind,
   TmuxActionSchema,
+  VoiceRequestSchema,
   type Request,
 } from "./gen/envelope_pb";
 
@@ -169,6 +170,75 @@ export function openFileStream(operationId: string, target: RootedPath, expected
       path: target.path,
       expectedServerIdentity,
     }),
+  });
+}
+
+// Voice (docs/mobile/voice-mode-plan.md §3). Every voice operation reads
+// `Request.voice` only; `scope`, `data` and the other payloads stay empty. The
+// host echoes `operationId` in `Response.voice.operationId` on success and on
+// error alike, and carries the retry hint there too.
+
+/**
+ * VOICE_STATUS: readiness probe. `warm` asks a READY host to spawn and load
+ * the sidecar in a detached task so the first utterance is not the cold one;
+ * the phone sets it when the Voice screen opens. Never provisions anything.
+ */
+export function voiceStatus(operationId: string, warm = false): Request {
+  return create(RequestSchema, {
+    operation: Operation.VOICE_STATUS,
+    voice: create(VoiceRequestSchema, { operationId, warm }),
+  });
+}
+
+/**
+ * VOICE_PROVISION: the ~640 MB model download. `confirmed` is the user's
+ * consent and the host refuses without it (`voice_consent_required`), so the
+ * builder sets it: the consent dialog is what calls this. Progress arrives as
+ * EVENT_KIND_VOICE_PROVISION events; the response is the READY status.
+ */
+export function voiceProvision(operationId: string): Request {
+  return create(RequestSchema, {
+    operation: Operation.VOICE_PROVISION,
+    voice: create(VoiceRequestSchema, { operationId, confirmed: true }),
+  });
+}
+
+/**
+ * VOICE_TRANSCRIBE: one recorded utterance -> one-line transcript. `audio` is
+ * the whole file (expo-audio's `.m4a`, so `audioMime` is "audio/mp4"); the host
+ * caps it and rejects an unknown mime. No `languageHint`: parakeet v3 detects
+ * the language itself.
+ */
+export function voiceTranscribe(operationId: string, audio: Uint8Array, audioMime: string): Request {
+  return create(RequestSchema, {
+    operation: Operation.VOICE_TRANSCRIBE,
+    voice: create(VoiceRequestSchema, { operationId, audio, audioMime }),
+  });
+}
+
+/**
+ * VOICE_SPEAK: `text` -> mp3 bytes, for replaying a reply whose pushed audio
+ * failed, or arbitrary text. `voice` empty means the host default
+ * ("en-US-AvaNeural"); `provider` is left unspecified, which the host reads as
+ * EDGE_TTS.
+ */
+export function voiceSpeak(operationId: string, text: string, voice = ""): Request {
+  return create(RequestSchema, {
+    operation: Operation.VOICE_SPEAK,
+    voice: create(VoiceRequestSchema, { operationId, text, voice }),
+  });
+}
+
+/**
+ * VOICE_SESSION: register `agentId` as the agent whose replies this connection
+ * wants pushed as EVENT_KIND_VOICE_REPLY; "" clears it. Per connection, so it
+ * is re-sent after every reconnect and refreshed periodically (the host holds
+ * a 10-minute TTL). No operation id: the answer is a bare ok/error.
+ */
+export function voiceSession(agentId: string): Request {
+  return create(RequestSchema, {
+    operation: Operation.VOICE_SESSION,
+    voice: create(VoiceRequestSchema, { agentId }),
   });
 }
 

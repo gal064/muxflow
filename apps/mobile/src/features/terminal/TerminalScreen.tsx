@@ -11,6 +11,7 @@ import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
+import { FolderIcon, MicIcon } from "../../ui/components/MediaIcons";
 import { StatusPill } from "../../ui/components/StatusPill";
 import { useSession } from "../../ui/hooks";
 import { colors, metrics, radii, typeScale } from "../../ui/tokens";
@@ -124,6 +125,16 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
         </Pressable>
         <Text numberOfLines={1} style={styles.title}>{title}</Text>
         {agent ? <StatusPill state={agentPillState(agent)} /> : null}
+        {gone || !agent ? null : (
+          <Pressable
+            accessibilityLabel="Talk to this agent"
+            accessibilityRole="button"
+            onPress={() => router.push({ pathname: "/voice/[paneId]", params: { paneId: toRouteParam(paneId), sessionId: toRouteParam(sessionId), agentId: toRouteParam(agent.id) } })}
+            style={styles.iconButton}
+          >
+            <MicIcon color={colors.accent} size={22} />
+          </Pressable>
+        )}
         {gone ? null : (
           <Pressable
             accessibilityLabel="Files"
@@ -131,7 +142,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
             onPress={() => router.push({ pathname: "/files/[paneId]", params: { paneId: toRouteParam(paneId) } })}
             style={styles.iconButton}
           >
-            <Text style={styles.filesGlyph}>▤</Text>
+            <FolderIcon color={colors.accent} size={24} />
           </Pressable>
         )}
       </View>
@@ -219,7 +230,6 @@ const styles = StyleSheet.create({
   iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
   backGlyph: { color: colors.chromeInkStrong, fontSize: 26, fontWeight: "600", lineHeight: 30 },
   title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600" },
-  filesGlyph: { color: colors.accent, fontSize: 24, lineHeight: 28 },
   terminalArea: { backgroundColor: colors.chromeBg, flex: 1 },
   banner: {
     backgroundColor: colors.chromeSelected,

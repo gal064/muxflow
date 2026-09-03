@@ -534,7 +534,7 @@ fn open_file_stream_operation_and_payload_are_append_only() {
     assert_eq!(v1::Operation::GitPush as i32, 47);
     assert_eq!(v1::Operation::RequestTerminalHistory as i32, 48);
     assert_eq!(v1::Operation::TestDelay as i32, 100);
-    assert!(v1::Operation::try_from(49).is_err());
+    assert!(v1::Operation::try_from(54).is_err());
 }
 
 #[test]
@@ -648,12 +648,13 @@ fn terminal_file_resolution_round_trips_its_exact_pane_route() {
 fn operation_additions_are_required_capabilities() {
     use tmux_agent_protocol::{
         CAP_FILE_STREAM, CAP_TERMINAL_FILE_RESOLUTION, CAP_TERMINAL_OUTPUT_CREDIT,
-        CAP_TMUX_EXECUTABLE_RESOLUTION, HOST_CAPABILITIES, capability_names,
+        CAP_TMUX_EXECUTABLE_RESOLUTION, CAP_VOICE, HOST_CAPABILITIES, capability_names,
         missing_host_capabilities,
     };
     assert_eq!(CAP_FILE_STREAM, 1 << 15);
     assert_eq!(CAP_TERMINAL_FILE_RESOLUTION, 1 << 16);
     assert_eq!(CAP_TMUX_EXECUTABLE_RESOLUTION, 1 << 17);
+    assert_eq!(CAP_VOICE, 1 << 18);
     // Append-only: every previously assigned bit keeps its position.
     assert_eq!(CAP_TERMINAL_OUTPUT_CREDIT, 1 << 14);
 
@@ -692,6 +693,16 @@ fn operation_additions_are_required_capabilities() {
     assert_eq!(
         capability_names(missing_host_capabilities(pre_resolver_helper)),
         vec!["tmuxExecutableResolution"]
+    );
+    let pre_voice_helper = HOST_CAPABILITIES & !CAP_VOICE;
+    assert_eq!(
+        missing_host_capabilities(pre_voice_helper),
+        CAP_VOICE,
+        "a helper that cannot serve the voice operations must be refused"
+    );
+    assert_eq!(
+        capability_names(missing_host_capabilities(pre_voice_helper)),
+        vec!["voice"]
     );
     // Every required bit has a name, so no refusal can be unexplainable.
     assert!(!capability_names(HOST_CAPABILITIES).contains(&"unknown"));
@@ -923,8 +934,183 @@ fn an_unknown_terminal_history_event_is_inert_rather_than_a_seed() {
     );
 
     // And the same in the other direction: an operation number a host predating
-    // 48 cannot resolve is refused at admission rather than run as its
+    // 53 cannot resolve is refused at admission rather than run as its
     // neighbour.
-    assert!(v1::Operation::try_from(48).is_ok());
-    assert!(v1::Operation::try_from(49).is_err());
+    assert!(v1::Operation::try_from(53).is_ok());
+    assert!(v1::Operation::try_from(54).is_err());
+}
+
+/// The voice contract: five operation numbers, two event kinds, one payload
+/// slot on each of Request, Response and HostEvent — all appended after the
+/// last number in use, never inserted.
+///
+/// The three payload messages are round-tripped with bytes and enums set,
+/// because those are the two field kinds a mis-numbered or mis-typed field
+/// corrupts silently: a `bytes` read as a `string` is a UTF-8 error on the
+/// first non-ASCII byte, and an enum read at a neighbouring number is a
+/// different provider or readiness with no decode error at all.
+#[test]
+fn voice_operations_and_payloads_are_append_only() {
+    assert_eq!(v1::Operation::VoiceStatus as i32, 49);
+    assert_eq!(v1::Operation::VoiceProvision as i32, 50);
+    assert_eq!(v1::Operation::VoiceTranscribe as i32, 51);
+    assert_eq!(v1::Operation::VoiceSpeak as i32, 52);
+    assert_eq!(v1::Operation::VoiceSession as i32, 53);
+    assert_eq!(v1::EventKind::VoiceProvision as i32, 20);
+    assert_eq!(v1::EventKind::VoiceReply as i32, 21);
+    assert_eq!(v1::VoiceProvider::EdgeTts as i32, 1);
+    assert_eq!(v1::VoiceReadiness::Ready as i32, 4);
+
+    // TRANSCRIBE carries the utterance as opaque bytes on the request's own
+    // voice payload, not on `Request.data`.
+    let request = v1::Request {
+        operation: v1::Operation::VoiceTranscribe.into(),
+        voice: Some(v1::VoiceRequest {
+            operation_id: "utterance-1".into(),
+            audio: vec![0, 0, 0, 0x1c, b'f', b't', b'y', b'p', 0xff, 0xfe],
+            audio_mime: "audio/mp4".into(),
+            language_hint: "en-US".into(),
+            provider: v1::VoiceProvider::EdgeTts.into(),
+            voice: "en-US-AvaNeural".into(),
+            confirmed: true,
+            warm: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = request.encode_to_vec();
+    let decoded = v1::Request::decode(bytes.as_slice()).unwrap();
+    assert_eq!(decoded, request);
+    assert!(decoded.data.is_empty());
+    // Field 19, length-delimited: tag 0x9a 0x01.
+    assert!(
+        bytes.windows(2).any(|window| window == [0x9a, 0x01]),
+        "Request.voice moved off field 19"
+    );
+
+    let response = v1::Response {
+        ok: true,
+        voice: Some(v1::VoiceResponse {
+            operation_id: "utterance-1".into(),
+            status: Some(v1::VoiceStatus {
+                readiness: v1::VoiceReadiness::Provisioning.into(),
+                uv_path: "/home/test/.local/bin/uv".into(),
+                model_dir: "/home/test/.cache/muxflow/voice/models".into(),
+                model_download_bytes: 671_088_640,
+                detail: "".into(),
+                sidecar_running: false,
+                provision: Some(v1::VoiceProvisionProgress {
+                    operation_id: "provision-1".into(),
+                    phase: "downloading".into(),
+                    transferred_bytes: 1 << 33,
+                    total_bytes: 671_088_640,
+                    error: String::new(),
+                }),
+            }),
+            transcript: Some(v1::VoiceTranscript {
+                text: "list the files in this directory".into(),
+                audio_millis: 4_200,
+                decode_millis: 812,
+            }),
+            speech: Some(v1::VoiceSpeech {
+                audio: vec![0xff, 0xfb, 0x90, 0x00, 0, 1, 2],
+                audio_mime: "audio/mpeg".into(),
+                text: "Done. The rest of the reply is on screen.".into(),
+                truncated: true,
+                voice: "en-US-AvaNeural".into(),
+                provider: v1::VoiceProvider::EdgeTts.into(),
+                agent_id: "codex:native-7".into(),
+                state_generation: (1_u64 << 53) + 5,
+                reply_at_unix_millis: 1_786_000_000_000,
+            }),
+            retryable: true,
+        }),
+        ..Default::default()
+    };
+    let bytes = response.encode_to_vec();
+    let decoded = v1::Response::decode(bytes.as_slice()).unwrap();
+    assert_eq!(decoded, response);
+    let voice = decoded.voice.unwrap();
+    assert_eq!(
+        voice.status.as_ref().unwrap().readiness,
+        v1::VoiceReadiness::Provisioning as i32
+    );
+    assert_eq!(
+        voice.speech.as_ref().unwrap().audio,
+        vec![0xff, 0xfb, 0x90, 0x00, 0, 1, 2]
+    );
+    // `ok` is field 1 (0x08 0x01) and the next field set is `voice`, so the
+    // third byte is its tag: field 13, length-delimited, 0x6a.
+    assert_eq!(
+        &bytes[..3],
+        &[0x08, 0x01, 0x6a],
+        "Response.voice moved off field 13"
+    );
+
+    // An error answer keeps the operation id and the retry hint on the voice
+    // payload, because `Response` has no retryable flag of its own.
+    let refusal = v1::Response {
+        ok: false,
+        error_code: "voice_model_missing".into(),
+        display_message: "Voice is not set up on this host yet".into(),
+        voice: Some(v1::VoiceResponse {
+            operation_id: "utterance-1".into(),
+            retryable: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let decoded = v1::Response::decode(refusal.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded, refusal);
+    assert!(!decoded.voice.unwrap().retryable);
+
+    let reply = v1::HostEvent {
+        kind: v1::EventKind::VoiceReply.into(),
+        voice: Some(v1::VoiceEvent {
+            reply: Some(v1::VoiceSpeech {
+                audio: vec![0xff, 0xfb, 0x90],
+                audio_mime: "audio/mpeg".into(),
+                text: "Done.".into(),
+                agent_id: "codex:native-7".into(),
+                state_generation: 9,
+                reply_at_unix_millis: 1_786_000_000_000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bytes = reply.encode_to_vec();
+    let decoded = v1::HostEvent::decode(bytes.as_slice()).unwrap();
+    assert_eq!(decoded, reply);
+    assert_eq!(decoded.kind, 21);
+    assert!(decoded.terminal.is_none() && decoded.agent.is_none());
+    // `kind` is field 1 (0x08 21) and the next field set is `voice`: field 13,
+    // length-delimited, tag 0x6a.
+    assert_eq!(
+        &bytes[..3],
+        &[0x08, 21, 0x6a],
+        "HostEvent.voice moved off field 13"
+    );
+
+    let progress = v1::HostEvent {
+        kind: v1::EventKind::VoiceProvision.into(),
+        scope: "voice".into(),
+        voice: Some(v1::VoiceEvent {
+            provision: Some(v1::VoiceProvisionProgress {
+                operation_id: "provision-1".into(),
+                phase: "installing_runtime".into(),
+                // Unknown total, deliberately zero: uv's own install has no
+                // byte count, and the phone shows an indeterminate bar.
+                total_bytes: 0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        v1::HostEvent::decode(progress.encode_to_vec().as_slice()).unwrap(),
+        progress
+    );
 }
