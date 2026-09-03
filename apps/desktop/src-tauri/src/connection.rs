@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     process::Child,
     sync::{
-        Arc, LazyLock, Mutex,
+        Arc, LazyLock, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc,
     },
@@ -136,6 +136,15 @@ pub(crate) struct TerminalSelection {
 
 pub(crate) struct TerminalClient {
     bulk_scope: Uuid,
+    /// The immutable route this native client was opened through. Bulk
+    /// prewarming is requested later, when the renderer makes this the active
+    /// host, so that request must recover the exact connection without trusting
+    /// a second copy sent across IPC.
+    connection: OnceLock<ConnectionSpec>,
+    /// The terminal epoch for which an active-host bulk prewarm was last
+    /// started. Repeated renders and session selections are harmless, while a
+    /// reconnect's fresh epoch earns one fresh warm connection.
+    bulk_prewarm_epoch: AtomicU64,
     writer: Mutex<Option<ControlWriterHandle>>,
     child: Mutex<Option<Child>>,
     /// `None` until the renderer names a session: the bridge then relays
@@ -222,6 +231,8 @@ impl TerminalClient {
     fn new() -> Self {
         Self {
             bulk_scope: Uuid::new_v4(),
+            connection: OnceLock::new(),
+            bulk_prewarm_epoch: AtomicU64::new(0),
             writer: Mutex::new(None),
             child: Mutex::new(None),
             terminal_selection: Mutex::new(None),
@@ -817,6 +828,10 @@ pub fn start_terminal(
         Uuid::parse_str(&measurement_id).map_err(|_| "invalid terminal measurement ID")?;
     let client_id = Uuid::new_v4().to_string();
     let client = Arc::new(TerminalClient::new());
+    client
+        .connection
+        .set(connection.clone())
+        .map_err(|_| "terminal client connection was already initialized".to_owned())?;
     *client.host_profile_id.lock().unwrap() = match &connection {
         ConnectionSpec::Local => "local".into(),
         ConnectionSpec::Ssh { profile_id, .. } => profile_id.clone(),
@@ -869,6 +884,74 @@ pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> 
         files::bulk_pool::close_pooled_bulk_bridges(client.bulk_scope);
     }
     Ok(())
+}
+
+/// Warms the active host's bulk file lane without making every shown peer pay
+/// for an idle SSH/helper process. The renderer calls this only for its active,
+/// writable link; the epoch gate makes repeated committed renders free.
+#[tauri::command]
+pub fn prewarm_terminal_bulk(
+    client_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    let client = get_client(&clients, &client_id)?;
+    let terminal_epoch = client.terminal_epoch.load(Ordering::Acquire);
+    if terminal_epoch == 0
+        || !client.ready.load(Ordering::Acquire)
+        || client.read_only.load(Ordering::Acquire)
+    {
+        return Ok(());
+    }
+    let server_identity = client.server_identity.lock().unwrap().clone();
+    let Ok(binding) = files::scheduler::BulkBinding::capture(
+        Arc::clone(&client),
+        server_identity,
+        terminal_epoch,
+    ) else {
+        // Prewarming has no user waiting on it. A connection racing a teardown
+        // or readiness transition simply leaves the first real operation to
+        // acquire its own bridge, exactly as a failed prewarm did before.
+        return Ok(());
+    };
+    if !claim_bulk_prewarm_epoch(
+        &client.terminal_epoch,
+        &client.bulk_prewarm_epoch,
+        terminal_epoch,
+    ) {
+        return Ok(());
+    }
+    let connection = client
+        .connection
+        .get()
+        .ok_or("terminal client connection is unavailable")?
+        .clone();
+    files::bulk_pool::prewarm_bulk_bridge(connection, binding);
+    Ok(())
+}
+
+fn claim_bulk_prewarm_epoch(
+    live_epoch: &AtomicU64,
+    last_started: &AtomicU64,
+    captured_epoch: u64,
+) -> bool {
+    if captured_epoch == 0 {
+        return false;
+    }
+    let mut previous = last_started.load(Ordering::Acquire);
+    loop {
+        if previous == captured_epoch || live_epoch.load(Ordering::Acquire) != captured_epoch {
+            return false;
+        }
+        match last_started.compare_exchange_weak(
+            previous,
+            captured_epoch,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => previous = actual,
+        }
+    }
 }
 
 #[tauri::command]
