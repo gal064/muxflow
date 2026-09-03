@@ -29,6 +29,8 @@ describe("parsePersistedPrefs", () => {
     ["{}", "priority"],
     ['{"agentListMode":"status"}', "priority"],
     ['{"agentListMode":"workspace"}', "workspace"],
+    ['{"agentListMode":"pinned"}', "pinned"],
+    ['{"agentListMode":"Pinned"}', "priority"],
     ['{"agentListMode":"priority"}', "priority"],
   ])("%j → %s", (raw, mode) => {
     expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode });
@@ -56,6 +58,12 @@ describe("prefsStore", () => {
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
     expect(restarted.getState().agentListMode).toBe("workspace");
+
+    restarted.getState().setAgentListMode("pinned");
+    await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(2));
+    const again = createPrefsStore(storage);
+    await again.getState().hydrate();
+    expect(again.getState().agentListMode).toBe("pinned");
   });
 
   it("hydrates once: repeated calls share the read", async () => {

@@ -14,12 +14,6 @@ export interface ListRowProps {
   leading?: ReactNode;
   /** Drawn right after the title text — a pin, say — so it hugs the end of the name rather than the row's edge. */
   titleAccessory?: ReactNode;
-  /**
-   * Draws line 2 in place of `subtitle`'s text, for a row that puts a glyph
-   * inside the line; build it from `ListRowSubtitleText` so it keeps the
-   * subtitle's type. `subtitle` still supplies the spoken line.
-   */
-  subtitleContent?: ReactNode;
   trailing?: ReactNode;
   dimmed?: boolean;
   onPress?: () => void;
@@ -28,7 +22,7 @@ export interface ListRowProps {
 }
 
 /** A list row per §9.3/§9.4: hairline-separated, title 16 sp, second line 13 sp `--chrome-dim`. */
-export function ListRow({ title, subtitle, height, edgeColor, accessibilityLabel, leading, titleAccessory, subtitleContent, trailing, dimmed, onPress, disabled, titleColor }: ListRowProps) {
+export function ListRow({ title, subtitle, height, edgeColor, accessibilityLabel, leading, titleAccessory, trailing, dimmed, onPress, disabled, titleColor }: ListRowProps) {
   return (
     <Pressable
       accessibilityLabel={accessibilityLabel}
@@ -45,17 +39,12 @@ export function ListRow({ title, subtitle, height, edgeColor, accessibilityLabel
             <Text style={[styles.title, titleColor ? { color: titleColor } : null]} numberOfLines={1}>{title}</Text>
             {titleAccessory ? <View style={styles.titleAccessory}>{titleAccessory}</View> : null}
           </View>
-          {subtitle ? (subtitleContent ?? <ListRowSubtitleText>{subtitle}</ListRowSubtitleText>) : null}
+          {subtitle ? <Text numberOfLines={1} style={styles.subtitle}>{subtitle}</Text> : null}
         </View>
         {trailing ? <View style={styles.trailing}>{trailing}</View> : null}
       </View>
     </Pressable>
   );
-}
-
-/** One run of line-2 text in the row's subtitle type, for a composed `subtitleContent`. Runs share the shrinking. */
-export function ListRowSubtitleText({ children }: { children: string }) {
-  return <Text numberOfLines={1} style={styles.subtitle}>{children}</Text>;
 }
 
 const styles = StyleSheet.create({
