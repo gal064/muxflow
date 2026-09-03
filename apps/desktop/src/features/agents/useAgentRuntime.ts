@@ -28,6 +28,10 @@ export interface AgentRuntimeOptions {
   focus: AgentFocus;
   /** Window IDs in the topology whose generation the requested snapshot covers. */
   topologyWindowIds: readonly string[];
+  /** Agent-relevant topology captured with `topologyWindowIds`. */
+  topologyRoutingFingerprint: string;
+  /** Latest generation that changed the captured routing fingerprint. */
+  topologyRoutingChangedAtGeneration: number;
   soundPreferences: AgentSoundPreferences;
   onStatus(message: string): void;
   effects?: {
@@ -78,7 +82,12 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
 
   const accept = useCallback((
     event: AgentWireEvent,
-    coverage?: { scope: AgentRequestScope; windowIds: readonly string[] },
+    coverage?: {
+      scope: AgentRequestScope;
+      windowIds: readonly string[];
+      routingFingerprint: string;
+      routingChangedAtGeneration: number;
+    },
   ) => {
     const previousState = stateRef.current;
     const nextState = agentReducer(previousState, { type: "wire", event });
@@ -99,6 +108,8 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
           serverIdentity: coverage.scope.serverIdentity,
           connectionEpoch: coverage.scope.connectionEpoch,
           topologyGeneration: coverage.scope.topologyGeneration,
+          routingFingerprint: coverage.routingFingerprint,
+          routingChangedAtGeneration: coverage.routingChangedAtGeneration,
           coveredWindowIds: new Set(coverage.windowIds),
         });
       }
@@ -139,16 +150,23 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     let cancelled = false;
     const captured = options.scope;
     const capturedWindowIds = options.topologyWindowIds;
+    const capturedRoutingFingerprint = options.topologyRoutingFingerprint;
+    const capturedRoutingChangedAtGeneration = options.topologyRoutingChangedAtGeneration;
     void options.client.snapshot(captured).then((snapshot) => {
       if (!cancelled) accept(
         { kind: "snapshot", snapshot, replayed: true },
-        { scope: captured, windowIds: capturedWindowIds },
+        {
+          scope: captured,
+          windowIds: capturedWindowIds,
+          routingFingerprint: capturedRoutingFingerprint,
+          routingChangedAtGeneration: capturedRoutingChangedAtGeneration,
+        },
       );
     }).catch((error) => {
       if (!cancelled) options.onStatus(`Agent snapshot unavailable: ${String(error)}`);
     });
     return () => { cancelled = true; };
-  }, [accept, options.client, options.scope?.clientId, options.scope?.connectionEpoch, options.scope?.hostProfileId, options.scope?.serverIdentity, options.scope?.topologyGeneration, resnapshot]);
+  }, [accept, options.client, options.scope?.clientId, options.scope?.connectionEpoch, options.scope?.hostProfileId, options.scope?.serverIdentity, options.scope?.topologyGeneration, options.topologyRoutingChangedAtGeneration, options.topologyRoutingFingerprint, resnapshot]);
 
   const agents = useMemo(
     () => agentsForScope(state, options.focus.hostProfileId, options.focus.serverIdentity),

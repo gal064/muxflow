@@ -15,7 +15,10 @@ import type { AgentAttentionRollup } from "../agents/types";
 
 /** An authority that positively covers these windows at the live generation. */
 function agentAuthority(windowIds: readonly string[]) {
-  const current = { hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, topologyGeneration: 8 };
+  const current = {
+    hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1,
+    topologyGeneration: 8, routingFingerprint: "routes", routingChangedAtGeneration: 8,
+  };
   return { accepted: { ...current, coveredWindowIds: new Set(windowIds) }, current };
 }
 

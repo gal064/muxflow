@@ -479,6 +479,8 @@ export function App() {
     switchHostProfile: switchAgentHostProfile,
     terminalEpoch,
     topologyGeneration: hostState.generation,
+    topologyRoutingChangedAtGeneration: hostState.agentRoutingChangedAtGeneration,
+    topologyRoutingFingerprint: hostState.agentRoutingFingerprint,
   });
   const recentIdleClock = useRecentIdleClock(
     agentRuntime.agents,
@@ -567,6 +569,8 @@ export function App() {
     serverIdentity: agentScope.serverIdentity,
     connectionEpoch: agentScope.connectionEpoch,
     topologyGeneration: hostState.generation,
+    routingFingerprint: hostState.agentRoutingFingerprint,
+    routingChangedAtGeneration: hostState.agentRoutingChangedAtGeneration,
   } : undefined;
   const hasUnmappedAgents = agentRuntime.agents.some((agent) => !agent.windowId || !agent.sessionId || !agent.paneId);
   const agentPresence: AgentPresenceSnapshot = {

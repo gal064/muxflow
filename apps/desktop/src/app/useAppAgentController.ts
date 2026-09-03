@@ -51,6 +51,8 @@ interface AppAgentControllerOptions {
   switchHostProfile(profile: HostProfile): void;
   terminalEpoch: number;
   topologyGeneration: number;
+  topologyRoutingChangedAtGeneration: number;
+  topologyRoutingFingerprint: string;
 }
 
 /** Owns the agent notification/runtime/setup domain outside the shell component. */
@@ -102,6 +104,8 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
     scope,
     focus,
     topologyWindowIds: options.snapshot.windows.map((window) => window.id),
+    topologyRoutingChangedAtGeneration: options.topologyRoutingChangedAtGeneration,
+    topologyRoutingFingerprint: options.topologyRoutingFingerprint,
     soundPreferences: options.soundPreferences,
     onStatus: options.setStatus,
   });

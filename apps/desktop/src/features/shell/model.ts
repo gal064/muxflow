@@ -25,7 +25,17 @@ export function selectableTabs(tabs: readonly CombinedTab[]): SelectableTab[] {
   return tabs.filter((tab): tab is SelectableTab => tab.kind !== "pending");
 }
 
-/** One canonical answer for both menu candidates and mutation-time rechecks. */
+/**
+ * One canonical answer for both menu candidates and mutation-time rechecks.
+ *
+ * Ordinary topology generations include cosmetic title churn. An accepted
+ * agent snapshot therefore remains authoritative across newer generations
+ * while the agent-relevant routing fingerprint and its last-change generation
+ * are unchanged. The latter keeps an A→B→A routing reversion from reviving the
+ * original A proof. A caller waiting for a destructive mutation still supplies
+ * that mutation's generation as the floor, so a pre-mutation agent snapshot
+ * can never admit the next close.
+ */
 export function agentPresenceIsCurrent(presence: AgentPresenceSnapshot, minimumGeneration = 0): boolean {
   const accepted = presence.accepted;
   const current = presence.current;
@@ -33,8 +43,10 @@ export function agentPresenceIsCurrent(presence: AgentPresenceSnapshot, minimumG
     && accepted.hostProfileId === current.hostProfileId
     && accepted.serverIdentity === current.serverIdentity
     && accepted.connectionEpoch === current.connectionEpoch
-    && accepted.topologyGeneration === current.topologyGeneration
-    && current.topologyGeneration >= minimumGeneration);
+    && accepted.routingFingerprint === current.routingFingerprint
+    && accepted.routingChangedAtGeneration === current.routingChangedAtGeneration
+    && accepted.topologyGeneration <= current.topologyGeneration
+    && accepted.topologyGeneration >= minimumGeneration);
 }
 
 /** One canonical answer for both menu candidates and mutation-time rechecks. */

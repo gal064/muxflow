@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import {
   appTabsForWorkspace,
+  agentPresenceIsCurrent,
   bulkCloseOutcomeStatus,
   closeAppTab,
   combineWorkspaceTabs,
@@ -255,6 +256,7 @@ describe("application shell model", () => {
     ]);
     const current = {
       hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, topologyGeneration: 9,
+      routingFingerprint: "routes", routingChangedAtGeneration: 9,
     };
     const accepted = { ...current, coveredWindowIds: new Set(windows.map((window) => window.id)) };
     const strip = combineWorkspaceTabs(
@@ -277,9 +279,16 @@ describe("application shell model", () => {
     expect(tabsToCloseNonAgent(strip).map((tab) => tab.key)).toEqual(["terminal:@6", "app:a", "app:b"]);
     expect(tabsToCloseNonAgent(strip.filter((tab) => tab.kind === "terminal" && tab.agentPresence === "present"))).toEqual([]);
 
-    const unknown = combineWorkspaceTabs(windows, [], new Map(), undefined, {
+    const titleOnlyAdvance = combineWorkspaceTabs(windows, [], new Map(), undefined, {
       accepted,
       current: { ...current, topologyGeneration: 10 },
+    });
+    expect(titleOnlyAdvance.every((tab) => tab.kind !== "terminal" || tab.agentPresence === "absent")).toBe(true);
+    expect(tabsToCloseNonAgent(titleOnlyAdvance)).toHaveLength(windows.length);
+
+    const unknown = combineWorkspaceTabs(windows, [], new Map(), undefined, {
+      accepted,
+      current: { ...current, topologyGeneration: 10, routingFingerprint: "changed-routes", routingChangedAtGeneration: 10 },
     });
     expect(unknown.every((tab) => tab.kind !== "terminal" || tab.agentPresence === "unknown")).toBe(true);
     expect(tabsToCloseNonAgent(unknown)).toEqual([]);
@@ -291,7 +300,7 @@ describe("application shell model", () => {
     })
       .map((tab) => tab.key)).toEqual(["app:a", "app:b"]);
     expect(tabsEligibleAtBulkCloseCommit(captured, true, {
-      accepted, current: { ...current, topologyGeneration: 10 }, byWindow: new Map(),
+      accepted, current: { ...current, topologyGeneration: 10, routingFingerprint: "changed-routes", routingChangedAtGeneration: 10 }, byWindow: new Map(),
     })
       .map((tab) => tab.key)).toEqual(["app:a", "app:b"]);
     expect(tabsEligibleAtBulkCloseCommit(captured, true, {
@@ -302,6 +311,24 @@ describe("application shell model", () => {
       byWindow: new Map(),
     }))
       .toEqual(captured);
+
+    expect(agentPresenceIsCurrent({ accepted, current: { ...current, topologyGeneration: 10 }, byWindow: new Map() })).toBe(true);
+    expect(agentPresenceIsCurrent({ accepted, current: { ...current, topologyGeneration: 10 }, byWindow: new Map() }, 10)).toBe(false);
+    expect(agentPresenceIsCurrent({
+      accepted: { ...accepted, topologyGeneration: 10 },
+      current: { ...current, topologyGeneration: 11 },
+      byWindow: new Map(),
+    }, 10)).toBe(true);
+    expect(agentPresenceIsCurrent({
+      accepted,
+      current: { ...current, topologyGeneration: 11, routingChangedAtGeneration: 11 },
+      byWindow: new Map(),
+    })).toBe(false);
+    expect(agentPresenceIsCurrent({
+      accepted: { ...accepted, topologyGeneration: 11, routingChangedAtGeneration: 11 },
+      current: { ...current, topologyGeneration: 11, routingChangedAtGeneration: 11 },
+      byWindow: new Map(),
+    })).toBe(true);
 
     // The strip and the commit-time recheck read one snapshot. An authority
     // holding an agent it cannot place makes both say "unknown"; when the strip
@@ -321,6 +348,7 @@ describe("application shell model", () => {
     ];
     const current = {
       hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, topologyGeneration: 9,
+      routingFingerprint: "routes", routingChangedAtGeneration: 9,
     };
     const accepted = { ...current, coveredWindowIds: new Set(["@1", "@2"]) };
     const rollups = deriveAgentRollups([agent({ id: "codex", windowId: "@1", lifecycle: "working" })]);
@@ -707,4 +735,3 @@ describe("application shell model", () => {
     expect(shellNavigationMode(false)).toBe("cached");
   });
 });
-
