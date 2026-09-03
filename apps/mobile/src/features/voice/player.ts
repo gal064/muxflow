@@ -14,7 +14,8 @@ export const PLAYER_UPDATE_INTERVAL_MS = 250;
 export function createExpoPlayer(): VoicePlayer {
   let player: AudioPlayer | undefined;
   let rate = 1;
-  // A source swap resets the rate on the native side, so it is applied per load.
+  // Applied per load: on iOS the pitch algorithm lives on the AVPlayerItem that
+  // `replace` creates, and `setPlaybackRate` is what sets it.
   const applyRate = (): void => {
     if (!player) return;
     player.shouldCorrectPitch = true;

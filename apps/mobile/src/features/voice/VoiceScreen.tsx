@@ -18,6 +18,7 @@ import { colors, metrics, radii, typeScale } from "../../ui/tokens";
 import { createExpoFiles } from "./files";
 import { createExpoHaptics } from "./haptics";
 import { MicButton } from "./MicButton";
+import { bigPaneHeight } from "./paneLayout";
 import { createExpoPlayer } from "./player";
 import { createExpoRecorder } from "./recorder";
 import { ReplyPlayer } from "./ReplyPlayer";
@@ -34,9 +35,6 @@ export interface VoiceScreenProps {
   paneId: string;
   sessionId: string;
 }
-
-/** The talk pane in its large mode takes this much of the window; the list keeps the rest (§9.11). */
-export const BIG_PANE_FRACTION = 0.7;
 
 // The one recorder, player, file and haptics adapter for the app, created when
 // the first Voice screen renders (§2c: nothing audio-related loads before that).
@@ -163,7 +161,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
 
       <VoiceStatusCard connected={connected} controller={controller} />
 
-      <View style={[styles.pane, bigPane && { height: Math.round(windowHeight * BIG_PANE_FRACTION) }]}>
+      <View style={[styles.pane, bigPane && { height: bigPaneHeight(windowHeight, insets.top, insets.bottom, metrics.terminalHeaderHeight) }]}>
         <View style={styles.paneControls}>
           <SpeedPicker onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
           <Pressable
