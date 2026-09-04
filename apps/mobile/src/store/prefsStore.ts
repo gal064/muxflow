@@ -10,6 +10,7 @@ import { isAgentListMode, type AgentListMode } from "../features/agents/agentLis
 import { secureStoreStorage, type KeyValueStorage } from "./secureStorage";
 
 export const PREFS_STORAGE_KEY = "muxflow.prefs.v1";
+export const DEFAULT_AGENT_COMMAND = "codex";
 
 export type VoicePlaybackRate = 1 | 1.5 | 2;
 export const VOICE_PLAYBACK_RATES: readonly VoicePlaybackRate[] = [1, 1.5, 2];
@@ -19,6 +20,8 @@ export function isVoicePlaybackRate(value: unknown): value is VoicePlaybackRate 
 
 export interface PrefsPersisted {
   agentListMode: AgentListMode;
+  /** Shell command started by the New agent shortcut. */
+  agentCommand: string;
   /** How fast voice replies are read back. */
   voicePlaybackRate: VoicePlaybackRate;
   /** The voice screen's talk pane takes most of the window. */
@@ -34,13 +37,14 @@ export interface PrefsActions {
   /** Reads the persisted value. Safe to call more than once; only the first read does I/O. */
   hydrate(): Promise<void>;
   setAgentListMode(mode: AgentListMode): void;
+  setAgentCommand(command: string): void;
   setVoicePlaybackRate(rate: VoicePlaybackRate): void;
   setVoiceBigPane(big: boolean): void;
 }
 
 export type PrefsStore = StoreApi<PrefsState & PrefsActions>;
 
-export const DEFAULT_PREFS: PrefsPersisted = { agentListMode: "priority", voicePlaybackRate: 1, voiceBigPane: false };
+export const DEFAULT_PREFS: PrefsPersisted = { agentListMode: "priority", agentCommand: DEFAULT_AGENT_COMMAND, voicePlaybackRate: 1, voiceBigPane: false };
 
 /** Tolerates anything on disk: an unknown or missing field falls back to its default. */
 export function parsePersistedPrefs(raw: string | null): PrefsPersisted {
@@ -50,6 +54,7 @@ export function parsePersistedPrefs(raw: string | null): PrefsPersisted {
     const fields = typeof parsed === "object" && parsed !== null ? (parsed as Partial<Record<keyof PrefsPersisted, unknown>>) : {};
     return {
       agentListMode: isAgentListMode(fields.agentListMode) ? fields.agentListMode : DEFAULT_PREFS.agentListMode,
+      agentCommand: typeof fields.agentCommand === "string" ? fields.agentCommand : DEFAULT_PREFS.agentCommand,
       voicePlaybackRate: isVoicePlaybackRate(fields.voicePlaybackRate) ? fields.voicePlaybackRate : DEFAULT_PREFS.voicePlaybackRate,
       voiceBigPane: typeof fields.voiceBigPane === "boolean" ? fields.voiceBigPane : DEFAULT_PREFS.voiceBigPane,
     };
@@ -64,8 +69,8 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
 
   return createStore<PrefsState & PrefsActions>((set, get) => {
     const persist = (): void => {
-      const { agentListMode, voicePlaybackRate, voiceBigPane } = get();
-      const value = JSON.stringify({ agentListMode, voicePlaybackRate, voiceBigPane } satisfies PrefsPersisted);
+      const { agentListMode, agentCommand, voicePlaybackRate, voiceBigPane } = get();
+      const value = JSON.stringify({ agentListMode, agentCommand, voicePlaybackRate, voiceBigPane } satisfies PrefsPersisted);
       writes = writes.then(
         () =>
           storage.setItem(PREFS_STORAGE_KEY, value).catch((error: unknown) => {
@@ -97,6 +102,12 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
       setAgentListMode(mode) {
         if (get().agentListMode === mode && get().hydrated) return;
         set({ agentListMode: mode, hydrated: true });
+        persist();
+      },
+
+      setAgentCommand(command) {
+        if (get().agentCommand === command && get().hydrated) return;
+        set({ agentCommand: command, hydrated: true });
         persist();
       },
 

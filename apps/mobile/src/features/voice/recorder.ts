@@ -7,6 +7,7 @@ import { AudioModule, AudioQuality, IOSOutputFormat, requestRecordingPermissions
 import type { AudioRecorder } from "expo-audio";
 import { Directory, File, Paths } from "expo-file-system";
 import { Platform } from "react-native";
+import { isBluetoothInput, playbackInputAfterBluetooth, preferredExternalInput } from "./inputRouting";
 import { nativeRecordingOptions } from "./recordingOptions";
 import type { VoiceRecorder } from "./audioPorts";
 
@@ -41,6 +42,7 @@ export function createExpoRecorder(): VoiceRecorder {
   // `cache/Audio/recording-<uuid>.m4a` per prepare). A prepared recorder that
   // never records would leave that empty file behind, so the adapter tracks it.
   let preparedUri: string | null = null;
+  let bluetoothRouteSelected = false;
   let swept = false;
   const dropPreparedFile = (): void => {
     if (preparedUri && !recording) deleteQuietly(preparedUri);
@@ -49,7 +51,14 @@ export function createExpoRecorder(): VoiceRecorder {
   const prepareNow = async (): Promise<void> => {
     const permission = await requestRecordingPermissionsAsync();
     if (!permission.granted) throw new RecordingPermissionDenied();
-    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, interruptionMode: "duckOthers" });
+    await setAudioModeAsync({
+      allowsRecording: true,
+      playsInSilentMode: true,
+      interruptionMode: "duckOthers",
+      // The loudspeaker remains the phone fallback, while selecting a headset
+      // input below moves the play-and-record route to that headset as a pair.
+      shouldRouteThroughEarpiece: false,
+    });
     if (!swept) {
       // Leftovers from an earlier run (a crash mid-utterance): nothing is prepared yet, so all of them are stale.
       swept = true;
@@ -57,6 +66,7 @@ export function createExpoRecorder(): VoiceRecorder {
     }
     recorder ??= new AudioModule.AudioRecorder(nativeRecordingOptions(RECORDING_PRESET, Platform.OS));
     await recorder.prepareToRecordAsync();
+    bluetoothRouteSelected = routeToPreferredInput(recorder);
     prepared = true;
     preparedUri = recorder.uri;
   };
@@ -69,6 +79,7 @@ export function createExpoRecorder(): VoiceRecorder {
     },
     record() {
       if (!recorder || !prepared) throw new Error("recorder not prepared");
+      bluetoothRouteSelected = routeToPreferredInput(recorder) || bluetoothRouteSelected;
       startedAt = Date.now();
       recorder.record();
       recording = true;
@@ -83,6 +94,9 @@ export function createExpoRecorder(): VoiceRecorder {
       } finally {
         // A stopped (or failed) recorder must be prepared again before the next `record()`.
         prepared = false;
+        restorePlaybackRoute(recorder, bluetoothRouteSelected);
+        bluetoothRouteSelected = false;
+        await setPlaybackAudioMode().catch(() => {});
       }
       preparedUri = null;
       return { uri: recorder.uri, durationMs };
@@ -90,11 +104,56 @@ export function createExpoRecorder(): VoiceRecorder {
     release() {
       if (recording) return; // a live utterance is the controller's to stop
       dropPreparedFile();
+      restorePlaybackRoute(recorder, bluetoothRouteSelected);
+      bluetoothRouteSelected = false;
       recorder?.release();
       recorder = undefined;
       prepared = false;
+      void setPlaybackAudioMode().catch(() => {});
     },
   };
+}
+
+/**
+ * Prefer the microphone that belongs to connected headphones. Expo exposes
+ * this only after prepare. Selection happens at prepare time so Android's
+ * asynchronous Bluetooth SCO route can settle, then again at press time in
+ * case headphones connected while the screen was already open.
+ *
+ * Android 8/9 can enumerate inputs but cannot set one through MediaRecorder;
+ * a routing refusal there must not turn a usable phone microphone into a
+ * broken voice screen.
+ */
+function routeToPreferredInput(recorder: AudioRecorder): boolean {
+  try {
+    const input = preferredExternalInput(recorder.getAvailableInputs());
+    if (input) {
+      recorder.setInput(input.uid);
+      return isBluetoothInput(input);
+    }
+  } catch {
+    // Keep the system-selected route when this OS/device cannot override it.
+  }
+  return false;
+}
+
+function restorePlaybackRoute(recorder: AudioRecorder | undefined, bluetoothSelected: boolean): void {
+  if (!recorder || !bluetoothSelected || Platform.OS !== "android") return;
+  try {
+    const fallback = playbackInputAfterBluetooth(recorder.getAvailableInputs());
+    if (fallback) recorder.setInput(fallback.uid);
+  } catch {
+    // Playback still works through the OS-selected route if restoration is unsupported.
+  }
+}
+
+function setPlaybackAudioMode(): Promise<void> {
+  return setAudioModeAsync({
+    allowsRecording: false,
+    playsInSilentMode: true,
+    interruptionMode: "duckOthers",
+    shouldRouteThroughEarpiece: false,
+  });
 }
 
 function deleteQuietly(uri: string): void {

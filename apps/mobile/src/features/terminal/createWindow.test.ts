@@ -26,11 +26,11 @@ describe("New terminal (§9.4, §7.5)", () => {
 
   it("sends TMUX_ACTION CREATE_WINDOW with the generation read at call time", async () => {
     const { store, transport, connection } = await connected();
-    const pending = createTerminalWindow(connection, store, "$1");
+    const pending = createTerminalWindow(connection, store, "$1", "codex --full-auto");
     const [frame] = transport.drain();
     if (frame?.payload.case !== "request") throw new Error("expected a request");
     expect(frame.payload.value.operation).toBe(Operation.TMUX_ACTION);
-    expect(frame.payload.value.tmuxAction).toMatchObject({ sessionId: "$1", expectedServerIdentity: "server-a", expectedGeneration: 7n });
+    expect(frame.payload.value.tmuxAction).toMatchObject({ sessionId: "$1", expectedServerIdentity: "server-a", expectedGeneration: 7n, command: "codex --full-auto" });
     transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { windowId: "@9", paneId: "%9" }) }) }, { requestId: frame.requestId }));
     await expect(pending).resolves.toEqual({ windowId: "@9", paneId: "%9" });
   });

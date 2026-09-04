@@ -17,17 +17,19 @@ export interface ListRowProps {
   trailing?: ReactNode;
   dimmed?: boolean;
   onPress?: () => void;
+  onLongPress?: () => void;
   disabled?: boolean;
   titleColor?: string;
 }
 
 /** A list row per §9.3/§9.4: hairline-separated, title 16 sp, second line 13 sp `--chrome-dim`. */
-export function ListRow({ title, subtitle, height, edgeColor, accessibilityLabel, leading, titleAccessory, trailing, dimmed, onPress, disabled, titleColor }: ListRowProps) {
+export function ListRow({ title, subtitle, height, edgeColor, accessibilityLabel, leading, titleAccessory, trailing, dimmed, onPress, onLongPress, disabled, titleColor }: ListRowProps) {
   return (
     <Pressable
       accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
-      disabled={disabled || !onPress}
+      disabled={disabled || (!onPress && !onLongPress)}
+      onLongPress={onLongPress}
       onPress={onPress}
       style={({ pressed }) => [styles.row, { height }, pressed && styles.pressed]}
     >
