@@ -4,6 +4,7 @@ use tmux_agent_protocol::v1;
 use super::super::terminal::validate_tmux_id;
 
 const MAX_NAME_BYTES: usize = 200;
+const MAX_START_COMMAND_BYTES: usize = 4 * 1024;
 pub(super) const APP_SHELL: &str = "exec \"${SHELL:-/bin/sh}\"";
 
 /// The whole `new-session` argv, built and judged before a session exists.
@@ -137,7 +138,24 @@ pub(super) fn configure_new_window(
         validate_name(&action.name)?;
         command.args(["-n", &escaped_format_literal(&action.name)]);
     }
-    command.arg(APP_SHELL);
+    if action.command.is_empty() {
+        command.arg(APP_SHELL);
+    } else {
+        validate_start_command(&action.command)?;
+        // tmux accepts the command as one argv value and runs it through the
+        // pane's shell. Shell syntax here is intentional: this is the exact
+        // command the user configured, rather than an app-composed fragment.
+        command.arg(&action.command);
+    }
+    Ok(())
+}
+
+fn validate_start_command(command: &str) -> anyhow::Result<()> {
+    if command.len() > MAX_START_COMMAND_BYTES || command.chars().any(char::is_control) {
+        bail!(
+            "window start command must be at most {MAX_START_COMMAND_BYTES} bytes without control characters"
+        );
+    }
     Ok(())
 }
 
@@ -469,5 +487,37 @@ mod tests {
                 APP_SHELL,
             ]
         );
+    }
+
+    #[test]
+    fn new_window_runs_the_configured_agent_command_as_one_shell_command() {
+        let action = v1::TmuxAction {
+            session_id: "$1".into(),
+            command: "codex --full-auto".into(),
+            ..Default::default()
+        };
+        let mut command = std::process::Command::new("tmux");
+        configure_new_window(&mut command, &action).unwrap();
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args.last().unwrap(), "codex --full-auto");
+        assert!(!args.iter().any(|argument| argument == APP_SHELL));
+    }
+
+    #[test]
+    fn new_window_refuses_command_record_boundaries() {
+        let mut command = std::process::Command::new("tmux");
+        let error = configure_new_window(
+            &mut command,
+            &v1::TmuxAction {
+                session_id: "$1".into(),
+                command: "codex\nkill-server".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("control characters"));
     }
 }

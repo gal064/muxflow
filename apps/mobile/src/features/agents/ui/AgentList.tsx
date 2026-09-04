@@ -10,6 +10,7 @@ import { ListRow } from "../../../ui/components/ListRow";
 import { StatusPill } from "../../../ui/components/StatusPill";
 import { useSession } from "../../../ui/hooks";
 import { colors, fonts, metrics, radii, typeScale } from "../../../ui/tokens";
+import { MicIcon } from "../../../ui/components/MediaIcons";
 import { useAnimationsAllowed } from "../../../ui/useAnimationsAllowed";
 import { NotificationsOffBanner } from "../../notifications/ui/NotificationsOffBanner";
 import { AGENT_LIST_MODES, buildAgentListItems, type AgentListItem, type AgentListMode } from "../agentListModel";
@@ -21,13 +22,15 @@ import { AgentMark, StateBadge } from "./AgentMark";
 interface AgentListProps {
   /** Owned by the screen so the navigation call stays in one place. */
   onOpen(agent: Agent): void;
+  onLongPress(agent: Agent): void;
+  onTalk(agent: Agent): void;
   refreshing: boolean;
   onRefresh(): void;
   empty: ReactElement | null;
 }
 
 /** The Agents tab's list (design.md §9.3.1): the desktop's two orders, headed, and the priority order split by pin. */
-export function AgentList({ onOpen, refreshing, onRefresh, empty }: AgentListProps) {
+export function AgentList({ onOpen, onLongPress, onTalk, refreshing, onRefresh, empty }: AgentListProps) {
   const agents = useSession((s) => s.agents);
   const sessions = useSession((s) => s.sessions);
   const windows = useSession((s) => s.windows);
@@ -58,13 +61,13 @@ export function AgentList({ onOpen, refreshing, onRefresh, empty }: AgentListPro
         </>
       }
       refreshControl={<RefreshControl colors={[colors.accent]} progressBackgroundColor={colors.chromeRaised} onRefresh={onRefresh} refreshing={refreshing} />}
-      renderItem={({ item, index }) => <Item animate={animate} index={index} item={item} items={items} onOpen={onOpen} />}
+      renderItem={({ item, index }) => <Item animate={animate} index={index} item={item} items={items} onLongPress={onLongPress} onOpen={onOpen} onTalk={onTalk} />}
       style={styles.list}
     />
   );
 }
 
-function Item({ item, items, index, onOpen, animate }: { item: AgentListItem; items: AgentListItem[]; index: number; onOpen(agent: Agent): void; animate: boolean }) {
+function Item({ item, items, index, onOpen, onLongPress, onTalk, animate }: { item: AgentListItem; items: AgentListItem[]; index: number; onOpen(agent: Agent): void; onLongPress(agent: Agent): void; onTalk(agent: Agent): void; animate: boolean }) {
   const afterDivider = items[index - 1]?.kind === "divider";
   switch (item.kind) {
     case "divider":
@@ -81,38 +84,59 @@ function Item({ item, items, index, onOpen, animate }: { item: AgentListItem; it
           {item.pinned ? <PinIcon color={colors.chromeDim} size={12} /> : null}
         </GroupHeading>
       );
-    case "agent":
+    case "agent": {
+      const rowHeight = item.subtitle === undefined ? metrics.windowRowHeight : metrics.agentRowHeight;
+      const canTalk = item.agent.present && Boolean(item.agent.route.paneId);
       return (
-        <ListRow
-          // The desktop's aria-label: the state is drawn, so it is spoken here.
-          accessibilityLabel={[
-            item.title,
-            item.agent.present ? STATE_WORDS[item.state] : "gone",
-            item.waiting ? "waiting" : undefined,
-            item.windowPinned ? "pinned window" : undefined,
-            item.workspacePinned ? "pinned workspace" : undefined,
-            // The desktop's label always names the workspace, even where the heading draws it.
-            item.workspaceName,
-          ].filter(Boolean).join(", ")}
-          dimmed={!item.agent.present}
-          // Blocked, or done and unseen: the mobile shape of the desktop's
-          // "1" badge, in the colour the Workspaces tab paints the same agent.
-          edgeColor={item.waiting ? waitingColor(item.waiting) : undefined}
-          // A one-line row (Workspace mode) takes the Workspaces tab's 64 dp rather than sit a title alone in 76.
-          height={item.subtitle === undefined ? metrics.windowRowHeight : metrics.agentRowHeight}
-          leading={<AgentMark adapterId={item.agent.adapterId} animate={animate} state={item.state} />}
-          onPress={() => onOpen(item.agent)}
-          subtitle={item.subtitle}
-          title={item.title}
-          // The window's pin only (the desktop's row pin). A pinned workspace
-          // draws nothing on its rows: a second pin by the workspace's name read
-          // as a second pinned thing. The spoken label still names it.
-          titleAccessory={item.windowPinned ? <PinIcon color={colors.chromeDim} size={14} /> : null}
-          // A gone agent has no live state to dock; the word is the only honest mark.
-          trailing={item.agent.present ? undefined : <StatusPill state="gone" />}
-        />
+        <View style={{ height: rowHeight }}>
+          <ListRow
+            // The desktop's aria-label: the state is drawn, so it is spoken here.
+            accessibilityLabel={[
+              item.title,
+              item.agent.present ? STATE_WORDS[item.state] : "gone",
+              item.waiting ? "waiting" : undefined,
+              item.windowPinned ? "pinned window" : undefined,
+              item.workspacePinned ? "pinned workspace" : undefined,
+              // The desktop's label always names the workspace, even where the heading draws it.
+              item.workspaceName,
+            ].filter(Boolean).join(", ")}
+            dimmed={!item.agent.present}
+            // Blocked, or done and unseen: the mobile shape of the desktop's
+            // "1" badge, in the colour the Workspaces tab paints the same agent.
+            edgeColor={item.waiting ? waitingColor(item.waiting) : undefined}
+            // A one-line row (Workspace mode) takes the Workspaces tab's 64 dp rather than sit a title alone in 76.
+            height={rowHeight}
+            leading={<AgentMark adapterId={item.agent.adapterId} animate={animate} state={item.state} />}
+            onPress={() => onOpen(item.agent)}
+            onLongPress={item.agent.present && item.agent.route.sessionId ? () => onLongPress(item.agent) : undefined}
+            subtitle={item.subtitle}
+            title={item.title}
+            // The window's pin only (the desktop's row pin). A pinned workspace
+            // draws nothing on its rows: a second pin by the workspace's name read
+            // as a second pinned thing. The spoken label still names it.
+            titleAccessory={item.windowPinned ? <PinIcon color={colors.chromeDim} size={14} /> : null}
+            // A gone agent has no live state to dock; the word is the only honest mark.
+            trailing={canTalk ? <View style={styles.talkSpace} /> : item.agent.present ? undefined : <StatusPill state="gone" />}
+          />
+          {canTalk ? <TalkButton onPress={() => onTalk(item.agent)} rowHeight={rowHeight} /> : null}
+        </View>
       );
+    }
   }
+}
+
+function TalkButton({ onPress, rowHeight }: { onPress(): void; rowHeight: number }) {
+  return (
+    <Pressable
+      accessibilityLabel="Talk to agent"
+      accessibilityRole="button"
+      hitSlop={8}
+      onPress={onPress}
+      style={({ pressed }) => [styles.talk, { top: (rowHeight - 40) / 2 }, pressed && styles.talkPressed]}
+    >
+      <MicIcon color={colors.accent} size={20} />
+    </Pressable>
+  );
 }
 
 const STATE_WORDS: Record<AgentDisplayState, string> = {
@@ -237,4 +261,7 @@ const styles = StyleSheet.create({
   segmentFill: { backgroundColor: colors.accentWash, borderRadius: radii.pill },
   segmentLabel: { color: colors.chromeDim, fontSize: typeScale.rowSecondary, fontWeight: "600" },
   segmentLabelSelected: { color: colors.accent },
+  talk: { alignItems: "center", height: 40, justifyContent: "center", position: "absolute", right: 16, width: 40 },
+  talkSpace: { height: 40, width: 40 },
+  talkPressed: { opacity: 0.7 },
 });

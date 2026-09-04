@@ -293,14 +293,31 @@ pub(crate) async fn handle_request(
             } else {
                 super::super::terminal::InputDelivery::Keys
             };
-            let result =
+            let guarded = !request.terminal_input_agent_id.is_empty();
+            let result = if guarded {
+                super::super::agents::AgentRuntime::global().with_valid_input_target(
+                    &request.terminal_input_agent_id,
+                    &request.scope,
+                    || {
+                        let mut terminal = terminal.lock().unwrap();
+                        terminal.send_input(&request.scope, &request.data, delivery)?;
+                        // Generic terminal typing is acknowledged after queue
+                        // admission. Guarded voice input fences the queue while
+                        // the agent record is locked, so retirement cannot be
+                        // confirmed between validation and the tmux commit.
+                        terminal.flush_input()
+                    },
+                )
+            } else {
                 terminal
                     .lock()
                     .unwrap()
-                    .send_input(&request.scope, &request.data, delivery);
+                    .send_input(&request.scope, &request.data, delivery)
+            };
             // A malformed scope has no pane to recover, and an unscoped
             // resnapshot event would escalate to a whole-connection reconnect.
-            if let Err(error) = &result
+            if !guarded
+                && let Err(error) = &result
                 && super::super::terminal::validate_tmux_id(&request.scope, '%').is_ok()
             {
                 // The desktop no longer awaits this response on the keystroke

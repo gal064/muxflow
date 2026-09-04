@@ -39,6 +39,7 @@ export default function RootLayout() {
         <Stack.Screen name="files/[paneId]/dir" options={{ title: "Files" }} />
         <Stack.Screen name="file/[paneId]" options={{ title: "File" }} />
         <Stack.Screen name="key" options={{ title: "Your SSH key" }} />
+        <Stack.Screen name="settings" options={{ title: "Settings" }} />
       </Stack>
       {/* §9.8 and §9.10 are raised over whatever screen is on top (§9 global chrome). */}
       <ConnectionModals />

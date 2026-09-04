@@ -11,6 +11,7 @@ import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { prefsStore } from "../../store/prefsStore";
+import { sessionStore } from "../../store/sessionStore";
 import { Dialog } from "../../ui/components/Dialog";
 import { EmptyState } from "../../ui/components/EmptyState";
 import { BackIcon } from "../../ui/components/MediaIcons";
@@ -73,6 +74,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     getConnection,
     ...sharedAudio(),
     appInForeground: () => AppState.currentState === "active",
+    canSubmit: () => sessionStore.getState().agents[agentId]?.present === true,
     playbackRate: prefsStore.getState().voicePlaybackRate,
     toast,
     log,
@@ -112,11 +114,13 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const newest = latestReply(session);
 
   const title = agent ? agentTitle({ windows, adapters }, agent) : "Agent";
-  const gone = agent !== undefined && !agent.present;
+  // The pane may survive an exited agent as an ordinary shell. Never submit
+  // dictated text there after the host has confirmed the agent's departure.
+  const gone = !agent || !agent.present;
   // One phrase per condition, matching the readiness card above the mic.
   const hint = !connected
     ? "Not connected"
-    : !agent || gone
+    : gone
       ? "This agent no longer exists"
       : readiness === "unknown"
         ? "Checking voice on the host…"
