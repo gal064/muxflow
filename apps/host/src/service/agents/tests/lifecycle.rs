@@ -520,6 +520,16 @@ fn a_departed_process_retires_a_working_agent_and_publishes_the_retirement() {
     assert_eq!(working.lifecycle, v1::AgentLifecycleState::Working as i32);
     assert!(
         runtime
+            .with_valid_input_target(&working.agent_id, "%7", || Ok(()))
+            .is_ok()
+    );
+    assert!(
+        runtime
+            .with_valid_input_target(&working.agent_id, "%8", || Ok(()))
+            .is_err()
+    );
+    assert!(
+        runtime
             .retire_departed_from(&topology, "server-a")
             .is_empty(),
         "a detected process is not departed"
@@ -547,6 +557,11 @@ fn a_departed_process_retires_a_working_agent_and_publishes_the_retirement() {
     assert_eq!(events[0].reason, "departed");
     assert!(!events[0].notify);
     assert!(runtime.snapshot_for("server-a").agents.is_empty());
+    assert!(
+        runtime
+            .with_valid_input_target(&working.agent_id, "%7", || Ok(()))
+            .is_err()
+    );
 }
 
 #[test]
@@ -684,12 +699,11 @@ fn retirement_never_convicts_an_agent_on_evidence_that_cannot_see_it() {
     );
 }
 
-/// An idle agent is never retired on absence. It is claiming nothing that
-/// outliving its process would turn into a lie, and its row is still how the
-/// user reaches that pane. Retirement exists to end a false `working`, not to
-/// garbage-collect the list — reconciliation already owns that.
+/// Idle is when the user is most likely to begin the next prompt. It gets the
+/// same transient-scan protection as a mid-turn agent, while a real exit still
+/// converges to removal.
 #[test]
-fn retirement_leaves_an_idle_agent_alone() {
+fn idle_agent_requires_consecutive_misses_before_retirement() {
     let runtime = runtime("departed-idle");
     let topology = topology("codex");
     for name in ["UserPromptSubmit", "Stop"] {
@@ -709,7 +723,20 @@ fn retirement_leaves_an_idle_agent_alone() {
             .retire_departed_from(&departed, "server-a")
             .is_empty()
     );
+    runtime.reconcile_topology(&topology, "server-a").unwrap();
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
     assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
+    assert_eq!(runtime.retire_departed_from(&departed, "server-a").len(), 1);
+    assert!(runtime.snapshot_for("server-a").agents.is_empty());
 }
 
 /// The headless case, which is the whole point of moving the sweep onto the

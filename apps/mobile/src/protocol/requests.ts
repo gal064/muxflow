@@ -86,12 +86,13 @@ export function requestTerminalHistory(paneId: string, lines: number, skip: numb
  * iff the pane's application asked for bracketed paste, and is never
  * coalesced with the input around it; the default is keystrokes.
  */
-export function terminalInput(paneId: string, data: Uint8Array, options: { paste?: boolean } = {}): Request {
+export function terminalInput(paneId: string, data: Uint8Array, options: { paste?: boolean; agentId?: string } = {}): Request {
   return create(RequestSchema, {
     operation: Operation.TERMINAL_INPUT,
     scope: paneId,
     data,
     terminalInputPaste: options.paste === true,
+    terminalInputAgentId: options.agentId ?? "",
   });
 }
 

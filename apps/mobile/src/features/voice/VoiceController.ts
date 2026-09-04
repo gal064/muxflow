@@ -361,14 +361,14 @@ export class VoiceController {
       // a gap. Claude Code and Codex both read an Enter inside a fast burst as a
       // pasted newline; on its own it submits. A refused paste sends no CR.
       const body = utf8Encode(text);
-      await connection.request(terminalInput(this.paneId, body, { paste: true }));
+      await connection.request(terminalInput(this.paneId, body, { paste: true, agentId: this.agentId }));
       if (this.submitDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, this.submitDelayMs));
       if (this.disposed || this.options.canSubmit?.() === false) {
         this.log("input.submit.skipped agent-departed");
         this.setPhaseIfAlive("idle");
         return;
       }
-      await connection.request(terminalInput(this.paneId, CR));
+      await connection.request(terminalInput(this.paneId, CR, { agentId: this.agentId }));
       this.log(`input ${body.byteLength} bytes as paste + CR → ok in ${this.now() - startedAt} ms`);
       this.options.haptics?.sent();
       this.options.tones?.sent();

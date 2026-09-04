@@ -185,7 +185,7 @@ impl AgentRuntime {
         // The tmux fork happens outside the lock. `ingest_hook` takes the same
         // mutex, and holding it across a subprocess would stall live hook
         // ingestion behind a discovery that has nothing to do with it.
-        if !self.has_claimed_work() {
+        if !self.has_mapped_agents() {
             self.departure_misses.lock().unwrap().clear();
             return Vec::new();
         }
@@ -214,7 +214,6 @@ impl AgentRuntime {
                 record.route.server_identity == identity
                     && !record.route.pane_id.is_empty()
                     && !record.adapter_id.is_empty()
-                    && claims_work(record)
                     && !detected
                         .contains_key(&(record.route.pane_id.clone(), record.adapter_id.clone()))
             })
@@ -262,12 +261,36 @@ impl AgentRuntime {
         }]
     }
 
-    /// Whether any record claims to be mid-turn, which is the only condition
-    /// under which the retirement pass is worth a tmux round-trip. Idle hosts
-    /// stay at zero periodic forks, which is what the topology actor's own
-    /// no-op early-out exists to preserve.
-    fn has_claimed_work(&self) -> bool {
-        self.state.lock().unwrap().agents.values().any(claims_work)
+    /// Whether any routed row needs process-presence maintenance. Hosts with
+    /// no mapped agents stay at zero periodic discovery forks.
+    fn has_mapped_agents(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .any(|record| !record.route.pane_id.is_empty() && !record.adapter_id.is_empty())
+    }
+
+    /// Voice-origin terminal input is accepted only while the host still has
+    /// this exact agent on this exact pane. The caller holds this lock through
+    /// its terminal-input fence, closing both the phone-event and queued-input
+    /// delivery races.
+    pub(super) fn with_valid_input_target<T>(
+        &self,
+        agent_id: &str,
+        pane_id: &str,
+        action: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let state = self.state.lock().unwrap();
+        let record = state
+            .agents
+            .get(agent_id)
+            .context("agent no longer exists")?;
+        if !record.present || record.route.pane_id != pane_id {
+            bail!("agent no longer owns this pane");
+        }
+        action()
     }
 
     pub(super) fn snapshot_for(&self, server_identity: &str) -> v1::AgentSnapshot {
@@ -312,7 +335,6 @@ impl AgentRuntime {
             })
             .map(|record| record.agent_id.clone())
             .collect();
-        drop(state);
         if !observed.is_empty() {
             self.departure_misses
                 .lock()
@@ -434,14 +456,6 @@ pub(crate) fn maintain() {
     for event in runtime.sweep_stale() {
         publish(event);
     }
-}
-
-/// Whether this record is asserting something about a turn in flight, which is
-/// the only claim a departed process can still be falsely making. `Idle` and
-/// `Unknown` say nothing that outliving the process would turn into a lie.
-fn claims_work(record: &StoredAgent) -> bool {
-    record.lifecycle == v1::AgentLifecycleState::Working as i32
-        || record.lifecycle == v1::AgentLifecycleState::Blocked as i32
 }
 
 fn validate_pane_id(pane_id: &str) -> anyhow::Result<()> {

@@ -55,10 +55,10 @@ pub(super) fn topology(
         } else {
             detected.contains_key(&(record.route.pane_id.clone(), record.adapter_id.clone()))
         };
-        // A live pane plus a mid-turn lifecycle is stronger evidence than one
-        // negative process scan. The daemon's maintenance loop confirms that
-        // absence across multiple scans before retirement. A closed pane or a
-        // different detected adapter in the same pane remains conclusive.
+        // A live pane is stronger evidence than one negative process scan.
+        // The daemon's maintenance loop confirms absence across multiple
+        // scans before retirement. A closed pane or a different detected
+        // adapter in the same pane remains conclusive.
         let pane_still_exists = snapshot
             .panes
             .iter()
@@ -66,8 +66,7 @@ pub(super) fn topology(
         let replaced = detected
             .keys()
             .any(|(pane_id, _)| pane_id == &record.route.pane_id);
-        let retain =
-            same_server && (live || (super::claims_work(record) && pane_still_exists && !replaced));
+        let retain = same_server && (live || (pane_still_exists && !replaced));
         if !retain {
             retired.push(agent_id.clone());
         }
