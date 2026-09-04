@@ -63,6 +63,7 @@ fn typed_tmux_action_round_trips_with_stale_and_confirmation_preconditions() {
         expected_server_identity: "socket:123".into(),
         expected_generation: 44,
         confirmed: true,
+        command: "codex --full-auto".into(),
         ..Default::default()
     };
     let envelope = tmux_agent_protocol::envelope(

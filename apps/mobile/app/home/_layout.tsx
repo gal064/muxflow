@@ -1,11 +1,12 @@
-import { Tabs } from "expo-router";
-import { StyleSheet, Text, View } from "react-native";
+import { Tabs, useRouter } from "expo-router";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { waitingCount } from "../../src/store/selectors";
 import { ConnectionDot } from "../../src/features/hosts/ConnectionDot";
 import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
+import { SettingsIcon } from "../../src/ui/components/MediaIcons";
 import { useSession } from "../../src/ui/hooks";
 import { colors, fixedChromeText, metrics, typeScale } from "../../src/ui/tokens";
 
@@ -68,10 +69,14 @@ export default function HomeLayout() {
 /** App bar (56 dp below the status bar) with the host label and the connection dot, then the global strip. */
 function TabHeader({ title }: { title: string; [key: string]: unknown }) {
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   return (
     <View style={[styles.headerWrap, { paddingTop: insets.top }]}>
       <View style={styles.header}>
         <Text {...fixedChromeText} style={styles.headerTitle} numberOfLines={1}>{title}</Text>
+        <Pressable accessibilityLabel="Settings" accessibilityRole="button" onPress={() => router.push("/settings")} style={styles.headerAction}>
+          <SettingsIcon color={colors.chromeDim} />
+        </Pressable>
         <ConnectionDot />
       </View>
       <ConnectionStrip />
@@ -95,4 +100,5 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     minWidth: 0,
   },
+  headerAction: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
 });

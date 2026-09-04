@@ -530,6 +530,16 @@ fn a_departed_process_retires_a_working_agent_and_publishes_the_retirement() {
     let mut departed = topology.clone();
     departed.panes[0].current_command = "zsh".into();
     departed.panes[0].start_command = "zsh".into();
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
     let events = runtime.retire_departed_from(&departed, "server-a");
     assert_eq!(events.len(), 1);
     assert!(events[0].agent.is_none(), "there is no record left to send");
@@ -537,6 +547,83 @@ fn a_departed_process_retires_a_working_agent_and_publishes_the_retirement() {
     assert_eq!(events[0].reason, "departed");
     assert!(!events[0].notify);
     assert!(runtime.snapshot_for("server-a").agents.is_empty());
+}
+
+#[test]
+fn a_transient_process_scan_miss_does_not_retire_a_working_agent() {
+    let runtime = runtime("departed-transient-miss");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let mut missed = topology.clone();
+    missed.panes[0].current_command = "zsh".into();
+    missed.panes[0].start_command = "zsh".into();
+
+    assert!(runtime.retire_departed_from(&missed, "server-a").is_empty());
+    assert!(
+        runtime
+            .retire_departed_from(&topology, "server-a")
+            .is_empty()
+    );
+    assert!(runtime.retire_departed_from(&missed, "server-a").is_empty());
+    assert!(runtime.retire_departed_from(&missed, "server-a").is_empty());
+    assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
+
+    let events = runtime.retire_departed_from(&missed, "server-a");
+    assert_eq!(events.len(), 1, "only three consecutive misses retire");
+}
+
+#[test]
+fn topology_process_detection_breaks_a_run_of_maintenance_misses() {
+    let runtime = runtime("departed-topology-positive");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let mut missed = topology.clone();
+    missed.panes[0].current_command = "zsh".into();
+    missed.panes[0].start_command = "zsh".into();
+
+    assert!(runtime.retire_departed_from(&missed, "server-a").is_empty());
+    runtime.reconcile_topology(&topology, "server-a").unwrap();
+    assert!(runtime.retire_departed_from(&missed, "server-a").is_empty());
+    assert!(runtime.retire_departed_from(&missed, "server-a").is_empty());
+    assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
+    assert_eq!(runtime.retire_departed_from(&missed, "server-a").len(), 1);
+}
+
+#[test]
+fn topology_reconciliation_keeps_mid_turn_identity_on_a_live_pane_scan_miss() {
+    let runtime = runtime("reconcile-transient-miss");
+    let topology = topology("codex");
+    let agent_id = runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap()
+        .agent_id;
+    let mut missed = topology;
+    missed.panes[0].current_command = "zsh".into();
+    missed.panes[0].start_command = "zsh".into();
+
+    assert!(!runtime.reconcile_topology(&missed, "server-a").unwrap());
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].agent_id,
+        agent_id
+    );
 }
 
 /// The conservatism half. A false positive deletes a live agent's row, so
@@ -576,6 +663,16 @@ fn retirement_never_convicts_an_agent_on_evidence_that_cannot_see_it() {
     );
     assert_eq!(runtime.snapshot_for("server-a").agents.len(), 2);
 
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
     let events = runtime.retire_departed_from(&departed, "server-a");
     assert_eq!(events.len(), 1);
     let survivors = runtime.snapshot_for("server-a").agents;

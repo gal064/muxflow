@@ -162,6 +162,9 @@ pub async fn tmux_action(
             target_window_id: action.target_window_id,
             relative_position: v1::WindowRelativePosition::from(action.relative_position).into(),
             directory: action.directory,
+            // Desktop-created windows continue to start the user's shell. The
+            // mobile New agent shortcut is the only command-bearing caller.
+            command: String::new(),
         }),
         ..Default::default()
     };

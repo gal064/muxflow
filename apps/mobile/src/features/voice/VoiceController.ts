@@ -44,6 +44,8 @@ export interface VoiceControllerOptions {
   tailHoldMs?: number;
   /** Gap between the transcript paste and the CR that submits it (`SUBMIT_DELAY_MS`); tests pass 0. */
   submitDelayMs?: number;
+  /** Rechecked after transcription and before Enter so a departed agent's shell never receives a submission. */
+  canSubmit?: () => boolean;
 }
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
@@ -342,6 +344,11 @@ export class VoiceController {
       this.setPhaseIfAlive("idle");
       return;
     }
+    if (this.options.canSubmit?.() === false) {
+      this.log("utterance.discarded agent-departed");
+      this.setPhaseIfAlive("idle");
+      return;
+    }
     const live = this.options.store.getState();
     live.setPhase(this.agentId, "sending");
     live.appendMessage(this.agentId, this.message("you", text));
@@ -356,6 +363,11 @@ export class VoiceController {
       const body = utf8Encode(text);
       await connection.request(terminalInput(this.paneId, body, { paste: true }));
       if (this.submitDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, this.submitDelayMs));
+      if (this.disposed || this.options.canSubmit?.() === false) {
+        this.log("input.submit.skipped agent-departed");
+        this.setPhaseIfAlive("idle");
+        return;
+      }
       await connection.request(terminalInput(this.paneId, CR));
       this.log(`input ${body.byteLength} bytes as paste + CR → ok in ${this.now() - startedAt} ms`);
       this.options.haptics?.sent();

@@ -26,7 +26,7 @@ class FakeTones implements VoiceTones {
   failed() { this.calls.push("failed"); }
 }
 
-function harness(agentId = "agent-a", paneId = "%3") {
+function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
   const haptics = new FakeHaptics();
   const tones = new FakeTones();
   const store = createVoiceStore();
@@ -37,10 +37,11 @@ function harness(agentId = "agent-a", paneId = "%3") {
   const player = new FakePlayer();
   const files = new FakeFiles();
   let foreground = true;
+  let canSubmit = true;
   const toasts: string[] = [];
   const controller = new VoiceController({
     tailHoldMs: 0,
-    submitDelayMs: 0,
+    submitDelayMs,
     agentId,
     paneId,
     sessionId: "$1",
@@ -50,12 +51,25 @@ function harness(agentId = "agent-a", paneId = "%3") {
     player,
     files,
     appInForeground: () => foreground,
+    canSubmit: () => canSubmit,
     haptics,
     tones,
     toast: (message) => toasts.push(message),
     now: () => Date.now(),
   });
-  return { store, connection, recorder, player, files, haptics, tones, controller, toasts, setForeground: (value: boolean) => { foreground = value; } };
+  return {
+    store,
+    connection,
+    recorder,
+    player,
+    files,
+    haptics,
+    tones,
+    controller,
+    toasts,
+    setForeground: (value: boolean) => { foreground = value; },
+    setCanSubmit: (value: boolean) => { canSubmit = value; },
+  };
 }
 
 function reply(agentId: string, text: string, audio: Uint8Array = MP3, generation = 0n): VoiceSpeech {
@@ -137,6 +151,44 @@ describe("VoiceController", () => {
     expect(h.files.deleted).toContain("file:///cache/voice/agent-a.mp3");
     expect(h.store.getState().sessions["agent-a"]).toBeUndefined();
     expect(h.store.getState().playback).toBeUndefined();
+  });
+
+  it("does not submit a transcript after the agent is confirmed gone", async () => {
+    const h = harness();
+    let answer: ((response: ReturnType<typeof transcriptResponse>) => void) | undefined;
+    h.connection.answer(Operation.VOICE_TRANSCRIBE, () => new Promise((resolve) => { answer = resolve; }));
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    const utterance = h.controller.endUtterance();
+    await settle();
+
+    h.setCanSubmit(false);
+    answer!(transcriptResponse("do not send this"));
+    await utterance;
+
+    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(0);
+    expect(h.store.getState().sessions["agent-a"]?.messages).toEqual([]);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+  });
+
+  it("does not press Enter when the agent departs after the transcript paste", async () => {
+    const h = harness("agent-a", "%3", 100);
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    const utterance = h.controller.endUtterance();
+    await settle();
+    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(1);
+
+    h.setCanSubmit(false);
+    await vi.advanceTimersByTimeAsync(100);
+    await utterance;
+
+    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(1);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
   });
 
   it("sends nothing for an empty transcript and toasts", async () => {

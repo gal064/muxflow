@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -41,6 +41,8 @@ use store::{StoredAgent, StoredRoute, StoredState};
 /// coffee break. Degrading is deliberately one-way per event: the next hook of
 /// any kind restores real state.
 const STALE_WORKING_TTL_MILLIS: i64 = 15 * 60 * 1_000;
+/** Three daemon maintenance passes (normally six seconds) make process absence conclusive. */
+const DEPARTURE_MISSES_REQUIRED: u8 = 3;
 
 pub(crate) struct AgentRuntime {
     state_path: PathBuf,
@@ -48,6 +50,8 @@ pub(crate) struct AgentRuntime {
     /// What this host's agent configuration was last observed to do with
     /// lifecycle events. Re-read only when a configuration file changed.
     wiring: Mutex<hooks::WiringCache>,
+    /** Consecutive process-scan misses, reset by detection or a newer hook generation. */
+    departure_misses: Mutex<BTreeMap<String, (u64, u8)>>,
     /// Where a `Stop` hands the agent's final message. Voice mode in
     /// production; a recorder in tests, so no test needs the voice service.
     reply_sink: ReplySink,
@@ -76,6 +80,7 @@ impl AgentRuntime {
             state_path,
             state: Mutex::new(state),
             wiring: Mutex::new(hooks::WiringCache::default()),
+            departure_misses: Mutex::new(BTreeMap::new()),
             reply_sink,
         }
     }
@@ -172,14 +177,16 @@ impl AgentRuntime {
     /// - A record with no adapter id cannot be matched against detection
     ///   evidence at all, so no evidence can convict it.
     ///
-    /// The bar is not a new one: `reconcile::topology` already deletes records
-    /// on this same evidence. And retirement is not final — any later hook
-    /// re-creates the agent.
+    /// Process absence has to repeat across several successful scans. One scan
+    /// can race a process-tree transition; a later positive scan or a newer
+    /// hook generation resets the count. Retirement is not final — any later
+    /// hook re-creates the agent.
     fn retire_departed(&self) -> Vec<v1::AgentEvent> {
         // The tmux fork happens outside the lock. `ingest_hook` takes the same
         // mutex, and holding it across a subprocess would stall live hook
         // ingestion behind a discovery that has nothing to do with it.
         if !self.has_claimed_work() {
+            self.departure_misses.lock().unwrap().clear();
             return Vec::new();
         }
         let Ok((topology, identity)) = super::snapshot::discover_consistent() else {
@@ -200,7 +207,7 @@ impl AgentRuntime {
     ) -> Vec<v1::AgentEvent> {
         let detected = reconcile::detect_all(topology);
         let mut state = self.state.lock().unwrap();
-        let departed: Vec<String> = state
+        let candidates: Vec<(String, u64)> = state
             .agents
             .values()
             .filter(|record| {
@@ -211,8 +218,25 @@ impl AgentRuntime {
                     && !detected
                         .contains_key(&(record.route.pane_id.clone(), record.adapter_id.clone()))
             })
-            .map(|record| record.agent_id.clone())
+            .map(|record| (record.agent_id.clone(), record.state_generation))
             .collect();
+        let mut misses = self.departure_misses.lock().unwrap();
+        misses.retain(|agent_id, _| {
+            candidates
+                .iter()
+                .any(|(candidate, _)| candidate == agent_id)
+        });
+        let mut departed = Vec::new();
+        for (agent_id, generation) in candidates {
+            let entry = misses.entry(agent_id.clone()).or_insert((generation, 0));
+            if entry.0 != generation {
+                *entry = (generation, 0);
+            }
+            entry.1 = entry.1.saturating_add(1);
+            if entry.1 >= DEPARTURE_MISSES_REQUIRED {
+                departed.push(agent_id);
+            }
+        }
         if departed.is_empty() {
             return Vec::new();
         }
@@ -225,6 +249,9 @@ impl AgentRuntime {
         if self.persist_locked(&state).is_err() {
             *state = original;
             return Vec::new();
+        }
+        for agent_id in &departed {
+            misses.remove(agent_id);
         }
         vec![v1::AgentEvent {
             agent: None,
@@ -270,6 +297,27 @@ impl AgentRuntime {
         {
             *state = original;
             return Err(error);
+        }
+        // Reconciliation and the maintenance loop observe the same process
+        // evidence. A positive observation in either path makes earlier
+        // negative maintenance scans non-consecutive.
+        let detected = reconcile::detect_all(topology);
+        let observed: BTreeSet<String> = state
+            .agents
+            .values()
+            .filter(|record| {
+                record.route.server_identity == identity
+                    && detected
+                        .contains_key(&(record.route.pane_id.clone(), record.adapter_id.clone()))
+            })
+            .map(|record| record.agent_id.clone())
+            .collect();
+        drop(state);
+        if !observed.is_empty() {
+            self.departure_misses
+                .lock()
+                .unwrap()
+                .retain(|agent_id, _| !observed.contains(agent_id));
         }
         Ok(result.changed)
     }
