@@ -649,6 +649,7 @@ export class HostConnection {
         break;
       case EventKind.AGENT_STATE: {
         if (event.agent) {
+          this.log(`agent.state reason=${event.agent.reason || "update"} retired=${event.agent.retiredAgentIds.length} update=${event.agent.agent ? "yes" : "no"}`);
           const transition = store.getState().applyAgentEvent(event.agent);
           if (transition) this.options.onAgentTransition?.(transition);
         }

@@ -65,3 +65,12 @@ export function FolderIcon({ size = 24, color }: { size?: number; color: string 
     </Svg>
   );
 }
+
+export function SettingsIcon({ size = 22, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" fill="none" stroke={color} strokeWidth="2" />
+      <Path d="m19.2 13.5 1.3 1-.2 1.4-1.6.6a8 8 0 0 1-1.2 1.6l.2 1.7-1.3.7-1.3-1a8 8 0 0 1-2 .5l-.7 1.5H11L10.3 20a8 8 0 0 1-2-.5l-1.3 1-1.3-.7.2-1.7a8 8 0 0 1-1.2-1.6L3 15.9l-.2-1.4 1.3-1a8 8 0 0 1 0-2l-1.3-1L3 9.1l1.6-.6A8 8 0 0 1 5.9 7l-.2-1.7L7 4.5l1.3 1a8 8 0 0 1 2-.5l.7-1.5h1.5l.7 1.5a8 8 0 0 1 2 .5l1.3-1 1.3.7-.2 1.7a8 8 0 0 1 1.2 1.6l1.6.6.2 1.4-1.3 1a8 8 0 0 1 0 2Z" fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
+    </Svg>
+  );
+}

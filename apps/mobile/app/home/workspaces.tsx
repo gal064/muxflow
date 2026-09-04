@@ -12,6 +12,8 @@ import { ListRow } from "../../src/ui/components/ListRow";
 import { pinnedDividers } from "../../src/store/selectors";
 import { useSession } from "../../src/ui/hooks";
 import { colors, metrics, typeScale } from "../../src/ui/tokens";
+import { WorkspaceActionsSheet } from "../../src/features/terminal/WorkspaceActionsSheet";
+import type { Session } from "../../src/store/sessionStore";
 
 /** Workspaces tab — design.md §9.3.2. */
 export default function WorkspacesScreen() {
@@ -22,6 +24,7 @@ export default function WorkspacesScreen() {
   const sessions = [...ordered.filter((s) => s.pinned), ...ordered.filter((s) => !s.pinned)];
   const dividers = pinnedDividers(sessions.map((s) => s.pinned));
   const [refreshing, setRefreshing] = useState(false);
+  const [actionsFor, setActionsFor] = useState<Session | null>(null);
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -32,6 +35,7 @@ export default function WorkspacesScreen() {
   }, []);
 
   return (
+    <>
     <FlatList
       contentContainerStyle={sessions.length === 0 ? styles.fill : undefined}
       data={sessions}
@@ -51,6 +55,7 @@ export default function WorkspacesScreen() {
             edgeColor={waiting.loudest ? waitingColor(waiting.loudest) : undefined}
             height={metrics.sessionRowHeight}
             onPress={() => router.push({ pathname: "/workspace/[sessionId]", params: { sessionId: toRouteParam(item.id) } })}
+            onLongPress={() => setActionsFor(item)}
             subtitle={windowCountLabel(item.windowCount)}
             title={stripAgentStatusGlyphs(item.name)}
             trailing={waiting.loudest ? <Text style={[styles.waiting, { color: waitingInk(waiting.loudest) }]}>{waitingLabel(waiting.count)}</Text> : undefined}
@@ -60,6 +65,13 @@ export default function WorkspacesScreen() {
       }}
       style={styles.list}
     />
+    <WorkspaceActionsSheet
+      onDismiss={() => setActionsFor(null)}
+      sessionId={actionsFor?.id}
+      title={actionsFor ? stripAgentStatusGlyphs(actionsFor.name) : undefined}
+      visible={actionsFor !== null}
+    />
+    </>
   );
 }
 

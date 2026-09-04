@@ -239,6 +239,7 @@ fn persist_failure_rolls_back_runtime_mutations() {
         state_path: blocker.join("agents.json"),
         state: Mutex::new(baseline_state.clone()),
         wiring: Mutex::new(hooks::WiringCache::default()),
+        departure_misses: Mutex::new(BTreeMap::new()),
         reply_sink: Box::new(|_| {}),
     };
     let agent_id = baseline_state.agents.keys().next().unwrap().clone();

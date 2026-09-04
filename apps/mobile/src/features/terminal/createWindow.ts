@@ -44,11 +44,12 @@ export async function createTerminalWindow(
   connection: HostConnection,
   store: SessionStore,
   sessionId: string,
+  command = "",
   staleWaitMs = STALE_TOPOLOGY_WAIT_MS,
 ): Promise<CreatedWindow> {
   const attempt = () => {
     const generation = store.getState().topologyGeneration;
-    return connection.request(createWindow(sessionId, connection.serverIdentity, generation)).catch((error: unknown) => {
+    return connection.request(createWindow(sessionId, connection.serverIdentity, generation, command)).catch((error: unknown) => {
       throw Object.assign(error instanceof Error ? error : new Error(String(error)), { generation });
     });
   };
