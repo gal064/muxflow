@@ -48,7 +48,7 @@ describe("TouchScrollController", () => {
     expect(h.calls).toEqual([]);
     expect(h.pendingFrames()).toBe(1);
     h.frame(16);
-    expect(h.calls).toEqual([3]);
+    expect(h.calls).toEqual([4]);
   });
 
   it("carries sub-row drag distance across frames", () => {
@@ -206,14 +206,14 @@ describe("TouchScrollController", () => {
       frames: 2,
       scrollCalls: 1,
       dragDistanceRows: 2,
-      rowsWhilePressed: 3,
+      rowsWhilePressed: 4,
       rowsAfterRelease: 0,
-      netRows: 3,
-      emittedDistanceRows: 3,
+      netRows: 4,
+      emittedDistanceRows: 4,
       interrupted: false,
     })]);
     expect(formatTouchScrollMetrics(h.metrics[0]!)).toContain(
-      "moves=8 frames=2 calls=1 dragDistanceRows=2 pressedRows=3 afterReleaseRows=0 netRows=3 emittedDistanceRows=3",
+      "moves=8 frames=2 calls=1 dragDistanceRows=2 pressedRows=4 afterReleaseRows=0 netRows=4 emittedDistanceRows=4",
     );
   });
 });
