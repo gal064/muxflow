@@ -32,6 +32,20 @@ fn terminal_bytes_round_trip_without_utf8_conversion() {
 }
 
 #[test]
+fn voice_terminal_input_round_trips_its_agent_guard() {
+    let request = v1::Request {
+        operation: v1::Operation::TerminalInput.into(),
+        scope: "%3".into(),
+        data: b"hello".to_vec(),
+        terminal_input_paste: true,
+        terminal_input_agent_id: "agent-1".into(),
+        ..Default::default()
+    };
+    let decoded = v1::Request::decode(request.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded, request);
+}
+
+#[test]
 fn length_delimited_frame_round_trips() {
     let envelope = tmux_agent_protocol::envelope(
         7,
@@ -983,10 +997,10 @@ fn voice_operations_and_payloads_are_append_only() {
     let decoded = v1::Request::decode(bytes.as_slice()).unwrap();
     assert_eq!(decoded, request);
     assert!(decoded.data.is_empty());
-    // Field 19, length-delimited: tag 0x9a 0x01.
+    // Field 20, length-delimited: tag 0xa2 0x01.
     assert!(
-        bytes.windows(2).any(|window| window == [0x9a, 0x01]),
-        "Request.voice moved off field 19"
+        bytes.windows(2).any(|window| window == [0xa2, 0x01]),
+        "Request.voice moved off field 20"
     );
 
     let response = v1::Response {

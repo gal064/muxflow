@@ -218,8 +218,13 @@ message Request {
   // input queued around it: a CR sent as keys after it arrives as its own
   // keystroke, which is what makes it submit rather than insert a newline.
   bool terminal_input_paste = 19;
-  // Every OPERATION_VOICE_* payload. NEXT FREE FIELD = 21.
+  // Every OPERATION_VOICE_* payload.
   VoiceRequest voice = 20;
+  // TERMINAL_INPUT only: when non-empty, the host accepts the input only
+  // while this exact agent still owns `scope`. Voice uses this to prevent a
+  // departed agent's surviving shell from receiving dictated commands.
+  string terminal_input_agent_id = 21;
+  // NEXT FREE FIELD = 22.
 }
 
 message Response {

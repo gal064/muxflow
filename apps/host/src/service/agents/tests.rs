@@ -217,7 +217,19 @@ fn title_animation_does_not_churn_routes_but_process_changes_still_reconcile() {
     let mut departed = renamed;
     departed.windows[0].name = "⠦ Ship tests".into();
     departed.panes[0].current_command = "bash".into();
-    assert!(runtime.reconcile_topology(&departed, "server-a").unwrap());
+    assert!(!runtime.reconcile_topology(&departed, "server-a").unwrap());
+    assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
+    assert_eq!(runtime.retire_departed_from(&departed, "server-a").len(), 1);
     assert!(runtime.snapshot_for("server-a").agents.is_empty());
 }
 
@@ -350,7 +362,7 @@ fn process_reconciliation_never_overwrites_a_hook_established_lifecycle() {
 }
 
 #[test]
-fn reconciliation_retires_process_exit_pane_close_and_adapter_replacement() {
+fn process_exit_debounces_while_pane_close_and_adapter_replacement_reconcile() {
     let runtime = runtime("retire");
     runtime
         .reconcile_topology(&topology("codex"), "server-a")
@@ -368,9 +380,20 @@ fn reconciliation_retires_process_exit_pane_close_and_adapter_replacement() {
         v1::AgentAdapterKind::ClaudeCode as i32
     );
 
-    runtime
-        .reconcile_topology(&topology("bash"), "server-a")
-        .unwrap();
+    let departed = topology("bash");
+    assert!(!runtime.reconcile_topology(&departed, "server-a").unwrap());
+    assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
+    assert!(
+        runtime
+            .retire_departed_from(&departed, "server-a")
+            .is_empty()
+    );
+    assert_eq!(runtime.retire_departed_from(&departed, "server-a").len(), 1);
     assert!(runtime.snapshot_for("server-a").agents.is_empty());
 
     runtime

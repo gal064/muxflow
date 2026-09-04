@@ -107,6 +107,7 @@ describe("VoiceController", () => {
     expect(input.map((r) => r.scope)).toEqual(["%3", "%3"]);
     expect(new TextDecoder().decode(input[0]!.data)).toBe("list the files in this directory");
     expect(input[0]!.terminalInputPaste).toBe(true);
+    expect(input.map((request) => request.terminalInputAgentId)).toEqual(["agent-a", "agent-a"]);
     expect(Array.from(input[1]!.data)).toEqual([0x0d]);
     expect(input[1]!.terminalInputPaste).toBe(false);
     const session = h.store.getState().sessions["agent-a"]!;
