@@ -16,8 +16,10 @@ function device(): string {
 }
 
 function build(): string {
-  if (Platform.OS === "android" && Constants.platform?.android?.versionCode !== undefined) {
-    return String(Constants.platform.android.versionCode);
+  const androidVersionCode =
+    Constants.platform?.android?.versionCode ?? Constants.expoConfig?.android?.versionCode;
+  if (Platform.OS === "android" && androidVersionCode !== undefined) {
+    return String(androidVersionCode);
   }
   return Constants.expoRuntimeVersion ?? "development";
 }
