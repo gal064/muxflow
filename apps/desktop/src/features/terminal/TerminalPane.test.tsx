@@ -91,6 +91,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       return () => { this.#gridListeners.delete(listener); };
     }
     isAlternateScreenActive(): boolean { return this.alternateScreen; }
+    isApplicationCursorMode(): boolean { return false; }
     onInput(listener: (input: { kind: "text"; data: string }) => void): () => void {
       this.#inputListeners.add(listener);
       return () => { this.#inputListeners.delete(listener); };
@@ -344,6 +345,7 @@ function paneElement(
   appFocused: boolean,
   terminalFontSize = 13,
   onInput: (paneId: string, input: { kind: "text"; data: string } | { kind: "binary"; data: Uint8Array }) => void = () => undefined,
+  activity: { onKeyActivity?(paneId: string): void; onPointerActivity?(paneId: string): void } = {},
 ) {
   return <TerminalPane
     appFocused={appFocused}
@@ -352,6 +354,8 @@ function paneElement(
     pane={pane}
     hub={hub.asHub()}
     onInput={onInput}
+    onKeyActivity={activity.onKeyActivity}
+    onPointerActivity={activity.onPointerActivity}
     onFocus={() => undefined}
     onMeasurements={() => undefined}
     onController={() => undefined}
@@ -365,10 +369,11 @@ async function mountPane(
   clientId = "client-a",
   appFocused = true,
   onInput?: (paneId: string, input: { kind: "text"; data: string } | { kind: "binary"; data: Uint8Array }) => void,
+  activity?: { onKeyActivity?(paneId: string): void; onPointerActivity?(paneId: string): void },
 ): Promise<ReactTestRenderer> {
   let renderer!: ReactTestRenderer;
   await act(async () => {
-    renderer = create(paneElement(pane, hub, clientId, appFocused, 13, onInput), {
+    renderer = create(paneElement(pane, hub, clientId, appFocused, 13, onInput, activity), {
       createNodeMock: (element) => {
         const node = document.createElement("div");
         if ((element.props as Record<string, unknown>)["data-terminal-surface"]) paneNodes.push(node);
@@ -413,6 +418,25 @@ afterEach(() => {
 });
 
 describe("TerminalPane pane-paint span lifecycle", () => {
+  it("reports deliberate pointer and physical-key activity without using focus", async () => {
+    const pane = fixturePane("%activity");
+    const hub = new FakeHub();
+    const onKeyActivity = vi.fn();
+    const onPointerActivity = vi.fn();
+    const mounted = await mountPane(pane, hub, "client-a", true, undefined, { onKeyActivity, onPointerActivity });
+    const surface = mounted.root.findByProps({ "data-terminal-surface": "true" });
+    await act(async () => surface.props.onMouseDownCapture({
+      currentTarget: { dataset: {} },
+      nativeEvent: { shiftKey: false },
+    }));
+    expect(onPointerActivity).toHaveBeenCalledWith("%activity");
+    expect(onKeyActivity).not.toHaveBeenCalled();
+
+    await act(async () => { paneNodes[0].dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true })); });
+    expect(onKeyActivity).toHaveBeenCalledWith("%activity");
+    await act(async () => mounted.unmount());
+  });
+
   it("updates font size on the existing renderer", async () => {
     const pane = fixturePane("%font");
     const hub = new FakeHub();

@@ -839,17 +839,14 @@ export function App() {
   }, [activePane, panes, shellNavigation]);
 
   const selectSession = useCallback((sessionId: string) => {
-    notificationActivation.clearNotificationFocusGuard();
     shellNavigation.selectSession(sessionId);
-  }, [notificationActivation, shellNavigation]);
+  }, [shellNavigation]);
   const selectWindow = useCallback((windowId: string) => {
-    notificationActivation.clearNotificationFocusGuard();
     shellNavigation.selectWindow(windowId);
-  }, [notificationActivation, shellNavigation]);
+  }, [shellNavigation]);
   const revealTerminalUnderAppTab = useCallback((sessionId: string, windowId: string | undefined) => {
-    notificationActivation.clearNotificationFocusGuard();
     shellNavigation.revealLocalTerminal(sessionId, windowId, () => setNavigationAppTab(sessionId, undefined));
-  }, [notificationActivation, setNavigationAppTab, shellNavigation]);
+  }, [setNavigationAppTab, shellNavigation]);
   const focusNavigation = useFocusHistoryNavigation({
     activeSessionId,
     hostProfileId: currentHostProfileId,
@@ -997,7 +994,11 @@ export function App() {
     // nothing to select, and inventing a selection here is precisely the
     // temp-id reconciliation this placeholder exists to avoid.
     if (tab.kind === "pending") return;
-    if (tab.kind === "terminal") selectWindow(tab.id);
+    if (tab.kind === "terminal") {
+      const pane = snapshot.panes.find((candidate) => candidate.windowId === tab.id && candidate.active);
+      if (pane) agentRuntime.acknowledgePane(pane.id);
+      selectWindow(tab.id);
+    }
     // No status: the tab the user asked for is now the tab on screen. The
     // message that used to be written here reached nobody either way — the
     // notice is the channel's only reader and it has classified "Opened …" as
@@ -1005,12 +1006,11 @@ export function App() {
     else if (activeSession && hostState.serverIdentity) {
       shellNavigation.selectAppTab(activeSession.id, activeWindowId, tab.id);
     }
-  }, [activeSession, activeWindowId, hostState.serverIdentity, selectWindow, shellNavigation]);
+  }, [activeSession, activeWindowId, agentRuntime.acknowledgePane, hostState.serverIdentity, selectWindow, shellNavigation, snapshot.panes]);
 
   // From the list the row comes with its host's scope; the bell jump has
   // none, and asks for whichever agent is loudest on whichever host.
   const selectAgentRow = useCallback((row: AgentListRow, scope?: HostScopeToken) => {
-    notificationActivation.clearNotificationFocusGuard();
     if (scope && !scopeIsLive(scope)) return;
     if (!row.agent.paneId) return setStatus(`Agent ${row.agent.displayName} has no exact pane match; navigation is unavailable.`);
     const source = `Agent ${row.agent.displayName}`;
@@ -1021,7 +1021,7 @@ export function App() {
     if (destination.kind === "unavailable") return setStatus(`Agent destination ${row.agent.displayName} is no longer available: ${destination.reason}.`);
     void surfacePaneDestination(destination.pane, source)
       .then((result) => reportAnnouncedPaneResult(result, setStatus));
-  }, [hostScopeRef, notificationActivation, scopeIsLive, selectOnHost, snapshot.panes, surfacePaneDestination]);
+  }, [hostScopeRef, scopeIsLive, selectOnHost, snapshot.panes, surfacePaneDestination]);
 
   /**
    * The picked host's mark and visibility, saved as typed. Saving does not
@@ -1207,7 +1207,6 @@ export function App() {
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, requestNewWorkspace, rowCommands, selectedAppTab,
     createWindow: (sessionId) => {
-      notificationActivation.clearNotificationFocusGuard();
       shellNavigation.createWindow(sessionId);
     },
     selectRelativeTab: (direction) => {
@@ -1281,8 +1280,9 @@ export function App() {
   }, [clientId, echoLagProbe, hostState.canMutate, inputLatencyReporter]);
 
   const handleKeyActivity = useCallback((paneId: string) => {
+    agentRuntime.acknowledgePane(paneId);
     echoLagProbe.noteKey(paneId);
-  }, [echoLagProbe]);
+  }, [agentRuntime.acknowledgePane, echoLagProbe]);
 
   /** The render half of the same measurement — see `TerminalPane`'s sampler. */
   const handlePaintSample = useCallback((_paneId: string, ms: number) => {
@@ -1628,6 +1628,7 @@ export function App() {
               grid={grid}
               handleInput={handleInput}
               handleKeyActivity={handleKeyActivity}
+              handlePointerActivity={agentRuntime.acknowledgePane}
               hub={hub}
               mountedPanes={mountedPanes}
               onPaintSample={handlePaintSample}

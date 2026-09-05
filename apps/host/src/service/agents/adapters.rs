@@ -5,6 +5,9 @@ use tmux_agent_protocol::v1;
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
 pub(crate) const CODEX_APPROVAL_REVIEWER_FIELD: &str = "approval_reviewer";
 pub(crate) const CODEX_APPROVAL_TURN_ID_FIELD: &str = "approval_turn_id";
+/// Private, transient locator used only between a live hook and daemon. It is
+/// removed before an undelivered event enters the durable fallback mailbox.
+pub(crate) const CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD: &str = "approval_transcript_path";
 pub(crate) const CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: &str = "has_running_subagent";
 /// The agent's final message, forwarded on `Stop` by both adapters for voice
 /// mode (docs/mobile/voice-mode-plan.md §4.5). Consumed by ingest and handed
@@ -127,10 +130,11 @@ impl AgentAdapter for CodexAdapter {
     /// Two events Claude Code has are absent from that surface and are
     /// therefore gaps rather than omissions: there is no `StopFailure`, so a
     /// turn that ends in failure is indistinguishable from one that succeeds,
-    /// and there is no `Notification`. `UserPromptSubmit` captures the turn's
-    /// normalized reviewer before work starts; an unclassified or mismatched
-    /// `PermissionRequest` and `PreToolUse(request_user_input)` are the two
-    /// observed signals that a Codex agent is blocked. `SubagentStart` is
+    /// and there is no `Notification`. `UserPromptSubmit` seeds the turn's
+    /// positive auto-review cache before work starts; `PermissionRequest`
+    /// revalidates a cache miss. A request still unclassified or explicitly
+    /// user-reviewed and `PreToolUse(request_user_input)` are the two observed
+    /// signals that a Codex agent is blocked. `SubagentStart` is
     /// deliberately not taken: it
     /// says nothing `PreToolUse` has not already said, and every hook costs a
     /// daemon connection.
@@ -173,8 +177,8 @@ impl AgentAdapter for CodexAdapter {
         parse_common_hook(
             payload,
             &[
-                // Ingest may promote this to Working only when the request's
-                // turn matches the reviewer captured at UserPromptSubmit.
+                // Ingest may promote this to Working when the request's turn
+                // matches the positive cache or its own reviewer is auto-review.
                 ("PermissionRequest", v1::AgentLifecycleState::Blocked),
                 ("UserPromptSubmit", v1::AgentLifecycleState::Working),
                 ("PreToolUse", pre_tool_lifecycle),

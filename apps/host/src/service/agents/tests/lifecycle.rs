@@ -99,6 +99,125 @@ fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
 }
 
 #[test]
+fn permission_revalidates_auto_review_after_prompt_cache_miss() {
+    let runtime = runtime("auto-review-revalidated-at-permission");
+    let topology = topology("codex");
+    let prompt = runtime
+        .ingest_hook_with_context(
+            &prompt_for_turn("prompt-before-context", "turn-1", None),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!prompt.notify);
+    assert_eq!(
+        prompt.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .all(|record| record.codex_auto_review_turn_id.is_empty())
+    );
+
+    let mut permission = permission_for_turn("permission-with-context", "turn-1");
+    let mut payload: serde_json::Value = serde_json::from_slice(&permission.payload_json).unwrap();
+    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "auto_review".into();
+    permission.payload_json = serde_json::to_vec(&payload).unwrap();
+    let revalidated = runtime
+        .ingest_hook_with_context(&permission, "server-a", Some(&topology))
+        .unwrap();
+    assert!(!revalidated.notify);
+    assert_eq!(
+        revalidated.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .all(|record| record.codex_auto_review_turn_id == "turn-1")
+    );
+
+    let cached = runtime
+        .ingest_hook_with_context(
+            &permission_for_turn("permission-after-revalidation", "turn-1"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!cached.notify);
+    assert_eq!(
+        cached.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+}
+
+#[test]
+fn permission_cache_miss_is_not_a_cached_block_decision() {
+    let runtime = runtime("permission-negative-is-not-cached");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &prompt_for_turn("prompt-before-context", "turn-1", None),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+
+    let unclassified = runtime
+        .ingest_hook_with_context(
+            &permission_for_turn("permission-before-context", "turn-1"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(unclassified.notify);
+    assert_eq!(
+        unclassified.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .all(|record| record.codex_auto_review_turn_id.is_empty())
+    );
+
+    let mut permission = permission_for_turn("permission-after-context", "turn-1");
+    let mut payload: serde_json::Value = serde_json::from_slice(&permission.payload_json).unwrap();
+    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "auto_review".into();
+    permission.payload_json = serde_json::to_vec(&payload).unwrap();
+    let recovered = runtime
+        .ingest_hook_with_context(&permission, "server-a", Some(&topology))
+        .unwrap();
+    assert!(!recovered.notify);
+    assert_eq!(
+        recovered.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .all(|record| record.codex_auto_review_turn_id == "turn-1")
+    );
+}
+
+#[test]
 fn explicit_non_auto_turn_start_clears_the_same_turn_cache() {
     for reviewer in ["user", "future_reviewer"] {
         let runtime = runtime(&format!("auto-review-override-{reviewer}"));

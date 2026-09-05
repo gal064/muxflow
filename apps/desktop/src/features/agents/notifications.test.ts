@@ -6,7 +6,7 @@ import {
 import { agent } from "./testFixtures";
 import { agentGeneration } from "./generation";
 
-const focus = { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@1", paneId: "%1", appFocused: false, terminalVisible: true, automaticSeen: true };
+const focus = { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@1", paneId: "%1", appFocused: false, terminalVisible: true };
 
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
