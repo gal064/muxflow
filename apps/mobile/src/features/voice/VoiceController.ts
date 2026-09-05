@@ -192,7 +192,7 @@ export class VoiceController {
       await connection.request(voiceSession(""));
       this.log("session.cleared");
     } catch (error) {
-      this.log(`session.clear.failed ${describe(error)}`);
+      this.log(`session.clear.failed ${diagnosticError(error)}`);
     }
   }
 
@@ -452,7 +452,7 @@ export class VoiceController {
       message.audioError = failureDetail || "The host couldn't synthesize this reply.";
     }
     store.appendReply(this.agentId, message);
-    this.log(`reply message=${message.id} stateGeneration=${speech.stateGeneration} audioBytes=${speech.audio.byteLength} textChars=${speech.text.length} truncated=${speech.truncated}${message.audioError ? ` audioError=${message.audioError}` : ""}`);
+    this.log(`reply message=${message.id} stateGeneration=${speech.stateGeneration} audioBytes=${speech.audio.byteLength} textChars=${speech.text.length} truncated=${speech.truncated} audioError=${message.audioError !== undefined}`);
     this.playUnplayedIfListening();
   }
 
@@ -579,7 +579,7 @@ export class VoiceController {
       void (this.arming ?? Promise.resolve()).then(() => recorder.stop()).then(({ uri }) => {
         if (uri) files.delete(uri);
         recorder.release();
-      }).catch((error: unknown) => this.log(`recorder.stop.failed ${describe(error)}`));
+      }).catch((error: unknown) => this.log(`recorder.stop.failed ${diagnosticError(error)}`));
       return;
     }
     void (this.arming ?? Promise.resolve()).then(() => {
@@ -614,7 +614,7 @@ export class VoiceController {
         // any other prepare failure is transient and toasts once, and the next
         // focus or release arms again.
         if ((error as { name?: unknown }).name === "RecordingPermissionDenied") {
-          this.log(`recorder.prepare.denied ${describe(error)}`);
+          this.log(`recorder.prepare.denied ${diagnosticError(error)}`);
           this.options.store.getState().setRecorderError(describe(error));
         } else {
           this.fail("recorder.prepare", error);
@@ -649,12 +649,12 @@ export class VoiceController {
       // says so, and the loop restarts once STATUS reports ready.
       if (this.applyReadinessRefusal(error)) {
         this.stopRefreshTimer();
-        this.log(`session.refused ${describe(error)}`);
+        this.log(`session.refused ${diagnosticError(error)}`);
       } else if (this.focused) {
         this.fail("session", error);
       } else {
         // A refresh failing behind another screen (link drop, slow host) is not worth a toast there.
-        this.log(`session.refresh.failed ${describe(error)}`);
+        this.log(`session.refresh.failed ${diagnosticError(error)}`);
       }
     } finally {
       this.registering = false;
@@ -713,7 +713,7 @@ export class VoiceController {
 
   private fail(what: string, error: unknown): void {
     const message = describeVoiceError(error);
-    this.log(`${what}.failed ${describe(error)}`);
+    this.log(`${what}.failed ${diagnosticError(error)}`);
     // A request that settles after End or disconnect has nobody to tell.
     if (message === undefined || this.disposed) return;
     this.options.store.getState().setLastError(message);
@@ -737,4 +737,17 @@ export class VoiceController {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Content-free error identity for copied diagnostics; UI still receives the friendly message. */
+function diagnosticError(error: unknown): string {
+  if (error instanceof HostError) {
+    return `type=HostError code=${safeToken(error.code)} operation=${safeToken(error.voice?.operationId ?? "none")} retryable=${error.voice?.retryable ?? false}`;
+  }
+  if (error instanceof Error) return `type=${safeToken(error.name || "Error")} messageChars=${error.message.length}`;
+  return `type=${typeof error}`;
+}
+
+function safeToken(value: string): string {
+  return value.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 160) || "unknown";
 }

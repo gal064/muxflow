@@ -418,6 +418,8 @@ describe("VoiceController against a host that is not set up (review round 1)", (
     await settle();
     expect(h.store.getState().hostStatus).toMatchObject({ readiness: "modelMissing", detail: "model not provisioned" });
     expect(h.toasts).toEqual([]);
+    expect(h.logs.join("\n")).toContain("session.refused type=HostError code=voice_model_missing");
+    expect(h.logs.join("\n")).not.toContain("model not provisioned");
     await vi.advanceTimersByTimeAsync(SESSION_REFRESH_MS * 2);
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(1);
     expect(h.toasts).toEqual([]);
@@ -428,6 +430,7 @@ describe("VoiceController against a host that is not set up (review round 1)", (
     await settle();
     expect(h.store.getState().hostStatus).toMatchObject({ readiness: "uvMissing", detail: "install uv: curl ..." });
     expect(h.toasts).toEqual([]);
+    expect(h.logs.join("\n")).not.toContain("install uv: curl");
     // End on a never-registered session sends no clear.
     await h.controller.endSession();
     expect(h.connection.of(Operation.VOICE_SESSION).every((r) => r.voice?.agentId === "agent-a")).toBe(true);
