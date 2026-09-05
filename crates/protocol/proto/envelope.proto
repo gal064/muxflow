@@ -1255,11 +1255,11 @@ message VoiceTranscript {
 }
 
 message VoiceSpeech {
-  // audio/mpeg; empty when synthesis failed and only `text` could be pushed.
+  // audio/mpeg; empty when synthesis failed and only the two text forms could be pushed.
   bytes audio = 1;
   string audio_mime = 2;
-  // Exactly what was synthesized (after markdown strip and cap).
-  string text = 3;
+  // Original Markdown shown by the phone. For SPEAK, this is the request text.
+  string display_markdown = 3;
   bool truncated = 4;
   string voice = 5;
   VoiceProvider provider = 6;
@@ -1268,6 +1268,8 @@ message VoiceSpeech {
   // VOICE_REPLY: the AgentRecord.state_generation the reply belongs to.
   uint64 state_generation = 8;
   int64 reply_at_unix_millis = 9;
+  // Exactly what was synthesized (after Markdown flattening and cap).
+  string speech_text = 10;
 }
 
 message VoiceResponse {

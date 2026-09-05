@@ -33,7 +33,7 @@ describe("parsePersistedPrefs", () => {
     ['{"agentListMode":"Pinned"}', "priority"],
     ['{"agentListMode":"priority"}', "priority"],
   ])("%j → %s", (raw, mode) => {
-    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, agentCommand: "codex", voicePlaybackRate: 1, voiceBigPane: false });
+    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false });
   });
 
   it.each<[string, number, boolean]>([
@@ -43,7 +43,12 @@ describe("parsePersistedPrefs", () => {
     ['{"voicePlaybackRate":3,"voiceBigPane":"yes"}', 1, false],
     ['{"voicePlaybackRate":"1.5","voiceBigPane":1}', 1, false],
   ])("voice fields %j → %s× big=%s", (raw, rate, big) => {
-    expect(parsePersistedPrefs(raw)).toMatchObject({ voicePlaybackRate: rate, voiceBigPane: big });
+    expect(parsePersistedPrefs(raw)).toMatchObject({ voicePlaybackRate: rate, voiceAutoPlay: true, voiceBigPane: big });
+  });
+
+  it("accepts only a boolean autoplay preference and defaults to the existing on behavior", () => {
+    expect(parsePersistedPrefs('{"voiceAutoPlay":false}').voiceAutoPlay).toBe(false);
+    expect(parsePersistedPrefs('{"voiceAutoPlay":"false"}').voiceAutoPlay).toBe(true);
   });
 });
 
@@ -63,7 +68,7 @@ describe("prefsStore", () => {
     store.getState().setAgentListMode("workspace");
     expect(store.getState().agentListMode).toBe("workspace");
     await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(1));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", agentCommand: "codex", voicePlaybackRate: 1, voiceBigPane: false });
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false });
 
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
@@ -76,19 +81,20 @@ describe("prefsStore", () => {
     expect(again.getState().agentListMode).toBe("pinned");
   });
 
-  it("persists the voice speed and pane size alongside the list mode", async () => {
+  it("persists voice speed, autoplay and pane size alongside the list mode", async () => {
     const { storage, values, setItem } = fakeStore({ [PREFS_STORAGE_KEY]: '{"agentListMode":"pinned"}' });
     const store = createPrefsStore(storage);
     await store.getState().hydrate();
     store.getState().setVoicePlaybackRate(2);
+    store.getState().setVoiceAutoPlay(false);
     store.getState().setVoiceBigPane(true);
     // Setting the value already held writes nothing.
     store.getState().setVoiceBigPane(true);
-    await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(2));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", agentCommand: "codex", voicePlaybackRate: 2, voiceBigPane: true });
+    await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(3));
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", agentCommand: "codex", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true });
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
-    expect(restarted.getState()).toMatchObject({ agentListMode: "pinned", voicePlaybackRate: 2, voiceBigPane: true });
+    expect(restarted.getState()).toMatchObject({ agentListMode: "pinned", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true });
   });
 
   it("persists the command used by the New agent shortcut", async () => {

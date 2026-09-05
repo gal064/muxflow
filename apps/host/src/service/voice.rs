@@ -363,7 +363,8 @@ impl VoiceService {
                             "audio/mpeg".into()
                         },
                         audio,
-                        text: spoken.text,
+                        display_markdown: reply.text,
+                        speech_text: spoken.text,
                         truncated: spoken.truncated || reply.truncated,
                         voice: DEFAULT_VOICE.into(),
                         provider: v1::VoiceProvider::EdgeTts.into(),
@@ -744,7 +745,8 @@ impl VoiceService {
         Ok(v1::VoiceSpeech {
             audio,
             audio_mime: "audio/mpeg".into(),
-            text: spoken.text,
+            display_markdown: text.to_owned(),
+            speech_text: spoken.text,
             truncated: spoken.truncated,
             voice: voice.to_owned(),
             provider: v1::VoiceProvider::EdgeTts.into(),

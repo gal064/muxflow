@@ -287,7 +287,7 @@ describe("ordered events (§7.4)", () => {
     }));
     transport.feed(event(EventKind.VOICE_REPLY, 2n, {
       voice: create(VoiceEventSchema, {
-        reply: create(VoiceSpeechSchema, { agentId: "a1", text: "Done.", audio: new Uint8Array([0xff, 0xfb]), audioMime: "audio/mpeg", stateGeneration: 4n }),
+        reply: create(VoiceSpeechSchema, { agentId: "a1", displayMarkdown: "**Done.**", speechText: "Done.", audio: new Uint8Array([0xff, 0xfb]), audioMime: "audio/mpeg", stateGeneration: 4n }),
       }),
     }));
     expect(received.map((e) => e.kind)).toEqual([EventKind.VOICE_PROVISION, EventKind.VOICE_REPLY]);
