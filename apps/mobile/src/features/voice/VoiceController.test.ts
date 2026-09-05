@@ -221,6 +221,101 @@ describe("VoiceController", () => {
     expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
   });
 
+  it("keeps a left-swiped utterance recording until the next tap sends it", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    h.controller.lockUtterance();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recordingLocked");
+    expect(h.recorder.recording).toBe(true);
+
+    await h.controller.endUtterance();
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
+    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(2);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+  });
+
+  it("discards a right-swiped utterance without transcription or terminal input", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+
+    await h.controller.cancelUtterance();
+    expect(h.recorder.recording).toBe(false);
+    expect(h.files.deleted).toContain("file:///cache/rec-1.m4a");
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(0);
+    expect(h.store.getState().sessions["agent-a"]?.messages).toEqual([]);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+  });
+
+  it("cancels and releases a locked recording on blur or background", async () => {
+    const blurred = harness();
+    blurred.controller.focus();
+    await settle();
+    blurred.controller.beginUtterance();
+    await settle();
+    blurred.controller.lockUtterance();
+    blurred.controller.blur();
+    await settle();
+    expect(blurred.recorder.recording).toBe(false);
+    expect(blurred.recorder.released).toBe(1);
+    expect(blurred.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+
+    const backgrounded = harness();
+    backgrounded.controller.focus();
+    await settle();
+    backgrounded.controller.beginUtterance();
+    await settle();
+    backgrounded.controller.lockUtterance();
+    backgrounded.setForeground(false);
+    backgrounded.controller.onAppInactive();
+    await settle();
+    expect(backgrounded.recorder.recording).toBe(false);
+    expect(backgrounded.recorder.released).toBe(1);
+    expect(backgrounded.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+  });
+
+  it("keeps a reply that arrives while listening manual-play only", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    h.controller.lockUtterance();
+    h.controller.onVoiceReply(reply("agent-a", "Reply during recording."));
+    const message = latestReply(h.store.getState().sessions["agent-a"])!;
+    expect(message.played).toBe(false);
+    expect(h.player.calls).not.toContain("play");
+
+    await h.controller.endUtterance();
+    h.controller.onAppActive();
+    h.controller.blur();
+    h.controller.focus();
+    expect(h.player.calls).not.toContain("play");
+    h.controller.play(message.id);
+    expect(h.player.calls).toContain("play");
+  });
+
+  it("suppresses autoplay until recorder.stop settles after a normal release", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    const ending = h.controller.endUtterance();
+    h.controller.onVoiceReply(reply("agent-a", "Reply during recorder stop."));
+    const message = latestReply(h.store.getState().sessions["agent-a"])!;
+    await ending;
+    h.controller.onAppActive();
+    expect(message.played).toBe(false);
+    expect(h.player.calls).not.toContain("play");
+  });
+
   it("a reply while the screen is unfocused is stored unplayed and plays on focus", async () => {
     const h = harness();
     h.controller.focus();
