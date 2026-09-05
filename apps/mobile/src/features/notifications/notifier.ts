@@ -79,7 +79,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
   let queue: Promise<void> = Promise.resolve();
   let running = false;
 
-  const log = (line: string): void => deps.log?.(`notifications: ${line}`);
+  const log = (line: string): void => deps.log?.(`notifications ${line}`);
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
@@ -134,7 +134,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
       workspaceName: agentWorkspaceName(state, transition.next),
     });
     if (decision.kind === "skip") {
-      log(`skip ${transition.next.id} ${decision.reason}`);
+      log(`skip agent=${transition.next.id} reason=${decision.reason}`);
       return;
     }
     const next = transition.next;
@@ -147,7 +147,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
       unseenWhenPosted: needsAttention(next),
       postedAtMs: now(),
     });
-    log(`post ${next.id} ${decision.event} gen=${next.attentionGeneration}`);
+    log(`post agent=${next.id} event=${decision.event} generation=${next.attentionGeneration} tag=${decision.tag}`);
     enqueue(async () => {
       try {
         await deps.host.present({
@@ -187,7 +187,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
     for (const [tag, entry] of [...outstanding]) {
       if (!stale(entry, agents[entry.agentId])) continue;
       outstanding.delete(tag);
-      log(`cancel ${tag}`);
+      log(`cancel tag=${tag} agent=${entry.agentId}`);
       const settleAfter = entry.postedAtMs + POST_SETTLE_MS;
       enqueue(async () => {
         const wait = settleAfter - now();

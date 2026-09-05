@@ -16,9 +16,11 @@ function harness() {
     },
   };
   const calls: number[] = [];
-  const controller = new TouchScrollController((rows) => calls.push(rows), scheduler);
+  const summaries: { durationMs: number; cancelled: boolean }[] = [];
+  const controller = new TouchScrollController((rows) => calls.push(rows), scheduler, (summary) => summaries.push(summary));
   return {
     calls,
+    summaries,
     controller,
     frame(timeMs: number) {
       const pending = [...callbacks.values()];
@@ -86,6 +88,7 @@ describe("TouchScrollController", () => {
 
     expect(h.calls.reduce((sum, rows) => sum + rows, 0)).toBeGreaterThan(4);
     expect(h.calls.length).toBeLessThanOrEqual(frames);
+    expect(h.summaries).toEqual([{ durationMs: frames * 16, cancelled: false }]);
   });
 
   it("a new touch cancels an in-flight fling", () => {
@@ -146,8 +149,9 @@ describe("TouchScrollController", () => {
     h.controller.start(100, 0);
     expect(h.controller.move(80, 16, 0)).toBe(false);
     h.controller.move(80, 16, 16);
-    h.controller.cancel();
+    h.controller.cancel(20);
     h.frame(32);
     expect(h.calls).toEqual([]);
+    expect(h.summaries).toEqual([{ durationMs: 20, cancelled: true }]);
   });
 });

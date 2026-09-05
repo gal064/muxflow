@@ -108,6 +108,7 @@ export class TerminalController {
   private phase: TerminalPhase = "preparing";
   private grid: Grid | undefined;
   private sentGrid: Grid | undefined;
+  private viewport: { width: number; height: number } | undefined;
   private lastError: string | undefined;
   private attached = false;
   private attaching = false;
@@ -175,6 +176,7 @@ export class TerminalController {
       onConnected: () => this.onConnected(),
     });
     this.options.store.getState().setFocusedPane(this.paneId);
+    this.log("screen.focus");
     // Step 1 or a size withheld while the app was in the background (see
     // attach and resizeNow) runs when a person is looking again. Nothing more:
     // a window the laptop took meanwhile is taken back by the next input, not
@@ -199,9 +201,17 @@ export class TerminalController {
         return;
       case "size": {
         const grid = { cols: message.cols, rows: message.rows };
-        if (sameGrid(grid, this.grid)) return;
+        const viewport = message.cellWidth !== undefined && message.cellHeight !== undefined
+          ? { width: message.cellWidth * grid.cols, height: message.cellHeight * grid.rows }
+          : undefined;
+        const gridChanged = !sameGrid(grid, this.grid);
+        const viewportChanged = Math.round(viewport?.width ?? -1) !== Math.round(this.viewport?.width ?? -1)
+          || Math.round(viewport?.height ?? -1) !== Math.round(this.viewport?.height ?? -1);
+        if (!gridChanged && !viewportChanged) return;
         this.grid = grid;
-        this.log(`size ${grid.cols}x${grid.rows}${message.cellWidth ? ` cell=${message.cellWidth.toFixed(2)}x${message.cellHeight?.toFixed(2)}` : ""}`);
+        this.viewport = viewport;
+        this.log(`layout ${this.layoutSummary()}${message.cellWidth ? ` cell=${message.cellWidth.toFixed(2)}x${message.cellHeight?.toFixed(2)}` : ""}`);
+        if (!gridChanged) return;
         this.emit();
         if (this.attached || this.attaching) this.scheduleResize();
         else void this.attach();
@@ -214,6 +224,9 @@ export class TerminalController {
         return;
       case "atTop":
         this.onAtTop(message.above);
+        return;
+      case "scroll":
+        this.log(`scroll mode=${message.mode} rows=${message.rows} durationMs=${message.durationMs} cancelled=${message.cancelled} ${this.layoutSummary()}`);
         return;
       case "log":
         this.log(`page: ${message.line}`);
@@ -298,6 +311,7 @@ export class TerminalController {
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.log("screen.blur");
     this.clearSeedTimers();
     if (this.resizeTimer !== undefined) {
       clearTimeout(this.resizeTimer);
@@ -546,7 +560,7 @@ export class TerminalController {
         else this.attached = false;
         return;
       }
-      this.log(`attached ${grid.cols}x${grid.rows}`);
+      this.log(`attached ${this.layoutSummary()}`);
       if (this.phase !== "seeded") this.startSeedTimers();
     } catch (error) {
       this.lastError = describe(error);
@@ -615,7 +629,7 @@ export class TerminalController {
     this.lastResizeAt = Date.now();
     try {
       await connection.request(resizeTerminal(grid.cols, grid.rows));
-      this.log(`resize ${grid.cols}x${grid.rows} → ok`);
+      this.log(`resize.ok ${this.layoutSummary()}`);
     } catch (error) {
       this.sentGrid = undefined;
       this.log(`resize.failed ${describe(error)}`);
@@ -639,8 +653,17 @@ export class TerminalController {
     this.options.onChange?.(this.snapshot);
   }
 
+  private layoutSummary(): string {
+    const viewport = this.viewport ? `${Math.round(this.viewport.width)}x${Math.round(this.viewport.height)}` : "unknown";
+    const grid = this.grid ? `${this.grid.cols}x${this.grid.rows}` : "unknown";
+    const sent = this.sentGrid ? `${this.sentGrid.cols}x${this.sentGrid.rows}` : "none";
+    const actual = this.actualWindowGrid();
+    const host = actual ? `${actual.cols}x${actual.rows}` : "unknown";
+    return `viewport=${viewport} xterm=${grid} sent=${sent} host=${host}`;
+  }
+
   private log(line: string): void {
-    this.options.log?.(`[muxflow] terminal ${this.paneId} ${line}`);
+    this.options.log?.(`[muxflow] terminal pane=${this.paneId} session=${this.sessionId} topology=${this.options.store.getState().topologyGeneration} ${line}`);
   }
 }
 

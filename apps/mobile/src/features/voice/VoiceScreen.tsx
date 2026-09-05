@@ -45,7 +45,7 @@ export interface VoiceScreenProps {
 // the first Voice screen renders (§2c: nothing audio-related loads before that).
 let audio: { recorder: ReturnType<typeof createExpoRecorder>; player: ReturnType<typeof createExpoPlayer>; files: ReturnType<typeof createExpoFiles>; haptics: ReturnType<typeof createExpoHaptics>; tones: ReturnType<typeof createExpoTones> } | undefined;
 function sharedAudio() {
-  audio ??= { recorder: createExpoRecorder(), player: createExpoPlayer(), files: createExpoFiles(), haptics: createExpoHaptics(), tones: createExpoTones() };
+  audio ??= { recorder: createExpoRecorder(log), player: createExpoPlayer(), files: createExpoFiles(), haptics: createExpoHaptics(), tones: createExpoTones() };
   return audio;
 }
 
