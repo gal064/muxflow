@@ -467,6 +467,7 @@ async fn serve_connection(
     let writer_closed = Arc::clone(&closed);
     let (writer_stopped_tx, mut writer_stopped_rx) = mpsc::unbounded_channel::<WriterStop>();
     let writer_activity = Arc::clone(activity);
+    let writer_connection_epoch = client_hello.connection_epoch;
     let mut writer_task = tokio::spawn(async move {
         let mut sequencer = ProtocolSequencer::default();
         let mut gap_fault = events::GapFaultInjector::for_connection();
@@ -512,6 +513,22 @@ async fn serve_connection(
                 ),
                 _ => (None, None),
             };
+            let terminal_output = match &frame.payload {
+                Some(Payload::Event(event))
+                    if v1::EventKind::try_from(event.kind).ok()
+                        == Some(v1::EventKind::TerminalOutput) =>
+                {
+                    event.terminal.as_ref().map(|terminal| {
+                        (
+                            terminal.pane_id.as_str(),
+                            terminal.generation,
+                            terminal.data.len(),
+                        )
+                    })
+                }
+                _ => None,
+            };
+            let frame_bytes = || prost::Message::encoded_len(&frame);
             let write_started = Instant::now();
             match timeout(PROTOCOL_WRITE_TIMEOUT, write_frame(&mut writer, &frame)).await {
                 Ok(Ok(())) => {
@@ -529,9 +546,20 @@ async fn serve_connection(
                         frame_event_kind,
                         frame_pane_id,
                         frame.request_id,
-                        || prost::Message::encoded_len(&frame),
+                        frame_bytes,
                         write_elapsed,
                     );
+                    if let Some((pane_id, generation, payload_bytes)) = terminal_output {
+                        crate::diagnostics::record_terminal_output_written(
+                            writer_connection_epoch,
+                            frame.sequence,
+                            pane_id,
+                            generation,
+                            payload_bytes,
+                            prost::Message::encoded_len(&frame),
+                            write_elapsed,
+                        );
+                    }
                 }
                 Ok(Err(error)) => {
                     stopped_reason =
@@ -570,9 +598,10 @@ async fn serve_connection(
     // tmux says nothing when a window retitles itself or a pane's cwd moves, so
     // the reader threads turn the pane output that always accompanies those
     // changes into a debounced dirty mark for the actor below.
-    let terminal = Arc::new(Mutex::new(TerminalClients::new(
+    let terminal = Arc::new(Mutex::new(TerminalClients::for_connection(
         Arc::clone(&output_credit),
         TopologyOutputTrigger::new(topology_signal.clone(), tokio::runtime::Handle::current()),
+        client_hello.connection_epoch,
     )));
     let topology_lock = Arc::new(tokio::sync::Mutex::new(()));
     let topology_baseline = Arc::new(Mutex::new(None::<(tmux_control::TmuxSnapshot, String)>));

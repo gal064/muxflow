@@ -256,7 +256,7 @@ describe("createEchoLagProbe", () => {
 
     type("%1");
     clock += ECHO_LAG_THRESHOLD_MS + 50;
-    probe.noteOutput("%1");
+    probe.noteOutput("%1", { sequence: 81, generation: 144, connectionEpoch: 23 });
     await flushMicrotasks();
 
     expect(echoes[0]).toMatchObject({
@@ -266,10 +266,20 @@ describe("createEchoLagProbe", () => {
       lagMs: ECHO_LAG_THRESHOLD_MS + 50,
       bytesAhead: 1_000,
       framesAhead: 2,
+      outputSequence: 81,
+      outputGeneration: 144,
+      connectionEpoch: 23,
     });
     // The outlier line carries the same evidence, so the journal and the perf
     // log agree about one echo instead of describing two.
-    expect(incidents[0]).toMatchObject({ kind: "input.echoLag", bytesAhead: 1_000, framesAhead: 2 });
+    expect(incidents[0]).toMatchObject({
+      kind: "input.echoLag",
+      bytesAhead: 1_000,
+      framesAhead: 2,
+      outputSequence: 81,
+      outputGeneration: 144,
+      connectionEpoch: 23,
+    });
 
     // The interval has elapsed, so this one is sampled too.
     type("%1");

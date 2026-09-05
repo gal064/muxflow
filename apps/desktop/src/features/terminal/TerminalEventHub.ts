@@ -135,7 +135,7 @@ export class TerminalEventHub {
      * a failure here would be indistinguishable from the pane's own consumer
      * rejecting the event.
      */
-    readonly onPaneRepaint?: (paneId: string) => void,
+    readonly onPaneRepaint?: (paneId: string, sequence: number, generation: number, connectionEpoch?: number) => void,
   ) {
     this.#maxPaneBytes = limits.maxPaneBytes ?? DEFAULT_MAX_PANE_BYTES;
     this.#maxTotalBytes = limits.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
@@ -301,7 +301,9 @@ export class TerminalEventHub {
     if (listener) {
       // A seed or restored screen repaints the pane just as output does; a
       // diagnostic carries no content and repaints nothing.
-      if (event.kind !== "seedDiagnostic") this.onPaneRepaint?.(event.paneId);
+      if (event.kind !== "seedDiagnostic") {
+        this.onPaneRepaint?.(event.paneId, event.sequence, event.generation, this.#generationEpoch);
+      }
       this.measurements?.add("terminal.hub.fanoutDeliveries");
       try {
         listener(event);

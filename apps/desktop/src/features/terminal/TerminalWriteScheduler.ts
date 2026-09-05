@@ -3,6 +3,11 @@ import { copyTerminalBytes, type OwnedTerminalBytes } from "./TerminalBytes";
 
 type FrameRequest = (callback: FrameRequestCallback) => number;
 type FrameCancel = (handle: number) => void;
+export type TerminalWriteObservation =
+  | { kind: "enqueue"; bytes: number; pendingBytes: number; queueDepth: number }
+  | { kind: "frameRequest" }
+  | { kind: "writeStarted"; bytes: number; records: number; pendingBytes: number; queueDepth: number }
+  | { kind: "writeSettled"; bytes: number; ms: number; succeeded: boolean };
 interface QueuedWrite {
   bytes: Uint8Array;
   backingByteLength: number;
@@ -82,6 +87,7 @@ export class TerminalWriteScheduler {
   #immediateResetFrame?: number;
   #immediateResetTimer?: ReturnType<typeof setTimeout>;
   #immediateResetArmed = false;
+  #onObservation?: (event: TerminalWriteObservation) => void;
   readonly #drainWaiters = new Set<() => void>();
 
   constructor(
@@ -94,7 +100,15 @@ export class TerminalWriteScheduler {
     readonly onOverflow?: (pendingBytes: number, pendingRecords?: number) => void,
     readonly measurements?: OperationRecorder,
     readonly maxPendingRecords = 4096,
-  ) {}
+    onObservation?: (event: TerminalWriteObservation) => void,
+  ) {
+    this.#onObservation = onObservation;
+  }
+
+  /** Enables or clears opt-in instrumentation without wrapping the hot path. */
+  setObservation(observer?: (event: TerminalWriteObservation) => void): void {
+    this.#onObservation = observer;
+  }
 
   /** Copies borrowed caller data once before it can outlive the call. */
   enqueue(bytes: Uint8Array, onRendered?: () => void): boolean {
@@ -290,6 +304,12 @@ export class TerminalWriteScheduler {
     this.measurements?.highWater?.("terminal.scheduler.pendingBytes", this.#pendingBytes);
     this.measurements?.highWater?.("terminal.scheduler.queueDepth", this.#queueLength());
     this.#notifyPendingBytes();
+    this.#onObservation?.({
+      kind: "enqueue",
+      bytes: bytes.byteLength,
+      pendingBytes: this.#pendingBytes,
+      queueDepth: this.#queueLength(),
+    });
     this.#schedule();
   }
 
@@ -341,6 +361,7 @@ export class TerminalWriteScheduler {
     if (this.#flushArmed) this.#frame = frame;
     else this.cancelFrame(frame);
     this.measurements?.add("terminal.scheduler.framesRequested");
+    this.#onObservation?.({ kind: "frameRequest" });
   }
 
   #runScheduledFlush(): void {
@@ -393,6 +414,7 @@ export class TerminalWriteScheduler {
     if (this.#immediateResetArmed) this.#immediateResetFrame = frame;
     else this.cancelFrame(frame);
     this.measurements?.add("terminal.scheduler.framesRequested");
+    this.#onObservation?.({ kind: "frameRequest" });
   }
 
   #runImmediateWriteReset(): void {
@@ -468,10 +490,25 @@ export class TerminalWriteScheduler {
     this.#inFlightBackingBytes = pieces.length > 1
       ? chunk.buffer.byteLength
       : partialRecord ? 0 : consumedBackingBytes;
+    const writeObserver = this.#onObservation;
+    writeObserver?.({
+      kind: "writeStarted",
+      bytes: length,
+      records: consumedRecords,
+      pendingBytes: this.#pendingBytes,
+      queueDepth: this.#queueLength(),
+    });
+    const observedWriteStarted = writeObserver ? performance.now() : 0;
     let completed = false;
     const settle = (succeeded: boolean) => {
       if (completed) return;
       completed = true;
+      writeObserver?.({
+        kind: "writeSettled",
+        bytes: length,
+        ms: performance.now() - observedWriteStarted,
+        succeeded,
+      });
       this.#pendingBytes -= this.#inFlightBytes;
       this.#inFlightBytes = 0;
       this.#inFlightRecords = 0;

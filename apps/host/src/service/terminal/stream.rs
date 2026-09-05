@@ -61,6 +61,7 @@ fn send_capture(
 }
 
 pub(super) struct ControlStreamReader {
+    pub(super) connection_epoch: u64,
     pub(super) stdout: ChildStdout,
     /// Writes the reader needs performed are handed to the input dispatch
     /// thread. The reader itself must never write to tmux's stdin: tmux stops
@@ -96,6 +97,7 @@ pub(super) enum StreamControl {
 
 pub(super) fn read_control_stream(context: ControlStreamReader) {
     let ControlStreamReader {
+        connection_epoch,
         stdout,
         writer,
         pane_ids,
@@ -117,6 +119,7 @@ pub(super) fn read_control_stream(context: ControlStreamReader) {
     let mut buffer = [0_u8; 64 * 1024];
     let mut pending_output = PendingOutput::default();
     let runtime = |read_started: Instant| StreamRuntime {
+        connection_epoch,
         writer: &writer,
         sender: &event_tx,
         overflowed: &overflowed,
@@ -396,6 +399,7 @@ pub(super) struct PendingAlternateCapture {
 }
 
 struct StreamRuntime<'a> {
+    connection_epoch: u64,
     writer: &'a std_mpsc::Sender<super::ControlWrite>,
     sender: &'a mpsc::Sender<SequencerControl>,
     overflowed: &'a AtomicBool,
@@ -506,6 +510,7 @@ impl StreamState {
 
     fn handle(&mut self, record: ControlRecord, runtime: StreamRuntime<'_>) {
         let StreamRuntime {
+            connection_epoch,
             writer,
             sender,
             overflowed,
@@ -545,6 +550,7 @@ impl StreamState {
                     }
                 }
                 _ => OutputEmission {
+                    connection_epoch,
                     sender,
                     overflowed,
                     resources,
@@ -610,6 +616,7 @@ impl StreamState {
             ControlRecord::End { tag, .. } => self.finish_block(
                 tag,
                 StreamRuntime {
+                    connection_epoch,
                     writer,
                     sender,
                     overflowed,
@@ -860,6 +867,7 @@ impl StreamState {
 
     fn finish_block(&mut self, end_tag: CommandTag, runtime: StreamRuntime<'_>) {
         let StreamRuntime {
+            connection_epoch: _,
             writer,
             sender,
             overflowed,

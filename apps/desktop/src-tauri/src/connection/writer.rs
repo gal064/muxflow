@@ -19,13 +19,58 @@ const WRITE_POLL: Duration = Duration::from_millis(10);
 struct ControlWrite {
     bytes: Vec<u8>,
     deadline: Instant,
-    completion: mpsc::SyncSender<Result<(), String>>,
+    enqueued_at: Instant,
+    queue_depth_at_enqueue: usize,
+    completion: mpsc::SyncSender<Result<ControlWriteTiming, String>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ControlWriteTiming {
+    pub(super) queue_wait: Duration,
+    pub(super) physical_write: Duration,
+    pub(super) queue_depth_at_enqueue: usize,
+}
+
+#[cfg(any(debug_assertions, feature = "perf-log"))]
+#[derive(Default)]
+struct ControlQueueDepth(std::sync::atomic::AtomicUsize);
+
+#[cfg(any(debug_assertions, feature = "perf-log"))]
+impl ControlQueueDepth {
+    fn entered(&self) -> usize {
+        self.0.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn rejected(&self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn dequeued(&self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+#[derive(Default)]
+struct ControlQueueDepth;
+
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+impl ControlQueueDepth {
+    #[inline(always)]
+    fn entered(&self) -> usize {
+        0
+    }
+    #[inline(always)]
+    fn rejected(&self) {}
+    #[inline(always)]
+    fn dequeued(&self) {}
 }
 
 #[derive(Clone)]
 pub(super) struct ControlWriterHandle {
     sender: mpsc::SyncSender<ControlWrite>,
     closed: Arc<AtomicBool>,
+    depth: Arc<ControlQueueDepth>,
 }
 
 impl ControlWriterHandle {
@@ -40,17 +85,31 @@ impl ControlWriterHandle {
         let (sender, receiver) = mpsc::sync_channel(CONTROL_WRITE_QUEUE);
         let closed = Arc::new(AtomicBool::new(false));
         let writer_closed = Arc::clone(&closed);
+        let depth = Arc::new(ControlQueueDepth::default());
+        let writer_depth = Arc::clone(&depth);
         thread::Builder::new()
             .name(format!("host-control-writer-{name}"))
-            .spawn(move || run_control_writer(writer, receiver, writer_closed))
+            .spawn(move || run_control_writer(writer, receiver, writer_closed, writer_depth))
             .map_err(|error| format!("failed to start host control writer: {error}"))?;
-        Ok(Self { sender, closed })
+        Ok(Self {
+            sender,
+            closed,
+            depth,
+        })
     }
 
     pub(super) fn write(&self, envelope: v1::Envelope, deadline: Instant) -> Result<(), String> {
+        self.write_timed(envelope, deadline).map(|_| ())
+    }
+
+    pub(super) fn write_timed(
+        &self,
+        envelope: v1::Envelope,
+        deadline: Instant,
+    ) -> Result<ControlWriteTiming, String> {
         let mut bytes = Vec::new();
         write_frame_sync(&mut bytes, &envelope).map_err(|error| error.to_string())?;
-        self.write_bytes(bytes, deadline)
+        self.write_bytes_timed(bytes, deadline)
     }
 
     /// Queues a best-effort control frame without extending an already-expired
@@ -67,25 +126,39 @@ impl ControlWriterHandle {
         let mut bytes = Vec::new();
         write_frame_sync(&mut bytes, &envelope).map_err(|error| error.to_string())?;
         let (completion, _completed) = mpsc::sync_channel(1);
+        let queue_depth_at_enqueue = self.depth.entered();
         self.sender
             .try_send(ControlWrite {
                 bytes,
                 deadline,
+                enqueued_at: Instant::now(),
+                queue_depth_at_enqueue,
                 completion,
             })
-            .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => "host bridge control writer queue is full".into(),
-                mpsc::TrySendError::Disconnected(_) => {
-                    "host bridge control writer disconnected".into()
+            .map_err(|error| {
+                self.depth.rejected();
+                match error {
+                    mpsc::TrySendError::Full(_) => {
+                        "host bridge control writer queue is full".into()
+                    }
+                    mpsc::TrySendError::Disconnected(_) => {
+                        "host bridge control writer disconnected".into()
+                    }
                 }
             })
     }
 
-    fn write_bytes(&self, bytes: Vec<u8>, deadline: Instant) -> Result<(), String> {
+    fn write_bytes_timed(
+        &self,
+        bytes: Vec<u8>,
+        deadline: Instant,
+    ) -> Result<ControlWriteTiming, String> {
         let (completion, completed) = mpsc::sync_channel(1);
         let mut command = ControlWrite {
             bytes,
             deadline,
+            enqueued_at: Instant::now(),
+            queue_depth_at_enqueue: 0,
             completion,
         };
         loop {
@@ -95,15 +168,18 @@ impl ControlWriterHandle {
             if Instant::now() >= deadline {
                 return Err("host request timed out before its bytes were written".into());
             }
+            command.queue_depth_at_enqueue = self.depth.entered();
             match self.sender.try_send(command) {
                 Ok(()) => break,
                 Err(mpsc::TrySendError::Full(returned)) => {
+                    self.depth.rejected();
                     command = returned;
                     thread::sleep(
                         WRITE_POLL.min(deadline.saturating_duration_since(Instant::now())),
                     );
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
+                    self.depth.rejected();
                     return Err("host bridge control writer disconnected".into());
                 }
             }
@@ -122,17 +198,25 @@ fn run_control_writer<W>(
     mut writer: W,
     receiver: mpsc::Receiver<ControlWrite>,
     closed: Arc<AtomicBool>,
+    depth: Arc<ControlQueueDepth>,
 ) where
     W: Write + AsRawFd,
 {
     let fd = writer.as_raw_fd();
     let setup = set_nonblocking(fd);
     while let Ok(command) = receiver.recv() {
+        depth.dequeued();
+        let write_started = Instant::now();
         let result = setup
             .as_ref()
             .map_err(Clone::clone)
             .and_then(|_| write_until(&mut writer, fd, &command.bytes, command.deadline, &closed));
         let poisoned = result.is_err();
+        let result = result.map(|()| ControlWriteTiming {
+            queue_wait: write_started.saturating_duration_since(command.enqueued_at),
+            physical_write: write_started.elapsed(),
+            queue_depth_at_enqueue: command.queue_depth_at_enqueue,
+        });
         let _ = command.completion.send(result);
         if poisoned {
             // A length-prefixed protobuf frame is indivisible at this layer.
@@ -142,6 +226,7 @@ fn run_control_writer<W>(
             // the connection supervisor must establish a fresh bridge.
             closed.store(true, Ordering::Release);
             while let Ok(pending) = receiver.try_recv() {
+                depth.dequeued();
                 let _ = pending.completion.send(Err(
                     "host bridge control writer is poisoned after a physical write failure".into(),
                 ));

@@ -377,6 +377,7 @@ fn write_rejected_client_resize_log(columns: u32, rows: u32) {
 /// `error` is the one free-form field, and it is bounded rather than trusted;
 /// see `bounded_log_text`.
 pub fn write_terminal_sizing_handoff_log(
+    connection_epoch: u64,
     previous_session: Option<&str>,
     session_id: &str,
     size: Option<(u32, u32)>,
@@ -386,6 +387,8 @@ pub fn write_terminal_sizing_handoff_log(
     let line = serde_json::json!({
         "subsystem": "host_daemon",
         "event": "terminalSizingHandoff",
+        "atUnixMillis": now_epoch_millis(),
+        "connectionEpoch": connection_epoch,
         "previousSession": previous_session,
         "sessionId": session_id,
         // Null means the desktop has not asked for a size yet on this
@@ -411,10 +414,12 @@ pub fn write_terminal_sizing_handoff_log(
 /// tmux session identifiers (`$3`) are the server's own ordinals: not names, not
 /// paths, not hostnames, and not terminal content. This stays inside the privacy
 /// declaration above.
-pub fn write_sizing_latest_claim_log(session_id: &str) {
+pub fn write_sizing_latest_claim_log(connection_epoch: u64, session_id: &str) {
     let line = serde_json::json!({
         "subsystem": "host_daemon",
         "event": "sizingLatestClaim",
+        "atUnixMillis": now_epoch_millis(),
+        "connectionEpoch": connection_epoch,
         "sessionId": session_id,
     });
     eprintln!("{line}");
@@ -818,7 +823,12 @@ mod switch_timing {
         fs::{self, OpenOptions},
         io::Write,
         os::unix::fs::OpenOptionsExt,
-        sync::{Mutex, OnceLock},
+        sync::{
+            Mutex, OnceLock,
+            atomic::{AtomicU64, Ordering},
+            mpsc,
+        },
+        thread,
         time::{Duration, Instant},
     };
 
@@ -852,14 +862,47 @@ mod switch_timing {
         }
     }
 
+    /// Input is the only timing stream emitted once per keystroke batch. Keep
+    /// file opens and JSON writes off the daemon's input dispatcher; a bounded
+    /// queue makes instrumentation loss explicit instead of making input wait.
+    const INPUT_TIMING_QUEUE: usize = 4_096;
+    static INPUT_TIMING_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+    fn append_input_timing_line(mut line: serde_json::Value) {
+        static SENDER: OnceLock<Option<mpsc::SyncSender<serde_json::Value>>> = OnceLock::new();
+        let sender = SENDER.get_or_init(|| {
+            let (sender, receiver) = mpsc::sync_channel(INPUT_TIMING_QUEUE);
+            thread::Builder::new()
+                .name("perf-host-input-writer".into())
+                .spawn(move || {
+                    while let Ok(line) = receiver.recv() {
+                        append_timing_line(&line);
+                    }
+                })
+                .ok()?;
+            Some(sender)
+        });
+        let Some(sender) = sender else { return };
+        let dropped_before = INPUT_TIMING_DROPPED.swap(0, Ordering::AcqRel);
+        line["droppedBefore"] = dropped_before.into();
+        if sender.try_send(line).is_err() {
+            INPUT_TIMING_DROPPED.fetch_add(dropped_before.saturating_add(1), Ordering::Relaxed);
+        }
+    }
+
     /// A request-keyed map big enough for any burst the desktop can produce and
     /// small enough that a leaked entry cannot grow without bound. Entries are
     /// removed by the line that joins them; the cap covers the requests that
     /// never reach one (refused at admission, cancelled, connection lost).
     const MAX_TRACKED_REQUESTS: usize = 512;
+    /// The terminal credit window permits 1,024 records, and output coalescing
+    /// can leave superseded generation marks behind until the writer catches
+    /// up. Keep enough headroom for both without allowing a lost writer to
+    /// grow the diagnostics map indefinitely.
+    const MAX_TRACKED_OUTPUTS: usize = 4_096;
 
-    fn prune<T>(map: &mut HashMap<u64, T>) {
-        if map.len() > MAX_TRACKED_REQUESTS {
+    fn prune<K, T>(map: &mut HashMap<K, T>, max: usize) {
+        if map.len() > max {
             map.clear();
         }
     }
@@ -898,14 +941,16 @@ mod switch_timing {
     pub(crate) fn note_request_read(request_id: u64, operation: i32) {
         {
             let mut operations = request_operation().lock().unwrap();
-            prune(&mut operations);
+            prune(&mut operations, MAX_TRACKED_REQUESTS);
             operations.insert(request_id, operation);
         }
-        if operation != tmux_agent_protocol::v1::Operation::TmuxAction as i32 {
+        if operation != tmux_agent_protocol::v1::Operation::TmuxAction as i32
+            && operation != tmux_agent_protocol::v1::Operation::TerminalInput as i32
+        {
             return;
         }
         let mut map = request_read_at().lock().unwrap();
-        prune(&mut map);
+        prune(&mut map, MAX_TRACKED_REQUESTS);
         map.insert(request_id, now_epoch_millis());
     }
 
@@ -920,7 +965,7 @@ mod switch_timing {
     /// dispatch calls this, so every other response stays untracked and untimed.
     pub(crate) fn note_response_enqueued(request_id: u64) {
         let mut map = response_enqueued_at().lock().unwrap();
-        prune(&mut map);
+        prune(&mut map, MAX_TRACKED_REQUESTS);
         map.insert(request_id, Instant::now());
     }
 
@@ -953,6 +998,99 @@ mod switch_timing {
             "outcome": timing.outcome,
             "topologyDiff": timing.topology_diff,
         }));
+    }
+
+    struct InputMark {
+        request_id: u64,
+        connection_epoch: u64,
+        pane_id: String,
+        bytes: usize,
+        read_at_unix_millis: Option<i64>,
+        handler_at_unix_millis: i64,
+        handler_started: Instant,
+        enqueued_at: Option<Instant>,
+    }
+
+    /// One or more requests which the host input dispatcher may coalesce into
+    /// one tmux write. Every original request retains its own queue timings and
+    /// request id; the shared batch fields explain why several records have the
+    /// same commit duration.
+    pub(crate) struct HostInputTiming {
+        marks: Vec<InputMark>,
+    }
+
+    impl Default for HostInputTiming {
+        fn default() -> Self {
+            Self { marks: Vec::new() }
+        }
+    }
+
+    impl HostInputTiming {
+        pub(crate) fn begin(
+            request_id: u64,
+            connection_epoch: u64,
+            pane_id: &str,
+            bytes: usize,
+        ) -> Self {
+            let read_at_unix_millis = request_read_at().lock().unwrap().remove(&request_id);
+            Self {
+                marks: vec![InputMark {
+                    request_id,
+                    connection_epoch,
+                    pane_id: pane_id.to_owned(),
+                    bytes,
+                    read_at_unix_millis,
+                    handler_at_unix_millis: now_epoch_millis(),
+                    handler_started: Instant::now(),
+                    enqueued_at: None,
+                }],
+            }
+        }
+
+        pub(crate) fn mark_enqueued(&mut self) {
+            let now = Instant::now();
+            for mark in &mut self.marks {
+                mark.enqueued_at = Some(now);
+            }
+        }
+
+        pub(crate) fn merge(&mut self, mut next: Self) {
+            self.marks.append(&mut next.marks);
+        }
+
+        pub(crate) fn finish(
+            self,
+            dequeued_at: Instant,
+            tmux: Duration,
+            path: &str,
+            batch_bytes: usize,
+            outcome: &str,
+        ) {
+            let completed_at = now_epoch_millis();
+            let request_count = self.marks.len();
+            for mark in self.marks {
+                append_input_timing_line(serde_json::json!({
+                    "atUnixMillis": completed_at,
+                    "subsystem": "host_daemon",
+                    "event": "terminalInput",
+                    "requestId": mark.request_id,
+                    "connectionEpoch": mark.connection_epoch,
+                    "paneId": mark.pane_id,
+                    "bytes": mark.bytes,
+                    "readAtUnixMillis": mark.read_at_unix_millis,
+                    "handlerAtUnixMillis": mark.handler_at_unix_millis,
+                    "readToHandlerMs": mark.read_at_unix_millis.map(|read| mark.handler_at_unix_millis.saturating_sub(read)),
+                    "handlerToEnqueueMs": mark.enqueued_at.map(|at| whole_millis(at.saturating_duration_since(mark.handler_started))),
+                    "hostQueueMs": mark.enqueued_at.map(|at| whole_millis(dequeued_at.saturating_duration_since(at))),
+                    "tmuxCommitMs": whole_millis(tmux),
+                    "completedAtUnixMillis": completed_at,
+                    "path": path,
+                    "batchBytes": batch_bytes,
+                    "batchRequestCount": request_count,
+                    "outcome": outcome,
+                }));
+            }
+        }
     }
 
     /// The writer half of the line above: when the answer reached the wire (H3),
@@ -1042,6 +1180,74 @@ mod switch_timing {
         }));
     }
 
+    /// The returning half of a keystroke timeline. Pane + terminal generation
+    /// identify this exact output record in the desktop-native and renderer
+    /// logs; sequence identifies the connection frame which carried it.
+    pub(crate) fn record_terminal_output_written(
+        connection_epoch: u64,
+        sequence: u64,
+        pane_id: &str,
+        generation: u64,
+        payload_bytes: usize,
+        frame_bytes: usize,
+        write: Duration,
+    ) {
+        let admitted = output_admitted_at().lock().unwrap().remove(&(
+            connection_epoch,
+            pane_id.to_owned(),
+            generation,
+        ));
+        append_input_timing_line(serde_json::json!({
+            "atUnixMillis": now_epoch_millis(),
+            "subsystem": "host_daemon",
+            "event": "terminalOutput",
+            "connectionEpoch": connection_epoch,
+            "sequence": sequence,
+            "paneId": pane_id,
+            "generation": generation,
+            "payloadBytes": payload_bytes,
+            "frameBytes": frame_bytes,
+            "admissionMatched": admitted.is_some(),
+            "tmuxReadAtUnixMillis": admitted.as_ref().map(|mark| mark.read_at_unix_millis),
+            "tmuxReadToEnqueueMs": admitted.as_ref().map(|mark| whole_millis(mark.read_to_enqueue)),
+            "writeMs": whole_millis(write),
+        }));
+    }
+
+    struct OutputAdmission {
+        read_at_unix_millis: i64,
+        read_to_enqueue: Duration,
+    }
+
+    type OutputKey = (u64, String, u64);
+    static OUTPUT_ADMITTED_AT: OnceLock<Mutex<HashMap<OutputKey, OutputAdmission>>> =
+        OnceLock::new();
+
+    fn output_admitted_at() -> &'static Mutex<HashMap<OutputKey, OutputAdmission>> {
+        OUTPUT_ADMITTED_AT.get_or_init(Default::default)
+    }
+
+    /// Marks the exact tmux-read → sequencer-admission leg before the ordered
+    /// writer assigns this output its protocol sequence.
+    pub(crate) fn note_terminal_output_admitted(
+        connection_epoch: u64,
+        pane_id: &str,
+        generation: u64,
+        read_to_enqueue: Duration,
+    ) {
+        let mut map = output_admitted_at().lock().unwrap();
+        prune(&mut map, MAX_TRACKED_OUTPUTS);
+        let admitted_at = now_epoch_millis();
+        map.insert(
+            (connection_epoch, pane_id.to_owned(), generation),
+            OutputAdmission {
+                read_at_unix_millis: admitted_at
+                    .saturating_sub(i64::try_from(read_to_enqueue.as_millis()).unwrap_or(i64::MAX)),
+                read_to_enqueue,
+            },
+        );
+    }
+
     /// One line per voice leg (docs/mobile/voice-mode-plan.md §2b): how long
     /// the AAC decode took here, how long the sidecar round trip took, and the
     /// decode time the sidecar reported for itself. Durations and an audio
@@ -1096,6 +1302,43 @@ mod switch_timing {
     #[inline(always)]
     pub(crate) fn note_response_enqueued(_request_id: u64) {}
 
+    pub(crate) struct HostInputTiming;
+
+    impl Default for HostInputTiming {
+        fn default() -> Self {
+            Self
+        }
+    }
+
+    impl HostInputTiming {
+        #[inline(always)]
+        pub(crate) fn begin(
+            _request_id: u64,
+            _connection_epoch: u64,
+            _pane_id: &str,
+            _bytes: usize,
+        ) -> Self {
+            Self
+        }
+
+        #[inline(always)]
+        pub(crate) fn mark_enqueued(&mut self) {}
+
+        #[inline(always)]
+        pub(crate) fn merge(&mut self, _next: Self) {}
+
+        #[inline(always)]
+        pub(crate) fn finish(
+            self,
+            _dequeued_at: Instant,
+            _tmux: Duration,
+            _path: &str,
+            _batch_bytes: usize,
+            _outcome: &str,
+        ) {
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn write_tmux_action_timing_log(_timing: super::TmuxActionTiming<'_>) {}
 
@@ -1119,6 +1362,27 @@ mod switch_timing {
     }
 
     #[inline(always)]
+    pub(crate) fn record_terminal_output_written(
+        _connection_epoch: u64,
+        _sequence: u64,
+        _pane_id: &str,
+        _generation: u64,
+        _payload_bytes: usize,
+        _frame_bytes: usize,
+        _write: Duration,
+    ) {
+    }
+
+    #[inline(always)]
+    pub(crate) fn note_terminal_output_admitted(
+        _connection_epoch: u64,
+        _pane_id: &str,
+        _generation: u64,
+        _read_to_enqueue: Duration,
+    ) {
+    }
+
+    #[inline(always)]
     pub(crate) fn write_seed_timing_log(_pane_id: &str, _bytes: usize, _capture: Option<Duration>) {
     }
 
@@ -1134,8 +1398,9 @@ mod switch_timing {
 }
 
 pub(crate) use switch_timing::{
-    handler_entry_stamp, note_request_read, note_response_enqueued, record_frame_write,
-    record_response_written, write_seed_timing_log, write_tmux_action_timing_log,
+    HostInputTiming, handler_entry_stamp, note_request_read, note_response_enqueued,
+    note_terminal_output_admitted, record_frame_write, record_response_written,
+    record_terminal_output_written, write_seed_timing_log, write_tmux_action_timing_log,
     write_voice_timing_log,
 };
 

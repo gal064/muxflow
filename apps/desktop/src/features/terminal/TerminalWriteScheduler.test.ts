@@ -72,6 +72,21 @@ describe("TerminalWriteScheduler", () => {
     await expect(h.scheduler.sealAndDrain()).resolves.toBeUndefined();
   });
 
+  it("can enable perf observation after construction without timing an older write", () => {
+    const h = harness();
+    const observed: string[] = [];
+    expect(h.scheduler.enqueue(Uint8Array.of(1))).toBe(true);
+
+    h.scheduler.setObservation((event) => observed.push(event.kind));
+    h.completions.shift()!();
+    expect(observed).toEqual([]);
+
+    expect(h.scheduler.enqueue(Uint8Array.of(2))).toBe(true);
+    h.frames.splice(0, h.frames.length).forEach((frame) => frame(16));
+    h.completions.shift()!();
+    expect(observed).toEqual(["enqueue", "frameRequest", "writeStarted", "writeSettled"]);
+  });
+
   it("admits a record that exactly fills the byte cap and latches overflow on the next byte", () => {
     const h = harness({ maxPendingBytes: 8 });
     expect(h.scheduler.enqueue(new Uint8Array(8))).toBe(true);

@@ -40,7 +40,7 @@ use dispatch::{
 };
 use operations::{Bound, OperationClaim, OperationLane, OperationRegistry};
 mod writer;
-use writer::ControlWriterHandle;
+use writer::{ControlWriteTiming, ControlWriterHandle};
 pub(crate) mod agent;
 pub(crate) mod files;
 pub(crate) mod git;
@@ -511,7 +511,7 @@ impl TerminalClient {
     /// Used by the keystroke path, whose acks carry nothing actionable. The
     /// reader drops responses with no waiter, so the host stays free to answer
     /// without either side having to change shape.
-    fn dispatch_request(&self, request: v1::Request) -> Result<(), String> {
+    fn dispatch_request(&self, request: v1::Request) -> Result<(u64, ControlWriteTiming), String> {
         if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
             return Err(
                 "host is disconnected, reconciling, or read-only; input was not sent".into(),
@@ -524,8 +524,8 @@ impl TerminalClient {
             .unwrap()
             .clone()
             .ok_or_else(|| "host bridge is disconnected".to_owned())?;
-        writer
-            .write(
+        let timing = writer
+            .write_timed(
                 envelope(request_id, 0, Payload::Request(request)),
                 Instant::now() + REQUEST_TIMEOUT,
             )
@@ -533,7 +533,8 @@ impl TerminalClient {
                 self.reconnect_transport(
                     "an input request could not be written before its deadline",
                 )
-            })
+            })?;
+        Ok((request_id, timing))
     }
 
     fn request_git(
@@ -852,6 +853,7 @@ pub fn start_terminal(
     // authentication, or any other network work.
     let _ = event_channel.send(encode_event(TerminalEvent::ConnectionState {
         state: "connecting".into(),
+        detail: None,
     }));
     let worker_id = client_id.clone();
     let worker_client = Arc::clone(&client);
@@ -863,6 +865,7 @@ pub fn start_terminal(
             client.shutdown_transport("host bridge supervisor failed to start");
             let _ = event_channel.send(encode_event(TerminalEvent::ConnectionState {
                 state: "disconnected".into(),
+                detail: None,
             }));
             format!("failed to start host bridge supervisor: {error}")
         })?;

@@ -160,6 +160,7 @@ impl PersistentInputClient {
         pane_id: &str,
         data: &[u8],
         delivery: InputDelivery,
+        mut timing: crate::diagnostics::HostInputTiming,
     ) -> anyhow::Result<()> {
         validate_tmux_id(pane_id, '%')?;
         if !self.is_ready() {
@@ -175,12 +176,14 @@ impl PersistentInputClient {
             .next_input_id
             .checked_add(1)
             .context("terminal input correlation sequence exhausted")?;
+        timing.mark_enqueued();
         self.input_tx
             .try_send(InputDispatch::Bytes {
                 input_id: self.next_input_id,
                 pane_id: pane_id.to_owned(),
                 data: data.to_vec(),
                 delivery,
+                timing,
             })
             .map_err(|error| match error {
                 std_mpsc::TrySendError::Full(_) => {
@@ -539,6 +542,7 @@ mod tests {
                     pane_id,
                     format!("printf '{token}\\n'\r").as_bytes(),
                     InputDelivery::Keys,
+                    Default::default(),
                 )
                 .unwrap();
             client.fence().unwrap();
@@ -797,6 +801,7 @@ mod tests {
                 &pane,
                 b"printf 'ADE_MUST_NOT_REPLAY\\n'\r",
                 InputDelivery::Keys,
+                Default::default(),
             )
             .unwrap();
         std::thread::sleep(Duration::from_millis(20));
@@ -851,10 +856,20 @@ mod tests {
         let mut input = start_fixture_client(&fixture, &session);
 
         input
-            .send_input(&bracketed, b"ADE_BRACKETED", InputDelivery::Paste)
+            .send_input(
+                &bracketed,
+                b"ADE_BRACKETED",
+                InputDelivery::Paste,
+                Default::default(),
+            )
             .unwrap();
         input
-            .send_input(&plain, b"ADE_PLAIN", InputDelivery::Paste)
+            .send_input(
+                &plain,
+                b"ADE_PLAIN",
+                InputDelivery::Paste,
+                Default::default(),
+            )
             .unwrap();
         input.fence().unwrap();
 
@@ -879,9 +894,16 @@ mod tests {
         fixture.send_and_observe(&mut input, &pane, "ADE_SHELL_READY");
 
         input
-            .send_input(&pane, b"printf 'ADE_PASTE_SUBMIT\\n'", InputDelivery::Paste)
+            .send_input(
+                &pane,
+                b"printf 'ADE_PASTE_SUBMIT\\n'",
+                InputDelivery::Paste,
+                Default::default(),
+            )
             .unwrap();
-        input.send_input(&pane, b"\r", InputDelivery::Keys).unwrap();
+        input
+            .send_input(&pane, b"\r", InputDelivery::Keys, Default::default())
+            .unwrap();
         input.fence().unwrap();
 
         // The command line echoes the token once; running it prints it again.
