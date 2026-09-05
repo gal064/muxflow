@@ -769,7 +769,9 @@ export class HostConnection {
     const delayMs = Math.min(2 ** n, this.maxBackoffMs / 1000) * 1000;
     this.reconnectAttempt = n + 1;
     this.options.store.getState().setConnection({ state: "reconnecting", attempt: n + 1, message, retryAtMs: Date.now() + delayMs });
-    this.log(`reconnect.scheduled attempt=${n + 1} delayMs=${delayMs} reason=${message}`);
+    // `message` can contain remote SSH stderr for the user-facing strip. It is
+    // deliberately excluded from copied diagnostics as untrusted free-form content.
+    this.log(`reconnect.scheduled attempt=${n + 1} delayMs=${delayMs}`);
     this.reconnectTimer = this.timer.set(delayMs, () => {
       this.reconnectTimer = undefined;
       if (!this.wantConnected) return;

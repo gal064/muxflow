@@ -46,7 +46,7 @@ export function createExpoRecorder(log?: (line: string) => void): VoiceRecorder 
   let bluetoothRouteSelected = false;
   let swept = false;
   const state = (): "unprepared" | "preparing" | "prepared" | "recording" | "stopping" =>
-    stopping ? "stopping" : recording ? "recording" : preparing ? "preparing" : prepared ? "prepared" : "unprepared";
+    stopping ? "stopping" : recording ? "recording" : prepared ? "prepared" : preparing ? "preparing" : "unprepared";
   const report = (event: string): void => log?.(`voice.recorder ${event} actual=${state()}`);
   const dropPreparedFile = (): void => {
     if (preparedUri && !recording) deleteQuietly(preparedUri);

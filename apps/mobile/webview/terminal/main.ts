@@ -41,7 +41,6 @@ let lastAtTopMs = 0;
 const AT_TOP_THROTTLE_MS = 2_000;
 /** Bounds synchronous xterm wheel encoding and the input batch to one frame's useful work. */
 const MAX_ALTERNATE_WHEEL_EVENTS_PER_FRAME = 8;
-const TOUCH_SCROLL_SENSITIVITY = 2;
 
 function root(): HTMLElement {
   return document.getElementById("terminal") as HTMLElement;
@@ -64,7 +63,7 @@ function measure(force = false): void {
   if (!force && !gridChanged && !viewportChanged) return;
   lastGrid = grid;
   lastViewport = viewport;
-  if (gridChanged && (term.cols !== grid.cols || term.rows !== grid.rows)) term.resize(grid.cols, grid.rows);
+  if (term.cols !== grid.cols || term.rows !== grid.rows) term.resize(grid.cols, grid.rows);
   const cellWidth = viewport.width / grid.cols;
   const cellHeight = viewport.height / grid.rows;
   post({ t: "size", cols: grid.cols, rows: grid.rows, cellWidth, cellHeight });
@@ -129,20 +128,20 @@ async function init(): Promise<void> {
   const el = root();
   let touchX = 0;
   let touchY = 0;
-  let gestureStartY: number | undefined;
-  let gestureStartedAt = 0;
-  let gestureMoved = false;
   let gestureMode: "normal" | "alternate" = "normal";
+  let gestureRows = 0;
   const touchScroll = new TouchScrollController(
     (rows) => {
       if (!term) return;
       if (term.buffer.active.type === "normal") {
         term.scrollLines(rows);
+        gestureRows += rows;
         return;
       }
       const element = term.element;
       if (!element) return;
       const input: string[] = [];
+      const wheelEvents = Math.min(Math.abs(rows), MAX_ALTERNATE_WHEEL_EVENTS_PER_FRAME);
       capturedWheelInput = input;
       term.options.disableStdin = false;
       try {
@@ -150,7 +149,6 @@ async function init(): Promise<void> {
         // drag distance and fling while letting xterm select the active mouse
         // protocol and encoding. The events are collected into one bridge
         // message for this animation frame.
-        const wheelEvents = Math.min(Math.abs(rows), MAX_ALTERNATE_WHEEL_EVENTS_PER_FRAME);
         for (let row = 0; row < wheelEvents; row += 1) {
           element.dispatchEvent(new WheelEvent("wheel", {
             bubbles: true,
@@ -165,20 +163,25 @@ async function init(): Promise<void> {
         term.options.disableStdin = true;
         capturedWheelInput = undefined;
       }
-      if (input.length > 0) post({ t: "input", b64: btoa(input.join("")) });
+      if (input.length > 0) {
+        post({ t: "input", b64: btoa(input.join("")) });
+        gestureRows += Math.sign(rows) * wheelEvents;
+      }
     },
     { request: (callback) => requestAnimationFrame(callback), cancel: (id) => cancelAnimationFrame(id) },
+    (summary) => {
+      post({ t: "scroll", mode: gestureMode, rows: gestureRows, ...summary });
+      gestureRows = 0;
+    },
   );
   el.addEventListener("touchstart", (event) => {
     const touch = event.touches[0];
     if (touch) {
       touchX = touch.clientX;
       touchY = touch.clientY;
-      gestureStartY = touch.clientY;
-      gestureStartedAt = event.timeStamp;
-      gestureMoved = false;
-      gestureMode = term?.buffer.active.type ?? "normal";
       touchScroll.start(touch.clientY, event.timeStamp);
+      gestureMode = term?.buffer.active.type ?? "normal";
+      gestureRows = 0;
     }
   }, { passive: true });
   el.addEventListener("touchmove", (event) => {
@@ -188,32 +191,14 @@ async function init(): Promise<void> {
     touchY = touch.clientY;
     const cellHeight = lastGrid ? el.clientHeight / lastGrid.rows : NOMINAL_CELL.height;
     if (touchScroll.move(touch.clientY, event.timeStamp, cellHeight)) {
-      gestureMoved = true;
       event.preventDefault();
     }
   }, { passive: false });
-  const reportGesture = (timeMs: number, cancelled: boolean): void => {
-    if (gestureStartY === undefined) return;
-    if (gestureMoved) {
-      const cellHeight = lastGrid ? el.clientHeight / lastGrid.rows : NOMINAL_CELL.height;
-      post({
-        t: "scroll",
-        mode: gestureMode,
-        rows: Math.round((gestureStartY - touchY) / cellHeight * TOUCH_SCROLL_SENSITIVITY),
-        durationMs: Math.max(0, Math.round(timeMs - gestureStartedAt)),
-        cancelled,
-      });
-    }
-    gestureStartY = undefined;
-    gestureMoved = false;
-  };
   el.addEventListener("touchend", (event) => {
     touchScroll.end(event.timeStamp);
-    reportGesture(event.timeStamp, false);
   }, { passive: true });
   el.addEventListener("touchcancel", (event) => {
-    touchScroll.cancel();
-    reportGesture(event.timeStamp, true);
+    touchScroll.cancel(event.timeStamp);
   }, { passive: true });
   term.onScroll(() => {
     if (!term || term.buffer.active.type === "alternate") return;
