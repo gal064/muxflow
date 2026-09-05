@@ -29,7 +29,7 @@ export function MicButton({ phase, disabled, hint, onPressIn, onPressOut, onLock
   const pulse = useRef(new Animated.Value(0)).current;
   const recording = phase === "recording" || phase === "recordingLocked";
   const locked = phase === "recordingLocked";
-  const busy = phase === "transcribing" || phase === "sending";
+  const busy = phase === "canceling" || phase === "transcribing" || phase === "sending";
   const gesture = useRef<{ x: number; y: number; action?: "lock" | "cancel" } | undefined>(undefined);
 
   useEffect(() => {
@@ -50,7 +50,7 @@ export function MicButton({ phase, disabled, hint, onPressIn, onPressOut, onLock
     opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] }),
     transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.6] }) }],
   };
-  const label = locked ? "Locked · tap anywhere to send" : recording ? "Listening…" : phase === "transcribing" ? "Transcribing…" : phase === "sending" ? "Sending…" : "Hold anywhere here to talk";
+  const label = locked ? "Locked · tap anywhere to send" : recording ? "Listening…" : phase === "canceling" ? "Canceling…" : phase === "transcribing" ? "Transcribing…" : phase === "sending" ? "Sending…" : "Hold anywhere here to talk";
 
   const classify = (event: GestureResponderEvent): "lock" | "cancel" | undefined => {
     const current = gesture.current;

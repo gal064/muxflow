@@ -317,7 +317,7 @@ export class VoiceController {
   async cancelUtterance(): Promise<void> {
     if (this.canceling) return this.canceling;
     if (this.recordingPhase() === undefined) return;
-    this.options.store.getState().setPhase(this.agentId, "idle");
+    this.options.store.getState().setPhase(this.agentId, "canceling");
     this.log("utterance.canceled");
     const { recorder, files } = this.options;
     this.canceling = (async () => {
@@ -335,6 +335,7 @@ export class VoiceController {
       await this.canceling;
     } finally {
       this.canceling = undefined;
+      this.setPhaseIfAlive("idle");
       if (this.disposed || !this.focused || !this.options.appInForeground()) recorder.release();
       else this.arm();
     }

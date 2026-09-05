@@ -253,6 +253,32 @@ describe("VoiceController", () => {
     expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
   });
 
+  it("does not accept a new hold until a canceled recorder has stopped", async () => {
+    const h = harness();
+    let finishStop!: () => void;
+    const stop = h.recorder.stop.bind(h.recorder);
+    h.recorder.stop = async () => {
+      await new Promise<void>((resolve) => { finishStop = resolve; });
+      return stop();
+    };
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+
+    const canceling = h.controller.cancelUtterance();
+    await settle();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("canceling");
+    h.controller.beginUtterance();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("canceling");
+
+    finishStop();
+    await canceling;
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+    h.controller.beginUtterance();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recording");
+  });
+
   it("cancels and releases a locked recording on blur or background", async () => {
     const blurred = harness();
     blurred.controller.focus();

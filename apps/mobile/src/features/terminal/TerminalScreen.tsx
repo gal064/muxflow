@@ -1,7 +1,7 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import Animated, { KeyboardState, useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
+import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { agentForPane, agentStateLabel, agentTitle } from "../agents/agentViews";
@@ -43,16 +43,7 @@ export function TerminalScreen({ paneId, sessionId, createdGeneration }: Termina
   // input bar visible and shrinks the WebView, which re-measures and sends
   // RESIZE_TERMINAL (§7.6 step 6).
   const keyboard = useAnimatedKeyboard({ isStatusBarTranslucentAndroid: true, isNavigationBarTranslucentAndroid: true });
-  // Reanimated's Android keyboard manager publishes height and lifecycle
-  // separately. A retained screen can mount with the last IME height before
-  // the first animation callback; UNKNOWN/CLOSED therefore cannot validate a
-  // non-zero height. Gating on its own lifecycle removes that stale initial
-  // inset while preserving UI-thread updates through open and close.
-  const keyboardPadding = useAnimatedStyle(() => ({
-    paddingBottom: keyboard.state.value === KeyboardState.UNKNOWN || keyboard.state.value === KeyboardState.CLOSED
-      ? insets.bottom
-      : Math.max(insets.bottom, keyboard.height.value),
-  }), [insets.bottom]);
+  const keyboardPadding = useAnimatedStyle(() => ({ paddingBottom: Math.max(insets.bottom, keyboard.height.value) }), [insets.bottom]);
   const state = useSession((s) => s);
   const webview = useRef<TerminalWebViewHandle>(null);
   const controller = useRef<TerminalController | null>(null);
