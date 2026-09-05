@@ -50,7 +50,7 @@ export function transcriptResponse(text: string): Response {
 }
 
 export function speechResponse(audio: Uint8Array, text: string): Response {
-  return create(ResponseSchema, { ok: true, voice: create(VoiceResponseSchema, { speech: create(VoiceSpeechSchema, { audio, audioMime: "audio/mpeg", text }) }) });
+  return create(ResponseSchema, { ok: true, voice: create(VoiceResponseSchema, { speech: create(VoiceSpeechSchema, { audio, audioMime: "audio/mpeg", displayMarkdown: text, speechText: text }) }) });
 }
 
 export class FakeRecorder implements VoiceRecorder {

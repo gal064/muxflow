@@ -35,6 +35,8 @@ export interface VoiceControllerOptions {
   tones?: VoiceTones;
   /** Initial reply playback speed; `setPlaybackRate` follows the preference afterwards. */
   playbackRate?: number;
+  /** Initial autoplay preference; `setAutoPlay` follows it afterwards. */
+  autoPlay?: boolean;
   toast?: (message: string) => void;
   log?: (line: string) => void;
   now?: () => number;
@@ -100,6 +102,7 @@ export class VoiceController {
   private readonly tailHoldMs: number;
   private readonly submitDelayMs: number;
   private playbackRate: number;
+  private autoPlay: boolean;
   /** The agent lifecycle last reported by the screen; the working acknowledgement fires on the edge into `working`. */
   private lastLifecycle: AgentLifecycle | undefined;
   /** The "you" message whose pickup by the agent was already acknowledged. */
@@ -114,6 +117,7 @@ export class VoiceController {
     this.tailHoldMs = options.tailHoldMs ?? TAIL_HOLD_MS;
     this.submitDelayMs = options.submitDelayMs ?? SUBMIT_DELAY_MS;
     this.playbackRate = options.playbackRate ?? 1;
+    this.autoPlay = options.autoPlay ?? true;
     options.store.getState().ensureSession(options.agentId, options.paneId, options.sessionId, this.now());
     this.unsubscribePlayer = options.player.onStatus((status) => this.onPlayerStatus(status));
   }
@@ -425,8 +429,9 @@ export class VoiceController {
       if (this.loadedMessageId === previous.id) this.loadedMessageId = undefined;
       this.options.files.delete(previous.fileUri);
     }
-    const message = this.message("agent", speech.text, {
+    const message = this.message("agent", speech.displayMarkdown, {
       at: speech.replyAtUnixMillis > 0n ? Number(speech.replyAtUnixMillis) : this.now(),
+      speechText: speech.speechText,
       truncated: speech.truncated,
       played: false,
     });
@@ -440,7 +445,7 @@ export class VoiceController {
       message.audioError = failureDetail || "The host couldn't synthesize this reply.";
     }
     store.appendReply(this.agentId, message);
-    this.log(`reply ${speech.audio.byteLength} bytes text=${speech.text.length} chars${speech.truncated ? " truncated" : ""}${message.audioError ? ` audioError=${message.audioError}` : ""}`);
+    this.log(`reply ${speech.audio.byteLength} bytes markdown=${speech.displayMarkdown.length} chars speech=${speech.speechText.length} chars${speech.truncated ? " truncated" : ""}${message.audioError ? ` audioError=${message.audioError}` : ""}`);
     this.playUnplayedIfListening();
   }
 
@@ -452,7 +457,7 @@ export class VoiceController {
     // Only the newest reply may hold the session's one file (§1).
     if (!message || message.kind !== "agent" || latestReply(this.options.store.getState().sessions[this.agentId])?.id !== messageId) return;
     try {
-      const response = await connection.request(voiceSpeak(newOperationId(), message.text), { timeoutMs: SPEAK_TIMEOUT_MS });
+      const response = await connection.request(voiceSpeak(newOperationId(), message.speechText), { timeoutMs: SPEAK_TIMEOUT_MS });
       if (this.disposed) return;
       const speech = response.voice?.speech;
       if (!speech || speech.audio.byteLength === 0) throw new Error("The host returned no audio.");
@@ -491,6 +496,13 @@ export class VoiceController {
     if (this.playbackRate === rate) return;
     this.playbackRate = rate;
     if (this.loadedMessageId !== undefined) this.options.player.setRate(rate);
+  }
+
+  /** The preference changed; enabling it also plays the newest reply that arrived while it was off. */
+  setAutoPlay(autoPlay: boolean): void {
+    if (this.autoPlay === autoPlay) return;
+    this.autoPlay = autoPlay;
+    if (autoPlay) this.playUnplayedIfListening();
   }
 
   pause(): void {
@@ -545,8 +557,8 @@ export class VoiceController {
   /** §1: the newest unplayed reply plays when this screen is focused, in the foreground, with auto-play on. */
   private playUnplayedIfListening(): void {
     if (this.disposed || !this.focused || !this.options.appInForeground()) return;
+    if (!this.autoPlay) return;
     const store = this.options.store.getState();
-    if (!store.autoPlay) return;
     const reply = latestReply(store.sessions[this.agentId]);
     if (reply && !reply.played && reply.fileUri) this.play(reply.id);
   }
@@ -683,7 +695,8 @@ export class VoiceController {
     return {
       id: `${this.agentId}:${this.now()}:${this.messageCounter}`,
       kind,
-      text,
+      displayText: text,
+      speechText: text,
       at: this.now(),
       truncated: false,
       fileUri: undefined,

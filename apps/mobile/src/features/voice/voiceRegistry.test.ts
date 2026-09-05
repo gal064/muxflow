@@ -18,16 +18,16 @@ describe("VoiceRegistry", () => {
     const h = harness();
     const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
     expect(h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps })).toBe(a);
-    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_REPLY, voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "a", text: "hi", audio: new Uint8Array([1]) }) }) }));
-    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_REPLY, voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "ghost", text: "no", audio: new Uint8Array([1]) }) }) }));
-    expect(h.store.getState().sessions["a"]?.messages.map((m) => m.text)).toEqual(["hi"]);
+    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_REPLY, voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "a", displayMarkdown: "**hi**", speechText: "hi", audio: new Uint8Array([1]) }) }) }));
+    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_REPLY, voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "ghost", displayMarkdown: "no", speechText: "no", audio: new Uint8Array([1]) }) }) }));
+    expect(h.store.getState().sessions["a"]?.messages.map((m) => m.displayText)).toEqual(["**hi**"]);
     expect(h.store.getState().sessions["ghost"]).toBeUndefined();
     // A failed synthesis carries the error in the event's status detail.
     h.registry.onVoiceEvent(create(HostEventSchema, {
       kind: EventKind.VOICE_REPLY,
-      voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "a", text: "silent" }), status: create(VoiceStatusSchema, { detail: "tts down" }) }),
+      voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "a", displayMarkdown: "_silent_", speechText: "silent" }), status: create(VoiceStatusSchema, { detail: "tts down" }) }),
     }));
-    expect(h.store.getState().sessions["a"]?.messages.at(-1)).toMatchObject({ text: "silent", audioError: "tts down" });
+    expect(h.store.getState().sessions["a"]?.messages.at(-1)).toMatchObject({ displayText: "_silent_", speechText: "silent", audioError: "tts down" });
     h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_PROVISION, voice: create(VoiceEventSchema, { provision: create(VoiceProvisionProgressSchema, { phase: "extracting", totalBytes: 4n, transferredBytes: 4n }) }) }));
     expect(h.store.getState().hostStatus).toMatchObject({ readiness: "provisioning", provision: { phase: "extracting" } });
   });

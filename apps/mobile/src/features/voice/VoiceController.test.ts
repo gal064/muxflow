@@ -38,6 +38,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
   const files = new FakeFiles();
   let foreground = true;
   let canSubmit = true;
+  let autoPlay = true;
   const toasts: string[] = [];
   const controller = new VoiceController({
     tailHoldMs: 0,
@@ -51,6 +52,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
     player,
     files,
     appInForeground: () => foreground,
+    autoPlay,
     canSubmit: () => canSubmit,
     haptics,
     tones,
@@ -69,11 +71,12 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
     toasts,
     setForeground: (value: boolean) => { foreground = value; },
     setCanSubmit: (value: boolean) => { canSubmit = value; },
+    setAutoPlay: (value: boolean) => { autoPlay = value; controller.setAutoPlay(value); },
   };
 }
 
-function reply(agentId: string, text: string, audio: Uint8Array = MP3, generation = 0n): VoiceSpeech {
-  return create(VoiceSpeechSchema, { agentId, text, audio, audioMime: "audio/mpeg", stateGeneration: generation, replyAtUnixMillis: 1_700_000_000_000n });
+function reply(agentId: string, displayMarkdown: string, audio: Uint8Array = MP3, generation = 0n, speechText = displayMarkdown): VoiceSpeech {
+  return create(VoiceSpeechSchema, { agentId, displayMarkdown, speechText, audio, audioMime: "audio/mpeg", stateGeneration: generation, replyAtUnixMillis: 1_700_000_000_000n });
 }
 
 describe("VoiceController", () => {
@@ -112,7 +115,7 @@ describe("VoiceController", () => {
     expect(input[1]!.terminalInputPaste).toBe(false);
     const session = h.store.getState().sessions["agent-a"]!;
     expect(session.phase).toBe("idle");
-    expect(session.messages.map((m) => [m.kind, m.text])).toEqual([["you", "list the files in this directory"]]);
+    expect(session.messages.map((m) => [m.kind, m.displayText])).toEqual([["you", "list the files in this directory"]]);
     // The recording was consumed and the recorder re-armed for the next press.
     expect(h.files.deleted).toContain("file:///cache/rec-1.m4a");
     expect(h.recorder.prepared).toBe(2);
@@ -120,7 +123,7 @@ describe("VoiceController", () => {
     // A pushed reply while focused and in the foreground: written, appended, auto-played once, marked played.
     h.controller.onVoiceReply(reply("agent-a", "Here are the files."));
     let latest = latestReply(h.store.getState().sessions["agent-a"])!;
-    expect(latest.text).toBe("Here are the files.");
+    expect(latest.displayText).toBe("Here are the files.");
     expect(latest.fileUri).toBe("file:///cache/voice/agent-a.mp3");
     expect(latest.played).toBe(true);
     expect(h.player.loaded).toBe("file:///cache/voice/agent-a.mp3");
@@ -133,7 +136,7 @@ describe("VoiceController", () => {
     expect(h.files.deleted).toContain("file:///cache/voice/agent-a.mp3");
     expect(h.player.calls.at(-1)).toBe("stop");
     latest = latestReply(h.store.getState().sessions["agent-a"])!;
-    expect(latest.text).toBe("Second answer.");
+    expect(latest.displayText).toBe("Second answer.");
     expect(latest.played).toBe(false);
     expect(latest.fileUri).toBe("file:///cache/voice/agent-a.mp3");
     expect(h.store.getState().playback).toBeUndefined();
@@ -234,7 +237,7 @@ describe("VoiceController", () => {
 
   it("auto-play off keeps the reply unplayed until tapped", async () => {
     const h = harness();
-    h.store.getState().setAutoPlay(false);
+    h.setAutoPlay(false);
     h.controller.focus();
     await settle();
     h.controller.onVoiceReply(reply("agent-a", "Quiet."));
@@ -243,6 +246,17 @@ describe("VoiceController", () => {
     h.controller.play(message.id);
     expect(h.player.playing).toBe(true);
     expect(latestReply(h.store.getState().sessions["agent-a"])!.played).toBe(true);
+  });
+
+  it("enabling auto-play starts the newest unplayed reply", async () => {
+    const h = harness();
+    h.setAutoPlay(false);
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "Waiting."));
+    expect(h.player.playing).toBe(false);
+    h.setAutoPlay(true);
+    expect(h.player.playing).toBe(true);
   });
 
   it("two sessions receive their own replies and share the one player", async () => {
@@ -264,8 +278,8 @@ describe("VoiceController", () => {
     await settle();
     a.controller.onVoiceReply(reply("agent-a", "For A."));
     b.onVoiceReply(reply("agent-b", "For B."));
-    expect(a.store.getState().sessions["agent-a"]!.messages.map((m) => m.text)).toEqual(["For A."]);
-    expect(a.store.getState().sessions["agent-b"]!.messages.map((m) => m.text)).toEqual(["For B."]);
+    expect(a.store.getState().sessions["agent-a"]!.messages.map((m) => m.displayText)).toEqual(["For A."]);
+    expect(a.store.getState().sessions["agent-b"]!.messages.map((m) => m.displayText)).toEqual(["For B."]);
     // Only the focused one auto-played; B's stays unplayed with its own file.
     expect(latestReply(a.store.getState().sessions["agent-a"])!.played).toBe(true);
     expect(latestReply(a.store.getState().sessions["agent-b"])!.played).toBe(false);
@@ -333,14 +347,16 @@ describe("VoiceController", () => {
     h.connection.answer(Operation.VOICE_SPEAK, () => speechResponse(MP3, "Spoken."));
     h.controller.focus();
     await settle();
-    h.controller.onVoiceReply(reply("agent-a", "Spoken.", new Uint8Array(0)), "edge-tts: network unreachable");
+    h.controller.onVoiceReply(reply("agent-a", "## Spoken\n\n- one\n- two", new Uint8Array(0), 0n, "Spoken. one. two"), "edge-tts: network unreachable");
     const message = latestReply(h.store.getState().sessions["agent-a"])!;
+    expect(message.displayText).toBe("## Spoken\n\n- one\n- two");
+    expect(message.speechText).toBe("Spoken. one. two");
     expect(message.fileUri).toBeUndefined();
     expect(message.audioError).toBe("edge-tts: network unreachable");
     expect(message.played).toBe(false);
     expect(h.player.calls).toEqual([]);
     await h.controller.retrySpeak(message.id);
-    expect(h.connection.of(Operation.VOICE_SPEAK)[0]!.voice?.text).toBe("Spoken.");
+    expect(h.connection.of(Operation.VOICE_SPEAK)[0]!.voice?.text).toBe("Spoken. one. two");
     const retried = latestReply(h.store.getState().sessions["agent-a"])!;
     expect(retried.fileUri).toBe("file:///cache/voice/agent-a.mp3");
     expect(retried.audioError).toBeUndefined();

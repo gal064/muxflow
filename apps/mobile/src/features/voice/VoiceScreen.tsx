@@ -25,13 +25,14 @@ import { bigPaneHeight } from "./paneLayout";
 import { createExpoPlayer } from "./player";
 import { createExpoRecorder } from "./recorder";
 import { ReplyPlayer } from "./ReplyPlayer";
-import { SpeedPicker } from "./SpeedPicker";
+import { SpeedButton } from "./SpeedButton";
 import { createExpoTones } from "./tones";
 import type { VoiceController } from "./VoiceController";
 import { useVoice } from "./voiceHooks";
 import { voiceRegistry } from "./voiceRegistry";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { VoiceStatusCard } from "./VoiceStatusCard";
+import { VoiceMarkdown } from "./VoiceMarkdown";
 import { latestReply, type VoiceMessage } from "./voiceStore";
 
 export interface VoiceScreenProps {
@@ -63,6 +64,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const recorderError = useVoice((s) => s.recorderError);
   const session = useVoice((s) => s.sessions[agentId]);
   const playbackRate = useStore(prefsStore, (s) => s.voicePlaybackRate);
+  const autoPlay = useStore(prefsStore, (s) => s.voiceAutoPlay);
   const bigPane = useStore(prefsStore, (s) => s.voiceBigPane);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const list = useRef<ScrollView>(null);
@@ -76,6 +78,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     appInForeground: () => AppState.currentState === "active",
     canSubmit: () => sessionStore.getState().agents[agentId]?.present === true,
     playbackRate: prefsStore.getState().voicePlaybackRate,
+    autoPlay: prefsStore.getState().voiceAutoPlay,
     toast,
     log,
   }), [agentId, paneId, sessionId]);
@@ -104,6 +107,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
 
   // The speed applies to the reply that is playing as well as the next one.
   useEffect(() => controller.setPlaybackRate(playbackRate), [controller, playbackRate]);
+  useEffect(() => controller.setAutoPlay(autoPlay), [autoPlay, controller]);
   // The agent picking up the utterance is a haptic, not only the working bubble.
   useEffect(() => {
     if (lifecycle) controller.onAgentLifecycle(lifecycle);
@@ -175,8 +179,18 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         <View style={styles.paneControls}>
           <View style={styles.speedGroup}>
             <Text {...fixedChromeText} numberOfLines={1} style={styles.speedCaption}>Speed</Text>
-            <SpeedPicker onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
+            <SpeedButton onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
           </View>
+          <Pressable
+            accessibilityLabel="Autoplay replies"
+            accessibilityRole="switch"
+            accessibilityState={{ checked: autoPlay }}
+            hitSlop={{ top: 6, bottom: 6 }}
+            onPress={() => prefsStore.getState().setVoiceAutoPlay(!autoPlay)}
+            style={({ pressed }) => [styles.autoPlayToggle, autoPlay && styles.autoPlayToggleOn, pressed && styles.pressed]}
+          >
+            <Text {...fixedChromeText} numberOfLines={1} style={[styles.paneToggleLabel, autoPlay && styles.autoPlayToggleLabelOn]}>Autoplay {autoPlay ? "On" : "Off"}</Text>
+          </Pressable>
           <Pressable
             accessibilityLabel={bigPane ? "Smaller talk pane" : "Larger talk pane"}
             accessibilityRole="button"
@@ -223,14 +237,16 @@ const MessageBubble = memo(function MessageBubble({ message, controller }: { mes
         {/* The text is the tap target; the player below stays its own set of controls for a screen reader. */}
         <Pressable
           accessibilityHint={you ? undefined : expanded ? "Collapses the reply" : "Expands the reply"}
-          accessibilityLabel={`${you ? "You" : "Agent"}: ${message.text}`}
+          accessibilityLabel={`${you ? "You" : "Agent"}: ${you ? message.displayText : message.speechText}`}
           accessibilityRole={you ? "text" : "button"}
           disabled={you}
           hitSlop={you ? undefined : { top: 10, bottom: 10 }}
           onPress={() => setExpanded((value) => !value)}
           style={you ? undefined : styles.expandTarget}
         >
-          <Text numberOfLines={you || expanded ? undefined : 3} style={[styles.bubbleText, you && styles.bubbleTextYou]}>{message.text}</Text>
+          {you
+            ? <Text style={[styles.bubbleText, styles.bubbleTextYou]}>{message.displayText}</Text>
+            : <VoiceMarkdown numberOfLines={expanded ? undefined : 3} source={message.displayText} />}
           {message.truncated && expanded ? <Text style={styles.truncatedNote}>Spoken reply shortened; the rest is in the terminal.</Text> : null}
         </Pressable>
         {controller ? <ReplyPlayer controller={controller} message={message} /> : null}
@@ -277,6 +293,9 @@ const styles = StyleSheet.create({
   paneControls: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", paddingBottom: 8, paddingHorizontal: 12, paddingTop: 8 },
   speedGroup: { alignItems: "center", flexDirection: "row", gap: 8 },
   speedCaption: { color: colors.chromeDim, fontSize: typeScale.rowSecondary },
+  autoPlayToggle: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", minWidth: 98, paddingHorizontal: 10 },
+  autoPlayToggleOn: { backgroundColor: colors.accent },
+  autoPlayToggleLabelOn: { color: colors.accentInk },
   /** Wide enough for "Smaller", so the pill's left edge does not jump when the label changes. */
   paneToggle: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", minWidth: 96, paddingHorizontal: 14 },
   paneToggleLabel: { color: colors.chromeInk, fontSize: typeScale.rowSecondary, fontWeight: "600" },
