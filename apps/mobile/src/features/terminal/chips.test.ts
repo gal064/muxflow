@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CR, KEY_CHIPS, SHIFT_CHIP, pressChip } from "./chips";
-import { toBase64, utf8Encode } from "./bytes";
+import { fromBase64, toBase64, utf8Encode } from "./bytes";
 import { parseFromPageMessage } from "./bridgeMessages";
 
 const hex = (bytes: Uint8Array | undefined) => (bytes ? Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(" ") : undefined);
@@ -53,6 +53,7 @@ describe("byte helpers", () => {
     for (const text of ["", "f", "fo", "foo", "foob", "fooba", "foobar", "é中"]) {
       const bytes = new TextEncoder().encode(text);
       expect(toBase64(bytes)).toBe(Buffer.from(bytes).toString("base64"));
+      expect(fromBase64(toBase64(bytes))).toEqual(bytes);
     }
   });
 
@@ -74,6 +75,8 @@ describe("bridge messages (§10.2)", () => {
     expect(parseFromPageMessage('{"t":"size","cols":46,"rows":40,"cellWidth":7.8,"cellHeight":15.6}')).toEqual({ t: "size", cols: 46, rows: 40, cellWidth: 7.8, cellHeight: 15.6 });
     expect(parseFromPageMessage('{"t":"ready"}')).toEqual({ t: "ready" });
     expect(parseFromPageMessage('{"t":"written","bytes":12}')).toEqual({ t: "written", bytes: 12 });
+    expect(parseFromPageMessage('{"t":"input","b64":"G1s8NjQ7MTsyTQ=="}')).toEqual({ t: "input", b64: "G1s8NjQ7MTsyTQ==" });
+    expect(parseFromPageMessage('{"t":"input","b64":""}')).toBeUndefined();
     expect(parseFromPageMessage('{"t":"size"}')).toBeUndefined();
     expect(parseFromPageMessage("not json")).toBeUndefined();
     expect(parseFromPageMessage('{"t":"keys"}')).toBeUndefined();

@@ -15,7 +15,7 @@ import {
 } from "../../protocol/requests";
 import type { SessionStore } from "../../store/sessionStore";
 import type { FromPageMessage, ToPageMessage } from "./bridgeMessages";
-import { toBase64, utf8Encode } from "./bytes";
+import { fromBase64, toBase64, utf8Encode } from "./bytes";
 import { CR } from "./chips";
 import { sameGrid, windowGrid, type Grid } from "./sizing";
 import type { TerminalRegistry } from "./terminalRegistry";
@@ -209,12 +209,31 @@ export class TerminalController {
       }
       case "written":
         return;
+      case "input":
+        this.inputFromPage(message.b64);
+        return;
       case "atTop":
         this.onAtTop(message.above);
         return;
       case "log":
         this.log(`page: ${message.line}`);
     }
+  }
+
+  /** Alternate-screen wheel input produced by xterm inside the WebView. */
+  private inputFromPage(base64: string): void {
+    // Gesture input is ephemeral. If the screen lost its connection between
+    // the page's frame and this turn, there is nothing useful to retry or say.
+    if (!this.liveConnection()) return;
+    let bytes: Uint8Array;
+    try {
+      bytes = fromBase64(base64);
+    } catch {
+      this.log("input.page.invalid base64");
+      return;
+    }
+    if (bytes.byteLength === 0) return;
+    void this.sendInput(bytes).catch((error: unknown) => this.log(`input.page.failed ${describe(error)}`));
   }
 
   /** Every tap and every Send: one TERMINAL_INPUT, immediately (§7.6). */
