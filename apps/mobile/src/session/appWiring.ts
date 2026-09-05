@@ -3,6 +3,7 @@
 // is the transport for every host.
 
 import { ToastAndroid } from "react-native";
+import { startNotifications } from "../features/notifications";
 import { muxflowSsh } from "../ssh/MuxflowSsh";
 import { sshTransportFactory } from "../ssh/registerTransport";
 import { onToast, setForegroundService, setTransportFactory } from "./connectionManager";
@@ -13,6 +14,7 @@ export function wireApp(): void {
   if (wired) return;
   wired = true;
   onToast((message) => ToastAndroid.show(message, ToastAndroid.SHORT));
+  startNotifications();
   setTransportFactory(sshTransportFactory);
   setForegroundService(muxflowSsh());
 }
