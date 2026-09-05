@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { HostProfile, Pane, TmuxSnapshot } from "../../app/types";
 import { notificationTopology, paneForResolvedNotification, type NotificationPaneRoute, type ResolvedNotificationRoute } from "../../app/paneRouting";
 import type { PaneSurfaceResult } from "../../app/useShellNavigation";
@@ -14,7 +14,6 @@ interface ActivationOptions {
   currentHostProfileId: string;
   connected: boolean;
   connectionEpoch: number;
-  focusedPaneId?: string;
   profiles: readonly HostProfile[];
   snapshot: TmuxSnapshot;
   setStatus(message: string): void;
@@ -30,44 +29,11 @@ interface PendingActivation {
   previousEpoch: number;
 }
 
-const FOCUS_GUARD_TIMEOUT_MS = 15_000;
-
-interface FocusGuard {
-  token: number;
-  paneId: string;
-  timer: ReturnType<typeof setTimeout>;
-}
-
 /** Owns native-route activation so App only supplies current authoritative shell state. */
 export function useAgentNotificationActivation(options: ActivationOptions) {
   const optionsRef = useRef(options);
   optionsRef.current = options;
   const pending = useRef<PendingActivation | undefined>(undefined);
-  const focusGuard = useRef<FocusGuard | undefined>(undefined);
-  const nextFocusGuardToken = useRef(0);
-  const [focusGuardPaneId, setFocusGuardPaneId] = useState<string>();
-
-  const clearFocusGuard = useCallback((token?: number) => {
-    const current = focusGuard.current;
-    if (!current || (token !== undefined && current.token !== token)) return;
-    clearTimeout(current.timer);
-    focusGuard.current = undefined;
-    setFocusGuardPaneId(undefined);
-  }, []);
-
-  const beginFocusGuard = useCallback((paneId: string): number => {
-    clearFocusGuard();
-    const token = ++nextFocusGuardToken.current;
-    const timer = setTimeout(() => clearFocusGuard(token), FOCUS_GUARD_TIMEOUT_MS);
-    focusGuard.current = { token, paneId, timer };
-    setFocusGuardPaneId(paneId);
-    return token;
-  }, [clearFocusGuard]);
-
-  useEffect(() => () => {
-    if (focusGuard.current) clearTimeout(focusGuard.current.timer);
-    focusGuard.current = undefined;
-  }, []);
 
   const queueForFreshConnection = useCallback((payload: NotificationPaneRoute, retryUsed: boolean) => {
     const current = optionsRef.current;
@@ -116,42 +82,37 @@ export function useAgentNotificationActivation(options: ActivationOptions) {
         latest.setStatus(`Notification destination unavailable: ${destination.reason}.`);
         return false;
       }
-      const guardToken = beginFocusGuard(destination.pane.id);
-      try {
-        const surfaced = await latest.surfacePaneDestination(
-          destination.pane,
-          "Notification",
-        );
-        if (!surfaced.ok) {
-          // A newer manual destination owns the shell now. Do not overwrite it
-          // with a stale failure notice or acknowledge a pane we did not show.
-          if (surfaced.error instanceof Error && surfaced.error.name === "ShellNavigationSupersededError") return false;
-          if (!retryUsed && isStaleFocusError(surfaced.error)) {
-            queueForFreshConnection(payload, true);
-            latest.setStatus("Notification topology changed while focusing; refreshing once before resolving the exact destination…");
-            latest.requestReconnect();
-            return false;
-          }
-          latest.setStatus(`Notification destination could not be focused${surfaced.error ? `: ${String(surfaced.error)}` : "."}`);
+      const surfaced = await latest.surfacePaneDestination(
+        destination.pane,
+        "Notification",
+      );
+      if (!surfaced.ok) {
+        // A newer manual destination owns the shell now. Do not overwrite it
+        // with a stale failure notice or acknowledge a pane we did not show.
+        if (surfaced.error instanceof Error && surfaced.error.name === "ShellNavigationSupersededError") return false;
+        if (!retryUsed && isStaleFocusError(surfaced.error)) {
+          queueForFreshConnection(payload, true);
+          latest.setStatus("Notification topology changed while focusing; refreshing once before resolving the exact destination…");
+          latest.requestReconnect();
           return false;
         }
-        const exactScope = optionsRef.current.agentScope;
-        if (!exactScope || !sameAgentConnection(capturedScope, exactScope)) return false;
-        try {
-          await acknowledgeNotificationActivation(latest.agentClient, exactScope, payload);
-        } catch (error) {
-          latest.setStatus(`Notification opened, but its exact attention generation was not acknowledged: ${String(error)}`);
-          return false;
-        }
-        return true;
-      } finally {
-        clearFocusGuard(guardToken);
+        latest.setStatus(`Notification destination could not be focused${surfaced.error ? `: ${String(surfaced.error)}` : "."}`);
+        return false;
       }
+      const exactScope = optionsRef.current.agentScope;
+      if (!exactScope || !sameAgentConnection(capturedScope, exactScope)) return false;
+      try {
+        await acknowledgeNotificationActivation(latest.agentClient, exactScope, payload);
+      } catch (error) {
+        latest.setStatus(`Notification opened, but its exact attention generation was not acknowledged: ${String(error)}`);
+        return false;
+      }
+      return true;
     } catch (error) {
       current.setStatus(`Could not resolve notification: ${String(error)}`);
       return false;
     }
-  }, [beginFocusGuard, clearFocusGuard, queueForFreshConnection]);
+  }, [queueForFreshConnection]);
 
   const activationHandler = useRef<(route: NotificationPaneRoute) => void>(() => undefined);
   activationHandler.current = (payload) => { void activate(payload); };
@@ -171,11 +132,7 @@ export function useAgentNotificationActivation(options: ActivationOptions) {
     void activate(waiting.payload, waiting.retryUsed);
   }, [activate, options.agentScope?.clientId, options.connected, options.connectionEpoch, options.currentHostProfileId]);
 
-  return {
-    activateNotificationRoute: activate,
-    automaticSeen: focusGuardPaneId !== options.focusedPaneId,
-    clearNotificationFocusGuard: clearFocusGuard,
-  };
+  return { activateNotificationRoute: activate };
 }
 
 function sameAgentConnection(left: AgentRequestScope, right: AgentRequestScope | undefined): boolean {

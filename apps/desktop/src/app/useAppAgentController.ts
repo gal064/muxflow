@@ -79,7 +79,6 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
     connected: options.hostCanMutate && Boolean(options.serverIdentity),
     connectionEpoch: options.terminalEpoch,
     currentHostProfileId: options.currentHostProfileId,
-    focusedPaneId: options.activePane?.id,
     profiles: options.profiles,
     snapshot: options.snapshot,
     requestReconnect: options.requestReconnect,
@@ -95,9 +94,8 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
     paneId: options.activePane?.id,
     appFocused: options.appFocused,
     terminalVisible: !options.selectedAppTab,
-    automaticSeen: notificationActivation.automaticSeen,
   }), [
-    notificationActivation.automaticSeen, options.activePane?.id, options.activeSessionId,
+    options.activePane?.id, options.activeSessionId,
     options.activeWindowId, options.appFocused, options.currentHostProfileId,
     options.selectedAppTab, options.serverIdentity,
   ]);

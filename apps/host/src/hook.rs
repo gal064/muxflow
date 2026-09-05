@@ -18,7 +18,7 @@ use tokio::{
     time::{Duration, timeout},
 };
 
-mod codex_transcript;
+pub(crate) mod codex_transcript;
 
 /// Vendor hook input can contain the complete tool result. In particular,
 /// Claude's `PostToolUse(Read)` embeds image data in `tool_response`, so the
@@ -688,7 +688,12 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
         now,
         home.as_deref(),
     )?;
-    deliver(&crate::paths::runtime_dir_candidates(), &event).await
+    deliver(
+        &crate::paths::runtime_dir_candidates(),
+        &event,
+        home.as_deref(),
+    )
+    .await
 }
 
 fn read_vendor_hook(reader: impl Read) -> anyhow::Result<VendorHookPayload> {
@@ -719,6 +724,7 @@ fn read_vendor_hook_bounded(
 async fn deliver(
     candidates: &[std::path::PathBuf],
     event: &v1::AgentHookEvent,
+    home: Option<&Path>,
 ) -> anyhow::Result<()> {
     for runtime in candidates {
         let socket = runtime.join("host.sock");
@@ -733,7 +739,7 @@ async fn deliver(
                 // The daemon answered, so do not probe another candidate and
                 // risk delivering twice. One rejection produces one durable
                 // mailbox entry for the daemon to replay later.
-                return persist_latest_fallback(runtime, event);
+                return persist_latest_fallback(runtime, &event_for_fallback(event, home)?);
             }
             Err(HookDeliveryFailure::PreDelivery(error)) => {
                 drop(error);
@@ -744,11 +750,14 @@ async fn deliver(
                 // daemon after that boundary; persist beside the one that may
                 // have applied it and let source-ID dedupe reconcile replay.
                 drop(error);
-                return persist_latest_fallback(runtime, event);
+                return persist_latest_fallback(runtime, &event_for_fallback(event, home)?);
             }
         }
     }
-    persist_latest_fallback(&crate::paths::fallback_runtime_dir(candidates), event)
+    persist_latest_fallback(
+        &crate::paths::fallback_runtime_dir(candidates),
+        &event_for_fallback(event, home)?,
+    )
 }
 
 #[derive(Debug)]
@@ -1072,6 +1081,21 @@ fn build_event_from_payload(
             reviewer.as_str().into(),
         );
     }
+    if codex_permission
+        && let Some(path) = payload
+            .transcript_path
+            .as_ref()
+            .filter(|path| !path.is_empty())
+    {
+        // This locator crosses only the private hook-to-daemon socket. The
+        // daemon consults the exact-turn positive cache before opening it, and
+        // the fallback path below resolves it to a reviewer and removes it
+        // before writing a mailbox event.
+        normalized.insert(
+            crate::service::agents::adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD.into(),
+            path.clone().into(),
+        );
+    }
     let payload_json = serde_json::to_vec(&normalized)?;
     if payload_json.len() > MAX_NORMALIZED_HOOK_BYTES {
         bail!("normalized hook payload exceeds the {MAX_NORMALIZED_HOOK_BYTES}-byte limit");
@@ -1090,6 +1114,56 @@ fn build_event_from_payload(
         source_sequence_authoritative: false,
         origin_server_identity: origin_server_identity.into(),
     })
+}
+
+fn event_for_fallback(
+    event: &v1::AgentHookEvent,
+    home: Option<&Path>,
+) -> anyhow::Result<v1::AgentHookEvent> {
+    let mut event = event.clone();
+    if event.adapter_id != "codex" {
+        return Ok(event);
+    }
+    let mut payload: serde_json::Value = serde_json::from_slice(&event.payload_json)?;
+    if payload
+        .get("hook_event_name")
+        .and_then(serde_json::Value::as_str)
+        != Some("PermissionRequest")
+    {
+        return Ok(event);
+    }
+    let turn_id = payload
+        .get(crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let transcript_path = payload
+        .get(crate::service::agents::adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    if payload
+        .get(crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD)
+        .is_none()
+        && let (Some(home), Some(turn_id), Some(transcript_path)) =
+            (home, turn_id.as_deref(), transcript_path.as_deref())
+        && let Some(reviewer) = codex_transcript::approval_reviewer(
+            &serde_json::json!({
+                "turn_id": turn_id,
+                "transcript_path": transcript_path,
+            }),
+            home,
+        )
+    {
+        payload[crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD] =
+            reviewer.as_str().into();
+    }
+    if let Some(object) = payload.as_object_mut() {
+        object.remove(crate::service::agents::adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD);
+    }
+    event.payload_json = serde_json::to_vec(&payload)?;
+    if event.payload_json.len() > MAX_NORMALIZED_HOOK_BYTES {
+        bail!("normalized hook payload exceeds the {MAX_NORMALIZED_HOOK_BYTES}-byte limit");
+    }
+    Ok(event)
 }
 
 #[cfg(test)]
@@ -1841,25 +1915,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_turn_start_normalizes_reviewer_and_permission_does_not_reread_it() {
+    fn codex_permission_defers_revalidation_and_fallback_materializes_it() {
         let home = tempfile::tempdir().unwrap();
         let sessions = home.path().join(".codex/sessions/2026/08/22");
         fs::create_dir_all(&sessions).unwrap();
         let transcript = sessions.join("rollout.jsonl");
-        fs::write(
-            &transcript,
-            serde_json::json!({
-                "type": "turn_context",
-                "payload": {
-                    "turn_id": "turn-1",
-                    "approval_policy": "on-request",
-                    "approvals_reviewer": "auto_review"
-                }
-            })
-            .to_string()
-                + "\n",
-        )
-        .unwrap();
+        fs::write(&transcript, "").unwrap();
         let raw = serde_json::to_vec(&serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
             "session_id": "session-1",
@@ -1879,9 +1940,10 @@ mod tests {
         )
         .unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
-        assert_eq!(
-            payload.get(crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD),
-            Some(&serde_json::Value::String("auto_review".into()))
+        assert!(
+            payload
+                .get(crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD)
+                .is_none()
         );
         assert_eq!(
             payload.get(crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD),
@@ -1892,6 +1954,21 @@ mod tests {
             assert!(!serialized.contains(private));
         }
         assert!(payload.get("turn_id").is_none());
+
+        fs::write(
+            &transcript,
+            serde_json::json!({
+                "type": "turn_context",
+                "payload": {
+                    "turn_id": "turn-1",
+                    "approval_policy": "on-request",
+                    "approvals_reviewer": "auto_review"
+                }
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
 
         let permission = build_event(
             v1::AgentAdapterKind::Codex,
@@ -1915,8 +1992,23 @@ mod tests {
                 "hook_event_name": "PermissionRequest",
                 "session_id": "session-1",
                 crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-1",
+                crate::service::agents::adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD: transcript,
             })
         );
+
+        let fallback = event_for_fallback(&permission, Some(home.path())).unwrap();
+        let fallback_payload: serde_json::Value =
+            serde_json::from_slice(&fallback.payload_json).unwrap();
+        assert_eq!(
+            fallback_payload,
+            serde_json::json!({
+                "hook_event_name": "PermissionRequest",
+                "session_id": "session-1",
+                crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-1",
+                crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD: "auto_review",
+            })
+        );
+        assert!(!String::from_utf8_lossy(&fallback.payload_json).contains("rollout.jsonl"));
     }
 
     #[tokio::test]
@@ -1937,7 +2029,7 @@ mod tests {
         )
         .unwrap();
 
-        deliver(std::slice::from_ref(&runtime), &event)
+        deliver(std::slice::from_ref(&runtime), &event, None)
             .await
             .unwrap();
         server.await.unwrap();
@@ -1963,7 +2055,7 @@ mod tests {
         )
         .unwrap();
 
-        deliver(std::slice::from_ref(&runtime), &event)
+        deliver(std::slice::from_ref(&runtime), &event, None)
             .await
             .unwrap();
         server.await.unwrap();
@@ -2013,7 +2105,7 @@ mod tests {
             None,
         )
         .unwrap();
-        deliver(&[first.clone(), second.clone()], &event)
+        deliver(&[first.clone(), second.clone()], &event, None)
             .await
             .unwrap();
         first_server.await.unwrap();
