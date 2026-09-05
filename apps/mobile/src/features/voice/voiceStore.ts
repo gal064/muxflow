@@ -31,7 +31,7 @@ export interface VoiceHostStatus {
   provision: ProvisionProgress | undefined;
 }
 
-export type VoicePhase = "idle" | "recording" | "recordingLocked" | "transcribing" | "sending";
+export type VoicePhase = "idle" | "recording" | "recordingLocked" | "canceling" | "transcribing" | "sending";
 
 export interface VoiceMessage {
   id: string;
