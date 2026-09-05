@@ -497,6 +497,25 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
     await expect(pending).resolves.toBeUndefined();
   });
+
+  it("forwards alternate-screen wheel input from the page and drops it while disconnected", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    const wheel = "\x1b[<64;10;12M";
+    h.controller.onPageMessage({ t: "input", b64: btoa(wheel) });
+    const [frame] = t.drain();
+    if (frame?.payload.case !== "request") throw new Error("expected page input");
+    expect(frame.payload.value).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1" });
+    expect(new TextDecoder().decode(frame.payload.value.data)).toBe(wheel);
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
+    await settle();
+
+    const disconnected = harness();
+    disconnected.controller.start();
+    disconnected.controller.onPageMessage({ t: "input", b64: btoa(wheel) });
+    expect(disconnected.transports).toHaveLength(0);
+  });
 });
 
 describe("TerminalController Send (§9.5)", () => {

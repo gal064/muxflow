@@ -22,6 +22,8 @@ export type FromPageMessage =
   | { t: "ready" }
   | { t: "size"; cols: number; rows: number; cellWidth?: number; cellHeight?: number }
   | { t: "written"; bytes: number }
+  /** Alternate-screen touch scrolling, encoded by xterm as mouse or cursor input. */
+  | { t: "input"; b64: string }
   /**
    * The reader hit the top of the buffer on the normal screen: `above` is how
    * many scrollback rows the page already holds, which becomes the request's
@@ -56,6 +58,8 @@ export function parseFromPageMessage(raw: string): FromPageMessage | undefined {
       };
     case "written":
       return { t: "written", bytes: typeof message.bytes === "number" ? message.bytes : 0 };
+    case "input":
+      return typeof message.b64 === "string" && message.b64.length > 0 ? { t: "input", b64: message.b64 } : undefined;
     case "atTop":
       return { t: "atTop", above: typeof message.above === "number" && message.above >= 0 ? Math.floor(message.above) : 0 };
     case "log":

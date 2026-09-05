@@ -6,6 +6,9 @@ import { PAGE_RECEIVE_FUNCTION, parseFromPageMessage, type FromPageMessage, type
 import { TERMINAL_HTML } from "./terminalHtml";
 import { colors } from "../../ui/tokens";
 
+const TERMINAL_DOCUMENT_ORIGIN = "https://terminal.muxflow.invalid";
+const TERMINAL_DOCUMENT_URL = `${TERMINAL_DOCUMENT_ORIGIN}/`;
+
 export interface TerminalWebViewHandle {
   send(message: ToPageMessage): void;
 }
@@ -25,6 +28,12 @@ export const TerminalWebView = forwardRef<TerminalWebViewHandle, { onMessage: (m
       },
     }), []);
     const handleMessage = useCallback((event: WebViewMessageEvent) => {
+      // `input` is a privileged bridge message: only the bundled terminal
+      // document may send it. Blocking navigation as well keeps an OSC link
+      // or `window.open` from replacing that document with an untrusted page.
+      // Modern Android reports the sender origin; older message paths report
+      // the document URL. Both identify the same fixed bundled document.
+      if (event.nativeEvent.url !== TERMINAL_DOCUMENT_ORIGIN && event.nativeEvent.url !== TERMINAL_DOCUMENT_URL) return;
       const message = parseFromPageMessage(event.nativeEvent.data);
       if (message) onMessage(message);
     }, [onMessage]);
@@ -40,11 +49,12 @@ export const TerminalWebView = forwardRef<TerminalWebViewHandle, { onMessage: (m
         nestedScrollEnabled
         onLoadEnd={onLoadEnd}
         onMessage={handleMessage}
-        originWhitelist={["*"]}
+        onShouldStartLoadWithRequest={(request) => request.url === TERMINAL_DOCUMENT_URL}
+        originWhitelist={[TERMINAL_DOCUMENT_ORIGIN]}
         overScrollMode="never"
         ref={webview}
         setSupportMultipleWindows={false}
-        source={{ html: TERMINAL_HTML }}
+        source={{ html: TERMINAL_HTML, baseUrl: TERMINAL_DOCUMENT_URL }}
         style={styles.webview}
         textZoom={100}
       />

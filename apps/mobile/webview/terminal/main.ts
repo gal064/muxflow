@@ -1,7 +1,8 @@
 // The terminal page (design doc §10.2): xterm.js fed by the app through the
 // bridge in ../../src/features/terminal/bridgeMessages.ts. Bundled by
 // scripts/build-webview.mjs into one self-contained HTML file. Nothing here
-// talks to a network; `onData` is deliberately not wired (§10.2).
+// talks to a network; input events are captured only while synthesizing an
+// alternate-screen wheel gesture (§10.2).
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -37,6 +38,8 @@ let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 /** Last time the top of the buffer was reported (§7.6.1); one report per 2 s. */
 let lastAtTopMs = 0;
 const AT_TOP_THROTTLE_MS = 2_000;
+/** Bounds synchronous xterm wheel encoding and the input batch to one frame's useful work. */
+const MAX_ALTERNATE_WHEEL_EVENTS_PER_FRAME = 8;
 
 function root(): HTMLElement {
   return document.getElementById("terminal") as HTMLElement;
@@ -99,6 +102,14 @@ async function init(): Promise<void> {
   fit = new FitAddon();
   term.loadAddon(fit);
   term.open(root());
+  // xterm already knows how a wheel should reach the application in an
+  // alternate screen: a mouse report when the TUI requested one, otherwise
+  // an up/down cursor sequence. Keep stdin disabled at rest so the WebView
+  // never becomes a second text-input surface; it is opened only around the
+  // synthetic wheel dispatch below.
+  let capturedWheelInput: string[] | undefined;
+  term.onData((data) => capturedWheelInput?.push(data));
+  term.onBinary((data) => capturedWheelInput?.push(data));
   // §7.6.1: reaching the top of the normal buffer asks the app for the
   // scrollback a screen-only seed left behind. The alternate screen has no
   // scrollback, and an empty buffer (nothing above the screen yet, or nothing
@@ -110,17 +121,57 @@ async function init(): Promise<void> {
   // to one repaint per animation frame and adds the short decaying fling a
   // native scrolling surface would normally provide.
   const el = root();
+  let touchX = 0;
+  let touchY = 0;
   const touchScroll = new TouchScrollController(
-    (rows) => term?.scrollLines(rows),
+    (rows) => {
+      if (!term) return;
+      if (term.buffer.active.type === "normal") {
+        term.scrollLines(rows);
+        return;
+      }
+      const element = term.element;
+      if (!element) return;
+      const input: string[] = [];
+      capturedWheelInput = input;
+      term.options.disableStdin = false;
+      try {
+        // One line-mode wheel event per row preserves the controller's tuned
+        // drag distance and fling while letting xterm select the active mouse
+        // protocol and encoding. The events are collected into one bridge
+        // message for this animation frame.
+        const wheelEvents = Math.min(Math.abs(rows), MAX_ALTERNATE_WHEEL_EVENTS_PER_FRAME);
+        for (let row = 0; row < wheelEvents; row += 1) {
+          element.dispatchEvent(new WheelEvent("wheel", {
+            bubbles: true,
+            cancelable: true,
+            clientX: touchX,
+            clientY: touchY,
+            deltaMode: WheelEvent.DOM_DELTA_LINE,
+            deltaY: Math.sign(rows),
+          }));
+        }
+      } finally {
+        term.options.disableStdin = true;
+        capturedWheelInput = undefined;
+      }
+      if (input.length > 0) post({ t: "input", b64: btoa(input.join("")) });
+    },
     { request: (callback) => requestAnimationFrame(callback), cancel: (id) => cancelAnimationFrame(id) },
   );
   el.addEventListener("touchstart", (event) => {
     const touch = event.touches[0];
-    if (touch) touchScroll.start(touch.clientY, event.timeStamp);
+    if (touch) {
+      touchX = touch.clientX;
+      touchY = touch.clientY;
+      touchScroll.start(touch.clientY, event.timeStamp);
+    }
   }, { passive: true });
   el.addEventListener("touchmove", (event) => {
     const touch = event.touches[0];
     if (!term || !touch) return;
+    touchX = touch.clientX;
+    touchY = touch.clientY;
     const cellHeight = lastGrid ? el.clientHeight / lastGrid.rows : NOMINAL_CELL.height;
     if (touchScroll.move(touch.clientY, event.timeStamp, cellHeight)) event.preventDefault();
   }, { passive: false });
