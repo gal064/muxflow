@@ -48,11 +48,11 @@ export function startNotifications(): void {
     // different one, routing the tap would open an unrelated pane; hold the
     // acknowledgement instead and let it flush if that host comes back.
     if (identity && target.serverIdentity && identity !== target.serverIdentity) {
-      log(`notifications: tap ${target.agentId} ignored (other host)`);
+      log(`notifications tap agent=${target.agentId} pane=${target.paneId} outcome=ignored-other-host`);
       markSeen.request(target);
       return;
     }
-    log(`notifications: tap ${target.agentId} pane=${target.paneId}`);
+    log(`notifications tap agent=${target.agentId} pane=${target.paneId} outcome=navigate`);
     openTerminal(target);
     markSeen.request(target);
   });
@@ -60,7 +60,7 @@ export function startNotifications(): void {
   const permission = createPermissionFlow({
     host,
     setPermission: (outcome) => {
-      log(`notifications: permission ${outcome}`);
+      log(`notifications permission=${outcome}`);
       notificationsUiStore.getState().setPermission(outcome);
     },
   });
@@ -89,10 +89,10 @@ function openTerminal(target: TapTarget): void {
   try {
     router.navigate(terminalRoute(target));
   } catch (error: unknown) {
-    log(`notifications: tap.navigate.failed ${error instanceof Error ? error.message : String(error)}`);
+    log(`notifications tap.navigate.failed ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 function reportFailure(what: string): (error: unknown) => void {
-  return (error) => log(`notifications: ${what}.failed ${error instanceof Error ? error.message : String(error)}`);
+  return (error) => log(`notifications ${what}.failed ${error instanceof Error ? error.message : String(error)}`);
 }

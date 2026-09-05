@@ -76,6 +76,7 @@ describe("bridge messages (§10.2)", () => {
     expect(parseFromPageMessage('{"t":"ready"}')).toEqual({ t: "ready" });
     expect(parseFromPageMessage('{"t":"written","bytes":12}')).toEqual({ t: "written", bytes: 12 });
     expect(parseFromPageMessage('{"t":"input","b64":"G1s8NjQ7MTsyTQ=="}')).toEqual({ t: "input", b64: "G1s8NjQ7MTsyTQ==" });
+    expect(parseFromPageMessage('{"t":"scroll","mode":"normal","rows":12.4,"durationMs":81.6,"cancelled":false}')).toEqual({ t: "scroll", mode: "normal", rows: 12, durationMs: 82, cancelled: false });
     expect(parseFromPageMessage('{"t":"input","b64":""}')).toBeUndefined();
     expect(parseFromPageMessage('{"t":"size"}')).toBeUndefined();
     expect(parseFromPageMessage("not json")).toBeUndefined();

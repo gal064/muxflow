@@ -21,6 +21,7 @@ import {
   type ServerHello,
   type VoiceResponse,
 } from "./gen/envelope_pb";
+import { logAgentTransitions } from "../features/agents/diagnostics";
 import { requestTerminalSeed, subscribeFull } from "./requests";
 import { jsBackgroundTimer, type BackgroundTimer, type BackgroundTimerHandle } from "./backgroundTimer";
 import { TransportDialError, type Transport, type TransportClose, type TransportCloseReason } from "./Transport";
@@ -649,8 +650,9 @@ export class HostConnection {
         break;
       case EventKind.AGENT_STATE: {
         if (event.agent) {
-          this.log(`agent.state reason=${event.agent.reason || "update"} retired=${event.agent.retiredAgentIds.length} update=${event.agent.agent ? "yes" : "no"}`);
+          const previousAgents = store.getState().agents;
           const transition = store.getState().applyAgentEvent(event.agent);
+          logAgentTransitions(previousAgents, store.getState().agents, `event:${event.agent.reason || "update"}`, store.getState().topologyGeneration, (line) => this.log(line));
           if (transition) this.options.onAgentTransition?.(transition);
         }
         break;
@@ -681,6 +683,7 @@ export class HostConnection {
     const store = this.options.store;
     const previousAgents = store.getState().agents;
     store.getState().applySnapshot(snapshot);
+    logAgentTransitions(previousAgents, store.getState().agents, "snapshot", snapshot.generation, (line) => this.log(line));
     if (snapshot.agents?.authoritative && this.options.onAgentTransition) {
       for (const agent of Object.values(store.getState().agents)) {
         this.options.onAgentTransition({ prev: previousAgents[agent.id], next: agent });
