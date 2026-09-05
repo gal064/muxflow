@@ -6,6 +6,7 @@
 // purpose: importing it costs nothing until a Voice screen opens (§2c).
 
 import { EventKind, type HostEvent } from "../../protocol/gen/envelope_pb";
+import { log } from "../../session/log";
 import { VoiceController, type VoiceControllerOptions } from "./VoiceController";
 import { provisionFromProto, voiceStore, type VoiceStore } from "./voiceStore";
 
@@ -81,4 +82,4 @@ export class VoiceRegistry {
   }
 }
 
-export const voiceRegistry = new VoiceRegistry(voiceStore);
+export const voiceRegistry = new VoiceRegistry(voiceStore, log);

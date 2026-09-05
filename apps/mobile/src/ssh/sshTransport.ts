@@ -188,7 +188,9 @@ export function openSshTransport(options: SshTransportOptions): Promise<Transpor
         }
         case "stderr":
           firstStderr ??= firstStderrLine(event.text);
-          log(`stderr ${event.text.trim()}`);
+          // Remote stderr is untrusted free-form content. Keep it for the
+          // user-visible close message, but never put it in copied diagnostics.
+          log(`stderr chars=${event.text.length}`);
           return;
         case "closed":
           finish(event);

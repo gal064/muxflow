@@ -273,6 +273,28 @@ describe("TerminalController scrollback paging (§7.6.1)", () => {
   });
 });
 
+describe("TerminalController diagnostic summaries", () => {
+  it("records one content-free layout and scroll summary with correlation ids", async () => {
+    const lines: string[] = [];
+    const h = harness({ log: (line) => lines.push(line) });
+    h.store.getState().applySnapshot(topologySnapshot());
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 40, rows: 20, cellWidth: 8, cellHeight: 16 });
+    h.controller.onPageMessage({ t: "size", cols: 40, rows: 20, cellWidth: 8.25, cellHeight: 16.5 });
+    h.controller.onPageMessage({ t: "scroll", mode: "normal", rows: 12, durationMs: 180, cancelled: false });
+    h.registry.output("%1", new TextEncoder().encode("terminal contents must stay out"), 1n);
+    await h.controller.stop();
+    expect(lines.filter((line) => line.includes(" layout "))).toHaveLength(2);
+    expect(lines.filter((line) => line.includes(" layout ")).at(-1)).toContain("viewport=330x330 xterm=40x20 sent=none host=80x24");
+    expect(lines.filter((line) => line.includes(" scroll "))).toEqual([
+      "[muxflow] terminal pane=%1 session=$1 topology=1 scroll mode=normal rows=12 durationMs=180 cancelled=false viewport=330x330 xterm=40x20 sent=none host=80x24",
+    ]);
+    expect(lines).toContain("[muxflow] terminal pane=%1 session=$1 topology=1 screen.focus");
+    expect(lines).toContain("[muxflow] terminal pane=%1 session=$1 topology=1 screen.blur");
+    expect(lines.join("\n")).not.toContain("terminal contents must stay out");
+  });
+});
+
 describe("TerminalController attach lifecycle (§7.6)", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());

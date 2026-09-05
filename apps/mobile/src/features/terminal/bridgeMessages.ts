@@ -30,6 +30,8 @@ export type FromPageMessage =
    * `skip`. Throttled by the page; the controller decides whether to ask.
    */
   | { t: "atTop"; above: number }
+  /** One content-free summary after a touch gesture; never emitted per move/frame. */
+  | { t: "scroll"; mode: "normal" | "alternate"; rows: number; durationMs: number; cancelled: boolean }
   | { t: "log"; line: string };
 
 /** Name of the page-global the app calls through `injectJavaScript`. */
@@ -62,6 +64,15 @@ export function parseFromPageMessage(raw: string): FromPageMessage | undefined {
       return typeof message.b64 === "string" && message.b64.length > 0 ? { t: "input", b64: message.b64 } : undefined;
     case "atTop":
       return { t: "atTop", above: typeof message.above === "number" && message.above >= 0 ? Math.floor(message.above) : 0 };
+    case "scroll":
+      if ((message.mode !== "normal" && message.mode !== "alternate") || typeof message.rows !== "number" || typeof message.durationMs !== "number") return undefined;
+      return {
+        t: "scroll",
+        mode: message.mode,
+        rows: Math.round(message.rows),
+        durationMs: Math.max(0, Math.round(message.durationMs)),
+        cancelled: message.cancelled === true,
+      };
     case "log":
       return { t: "log", line: typeof message.line === "string" ? message.line : "" };
     default:

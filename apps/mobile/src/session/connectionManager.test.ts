@@ -3,7 +3,8 @@ import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot 
 import { sessionStore } from "../store/sessionStore";
 import type { SavedHost } from "../store/hostsStore";
 import { createMuxflowSsh, type NativeMuxflowSshModule } from "../ssh/MuxflowSsh";
-import { connectHost, disconnectHost, getConnection, openBulkConnection, setForegroundService, setTransportFactory } from "./connectionManager";
+import { connectHost, disconnectHost, getConnection, onToast, openBulkConnection, setForegroundService, setTransportFactory, toast } from "./connectionManager";
+import { logStore } from "./log";
 
 const host: SavedHost = { id: "h1", label: "Dev box", host: "dev.local", port: 22, user: "dev", trustedHostKeyFingerprint: null, connectionEpoch: 0, lastConnectedAtMs: null };
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -81,6 +82,17 @@ describe("connectionManager", () => {
     expect(sessionStore.getState().connection).toMatchObject({ state: "connected", host: { label: "Dev box" } });
     expect(getConnection()?.connectionEpoch).toBe(epoch);
     expect(epoch).toBeGreaterThanOrEqual(1n);
+  });
+
+  it("shows host-provided toast text without copying that content into diagnostics", () => {
+    const shown: string[] = [];
+    const unsubscribe = onToast((message) => shown.push(message));
+    logStore.getState().clear();
+    toast("prompt=private host content");
+    unsubscribe();
+    expect(shown).toEqual(["prompt=private host content"]);
+    expect(logStore.getState().lines.at(-1)).toContain("toast shown chars=27");
+    expect(logStore.getState().lines.join("\n")).not.toContain("private host content");
   });
 
   it("opens the bulk lane bound to the control epoch, without Subscribe, and memoises it", async () => {

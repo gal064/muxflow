@@ -40,6 +40,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
   let canSubmit = true;
   let autoPlay = true;
   const toasts: string[] = [];
+  const logs: string[] = [];
   const controller = new VoiceController({
     tailHoldMs: 0,
     submitDelayMs,
@@ -57,6 +58,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
     haptics,
     tones,
     toast: (message) => toasts.push(message),
+    log: (line) => logs.push(line),
     now: () => Date.now(),
   });
   return {
@@ -69,6 +71,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
     tones,
     controller,
     toasts,
+    logs,
     setForeground: (value: boolean) => { foreground = value; },
     setCanSubmit: (value: boolean) => { canSubmit = value; },
     setAutoPlay: (value: boolean) => { autoPlay = value; controller.setAutoPlay(value); },
@@ -129,6 +132,14 @@ describe("VoiceController", () => {
     expect(h.player.loaded).toBe("file:///cache/voice/agent-a.mp3");
     expect(h.player.calls.filter((c) => c === "play")).toHaveLength(1);
     expect(h.store.getState().playback).toMatchObject({ messageId: latest.id, state: "playing" });
+    const diagnostics = h.logs.join("\n");
+    expect(diagnostics).toContain("voice agent=agent-a pane=%3 session=$1 recorder.started actual=recording");
+    expect(diagnostics).toContain("submission.ack message=agent-a:");
+    expect(diagnostics).toContain("reply message=agent-a:");
+    expect(diagnostics).not.toContain("list the files in this directory");
+    expect(diagnostics).not.toContain("Here are the files.");
+    expect(diagnostics).not.toContain("aac-bytes");
+    expect(diagnostics).not.toContain("mp3-bytes");
 
     // Background: the second reply replaces the first file, stops its playback, and stays unplayed.
     h.setForeground(false);
@@ -423,6 +434,8 @@ describe("VoiceController against a host that is not set up (review round 1)", (
     await settle();
     expect(h.store.getState().hostStatus).toMatchObject({ readiness: "modelMissing", detail: "model not provisioned" });
     expect(h.toasts).toEqual([]);
+    expect(h.logs.join("\n")).toContain("session.refused type=HostError code=voice_model_missing");
+    expect(h.logs.join("\n")).not.toContain("model not provisioned");
     await vi.advanceTimersByTimeAsync(SESSION_REFRESH_MS * 2);
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(1);
     expect(h.toasts).toEqual([]);
@@ -433,6 +446,7 @@ describe("VoiceController against a host that is not set up (review round 1)", (
     await settle();
     expect(h.store.getState().hostStatus).toMatchObject({ readiness: "uvMissing", detail: "install uv: curl ..." });
     expect(h.toasts).toEqual([]);
+    expect(h.logs.join("\n")).not.toContain("install uv: curl");
     // End on a never-registered session sends no clear.
     await h.controller.endSession();
     expect(h.connection.of(Operation.VOICE_SESSION).every((r) => r.voice?.agentId === "agent-a")).toBe(true);
