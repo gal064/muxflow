@@ -1,4 +1,5 @@
 import { useFocusEffect, useRouter } from "expo-router";
+import { useKeepAwake } from "expo-keep-awake";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -66,7 +67,10 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const playbackRate = useStore(prefsStore, (s) => s.voicePlaybackRate);
   const autoPlay = useStore(prefsStore, (s) => s.voiceAutoPlay);
   const bigPane = useStore(prefsStore, (s) => s.voiceBigPane);
+  const keepScreenAwake = useStore(prefsStore, (s) => s.voiceKeepAwake);
   const [confirmEnd, setConfirmEnd] = useState(false);
+  const [screenFocused, setScreenFocused] = useState(false);
+  const [appActive, setAppActive] = useState(AppState.currentState === "active");
   const list = useRef<ScrollView>(null);
 
   const open = useCallback((): VoiceController => voiceRegistry.open({
@@ -94,13 +98,20 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   useFocusEffect(useCallback(() => {
     const live = controller.isDisposed ? open() : controller;
     if (live !== controller) setController(live);
+    setScreenFocused(true);
     live.focus();
-    return () => live.blur();
+    return () => {
+      setScreenFocused(false);
+      live.blur();
+    };
   }, [controller, open]));
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (next) => {
-      if (next === "active") controller.onAppActive();
+      const active = next === "active";
+      setAppActive(active);
+      if (active) controller.onAppActive();
+      else controller.onAppInactive();
     });
     return () => subscription.remove();
   }, [controller]);
@@ -150,6 +161,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
 
   return (
     <View style={[styles.root, { paddingBottom: insets.bottom, paddingTop: insets.top }]}>
+      {keepScreenAwake && screenFocused && appActive ? <VoiceWakeLock /> : null}
       <ConnectionStrip />
       <View style={styles.header}>
         <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={() => router.back()} style={styles.iconButton}>
@@ -205,11 +217,23 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         <MicButton
           disabled={micDisabled}
           hint={hint}
+          onCancel={() => void controller.cancelUtterance()}
+          onLock={() => controller.lockUtterance()}
           onPressIn={() => controller.beginUtterance()}
           onPressOut={() => void controller.endUtterance()}
           phase={phase}
         />
       </View>
+
+      {phase === "recordingLocked" ? (
+        <Pressable
+          accessibilityHint="Stops recording and sends it"
+          accessibilityLabel="Stop and send locked recording"
+          accessibilityRole="button"
+          onPressIn={() => void controller.endUtterance()}
+          style={styles.lockedStopTarget}
+        />
+      ) : null}
 
       <Dialog
         actions={[
@@ -223,6 +247,11 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
       />
     </View>
   );
+}
+
+function VoiceWakeLock() {
+  useKeepAwake("muxflow-voice-screen", { suppressDeactivateWarnings: true });
+  return null;
 }
 
 /** One turn. Agent replies collapse to three lines; tap to expand. The newest reply carries the player. */
@@ -258,6 +287,7 @@ const MessageBubble = memo(function MessageBubble({ message, controller }: { mes
 
 
 const styles = StyleSheet.create({
+  lockedStopTarget: { bottom: 0, left: 0, position: "absolute", right: 0, top: 0, zIndex: 10 },
   root: { backgroundColor: colors.chromeBg, flex: 1 },
   header: {
     alignItems: "center",
