@@ -13,8 +13,6 @@ import { useSession } from "../../ui/hooks";
 import { colors, typeScale } from "../../ui/tokens";
 import { createTerminalWindow } from "./createWindow";
 
-const NEW_PANE_TOPOLOGY_WAIT_MS = 3_000;
-
 interface WorkspaceActionsSheetProps {
   sessionId: string | undefined;
   title: string | undefined;
@@ -43,8 +41,18 @@ export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss }: 
     setCreating(kind);
     try {
       const created = await createTerminalWindow(connection, sessionStore, sessionId, command);
-      await waitForPane(created.paneId, NEW_PANE_TOPOLOGY_WAIT_MS);
-      router.push({ pathname: "/terminal/[paneId]", params: { paneId: toRouteParam(created.paneId), sessionId: toRouteParam(sessionId) } });
+      // CREATE_WINDOW returns an authoritative pane identity before its
+      // TOPOLOGY_SNAPSHOT reaches the phone. Carry that generation to the
+      // terminal so a delayed snapshot cannot make the newly-created pane
+      // look gone while it is attaching.
+      router.push({
+        pathname: "/terminal/[paneId]",
+        params: {
+          paneId: toRouteParam(created.paneId),
+          sessionId: toRouteParam(sessionId),
+          createdGeneration: created.topologyGeneration.toString(),
+        },
+      });
     } catch (error) {
       toast(`Couldn't open ${kind === "agent" ? "an agent" : "a terminal"}: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -69,22 +77,6 @@ function SheetAction({ label, onPress, disabled, busy }: { label: string; onPres
       {busy ? <ActivityIndicator color={colors.accent} size="small" /> : null}
     </Pressable>
   );
-}
-
-function waitForPane(paneId: string, timeoutMs: number): Promise<void> {
-  return new Promise((resolve) => {
-    if (sessionStore.getState().panes[paneId]) return resolve();
-    const timer = setTimeout(() => {
-      unsubscribe();
-      resolve();
-    }, timeoutMs);
-    const unsubscribe = sessionStore.subscribe((state) => {
-      if (!state.panes[paneId]) return;
-      clearTimeout(timer);
-      unsubscribe();
-      resolve();
-    });
-  });
 }
 
 const styles = StyleSheet.create({

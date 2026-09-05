@@ -31,8 +31,8 @@ describe("New terminal (§9.4, §7.5)", () => {
     if (frame?.payload.case !== "request") throw new Error("expected a request");
     expect(frame.payload.value.operation).toBe(Operation.TMUX_ACTION);
     expect(frame.payload.value.tmuxAction).toMatchObject({ sessionId: "$1", expectedServerIdentity: "server-a", expectedGeneration: 7n, command: "codex --full-auto" });
-    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { windowId: "@9", paneId: "%9" }) }) }, { requestId: frame.requestId }));
-    await expect(pending).resolves.toEqual({ windowId: "@9", paneId: "%9" });
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { windowId: "@9", paneId: "%9", topologyGeneration: 8n }) }) }, { requestId: frame.requestId }));
+    await expect(pending).resolves.toEqual({ windowId: "@9", paneId: "%9", topologyGeneration: 8n });
   });
 
   it("retries once on stale_topology, waiting for the snapshot that follows the refusal", async () => {
@@ -49,8 +49,8 @@ describe("New terminal (§9.4, §7.5)", () => {
     const [second] = transport.drain();
     if (second?.payload.case !== "request") throw new Error("expected a retry");
     expect(second.payload.value.tmuxAction?.expectedGeneration).toBe(8n);
-    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { windowId: "@2", paneId: "%2" }) }) }, { requestId: second.requestId }));
-    await expect(pending).resolves.toEqual({ windowId: "@2", paneId: "%2" });
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({ tmuxActionResult: create(TmuxActionResultSchema, { windowId: "@2", paneId: "%2", topologyGeneration: 9n }) }) }, { requestId: second.requestId }));
+    await expect(pending).resolves.toEqual({ windowId: "@2", paneId: "%2", topologyGeneration: 9n });
   });
 
   it("gives up after a second stale_topology and surfaces other errors untouched", async () => {
