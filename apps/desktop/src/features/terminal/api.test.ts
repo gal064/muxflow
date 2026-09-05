@@ -148,6 +148,22 @@ describe("binary terminal IPC", () => {
     expect(() => decodeTerminalEvent(frame(10, "terminal", 1, u64(7)))).toThrow("sequence zero");
   });
 
+  it("carries the exact native resync trigger on the local state frame", () => {
+    expect(decodeTerminalEvent(frame(
+      6,
+      "resyncing",
+      0,
+      textEncoder.encode("sequence gap: expected 41, received 44"),
+    ))).toEqual({
+      kind: "connectionState",
+      state: "resyncing",
+      sequence: 0,
+      detail: "sequence gap: expected 41, received 44",
+    });
+    expect(() => decodeTerminalEvent(frame(6, "resyncing", 0, Uint8Array.from([0xff]))))
+      .toThrow("not valid UTF-8");
+  });
+
   it("preserves authoritative snapshot metadata and rejects split sequence metadata", () => {
     const payload = textEncoder.encode(JSON.stringify({
       snapshot: { sessions: [], windows: [], panes: [] }, sequence: 12, generation: 7,

@@ -50,6 +50,7 @@ pub(super) fn supervise_bridge(
                 &channel,
                 TerminalEvent::ConnectionState {
                     state: "reconnecting".into(),
+                    detail: None,
                 },
             );
         }
@@ -116,6 +117,7 @@ pub(super) fn supervise_bridge(
             &channel,
             TerminalEvent::ConnectionState {
                 state: "disconnected".into(),
+                detail: None,
             },
         );
         attempt = next_reconnect_attempt(attempt, connected_at.map(|at| at.elapsed()));
@@ -286,6 +288,7 @@ fn run_bridge_once(
             channel,
             TerminalEvent::ConnectionState {
                 state: "readOnly".into(),
+                detail: None,
             },
         );
     } else if let Some((attach_session, attach_panes)) = terminal_scope_value
@@ -328,6 +331,7 @@ fn run_bridge_once(
                 channel,
                 TerminalEvent::ConnectionState {
                     state: "connected".into(),
+                    detail: None,
                 },
             );
         }
@@ -580,6 +584,7 @@ fn read_protocol_stream(
                     channel,
                     TerminalEvent::ConnectionState {
                         state: "connected".into(),
+                        detail: None,
                     },
                 );
                 continue;
@@ -635,13 +640,17 @@ fn read_protocol_stream(
                     )?;
                 }
             }
-            Err(error) if error.starts_with("sequence gap") || error == "host requested resync" => {
+            Err(error)
+                if error.starts_with("sequence gap")
+                    || error.starts_with("host requested resync") =>
+            {
                 quarantined_charge.accumulate(charge);
                 client.ready.store(false, Ordering::Release);
                 send_event(
                     channel,
                     TerminalEvent::ConnectionState {
                         state: "resyncing".into(),
+                        detail: Some(error),
                     },
                 );
                 let request_id = client.next_request_id.fetch_add(1, Ordering::AcqRel);
@@ -821,7 +830,14 @@ fn process_event(
             event_sequence,
             TerminalEvent::TopologyDirty { name: event.detail },
         )?,
-        v1::EventKind::ResyncRequired => return Err("host requested resync".into()),
+        v1::EventKind::ResyncRequired => {
+            let detail = event.detail.trim();
+            return Err(if detail.is_empty() {
+                "host requested resync".into()
+            } else {
+                format!("host requested resync: {detail}")
+            });
+        }
         v1::EventKind::TerminalResnapshotRequired => {
             if let Some(pane_id) = scoped_terminal_recovery(&event.scope) {
                 send_protocol_event(channel, event_sequence, TerminalEvent::ProtocolProgress)?;
@@ -895,9 +911,17 @@ fn process_event(
         }
         v1::EventKind::TerminalSeed | v1::EventKind::TerminalOutput => {
             let terminal = event.terminal.ok_or("terminal event omitted bytes")?;
-            let value = if v1::EventKind::try_from(event.kind).unwrap_or_default()
-                == v1::EventKind::TerminalSeed
-            {
+            let kind = v1::EventKind::try_from(event.kind).unwrap_or_default();
+            if kind == v1::EventKind::TerminalOutput {
+                crate::perf_log::input_timing::record_terminal_output_received(
+                    client.terminal_epoch.load(Ordering::Acquire),
+                    event_sequence,
+                    &terminal.pane_id,
+                    terminal.generation,
+                    terminal.data.len(),
+                );
+            }
+            let value = if kind == v1::EventKind::TerminalSeed {
                 TerminalEvent::Seed {
                     pane_id: terminal.pane_id,
                     generation: terminal.generation,

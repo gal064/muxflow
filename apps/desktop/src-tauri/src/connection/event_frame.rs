@@ -34,6 +34,9 @@ pub(super) enum TerminalEvent {
     },
     ConnectionState {
         state: String,
+        /// Why this transition happened when the state alone is ambiguous.
+        /// Present for `resyncing`; absent for routine lifecycle transitions.
+        detail: Option<String>,
     },
     ProtocolProgress,
     PaneResource {
@@ -154,7 +157,12 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
         TerminalEvent::TopologyDirty { name } => encode_empty(3, name, sequence),
         TerminalEvent::Error { message } => encode_empty(4, message, sequence),
         TerminalEvent::Exit { reason } => encode_empty(5, reason, sequence),
-        TerminalEvent::ConnectionState { state } => encode_empty(6, state, sequence),
+        TerminalEvent::ConnectionState { state, detail } => {
+            let detail = detail.unwrap_or_default().into_bytes();
+            encode_parts(6, &state, sequence, detail.len(), |frame| {
+                frame.extend_from_slice(&detail);
+            })
+        }
         TerminalEvent::ProtocolProgress => encode_empty(8, "protocol".into(), sequence),
         TerminalEvent::PaneResource {
             pane_id,

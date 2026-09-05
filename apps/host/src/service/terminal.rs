@@ -426,6 +426,8 @@ fn membership_delta(
 }
 
 pub(super) struct TerminalClients {
+    /// Opaque connection identity used only to correlate safe diagnostic lines.
+    connection_epoch: u64,
     clients: HashMap<String, TerminalAttachment>,
     visible_session: Option<String>,
     /// The last size the desktop asked for, kept so the *next* client to
@@ -486,11 +488,21 @@ pub(super) struct TerminalClients {
 }
 
 impl TerminalClients {
+    #[cfg(test)]
     pub(super) fn new(
         output_credit: Arc<OutputCredit>,
         topology_trigger: TopologyOutputTrigger,
     ) -> Self {
+        Self::for_connection(output_credit, topology_trigger, 0)
+    }
+
+    pub(super) fn for_connection(
+        output_credit: Arc<OutputCredit>,
+        topology_trigger: TopologyOutputTrigger,
+        connection_epoch: u64,
+    ) -> Self {
         Self {
+            connection_epoch,
             topology_trigger,
             clients: HashMap::new(),
             visible_session: None,
@@ -570,6 +582,7 @@ impl TerminalClients {
             session_id,
             pane_ids,
             AttachmentRuntime {
+                connection_epoch: self.connection_epoch,
                 event_tx: event_tx.clone(),
                 overflowed: Arc::clone(&overflowed),
                 resources: Arc::clone(&self.resources),
@@ -754,13 +767,17 @@ impl TerminalClients {
             // in: the claim recomputes the windows from the size this client
             // holds, so it is only ever correct once that size has landed.
             if claim && client.claim_latest(session_id)? {
-                crate::diagnostics::write_sizing_latest_claim_log(session_id);
+                crate::diagnostics::write_sizing_latest_claim_log(
+                    self.connection_epoch,
+                    session_id,
+                );
             }
             Ok(())
         })();
         // Both writes go to a pipe, and a pipe write tmux ignores still
         // succeeds, so this is the only record that the handoff happened at all.
         crate::diagnostics::write_terminal_sizing_handoff_log(
+            self.connection_epoch,
             previous.as_deref(),
             session_id,
             last_size,
@@ -774,6 +791,7 @@ impl TerminalClients {
         pane_id: &str,
         data: &[u8],
         delivery: InputDelivery,
+        timing: crate::diagnostics::HostInputTiming,
     ) -> anyhow::Result<()> {
         self.clients
             .values_mut()
@@ -782,7 +800,7 @@ impl TerminalClients {
         self.input
             .as_mut()
             .context("persistent terminal input client is not attached")?
-            .send_input(pane_id, data, delivery)
+            .send_input(pane_id, data, delivery, timing)
     }
 
     pub(super) fn flush_input(&mut self) -> anyhow::Result<()> {
@@ -824,7 +842,7 @@ impl TerminalClients {
                 .context("visible session control client is detached")?
                 .claim_latest(&session_id)?
         {
-            crate::diagnostics::write_sizing_latest_claim_log(&session_id);
+            crate::diagnostics::write_sizing_latest_claim_log(self.connection_epoch, &session_id);
         }
         Ok(())
     }
@@ -841,6 +859,7 @@ impl TerminalClients {
         validate_tmux_id(session_id, '$')?;
         if !self.clients.contains_key(session_id) {
             crate::diagnostics::write_terminal_sizing_handoff_log(
+                self.connection_epoch,
                 self.visible_session.as_deref(),
                 session_id,
                 self.last_size,
@@ -866,6 +885,7 @@ impl TerminalClients {
             // happen is exactly the kind of thing the handoff log exists for.
             if let Err(error) = client.set_sizing(false) {
                 crate::diagnostics::write_terminal_sizing_handoff_log(
+                    self.connection_epoch,
                     previous_id.as_deref(),
                     session_id,
                     self.last_size,

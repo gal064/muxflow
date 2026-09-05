@@ -239,6 +239,12 @@ impl StreamHarness {
 
     /// The next frame the loop published, as (kind, label, sequence).
     fn frame(&self) -> (u8, String, u64) {
+        let (kind, label, sequence, _) = self.frame_with_payload();
+        (kind, label, sequence)
+    }
+
+    /// The next frame plus its opaque payload, for state-detail assertions.
+    fn frame_with_payload(&self) -> (u8, String, u64, Vec<u8>) {
         let frame = self
             .frames
             .recv_timeout(Duration::from_secs(5))
@@ -246,7 +252,7 @@ impl StreamHarness {
         let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
         let label = String::from_utf8(frame[3..3 + label_len].to_vec()).unwrap();
         let sequence = u64::from_be_bytes(frame[3 + label_len..11 + label_len].try_into().unwrap());
-        (frame[0], label, sequence)
+        (frame[0], label, sequence, frame[11 + label_len..].to_vec())
     }
 
     fn next_control(&mut self) -> v1::Envelope {
@@ -311,6 +317,18 @@ fn charged_output(sequence: u64, bytes: &[u8]) -> v1::Envelope {
     )
 }
 
+fn resync_required(sequence: u64, detail: &str) -> v1::Envelope {
+    envelope(
+        0,
+        sequence,
+        Payload::Event(v1::HostEvent {
+            kind: v1::EventKind::ResyncRequired.into(),
+            detail: detail.into(),
+            ..Default::default()
+        }),
+    )
+}
+
 fn resync_response(request_id: u64, accepted_sequence: u64) -> v1::Envelope {
     envelope(
         request_id,
@@ -342,7 +360,12 @@ fn a_resync_barrier_resumes_the_same_run_instead_of_reconnecting() {
         // The event that trips the gap is refused before it is forwarded, so
         // nothing of it reaches the renderer.
         harness.send(&charged_output(gap_at, b"lost!"));
-        assert_eq!(harness.frame(), (6, "resyncing".into(), 0));
+        let (kind, label, sequence, detail) = harness.frame_with_payload();
+        assert_eq!((kind, label, sequence), (6, "resyncing".into(), 0));
+        assert_eq!(
+            String::from_utf8(detail).unwrap(),
+            format!("sequence gap: expected {}, received {gap_at}", gap_at - 1)
+        );
 
         let request = harness.next_request();
         let Some(Payload::Request(resync)) = &request.payload else {
@@ -380,6 +403,25 @@ fn a_resync_barrier_resumes_the_same_run_instead_of_reconnecting() {
         assert_eq!(harness.frame(), (3, "resumed".into(), resumed_at));
     }
 
+    assert_eq!(harness.finish(), Err("host bridge closed".into()));
+}
+
+#[test]
+fn a_host_requested_resync_preserves_its_exact_reason_for_the_journal() {
+    let mut harness = StreamHarness::start(0);
+    harness.send(&resync_required(1, "terminal event queue overflowed"));
+
+    let (kind, label, sequence, detail) = harness.frame_with_payload();
+    assert_eq!((kind, label, sequence), (6, "resyncing".into(), 0));
+    assert_eq!(
+        String::from_utf8(detail).unwrap(),
+        "host requested resync: terminal event queue overflowed"
+    );
+
+    let request = harness.next_request();
+    harness.send(&resync_response(request.request_id, 1));
+    assert_eq!(harness.frame(), (7, "snapshot".into(), 1));
+    assert_eq!(harness.frame(), (6, "connected".into(), 0));
     assert_eq!(harness.finish(), Err("host bridge closed".into()));
 }
 

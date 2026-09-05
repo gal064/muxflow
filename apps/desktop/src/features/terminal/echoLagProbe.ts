@@ -76,6 +76,10 @@ export interface EchoLinkCounters {
 export interface EchoAhead {
   bytesAhead?: number;
   framesAhead?: number;
+  /** Exact host output frame which closed this measurement. */
+  outputSequence?: number;
+  outputGeneration?: number;
+  connectionEpoch?: number;
 }
 
 /**
@@ -130,7 +134,7 @@ export interface EchoLagProbe {
   /** One batch of input bytes was dispatched to `paneId`. */
   noteInput(paneId: string): void;
   /** Output, a seed, or restored content was delivered to `paneId`. */
-  noteOutput(paneId: string): void;
+  noteOutput(paneId: string, output?: { sequence: number; generation: number; connectionEpoch?: number }): void;
   /**
    * Forgets every open measurement and every per-pane memory. Pane ids repeat
    * across hosts, so a host switch must not let the new host's `%1` painting
@@ -224,17 +228,24 @@ export function createEchoLagProbe({
       if (before) lastSampleAt.set(paneId, t0);
       pending.set(paneId, { t0, inputCount: 1, timer, before });
     },
-    noteOutput(paneId) {
+    noteOutput(paneId, output) {
       const open = pending.get(paneId);
       if (!open) return;
       pending.delete(paneId);
       clearTimeout(open.timer);
       const echoAt = now();
       const lagMs = echoAt - open.t0;
+      const outputIdentity = output
+        ? {
+          outputSequence: output.sequence,
+          outputGeneration: output.generation,
+          connectionEpoch: output.connectionEpoch,
+        }
+        : {};
       onSample?.(paneId, lagMs);
       const outlier = lagMs > ECHO_LAG_THRESHOLD_MS;
       if (!open.before) {
-        if (outlier) report({ kind: "input.echoLag", paneId, lagMs, inputCount: open.inputCount });
+        if (outlier) report({ kind: "input.echoLag", paneId, lagMs, inputCount: open.inputCount, ...outputIdentity });
         return;
       }
       // A measurement that cannot read its counters still reports the lag: a
@@ -242,9 +253,9 @@ export function createEchoLagProbe({
       void ahead(open.before)
         .catch(() => ({}) as EchoAhead)
         .then((counters) => {
-          onEcho?.({ paneId, sentAt: open.t0, echoAt, lagMs, inputCount: open.inputCount, ...counters });
+          onEcho?.({ paneId, sentAt: open.t0, echoAt, lagMs, inputCount: open.inputCount, ...counters, ...outputIdentity });
           if (outlier) {
-            report({ kind: "input.echoLag", paneId, lagMs, inputCount: open.inputCount, ...counters });
+            report({ kind: "input.echoLag", paneId, lagMs, inputCount: open.inputCount, ...counters, ...outputIdentity });
           }
         });
     },

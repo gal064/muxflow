@@ -295,8 +295,11 @@ export function useAppConnectionController({
     // The fast baseline the outlier lines have to be compared against. It goes
     // to the perf log rather than the journal: `input.echoLag` is the incident,
     // this is the measurement.
-    onEcho: ({ paneId, sentAt, echoAt, lagMs, inputCount, bytesAhead, framesAhead }) =>
-      recordPerfRecord("perf.echo", { paneId, sentAt, echoAt, lagMs, inputCount, bytesAhead, framesAhead }),
+    onEcho: ({ paneId, sentAt, echoAt, lagMs, inputCount, bytesAhead, framesAhead, outputSequence, outputGeneration, connectionEpoch }) =>
+      recordPerfRecord("perf.echo", {
+        paneId, sentAt, echoAt, lagMs, inputCount, bytesAhead, framesAhead,
+        outputSequence, outputGeneration, connectionEpoch,
+      }),
     onIncident: ({ kind, ...detail }) => {
       // The probe has already applied its own threshold and its own per-pane
       // dedupe, so an outlier here is exactly one occasion of "the host
@@ -350,7 +353,11 @@ export function useAppConnectionController({
       },
       // The probe is keyed by pane id, and pane ids repeat across hosts: only
       // the host the user is typing on may close its round trips.
-      (paneId) => { if (profileId === activeProfileIdRef.current) echoLagProbe.noteOutput(paneId); },
+      (paneId, sequence, generation, connectionEpoch) => {
+        if (profileId === activeProfileIdRef.current) {
+          echoLagProbe.noteOutput(paneId, { sequence, generation, connectionEpoch });
+        }
+      },
     );
     runtime = { hub, phase: "disconnected", resyncActive: false };
     runtimes.current.set(profileId, runtime);
@@ -754,6 +761,12 @@ export function useAppConnectionController({
             handshakeFailureRef.current?.(linkConnection);
           }
         } else if (event.kind === "connectionState") {
+          if (event.state === "resyncing") {
+            recordIncident("link.resyncStarted", {
+              hostProfileId: profileId,
+              reason: event.detail ?? "resync reason unavailable",
+            });
+          }
           // Let helper reconciliation observe the active host's transport
           // transition before publishing it to the shell. React batches both
           // updates, so a live or read-only helper probe can arbitrate against

@@ -131,6 +131,48 @@ pub(crate) mod operations {
     }
 }
 
+/// Zero-cost twin of the native input timeline. The real type owns the pane
+/// label and clock stamps only in an opted-in measurement build.
+pub(crate) mod input_timing {
+    use std::time::Duration;
+
+    pub(crate) struct DesktopInputTiming;
+
+    impl DesktopInputTiming {
+        #[inline(always)]
+        pub(crate) fn begin(
+            _pane_id: &str,
+            _bytes: usize,
+            _messages: usize,
+            _oldest_queue: Duration,
+            _newest_queue: Duration,
+        ) -> Self {
+            Self
+        }
+
+        #[inline(always)]
+        pub(crate) fn finish(
+            self,
+            _request_id: u64,
+            _connection_epoch: u64,
+            _control_queue: Duration,
+            _bridge_write: Duration,
+            _control_queue_depth: usize,
+        ) {
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn record_terminal_output_received(
+        _connection_epoch: u64,
+        _sequence: u64,
+        _pane_id: &str,
+        _generation: u64,
+        _bytes: usize,
+    ) {
+    }
+}
+
 pub(crate) mod sink {
     #[tauri::command]
     pub fn perf_log_enabled() -> bool {

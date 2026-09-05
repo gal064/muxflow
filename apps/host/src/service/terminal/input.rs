@@ -77,6 +77,7 @@ pub(super) enum InputDispatch {
         pane_id: String,
         data: Vec<u8>,
         delivery: InputDelivery,
+        timing: crate::diagnostics::HostInputTiming,
     },
     Barrier(mpsc::SyncSender<Result<(), String>>),
     Stop,
@@ -164,6 +165,7 @@ fn run_input_dispatch_with(
                 pane_id,
                 mut data,
                 delivery,
+                mut timing,
             } => {
                 // The earliest per-batch point on this thread: the batch exists
                 // from the moment its first message leaves the queue, and the
@@ -181,12 +183,14 @@ fn run_input_dispatch_with(
                             pane_id: next_pane,
                             data: next_data,
                             delivery: InputDelivery::Keys,
+                            timing: next_timing,
                         }) if next_pane == pane_id
                             && data.len().saturating_add(next_data.len())
                                 <= HOST_INPUT_COALESCE_BYTES =>
                         {
                             data.extend_from_slice(&next_data);
                             input_id = next_id;
+                            timing.merge(next_timing);
                         }
                         Ok(message) => {
                             deferred = Some(message);
@@ -196,7 +200,20 @@ fn run_input_dispatch_with(
                         Err(mpsc::TryRecvError::Disconnected) => break,
                     }
                 }
+                let dispatch_started = Instant::now();
                 let result = send_batch(input_id, &pane_id, &data, delivery);
+                let tmux = dispatch_started.elapsed();
+                let path = match input_path(data.len(), delivery) {
+                    InputPath::InBand => "inBand",
+                    InputPath::Batch => "batch",
+                };
+                timing.finish(
+                    dequeued,
+                    tmux,
+                    path,
+                    data.len(),
+                    if result.is_ok() { "ok" } else { "error" },
+                );
                 // Only a committed batch has a leg to measure: a failed write
                 // times a failure, not a latency, and the failure is already
                 // reported through the barrier.
@@ -406,6 +423,7 @@ mod tests {
                 pane_id: "%1".into(),
                 data: b"a".to_vec(),
                 delivery: InputDelivery::Keys,
+                timing: Default::default(),
             })
             .unwrap();
         sender
@@ -414,6 +432,7 @@ mod tests {
                 pane_id: "%2".into(),
                 data: b"b".to_vec(),
                 delivery: InputDelivery::Keys,
+                timing: Default::default(),
             })
             .unwrap();
         let (first_barrier_tx, first_barrier_rx) = mpsc::sync_channel(1);
@@ -450,6 +469,7 @@ mod tests {
                 pane_id: "%1".into(),
                 data: b"a".to_vec(),
                 delivery: InputDelivery::Keys,
+                timing: Default::default(),
             })
             .unwrap();
         let (abandoned_tx, abandoned_rx) = mpsc::sync_channel(1);
@@ -473,6 +493,7 @@ mod tests {
                 pane_id: "%1".into(),
                 data: b"a".to_vec(),
                 delivery: InputDelivery::Keys,
+                timing: Default::default(),
             })
             .unwrap();
         let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
@@ -524,6 +545,7 @@ mod tests {
                 pane_id: "%1".into(),
                 data: b"accepted".to_vec(),
                 delivery: InputDelivery::Keys,
+                timing: Default::default(),
             })
             .unwrap();
         assert!(matches!(
@@ -532,6 +554,7 @@ mod tests {
                 pane_id: "%1".into(),
                 data: b"rejected".to_vec(),
                 delivery: InputDelivery::Keys,
+                timing: Default::default(),
             }),
             Err(mpsc::TrySendError::Full(_))
         ));
@@ -551,6 +574,7 @@ mod tests {
                 pane_id: "%1".into(),
                 data: b"must not replay".to_vec(),
                 delivery: InputDelivery::Keys,
+                timing: Default::default(),
             })
             .unwrap();
         let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
@@ -588,6 +612,7 @@ mod tests {
                     pane_id: pane_id.into(),
                     data: data.to_vec(),
                     delivery: InputDelivery::Keys,
+                    timing: Default::default(),
                 })
                 .unwrap();
         }
@@ -622,6 +647,7 @@ mod tests {
                 pane_id: "%1".into(),
                 data: data.clone(),
                 delivery: InputDelivery::Keys,
+                timing: Default::default(),
             })
             .unwrap();
         let (barrier_tx, barrier_rx) = mpsc::sync_channel(1);
@@ -656,6 +682,7 @@ mod tests {
                     pane_id: "%1".into(),
                     data: data.to_vec(),
                     delivery,
+                    timing: Default::default(),
                 })
                 .unwrap();
         }
@@ -687,6 +714,7 @@ mod tests {
                     pane_id: "%1".into(),
                     data: data.to_vec(),
                     delivery: InputDelivery::Paste,
+                    timing: Default::default(),
                 })
                 .unwrap();
         }

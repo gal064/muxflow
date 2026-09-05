@@ -24,6 +24,7 @@ use crate::service::snapshot::tmux_command;
 use crate::service::topology_output_trigger::TopologyOutputTrigger;
 
 pub(super) struct AttachmentRuntime {
+    pub(super) connection_epoch: u64,
     pub(super) event_tx: mpsc::Sender<SequencerControl>,
     pub(super) overflowed: Arc<AtomicBool>,
     pub(super) resources: Arc<Mutex<PaneResourceStore>>,
@@ -57,6 +58,7 @@ impl TerminalAttachment {
         reports_terminal_colors: bool,
     ) -> anyhow::Result<Self> {
         let AttachmentRuntime {
+            connection_epoch,
             event_tx,
             overflowed,
             resources,
@@ -148,6 +150,7 @@ impl TerminalAttachment {
             std::thread::Builder::new().name(format!("host-tmux-control-{session_id}")),
             move || {
                 read_control_stream(ControlStreamReader {
+                    connection_epoch,
                     stdout,
                     writer: reader_writer,
                     pane_ids: reader_panes,

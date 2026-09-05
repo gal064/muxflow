@@ -38,7 +38,7 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "topologyDirty"; name: string }
   | { kind: "error"; message: string }
   | { kind: "exit"; reason: string }
-  | { kind: "connectionState"; state: "connecting" | "connected" | "reconnecting" | "resyncing" | "disconnected" | "readOnly" }
+  | { kind: "connectionState"; state: "connecting" | "connected" | "reconnecting" | "resyncing" | "disconnected" | "readOnly"; detail?: string }
   | { kind: "protocolProgress" }
   | {
       kind: "paneResource";
@@ -118,11 +118,15 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
       return { kind: "exit", reason: label, sequence };
     case 6:
       requireLocalSequence(sequence, "connection state");
-      requireEmptyPayload(data, "connection state");
       if (!["connecting", "connected", "reconnecting", "resyncing", "disconnected", "readOnly"].includes(label)) {
         throw new Error(`unknown connection state ${label}`);
       }
-      return { kind: "connectionState", state: label as Extract<TerminalEvent, { kind: "connectionState" }>["state"], sequence };
+      try {
+        const detail = data.byteLength === 0 ? undefined : decoder.decode(data);
+        return { kind: "connectionState", state: label as Extract<TerminalEvent, { kind: "connectionState" }>["state"], sequence, detail };
+      } catch {
+        throw new Error("connection state detail is not valid UTF-8");
+      }
     case 7: {
       if (label !== "snapshot") throw new Error("topology snapshot has an invalid label");
       let parsed: { snapshot: TmuxSnapshot; sequence: number; generation: number; serverIdentity: string; authoritative: boolean };

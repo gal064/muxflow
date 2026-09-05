@@ -293,6 +293,12 @@ pub(crate) async fn handle_request(
             } else {
                 super::super::terminal::InputDelivery::Keys
             };
+            let timing = crate::diagnostics::HostInputTiming::begin(
+                request_id,
+                context.connection_epoch,
+                &request.scope,
+                request.data.len(),
+            );
             let guarded = !request.terminal_input_agent_id.is_empty();
             let result = if guarded {
                 super::super::agents::AgentRuntime::global().with_valid_input_target(
@@ -300,7 +306,7 @@ pub(crate) async fn handle_request(
                     &request.scope,
                     || {
                         let mut terminal = terminal.lock().unwrap();
-                        terminal.send_input(&request.scope, &request.data, delivery)?;
+                        terminal.send_input(&request.scope, &request.data, delivery, timing)?;
                         // Generic terminal typing is acknowledged after queue
                         // admission. Guarded voice input fences the queue while
                         // the agent record is locked, so retirement cannot be
@@ -312,7 +318,7 @@ pub(crate) async fn handle_request(
                 terminal
                     .lock()
                     .unwrap()
-                    .send_input(&request.scope, &request.data, delivery)
+                    .send_input(&request.scope, &request.data, delivery, timing)
             };
             // A malformed scope has no pane to recover, and an unscoped
             // resnapshot event would escalate to a whole-connection reconnect.

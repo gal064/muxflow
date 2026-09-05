@@ -141,6 +141,7 @@ fn emit_terminal_bytes(
 }
 
 pub(in crate::service::terminal) struct OutputEmission<'a> {
+    pub(in crate::service::terminal) connection_epoch: u64,
     pub(in crate::service::terminal) sender: &'a mpsc::Sender<SequencerControl>,
     pub(in crate::service::terminal) overflowed: &'a AtomicBool,
     pub(in crate::service::terminal) resources: &'a Arc<Mutex<PaneResourceStore>>,
@@ -203,7 +204,16 @@ impl OutputEmission<'_> {
             // else has: `admit` and the sequencer's own backpressure are part of
             // it, the delivery window below is not. A record nothing admitted
             // has no leg — there is no emission to have been slow.
-            (admitted, admitted.then(|| self.read_started.elapsed()))
+            let leg = admitted.then(|| self.read_started.elapsed());
+            if let Some(elapsed) = leg {
+                crate::diagnostics::note_terminal_output_admitted(
+                    self.connection_epoch,
+                    &leg_pane_id,
+                    generation,
+                    elapsed,
+                );
+            }
+            (admitted, leg)
         };
         // Reported with the fence released: the measurement is two instructions
         // and belongs under it, writing a log line is I/O and does not.
