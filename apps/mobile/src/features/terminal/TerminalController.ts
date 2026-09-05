@@ -201,12 +201,17 @@ export class TerminalController {
         return;
       case "size": {
         const grid = { cols: message.cols, rows: message.rows };
-        if (sameGrid(grid, this.grid)) return;
-        this.grid = grid;
-        this.viewport = message.cellWidth !== undefined && message.cellHeight !== undefined
+        const viewport = message.cellWidth !== undefined && message.cellHeight !== undefined
           ? { width: message.cellWidth * grid.cols, height: message.cellHeight * grid.rows }
           : undefined;
+        const gridChanged = !sameGrid(grid, this.grid);
+        const viewportChanged = Math.round(viewport?.width ?? -1) !== Math.round(this.viewport?.width ?? -1)
+          || Math.round(viewport?.height ?? -1) !== Math.round(this.viewport?.height ?? -1);
+        if (!gridChanged && !viewportChanged) return;
+        this.grid = grid;
+        this.viewport = viewport;
         this.log(`layout ${this.layoutSummary()}${message.cellWidth ? ` cell=${message.cellWidth.toFixed(2)}x${message.cellHeight?.toFixed(2)}` : ""}`);
+        if (!gridChanged) return;
         this.emit();
         if (this.attached || this.attaching) this.scheduleResize();
         else void this.attach();

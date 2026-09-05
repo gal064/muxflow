@@ -43,7 +43,7 @@ describe("the memory-only diagnostic flight recorder", () => {
 
   it("redacts key bodies, credentials, tokens, private-key blocks, and embedded passwords", () => {
     const key = "AAAAC3NzaC1lZDI1NTE5AAAAIExampleExampleExampleExampleExampleEx";
-    const dirty = `publicKey=${key} token=abc.def password='hello world' {"access_token":"json-secret"} Bearer eyJhbGciOiJI ssh-ed25519 ${key} https://me:hunter2@example.test -----BEGIN OPENSSH PRIVATE KEY-----\nbody\n-----END OPENSSH PRIVATE KEY-----`;
+    const dirty = `publicKey=${key} token=abc.def password='hello world' OPENAI_API_KEY=sk-openai GITHUB_TOKEN=ghp_token AWS_SECRET_ACCESS_KEY=aws-secret {"access_token":"json-secret","service.client-secret":"client-value"} Bearer eyJhbGciOiJI ssh-ed25519 ${key} https://me:hunter2@example.test -----BEGIN OPENSSH PRIVATE KEY-----\nbody\n-----END OPENSSH PRIVATE KEY-----`;
     const clean = redactSecrets(dirty);
     expect(clean).not.toContain(key);
     expect(clean).not.toContain("abc.def");
@@ -51,6 +51,10 @@ describe("the memory-only diagnostic flight recorder", () => {
     expect(clean).not.toContain("eyJhbGciOiJI");
     expect(clean).not.toContain("hunter2");
     expect(clean).not.toContain("json-secret");
+    expect(clean).not.toContain("sk-openai");
+    expect(clean).not.toContain("ghp_token");
+    expect(clean).not.toContain("aws-secret");
+    expect(clean).not.toContain("client-value");
     expect(clean).not.toContain("PRIVATE KEY-----");
     expect(clean).toContain("ssh-ed25519 …");
   });

@@ -34,6 +34,7 @@ function decodeBase64(b64: string): Uint8Array {
 let term: Terminal | undefined;
 let fit: FitAddon | undefined;
 let lastGrid: Grid | undefined;
+let lastViewport: { width: number; height: number } | undefined;
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 /** Last time the top of the buffer was reported (§7.6.1); one report per 2 s. */
 let lastAtTopMs = 0;
@@ -57,11 +58,15 @@ function measure(force = false): void {
   const grid = proposed && proposed.cols > 0 && proposed.rows > 0
     ? { cols: Math.max(2, proposed.cols), rows: Math.max(1, proposed.rows) }
     : computeGrid({ width: el.clientWidth, height: el.clientHeight }, NOMINAL_CELL);
-  if (!force && sameGrid(grid, lastGrid)) return;
+  const viewport = { width: el.clientWidth, height: el.clientHeight };
+  const gridChanged = !sameGrid(grid, lastGrid);
+  const viewportChanged = viewport.width !== lastViewport?.width || viewport.height !== lastViewport?.height;
+  if (!force && !gridChanged && !viewportChanged) return;
   lastGrid = grid;
-  if (term.cols !== grid.cols || term.rows !== grid.rows) term.resize(grid.cols, grid.rows);
-  const cellWidth = el.clientWidth / grid.cols;
-  const cellHeight = el.clientHeight / grid.rows;
+  lastViewport = viewport;
+  if (gridChanged && (term.cols !== grid.cols || term.rows !== grid.rows)) term.resize(grid.cols, grid.rows);
+  const cellWidth = viewport.width / grid.cols;
+  const cellHeight = viewport.height / grid.rows;
   post({ t: "size", cols: grid.cols, rows: grid.rows, cellWidth, cellHeight });
 }
 
