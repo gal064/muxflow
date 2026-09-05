@@ -11,7 +11,8 @@ import { logStore } from "./log";
 
 function device(): string {
   if (Platform.OS === "android") return `${Platform.constants.Manufacturer}/${Platform.constants.Model}`;
-  return Constants.deviceName ?? Platform.OS;
+  if (Platform.OS === "ios") return `ios/${Platform.constants.interfaceIdiom}`;
+  return Platform.OS;
 }
 
 function build(): string {

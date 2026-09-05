@@ -39,6 +39,10 @@ export function redactSecrets(value: string): string {
   return value
     .replace(/-----BEGIN [^-\r\n]*(?:PRIVATE|PUBLIC) KEY-----[\s\S]*?-----END [^-\r\n]*(?:PRIVATE|PUBLIC) KEY-----/gi, SECRET_VALUE)
     .replace(/\b(ssh-ed25519|ssh-rsa|ecdsa-sha2-[a-z0-9-]+)\s+[A-Za-z0-9+/=]{60,}/gi, "$1 …")
+    .replace(/\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}/g, SECRET_VALUE)
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, SECRET_VALUE)
+    .replace(/\bAKIA[A-Z0-9]{16}\b/g, SECRET_VALUE)
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, SECRET_VALUE)
     .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/gi, `$1 ${SECRET_VALUE}`)
     .replace(/(["'](?:[a-z][a-z0-9_.-]*[_.-])?(?:authorization|credential|password|passwd|passphrase|private[_-]?key|public[_-]?key|api[_-]?key|client[_-]?secret|secret[_-]access[_-]key|access[_-]?token|refresh[_-]?token|secret|token)["']\s*:\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, `$1"${SECRET_VALUE}"`)
     .replace(/\b((?:[a-z][a-z0-9_.-]*[_.-])?(?:authorization|credential|password|passwd|passphrase|private[_-]?key|public[_-]?key|api[_-]?key|client[_-]?secret|secret[_-]access[_-]key|access[_-]?token|refresh[_-]?token|secret|token))\s*([=:])\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, `$1$2${SECRET_VALUE}`)
