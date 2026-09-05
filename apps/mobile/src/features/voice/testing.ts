@@ -77,6 +77,9 @@ export class FakeRecorder implements VoiceRecorder {
     this.released += 1;
     this.prepared = 0;
   }
+  state(): "unprepared" | "prepared" | "recording" {
+    return this.recording ? "recording" : this.prepared > 0 ? "prepared" : "unprepared";
+  }
 }
 
 export class FakePlayer implements VoicePlayer {

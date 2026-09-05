@@ -3,7 +3,8 @@ import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-nati
 
 import { Button } from "../../ui/components/Button";
 import { colors, fonts, typeScale } from "../../ui/tokens";
-import { logText } from "./logBuffer";
+import { diagnosticHeader } from "../../session/diagnosticSnapshot";
+import { logText } from "../../session/log";
 import { useLog } from "./hooks";
 
 export interface LogViewerProps {
@@ -12,40 +13,46 @@ export interface LogViewerProps {
 }
 
 /**
- * The log ring buffer (design.md §12, §16 M6): the last 500 `[muxflow]` lines,
- * copyable. Opened from the Connection sheet's "Show log". Nothing leaves the
- * phone.
+ * The process-local diagnostic flight recorder, copyable from the Connection
+ * sheet. Nothing leaves the phone unless the user taps Copy.
  */
 export function LogViewer({ visible, onDismiss }: LogViewerProps) {
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onDismiss} statusBarTranslucent>
+      {visible ? <LogContents onDismiss={onDismiss} /> : null}
+    </Modal>
+  );
+}
+
+/** Unmounted while hidden, so normal diagnostic writes do not cause React renders. */
+function LogContents({ onDismiss }: { onDismiss: () => void }) {
   const lines = useLog((state) => state.lines);
   const clear = useLog((state) => state.clear);
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onDismiss} statusBarTranslucent>
-      <View style={styles.root}>
-        <View style={styles.bar}>
-          <Pressable onPress={onDismiss} accessibilityRole="button" hitSlop={12}>
-            <Text style={styles.back}>{"←"}</Text>
-          </Pressable>
-          <Text style={styles.title}>Log</Text>
-        </View>
-        <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
-          {lines.length === 0 ? (
-            <Text style={styles.empty}>Nothing logged yet.</Text>
-          ) : (
-            lines.map((line, index) => (
-              <Text key={`${index}-${line}`} style={styles.line} selectable>
-                {line}
-              </Text>
-            ))
-          )}
-        </ScrollView>
-        <View style={styles.actions}>
-          <Button label="Clear" variant="text" onPress={clear} />
-          <Button label="Copy" onPress={() => void Clipboard.setStringAsync(logText())} />
-        </View>
+    <View style={styles.root}>
+      <View style={styles.bar}>
+        <Pressable onPress={onDismiss} accessibilityRole="button" hitSlop={12}>
+          <Text style={styles.back}>{"←"}</Text>
+        </Pressable>
+        <Text style={styles.title}>Log</Text>
       </View>
-    </Modal>
+      <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+        {lines.length === 0 ? (
+          <Text style={styles.empty}>Nothing logged yet.</Text>
+        ) : (
+          lines.map((line, index) => (
+            <Text key={`${index}-${line}`} style={styles.line} selectable>
+              {line}
+            </Text>
+          ))
+        )}
+      </ScrollView>
+      <View style={styles.actions}>
+        <Button label="Clear" variant="text" onPress={clear} />
+        <Button label="Copy" onPress={() => void Clipboard.setStringAsync(logText(undefined, diagnosticHeader()))} />
+      </View>
+    </View>
   );
 }
 

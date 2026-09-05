@@ -144,6 +144,7 @@ export class VoiceController {
   focus(): void {
     if (this.disposed) return;
     this.focused = true;
+    this.log("screen.focus");
     this.wantRegistered = true;
     void this.refreshStatus(true);
     void this.registerSession();
@@ -154,6 +155,7 @@ export class VoiceController {
   /** The screen left (Back, Files); the session and its registration stay. */
   blur(): void {
     this.focused = false;
+    this.log("screen.blur");
     // The next mount re-baselines the lifecycle: an edge that happened while
     // another screen was up is not acknowledged late, or for the wrong turn.
     this.lastLifecycle = undefined;
@@ -223,9 +225,10 @@ export class VoiceController {
       this.log(`status.skipped warm=${warm} connection=${this.options.getConnection()?.state ?? "none"}`);
       return;
     }
-    this.log(`status.request warm=${warm}`);
+    const operationId = newOperationId();
+    this.log(`status.request operation=${operationId} warm=${warm}`);
     try {
-      const response = await connection.request(voiceStatus(newOperationId(), warm));
+      const response = await connection.request(voiceStatus(operationId, warm));
       if (this.disposed) return;
       if (response.voice?.status) this.options.store.getState().setHostStatus(response.voice.status);
       this.log(`status readiness=${response.voice?.status?.readiness ?? "?"} warm=${warm}`);
@@ -244,8 +247,10 @@ export class VoiceController {
     const store = this.options.store.getState();
     // The button reads as taken before the host's first progress line lands.
     store.applyProvisionProgress({ phase: "installing_runtime", transferredBytes: 0, totalBytes: 0, error: "" });
+    const operationId = newOperationId();
+    this.log(`provision.request operation=${operationId}`);
     try {
-      const response = await connection.request(voiceProvision(newOperationId()), { timeoutMs: PROVISION_TIMEOUT_MS });
+      const response = await connection.request(voiceProvision(operationId), { timeoutMs: PROVISION_TIMEOUT_MS });
       if (this.disposed) return;
       if (response.voice?.status) this.options.store.getState().setHostStatus(response.voice.status);
       this.log("provision → ok");
@@ -270,7 +275,7 @@ export class VoiceController {
       store.setPlayback({ ...store.playback, state: "stopped", positionMs: 0 });
     }
     store.setPhase(this.agentId, "recording");
-    this.log("utterance.begin");
+    this.log(`utterance.begin recorder=${this.recorderState()}`);
     // A press that lands while the recorder is still re-arming after the
     // previous release waits for it; a release before then finds nothing
     // recorded and is discarded.
@@ -278,7 +283,9 @@ export class VoiceController {
     void armed.then(() => {
       if (this.disposed || this.options.store.getState().sessions[this.agentId]?.phase !== "recording") return;
       try {
+        this.log(`recorder.start.requested actual=${this.recorderState()}`);
         this.options.recorder.record();
+        this.log(`recorder.started actual=${this.recorderState()}`);
         this.options.haptics?.listening();
       } catch (error) {
         this.fail("record", error);
@@ -302,7 +309,9 @@ export class VoiceController {
     let uri: string | null = null;
     let durationMs = 0;
     try {
+      this.log(`recorder.stop.requested actual=${this.recorderState()}`);
       ({ uri, durationMs } = await recorder.stop());
+      this.log(`recorder.stopped actual=${this.recorderState()} durationMs=${durationMs}`);
     } catch (error) {
       this.fail("recorder.stop", error);
     }
@@ -327,7 +336,9 @@ export class VoiceController {
       this.rearm();
       const connection = this.liveConnection();
       if (!connection) throw new Error("Not connected.");
-      const response = await connection.request(voiceTranscribe(newOperationId(), audio, RECORDING_MIME), { timeoutMs: TRANSCRIBE_TIMEOUT_MS });
+      const operationId = newOperationId();
+      this.log(`transcribe.request operation=${operationId} bytes=${audio.byteLength} durationMs=${durationMs}`);
+      const response = await connection.request(voiceTranscribe(operationId, audio, RECORDING_MIME), { timeoutMs: TRANSCRIBE_TIMEOUT_MS });
       const transcript = response.voice?.transcript;
       // The host single-lines the transcript (§4.4); a newline here would submit mid-text, so it is never trusted to.
       text = (transcript?.text ?? "").replace(/\s*[\r\n]+\s*/g, " ").trim();
@@ -351,7 +362,8 @@ export class VoiceController {
     }
     const live = this.options.store.getState();
     live.setPhase(this.agentId, "sending");
-    live.appendMessage(this.agentId, this.message("you", text));
+    const outgoing = this.message("you", text);
+    live.appendMessage(this.agentId, outgoing);
     try {
       const connection = this.liveConnection();
       if (!connection) throw new Error("Not connected.");
@@ -369,7 +381,7 @@ export class VoiceController {
         return;
       }
       await connection.request(terminalInput(this.paneId, CR, { agentId: this.agentId }));
-      this.log(`input ${body.byteLength} bytes as paste + CR → ok in ${this.now() - startedAt} ms`);
+      this.log(`submission.ack message=${outgoing.id} bytes=${body.byteLength} elapsedMs=${this.now() - startedAt}`);
       this.options.haptics?.sent();
       this.options.tones?.sent();
     } catch (error) {
@@ -394,7 +406,7 @@ export class VoiceController {
     const last = this.options.store.getState().sessions[this.agentId]?.messages.at(-1);
     if (!last || last.kind !== "you" || this.workingAckedFor === last.id) return;
     this.workingAckedFor = last.id;
-    this.log(`working.ack ${last.id}`);
+    this.log(`working.ack message=${last.id}`);
     this.options.haptics?.working();
     this.options.tones?.working();
   }
@@ -440,7 +452,7 @@ export class VoiceController {
       message.audioError = failureDetail || "The host couldn't synthesize this reply.";
     }
     store.appendReply(this.agentId, message);
-    this.log(`reply ${speech.audio.byteLength} bytes text=${speech.text.length} chars${speech.truncated ? " truncated" : ""}${message.audioError ? ` audioError=${message.audioError}` : ""}`);
+    this.log(`reply message=${message.id} stateGeneration=${speech.stateGeneration} audioBytes=${speech.audio.byteLength} textChars=${speech.text.length} truncated=${speech.truncated}${message.audioError ? ` audioError=${message.audioError}` : ""}`);
     this.playUnplayedIfListening();
   }
 
@@ -451,8 +463,10 @@ export class VoiceController {
     const message = this.find(messageId);
     // Only the newest reply may hold the session's one file (§1).
     if (!message || message.kind !== "agent" || latestReply(this.options.store.getState().sessions[this.agentId])?.id !== messageId) return;
+    const operationId = newOperationId();
+    this.log(`speak.request operation=${operationId} message=${messageId}`);
     try {
-      const response = await connection.request(voiceSpeak(newOperationId(), message.text), { timeoutMs: SPEAK_TIMEOUT_MS });
+      const response = await connection.request(voiceSpeak(operationId, message.text), { timeoutMs: SPEAK_TIMEOUT_MS });
       if (this.disposed) return;
       const speech = response.voice?.speech;
       if (!speech || speech.audio.byteLength === 0) throw new Error("The host returned no audio.");
@@ -483,7 +497,7 @@ export class VoiceController {
     }
     this.options.player.play();
     store.markPlayed(this.agentId, messageId);
-    this.log(`play ${messageId}`);
+    this.log(`play message=${messageId}`);
   }
 
   /** The preference changed: the reply playing now and every later one take the new speed. */
@@ -586,9 +600,13 @@ export class VoiceController {
     if (this.arming) return;
     const store = this.options.store.getState();
     if (store.recorderError) return;
+    this.log(`recorder.prepare.requested actual=${this.recorderState()}`);
     this.arming = this.options.recorder.prepare()
       .then(() => {
-        if (!this.disposed) this.options.store.getState().setRecorderError(undefined);
+        if (!this.disposed) {
+          this.options.store.getState().setRecorderError(undefined);
+          this.log(`recorder.prepared actual=${this.recorderState()}`);
+        }
       })
       .catch((error: unknown) => {
         if (this.disposed) return;
@@ -708,8 +726,12 @@ export class VoiceController {
     if (typeof code === "string" && STATUS_CHANGING_CODES.has(code) && what !== "status") void this.refreshStatus(false);
   }
 
+  private recorderState(): string {
+    return this.options.recorder.state?.() ?? "unknown";
+  }
+
   private log(line: string): void {
-    this.options.log?.(`[muxflow] voice ${this.agentId} ${line}`);
+    this.options.log?.(`[muxflow] voice agent=${this.agentId} pane=${this.paneId} session=${this.sessionId} ${line}`);
   }
 }
 
