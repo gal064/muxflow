@@ -4,6 +4,7 @@ import { HostError } from "../../protocol/HostConnection";
 import { Operation, ResponseSchema, VoiceReadiness, VoiceResponseSchema, VoiceSpeechSchema, type VoiceSpeech } from "../../protocol/gen/envelope_pb";
 import type { VoiceHaptics } from "./haptics";
 import type { VoiceTones } from "./tones";
+import { VoiceRecorderCoordinator } from "./recorderCoordinator";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, speechResponse, statusResponse, transcriptResponse } from "./testing";
 import { MIN_UTTERANCE_MS, SESSION_REFRESH_MS, VoiceController } from "./VoiceController";
 import { createVoiceStore, latestReply } from "./voiceStore";
@@ -26,7 +27,7 @@ class FakeTones implements VoiceTones {
   failed() { this.calls.push("failed"); }
 }
 
-function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
+function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHoldMs = 0) {
   const haptics = new FakeHaptics();
   const tones = new FakeTones();
   const store = createVoiceStore();
@@ -34,6 +35,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
   connection.answer(Operation.VOICE_STATUS, () => statusResponse(VoiceReadiness.READY));
   connection.answer(Operation.VOICE_TRANSCRIBE, () => transcriptResponse("list the files in this directory"));
   const recorder = new FakeRecorder();
+  const recorderCoordinator = new VoiceRecorderCoordinator();
   const player = new FakePlayer();
   const files = new FakeFiles();
   let foreground = true;
@@ -42,7 +44,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
   const toasts: string[] = [];
   const logs: string[] = [];
   const controller = new VoiceController({
-    tailHoldMs: 0,
+    tailHoldMs,
     submitDelayMs,
     agentId,
     paneId,
@@ -50,6 +52,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
     store,
     getConnection: () => connection.asHostConnection(),
     recorder,
+    recorderCoordinator,
     player,
     files,
     appInForeground: () => foreground,
@@ -65,6 +68,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
     store,
     connection,
     recorder,
+    recorderCoordinator,
     player,
     files,
     haptics,
@@ -290,6 +294,26 @@ describe("VoiceController", () => {
     expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recording");
   });
 
+  it("does not put recorder stop rejection details in copied diagnostics while canceling", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    h.recorder.stop = async () => {
+      const error = new Error("private transcript and token sk-proj-abcdefghijklmnop");
+      error.name = "sk-proj-qrstuvwxyzabcdef";
+      throw error;
+    };
+
+    await h.controller.cancelUtterance();
+
+    const diagnostics = h.logs.join("\n");
+    expect(diagnostics).toContain("recorder.stop.failed type=Error messageChars=");
+    expect(diagnostics).not.toContain("private transcript");
+    expect(diagnostics).not.toContain("sk-proj-");
+  });
+
   it("cancels and releases a locked recording on blur or background", async () => {
     const blurred = harness();
     blurred.controller.focus();
@@ -402,6 +426,7 @@ describe("VoiceController", () => {
       store: a.store,
       getConnection: () => a.connection.asHostConnection(),
       recorder: a.recorder,
+      recorderCoordinator: a.recorderCoordinator,
       player: a.player,
       files: a.files,
       appInForeground: () => true,
@@ -629,6 +654,7 @@ describe("VoiceController against a host that is not set up (review round 1)", (
       store: a.store,
       getConnection: () => a.connection.asHostConnection(),
       recorder: a.recorder,
+      recorderCoordinator: a.recorderCoordinator,
       player: a.player,
       files: a.files,
       appInForeground: () => true,
@@ -668,6 +694,7 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
       store: a.store,
       getConnection: () => a.connection.asHostConnection(),
       recorder: a.recorder,
+      recorderCoordinator: a.recorderCoordinator,
       player: a.player,
       files: a.files,
       appInForeground: () => true,
@@ -698,6 +725,7 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
     h.controller.focus();
     h.controller.beginUtterance();
     const released = h.controller.endUtterance();
+    await settle();
     armed!();
     await released;
     expect(h.recorder.recording).toBe(false);
@@ -880,6 +908,47 @@ describe("VoiceController recorder release races (QA fix review)", () => {
     expect(h.files.deleted).toContain("file:///cache/rec-1.m4a");
     await h.controller.endUtterance(); // the lift after End is a no-op
     expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+  });
+
+  it("disposal during the tail hold stops A before B can claim the shared recorder", async () => {
+    const h = harness("agent-a", "%3", 0, 350);
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    const ending = h.controller.endUtterance();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("transcribing");
+    expect(h.recorder.recording).toBe(true);
+
+    h.controller.dispose();
+    await settle();
+    expect(h.recorder.recording).toBe(false);
+    expect(h.recorder.released).toBe(1);
+    const b = new VoiceController({
+      tailHoldMs: 0,
+      submitDelayMs: 0,
+      agentId: "agent-b",
+      paneId: "%4",
+      sessionId: "$1",
+      store: h.store,
+      getConnection: () => h.connection.asHostConnection(),
+      recorder: h.recorder,
+      recorderCoordinator: h.recorderCoordinator,
+      player: h.player,
+      files: h.files,
+      appInForeground: () => true,
+    });
+    b.focus();
+    await settle();
+    b.beginUtterance();
+    await settle();
+    expect(h.recorder.recording).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(350);
+    await ending;
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+    b.dispose();
+    await settle();
   });
 
   it("leaving during the transcription releases the recorder once the utterance settles", async () => {
