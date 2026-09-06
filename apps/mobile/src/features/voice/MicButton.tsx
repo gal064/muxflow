@@ -1,8 +1,9 @@
 import { useEffect, useRef } from "react";
-import { ActivityIndicator, Animated, Easing, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Animated, Easing, type GestureResponderEvent, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { MicIcon } from "../../ui/components/MediaIcons";
 import { colors, typeScale } from "../../ui/tokens";
+import { horizontalVoiceGesture } from "./voiceGesture";
 import type { VoicePhase } from "./voiceStore";
 
 export interface MicButtonProps {
@@ -12,6 +13,8 @@ export interface MicButtonProps {
   hint: string;
   onPressIn: () => void;
   onPressOut: () => void;
+  onLock: () => void;
+  onCancel: () => void;
 }
 
 const SIZE = 96;
@@ -22,10 +25,12 @@ const SIZE = 96;
  * screen works without looking at it. The disc is the visual anchor (pulsing
  * ring while recording, spinner while the host works), not the hit area.
  */
-export function MicButton({ phase, disabled, hint, onPressIn, onPressOut }: MicButtonProps) {
+export function MicButton({ phase, disabled, hint, onPressIn, onPressOut, onLock, onCancel }: MicButtonProps) {
   const pulse = useRef(new Animated.Value(0)).current;
-  const recording = phase === "recording";
-  const busy = phase === "transcribing" || phase === "sending";
+  const recording = phase === "recording" || phase === "recordingLocked";
+  const locked = phase === "recordingLocked";
+  const busy = phase === "canceling" || phase === "transcribing" || phase === "sending";
+  const gesture = useRef<{ x: number; y: number; action?: "lock" | "cancel" } | undefined>(undefined);
 
   useEffect(() => {
     if (!recording) {
@@ -45,17 +50,39 @@ export function MicButton({ phase, disabled, hint, onPressIn, onPressOut }: MicB
     opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] }),
     transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.6] }) }],
   };
-  const label = recording ? "Listening…" : phase === "transcribing" ? "Transcribing…" : phase === "sending" ? "Sending…" : "Hold anywhere here to talk";
+  const label = locked ? "Locked · tap anywhere to send" : recording ? "Listening…" : phase === "canceling" ? "Canceling…" : phase === "transcribing" ? "Transcribing…" : phase === "sending" ? "Sending…" : "Hold anywhere here to talk";
+
+  const classify = (event: GestureResponderEvent): "lock" | "cancel" | undefined => {
+    const current = gesture.current;
+    if (!current || current.action) return current?.action;
+    const action = horizontalVoiceGesture(event.nativeEvent.pageX - current.x, event.nativeEvent.pageY - current.y);
+    if (action === "lock") {
+      current.action = action;
+      onLock();
+    } else if (action === "cancel") {
+      current.action = action;
+      onCancel();
+    }
+    return action;
+  };
 
   return (
     <Pressable
-      accessibilityHint="Press and hold, speak, then release to send"
+      accessibilityHint="Hold and release to send, swipe left to lock, or swipe right to cancel"
       accessibilityLabel={label}
       accessibilityRole="button"
       accessibilityState={{ disabled: disabled || busy, busy }}
       disabled={disabled || busy}
-      onPressIn={onPressIn}
-      onPressOut={onPressOut}
+      onPressIn={(event) => {
+        gesture.current = { x: event.nativeEvent.pageX, y: event.nativeEvent.pageY };
+        onPressIn();
+      }}
+      onPressOut={(event) => {
+        const action = classify(event);
+        gesture.current = undefined;
+        if (!action) onPressOut();
+      }}
+      onTouchMove={classify}
       // A thumb drifting well outside the pane mid-sentence must not count as a release.
       pressRetentionOffset={160}
       style={({ pressed }) => [styles.root, pressed && !disabled && !busy && styles.rootPressed]}

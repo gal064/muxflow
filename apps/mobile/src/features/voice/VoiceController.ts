@@ -96,6 +96,10 @@ export class VoiceController {
   private messageCounter = 0;
   /** The `prepare()` in flight, so a press that lands before it settles waits for it instead of failing. */
   private arming: Promise<void> | undefined;
+  /** A right-swipe or locked-screen exit is stopping and discarding the current take. */
+  private canceling: Promise<void> | undefined;
+  /** True from press-in until the recorder has actually stopped, including the tail hold. */
+  private microphoneListening = false;
   private readonly unsubscribePlayer: () => void;
   private readonly now: () => number;
   private readonly sessionRefreshMs: number;
@@ -103,6 +107,8 @@ export class VoiceController {
   private readonly submitDelayMs: number;
   private playbackRate: number;
   private autoPlay: boolean;
+  /** A reply that arrived while the microphone was listening stays manual-play only. */
+  private autoPlaySuppressedMessageId: string | undefined;
   /** The agent lifecycle last reported by the screen; the working acknowledgement fires on the edge into `working`. */
   private lastLifecycle: AgentLifecycle | undefined;
   /** The "you" message whose pickup by the agent was already acknowledged. */
@@ -163,12 +169,19 @@ export class VoiceController {
     // The next mount re-baselines the lifecycle: an edge that happened while
     // another screen was up is not acknowledged late, or for the wrong turn.
     this.lastLifecycle = undefined;
-    this.disarm();
+    if (this.recordingPhase() === "recordingLocked") void this.cancelUtterance();
+    else this.disarm();
   }
 
   /** The app came back to the foreground while this screen is on top. */
   onAppActive(): void {
+    if (this.focused) this.arm();
     this.playUnplayedIfListening();
+  }
+
+  /** A locked take never keeps the microphone when the app leaves the foreground. */
+  onAppInactive(): void {
+    if (this.recordingPhase() === "recordingLocked") void this.cancelUtterance();
   }
 
   /** Every reconnect is a new connection, and the host's registration is per connection (§4.3). */
@@ -279,30 +292,67 @@ export class VoiceController {
       store.setPlayback({ ...store.playback, state: "stopped", positionMs: 0 });
     }
     store.setPhase(this.agentId, "recording");
+    this.microphoneListening = true;
     this.log(`utterance.begin recorder=${this.recorderState()}`);
     // A press that lands while the recorder is still re-arming after the
     // previous release waits for it; a release before then finds nothing
     // recorded and is discarded.
     const armed = this.arming ?? Promise.resolve();
     void armed.then(() => {
-      if (this.disposed || this.options.store.getState().sessions[this.agentId]?.phase !== "recording") return;
+      if (this.disposed || this.recordingPhase() === undefined) return;
       try {
         this.log(`recorder.start.requested actual=${this.recorderState()}`);
         this.options.recorder.record();
         this.log(`recorder.started actual=${this.recorderState()}`);
         this.options.haptics?.listening();
       } catch (error) {
+        this.microphoneListening = false;
         this.fail("record", error);
         this.setPhaseIfAlive("idle");
       }
     });
   }
 
+  /** A left swipe detaches the recording from the finger that started it. */
+  lockUtterance(): void {
+    if (this.recordingPhase() !== "recording") return;
+    this.options.store.getState().setPhase(this.agentId, "recordingLocked");
+    this.log("utterance.locked");
+  }
+
+  /** Stop the current take and delete it without transcription or terminal input. */
+  async cancelUtterance(): Promise<void> {
+    if (this.canceling) return this.canceling;
+    if (this.recordingPhase() === undefined) return;
+    this.options.store.getState().setPhase(this.agentId, "canceling");
+    this.log("utterance.canceled");
+    const { recorder, files } = this.options;
+    this.canceling = (async () => {
+      await (this.arming ?? Promise.resolve()).catch(() => undefined);
+      let uri: string | null = null;
+      try {
+        ({ uri } = await recorder.stop());
+      } catch (error) {
+        this.log(`recorder.stop.failed ${describe(error)}`);
+      }
+      this.microphoneListening = false;
+      if (uri) files.delete(uri);
+    })();
+    try {
+      await this.canceling;
+    } finally {
+      this.canceling = undefined;
+      this.setPhaseIfAlive("idle");
+      if (this.disposed || !this.focused || !this.options.appInForeground()) recorder.release();
+      else this.arm();
+    }
+  }
+
   /** Press-out: stop → read → VOICE_TRANSCRIBE → TERMINAL_INPUT of the transcript as a paste, then a CR on its own. */
   async endUtterance(): Promise<void> {
     if (this.disposed) return;
     const store = this.options.store.getState();
-    if (store.sessions[this.agentId]?.phase !== "recording") return;
+    if (this.recordingPhase() === undefined) return;
     store.setPhase(this.agentId, "transcribing");
     const { recorder, files } = this.options;
     // The press may still be waiting for the recorder (see beginUtterance).
@@ -319,6 +369,7 @@ export class VoiceController {
     } catch (error) {
       this.fail("recorder.stop", error);
     }
+    this.microphoneListening = false;
     if (!uri || durationMs < MIN_UTTERANCE_MS) {
       this.log(`utterance.discarded durationMs=${durationMs}`);
       this.rearm();
@@ -447,6 +498,7 @@ export class VoiceController {
       truncated: speech.truncated,
       played: false,
     });
+    this.autoPlaySuppressedMessageId = this.microphoneListening ? message.id : undefined;
     if (speech.audio.byteLength > 0) {
       try {
         message.fileUri = this.options.files.writeReply(this.agentId, speech.audio);
@@ -574,7 +626,7 @@ export class VoiceController {
     if (!this.autoPlay) return;
     const store = this.options.store.getState();
     const reply = latestReply(store.sessions[this.agentId]);
-    if (reply && !reply.played && reply.fileUri) this.play(reply.id);
+    if (reply && !reply.played && reply.fileUri && reply.id !== this.autoPlaySuppressedMessageId) this.play(reply.id);
   }
 
   // ---- helpers ------------------------------------------------------------------
@@ -587,11 +639,15 @@ export class VoiceController {
     const { recorder, files } = this.options;
     // Disposed mid-hold (End, disconnect): endUtterance() will not run, so the
     // live recording is stopped here, or the microphone stays hot.
-    if (disposing && this.options.store.getState().sessions[this.agentId]?.phase === "recording") {
+    if (disposing && this.recordingPhase() !== undefined) {
       void (this.arming ?? Promise.resolve()).then(() => recorder.stop()).then(({ uri }) => {
+        this.microphoneListening = false;
         if (uri) files.delete(uri);
         recorder.release();
-      }).catch((error: unknown) => this.log(`recorder.stop.failed ${diagnosticError(error)}`));
+      }).catch((error: unknown) => {
+        this.microphoneListening = false;
+        this.log(`recorder.stop.failed ${diagnosticError(error)}`);
+      });
       return;
     }
     void (this.arming ?? Promise.resolve()).then(() => {
@@ -609,7 +665,7 @@ export class VoiceController {
 
   /** Prepares the recorder once per release so press-in is `record()` alone (§2b). */
   private arm(): void {
-    if (this.arming) return;
+    if (this.arming || this.canceling) return;
     const store = this.options.store.getState();
     if (store.recorderError) return;
     this.log(`recorder.prepare.requested actual=${this.recorderState()}`);
@@ -635,6 +691,11 @@ export class VoiceController {
       .finally(() => {
         this.arming = undefined;
       });
+  }
+
+  private recordingPhase(): "recording" | "recordingLocked" | undefined {
+    const phase = this.options.store.getState().sessions[this.agentId]?.phase;
+    return phase === "recording" || phase === "recordingLocked" ? phase : undefined;
   }
 
   private async registerSession(): Promise<void> {
