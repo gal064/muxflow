@@ -35,6 +35,7 @@ const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 #[derive(Debug)]
 struct VendorHookPayload {
     session_id: Option<String>,
+    agent_id: Option<String>,
     event_id: Option<String>,
     hook_event_name: Option<String>,
     notification_type: Option<String>,
@@ -49,6 +50,8 @@ struct VendorHookPayload {
 enum HookField {
     SessionId,
     SessionIdCamel,
+    AgentId,
+    AgentIdCamel,
     EventId,
     EventIdCamel,
     HookEventId,
@@ -94,6 +97,8 @@ impl Visitor<'_> for HookFieldVisitor {
         Ok(match value {
             "session_id" => HookField::SessionId,
             "sessionId" => HookField::SessionIdCamel,
+            "agent_id" => HookField::AgentId,
+            "agentId" => HookField::AgentIdCamel,
             "event_id" => HookField::EventId,
             "eventId" => HookField::EventIdCamel,
             "hook_event_id" => HookField::HookEventId,
@@ -324,6 +329,8 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
     {
         let mut session_id = None;
         let mut session_id_camel = None;
+        let mut agent_id = None;
+        let mut agent_id_camel = None;
         let mut event_id = None;
         let mut event_id_camel = None;
         let mut hook_event_id = None;
@@ -348,6 +355,8 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
                 HookField::SessionIdCamel => {
                     session_id_camel = map.next_value::<BoundedString>()?.0
                 }
+                HookField::AgentId => agent_id = map.next_value::<BoundedString>()?.0,
+                HookField::AgentIdCamel => agent_id_camel = map.next_value::<BoundedString>()?.0,
                 HookField::EventId => event_id = map.next_value::<BoundedString>()?.0,
                 HookField::EventIdCamel => event_id_camel = map.next_value::<BoundedString>()?.0,
                 HookField::HookEventId => hook_event_id = map.next_value::<BoundedString>()?.0,
@@ -387,6 +396,7 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
 
         Ok(VendorHookPayload {
             session_id: session_id.or(session_id_camel),
+            agent_id: agent_id.or(agent_id_camel),
             event_id: event_id.or(event_id_camel).or(hook_event_id),
             hook_event_name: hook_event_name.or(hook_event_name_camel).or(event),
             notification_type: notification_type.or(notification_type_camel),
@@ -1015,6 +1025,7 @@ fn build_event_from_payload(
     let codex_permission =
         adapter == v1::AgentAdapterKind::Codex && event_name == "PermissionRequest";
     let codex_pre_tool = adapter == v1::AgentAdapterKind::Codex && event_name == "PreToolUse";
+    let codex_child_event = adapter == v1::AgentAdapterKind::Codex && payload.agent_id.is_some();
     let claude_stop = adapter == v1::AgentAdapterKind::ClaudeCode && event_name == "Stop";
     // Both adapters send the final message on `Stop`; nothing else forwards
     // it, and `StopFailure` forwards nothing. The daemon hands it to voice mode
@@ -1028,6 +1039,14 @@ fn build_event_from_payload(
     }
     if !notification_type.is_empty() {
         normalized.insert("notification_type".into(), notification_type.into());
+    }
+    if codex_child_event
+        && let Some(agent_id) = payload.agent_id.as_ref().filter(|id| !id.is_empty())
+    {
+        normalized.insert(
+            crate::service::agents::adapters::CODEX_SUBAGENT_ID_FIELD.into(),
+            agent_id.clone().into(),
+        );
     }
     if claude_stop {
         normalized.insert(
@@ -1620,8 +1639,71 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_hooks_forward_only_the_opaque_agent_id() {
+        for event_name in ["SubagentStart", "SubagentStop"] {
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": event_name,
+                "session_id": "session-1",
+                "agent_id": "agent-1",
+                "agent_type": "private-role",
+                "agent_transcript_path": "/private/transcript",
+                "last_assistant_message": "private result",
+            }))
+            .unwrap();
+            let event = build_event(
+                v1::AgentAdapterKind::Codex,
+                raw,
+                "%12",
+                "tmux:server-a",
+                7,
+                None,
+            )
+            .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+            assert_eq!(
+                payload,
+                serde_json::json!({
+                    "hook_event_name": event_name,
+                    "session_id": "session-1",
+                    "agent_id": "agent-1",
+                })
+            );
+            let serialized = payload.to_string();
+            for private in ["private-role", "/private/transcript", "private result"] {
+                assert!(!serialized.contains(private));
+            }
+        }
+    }
+
+    #[test]
+    fn codex_child_activity_retains_its_id_but_not_its_private_payload() {
+        let event = build_event(
+            v1::AgentAdapterKind::Codex,
+            br#"{"hook_event_name":"PreToolUse","session_id":"session-1","agent_id":"agent-1","agent_type":"private-role","tool_name":"Bash","tool_input":{"command":"private command"}}"#.to_vec(),
+            "%12",
+            "tmux:server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "session-1",
+                "agent_id": "agent-1",
+                "tool_name": "Bash",
+            })
+        );
+        let serialized = payload.to_string();
+        assert!(!serialized.contains("private-role"));
+        assert!(!serialized.contains("private command"));
+    }
+
+    #[test]
     fn oversized_retained_fields_are_rejected_before_event_delivery() {
-        for field in ["session_id", "event_id"] {
+        for field in ["session_id", "agent_id", "event_id"] {
             let raw = serde_json::to_vec(&serde_json::json!({
                 "hook_event_name": "Stop",
                 (field): "x".repeat(MAX_LIFECYCLE_FIELD_BYTES + 1),

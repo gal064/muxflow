@@ -67,21 +67,24 @@ Claude Code: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `PermissionRequest`, `PostToolUse`, `SubagentStop`, `Stop`, `StopFailure`,
 `Notification`.
 
-Codex: the same, minus `StopFailure` and `Notification`, which its hook surface
-does not have (measured against Codex CLI 0.128, 0.147 and 0.149.1). A Codex
-turn that ends in failure is therefore indistinguishable from one that
-succeeds. `UserPromptSubmit` caches a positive auto-review result for the exact
-turn before tool work begins. A `PermissionRequest` trusts that positive cache;
-on a cache miss it re-reads the request's turn context rather than caching a
-negative result. A permission request still unclassified after that check and
-`PreToolUse(request_user_input)` are the observed blocked signals. Recorded
-rather than faked.
+Codex: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`,
+`PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`. It has no
+`StopFailure` or `Notification` (measured against Codex CLI 0.128, 0.147,
+0.149.1 and 0.153.4), so a turn that ends in failure is indistinguishable from
+one that succeeds. `UserPromptSubmit` caches a positive auto-review result for
+the exact turn before tool work begins. A `PermissionRequest` trusts that
+positive cache; on a cache miss it re-reads the request's turn context rather
+than caching a negative result. A permission request still unclassified after
+that check and `PreToolUse(request_user_input)` are the observed blocked
+signals. Recorded rather than faked.
 
 A `Working` state that receives no further event for fifteen minutes decays to
-`Unknown`. Attention already earned survives; only the claim about right now is
-dropped. The bound is the longest gap a healthy agent can leave — one tool call,
-at Claude's maximum configurable `Bash` timeout of 600s — with half again for
-headroom.
+`Unknown`. Direct evidence of a running subagent extends that recovery window
+to 24 hours, so long child tasks remain Working without letting one lost stop
+hook create a permanent claim. Attention already earned survives; only the
+claim about right now is dropped. The ordinary bound is the longest gap a
+healthy agent can otherwise leave — one tool call, at Claude's maximum
+configurable `Bash` timeout of 600s — with half again for headroom.
 
 Use the same review flow with Uninstall to remove only entries labeled
 `muxflow-managed`. Do this before uninstalling the desktop package. The
@@ -103,14 +106,20 @@ daemon payload remains limited to 256 KiB. The
 normalized Codex `PreToolUse` payload retains only the tool name needed to
 distinguish a question from ordinary work. The normalized turn-start and
 permission payloads retain only the opaque turn ID and reviewer needed for the
-positive cache and its revalidation. A Claude `Stop` retains only a
-boolean saying whether a subagent is still running; task descriptions, commands,
-IDs, and the rest of Claude's background-task payload are discarded. Malformed
-or stale events are rejected. The daemon retains that boolean until the final
-`Stop`, including across restarts, so Claude's routine idle notification cannot
-misreport a long-running subagent as blocked. A real permission request remains
-blocked even if an idle notification follows it. A temporarily unavailable
-daemon retains only bounded, atomic hook state.
+positive cache and its revalidation. Codex child-scoped events retain only
+their opaque agent ID; the daemon keeps those IDs as a set so duplicate events
+cannot miscount concurrent children and later child activity can reopen an
+existing child. A parent `Stop` remains Working until that set is empty,
+including across daemon restarts. A Claude `Stop` retains only a boolean
+saying whether a subagent is still running; task descriptions, commands, IDs,
+and the rest of Claude's background-task payload are discarded. The daemon
+retains that boolean until the final `Stop`, including across restarts, so
+Claude's routine idle notification cannot misreport a long-running subagent as
+blocked. Malformed or stale events are rejected. A real permission request
+remains blocked even if an idle notification follows it. The 24-hour recovery
+bound uses a separate child-evidence clock, so unrelated hooks cannot keep stale
+evidence alive. A temporarily unavailable daemon retains only bounded, atomic
+hook state.
 
 One field carries content, for voice mode only: a `Stop` from either adapter
 forwards `last_assistant_message` — the agent's final message of the turn —
