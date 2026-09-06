@@ -3,13 +3,17 @@ import { describe, expect, it } from "vitest";
 import { EventKind, HostEventSchema, Operation, VoiceEventSchema, VoiceProvisionProgressSchema, VoiceSpeechSchema, VoiceStatusSchema } from "../../protocol/gen/envelope_pb";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder } from "./testing";
 import { VoiceRegistry } from "./voiceRegistry";
-import { createVoiceStore } from "./voiceStore";
+import { createVoiceStore, latestReply } from "./voiceStore";
+
+const settle = async () => {
+  for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+};
 
 function harness() {
   const store = createVoiceStore();
   const connection = new FakeConnection();
   const registry = new VoiceRegistry(store);
-  const deps = { getConnection: () => connection.asHostConnection(), recorder: new FakeRecorder(), player: new FakePlayer(), files: new FakeFiles(), appInForeground: () => true };
+  const deps = { tailHoldMs: 0, getConnection: () => connection.asHostConnection(), recorder: new FakeRecorder(), player: new FakePlayer(), files: new FakeFiles(), appInForeground: () => true };
   return { store, connection, registry, deps };
 }
 
@@ -54,6 +58,142 @@ describe("VoiceRegistry", () => {
     expect(h.registry.get("b")).toBeUndefined();
     expect(h.store.getState().sessions).toEqual({});
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(5);
+  });
+
+  it("keeps B's reply manual-only when it arrives while A owns the listening microphone", async () => {
+    const h = harness();
+    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    a.focus();
+    await settle();
+    a.beginUtterance();
+    await settle();
+
+    h.registry.onVoiceEvent(create(HostEventSchema, {
+      kind: EventKind.VOICE_REPLY,
+      voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "b", displayMarkdown: "For B", speechText: "For B", audio: new Uint8Array([1]) }) }),
+    }));
+    const message = latestReply(h.store.getState().sessions.b)!;
+    expect(message.played).toBe(false);
+
+    await a.cancelUtterance();
+    a.blur();
+    b.focus();
+    await settle();
+    expect(message.played).toBe(false);
+    expect(h.deps.player.calls).not.toContain("play");
+    h.registry.disposeAll();
+  });
+
+  it("hands the recorder to B after A's normal release has safely consumed its recording", async () => {
+    const h = harness();
+    const events: string[] = [];
+    const nativePrepare = h.deps.recorder.prepare.bind(h.deps.recorder);
+    const nativeRecord = h.deps.recorder.record.bind(h.deps.recorder);
+    const nativeRead = h.deps.files.read.bind(h.deps.files);
+    let finishRead!: () => void;
+    h.deps.recorder.prepare = async () => { events.push("prepare"); await nativePrepare(); };
+    h.deps.recorder.record = () => { events.push("record"); nativeRecord(); };
+    h.deps.files.read = async (uri) => {
+      events.push("read.begin");
+      await new Promise<void>((resolve) => { finishRead = resolve; });
+      events.push("read.end");
+      return nativeRead(uri);
+    };
+    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    a.focus();
+    await settle();
+    a.beginUtterance();
+    await settle();
+    events.length = 0;
+
+    const ending = a.endUtterance();
+    await settle();
+    a.blur();
+    b.focus();
+    b.beginUtterance();
+    await settle();
+    expect(events).toEqual(["read.begin"]);
+
+    finishRead();
+    await ending;
+    await settle();
+    expect(events).toEqual(["read.begin", "read.end", "prepare", "record"]);
+    expect(h.deps.recorder.recording).toBe(true);
+    expect(h.store.getState().sessions.b?.phase).toBe("recording");
+    h.registry.disposeAll();
+    await settle();
+  });
+
+  it("keeps B's recorder claim pending when its focus arrives before A's blur", async () => {
+    const h = harness();
+    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    a.focus();
+    await settle();
+    expect(h.deps.recorder.prepared).toBe(1);
+
+    b.focus();
+    await settle();
+    expect(h.deps.recorder.prepared).toBe(1);
+    a.blur();
+    await settle();
+    expect(h.deps.recorder.released).toBe(1);
+    expect(h.deps.recorder.prepared).toBe(1);
+
+    b.beginUtterance();
+    await settle();
+    expect(h.deps.recorder.recording).toBe(true);
+    expect(h.store.getState().sessions.b?.phase).toBe("recording");
+    h.registry.disposeAll();
+    await settle();
+  });
+
+  it("does not let A's delayed cancellation release the recorder after B claims it", async () => {
+    const h = harness();
+    const events: string[] = [];
+    const nativePrepare = h.deps.recorder.prepare.bind(h.deps.recorder);
+    const nativeRecord = h.deps.recorder.record.bind(h.deps.recorder);
+    const nativeStop = h.deps.recorder.stop.bind(h.deps.recorder);
+    const nativeRelease = h.deps.recorder.release.bind(h.deps.recorder);
+    let finishStop!: () => void;
+    h.deps.recorder.prepare = async () => { events.push("prepare"); await nativePrepare(); };
+    h.deps.recorder.record = () => { events.push("record"); nativeRecord(); };
+    h.deps.recorder.stop = async () => {
+      events.push("stop.begin");
+      await new Promise<void>((resolve) => { finishStop = resolve; });
+      events.push("stop.end");
+      return nativeStop();
+    };
+    h.deps.recorder.release = () => { events.push("release"); nativeRelease(); };
+    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    a.focus();
+    await settle();
+    a.beginUtterance();
+    await settle();
+    events.length = 0;
+
+    const canceling = a.cancelUtterance();
+    await settle();
+    a.blur();
+    b.focus();
+    b.beginUtterance();
+    await settle();
+    expect(events).toEqual(["stop.begin"]);
+    expect(h.deps.recorder.released).toBe(0);
+
+    finishStop();
+    await canceling;
+    await settle();
+    expect(events).toEqual(["stop.begin", "stop.end", "release", "prepare", "record"]);
+    expect(h.deps.recorder.recording).toBe(true);
+    expect(h.deps.recorder.released).toBe(1);
+    expect(h.store.getState().sessions.b?.phase).toBe("recording");
+    h.deps.recorder.stop = nativeStop;
+    h.registry.disposeAll();
+    await settle();
   });
 });
 
