@@ -41,6 +41,10 @@ use store::{StoredAgent, StoredRoute, StoredState};
 /// coffee break. Degrading is deliberately one-way per event: the next hook of
 /// any kind restores real state.
 const STALE_WORKING_TTL_MILLIS: i64 = 15 * 60 * 1_000;
+/// A vendor-reported child may legitimately be silent far longer than one
+/// tool call. Keep that stronger evidence for a day, but not forever: a lost
+/// terminal hook must still have a bounded recovery path.
+const STALE_SUBAGENT_WORKING_TTL_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 /** Three daemon maintenance passes (normally six seconds) make process absence conclusive. */
 const DEPARTURE_MISSES_REQUIRED: u8 = 3;
 
@@ -108,7 +112,8 @@ impl AgentRuntime {
     /// of the first. Nothing outside the record is touched either — no signal
     /// reaches the agent's process, and `notify` stays false, so a healthy
     /// agent that merely ran one long silent tool call loses a label and
-    /// regains it on its next hook.
+    /// regains it on its next hook. A retained vendor subagent guard is direct
+    /// evidence of live work and is exempt until its matching terminal event.
     pub(crate) fn sweep_stale(&self) -> Vec<v1::AgentEvent> {
         let now = now_millis();
         let mut state = self.state.lock().unwrap();
@@ -118,12 +123,22 @@ impl AgentRuntime {
             // The clock is the lifecycle observation, not `updated_at`, which
             // reconciliation also moves when the agent merely changes pane.
             .filter(|record| {
-                let observed = match record.lifecycle_observed_at_unix_millis {
+                let lifecycle_observed = match record.lifecycle_observed_at_unix_millis {
                     0 => record.updated_at_unix_millis,
                     value => value,
                 };
+                let subagent_evidence = record.claude_has_running_subagent
+                    || !record.codex_running_subagent_ids.is_empty();
+                let (observed, ttl) = if subagent_evidence {
+                    (
+                        record.subagent_evidence_observed_at_unix_millis,
+                        STALE_SUBAGENT_WORKING_TTL_MILLIS,
+                    )
+                } else {
+                    (lifecycle_observed, STALE_WORKING_TTL_MILLIS)
+                };
                 record.lifecycle == v1::AgentLifecycleState::Working as i32
-                    && now.saturating_sub(observed) > STALE_WORKING_TTL_MILLIS
+                    && now.saturating_sub(observed) > ttl
             })
             .map(|record| record.agent_id.clone())
             .collect();
@@ -137,6 +152,10 @@ impl AgentRuntime {
             let generation = state.generation;
             let record = state.agents.get_mut(&agent_id).expect("collected above");
             record.lifecycle = v1::AgentLifecycleState::Unknown as i32;
+            record.claude_has_running_subagent = false;
+            record.codex_running_subagent_ids.clear();
+            record.codex_parent_stopped_for_subagents = false;
+            record.subagent_evidence_observed_at_unix_millis = 0;
             record.lifecycle_changed_at_unix_millis = now;
             record.state_generation = generation;
             events.push(v1::AgentEvent {

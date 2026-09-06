@@ -829,6 +829,69 @@ fn a_stop_landing_in_idle_hands_the_reply_on_once_and_stores_none_of_it() {
     assert_eq!(replies.lock().unwrap().len(), 1);
 }
 
+#[test]
+fn an_unwaited_codex_parent_reply_is_handed_on_at_its_only_stop() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("codex-unwaited-reply-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&replies);
+    let runtime = AgentRuntime::isolated_with_sink(
+        path.clone(),
+        Box::new(move |reply| sink.lock().unwrap().push(reply)),
+    );
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let mut start = event("start", 0, "SubagentStart");
+    start.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        adapters::CODEX_SUBAGENT_ID_FIELD: "child",
+    }))
+    .unwrap();
+    runtime
+        .ingest_hook_with_context(&start, "server-a", Some(&topology))
+        .unwrap();
+    let secret = "The one Codex parent reply.";
+    let mut stop = event("parent-stop", 0, "Stop");
+    stop.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "Stop",
+        adapters::LAST_ASSISTANT_MESSAGE_FIELD: secret,
+    }))
+    .unwrap();
+    let working = runtime
+        .ingest_hook_with_context(&stop, "server-a", Some(&topology))
+        .unwrap();
+    assert_eq!(
+        working.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    assert_eq!(replies.lock().unwrap()[0].text, secret);
+
+    let mut child_stop = event("child-stop", 0, "SubagentStop");
+    child_stop.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "SubagentStop",
+        adapters::CODEX_SUBAGENT_ID_FIELD: "child",
+    }))
+    .unwrap();
+    let finished = runtime
+        .ingest_hook_with_context(&child_stop, "server-a", Some(&topology))
+        .unwrap();
+    assert_eq!(
+        finished.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+    assert_eq!(replies.lock().unwrap().len(), 1);
+    assert!(!fs::read_to_string(path).unwrap().contains(secret));
+}
+
 /// `agents.json` is shaped by the lifecycle alone: a Stop that carries a
 /// message persists exactly what the same Stop without one persists.
 #[test]

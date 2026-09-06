@@ -250,6 +250,47 @@ impl AgentRuntime {
         let previous_claude_has_running_subagent = previous
             .as_ref()
             .is_some_and(|record| record.claude_has_running_subagent);
+        let previous_hook_terminal = previous.as_ref().is_some_and(|record| record.hook_terminal);
+        let previous_codex_parent_stopped = previous
+            .as_ref()
+            .is_some_and(|record| record.codex_parent_stopped_for_subagents);
+        let previous_subagent_evidence_observed_at = previous
+            .as_ref()
+            .map_or(0, |record| record.subagent_evidence_observed_at_unix_millis);
+        let mut codex_running_subagent_ids = previous
+            .as_ref()
+            .map(|record| record.codex_running_subagent_ids.clone())
+            .unwrap_or_default();
+        let codex_subagent_id = payload
+            .get(adapters::CODEX_SUBAGENT_ID_FIELD)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let codex_child_event = adapter.id() == "codex" && !codex_subagent_id.is_empty();
+        let codex_child_activity = codex_child_event && parsed.event_name != "SubagentStop";
+        if adapter.id() == "codex"
+            && (!previous_hook_terminal
+                || parsed.event_name == "SessionStart"
+                || codex_turn_start
+                || codex_child_activity)
+        {
+            match parsed.event_name.as_str() {
+                "SessionStart" => codex_running_subagent_ids.clear(),
+                "SubagentStop" => {
+                    codex_running_subagent_ids.remove(codex_subagent_id);
+                }
+                _ if codex_child_activity => {
+                    codex_running_subagent_ids.insert(codex_subagent_id.to_owned());
+                }
+                _ => {}
+            }
+        }
+        let codex_parent_stop_during_subagents = adapter.id() == "codex"
+            && parsed.event_name == "Stop"
+            && !codex_running_subagent_ids.is_empty();
+        let codex_final_unwaited_subagent_stop = adapter.id() == "codex"
+            && parsed.event_name == "SubagentStop"
+            && previous_codex_parent_stopped
+            && codex_running_subagent_ids.is_empty();
         let claude_idle_prompt_during_subagent = adapter.id() == "claude-code"
             && previous_claude_has_running_subagent
             && previous_lifecycle != v1::AgentLifecycleState::Blocked
@@ -258,20 +299,35 @@ impl AgentRuntime {
                 .get("notification_type")
                 .and_then(serde_json::Value::as_str)
                 == Some("idle_prompt");
-        let parsed_lifecycle = if matches!(
-            permission_review,
-            Some(PermissionReview::CachedAuto | PermissionReview::ObservedAuto)
-        ) || claude_idle_prompt_during_subagent
+        let subagent_bookkeeping_during_block = previous_lifecycle
+            == v1::AgentLifecycleState::Blocked
+            && (codex_child_event
+                || adapter.id() == "claude-code" && parsed.event_name == "SubagentStop"
+                || codex_parent_stop_during_subagents
+                || adapter.id() == "claude-code"
+                    && parsed.event_name == "Stop"
+                    && parsed.lifecycle == v1::AgentLifecycleState::Working);
+        let parsed_lifecycle = if codex_final_unwaited_subagent_stop {
+            v1::AgentLifecycleState::Idle
+        } else if subagent_bookkeeping_during_block {
+            v1::AgentLifecycleState::Blocked
+        } else if codex_parent_stop_during_subagents
+            || matches!(
+                permission_review,
+                Some(PermissionReview::CachedAuto | PermissionReview::ObservedAuto)
+            )
+            || claude_idle_prompt_during_subagent
         {
             v1::AgentLifecycleState::Working
         } else {
             parsed.lifecycle
         };
-        let terminal_late = previous.as_ref().is_some_and(|record| record.hook_terminal)
+        let terminal_late = previous_hook_terminal
             && !matches!(
                 parsed.event_name.as_str(),
                 "SessionStart" | "UserPromptSubmit"
-            );
+            )
+            && !codex_child_activity;
         let lifecycle = if terminal_late {
             // `hook_terminal` means a terminal Stop was already committed.
             // A late tool/subagent event cannot revive that turn, and an
@@ -290,14 +346,16 @@ impl AgentRuntime {
         let hook_terminal = if matches!(
             parsed.event_name.as_str(),
             "SessionStart" | "UserPromptSubmit"
-        ) {
+        ) || codex_child_activity
+        {
             false
-        } else if matches!(parsed.event_name.as_str(), "Stop" | "StopFailure")
-            && parsed.lifecycle == v1::AgentLifecycleState::Idle
+        } else if codex_final_unwaited_subagent_stop
+            || matches!(parsed.event_name.as_str(), "Stop" | "StopFailure")
+                && parsed_lifecycle == v1::AgentLifecycleState::Idle
         {
             true
         } else {
-            previous.as_ref().is_some_and(|record| record.hook_terminal)
+            previous_hook_terminal
         };
         let attention_transition = lifecycle == v1::AgentLifecycleState::Blocked
             && previous_lifecycle != v1::AgentLifecycleState::Blocked
@@ -372,6 +430,42 @@ impl AgentRuntime {
         } else {
             previous_claude_has_running_subagent
         };
+        let codex_parent_stopped_for_subagents = if adapter.id() != "codex" || terminal_late {
+            false
+        } else {
+            match parsed.event_name.as_str() {
+                "SessionStart" => false,
+                "UserPromptSubmit" if !codex_child_event => false,
+                "Stop" => !codex_running_subagent_ids.is_empty(),
+                "SubagentStop" if codex_running_subagent_ids.is_empty() => false,
+                _ if codex_child_activity && previous_hook_terminal => true,
+                _ => previous_codex_parent_stopped,
+            }
+        };
+        if hook_terminal {
+            codex_running_subagent_ids.clear();
+        }
+        let subagent_evidence_observed_at_unix_millis = if hook_terminal {
+            0
+        } else if adapter.id() == "codex" {
+            if codex_running_subagent_ids.is_empty() {
+                0
+            } else if codex_child_event {
+                observed_now
+            } else {
+                previous_subagent_evidence_observed_at
+            }
+        } else if adapter.id() == "claude-code" {
+            if !claude_has_running_subagent {
+                0
+            } else if parsed.event_name == "Stop" && !terminal_late {
+                observed_now
+            } else {
+                previous_subagent_evidence_observed_at
+            }
+        } else {
+            0
+        };
         let record = StoredAgent {
             agent_id: agent_id.clone(),
             adapter: adapter.legacy_kind() as i32,
@@ -405,6 +499,9 @@ impl AgentRuntime {
             present: true,
             hook_terminal,
             claude_has_running_subagent,
+            codex_running_subagent_ids,
+            codex_parent_stopped_for_subagents,
+            subagent_evidence_observed_at_unix_millis,
             codex_auto_review_turn_id,
             lifecycle_observed_at_unix_millis: observed_now,
             lifecycle_changed_at_unix_millis: lifecycle_changed_at,
@@ -415,12 +512,13 @@ impl AgentRuntime {
             return Err(HookIngestFailure::Retryable(error));
         }
         drop(state);
-        // Voice mode (docs/mobile/voice-mode-plan.md §4.5): a `Stop` that ends
-        // the turn hands the final message on, after the state is committed,
-        // and keeps none of it. Claude's Stop while subagents still run leaves
-        // the lifecycle Working and is skipped, so one turn speaks once.
+        // Voice mode (docs/mobile/voice-mode-plan.md §4.5): Claude produces a
+        // final aggregate Stop after its background children, so its
+        // intermediate Stop is skipped. Codex does not produce another parent
+        // Stop when an unwaited child finishes; speaking its one parent reply
+        // here preserves the existing voice behavior without storing content.
         if parsed.event_name == "Stop"
-            && lifecycle == v1::AgentLifecycleState::Idle
+            && (lifecycle == v1::AgentLifecycleState::Idle || adapter.id() == "codex")
             && let Some(text) = payload
                 .get(adapters::LAST_ASSISTANT_MESSAGE_FIELD)
                 .and_then(serde_json::Value::as_str)

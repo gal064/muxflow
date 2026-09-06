@@ -33,6 +33,16 @@ fn codex_tool_event(id: &str, event_name: &str, tool_name: &str) -> v1::AgentHoo
     tool
 }
 
+fn codex_subagent_event(id: &str, event_name: &str, agent_id: &str) -> v1::AgentHookEvent {
+    let mut hook = event(id, 0, event_name);
+    hook.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": event_name,
+        "agent_id": agent_id,
+    }))
+    .unwrap();
+    hook
+}
+
 #[test]
 fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
     let path = std::env::current_dir()
@@ -991,6 +1001,18 @@ fn an_active_subagent_never_hides_a_real_permission_block() {
     assert_eq!(repeated.lifecycle, v1::AgentLifecycleState::Blocked as i32);
     assert_eq!(repeated.attention_generation, blocked.attention_generation);
 
+    let sibling_finished = claude_hook(
+        &runtime,
+        &topology,
+        "sibling-finished",
+        serde_json::json!({"hook_event_name": "SubagentStop"}),
+    );
+    assert!(!sibling_finished.notify);
+    assert_eq!(
+        sibling_finished.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+
     let resumed = claude_hook(
         &runtime,
         &topology,
@@ -1295,19 +1317,340 @@ fn an_idle_prompt_inside_a_live_turn_still_asks_for_a_human() {
     assert_eq!(blocked.attention_kind, "blocked");
 }
 
-/// A subagent finishing is the parent still working, not the parent done.
 #[test]
-fn a_finished_subagent_does_not_end_its_parents_turn() {
-    let runtime = runtime("subagent-stop");
+fn unwaited_codex_subagents_keep_the_parent_working_until_the_last_one_stops() {
+    let runtime = runtime("codex-unwaited-subagents");
     let topology = topology("codex");
-    for (id, name) in [("prompt", "UserPromptSubmit"), ("sub", "SubagentStop")] {
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    for child in ["child-1", "child-2", "child-3"] {
         runtime
-            .ingest_hook_with_context(&event(id, 0, name), "server-a", Some(&topology))
+            .ingest_hook_with_context(
+                &codex_subagent_event(&format!("start-{child}"), "SubagentStart", child),
+                "server-a",
+                Some(&topology),
+            )
             .unwrap();
     }
-    let record = &runtime.snapshot_for("server-a").agents[0];
-    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
-    assert_eq!(record.attention_generation, 0);
+
+    let parent_stop = runtime
+        .ingest_hook_with_context(
+            &event("parent-stop", 0, "Stop"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!parent_stop.notify);
+    assert_eq!(
+        parent_stop.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    {
+        let state = runtime.state.lock().unwrap();
+        let stored = state.agents.values().next().unwrap();
+        assert_eq!(stored.codex_running_subagent_ids.len(), 3);
+        assert!(stored.codex_parent_stopped_for_subagents);
+        assert!(!stored.hook_terminal);
+    }
+
+    for (event_id, child, remaining) in [
+        ("stop-1", "child-1", 2),
+        ("duplicate-stop-1", "child-1", 2),
+        ("stop-2", "child-2", 1),
+    ] {
+        let stopped = runtime
+            .ingest_hook_with_context(
+                &codex_subagent_event(event_id, "SubagentStop", child),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        assert!(!stopped.notify);
+        assert_eq!(
+            stopped.agent.unwrap().lifecycle,
+            v1::AgentLifecycleState::Working as i32
+        );
+        assert_eq!(
+            runtime
+                .state
+                .lock()
+                .unwrap()
+                .agents
+                .values()
+                .next()
+                .unwrap()
+                .codex_running_subagent_ids
+                .len(),
+            remaining
+        );
+    }
+
+    let finished = runtime
+        .ingest_hook_with_context(
+            &codex_subagent_event("stop-3", "SubagentStop", "child-3"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(finished.notify);
+    let finished = finished.agent.unwrap();
+    assert_eq!(finished.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(finished.attention_generation, 1);
+    assert_eq!(finished.attention_kind, "completed");
+    let state = runtime.state.lock().unwrap();
+    let stored = state.agents.values().next().unwrap();
+    assert!(stored.codex_running_subagent_ids.is_empty());
+    assert!(!stored.codex_parent_stopped_for_subagents);
+    assert!(stored.hook_terminal);
+}
+
+#[test]
+fn waited_codex_subagents_leave_completion_to_the_final_parent_stop() {
+    let runtime = runtime("codex-waited-subagents");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    for child in ["child-1", "child-2", "child-3"] {
+        runtime
+            .ingest_hook_with_context(
+                &codex_subagent_event(&format!("start-{child}"), "SubagentStart", child),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+    }
+    for child in ["child-1", "child-2", "child-3"] {
+        let stopped = runtime
+            .ingest_hook_with_context(
+                &codex_subagent_event(&format!("stop-{child}"), "SubagentStop", child),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        assert!(!stopped.notify);
+        assert_eq!(
+            stopped.agent.unwrap().lifecycle,
+            v1::AgentLifecycleState::Working as i32
+        );
+    }
+    let finished = runtime
+        .ingest_hook_with_context(
+            &event("parent-stop", 0, "Stop"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(finished.notify);
+    assert_eq!(
+        finished.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn an_unwaited_codex_subagent_guard_survives_a_daemon_restart() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("codex-subagent-restart-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let topology = topology("codex");
+    {
+        let runtime = AgentRuntime::isolated(path.clone());
+        for hook in [
+            event("prompt", 0, "UserPromptSubmit"),
+            codex_subagent_event("start", "SubagentStart", "child"),
+            event("parent-stop", 0, "Stop"),
+        ] {
+            runtime
+                .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+                .unwrap();
+        }
+    }
+
+    let restarted = AgentRuntime::isolated(path);
+    let finished = restarted
+        .ingest_hook_with_context(
+            &codex_subagent_event("child-stop", "SubagentStop", "child"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(finished.notify);
+    assert_eq!(
+        finished.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn a_codex_sibling_finishing_cannot_hide_a_permission_block() {
+    let runtime = runtime("codex-subagent-permission");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("start-1", "SubagentStart", "child-1"),
+        codex_subagent_event("start-2", "SubagentStart", "child-2"),
+        event("parent-stop", 0, "Stop"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let blocked = runtime
+        .ingest_hook_with_context(
+            &event("permission", 0, "PermissionRequest"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(blocked.notify);
+    let attention = blocked.agent.unwrap().attention_generation;
+
+    let sibling_finished = runtime
+        .ingest_hook_with_context(
+            &codex_subagent_event("stop-1", "SubagentStop", "child-1"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!sibling_finished.notify);
+    let sibling_finished = sibling_finished.agent.unwrap();
+    assert_eq!(
+        sibling_finished.lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+    assert_eq!(sibling_finished.attention_generation, attention);
+
+    runtime
+        .ingest_hook_with_context(
+            &event("permission-resolved", 0, "PostToolUse"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let finished = runtime
+        .ingest_hook_with_context(
+            &codex_subagent_event("stop-2", "SubagentStop", "child-2"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(finished.notify);
+    assert_eq!(
+        finished.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn a_new_codex_prompt_owns_completion_while_an_older_child_finishes() {
+    let runtime = runtime("codex-overlapping-prompt");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt-1", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "child"),
+        event("parent-stop-1", 0, "Stop"),
+        event("prompt-2", 0, "UserPromptSubmit"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let child_stop = runtime
+        .ingest_hook_with_context(
+            &codex_subagent_event("child-stop", "SubagentStop", "child"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!child_stop.notify);
+    assert_eq!(
+        child_stop.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    let parent_stop = runtime
+        .ingest_hook_with_context(
+            &event("parent-stop-2", 0, "Stop"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(parent_stop.notify);
+    assert_eq!(
+        parent_stop.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn continued_codex_child_activity_reopens_a_stopped_parent() {
+    let runtime = runtime("codex-continued-child");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "child"),
+        event("parent-stop", 0, "Stop"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let first_stop = runtime
+        .ingest_hook_with_context(
+            &codex_subagent_event("child-stop-1", "SubagentStop", "child"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(first_stop.notify);
+    assert_eq!(
+        first_stop.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+
+    let resumed = runtime
+        .ingest_hook_with_context(
+            &codex_subagent_event("child-resumed", "UserPromptSubmit", "child"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!resumed.notify);
+    assert_eq!(
+        resumed.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    {
+        let state = runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        assert!(record.codex_running_subagent_ids.contains("child"));
+        assert!(record.codex_parent_stopped_for_subagents);
+        assert!(!record.hook_terminal);
+    }
+
+    let final_stop = runtime
+        .ingest_hook_with_context(
+            &codex_subagent_event("child-stop-2", "SubagentStop", "child"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(final_stop.notify);
+    assert_eq!(
+        final_stop.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
 }
 
 #[test]
@@ -1450,6 +1793,147 @@ fn staleness_never_touches_attention_or_a_blocked_agent() {
     let record = &runtime.snapshot_for("server-a").agents[0];
     assert_eq!(record.lifecycle, v1::AgentLifecycleState::Blocked as i32);
     assert_eq!(record.attention_kind, "blocked");
+}
+
+#[test]
+fn staleness_never_overrides_direct_evidence_of_a_running_subagent() {
+    let codex_topology = topology("codex");
+    let codex = runtime("stale-codex-subagent");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "child"),
+        event("parent-stop", 0, "Stop"),
+    ] {
+        codex
+            .ingest_hook_with_context(&hook, "server-a", Some(&codex_topology))
+            .unwrap();
+    }
+    {
+        let mut state = codex.state.lock().unwrap();
+        let record = state.agents.values_mut().next().unwrap();
+        record.lifecycle_observed_at_unix_millis = now_millis() - STALE_WORKING_TTL_MILLIS - 1_000;
+        record.subagent_evidence_observed_at_unix_millis =
+            now_millis() - STALE_WORKING_TTL_MILLIS - 1_000;
+    }
+    assert!(codex.sweep_stale().is_empty());
+    let finished = codex
+        .ingest_hook_with_context(
+            &codex_subagent_event("stop", "SubagentStop", "child"),
+            "server-a",
+            Some(&codex_topology),
+        )
+        .unwrap();
+    assert!(finished.notify);
+    assert_eq!(
+        finished.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+
+    let claude = runtime("stale-claude-subagent");
+    let claude_topology = topology("claude");
+    claude_hook(
+        &claude,
+        &claude_topology,
+        "prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    claude_hook(
+        &claude,
+        &claude_topology,
+        "parent-stop",
+        serde_json::json!({
+            "hook_event_name": "Stop",
+            "has_running_subagent": true
+        }),
+    );
+    {
+        let mut state = claude.state.lock().unwrap();
+        let record = state.agents.values_mut().next().unwrap();
+        record.lifecycle_observed_at_unix_millis = now_millis() - STALE_WORKING_TTL_MILLIS - 1_000;
+        record.subagent_evidence_observed_at_unix_millis =
+            now_millis() - STALE_WORKING_TTL_MILLIS - 1_000;
+    }
+    assert!(claude.sweep_stale().is_empty());
+    assert_eq!(
+        claude.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    {
+        let mut state = claude.state.lock().unwrap();
+        let record = state.agents.values_mut().next().unwrap();
+        record.lifecycle_observed_at_unix_millis =
+            now_millis() - STALE_SUBAGENT_WORKING_TTL_MILLIS - 1_000;
+        record.subagent_evidence_observed_at_unix_millis =
+            now_millis() - STALE_SUBAGENT_WORKING_TTL_MILLIS - 1_000;
+    }
+    let stale = claude.sweep_stale();
+    assert_eq!(
+        stale.len(),
+        1,
+        "lost child-stop evidence cannot live forever"
+    );
+    assert_eq!(
+        stale[0].agent.as_ref().unwrap().lifecycle,
+        v1::AgentLifecycleState::Unknown as i32
+    );
+    let state = claude.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert!(!record.claude_has_running_subagent);
+    assert!(record.codex_running_subagent_ids.is_empty());
+    assert!(!record.codex_parent_stopped_for_subagents);
+    assert_eq!(record.subagent_evidence_observed_at_unix_millis, 0);
+}
+
+#[test]
+fn expired_codex_subagent_evidence_cannot_poison_the_next_turn() {
+    let runtime = runtime("expired-codex-subagent");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt-1", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "lost-child"),
+        event("parent-stop-1", 0, "Stop"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    runtime
+        .state
+        .lock()
+        .unwrap()
+        .agents
+        .values_mut()
+        .next()
+        .unwrap()
+        .subagent_evidence_observed_at_unix_millis =
+        now_millis() - STALE_SUBAGENT_WORKING_TTL_MILLIS - 1_000;
+    assert_eq!(runtime.sweep_stale().len(), 1);
+    {
+        let state = runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        assert!(record.codex_running_subagent_ids.is_empty());
+        assert!(!record.codex_parent_stopped_for_subagents);
+    }
+
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt-2", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let finished = runtime
+        .ingest_hook_with_context(
+            &event("parent-stop-2", 0, "Stop"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(finished.notify);
+    assert_eq!(
+        finished.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
 }
 
 /// The disconnect catch-up contract: everything that happened while the
