@@ -3,9 +3,10 @@
 
 import { HostError, type HostConnection } from "../../protocol/HostConnection";
 import { createWindow } from "../../protocol/requests";
+import { log } from "../../session/log";
 import type { SessionStore } from "../../store/sessionStore";
 
-export interface CreatedWindow { windowId: string; paneId: string; topologyGeneration: bigint }
+export interface CreatedWindow { windowId: string; paneId: string }
 
 /**
  * How long a stale_topology retry waits for the newer TOPOLOGY_SNAPSHOT to
@@ -47,11 +48,21 @@ export async function createTerminalWindow(
   command = "",
   staleWaitMs = STALE_TOPOLOGY_WAIT_MS,
 ): Promise<CreatedWindow> {
-  const attempt = () => {
+  const kind = command.trim() ? "agent" : "terminal";
+  let attemptNumber = 0;
+  const attempt = async () => {
+    attemptNumber += 1;
     const generation = store.getState().topologyGeneration;
-    return connection.request(createWindow(sessionId, connection.serverIdentity, generation, command)).catch((error: unknown) => {
+    log(`create.window request kind=${kind} attempt=${attemptNumber} session=${sessionId} topology=${generation} commandPresent=${command.trim() ? "yes" : "no"}`);
+    try {
+      const response = await connection.request(createWindow(sessionId, connection.serverIdentity, generation, command));
+      const result = response.tmuxActionResult;
+      log(`create.window response kind=${kind} attempt=${attemptNumber} result=${result?.paneId ? "present" : "missing"} window=${result?.windowId || "none"} pane=${result?.paneId || "none"} responseTopology=${result?.topologyGeneration ?? 0n} storeTopology=${store.getState().topologyGeneration}`);
+      return response;
+    } catch (error) {
+      log(`create.window refused kind=${kind} attempt=${attemptNumber} code=${diagnosticErrorCode(error)} storeTopology=${store.getState().topologyGeneration}`);
       throw Object.assign(error instanceof Error ? error : new Error(String(error)), { generation });
-    });
+    }
   };
   let response;
   try {
@@ -63,5 +74,10 @@ export async function createTerminalWindow(
   }
   const result = response.tmuxActionResult;
   if (!result || !result.paneId) throw new HostError("missing_result", "the host did not return the new pane");
-  return { windowId: result.windowId, paneId: result.paneId, topologyGeneration: result.topologyGeneration };
+  return { windowId: result.windowId, paneId: result.paneId };
+}
+
+function diagnosticErrorCode(error: unknown): string {
+  if (error instanceof HostError) return error.code;
+  return error instanceof Error ? error.name : typeof error;
 }
