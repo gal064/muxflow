@@ -13,6 +13,8 @@ export interface NotificationContext {
   alreadyNotified: (agentId: string, attentionGeneration: bigint) => boolean;
   /** Step 6. */
   focusedPaneId: string | undefined;
+  /** Agent shown by a focused agent-specific screen, such as Voice. */
+  viewedAgentId: string | undefined;
   appInForeground: boolean;
   /** `agentWorkspaceName(state, next)` — the caller resolves it from the store. */
   workspaceName: string;
@@ -51,7 +53,9 @@ export function decideAgentNotification(
   // 5.
   if (context.alreadyNotified(next.id, next.attentionGeneration)) return { kind: "skip", reason: "alreadyNotified" };
   // 6.
-  if (context.appInForeground && context.focusedPaneId !== undefined && context.focusedPaneId === next.route.paneId) {
+  const viewingAgent = context.viewedAgentId === next.id;
+  const viewingTerminal = context.focusedPaneId !== undefined && context.focusedPaneId === next.route.paneId;
+  if (context.appInForeground && (viewingAgent || viewingTerminal)) {
     return { kind: "skip", reason: "focused" };
   }
   // 7.

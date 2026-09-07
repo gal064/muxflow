@@ -8,6 +8,7 @@ import { useStore } from "zustand";
 import { agentStateLabel, agentTitle } from "../agents/agentViews";
 import { markState } from "../agents/agentListModel";
 import { AgentMark } from "../agents/ui/AgentMark";
+import { notificationAttention } from "../notifications/attention";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
@@ -97,14 +98,16 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   }, [connected, controller, open]);
   useFocusEffect(useCallback(() => {
     const live = controller.isDisposed ? open() : controller;
+    const clearViewedAgent = notificationAttention.focusAgent(agentId);
     if (live !== controller) setController(live);
     setScreenFocused(true);
     live.focus();
     return () => {
+      clearViewedAgent();
       setScreenFocused(false);
       live.blur();
     };
-  }, [controller, open]));
+  }, [agentId, controller, open]));
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (next) => {
