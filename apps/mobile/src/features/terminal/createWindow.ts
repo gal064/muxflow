@@ -5,7 +5,7 @@ import { HostError, type HostConnection } from "../../protocol/HostConnection";
 import { createWindow } from "../../protocol/requests";
 import type { SessionStore } from "../../store/sessionStore";
 
-export interface CreatedWindow { windowId: string; paneId: string; topologyGeneration: bigint }
+export interface CreatedWindow { windowId: string; paneId: string }
 
 /**
  * How long a stale_topology retry waits for the newer TOPOLOGY_SNAPSHOT to
@@ -63,5 +63,5 @@ export async function createTerminalWindow(
   }
   const result = response.tmuxActionResult;
   if (!result || !result.paneId) throw new HostError("missing_result", "the host did not return the new pane");
-  return { windowId: result.windowId, paneId: result.paneId, topologyGeneration: result.topologyGeneration };
+  return { windowId: result.windowId, paneId: result.paneId };
 }

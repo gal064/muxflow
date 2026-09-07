@@ -15,6 +15,9 @@ import { StatusPill } from "../../src/ui/components/StatusPill";
 import { useSession } from "../../src/ui/hooks";
 import { colors, fixedChromeText, metrics, typeScale } from "../../src/ui/tokens";
 
+/** How long the New-terminal row waits for the created pane to reach the topology before navigating. */
+const NEW_PANE_TOPOLOGY_WAIT_MS = 3_000;
+
 /** Workspace — design.md §9.4. */
 export default function WorkspaceScreen() {
   const params = useLocalSearchParams<{ sessionId: string }>();
@@ -44,20 +47,14 @@ export default function WorkspaceScreen() {
     setCreating(true);
     try {
       const created = await createTerminalWindow(connection, sessionStore, sessionId);
-      router.push({
-        pathname: "/terminal/[paneId]",
-        params: {
-          paneId: toRouteParam(created.paneId),
-          sessionId: toRouteParam(sessionId),
-          createdGeneration: created.topologyGeneration.toString(),
-        },
-      });
+      await waitForPane(created.paneId);
+      openPane(created.paneId);
     } catch (error) {
       toast(`Couldn't open a terminal: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setCreating(false);
     }
-  }, [creating, router, sessionId]);
+  }, [creating, openPane, sessionId]);
 
   return (
     <View style={styles.root}>
@@ -87,6 +84,23 @@ export default function WorkspaceScreen() {
       />
     </View>
   );
+}
+
+function waitForPane(paneId: string): Promise<void> {
+  return new Promise((resolve) => {
+    if (sessionStore.getState().panes[paneId]) return resolve();
+    const timer = setTimeout(() => {
+      unsubscribe();
+      resolve();
+    }, NEW_PANE_TOPOLOGY_WAIT_MS);
+    const unsubscribe = sessionStore.subscribe((s) => {
+      if (s.panes[paneId]) {
+        clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      }
+    });
+  });
 }
 
 /** 48 dp action row on `--chrome-raised` (§9.4). */
