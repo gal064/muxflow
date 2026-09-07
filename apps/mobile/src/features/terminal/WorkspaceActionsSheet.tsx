@@ -5,6 +5,7 @@ import { useStore } from "zustand";
 
 import { toRouteParam } from "../../navigation/routeParams";
 import { getConnection, toast } from "../../session/connectionManager";
+import { log } from "../../session/log";
 import { prefsStore } from "../../store/prefsStore";
 import { sessionStore } from "../../store/sessionStore";
 import { Hairline } from "../../ui/components/Button";
@@ -31,9 +32,14 @@ export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss }: 
 
   const createWindow = useCallback(async (kind: "terminal" | "agent") => {
     const connection = getConnection();
-    if (!sessionId || !connection || creating) return;
     const command = kind === "agent" ? agentCommand.trim() : "";
+    log(`create.window ui.press kind=${kind} session=${sessionId ?? "none"} connection=${connection ? "present" : "missing"} alreadyCreating=${creating ? "yes" : "no"} commandPresent=${command ? "yes" : "no"} prefsHydrated=${prefsStore.getState().hydrated ? "yes" : "no"} topology=${sessionStore.getState().topologyGeneration}`);
+    if (!sessionId || !connection || creating) {
+      log(`create.window ui.ignored kind=${kind} reason=${!sessionId ? "missing-session" : !connection ? "missing-connection" : "already-creating"}`);
+      return;
+    }
     if (kind === "agent" && !command) {
+      log("create.window ui.ignored kind=agent reason=missing-command");
       onDismiss();
       toast("Set an agent command first.");
       router.push("/settings");
@@ -43,9 +49,11 @@ export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss }: 
     setCreating(kind);
     try {
       const created = await createTerminalWindow(connection, sessionStore, sessionId, command);
-      await waitForPane(created.paneId, NEW_PANE_TOPOLOGY_WAIT_MS);
+      const paneObserved = await waitForPane(created.paneId, NEW_PANE_TOPOLOGY_WAIT_MS);
+      log(`create.window ui.navigate kind=${kind} session=${sessionId} window=${created.windowId} pane=${created.paneId} paneObserved=${paneObserved ? "yes" : "no"} topology=${sessionStore.getState().topologyGeneration}`);
       router.push({ pathname: "/terminal/[paneId]", params: { paneId: toRouteParam(created.paneId), sessionId: toRouteParam(sessionId) } });
     } catch (error) {
+      log(`create.window ui.failed kind=${kind} code=${diagnosticErrorCode(error)} topology=${sessionStore.getState().topologyGeneration}`);
       toast(`Couldn't open ${kind === "agent" ? "an agent" : "a terminal"}: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setCreating(null);
@@ -71,20 +79,26 @@ function SheetAction({ label, onPress, disabled, busy }: { label: string; onPres
   );
 }
 
-function waitForPane(paneId: string, timeoutMs: number): Promise<void> {
+function waitForPane(paneId: string, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
-    if (sessionStore.getState().panes[paneId]) return resolve();
+    if (sessionStore.getState().panes[paneId]) return resolve(true);
     const timer = setTimeout(() => {
       unsubscribe();
-      resolve();
+      resolve(false);
     }, timeoutMs);
     const unsubscribe = sessionStore.subscribe((state) => {
       if (!state.panes[paneId]) return;
       clearTimeout(timer);
       unsubscribe();
-      resolve();
+      resolve(true);
     });
   });
+}
+
+function diagnosticErrorCode(error: unknown): string {
+  return error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code
+    : error instanceof Error ? error.name : typeof error;
 }
 
 const styles = StyleSheet.create({
