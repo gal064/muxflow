@@ -20,6 +20,8 @@ export interface AgentNotifierDeps {
   onAgentTransition: (listener: (transition: AgentTransition) => void) => () => void;
   /** §13 step 6. */
   appInForeground: () => boolean;
+  /** Agent shown by a focused agent-specific screen, if any. */
+  viewedAgentId: () => string | undefined;
   /** Injected for the post/cancel settle guard; the default is the real clock. */
   now?: (() => number) | undefined;
   sleep?: ((ms: number) => Promise<void>) | undefined;
@@ -130,6 +132,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
       notificationWatermark: baseline.get(transition.next.id) ?? 0n,
       alreadyNotified: (agentId, generation) => (lastNotified.get(agentId) ?? -1n) >= generation,
       focusedPaneId: state.focusedPaneId,
+      viewedAgentId: deps.viewedAgentId(),
       appInForeground: deps.appInForeground(),
       workspaceName: agentWorkspaceName(state, transition.next),
     });

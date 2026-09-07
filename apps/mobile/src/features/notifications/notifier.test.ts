@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import type { AgentNotification, NotificationHost } from "./host";
+import { createNotificationAttention } from "./attention";
 import { createAgentNotifier, type AgentNotifier } from "./notifier";
 import { initialSessionState, type Agent, type AgentTransition, type SessionState } from "../../store/sessionStore";
 
@@ -51,7 +52,7 @@ function fakeHost() {
 }
 
 /** A store stand-in: the state is set outright and `emit()` is the subscription. */
-function harness(options: { foreground?: boolean } = {}) {
+function harness(options: { foreground?: boolean; viewedAgentId?: string | (() => string | undefined) } = {}) {
   const platform = fakeHost();
   let state: SessionState = { ...initialSessionState(), connection: { state: "connected", attempt: 0 }, serverIdentity: "tmux:/s:1" };
   // A virtual clock: the post-settle guard is asserted, never waited on.
@@ -71,6 +72,7 @@ function harness(options: { foreground?: boolean } = {}) {
       return () => transitionListeners.delete(listener);
     },
     appInForeground: () => options.foreground ?? false,
+    viewedAgentId: () => typeof options.viewedAgentId === "function" ? options.viewedAgentId() : options.viewedAgentId,
     now: () => clock,
     sleep: async (ms) => {
       slept.push(ms);
@@ -215,6 +217,40 @@ describe("agent notifier (§13)", () => {
       front.setState({ focusedPaneId: "%9" });
       await front.transition(agent(), blocked());
       expect(front.presented).toHaveLength(1);
+    });
+  });
+
+  describe("step 6, a viewed agent outside its Terminal", () => {
+    it.each([blocked(), completed()])("stays quiet for the exact agent on its Voice screen", async (next) => {
+      const voice = harness({ foreground: true, viewedAgentId: "a1" });
+      await voice.transition(agent({ attentionGeneration: 1n }), next);
+      expect(voice.presented).toHaveLength(0);
+    });
+
+    it("still posts for every other agent", async () => {
+      const voice = harness({ foreground: true, viewedAgentId: "a1" });
+      await voice.transition(agent({ id: "a2", attentionGeneration: 1n }), blocked({ id: "a2" }));
+      expect(voice.presented).toHaveLength(1);
+      expect(voice.presented[0]?.tag).toBe("a2");
+    });
+
+    it("still posts for the viewed agent when the app is in the background", async () => {
+      const voice = harness({ foreground: false, viewedAgentId: "a1" });
+      await voice.transition(agent(), blocked());
+      expect(voice.presented).toHaveLength(1);
+    });
+
+    it("posts again after the Voice focus cleanup runs on blur or unmount", async () => {
+      const attention = createNotificationAttention();
+      const clearVoiceFocus = attention.focusAgent("a1");
+      const voice = harness({ foreground: true, viewedAgentId: () => attention.viewedAgentId() });
+
+      await voice.transition(agent({ attentionGeneration: 1n }), blocked({ attentionGeneration: 2n }));
+      clearVoiceFocus();
+      await voice.transition(blocked({ attentionGeneration: 2n }), completed({ attentionGeneration: 3n }));
+
+      expect(voice.presented).toHaveLength(1);
+      expect(voice.presented[0]?.body).toBe("Finished");
     });
   });
 
