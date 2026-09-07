@@ -26,6 +26,7 @@ function context(overrides: Partial<NotificationContext> = {}): NotificationCont
     notificationWatermark: 0n,
     alreadyNotified: () => false,
     focusedPaneId: undefined,
+    viewedAgentId: undefined,
     appInForeground: false,
     workspaceName: "muxflow",
     ...overrides,
@@ -73,6 +74,13 @@ describe("notification decision rule (§13), one case per step", () => {
     expect(decideAgentNotification(agent({ attentionGeneration: 1n }), blocked(2n), context({ focusedPaneId: "%1", appInForeground: false })))
       .toMatchObject({ kind: "post" });
     expect(decideAgentNotification(agent({ attentionGeneration: 1n }), blocked(2n), context({ focusedPaneId: "%2", appInForeground: true })))
+      .toMatchObject({ kind: "post" });
+  });
+
+  it("step 6: a viewed agent is quiet without suppressing another agent", () => {
+    expect(decideAgentNotification(agent({ attentionGeneration: 1n }), completed(2n), context({ viewedAgentId: "a1", appInForeground: true })))
+      .toEqual({ kind: "skip", reason: "focused" });
+    expect(decideAgentNotification(agent({ attentionGeneration: 1n }), blocked(2n), context({ viewedAgentId: "a2", appInForeground: true })))
       .toMatchObject({ kind: "post" });
   });
 
