@@ -20,7 +20,6 @@ import { useAnimationsAllowed } from "../../ui/useAnimationsAllowed";
 import { appForeground } from "./appForeground";
 import type { FromPageMessage } from "./bridgeMessages";
 import { KEY_CHIPS, SHIFT_CHIP, pressChip } from "./chips";
-import { awaitingCreatedPaneTopology } from "./panes";
 import { TerminalController, type TerminalSnapshot } from "./TerminalController";
 import { terminalRegistry } from "./terminalRegistry";
 import { TerminalWebView, type TerminalWebViewHandle } from "./TerminalWebView";
@@ -28,12 +27,10 @@ import { TerminalWebView, type TerminalWebViewHandle } from "./TerminalWebView";
 export interface TerminalScreenProps {
   paneId: string;
   sessionId: string;
-  /** CREATE_WINDOW is authoritative before its topology event reaches the phone. */
-  createdGeneration?: bigint;
 }
 
 /** Terminal — design.md §9.5. Header, xterm WebView, key chips, input bar. */
-export function TerminalScreen({ paneId, sessionId, createdGeneration }: TerminalScreenProps) {
+export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const animateAgentState = useAnimationsAllowed();
@@ -53,18 +50,22 @@ export function TerminalScreen({ paneId, sessionId, createdGeneration }: Termina
   // §9.5: the ⇧ chip arms Shift for the next chip only; Send also disarms it.
   const [shiftArmed, setShiftArmed] = useState(false);
   const pane = state.panes[paneId];
+  const panePresent = pane !== undefined;
   const connected = state.connection.state === "connected";
   // §9.5: the pane left the topology (window closed elsewhere), or never was
-  // in it (a retained "gone" agent). CREATE_WINDOW is the one exception: its
-  // response is ordered immediately before the topology snapshot it names.
-  const awaitingCreatedTopology = awaitingCreatedPaneTopology(pane !== undefined, state.topologyGeneration, createdGeneration);
-  const gone = connected && !pane && state.topologyGeneration > 0n && !awaitingCreatedTopology;
+  // in it (a retained "gone" agent). New terminal waits for its pane before
+  // navigating here, so an absent pane on a loaded topology is conclusive.
+  const gone = connected && !pane && state.topologyGeneration > 0n;
   const agent = agentForPane(state, paneId);
   const session = state.sessions[sessionId];
   const window = pane ? state.windows[pane.windowId] : undefined;
   const title = agent
     ? agentTitle(state, agent)
     : `${stripAgentStatusGlyphs(session?.name ?? sessionId)} · ${stripAgentStatusGlyphs(window?.name ?? "")}`.replace(/ · $/, "");
+
+  useEffect(() => {
+    log(`[muxflow] terminal.route pane=${paneId} session=${sessionId} connected=${connected ? "yes" : "no"} panePresent=${panePresent ? "yes" : "no"} decision=${gone ? "unavailable" : "attach"} topology=${sessionStore.getState().topologyGeneration}`);
+  }, [connected, gone, paneId, panePresent, sessionId]);
 
   // One controller per focus: hide on blur (Files, back), re-attach on focus (§7.6 steps 1, 4).
   useFocusEffect(useCallback(() => {
