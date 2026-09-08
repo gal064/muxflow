@@ -11,6 +11,7 @@ const REPORT_INTERVAL_MS = 2_000;
 export class TerminalPanePerf {
   #interval: PanePerfInterval;
   readonly #retired = new Set<PanePerfInterval>();
+  #flushTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(readonly paneId: string, connectionEpoch?: number) {
     this.#interval = createInterval(connectionEpoch);
@@ -18,6 +19,7 @@ export class TerminalPanePerf {
 
   setConnectionEpoch(connectionEpoch: number | undefined): void {
     if (connectionEpoch === this.#interval.connectionEpoch) return;
+    this.#clearFlushTimer();
     const previous = this.#interval;
     previous.closing = true;
     this.#retired.add(previous);
@@ -60,15 +62,18 @@ export class TerminalPanePerf {
         break;
     }
     this.#flush(interval, interval.closing);
+    this.#armFlush(interval);
   }
 
   render(startRow: number, endRow: number): void {
     this.#interval.renderEvents += 1;
     this.#interval.renderedRows += Math.max(0, endRow - startRow + 1);
     this.#flush(this.#interval, false);
+    this.#armFlush(this.#interval);
   }
 
   dispose(): void {
+    this.#clearFlushTimer();
     this.#interval.closing = true;
     this.#retired.add(this.#interval);
     for (const interval of [...this.#retired]) {
@@ -109,7 +114,25 @@ export class TerminalPanePerf {
       this.#retired.delete(interval);
       return;
     }
+    if (interval === this.#interval) this.#clearFlushTimer();
     resetInterval(interval, now);
+  }
+
+  #armFlush(interval: PanePerfInterval): void {
+    if (interval !== this.#interval || interval.closing || this.#flushTimer !== undefined) return;
+    const elapsed = performance.now() - interval.startedAt;
+    this.#flushTimer = setTimeout(() => {
+      this.#flushTimer = undefined;
+      if (interval !== this.#interval || interval.closing) return;
+      this.#flush(interval, true);
+      if (interval.pendingWrites > 0) this.#armFlush(interval);
+    }, Math.max(0, REPORT_INTERVAL_MS - elapsed));
+  }
+
+  #clearFlushTimer(): void {
+    if (this.#flushTimer === undefined) return;
+    clearTimeout(this.#flushTimer);
+    this.#flushTimer = undefined;
   }
 }
 

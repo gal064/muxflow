@@ -55,6 +55,10 @@ impl ControlQueueDepth {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
 
+    fn retried(&self, measurement: &mut ControlWriteMeasurement) {
+        measurement.queue_depth_at_enqueue = self.0.fetch_add(1, Ordering::Relaxed) + 1;
+    }
+
     fn dequeued(&self, measurement: ControlWriteMeasurement) -> ControlWriteStarted {
         self.0.fetch_sub(1, Ordering::Relaxed);
         let write_started = Instant::now();
@@ -102,6 +106,8 @@ impl ControlQueueDepth {
     }
     #[inline(always)]
     fn rejected(&self) {}
+    #[inline(always)]
+    fn retried(&self, _measurement: &mut ControlWriteMeasurement) {}
     #[inline(always)]
     fn dequeued(&self, _measurement: ControlWriteMeasurement) -> ControlWriteStarted {
         ControlWriteStarted
@@ -244,7 +250,7 @@ impl ControlWriterHandle {
                     thread::sleep(
                         WRITE_POLL.min(deadline.saturating_duration_since(Instant::now())),
                     );
-                    command.measurement = self.depth.entered();
+                    self.depth.retried(&mut command.measurement);
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
                     self.depth.rejected();
@@ -360,6 +366,17 @@ mod tests {
     use super::*;
     use std::{fs::File, os::fd::FromRawFd, sync::Mutex};
     use tmux_agent_protocol::{envelope, v1::envelope::Payload};
+
+    #[test]
+    fn a_full_queue_retry_preserves_the_original_wait_origin() {
+        let depth = ControlQueueDepth::default();
+        let mut measurement = depth.entered();
+        let started = measurement.enqueued_at;
+        depth.rejected();
+        depth.retried(&mut measurement);
+        assert_eq!(measurement.enqueued_at, started);
+        depth.rejected();
+    }
 
     #[test]
     fn a_full_os_pipe_obeys_the_write_deadline_and_close_never_needs_the_writer() {

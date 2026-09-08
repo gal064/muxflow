@@ -845,6 +845,7 @@ pub(crate) struct TmuxActionTiming<'a> {
     /// Joins this line to the desktop's `perf.timeline` record and to the
     /// `responseWritten` line the writer task adds.
     pub(crate) request_id: u64,
+    pub(crate) connection_epoch: u64,
     pub(crate) kind: &'a str,
     pub(crate) session_id: &'a str,
     pub(crate) window_id: &'a str,
@@ -997,9 +998,11 @@ mod switch_timing {
     /// When each tmux-action response was handed to the sequencer, keyed by
     /// request id, so the writer task can name the queue-to-wire delay it then
     /// paid.
-    static RESPONSE_ENQUEUED_AT: OnceLock<Mutex<HashMap<u64, Instant>>> = OnceLock::new();
+    type RequestKey = (u64, u64);
 
-    fn response_enqueued_at() -> &'static Mutex<HashMap<u64, Instant>> {
+    static RESPONSE_ENQUEUED_AT: OnceLock<Mutex<HashMap<RequestKey, Instant>>> = OnceLock::new();
+
+    fn response_enqueued_at() -> &'static Mutex<HashMap<RequestKey, Instant>> {
         RESPONSE_ENQUEUED_AT.get_or_init(Default::default)
     }
 
@@ -1007,15 +1010,15 @@ mod switch_timing {
     /// by request id. The `tmuxAction` line joins it as `readAtUnixMillis`, so
     /// the desktop's "the answer took four seconds" can be split into "the
     /// request was still arriving" and "the answer was still leaving".
-    static REQUEST_READ_AT: OnceLock<Mutex<HashMap<u64, i64>>> = OnceLock::new();
+    static REQUEST_READ_AT: OnceLock<Mutex<HashMap<RequestKey, i64>>> = OnceLock::new();
 
-    fn request_read_at() -> &'static Mutex<HashMap<u64, i64>> {
+    fn request_read_at() -> &'static Mutex<HashMap<RequestKey, i64>> {
         REQUEST_READ_AT.get_or_init(Default::default)
     }
 
-    static REQUEST_OPERATION: OnceLock<Mutex<HashMap<u64, i32>>> = OnceLock::new();
+    static REQUEST_OPERATION: OnceLock<Mutex<HashMap<RequestKey, i32>>> = OnceLock::new();
 
-    fn request_operation() -> &'static Mutex<HashMap<u64, i32>> {
+    fn request_operation() -> &'static Mutex<HashMap<RequestKey, i32>> {
         REQUEST_OPERATION.get_or_init(Default::default)
     }
 
@@ -1025,11 +1028,12 @@ mod switch_timing {
     ///
     /// The operation itself is remembered for every request: it is what lets a
     /// `bigFrame` line say which question an oversized answer was answering.
-    pub(crate) fn note_request_read(request_id: u64, operation: i32) {
+    pub(crate) fn note_request_read(connection_epoch: u64, request_id: u64, operation: i32) {
+        let key = (connection_epoch, request_id);
         {
             let mut operations = request_operation().lock().unwrap();
             prune(&mut operations, MAX_TRACKED_REQUESTS);
-            operations.insert(request_id, operation);
+            operations.insert(key, operation);
         }
         if operation != tmux_agent_protocol::v1::Operation::TmuxAction as i32
             && operation != tmux_agent_protocol::v1::Operation::TerminalInput as i32
@@ -1038,7 +1042,7 @@ mod switch_timing {
         }
         let mut map = request_read_at().lock().unwrap();
         prune(&mut map, MAX_TRACKED_REQUESTS);
-        map.insert(request_id, now_epoch_millis());
+        map.insert(key, now_epoch_millis());
     }
 
     /// H2 of the switch timeline: the wall clock at tmux-action handler entry,
@@ -1050,22 +1054,26 @@ mod switch_timing {
 
     /// Marks a response as one the writer should time. Only the tmux action
     /// dispatch calls this, so every other response stays untracked and untimed.
-    pub(crate) fn note_response_enqueued(request_id: u64) {
+    pub(crate) fn note_response_enqueued(connection_epoch: u64, request_id: u64) {
         let mut map = response_enqueued_at().lock().unwrap();
         prune(&mut map, MAX_TRACKED_REQUESTS);
-        map.insert(request_id, Instant::now());
+        map.insert((connection_epoch, request_id), Instant::now());
     }
 
     /// One line per tmux action, written where its response is handed to the
     /// sequencer. The two writer-side numbers are a separate `responseWritten`
     /// line, joined to this one by `requestId`.
     pub(crate) fn write_tmux_action_timing_log(timing: TmuxActionTiming<'_>) {
-        let read_at = request_read_at().lock().unwrap().remove(&timing.request_id);
+        let read_at = request_read_at()
+            .lock()
+            .unwrap()
+            .remove(&(timing.connection_epoch, timing.request_id));
         append_timing_line(&serde_json::json!({
             "atUnixMillis": now_epoch_millis(),
             "subsystem": "host_daemon",
             "event": "tmuxAction",
             "requestId": timing.request_id,
+            "connectionEpoch": timing.connection_epoch,
             "kind": timing.kind,
             "sessionId": (!timing.session_id.is_empty()).then_some(timing.session_id),
             "windowId": (!timing.window_id.is_empty()).then_some(timing.window_id),
@@ -1114,7 +1122,10 @@ mod switch_timing {
             pane_id: &str,
             bytes: usize,
         ) -> Self {
-            let read_at_unix_millis = request_read_at().lock().unwrap().remove(&request_id);
+            let read_at_unix_millis = request_read_at()
+                .lock()
+                .unwrap()
+                .remove(&(connection_epoch, request_id));
             Self {
                 marks: Some(vec![InputMark {
                     request_id,
@@ -1225,11 +1236,16 @@ mod switch_timing {
     /// write took. Silent for every response `note_response_enqueued` did not
     /// mark.
     pub(crate) fn record_response_written(
+        connection_epoch: u64,
         request_id: u64,
         write_started: Instant,
         write: Duration,
     ) {
-        let Some(enqueued) = response_enqueued_at().lock().unwrap().remove(&request_id) else {
+        let Some(enqueued) = response_enqueued_at()
+            .lock()
+            .unwrap()
+            .remove(&(connection_epoch, request_id))
+        else {
             return;
         };
         // H3, taken once: the writer calls this as soon as the write returns,
@@ -1240,6 +1256,7 @@ mod switch_timing {
             "subsystem": "host_daemon",
             "event": "responseWritten",
             "requestId": request_id,
+            "connectionEpoch": connection_epoch,
             "writtenAtUnixMillis": written_at,
             "enqueueToWireMs": whole_millis(write_started.saturating_duration_since(enqueued)),
             "writeMs": whole_millis(write),
@@ -1266,6 +1283,7 @@ mod switch_timing {
     /// because "event" alone did not say which — and which one it is is the
     /// whole question a stalled link asks.
     pub(crate) fn record_frame_write(
+        connection_epoch: u64,
         kind: &str,
         event_kind: Option<&str>,
         pane_id: Option<&str>,
@@ -1276,7 +1294,12 @@ mod switch_timing {
         let bytes = frame_bytes();
         if bytes >= BIG_FRAME_THRESHOLD {
             let operation = (kind == "response")
-                .then(|| request_operation().lock().unwrap().remove(&request_id))
+                .then(|| {
+                    request_operation()
+                        .lock()
+                        .unwrap()
+                        .remove(&(connection_epoch, request_id))
+                })
                 .flatten()
                 .and_then(|operation| tmux_agent_protocol::v1::Operation::try_from(operation).ok())
                 .map(|operation| operation.as_str_name());
@@ -1289,6 +1312,7 @@ mod switch_timing {
                 "eventKind": event_kind,
                 "paneId": pane_id,
                 "requestId": request_id,
+                "connectionEpoch": connection_epoch,
                 "operation": operation,
             }));
         }
@@ -1304,6 +1328,7 @@ mod switch_timing {
             "kind": kind,
             "eventKind": event_kind,
             "paneId": pane_id,
+            "connectionEpoch": connection_epoch,
         }));
     }
 
@@ -1368,6 +1393,7 @@ mod switch_timing {
         );
     }
 
+    #[derive(Clone, Copy)]
     struct OutputAdmission {
         read_at_unix_millis: i64,
         read_to_enqueue: Duration,
@@ -1402,9 +1428,29 @@ mod switch_timing {
         );
     }
 
-    /// Coalescing keeps only the final generation on the wire. Discard the
-    /// admission mark belonging to each superseded generation so sustained
-    /// output cannot leak the map and clear unrelated in-flight joins.
+    /// Extends the provisional mark through the completed sequencer send. The
+    /// mark is installed before publication so the writer can never miss it;
+    /// under backpressure the writer is behind that send and this update lands
+    /// before it reaches the frame.
+    pub(crate) fn update_terminal_output_admitted(
+        connection_epoch: u64,
+        pane_id: &str,
+        generation: u64,
+        read_to_enqueue: Duration,
+    ) {
+        let key = (connection_epoch, pane_id.to_owned(), generation);
+        let mut map = output_admitted_at().lock().unwrap();
+        if let Some(mark) = map.get_mut(&key) {
+            let admitted_at = now_epoch_millis();
+            *mark = OutputAdmission {
+                read_at_unix_millis: admitted_at
+                    .saturating_sub(i64::try_from(read_to_enqueue.as_millis()).unwrap_or(i64::MAX)),
+                read_to_enqueue,
+            };
+        }
+    }
+
+    /// Removes a provisional mark when publication failed.
     pub(crate) fn forget_terminal_output_admitted(
         connection_epoch: u64,
         pane_id: &str,
@@ -1415,6 +1461,33 @@ mod switch_timing {
             pane_id.to_owned(),
             generation,
         ));
+    }
+
+    /// Coalescing keeps only the final generation on the wire. Move the
+    /// earliest contributing admission under that final identity so the map
+    /// neither leaks superseded generations nor hides the first byte's wait.
+    pub(crate) fn coalesce_terminal_output_admitted(
+        connection_epoch: u64,
+        pane_id: &str,
+        first_generation: u64,
+        final_generation: u64,
+    ) {
+        if first_generation == final_generation {
+            return;
+        }
+        let mut map = output_admitted_at().lock().unwrap();
+        let Some(first) = map.remove(&(connection_epoch, pane_id.to_owned(), first_generation))
+        else {
+            return;
+        };
+        let final_key = (connection_epoch, pane_id.to_owned(), final_generation);
+        if let Some(final_mark) = map.get_mut(&final_key) {
+            if first.read_at_unix_millis < final_mark.read_at_unix_millis {
+                *final_mark = first;
+            }
+        } else {
+            map.insert(final_key, first);
+        }
     }
 
     /// One line per voice leg (docs/mobile/voice-mode-plan.md §2b): how long
@@ -1452,6 +1525,46 @@ mod switch_timing {
             "captureMs": capture.map(whole_millis),
         }));
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn request_marks_are_scoped_by_connection_epoch() {
+            let operation = tmux_agent_protocol::v1::Operation::TerminalInput as i32;
+            let request_id = u64::MAX - 17;
+            let first_epoch = u64::MAX - 18;
+            let second_epoch = u64::MAX - 19;
+            note_request_read(first_epoch, request_id, operation);
+            note_request_read(second_epoch, request_id, operation);
+
+            let mut reads = request_read_at().lock().unwrap();
+            assert!(reads.remove(&(first_epoch, request_id)).is_some());
+            assert!(reads.remove(&(second_epoch, request_id)).is_some());
+            drop(reads);
+            let mut operations = request_operation().lock().unwrap();
+            operations.remove(&(first_epoch, request_id));
+            operations.remove(&(second_epoch, request_id));
+        }
+
+        #[test]
+        fn coalescing_retains_the_earliest_output_admission() {
+            let epoch = u64::MAX - 20;
+            let pane = "%perf-coalesce";
+            note_terminal_output_admitted(epoch, pane, 1, Duration::from_millis(9));
+            note_terminal_output_admitted(epoch, pane, 2, Duration::from_millis(1));
+
+            coalesce_terminal_output_admitted(epoch, pane, 1, 2);
+
+            let mut admissions = output_admitted_at().lock().unwrap();
+            assert!(!admissions.contains_key(&(epoch, pane.to_owned(), 1)));
+            let final_mark = admissions
+                .remove(&(epoch, pane.to_owned(), 2))
+                .expect("final generation keeps one admission");
+            assert_eq!(final_mark.read_to_enqueue, Duration::from_millis(9));
+        }
+    }
 }
 
 /// Inert replacement compiled into a plain release build. Same paths, same
@@ -1463,7 +1576,7 @@ mod switch_timing {
     use super::HostInputCommitTiming;
 
     #[inline(always)]
-    pub(crate) fn note_request_read(_request_id: u64, _operation: i32) {}
+    pub(crate) fn note_request_read(_connection_epoch: u64, _request_id: u64, _operation: i32) {}
 
     #[inline(always)]
     pub(crate) fn handler_entry_stamp() -> i64 {
@@ -1471,7 +1584,7 @@ mod switch_timing {
     }
 
     #[inline(always)]
-    pub(crate) fn note_response_enqueued(_request_id: u64) {}
+    pub(crate) fn note_response_enqueued(_connection_epoch: u64, _request_id: u64) {}
 
     pub(crate) struct HostInputTiming;
 
@@ -1523,6 +1636,7 @@ mod switch_timing {
 
     #[inline(always)]
     pub(crate) fn record_response_written(
+        _connection_epoch: u64,
         _request_id: u64,
         _write_started: Instant,
         _write: Duration,
@@ -1531,6 +1645,7 @@ mod switch_timing {
 
     #[inline(always)]
     pub(crate) fn record_frame_write(
+        _connection_epoch: u64,
         _kind: &str,
         _event_kind: Option<&str>,
         _pane_id: Option<&str>,
@@ -1558,10 +1673,28 @@ mod switch_timing {
     }
 
     #[inline(always)]
+    pub(crate) fn update_terminal_output_admitted(
+        _connection_epoch: u64,
+        _pane_id: &str,
+        _generation: u64,
+        _read_to_enqueue: Duration,
+    ) {
+    }
+
+    #[inline(always)]
     pub(crate) fn forget_terminal_output_admitted(
         _connection_epoch: u64,
         _pane_id: &str,
         _generation: u64,
+    ) {
+    }
+
+    #[inline(always)]
+    pub(crate) fn coalesce_terminal_output_admitted(
+        _connection_epoch: u64,
+        _pane_id: &str,
+        _first_generation: u64,
+        _final_generation: u64,
     ) {
     }
 
@@ -1581,10 +1714,11 @@ mod switch_timing {
 }
 
 pub(crate) use switch_timing::{
-    HostInputTiming, forget_terminal_output_admitted, handler_entry_stamp, note_request_read,
-    note_response_enqueued, note_terminal_output_admitted, record_frame_write,
-    record_response_written, record_terminal_output_frame_written, write_seed_timing_log,
-    write_tmux_action_timing_log, write_voice_timing_log,
+    HostInputTiming, coalesce_terminal_output_admitted, forget_terminal_output_admitted,
+    handler_entry_stamp, note_request_read, note_response_enqueued, note_terminal_output_admitted,
+    record_frame_write, record_response_written, record_terminal_output_frame_written,
+    update_terminal_output_admitted, write_seed_timing_log, write_tmux_action_timing_log,
+    write_voice_timing_log,
 };
 
 #[derive(Debug, Serialize)]

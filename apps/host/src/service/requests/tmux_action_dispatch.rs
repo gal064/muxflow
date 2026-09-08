@@ -10,6 +10,7 @@ pub(super) struct TmuxActionContext<'a> {
     pub(super) topology_lock: &'a Arc<tokio::sync::Mutex<()>>,
     pub(super) topology_baseline: &'a Arc<Mutex<Option<(tmux_control::TmuxSnapshot, String)>>>,
     pub(super) topology_signal: &'a super::super::topology::TopologySignal,
+    pub(super) connection_epoch: u64,
 }
 
 pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxActionContext<'_>) {
@@ -23,6 +24,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
         topology_lock,
         topology_baseline,
         topology_signal,
+        connection_epoch,
     } = context;
     match v1::Operation::TmuxAction {
         v1::Operation::TmuxAction => {
@@ -63,6 +65,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 crate::diagnostics::write_tmux_action_timing_log(
                     crate::diagnostics::TmuxActionTiming {
                         request_id,
+                        connection_epoch,
                         kind: &timing_kind,
                         session_id: &timing_session_id,
                         window_id: &timing_window_id,
@@ -94,6 +97,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 Err(error) => {
                     let depth = send_timed_response(
                         control_tx,
+                        connection_epoch,
                         request_id,
                         response_error("terminal_input_flush_failed", &error.to_string()),
                     )
@@ -116,6 +120,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 Ok(Err(error)) => {
                     let depth = send_timed_response(
                         control_tx,
+                        connection_epoch,
                         request_id,
                         response_error("tmux_action_rejected", &error.to_string()),
                     )
@@ -133,6 +138,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 Err(error) => {
                     let depth = send_timed_response(
                         control_tx,
+                        connection_epoch,
                         request_id,
                         response_error("tmux_action_task_failed", &error.to_string()),
                     )
@@ -184,6 +190,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                 if !same_identity || !tmux_actions::selection_only(action_kind) {
                     let depth = send_timed_response(
                         control_tx,
+                        connection_epoch,
                         request_id,
                         response_error(
                             "stale_topology",
@@ -265,6 +272,7 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                         // visibility restatement before applying the snapshot.
                         let depth = send_timed_response(
                             control_tx,
+                            connection_epoch,
                             request_id,
                             success_response.take().expect("success response exists"),
                         )
@@ -280,7 +288,9 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                         }))
                         .await;
                     if let Some(response) = success_response {
-                        let depth = send_timed_response(control_tx, request_id, response).await;
+                        let depth =
+                            send_timed_response(control_tx, connection_epoch, request_id, response)
+                                .await;
                         log_timing(flush_discover, execute_elapsed, barrier, depth, "ok");
                     }
                 }
@@ -297,14 +307,19 @@ pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxA
                     } else {
                         "tmux_action_rejected"
                     };
-                    let depth =
-                        send_timed_response(control_tx, request_id, response_error(code, &message))
-                            .await;
+                    let depth = send_timed_response(
+                        control_tx,
+                        connection_epoch,
+                        request_id,
+                        response_error(code, &message),
+                    )
+                    .await;
                     log_timing(flush_discover, execute_elapsed, barrier, depth, code);
                 }
                 Err(error) => {
                     let depth = send_timed_response(
                         control_tx,
+                        connection_epoch,
                         request_id,
                         response_error("tmux_action_task_failed", &error.to_string()),
                     )
@@ -362,13 +377,14 @@ async fn publish_refreshed_baseline(
 /// `send_response` in every other dispatcher stays untimed.
 async fn send_timed_response(
     control_tx: &mpsc::Sender<SequencerControl>,
+    connection_epoch: u64,
     request_id: u64,
     response: v1::Response,
 ) -> usize {
     let depth = control_tx
         .max_capacity()
         .saturating_sub(control_tx.capacity());
-    crate::diagnostics::note_response_enqueued(request_id);
+    crate::diagnostics::note_response_enqueued(connection_epoch, request_id);
     send_response(control_tx, request_id, response).await;
     depth
 }

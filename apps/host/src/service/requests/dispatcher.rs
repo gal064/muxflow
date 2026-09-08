@@ -170,6 +170,7 @@ pub(crate) async fn handle_request(
                     topology_lock,
                     topology_baseline,
                     topology_signal,
+                    connection_epoch,
                 },
             )
             .await;

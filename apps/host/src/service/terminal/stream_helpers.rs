@@ -188,6 +188,14 @@ impl OutputEmission<'_> {
             // Resource ownership is released before channel backpressure. The
             // emission fence stays held so a reveal transition and its recovery
             // event cannot be overtaken by output that observes Visible.
+            if visible {
+                crate::diagnostics::note_terminal_output_admitted(
+                    self.connection_epoch.get(),
+                    &leg_pane_id,
+                    generation,
+                    self.read_started.elapsed(),
+                );
+            }
             let admitted = visible
                 && emit_terminal(
                     self.sender,
@@ -206,11 +214,17 @@ impl OutputEmission<'_> {
             // has no leg — there is no emission to have been slow.
             let leg = admitted.then(|| self.read_started.elapsed());
             if let Some(elapsed) = leg {
-                crate::diagnostics::note_terminal_output_admitted(
+                crate::diagnostics::update_terminal_output_admitted(
                     self.connection_epoch.get(),
                     &leg_pane_id,
                     generation,
                     elapsed,
+                );
+            } else if visible {
+                crate::diagnostics::forget_terminal_output_admitted(
+                    self.connection_epoch.get(),
+                    &leg_pane_id,
+                    generation,
                 );
             }
             (admitted, leg)

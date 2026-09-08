@@ -525,12 +525,14 @@ async fn serve_connection(
                     let write_elapsed = write_started.elapsed();
                     if let Some(request_id) = timed_response {
                         crate::diagnostics::record_response_written(
+                            writer_connection_epoch.get(),
                             request_id,
                             write_started,
                             write_elapsed,
                         );
                     }
                     crate::diagnostics::record_frame_write(
+                        writer_connection_epoch.get(),
                         frame_kind,
                         frame_event_kind,
                         frame_pane_id,
@@ -710,7 +712,11 @@ async fn serve_connection(
                 // this is the first instant the daemon could act on it. Inert
                 // for every operation but a tmux action, and compiled out of a
                 // plain release build — see `diagnostics::switch_timing`.
-                crate::diagnostics::note_request_read(frame.request_id, request.operation);
+                crate::diagnostics::note_request_read(
+                    client_hello.connection_epoch,
+                    frame.request_id,
+                    request.operation,
+                );
                 if frame.request_id == 0 {
                     send_response(
                         &control_tx,

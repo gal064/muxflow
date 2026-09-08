@@ -288,10 +288,11 @@ pub(super) fn coalesce_adjacent_terminal_output(
         {
             return (message, Some(next));
         }
-        crate::diagnostics::forget_terminal_output_admitted(
+        crate::diagnostics::coalesce_terminal_output_admitted(
             connection_epoch.get(),
             &first_terminal.pane_id,
             first_terminal.generation,
+            next_terminal.generation,
         );
         first_terminal.data.extend_from_slice(&next_terminal.data);
         first_terminal.generation = next_terminal.generation;
