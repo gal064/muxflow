@@ -22,6 +22,7 @@ import { jsBackgroundTimer } from "./backgroundTimer";
 import { terminalInput, voiceTranscribe } from "./requests";
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "./testing/fakeTransport";
 import { createSessionStore, type SessionStore } from "../store/sessionStore";
+import { createNotificationAttention } from "../features/notifications/attention";
 
 interface Harness {
   connection: HostConnection;
@@ -278,9 +279,14 @@ describe("ordered events (§7.4)", () => {
 
   it("delivers a same-event identity promotion before the replacement lifecycle transition", async () => {
     const calls: string[] = [];
+    const attention = createNotificationAttention();
+    attention.focusAgent("manual");
     const h = harness({
-      onAgentIdentityPromotion: (promotion) => calls.push(`promote:${promotion.retiredAgentIds.join(",")}->${promotion.agent.id}`),
-      onAgentTransition: (transition) => calls.push(`transition:${transition.next.id}:${transition.next.lifecycle}`),
+      onAgentIdentityPromotion: (promotion) => {
+        attention.promoteAgent(promotion.retiredAgentIds[0]!, promotion.agent.id);
+        calls.push(`promote:${promotion.retiredAgentIds.join(",")}->${promotion.agent.id}`);
+      },
+      onAgentTransition: (transition) => calls.push(`transition:${transition.next.id}:${transition.next.lifecycle}:viewing=${attention.viewedAgentId()}`),
     });
     const transport = await connectHappily(h);
     const route = create(AgentRouteSchema, { sessionId: "$1", windowId: "@1", paneId: "%7" });
@@ -292,12 +298,12 @@ describe("ordered events (§7.4)", () => {
     calls.length = 0;
     transport.feed(event(EventKind.AGENT_STATE, 2n, {
       agent: create(AgentEventSchema, {
-        agent: create(AgentRecordSchema, { agentId: "native", adapterId: "codex", lifecycle: AgentLifecycleState.WORKING, stateGeneration: 2n, present: true, route }),
+        agent: create(AgentRecordSchema, { agentId: "native", adapterId: "codex", nativeSessionId: "native-session", lifecycle: AgentLifecycleState.WORKING, stateGeneration: 2n, present: true, route }),
         retiredAgentIds: ["manual"],
       }),
     }));
 
-    expect(calls).toEqual(["promote:manual->native", "transition:native:working"]);
+    expect(calls).toEqual(["promote:manual->native", "transition:native:working:viewing=native"]);
     expect(h.store.getState().agents.manual).toBeUndefined();
     expect(h.store.getState().agents.native?.route.paneId).toBe("%7");
   });
@@ -317,6 +323,26 @@ describe("ordered events (§7.4)", () => {
       }),
     }));
     expect(promotions).toEqual([]);
+  });
+
+  it("does not promote between unrelated native sessions that reuse one pane", async () => {
+    const promotions: string[] = [];
+    const h = harness({ onAgentIdentityPromotion: (promotion) => promotions.push(promotion.agent.id) });
+    const transport = await connectHappily(h);
+    const route = create(AgentRouteSchema, { sessionId: "$1", windowId: "@1", paneId: "%7" });
+    transport.feed(event(EventKind.AGENT_STATE, 1n, {
+      agent: create(AgentEventSchema, { agent: create(AgentRecordSchema, { agentId: "native-a", adapterId: "codex", nativeSessionId: "session-a", stateGeneration: 1n, present: true, route }) }),
+    }));
+    transport.feed(event(EventKind.AGENT_STATE, 2n, {
+      agent: create(AgentEventSchema, {
+        agent: create(AgentRecordSchema, { agentId: "native-b", adapterId: "codex", nativeSessionId: "session-b", stateGeneration: 2n, present: true, route }),
+        retiredAgentIds: ["native-a"],
+      }),
+    }));
+
+    expect(promotions).toEqual([]);
+    expect(h.store.getState().agents["native-a"]).toBeUndefined();
+    expect(h.store.getState().agents["native-b"]?.nativeSessionId).toBe("session-b");
   });
 
   it("routes VOICE_PROVISION and VOICE_REPLY to onVoiceEvent with their payloads intact", async () => {

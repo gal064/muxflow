@@ -9,7 +9,14 @@ use crate::service::snapshot::{discover_authoritative, server_identity};
 pub(super) const MAX_HOOK_BYTES: usize = 256 * 1024;
 const MAX_DEDUPE_IDS: usize = 512;
 
+#[cfg(test)]
 pub(crate) type HookIngestResult = Result<v1::AgentEvent, HookIngestFailure>;
+pub(crate) type DeferredHookIngestResult = Result<IngestedHook, HookIngestFailure>;
+
+pub(crate) struct IngestedHook {
+    pub(crate) event: v1::AgentEvent,
+    pub(crate) reply: Option<crate::service::voice::AgentReply>,
+}
 
 /// A failed ingest is final only when its variant says so. Callers retain
 /// `Retryable` input; duplicate and permanently malformed input are discarded.
@@ -31,17 +38,9 @@ impl HookIngestFailure {
 
 impl AgentRuntime {
     /// Older durable input always drains before a newer live hook is accepted.
-    pub(crate) fn ingest_live_hook(&self, event: &v1::AgentHookEvent) -> HookIngestResult {
-        self.ingest_after_replay(event, super::ingest_fallbacks)
-    }
-
-    pub(super) fn ingest_after_replay(
-        &self,
-        event: &v1::AgentHookEvent,
-        replay: impl FnOnce() -> anyhow::Result<usize>,
-    ) -> HookIngestResult {
-        replay().map_err(HookIngestFailure::Retryable)?;
-        self.ingest_hook(event)
+    pub(crate) fn ingest_live_hook(&self, event: &v1::AgentHookEvent) -> DeferredHookIngestResult {
+        super::ingest_fallbacks().map_err(HookIngestFailure::Retryable)?;
+        self.ingest_hook_deferred(event)
     }
 
     #[cfg(test)]
@@ -56,21 +55,45 @@ impl AgentRuntime {
         self.ingest_hook_with_context(event, active_server_identity, topology)
     }
 
+    #[cfg(test)]
     pub(crate) fn ingest_hook(&self, event: &v1::AgentHookEvent) -> HookIngestResult {
+        let ingested = self.ingest_hook_deferred(event)?;
+        self.dispatch_reply(ingested.reply);
+        Ok(ingested.event)
+    }
+
+    pub(super) fn ingest_hook_deferred(
+        &self,
+        event: &v1::AgentHookEvent,
+    ) -> DeferredHookIngestResult {
         let identity = server_identity();
         let topology = discover_authoritative()
             .ok()
             .filter(|(_, discovered_identity)| discovered_identity == &identity)
             .map(|(topology, _)| topology);
-        self.ingest_hook_with_context(event, &identity, topology.as_ref())
+        self.try_ingest_hook_with_context(event, &identity, topology.as_ref())
     }
 
+    #[cfg(test)]
     pub(super) fn ingest_hook_with_context(
         &self,
         event: &v1::AgentHookEvent,
         active_server_identity: &str,
         topology: Option<&tmux_control::TmuxSnapshot>,
     ) -> HookIngestResult {
+        let ingested =
+            self.try_ingest_hook_with_context(event, active_server_identity, topology)?;
+        self.dispatch_reply(ingested.reply);
+        Ok(ingested.event)
+    }
+
+    #[cfg(test)]
+    pub(super) fn ingest_hook_with_context_deferred(
+        &self,
+        event: &v1::AgentHookEvent,
+        active_server_identity: &str,
+        topology: Option<&tmux_control::TmuxSnapshot>,
+    ) -> DeferredHookIngestResult {
         self.try_ingest_hook_with_context(event, active_server_identity, topology)
     }
 
@@ -79,7 +102,7 @@ impl AgentRuntime {
         event: &v1::AgentHookEvent,
         active_server_identity: &str,
         topology: Option<&tmux_control::TmuxSnapshot>,
-    ) -> Result<v1::AgentEvent, HookIngestFailure> {
+    ) -> DeferredHookIngestResult {
         if event.payload_json.len() > MAX_HOOK_BYTES {
             return Err(HookIngestFailure::Permanent(anyhow::anyhow!(
                 "hook payload exceeds the {MAX_HOOK_BYTES}-byte limit"
@@ -194,6 +217,22 @@ impl AgentRuntime {
                 }
             }
         }
+        let voice_retired_agent_ids: Vec<String> = if native_session_id.is_empty() {
+            Vec::new()
+        } else {
+            [native_record_id.as_ref(), pane_record_id.as_ref()]
+                .into_iter()
+                .flatten()
+                .filter(|old_id| old_id.as_str() != agent_id)
+                .filter(|old_id| {
+                    state
+                        .agents
+                        .get(old_id.as_str())
+                        .is_some_and(|record| record.native_session_id.is_empty())
+                })
+                .cloned()
+                .collect()
+        };
         let mut retired_agent_ids = Vec::new();
         for old_id in [native_record_id, pane_record_id].into_iter().flatten() {
             if old_id != agent_id && state.agents.remove(&old_id).is_some() {
@@ -393,22 +432,22 @@ impl AgentRuntime {
             return Err(HookIngestFailure::Retryable(error));
         }
         drop(state);
-        if !retired_agent_ids.is_empty() {
-            (self.identity_promotion_sink)(&retired_agent_ids, &agent_id);
+        if !voice_retired_agent_ids.is_empty() {
+            (self.identity_promotion_sink)(&voice_retired_agent_ids, &agent_id);
         }
         // Voice mode (docs/mobile/voice-mode-plan.md §4.5): a `Stop` that ends
         // the turn hands the final message on, after the state is committed,
         // and keeps none of it. Claude's Stop while subagents still run leaves
         // the lifecycle Working and is skipped, so one turn speaks once.
-        if parsed.event_name == "Stop"
+        let reply = if parsed.event_name == "Stop"
             && lifecycle == v1::AgentLifecycleState::Idle
             && let Some(text) = payload
                 .get(adapters::LAST_ASSISTANT_MESSAGE_FIELD)
                 .and_then(serde_json::Value::as_str)
                 .filter(|text| !text.trim().is_empty())
         {
-            (self.reply_sink)(crate::service::voice::AgentReply {
-                agent_id,
+            Some(crate::service::voice::AgentReply {
+                agent_id: agent_id.clone(),
                 text: text.to_owned(),
                 truncated: payload
                     .get(adapters::LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD)
@@ -416,8 +455,10 @@ impl AgentRuntime {
                     == Some(true),
                 state_generation: generation,
                 occurred_at_unix_millis: occurred_at,
-            });
-        }
+            })
+        } else {
+            None
+        };
         let reason = if lifecycle == v1::AgentLifecycleState::Blocked {
             "blocked"
         } else if previous_lifecycle == v1::AgentLifecycleState::Working
@@ -427,12 +468,21 @@ impl AgentRuntime {
         } else {
             "state_changed"
         };
-        Ok(v1::AgentEvent {
-            agent: Some(snapshot::record(&record)),
-            generation,
-            notify: attention_transition,
-            reason: reason.into(),
-            retired_agent_ids,
+        Ok(IngestedHook {
+            event: v1::AgentEvent {
+                agent: Some(snapshot::record(&record)),
+                generation,
+                notify: attention_transition,
+                reason: reason.into(),
+                retired_agent_ids,
+            },
+            reply,
         })
+    }
+
+    pub(super) fn dispatch_reply(&self, reply: Option<crate::service::voice::AgentReply>) {
+        if let Some(reply) = reply {
+            (self.reply_sink)(reply);
+        }
     }
 }

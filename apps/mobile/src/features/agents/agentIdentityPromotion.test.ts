@@ -4,10 +4,11 @@ import { AgentEventSchema, AgentRecordSchema } from "../../protocol/gen/envelope
 import type { Agent } from "../../store/sessionStore";
 import { deriveAgentIdentityPromotion } from "./agentIdentityPromotion";
 
-function agent(id: string, adapterId = "codex", paneId = "%7"): Agent {
+function agent(id: string, adapterId = "codex", paneId = "%7", nativeSessionId = id === "native" ? "native-session" : ""): Agent {
   return {
     id,
     adapterId,
+    nativeSessionId,
     displayName: "Agent",
     lifecycle: "working",
     attentionKind: "",
@@ -35,6 +36,8 @@ describe("deriveAgentIdentityPromotion", () => {
     expect(deriveAgentIdentityPromotion({ manual: agent("manual", "claude-code") }, event, next)).toBeUndefined();
     expect(deriveAgentIdentityPromotion({ manual: agent("manual", "codex", "%8") }, event, next)).toBeUndefined();
     expect(deriveAgentIdentityPromotion({ manual: agent("manual", "codex", "") }, event, next)).toBeUndefined();
+    expect(deriveAgentIdentityPromotion({ manual: old }, event, agent("native", "codex", "%7", ""))).toBeUndefined();
+    expect(deriveAgentIdentityPromotion({ manual: agent("manual", "codex", "%7", "old-native") }, event, next)).toBeUndefined();
   });
 
   it("returns every qualifying retired candidate without choosing by array order", () => {

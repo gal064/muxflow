@@ -89,7 +89,7 @@ export interface VoiceActions {
   /** One EVENT_KIND_VOICE_PROVISION line; `ready` / `failed` also move `readiness`. */
   applyProvisionProgress(progress: ProvisionProgress): void;
   /** Creates the session when absent; an existing one keeps its history. */
-  ensureSession(sessionKey: string, paneId: string, sessionId: string, now: number): void;
+  ensureSession(sessionKey: string, paneId: string, sessionId: string, now: number, agentId?: string): void;
   /** Retargets only the remote identity and route; all local session state stays put. */
   promoteSession(sessionKey: string, agent: Agent): void;
   setPhase(sessionKey: string, phase: VoicePhase): void;
@@ -169,14 +169,14 @@ export function createVoiceStore(): VoiceStore {
         set({ hostStatus: { ...current, readiness, provision: provision.phase === "ready" ? undefined : provision } });
       },
 
-      ensureSession(sessionKey, paneId, sessionId, now) {
+      ensureSession(sessionKey, paneId, sessionId, now, agentId = sessionKey) {
         const existing = get().sessions[sessionKey];
         if (existing) {
           if (existing.paneId === paneId && existing.sessionId === sessionId) return;
           set({ sessions: { ...get().sessions, [sessionKey]: { ...existing, paneId, sessionId } } });
           return;
         }
-        set({ sessions: { ...get().sessions, [sessionKey]: { agentId: sessionKey, paneId, sessionId, startedAt: now, messages: [], phase: "idle" } } });
+        set({ sessions: { ...get().sessions, [sessionKey]: { agentId, paneId, sessionId, startedAt: now, messages: [], phase: "idle" } } });
       },
 
       promoteSession(sessionKey, agent) {

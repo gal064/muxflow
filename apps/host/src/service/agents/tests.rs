@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::{SequencerControl, register_control_event_sink};
 use prost::Message;
 use std::fs;
 
@@ -453,12 +454,32 @@ fn promotion_sink_observes_persisted_identity_before_stop_reply_sink() {
         ))
         .join("agents.json");
     let calls = Arc::new(Mutex::new(Vec::new()));
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<SequencerControl>(64);
+    let _event_registration = register_control_event_sink(event_tx);
+    let event_rx = Arc::new(Mutex::new(event_rx));
     let promotion_calls = Arc::clone(&calls);
     let promotion_path = path.clone();
     let reply_calls = Arc::clone(&calls);
+    let reply_events = Arc::clone(&event_rx);
     let runtime = AgentRuntime::isolated_with_sinks(
         path,
         Box::new(move |reply| {
+            let published_first = loop {
+                match reply_events.lock().unwrap().try_recv() {
+                    Ok(SequencerControl::OrderedEvent(event))
+                        if event.kind == v1::EventKind::AgentState as i32
+                            && event.scope == reply.agent_id =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            };
+            assert!(
+                published_first,
+                "Agent State must be queued before its Voice reply"
+            );
             reply_calls
                 .lock()
                 .unwrap()
@@ -488,11 +509,14 @@ fn promotion_sink_observes_persisted_identity_before_stop_reply_sink() {
     }))
     .unwrap();
 
-    let promoted = runtime
-        .ingest_hook_with_context(&stop, "server-a", Some(&topology))
+    let ingested = runtime
+        .ingest_hook_with_context_deferred(&stop, "server-a", Some(&topology))
         .unwrap();
+    let promoted = ingested.event.clone();
     let native_id = promoted.agent.as_ref().unwrap().agent_id.clone();
 
+    assert_eq!(*calls.lock().unwrap(), [format!("promotion:{native_id}")]);
+    publish_ingested(&runtime, ingested);
     assert_eq!(promoted.retired_agent_ids, [manual_id]);
     assert_eq!(
         *calls.lock().unwrap(),
@@ -501,6 +525,48 @@ fn promotion_sink_observes_persisted_identity_before_stop_reply_sink() {
             format!("reply:{native_id}")
         ]
     );
+}
+
+#[test]
+fn native_to_native_pane_replacement_does_not_transfer_voice_identity() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-native-replace-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let promotions = Arc::new(Mutex::new(Vec::new()));
+    let promotion_calls = Arc::clone(&promotions);
+    let runtime = AgentRuntime::isolated_with_sinks(
+        path,
+        Box::new(|_| {}),
+        Box::new(move |retired, new_id| {
+            promotion_calls
+                .lock()
+                .unwrap()
+                .push((retired.to_vec(), new_id.to_owned()));
+        }),
+    );
+    let topology = topology("codex");
+    let first = runtime
+        .ingest_hook_with_context(
+            &event("native-a", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let old_id = first.agent.unwrap().agent_id;
+    let mut replacement = event("native-b", 0, "UserPromptSubmit");
+    replacement.native_session_id = "native-2".into();
+
+    let replaced = runtime
+        .ingest_hook_with_context(&replacement, "server-a", Some(&topology))
+        .unwrap();
+
+    assert_eq!(replaced.retired_agent_ids, [old_id]);
+    assert!(promotions.lock().unwrap().is_empty());
 }
 
 #[test]

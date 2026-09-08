@@ -377,6 +377,29 @@ fn identity_promotion_preserves_an_existing_native_registration_and_removes_reti
     assert_eq!(sessions["native"].since, native_since);
 }
 
+#[test]
+fn identity_promotion_prunes_a_dead_native_registration_before_selecting_the_live_retired_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
+    let (manual_tx, _manual_rx) = mpsc::channel::<SequencerControl>(1);
+    let (native_tx, _native_rx) = mpsc::channel::<SequencerControl>(1);
+    let manual_connection = register_control_event_sink(manual_tx);
+    let native_connection = register_control_event_sink(native_tx);
+    service
+        .register_session(manual_connection.id, "manual")
+        .unwrap();
+    service
+        .register_session(native_connection.id, "native")
+        .unwrap();
+    drop(native_connection);
+
+    service.promote_sessions(&["manual".into()], "native");
+
+    let sessions = service.sessions.lock().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions["native"].connection_id, manual_connection.id);
+}
+
 #[tokio::test]
 async fn promoted_reply_reaches_the_connection_that_registered_the_retired_id() {
     let dir = tempfile::tempdir().unwrap();

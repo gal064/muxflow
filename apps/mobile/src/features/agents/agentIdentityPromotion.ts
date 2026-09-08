@@ -16,11 +16,12 @@ export function deriveAgentIdentityPromotion(
   event: AgentEvent,
   next: Agent,
 ): AgentIdentityPromotion | undefined {
-  if (!event.agent || event.agent.agentId !== next.id || !next.route.paneId) return undefined;
+  if (!event.agent || event.agent.agentId !== next.id || !next.nativeSessionId || !next.route.paneId) return undefined;
   const retiredAgentIds = [...new Set(event.retiredAgentIds)].filter((retiredId) => {
     if (retiredId === next.id) return false;
     const retired = previousAgents[retiredId];
     return retired !== undefined
+      && retired.nativeSessionId === ""
       && retired.adapterId === next.adapterId
       && retired.route.paneId !== ""
       && retired.route.paneId === next.route.paneId;
