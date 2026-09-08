@@ -139,7 +139,12 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
       agentName: agentTitle(state, transition.next),
     });
     if (decision.kind === "skip") {
-      log(`skip agent=${transition.next.id} reason=${decision.reason}`);
+      // Most agent updates are not notification events. Logging each one can
+      // evict the navigation and layout evidence that diagnostics are meant
+      // to preserve, so retain only actionable suppression decisions.
+      if (decision.reason !== "noEvent") {
+        log(`skip agent=${transition.next.id} reason=${decision.reason}`);
+      }
       return;
     }
     const next = transition.next;

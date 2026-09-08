@@ -1,5 +1,5 @@
 import { useMemo, type ReactElement } from "react";
-import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
+import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
 import { useStore } from "zustand";
 
 import { prefsStore } from "../../../store/prefsStore";
@@ -27,10 +27,11 @@ interface AgentListProps {
   refreshing: boolean;
   onRefresh(): void;
   empty: ReactElement | null;
+  onLayout?(event: LayoutChangeEvent): void;
 }
 
 /** The Agents tab's list (design.md §9.3.1): the desktop's two orders, headed, and the priority order split by pin. */
-export function AgentList({ onOpen, onLongPress, onTalk, refreshing, onRefresh, empty }: AgentListProps) {
+export function AgentList({ onOpen, onLongPress, onTalk, refreshing, onRefresh, empty, onLayout }: AgentListProps) {
   const agents = useSession((s) => s.agents);
   const sessions = useSession((s) => s.sessions);
   const windows = useSession((s) => s.windows);
@@ -60,6 +61,7 @@ export function AgentList({ onOpen, onLongPress, onTalk, refreshing, onRefresh, 
           {items.length > 0 ? <ModeToggle mode={mode} onChange={(next) => prefsStore.getState().setAgentListMode(next)} /> : null}
         </>
       }
+      onLayout={onLayout}
       refreshControl={<RefreshControl colors={[colors.accent]} progressBackgroundColor={colors.chromeRaised} onRefresh={onRefresh} refreshing={refreshing} />}
       renderItem={({ item, index }) => <Item animate={animate} index={index} item={item} items={items} onLongPress={onLongPress} onOpen={onOpen} onTalk={onTalk} />}
       style={styles.list}

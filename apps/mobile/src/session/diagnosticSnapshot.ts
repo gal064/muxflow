@@ -2,7 +2,7 @@
 // existing in-memory stores synchronously; copying performs no I/O.
 
 import Constants from "expo-constants";
-import { AppState, Platform } from "react-native";
+import { AppState, Dimensions, Keyboard, Platform } from "react-native";
 
 import { voiceStore } from "../features/voice/voiceStore";
 import { windowGrid } from "../features/terminal/sizing";
@@ -36,11 +36,17 @@ export function diagnosticHeader(now = Date.now()): string[] {
   }, {});
   const phaseSummary = Object.entries(phases).map(([phase, count]) => `${phase}:${count}`).join(",") || "none";
   const working = Object.values(state.agents).filter((agent) => agent.present && agent.lifecycle === "working").length;
+  const window = Dimensions.get("window");
+  const screen = Dimensions.get("screen");
+  const keyboard = Keyboard.metrics();
+  const keyboardSummary = Keyboard.isVisible()
+    ? `visible:${keyboard ? Math.round(keyboard.height) : "unknown"}`
+    : `hidden:${keyboard ? Math.round(keyboard.height) : "none"}`;
   const appName = Constants.expoConfig?.name ?? "Muxflow";
   const version = Constants.expoConfig?.version ?? "unknown";
   return [
     `diagnostics copied=${new Date(now).toISOString()} storage=memory-only events=${recorder.lines.length} bytes=${recorder.bytes}`,
     `app name=${appName} version=${version} build=${build()} platform=${Platform.OS} os=${String(Platform.Version)} device=${device()}`,
-    `state lifecycle=${AppState.currentState} connection=${state.connection.state} attempt=${state.connection.attempt} topology=${state.topologyGeneration} focusedPane=${state.focusedPaneId ?? "none"} hostGrid=${hostGrid ? `${hostGrid.cols}x${hostGrid.rows}` : "unknown"} agents=${Object.keys(state.agents).length} working=${working} voice=${phaseSummary}`,
+    `state lifecycle=${AppState.currentState} connection=${state.connection.state} attempt=${state.connection.attempt} topology=${state.topologyGeneration} focusedPane=${state.focusedPaneId ?? "none"} hostGrid=${hostGrid ? `${hostGrid.cols}x${hostGrid.rows}` : "unknown"} agents=${Object.keys(state.agents).length} working=${working} voice=${phaseSummary} window=${Math.round(window.width)}x${Math.round(window.height)} screen=${Math.round(screen.width)}x${Math.round(screen.height)} keyboard=${keyboardSummary}`,
   ];
 }
