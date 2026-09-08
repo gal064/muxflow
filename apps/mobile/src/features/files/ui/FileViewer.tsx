@@ -8,6 +8,7 @@ import { WebView, type WebViewMessageEvent } from "react-native-webview";
 import { useStore } from "zustand";
 
 import { colors, fonts, radii, terminalTheme, typeScale } from "../../../ui/tokens";
+import { externalLinkTarget, markdownNavigationStaysInApp } from "../../../ui/externalLinks";
 import { MARKDOWN_HTML } from "../../../webview/markdownBundle";
 import { relativeToRoot, subtitleFor } from "../activeRoot";
 import { filesStore } from "../filesStore";
@@ -141,12 +142,20 @@ function MarkdownView({ source }: { source: string }) {
         send();
         return;
       }
-      if (message.t === "link" && typeof message.href === "string" && /^(?:https?|mailto):/iu.test(message.href)) {
-        void Linking.openURL(message.href).catch(() => {});
+      if (message.t === "link" && typeof message.href === "string") {
+        const target = externalLinkTarget(message.href);
+        if (target) void Linking.openURL(target).catch(() => {});
       }
     },
     [send],
   );
+
+  const allowNavigation = useCallback((url: string) => {
+    if (markdownNavigationStaysInApp(url)) return true;
+    const target = externalLinkTarget(url);
+    if (target) void Linking.openURL(target).catch(() => {});
+    return false;
+  }, []);
 
   return (
     <WebView
@@ -158,7 +167,7 @@ function MarkdownView({ source }: { source: string }) {
       javaScriptEnabled
       onLoadEnd={send}
       onMessage={onMessage}
-      onShouldStartLoadWithRequest={(request) => request.url === "about:blank" || request.url.startsWith("about:")}
+      onShouldStartLoadWithRequest={(request) => allowNavigation(request.url)}
       originWhitelist={["about:blank"]}
       setSupportMultipleWindows={false}
       source={{ html: MARKDOWN_HTML }}

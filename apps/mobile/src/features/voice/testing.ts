@@ -50,7 +50,7 @@ export function transcriptResponse(text: string): Response {
 }
 
 export function speechResponse(audio: Uint8Array, text: string): Response {
-  return create(ResponseSchema, { ok: true, voice: create(VoiceResponseSchema, { speech: create(VoiceSpeechSchema, { audio, audioMime: "audio/mpeg", text }) }) });
+  return create(ResponseSchema, { ok: true, voice: create(VoiceResponseSchema, { speech: create(VoiceSpeechSchema, { audio, audioMime: "audio/mpeg", displayMarkdown: text, speechText: text }) }) });
 }
 
 export class FakeRecorder implements VoiceRecorder {
@@ -76,6 +76,9 @@ export class FakeRecorder implements VoiceRecorder {
     if (this.recording || this.prepared === 0) return;
     this.released += 1;
     this.prepared = 0;
+  }
+  state(): "unprepared" | "prepared" | "recording" {
+    return this.recording ? "recording" : this.prepared > 0 ? "prepared" : "unprepared";
   }
 }
 

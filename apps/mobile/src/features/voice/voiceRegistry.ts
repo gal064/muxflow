@@ -6,13 +6,16 @@
 // purpose: importing it costs nothing until a Voice screen opens (§2c).
 
 import { EventKind, type HostEvent } from "../../protocol/gen/envelope_pb";
+import { log } from "../../session/log";
 import { VoiceController, type VoiceControllerOptions } from "./VoiceController";
+import { VoiceRecorderCoordinator } from "./recorderCoordinator";
 import { provisionFromProto, voiceStore, type VoiceStore } from "./voiceStore";
 
-export type VoiceSessionOptions = Omit<VoiceControllerOptions, "store">;
+export type VoiceSessionOptions = Omit<VoiceControllerOptions, "recorderCoordinator" | "store">;
 
 export class VoiceRegistry {
   private readonly controllers = new Map<string, VoiceController>();
+  private readonly recorderCoordinator = new VoiceRecorderCoordinator();
 
   constructor(private readonly store: VoiceStore, private readonly log?: (line: string) => void) {}
 
@@ -24,7 +27,7 @@ export class VoiceRegistry {
       existing.retarget(options.paneId, options.sessionId);
       return existing;
     }
-    const controller = new VoiceController({ ...options, store: this.store });
+    const controller = new VoiceController({ ...options, recorderCoordinator: this.recorderCoordinator, store: this.store });
     this.controllers.set(options.agentId, controller);
     return controller;
   }
@@ -81,4 +84,4 @@ export class VoiceRegistry {
   }
 }
 
-export const voiceRegistry = new VoiceRegistry(voiceStore);
+export const voiceRegistry = new VoiceRegistry(voiceStore, log);

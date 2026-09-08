@@ -1,4 +1,5 @@
 import { useFocusEffect, useRouter } from "expo-router";
+import { useKeepAwake } from "expo-keep-awake";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -7,6 +8,7 @@ import { useStore } from "zustand";
 import { agentStateLabel, agentTitle } from "../agents/agentViews";
 import { markState } from "../agents/agentListModel";
 import { AgentMark } from "../agents/ui/AgentMark";
+import { notificationAttention } from "../notifications/attention";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
@@ -25,13 +27,14 @@ import { bigPaneHeight } from "./paneLayout";
 import { createExpoPlayer } from "./player";
 import { createExpoRecorder } from "./recorder";
 import { ReplyPlayer } from "./ReplyPlayer";
-import { SpeedPicker } from "./SpeedPicker";
+import { SpeedButton } from "./SpeedButton";
 import { createExpoTones } from "./tones";
 import type { VoiceController } from "./VoiceController";
 import { useVoice } from "./voiceHooks";
 import { voiceRegistry } from "./voiceRegistry";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { VoiceStatusCard } from "./VoiceStatusCard";
+import { VoiceMarkdown } from "./VoiceMarkdown";
 import { latestReply, type VoiceMessage } from "./voiceStore";
 
 export interface VoiceScreenProps {
@@ -44,7 +47,7 @@ export interface VoiceScreenProps {
 // the first Voice screen renders (§2c: nothing audio-related loads before that).
 let audio: { recorder: ReturnType<typeof createExpoRecorder>; player: ReturnType<typeof createExpoPlayer>; files: ReturnType<typeof createExpoFiles>; haptics: ReturnType<typeof createExpoHaptics>; tones: ReturnType<typeof createExpoTones> } | undefined;
 function sharedAudio() {
-  audio ??= { recorder: createExpoRecorder(), player: createExpoPlayer(), files: createExpoFiles(), haptics: createExpoHaptics(), tones: createExpoTones() };
+  audio ??= { recorder: createExpoRecorder(log), player: createExpoPlayer(), files: createExpoFiles(), haptics: createExpoHaptics(), tones: createExpoTones() };
   return audio;
 }
 
@@ -63,8 +66,12 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const recorderError = useVoice((s) => s.recorderError);
   const session = useVoice((s) => s.sessions[agentId]);
   const playbackRate = useStore(prefsStore, (s) => s.voicePlaybackRate);
+  const autoPlay = useStore(prefsStore, (s) => s.voiceAutoPlay);
   const bigPane = useStore(prefsStore, (s) => s.voiceBigPane);
+  const keepScreenAwake = useStore(prefsStore, (s) => s.voiceKeepAwake);
   const [confirmEnd, setConfirmEnd] = useState(false);
+  const [screenFocused, setScreenFocused] = useState(false);
+  const [appActive, setAppActive] = useState(AppState.currentState === "active");
   const list = useRef<ScrollView>(null);
 
   const open = useCallback((): VoiceController => voiceRegistry.open({
@@ -76,6 +83,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     appInForeground: () => AppState.currentState === "active",
     canSubmit: () => sessionStore.getState().agents[agentId]?.present === true,
     playbackRate: prefsStore.getState().voicePlaybackRate,
+    autoPlay: prefsStore.getState().voiceAutoPlay,
     toast,
     log,
   }), [agentId, paneId, sessionId]);
@@ -90,20 +98,30 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   }, [connected, controller, open]);
   useFocusEffect(useCallback(() => {
     const live = controller.isDisposed ? open() : controller;
+    const clearViewedAgent = notificationAttention.focusAgent(agentId);
     if (live !== controller) setController(live);
+    setScreenFocused(true);
     live.focus();
-    return () => live.blur();
-  }, [controller, open]));
+    return () => {
+      clearViewedAgent();
+      setScreenFocused(false);
+      live.blur();
+    };
+  }, [agentId, controller, open]));
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (next) => {
-      if (next === "active") controller.onAppActive();
+      const active = next === "active";
+      setAppActive(active);
+      if (active) controller.onAppActive();
+      else controller.onAppInactive();
     });
     return () => subscription.remove();
   }, [controller]);
 
   // The speed applies to the reply that is playing as well as the next one.
   useEffect(() => controller.setPlaybackRate(playbackRate), [controller, playbackRate]);
+  useEffect(() => controller.setAutoPlay(autoPlay), [autoPlay, controller]);
   // The agent picking up the utterance is a haptic, not only the working bubble.
   useEffect(() => {
     if (lifecycle) controller.onAgentLifecycle(lifecycle);
@@ -146,6 +164,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
 
   return (
     <View style={[styles.root, { paddingBottom: insets.bottom, paddingTop: insets.top }]}>
+      {keepScreenAwake && screenFocused && appActive ? <VoiceWakeLock /> : null}
       <ConnectionStrip />
       <View style={styles.header}>
         <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={() => router.back()} style={styles.iconButton}>
@@ -175,8 +194,18 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         <View style={styles.paneControls}>
           <View style={styles.speedGroup}>
             <Text {...fixedChromeText} numberOfLines={1} style={styles.speedCaption}>Speed</Text>
-            <SpeedPicker onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
+            <SpeedButton onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
           </View>
+          <Pressable
+            accessibilityLabel="Autoplay replies"
+            accessibilityRole="switch"
+            accessibilityState={{ checked: autoPlay }}
+            hitSlop={{ top: 6, bottom: 6 }}
+            onPress={() => prefsStore.getState().setVoiceAutoPlay(!autoPlay)}
+            style={({ pressed }) => [styles.autoPlayToggle, autoPlay && styles.autoPlayToggleOn, pressed && styles.pressed]}
+          >
+            <Text {...fixedChromeText} numberOfLines={1} style={[styles.paneToggleLabel, autoPlay && styles.autoPlayToggleLabelOn]}>Autoplay {autoPlay ? "On" : "Off"}</Text>
+          </Pressable>
           <Pressable
             accessibilityLabel={bigPane ? "Smaller talk pane" : "Larger talk pane"}
             accessibilityRole="button"
@@ -191,11 +220,23 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         <MicButton
           disabled={micDisabled}
           hint={hint}
+          onCancel={() => void controller.cancelUtterance()}
+          onLock={() => controller.lockUtterance()}
           onPressIn={() => controller.beginUtterance()}
           onPressOut={() => void controller.endUtterance()}
           phase={phase}
         />
       </View>
+
+      {phase === "recordingLocked" ? (
+        <Pressable
+          accessibilityHint="Stops recording and sends it"
+          accessibilityLabel="Stop and send locked recording"
+          accessibilityRole="button"
+          onPressIn={() => void controller.endUtterance()}
+          style={styles.lockedStopTarget}
+        />
+      ) : null}
 
       <Dialog
         actions={[
@@ -211,6 +252,11 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   );
 }
 
+function VoiceWakeLock() {
+  useKeepAwake("muxflow-voice-screen", { suppressDeactivateWarnings: true });
+  return null;
+}
+
 /** One turn. Agent replies collapse to three lines; tap to expand. The newest reply carries the player. */
 const MessageBubble = memo(function MessageBubble({ message, controller }: { message: VoiceMessage; controller: VoiceController | undefined }) {
   const [expanded, setExpanded] = useState(false);
@@ -223,14 +269,16 @@ const MessageBubble = memo(function MessageBubble({ message, controller }: { mes
         {/* The text is the tap target; the player below stays its own set of controls for a screen reader. */}
         <Pressable
           accessibilityHint={you ? undefined : expanded ? "Collapses the reply" : "Expands the reply"}
-          accessibilityLabel={`${you ? "You" : "Agent"}: ${message.text}`}
+          accessibilityLabel={`${you ? "You" : "Agent"}: ${you ? message.displayText : message.speechText}`}
           accessibilityRole={you ? "text" : "button"}
           disabled={you}
           hitSlop={you ? undefined : { top: 10, bottom: 10 }}
           onPress={() => setExpanded((value) => !value)}
           style={you ? undefined : styles.expandTarget}
         >
-          <Text numberOfLines={you || expanded ? undefined : 3} style={[styles.bubbleText, you && styles.bubbleTextYou]}>{message.text}</Text>
+          {you
+            ? <Text style={[styles.bubbleText, styles.bubbleTextYou]}>{message.displayText}</Text>
+            : <VoiceMarkdown numberOfLines={expanded ? undefined : 3} source={message.displayText} />}
           {message.truncated && expanded ? <Text style={styles.truncatedNote}>Spoken reply shortened; the rest is in the terminal.</Text> : null}
         </Pressable>
         {controller ? <ReplyPlayer controller={controller} message={message} /> : null}
@@ -242,6 +290,7 @@ const MessageBubble = memo(function MessageBubble({ message, controller }: { mes
 
 
 const styles = StyleSheet.create({
+  lockedStopTarget: { bottom: 0, left: 0, position: "absolute", right: 0, top: 0, zIndex: 10 },
   root: { backgroundColor: colors.chromeBg, flex: 1 },
   header: {
     alignItems: "center",
@@ -277,6 +326,9 @@ const styles = StyleSheet.create({
   paneControls: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", paddingBottom: 8, paddingHorizontal: 12, paddingTop: 8 },
   speedGroup: { alignItems: "center", flexDirection: "row", gap: 8 },
   speedCaption: { color: colors.chromeDim, fontSize: typeScale.rowSecondary },
+  autoPlayToggle: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", minWidth: 98, paddingHorizontal: 10 },
+  autoPlayToggleOn: { backgroundColor: colors.accent },
+  autoPlayToggleLabelOn: { color: colors.accentInk },
   /** Wide enough for "Smaller", so the pill's left edge does not jump when the label changes. */
   paneToggle: { alignItems: "center", backgroundColor: colors.chromeRaised, borderRadius: radii.card, height: 40, justifyContent: "center", minWidth: 96, paddingHorizontal: 14 },
   paneToggleLabel: { color: colors.chromeInk, fontSize: typeScale.rowSecondary, fontWeight: "600" },

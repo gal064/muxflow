@@ -23,6 +23,23 @@ export function MicIcon({ size = 24, color }: { size?: number; color: string }) 
   );
 }
 
+export function LockIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Rect fill="none" height="11" rx="2" stroke={color} strokeWidth="2" width="14" x="5" y="10" />
+      <Path d="M8 10V7a4 4 0 0 1 8 0v3" fill="none" stroke={color} strokeLinecap="round" strokeWidth="2" />
+    </Svg>
+  );
+}
+
+export function TrashIcon({ size = 24, color }: { size?: number; color: string }) {
+  return (
+    <Svg height={size} viewBox="0 0 24 24" width={size}>
+      <Path d="M4 7h16M9 3h6l1 4H8l1-4M7 7l1 14h8l1-14M10 11v6M14 11v6" fill="none" stroke={color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+    </Svg>
+  );
+}
+
 /** The app bar's back arrow: a stroke on the same grid as the transport marks, so it centres on the title's line. */
 export function BackIcon({ size = 24, color }: { size?: number; color: string }) {
   return (
