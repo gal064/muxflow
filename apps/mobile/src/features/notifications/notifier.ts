@@ -59,8 +59,6 @@ interface Outstanding {
   postedAtMs: number;
 }
 
-type StaleReason = "retired" | "seen" | "blocked-resolved";
-
 export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
   /**
    * Step 5. Generations are monotonic per agent, so the highest generation
@@ -147,7 +145,6 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
     const next = transition.next;
     const previouslyNotified = lastNotified.get(next.id);
     lastNotified.set(next.id, next.attentionGeneration);
-    const operation = outstanding.has(decision.tag) ? "replace" : "new";
     outstanding.set(decision.tag, {
       agentId: next.id,
       event: decision.event,
@@ -155,7 +152,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
       unseenWhenPosted: needsAttention(next),
       postedAtMs: now(),
     });
-    log(`post agent=${next.id} event=${decision.event} generation=${next.attentionGeneration} tag=${decision.tag} operation=${operation}`);
+    log(`post agent=${next.id} event=${decision.event} generation=${next.attentionGeneration} tag=${decision.tag}`);
     enqueue(async () => {
       try {
         await deps.host.present({
@@ -164,7 +161,6 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
           body: decision.body,
           data: encodePayload(decision.data, state.serverIdentity),
         });
-        log(`presented agent=${next.id} event=${decision.event} generation=${next.attentionGeneration} tag=${decision.tag}`);
       } catch (error) {
         // Nothing was shown, so nothing is outstanding and this generation was
         // not notified: undo the bookkeeping rather than swallow the event for
@@ -194,10 +190,9 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
     if (state.connection.state !== "connected") return;
     const agents = state.agents;
     for (const [tag, entry] of [...outstanding]) {
-      const reason = staleReason(entry, agents[entry.agentId]);
-      if (reason === undefined) continue;
+      if (!stale(entry, agents[entry.agentId])) continue;
       outstanding.delete(tag);
-      log(`cancel tag=${tag} agent=${entry.agentId} event=${entry.event} generation=${entry.attentionGeneration} reason=${reason}`);
+      log(`cancel tag=${tag} agent=${entry.agentId}`);
       const settleAfter = entry.postedAtMs + POST_SETTLE_MS;
       enqueue(async () => {
         const wait = settleAfter - now();
@@ -242,9 +237,8 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
  *   `completed` one is not cancelled this way: `completed` *is* the idle state
  *   it reports, and it stands until seen.
  */
-function staleReason(entry: Outstanding, agent: Agent | undefined): StaleReason | undefined {
-  if (agent === undefined || !agent.present) return "retired";
-  if (entry.unseenWhenPosted && !needsAttention(agent)) return "seen";
-  if (entry.event === "blocked" && agent.lifecycle !== "blocked") return "blocked-resolved";
-  return undefined;
+function stale(entry: Outstanding, agent: Agent | undefined): boolean {
+  if (agent === undefined || !agent.present) return true;
+  if (entry.unseenWhenPosted && !needsAttention(agent)) return true;
+  return entry.event === "blocked" && agent.lifecycle !== "blocked";
 }
