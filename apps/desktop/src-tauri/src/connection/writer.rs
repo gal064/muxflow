@@ -13,80 +13,139 @@ use std::{
 
 use tmux_agent_protocol::{v1, write_frame_sync};
 
+pub(crate) use crate::perf_log::input_timing::{ControlWriteTiming, InputConnectionEpoch};
+
 const CONTROL_WRITE_QUEUE: usize = 512;
 const WRITE_POLL: Duration = Duration::from_millis(10);
 
 struct ControlWrite {
     bytes: Vec<u8>,
     deadline: Instant,
-    enqueued_at: Instant,
-    queue_depth_at_enqueue: usize,
+    measurement: ControlWriteMeasurement,
     completion: mpsc::SyncSender<Result<ControlWriteTiming, String>>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ControlWriteTiming {
-    pub(super) queue_wait: Duration,
-    pub(super) physical_write: Duration,
-    pub(super) queue_depth_at_enqueue: usize,
+#[cfg(any(debug_assertions, feature = "perf-log"))]
+struct ControlWriteMeasurement {
+    enqueued_at: Instant,
+    queue_depth_at_enqueue: usize,
 }
 
 #[cfg(any(debug_assertions, feature = "perf-log"))]
-#[derive(Default)]
-struct ControlQueueDepth(std::sync::atomic::AtomicUsize);
+struct ControlWriteStarted {
+    write_started: Instant,
+    queue_wait: Duration,
+    queue_depth_at_enqueue: usize,
+}
+
+#[cfg(any(debug_assertions, feature = "perf-log"))]
+#[derive(Clone, Default)]
+struct ControlQueueDepth(Arc<std::sync::atomic::AtomicUsize>);
 
 #[cfg(any(debug_assertions, feature = "perf-log"))]
 impl ControlQueueDepth {
-    fn entered(&self) -> usize {
-        self.0.fetch_add(1, Ordering::Relaxed) + 1
+    fn entered(&self) -> ControlWriteMeasurement {
+        ControlWriteMeasurement {
+            enqueued_at: Instant::now(),
+            queue_depth_at_enqueue: self.0.fetch_add(1, Ordering::Relaxed) + 1,
+        }
     }
 
     fn rejected(&self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
 
-    fn dequeued(&self) {
+    fn dequeued(&self, measurement: ControlWriteMeasurement) -> ControlWriteStarted {
         self.0.fetch_sub(1, Ordering::Relaxed);
+        let write_started = Instant::now();
+        ControlWriteStarted {
+            write_started,
+            queue_wait: write_started.saturating_duration_since(measurement.enqueued_at),
+            queue_depth_at_enqueue: measurement.queue_depth_at_enqueue,
+        }
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "perf-log"))]
+impl ControlWriteStarted {
+    fn finish(self) -> ControlWriteTiming {
+        ControlWriteTiming {
+            queue_wait: self.queue_wait,
+            physical_write: self.write_started.elapsed(),
+            queue_depth_at_enqueue: self.queue_depth_at_enqueue,
+        }
     }
 }
 
 #[cfg(not(any(debug_assertions, feature = "perf-log")))]
-#[derive(Default)]
+struct ControlWriteMeasurement;
+
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+struct ControlWriteStarted;
+
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+#[derive(Clone, Default)]
 struct ControlQueueDepth;
+
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+const _: () = {
+    assert!(std::mem::size_of::<ControlWriteMeasurement>() == 0);
+    assert!(std::mem::size_of::<ControlWriteStarted>() == 0);
+    assert!(std::mem::size_of::<ControlQueueDepth>() == 0);
+};
 
 #[cfg(not(any(debug_assertions, feature = "perf-log")))]
 impl ControlQueueDepth {
     #[inline(always)]
-    fn entered(&self) -> usize {
-        0
+    fn entered(&self) -> ControlWriteMeasurement {
+        ControlWriteMeasurement
     }
     #[inline(always)]
     fn rejected(&self) {}
     #[inline(always)]
-    fn dequeued(&self) {}
+    fn dequeued(&self, _measurement: ControlWriteMeasurement) -> ControlWriteStarted {
+        ControlWriteStarted
+    }
+}
+
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+impl ControlWriteStarted {
+    #[inline(always)]
+    fn finish(self) -> ControlWriteTiming {
+        ControlWriteTiming
+    }
 }
 
 #[derive(Clone)]
 pub(super) struct ControlWriterHandle {
     sender: mpsc::SyncSender<ControlWrite>,
     closed: Arc<AtomicBool>,
-    depth: Arc<ControlQueueDepth>,
+    depth: ControlQueueDepth,
+    input_epoch: InputConnectionEpoch,
 }
 
 impl ControlWriterHandle {
-    pub(super) fn start(stdin: ChildStdin, name: &str) -> Result<Self, String> {
-        Self::start_with(stdin, name)
+    pub(super) fn start(stdin: ChildStdin, name: &str, input_epoch: u64) -> Result<Self, String> {
+        Self::start_with_epoch(stdin, name, input_epoch)
     }
 
+    #[cfg(test)]
     pub(super) fn start_with<W>(writer: W, name: &str) -> Result<Self, String>
+    where
+        W: Write + AsRawFd + Send + 'static,
+    {
+        Self::start_with_epoch(writer, name, 0)
+    }
+
+    fn start_with_epoch<W>(writer: W, name: &str, input_epoch: u64) -> Result<Self, String>
     where
         W: Write + AsRawFd + Send + 'static,
     {
         let (sender, receiver) = mpsc::sync_channel(CONTROL_WRITE_QUEUE);
         let closed = Arc::new(AtomicBool::new(false));
         let writer_closed = Arc::clone(&closed);
-        let depth = Arc::new(ControlQueueDepth::default());
-        let writer_depth = Arc::clone(&depth);
+        let depth = ControlQueueDepth::default();
+        let writer_depth = depth.clone();
         thread::Builder::new()
             .name(format!("host-control-writer-{name}"))
             .spawn(move || run_control_writer(writer, receiver, writer_closed, writer_depth))
@@ -95,7 +154,16 @@ impl ControlWriterHandle {
             sender,
             closed,
             depth,
+            input_epoch: InputConnectionEpoch::new(input_epoch),
         })
+    }
+
+    pub(super) fn dispatched_input(
+        &self,
+        request_id: u64,
+        timing: ControlWriteTiming,
+    ) -> crate::perf_log::input_timing::DispatchedInput {
+        crate::perf_log::input_timing::DispatchedInput::new(request_id, self.input_epoch, timing)
     }
 
     pub(super) fn write(&self, envelope: v1::Envelope, deadline: Instant) -> Result<(), String> {
@@ -126,13 +194,12 @@ impl ControlWriterHandle {
         let mut bytes = Vec::new();
         write_frame_sync(&mut bytes, &envelope).map_err(|error| error.to_string())?;
         let (completion, _completed) = mpsc::sync_channel(1);
-        let queue_depth_at_enqueue = self.depth.entered();
+        let measurement = self.depth.entered();
         self.sender
             .try_send(ControlWrite {
                 bytes,
                 deadline,
-                enqueued_at: Instant::now(),
-                queue_depth_at_enqueue,
+                measurement,
                 completion,
             })
             .map_err(|error| {
@@ -157,18 +224,18 @@ impl ControlWriterHandle {
         let mut command = ControlWrite {
             bytes,
             deadline,
-            enqueued_at: Instant::now(),
-            queue_depth_at_enqueue: 0,
+            measurement: self.depth.entered(),
             completion,
         };
         loop {
             if self.closed.load(Ordering::Acquire) {
+                self.depth.rejected();
                 return Err("host bridge control writer is closed".into());
             }
             if Instant::now() >= deadline {
+                self.depth.rejected();
                 return Err("host request timed out before its bytes were written".into());
             }
-            command.queue_depth_at_enqueue = self.depth.entered();
             match self.sender.try_send(command) {
                 Ok(()) => break,
                 Err(mpsc::TrySendError::Full(returned)) => {
@@ -177,6 +244,7 @@ impl ControlWriterHandle {
                     thread::sleep(
                         WRITE_POLL.min(deadline.saturating_duration_since(Instant::now())),
                     );
+                    command.measurement = self.depth.entered();
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
                     self.depth.rejected();
@@ -198,25 +266,20 @@ fn run_control_writer<W>(
     mut writer: W,
     receiver: mpsc::Receiver<ControlWrite>,
     closed: Arc<AtomicBool>,
-    depth: Arc<ControlQueueDepth>,
+    depth: ControlQueueDepth,
 ) where
     W: Write + AsRawFd,
 {
     let fd = writer.as_raw_fd();
     let setup = set_nonblocking(fd);
     while let Ok(command) = receiver.recv() {
-        depth.dequeued();
-        let write_started = Instant::now();
+        let measurement = depth.dequeued(command.measurement);
         let result = setup
             .as_ref()
             .map_err(Clone::clone)
             .and_then(|_| write_until(&mut writer, fd, &command.bytes, command.deadline, &closed));
         let poisoned = result.is_err();
-        let result = result.map(|()| ControlWriteTiming {
-            queue_wait: write_started.saturating_duration_since(command.enqueued_at),
-            physical_write: write_started.elapsed(),
-            queue_depth_at_enqueue: command.queue_depth_at_enqueue,
-        });
+        let result = result.map(|()| measurement.finish());
         let _ = command.completion.send(result);
         if poisoned {
             // A length-prefixed protobuf frame is indivisible at this layer.
@@ -226,7 +289,7 @@ fn run_control_writer<W>(
             // the connection supervisor must establish a fresh bridge.
             closed.store(true, Ordering::Release);
             while let Ok(pending) = receiver.try_recv() {
-                depth.dequeued();
+                let _ = depth.dequeued(pending.measurement);
                 let _ = pending.completion.send(Err(
                     "host bridge control writer is poisoned after a physical write failure".into(),
                 ));

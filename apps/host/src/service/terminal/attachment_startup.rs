@@ -24,7 +24,7 @@ use crate::service::snapshot::tmux_command;
 use crate::service::topology_output_trigger::TopologyOutputTrigger;
 
 pub(super) struct AttachmentRuntime {
-    pub(super) connection_epoch: u64,
+    pub(super) connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     pub(super) event_tx: mpsc::Sender<SequencerControl>,
     pub(super) overflowed: Arc<AtomicBool>,
     pub(super) resources: Arc<Mutex<PaneResourceStore>>,

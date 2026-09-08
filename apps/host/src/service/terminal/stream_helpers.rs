@@ -141,7 +141,7 @@ fn emit_terminal_bytes(
 }
 
 pub(in crate::service::terminal) struct OutputEmission<'a> {
-    pub(in crate::service::terminal) connection_epoch: u64,
+    pub(in crate::service::terminal) connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     pub(in crate::service::terminal) sender: &'a mpsc::Sender<SequencerControl>,
     pub(in crate::service::terminal) overflowed: &'a AtomicBool,
     pub(in crate::service::terminal) resources: &'a Arc<Mutex<PaneResourceStore>>,
@@ -207,7 +207,7 @@ impl OutputEmission<'_> {
             let leg = admitted.then(|| self.read_started.elapsed());
             if let Some(elapsed) = leg {
                 crate::diagnostics::note_terminal_output_admitted(
-                    self.connection_epoch,
+                    self.connection_epoch.get(),
                     &leg_pane_id,
                     generation,
                     elapsed,

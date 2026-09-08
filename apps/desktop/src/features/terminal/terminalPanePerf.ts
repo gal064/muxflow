@@ -9,90 +9,160 @@ const REPORT_INTERVAL_MS = 2_000;
  * log itself into the bottleneck. It exists only for an opted-in perf launch.
  */
 export class TerminalPanePerf {
-  #startedAt = performance.now();
-  #inputBytes = 0;
-  #enqueueRecords = 0;
-  #frameRequests = 0;
-  #xtermWrites = 0;
-  #xtermWriteBytes = 0;
-  #xtermWriteMs = 0;
-  #renderEvents = 0;
-  #renderedRows = 0;
-  #maxPendingBytes = 0;
-  #maxQueueDepth = 0;
+  #interval: PanePerfInterval;
+  readonly #retired = new Set<PanePerfInterval>();
 
-  constructor(readonly paneId: string) {}
+  constructor(readonly paneId: string, connectionEpoch?: number) {
+    this.#interval = createInterval(connectionEpoch);
+  }
 
-  observe = (event: TerminalWriteObservation): void => {
+  setConnectionEpoch(connectionEpoch: number | undefined): void {
+    if (connectionEpoch === this.#interval.connectionEpoch) return;
+    const previous = this.#interval;
+    previous.closing = true;
+    this.#retired.add(previous);
+    this.#interval = createInterval(connectionEpoch);
+    this.#flush(previous, true);
+  }
+
+  /**
+   * The scheduler captures one observer for an in-flight xterm write. Returning
+   * a closure bound to this interval keeps a late settlement on the epoch in
+   * which its write began, even after reconnect installs a new observer.
+   */
+  get observe(): (event: TerminalWriteObservation) => void {
+    const interval = this.#interval;
+    return (event) => this.#observe(interval, event);
+  }
+
+  #observe(interval: PanePerfInterval, event: TerminalWriteObservation): void {
+    if (interval.finalized) return;
     switch (event.kind) {
       case "enqueue":
-        this.#inputBytes += event.bytes;
-        this.#enqueueRecords += 1;
-        this.#maxPendingBytes = Math.max(this.#maxPendingBytes, event.pendingBytes);
-        this.#maxQueueDepth = Math.max(this.#maxQueueDepth, event.queueDepth);
+        interval.inputBytes += event.bytes;
+        interval.enqueueRecords += 1;
+        interval.maxPendingBytes = Math.max(interval.maxPendingBytes, event.pendingBytes);
+        interval.maxQueueDepth = Math.max(interval.maxQueueDepth, event.queueDepth);
         break;
       case "frameRequest":
-        this.#frameRequests += 1;
+        interval.frameRequests += 1;
         break;
       case "writeStarted":
-        this.#xtermWrites += 1;
-        this.#xtermWriteBytes += event.bytes;
-        this.#maxPendingBytes = Math.max(this.#maxPendingBytes, event.pendingBytes);
-        this.#maxQueueDepth = Math.max(this.#maxQueueDepth, event.queueDepth);
+        interval.xtermWrites += 1;
+        interval.pendingWrites += 1;
+        interval.xtermWriteBytes += event.bytes;
+        interval.maxPendingBytes = Math.max(interval.maxPendingBytes, event.pendingBytes);
+        interval.maxQueueDepth = Math.max(interval.maxQueueDepth, event.queueDepth);
         break;
       case "writeSettled":
-        this.#xtermWriteMs += event.ms;
+        interval.pendingWrites = Math.max(0, interval.pendingWrites - 1);
+        interval.xtermWriteMs += event.ms;
         break;
     }
-    this.#flush(false);
-  };
+    this.#flush(interval, interval.closing);
+  }
 
   render(startRow: number, endRow: number): void {
-    this.#renderEvents += 1;
-    this.#renderedRows += Math.max(0, endRow - startRow + 1);
-    this.#flush(false);
+    this.#interval.renderEvents += 1;
+    this.#interval.renderedRows += Math.max(0, endRow - startRow + 1);
+    this.#flush(this.#interval, false);
   }
 
   dispose(): void {
-    this.#flush(true);
+    this.#interval.closing = true;
+    this.#retired.add(this.#interval);
+    for (const interval of [...this.#retired]) {
+      interval.incompleteWrites += interval.pendingWrites;
+      interval.pendingWrites = 0;
+      interval.finalized = true;
+      this.#flush(interval, true);
+    }
   }
 
-  #flush(force: boolean): void {
+  #flush(interval: PanePerfInterval, force: boolean): void {
     const now = performance.now();
-    const intervalMs = now - this.#startedAt;
-    if (!force && intervalMs < REPORT_INTERVAL_MS) return;
-    if (this.#enqueueRecords > 0 || this.#renderEvents > 0 || this.#frameRequests > 0) {
+    const intervalMs = now - interval.startedAt;
+    if (interval.pendingWrites > 0 || (!force && intervalMs < REPORT_INTERVAL_MS)) return;
+    if (interval.connectionEpoch !== undefined
+      && (interval.enqueueRecords > 0
+        || interval.renderEvents > 0
+        || interval.frameRequests > 0
+        || interval.xtermWrites > 0)) {
       recordPerfRecord("perf.terminalPane", {
         paneId: this.paneId,
+        connectionEpoch: interval.connectionEpoch,
         intervalMs,
-        inputBytes: this.#inputBytes,
-        enqueueRecords: this.#enqueueRecords,
-        frameRequests: this.#frameRequests,
-        xtermWrites: this.#xtermWrites,
-        xtermWriteBytes: this.#xtermWriteBytes,
-        xtermWriteMs: this.#xtermWriteMs,
-        renderEvents: this.#renderEvents,
-        renderedRows: this.#renderedRows,
-        maxPendingBytes: this.#maxPendingBytes,
-        maxQueueDepth: this.#maxQueueDepth,
+        inputBytes: interval.inputBytes,
+        enqueueRecords: interval.enqueueRecords,
+        frameRequests: interval.frameRequests,
+        xtermWrites: interval.xtermWrites,
+        xtermWriteBytes: interval.xtermWriteBytes,
+        xtermWriteMs: interval.xtermWriteMs,
+        incompleteWrites: interval.incompleteWrites,
+        renderEvents: interval.renderEvents,
+        renderedRows: interval.renderedRows,
+        maxPendingBytes: interval.maxPendingBytes,
+        maxQueueDepth: interval.maxQueueDepth,
       });
     }
-    this.#startedAt = now;
-    this.#inputBytes = 0;
-    this.#enqueueRecords = 0;
-    this.#frameRequests = 0;
-    this.#xtermWrites = 0;
-    this.#xtermWriteBytes = 0;
-    this.#xtermWriteMs = 0;
-    this.#renderEvents = 0;
-    this.#renderedRows = 0;
-    this.#maxPendingBytes = 0;
-    this.#maxQueueDepth = 0;
+    if (interval.closing) {
+      this.#retired.delete(interval);
+      return;
+    }
+    resetInterval(interval, now);
   }
 }
 
-export function createTerminalPanePerf(paneId: string | undefined): TerminalPanePerf | undefined {
-  return paneId && perfProbeEnabled() ? new TerminalPanePerf(paneId) : undefined;
+interface PanePerfInterval {
+  connectionEpoch: number | undefined;
+  startedAt: number;
+  inputBytes: number;
+  enqueueRecords: number;
+  frameRequests: number;
+  xtermWrites: number;
+  pendingWrites: number;
+  incompleteWrites: number;
+  xtermWriteBytes: number;
+  xtermWriteMs: number;
+  renderEvents: number;
+  renderedRows: number;
+  maxPendingBytes: number;
+  maxQueueDepth: number;
+  closing: boolean;
+  finalized: boolean;
+}
+
+function createInterval(connectionEpoch: number | undefined): PanePerfInterval {
+  return {
+    connectionEpoch,
+    startedAt: performance.now(),
+    inputBytes: 0,
+    enqueueRecords: 0,
+    frameRequests: 0,
+    xtermWrites: 0,
+    pendingWrites: 0,
+    incompleteWrites: 0,
+    xtermWriteBytes: 0,
+    xtermWriteMs: 0,
+    renderEvents: 0,
+    renderedRows: 0,
+    maxPendingBytes: 0,
+    maxQueueDepth: 0,
+    closing: false,
+    finalized: false,
+  };
+}
+
+function resetInterval(interval: PanePerfInterval, now: number): void {
+  const connectionEpoch = interval.connectionEpoch;
+  Object.assign(interval, createInterval(connectionEpoch), { startedAt: now });
+}
+
+export function createTerminalPanePerf(
+  paneId: string | undefined,
+  connectionEpoch?: number,
+): TerminalPanePerf | undefined {
+  return paneId && perfProbeEnabled() ? new TerminalPanePerf(paneId, connectionEpoch) : undefined;
 }
 
 /**
@@ -102,7 +172,8 @@ export function createTerminalPanePerf(paneId: string | undefined): TerminalPane
  */
 export async function terminalPanePerfWhenReady(
   paneId: string | undefined,
+  connectionEpoch: () => number | undefined,
 ): Promise<TerminalPanePerf | undefined> {
   if (!paneId || !(await perfProbeReady())) return undefined;
-  return new TerminalPanePerf(paneId);
+  return new TerminalPanePerf(paneId, connectionEpoch());
 }

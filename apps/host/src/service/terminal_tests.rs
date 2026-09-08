@@ -33,7 +33,7 @@ fn start_long_lived_attachment(
         "$1",
         &["%1".into()],
         AttachmentRuntime {
-            connection_epoch: 0,
+            connection_epoch: crate::diagnostics::PerfConnectionEpoch::new(0),
             event_tx,
             overflowed,
             resources,
@@ -133,7 +133,7 @@ fn clients_with_recorded_client(
         "$1",
         &["%1".into()],
         AttachmentRuntime {
-            connection_epoch: 0,
+            connection_epoch: crate::diagnostics::PerfConnectionEpoch::new(0),
             event_tx: events,
             overflowed,
             resources: Arc::clone(&clients.resources),
@@ -526,7 +526,7 @@ async fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() 
     let output_credit_clone = Arc::clone(&output_credit);
     let output = std::thread::spawn(move || {
         TestOutputEmission {
-            connection_epoch: 0,
+            connection_epoch: crate::diagnostics::PerfConnectionEpoch::new(0),
             sender: &output_events,
             overflowed: &output_overflowed,
             resources: &output_resources,
@@ -629,7 +629,7 @@ fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
     let parked_reader_stopped = Arc::clone(&reader_stopped);
     let reader = std::thread::spawn(move || {
         TestOutputEmission {
-            connection_epoch: 0,
+            connection_epoch: crate::diagnostics::PerfConnectionEpoch::new(0),
             sender: &reader_events,
             overflowed: &reader_overflowed,
             resources: &reader_resources,
@@ -1888,7 +1888,7 @@ fn an_evicted_pane_is_reported_to_the_desktop_as_requiring_a_seed() {
     let output_credit = OutputCredit::negotiated(false);
     let emission_order = Mutex::new(());
     TestOutputEmission {
-        connection_epoch: 0,
+        connection_epoch: crate::diagnostics::PerfConnectionEpoch::new(0),
         sender: &events,
         overflowed: &overflowed,
         resources: &resources,

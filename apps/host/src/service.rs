@@ -467,7 +467,8 @@ async fn serve_connection(
     let writer_closed = Arc::clone(&closed);
     let (writer_stopped_tx, mut writer_stopped_rx) = mpsc::unbounded_channel::<WriterStop>();
     let writer_activity = Arc::clone(activity);
-    let writer_connection_epoch = client_hello.connection_epoch;
+    let writer_connection_epoch =
+        crate::diagnostics::PerfConnectionEpoch::new(client_hello.connection_epoch);
     let mut writer_task = tokio::spawn(async move {
         let mut sequencer = ProtocolSequencer::default();
         let mut gap_fault = events::GapFaultInjector::for_connection();
@@ -481,8 +482,11 @@ async fn serve_connection(
                     None => break,
                 },
             };
-            let (message, pending) =
-                events::coalesce_adjacent_terminal_output(message, &mut control_rx);
+            let (message, pending) = events::coalesce_adjacent_terminal_output(
+                message,
+                &mut control_rx,
+                writer_connection_epoch,
+            );
             pending_message = pending;
             if let SequencerControl::TopologyEpochBarrier(completion) = message {
                 let _ = completion.send(writer_topology_signal.current_epoch());
@@ -513,21 +517,6 @@ async fn serve_connection(
                 ),
                 _ => (None, None),
             };
-            let terminal_output = match &frame.payload {
-                Some(Payload::Event(event))
-                    if v1::EventKind::try_from(event.kind).ok()
-                        == Some(v1::EventKind::TerminalOutput) =>
-                {
-                    event.terminal.as_ref().map(|terminal| {
-                        (
-                            terminal.pane_id.as_str(),
-                            terminal.generation,
-                            terminal.data.len(),
-                        )
-                    })
-                }
-                _ => None,
-            };
             let frame_bytes = || prost::Message::encoded_len(&frame);
             let write_started = Instant::now();
             match timeout(PROTOCOL_WRITE_TIMEOUT, write_frame(&mut writer, &frame)).await {
@@ -549,17 +538,11 @@ async fn serve_connection(
                         frame_bytes,
                         write_elapsed,
                     );
-                    if let Some((pane_id, generation, payload_bytes)) = terminal_output {
-                        crate::diagnostics::record_terminal_output_written(
-                            writer_connection_epoch,
-                            frame.sequence,
-                            pane_id,
-                            generation,
-                            payload_bytes,
-                            prost::Message::encoded_len(&frame),
-                            write_elapsed,
-                        );
-                    }
+                    crate::diagnostics::record_terminal_output_frame_written(
+                        || writer_connection_epoch.get(),
+                        &frame,
+                        write_elapsed,
+                    );
                 }
                 Ok(Err(error)) => {
                     stopped_reason =

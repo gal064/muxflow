@@ -784,6 +784,53 @@ pub fn write_safe_log(class: SafeErrorClass) {
 // stays inside the privacy declaration above.
 // ---------------------------------------------------------------------------
 
+/// Connection identity carried only by measurement builds. The inert twin is
+/// zero-sized, so threading it through terminal runtime structs does not add a
+/// word to ordinary production objects.
+#[cfg(any(debug_assertions, feature = "perf-log"))]
+#[derive(Clone, Copy)]
+pub(crate) struct PerfConnectionEpoch(u64);
+
+#[cfg(any(debug_assertions, feature = "perf-log"))]
+impl PerfConnectionEpoch {
+    pub(crate) fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[cfg(any(debug_assertions, feature = "perf-log"))]
+pub(crate) struct HostInputCommitTiming(Instant);
+
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+pub(crate) struct HostInputCommitTiming;
+
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+#[derive(Clone, Copy)]
+pub(crate) struct PerfConnectionEpoch;
+
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+const _: () = {
+    assert!(std::mem::size_of::<PerfConnectionEpoch>() == 0);
+    assert!(std::mem::size_of::<HostInputCommitTiming>() == 0);
+};
+
+#[cfg(not(any(debug_assertions, feature = "perf-log")))]
+impl PerfConnectionEpoch {
+    #[inline(always)]
+    pub(crate) fn new(_value: u64) -> Self {
+        Self
+    }
+
+    #[inline(always)]
+    pub(crate) fn get(self) -> u64 {
+        0
+    }
+}
+
 /// One tmux action's host-side timeline, as the dispatcher measured it.
 ///
 /// Declared outside the two twins below so both take the same record: a dozen
@@ -821,7 +868,7 @@ mod switch_timing {
     use std::{
         collections::HashMap,
         fs::{self, OpenOptions},
-        io::Write,
+        io::{Read, Seek, SeekFrom, Write},
         os::unix::fs::OpenOptionsExt,
         sync::{
             Mutex, OnceLock,
@@ -832,7 +879,7 @@ mod switch_timing {
         time::{Duration, Instant},
     };
 
-    use super::{TmuxActionTiming, now_epoch_millis, whole_millis};
+    use super::{HostInputCommitTiming, TmuxActionTiming, now_epoch_millis, whole_millis};
     use crate::paths;
 
     /// Past this the timing log starts over. It is a debugging artefact, not
@@ -842,6 +889,14 @@ mod switch_timing {
     /// Appends one line to `timing.log`, on the same terms as `bridge.log`: the
     /// runtime directory is the user's own, and a symlink out of it is refused.
     fn append_timing_line(line: &serde_json::Value) {
+        static WRITER: OnceLock<Mutex<()>> = OnceLock::new();
+        let Ok(_writer) = WRITER.get_or_init(Default::default).lock() else {
+            return;
+        };
+        let Ok(mut encoded) = serde_json::to_vec(line) else {
+            return;
+        };
+        encoded.push(b'\n');
         let path = paths::runtime_dir().join("timing.log");
         let oversized = fs::symlink_metadata(&path)
             .map(|metadata| metadata.is_file() && metadata.len() > MAX_TIMING_LOG_BYTES)
@@ -850,6 +905,7 @@ mod switch_timing {
         options
             .create(true)
             .write(true)
+            .read(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         if oversized {
@@ -857,9 +913,40 @@ mod switch_timing {
         } else {
             options.append(true);
         }
-        if let Ok(mut file) = options.open(&path) {
-            let _ = writeln!(file, "{line}");
+        let Ok(mut file) = options.open(&path) else {
+            return;
+        };
+        if !oversized {
+            let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+                return;
+            };
+            if length > 0 && file.seek(SeekFrom::End(-1)).is_ok() {
+                let mut last = [0_u8; 1];
+                if file.read_exact(&mut last).is_err() {
+                    return;
+                }
+                if last[0] != b'\n' {
+                    if file.seek(SeekFrom::Start(0)).is_err() {
+                        return;
+                    }
+                    let mut contents = Vec::new();
+                    if file.read_to_end(&mut contents).is_err() {
+                        return;
+                    }
+                    let complete_length = contents
+                        .iter()
+                        .rposition(|byte| *byte == b'\n')
+                        .map_or(0, |boundary| boundary + 1);
+                    if file
+                        .set_len(u64::try_from(complete_length).unwrap_or(0))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
         }
+        let _ = file.write_all(&encoded);
     }
 
     /// Input is the only timing stream emitted once per keystroke batch. Keep
@@ -1015,14 +1102,9 @@ mod switch_timing {
     /// one tmux write. Every original request retains its own queue timings and
     /// request id; the shared batch fields explain why several records have the
     /// same commit duration.
+    #[derive(Default)]
     pub(crate) struct HostInputTiming {
-        marks: Vec<InputMark>,
-    }
-
-    impl Default for HostInputTiming {
-        fn default() -> Self {
-            Self { marks: Vec::new() }
-        }
+        marks: Option<Vec<InputMark>>,
     }
 
     impl HostInputTiming {
@@ -1034,7 +1116,7 @@ mod switch_timing {
         ) -> Self {
             let read_at_unix_millis = request_read_at().lock().unwrap().remove(&request_id);
             Self {
-                marks: vec![InputMark {
+                marks: Some(vec![InputMark {
                     request_id,
                     connection_epoch,
                     pane_id: pane_id.to_owned(),
@@ -1043,32 +1125,41 @@ mod switch_timing {
                     handler_at_unix_millis: now_epoch_millis(),
                     handler_started: Instant::now(),
                     enqueued_at: None,
-                }],
+                }]),
             }
         }
 
         pub(crate) fn mark_enqueued(&mut self) {
             let now = Instant::now();
-            for mark in &mut self.marks {
+            for mark in self.marks.iter_mut().flatten() {
                 mark.enqueued_at = Some(now);
             }
         }
 
         pub(crate) fn merge(&mut self, mut next: Self) {
-            self.marks.append(&mut next.marks);
+            if let Some(mut next_marks) = next.marks.take() {
+                self.marks.get_or_insert_default().append(&mut next_marks);
+            }
+        }
+
+        pub(crate) fn begin_commit(&self) -> HostInputCommitTiming {
+            HostInputCommitTiming(Instant::now())
         }
 
         pub(crate) fn finish(
-            self,
+            mut self,
             dequeued_at: Instant,
-            tmux: Duration,
-            path: &str,
+            commit: HostInputCommitTiming,
+            path: impl FnOnce() -> &'static str,
             batch_bytes: usize,
             outcome: &str,
         ) {
+            let tmux = commit.0.elapsed();
+            let path = path();
             let completed_at = now_epoch_millis();
-            let request_count = self.marks.len();
-            for mark in self.marks {
+            let marks = self.marks.take().unwrap_or_default();
+            let request_count = marks.len();
+            for mark in marks {
                 append_input_timing_line(serde_json::json!({
                     "atUnixMillis": completed_at,
                     "subsystem": "host_daemon",
@@ -1090,6 +1181,42 @@ mod switch_timing {
                     "outcome": outcome,
                 }));
             }
+        }
+
+        pub(crate) fn finish_rejected(mut self, outcome: &'static str) {
+            emit_uncommitted_input(self.marks.take().unwrap_or_default(), outcome);
+        }
+    }
+
+    impl Drop for HostInputTiming {
+        fn drop(&mut self) {
+            emit_uncommitted_input(self.marks.take().unwrap_or_default(), "notCommitted");
+        }
+    }
+
+    fn emit_uncommitted_input(marks: Vec<InputMark>, outcome: &'static str) {
+        let completed_at = now_epoch_millis();
+        for mark in marks {
+            append_input_timing_line(serde_json::json!({
+                "atUnixMillis": completed_at,
+                "subsystem": "host_daemon",
+                "event": "terminalInput",
+                "requestId": mark.request_id,
+                "connectionEpoch": mark.connection_epoch,
+                "paneId": mark.pane_id,
+                "bytes": mark.bytes,
+                "readAtUnixMillis": mark.read_at_unix_millis,
+                "handlerAtUnixMillis": mark.handler_at_unix_millis,
+                "readToHandlerMs": mark.read_at_unix_millis.map(|read| mark.handler_at_unix_millis.saturating_sub(read)),
+                "handlerToEnqueueMs": mark.enqueued_at.map(|at| whole_millis(at.saturating_duration_since(mark.handler_started))),
+                "hostQueueMs": serde_json::Value::Null,
+                "tmuxCommitMs": serde_json::Value::Null,
+                "completedAtUnixMillis": completed_at,
+                "path": serde_json::Value::Null,
+                "batchBytes": mark.bytes,
+                "batchRequestCount": 1,
+                "outcome": outcome,
+            }));
         }
     }
 
@@ -1214,6 +1341,33 @@ mod switch_timing {
         }));
     }
 
+    pub(crate) fn record_terminal_output_frame_written(
+        connection_epoch: impl FnOnce() -> u64,
+        frame: &tmux_agent_protocol::v1::Envelope,
+        write: Duration,
+    ) {
+        let Some(tmux_agent_protocol::v1::envelope::Payload::Event(event)) = &frame.payload else {
+            return;
+        };
+        if tmux_agent_protocol::v1::EventKind::try_from(event.kind).ok()
+            != Some(tmux_agent_protocol::v1::EventKind::TerminalOutput)
+        {
+            return;
+        }
+        let Some(terminal) = &event.terminal else {
+            return;
+        };
+        record_terminal_output_written(
+            connection_epoch(),
+            frame.sequence,
+            &terminal.pane_id,
+            terminal.generation,
+            terminal.data.len(),
+            prost::Message::encoded_len(frame),
+            write,
+        );
+    }
+
     struct OutputAdmission {
         read_at_unix_millis: i64,
         read_to_enqueue: Duration,
@@ -1246,6 +1400,21 @@ mod switch_timing {
                 read_to_enqueue,
             },
         );
+    }
+
+    /// Coalescing keeps only the final generation on the wire. Discard the
+    /// admission mark belonging to each superseded generation so sustained
+    /// output cannot leak the map and clear unrelated in-flight joins.
+    pub(crate) fn forget_terminal_output_admitted(
+        connection_epoch: u64,
+        pane_id: &str,
+        generation: u64,
+    ) {
+        output_admitted_at().lock().unwrap().remove(&(
+            connection_epoch,
+            pane_id.to_owned(),
+            generation,
+        ));
     }
 
     /// One line per voice leg (docs/mobile/voice-mode-plan.md §2b): how long
@@ -1291,6 +1460,8 @@ mod switch_timing {
 mod switch_timing {
     use std::time::{Duration, Instant};
 
+    use super::HostInputCommitTiming;
+
     #[inline(always)]
     pub(crate) fn note_request_read(_request_id: u64, _operation: i32) {}
 
@@ -1328,15 +1499,23 @@ mod switch_timing {
         pub(crate) fn merge(&mut self, _next: Self) {}
 
         #[inline(always)]
+        pub(crate) fn begin_commit(&self) -> HostInputCommitTiming {
+            HostInputCommitTiming
+        }
+
+        #[inline(always)]
         pub(crate) fn finish(
             self,
             _dequeued_at: Instant,
-            _tmux: Duration,
-            _path: &str,
+            _commit: HostInputCommitTiming,
+            _path: impl FnOnce() -> &'static str,
             _batch_bytes: usize,
             _outcome: &str,
         ) {
         }
+
+        #[inline(always)]
+        pub(crate) fn finish_rejected(self, _outcome: &'static str) {}
     }
 
     #[inline(always)]
@@ -1362,13 +1541,9 @@ mod switch_timing {
     }
 
     #[inline(always)]
-    pub(crate) fn record_terminal_output_written(
-        _connection_epoch: u64,
-        _sequence: u64,
-        _pane_id: &str,
-        _generation: u64,
-        _payload_bytes: usize,
-        _frame_bytes: usize,
+    pub(crate) fn record_terminal_output_frame_written(
+        _connection_epoch: impl FnOnce() -> u64,
+        _frame: &tmux_agent_protocol::v1::Envelope,
         _write: Duration,
     ) {
     }
@@ -1379,6 +1554,14 @@ mod switch_timing {
         _pane_id: &str,
         _generation: u64,
         _read_to_enqueue: Duration,
+    ) {
+    }
+
+    #[inline(always)]
+    pub(crate) fn forget_terminal_output_admitted(
+        _connection_epoch: u64,
+        _pane_id: &str,
+        _generation: u64,
     ) {
     }
 
@@ -1398,10 +1581,10 @@ mod switch_timing {
 }
 
 pub(crate) use switch_timing::{
-    HostInputTiming, handler_entry_stamp, note_request_read, note_response_enqueued,
-    note_terminal_output_admitted, record_frame_write, record_response_written,
-    record_terminal_output_written, write_seed_timing_log, write_tmux_action_timing_log,
-    write_voice_timing_log,
+    HostInputTiming, forget_terminal_output_admitted, handler_entry_stamp, note_request_read,
+    note_response_enqueued, note_terminal_output_admitted, record_frame_write,
+    record_response_written, record_terminal_output_frame_written, write_seed_timing_log,
+    write_tmux_action_timing_log, write_voice_timing_log,
 };
 
 #[derive(Debug, Serialize)]

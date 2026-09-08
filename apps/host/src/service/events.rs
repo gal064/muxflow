@@ -254,6 +254,7 @@ const MAX_COALESCED_TERMINAL_OUTPUT_BYTES: usize = 64 * 1024;
 pub(super) fn coalesce_adjacent_terminal_output(
     mut message: SequencerControl,
     receiver: &mut tokio::sync::mpsc::Receiver<SequencerControl>,
+    connection_epoch: crate::diagnostics::PerfConnectionEpoch,
 ) -> (SequencerControl, Option<SequencerControl>) {
     let SequencerControl::OrderedEvent(first_event) = &mut message else {
         return (message, None);
@@ -287,6 +288,11 @@ pub(super) fn coalesce_adjacent_terminal_output(
         {
             return (message, Some(next));
         }
+        crate::diagnostics::forget_terminal_output_admitted(
+            connection_epoch.get(),
+            &first_terminal.pane_id,
+            first_terminal.generation,
+        );
         first_terminal.data.extend_from_slice(&next_terminal.data);
         first_terminal.generation = next_terminal.generation;
         first_event.terminal_delivery_bytes = first_event
@@ -451,6 +457,7 @@ mod coalescing_tests {
         let (merged, deferred) = coalesce_adjacent_terminal_output(
             output("%1", "terminal", 1, b"a".to_vec()),
             &mut receiver,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
         );
         assert!(deferred.is_none());
         assert_eq!(terminal(&merged).data, b"abc");
@@ -461,8 +468,11 @@ mod coalescing_tests {
     #[test]
     fn other_pane_and_scope_boundaries_are_preserved_in_the_deferred_slot() {
         let (_sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        let (first, deferred) =
-            coalesce_adjacent_terminal_output(output("%1", "one", 1, b"a".to_vec()), &mut receiver);
+        let (first, deferred) = coalesce_adjacent_terminal_output(
+            output("%1", "one", 1, b"a".to_vec()),
+            &mut receiver,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
+        );
         assert_eq!(terminal(&first).data, b"a");
         assert!(deferred.is_none());
 
@@ -470,16 +480,22 @@ mod coalescing_tests {
         sender
             .try_send(output("%2", "one", 2, b"b".to_vec()))
             .unwrap();
-        let (_, deferred) =
-            coalesce_adjacent_terminal_output(output("%1", "one", 1, b"a".to_vec()), &mut receiver);
+        let (_, deferred) = coalesce_adjacent_terminal_output(
+            output("%1", "one", 1, b"a".to_vec()),
+            &mut receiver,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
+        );
         assert_eq!(terminal(deferred.as_ref().unwrap()).pane_id, "%2");
 
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
         sender
             .try_send(output("%1", "two", 2, b"b".to_vec()))
             .unwrap();
-        let (_, deferred) =
-            coalesce_adjacent_terminal_output(output("%1", "one", 1, b"a".to_vec()), &mut receiver);
+        let (_, deferred) = coalesce_adjacent_terminal_output(
+            output("%1", "one", 1, b"a".to_vec()),
+            &mut receiver,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
+        );
         assert_eq!(terminal(deferred.as_ref().unwrap()).data, b"b");
     }
 
@@ -496,6 +512,7 @@ mod coalescing_tests {
         let (_, deferred) = coalesce_adjacent_terminal_output(
             output("%1", "terminal", 1, b"a".to_vec()),
             &mut receiver,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
         );
         assert!(matches!(
             deferred,
@@ -511,6 +528,7 @@ mod coalescing_tests {
         let (merged, deferred) = coalesce_adjacent_terminal_output(
             output("%1", "", 1, vec![1; 64 * 1024 - 1]),
             &mut receiver,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
         );
         assert!(deferred.is_none());
         assert_eq!(terminal(&merged).data.len(), 64 * 1024);
@@ -520,6 +538,7 @@ mod coalescing_tests {
         let (first, deferred) = coalesce_adjacent_terminal_output(
             output("%1", "", 1, vec![1; 64 * 1024]),
             &mut receiver,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
         );
         assert_eq!(terminal(&first).data.len(), 64 * 1024);
         assert!(deferred.is_some());
@@ -529,6 +548,7 @@ mod coalescing_tests {
         let (oversize, deferred) = coalesce_adjacent_terminal_output(
             output("%1", "", 1, vec![1; 64 * 1024 + 1]),
             &mut receiver,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
         );
         assert_eq!(terminal(&oversize).data.len(), 64 * 1024 + 1);
         assert!(deferred.is_some());
@@ -546,6 +566,7 @@ mod coalescing_tests {
         let (_, deferred) = coalesce_adjacent_terminal_output(
             output("%1", "terminal", 1, b"a".to_vec()),
             &mut receiver,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
         );
         assert!(deferred.is_some());
     }
@@ -568,7 +589,11 @@ mod coalescing_tests {
         };
         event.terminal_delivery_bytes = 1;
         event.terminal_delivery_records = 1;
-        let (merged, deferred) = coalesce_adjacent_terminal_output(first, &mut receiver);
+        let (merged, deferred) = coalesce_adjacent_terminal_output(
+            first,
+            &mut receiver,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
+        );
         assert!(deferred.is_none());
         let SequencerControl::OrderedEvent(merged) = merged else {
             unreachable!()

@@ -64,6 +64,20 @@ pub(crate) mod bridge {
 }
 
 pub(crate) mod operations {
+    #[cfg(test)]
+    #[derive(Clone, Default)]
+    pub(crate) struct TransferMeasurementSnapshot {
+        pub(crate) admission_attempts: u64,
+        pub(crate) admission_accepted: u64,
+        pub(crate) admission_rejected: u64,
+        pub(crate) active: usize,
+        pub(crate) active_high_water: usize,
+        pub(crate) queued: usize,
+        pub(crate) queued_high_water: usize,
+        pub(crate) completed_successes: u64,
+        pub(crate) completed_failures: u64,
+    }
+
     pub(crate) enum RemoteOperation {
         ControlMasterEnsureAttempt,
         ControlMasterCheckAttempt,
@@ -129,14 +143,56 @@ pub(crate) mod operations {
     pub fn sample_native_measurements() -> Result<(), String> {
         Err(super::DISABLED.into())
     }
+
+    #[cfg(test)]
+    pub(crate) fn reset_transfer_measurements() {}
+
+    #[cfg(test)]
+    pub(crate) fn transfer_measurements_for_test() -> TransferMeasurementSnapshot {
+        TransferMeasurementSnapshot::default()
+    }
 }
 
 /// Zero-cost twin of the native input timeline. The real type owns the pane
 /// label and clock stamps only in an opted-in measurement build.
 pub(crate) mod input_timing {
-    use std::time::Duration;
+    use std::time::Instant;
+
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct ControlWriteTiming;
+
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct InputConnectionEpoch;
+
+    impl InputConnectionEpoch {
+        #[inline(always)]
+        pub(crate) fn new(_value: u64) -> Self {
+            Self
+        }
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct DispatchedInput;
+
+    impl DispatchedInput {
+        #[inline(always)]
+        pub(crate) fn new(
+            _request_id: u64,
+            _connection_epoch: InputConnectionEpoch,
+            _control: ControlWriteTiming,
+        ) -> Self {
+            Self
+        }
+    }
 
     pub(crate) struct DesktopInputTiming;
+
+    const _: () = {
+        assert!(std::mem::size_of::<ControlWriteTiming>() == 0);
+        assert!(std::mem::size_of::<InputConnectionEpoch>() == 0);
+        assert!(std::mem::size_of::<DispatchedInput>() == 0);
+        assert!(std::mem::size_of::<DesktopInputTiming>() == 0);
+    };
 
     impl DesktopInputTiming {
         #[inline(always)]
@@ -144,27 +200,19 @@ pub(crate) mod input_timing {
             _pane_id: &str,
             _bytes: usize,
             _messages: usize,
-            _oldest_queue: Duration,
-            _newest_queue: Duration,
+            _enqueued_at: Instant,
+            _coalesced_at: &[Instant],
         ) -> Self {
             Self
         }
 
         #[inline(always)]
-        pub(crate) fn finish(
-            self,
-            _request_id: u64,
-            _connection_epoch: u64,
-            _control_queue: Duration,
-            _bridge_write: Duration,
-            _control_queue_depth: usize,
-        ) {
-        }
+        pub(crate) fn finish(self, _dispatched: DispatchedInput) {}
     }
 
     #[inline(always)]
     pub(crate) fn record_terminal_output_received(
-        _connection_epoch: u64,
+        _connection_epoch: impl FnOnce() -> u64,
         _sequence: u64,
         _pane_id: &str,
         _generation: u64,

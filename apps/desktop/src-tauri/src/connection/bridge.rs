@@ -319,7 +319,8 @@ fn run_bridge_once(
             }
         }
     }
-    let control_writer = ControlWriterHandle::start(stdin, &terminal_epoch.to_string())?;
+    let control_writer =
+        ControlWriterHandle::start(stdin, &terminal_epoch.to_string(), terminal_epoch)?;
     let published_writer = control_writer.clone();
     let published = client.stop_signal.if_running(|| {
         *client.writer.lock().unwrap() = Some(published_writer);
@@ -914,7 +915,7 @@ fn process_event(
             let kind = v1::EventKind::try_from(event.kind).unwrap_or_default();
             if kind == v1::EventKind::TerminalOutput {
                 crate::perf_log::input_timing::record_terminal_output_received(
-                    client.terminal_epoch.load(Ordering::Acquire),
+                    || client.terminal_epoch.load(Ordering::Acquire),
                     event_sequence,
                     &terminal.pane_id,
                     terminal.generation,

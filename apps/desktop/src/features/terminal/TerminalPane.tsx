@@ -462,6 +462,7 @@ export function TerminalPane({
     const renderer = new XtermRenderer({
       fontSize: terminalFontSize,
       paneId: pane.id,
+      perfConnectionEpoch: __MUXFLOW_PERF_BUILD__ ? () => hub.generationEpoch : undefined,
       onDiagnostic: (message) => {
         if (!rendererActive) return;
         setRendererDiagnostic(message);
@@ -1477,7 +1478,10 @@ export function TerminalPane({
       revealForCurrentEpoch();
     };
     revealForCurrentEpoch();
-    const unsubscribe = hub.subscribeEpoch(() => {
+    const unsubscribe = hub.subscribeEpoch((event) => {
+      if (__MUXFLOW_PERF_BUILD__) {
+        rendererRef.current?.setPerfConnectionEpoch?.(event?.epoch ?? hub.generationEpoch);
+      }
       terminalStateCache.delete(cacheKey);
       deferredOutputRef.current.reset();
       rendererEpochRef.current = undefined;

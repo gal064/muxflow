@@ -582,7 +582,9 @@ impl TerminalClients {
             session_id,
             pane_ids,
             AttachmentRuntime {
-                connection_epoch: self.connection_epoch,
+                connection_epoch: crate::diagnostics::PerfConnectionEpoch::new(
+                    self.connection_epoch,
+                ),
                 event_tx: event_tx.clone(),
                 overflowed: Arc::clone(&overflowed),
                 resources: Arc::clone(&self.resources),

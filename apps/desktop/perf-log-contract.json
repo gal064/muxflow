@@ -1,4 +1,5 @@
 {
   "maxLinesPerAppend": 4096,
-  "maxLineBytes": 4096
+  "maxLineBytes": 4096,
+  "maxFileBytes": 16777216
 }

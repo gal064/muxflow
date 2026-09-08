@@ -40,7 +40,7 @@ use dispatch::{
 };
 use operations::{Bound, OperationClaim, OperationLane, OperationRegistry};
 mod writer;
-use writer::{ControlWriteTiming, ControlWriterHandle};
+use writer::ControlWriterHandle;
 pub(crate) mod agent;
 pub(crate) mod files;
 pub(crate) mod git;
@@ -511,7 +511,10 @@ impl TerminalClient {
     /// Used by the keystroke path, whose acks carry nothing actionable. The
     /// reader drops responses with no waiter, so the host stays free to answer
     /// without either side having to change shape.
-    fn dispatch_request(&self, request: v1::Request) -> Result<(u64, ControlWriteTiming), String> {
+    fn dispatch_request(
+        &self,
+        request: v1::Request,
+    ) -> Result<crate::perf_log::input_timing::DispatchedInput, String> {
         if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
             return Err(
                 "host is disconnected, reconciling, or read-only; input was not sent".into(),
@@ -534,7 +537,7 @@ impl TerminalClient {
                     "an input request could not be written before its deadline",
                 )
             })?;
-        Ok((request_id, timing))
+        Ok(writer.dispatched_input(request_id, timing))
     }
 
     fn request_git(

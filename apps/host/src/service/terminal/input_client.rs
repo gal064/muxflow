@@ -162,40 +162,47 @@ impl PersistentInputClient {
         delivery: InputDelivery,
         mut timing: crate::diagnostics::HostInputTiming,
     ) -> anyhow::Result<()> {
-        validate_tmux_id(pane_id, '%')?;
+        if let Err(error) = validate_tmux_id(pane_id, '%') {
+            timing.finish_rejected("invalidPane");
+            return Err(error);
+        }
         if !self.is_ready() {
+            timing.finish_rejected("unavailable");
             bail!("persistent terminal input client is unavailable");
         }
         if data.len() > MAX_INPUT_REQUEST_BYTES {
+            timing.finish_rejected("oversize");
             bail!("terminal input request exceeds the 1 MiB atomic commit limit");
         }
         if data.is_empty() {
+            timing.finish_rejected("empty");
             return Ok(());
         }
-        self.next_input_id = self
-            .next_input_id
-            .checked_add(1)
-            .context("terminal input correlation sequence exhausted")?;
+        let Some(next_input_id) = self.next_input_id.checked_add(1) else {
+            timing.finish_rejected("sequenceExhausted");
+            bail!("terminal input correlation sequence exhausted");
+        };
+        self.next_input_id = next_input_id;
         timing.mark_enqueued();
-        self.input_tx
-            .try_send(InputDispatch::Bytes {
-                input_id: self.next_input_id,
-                pane_id: pane_id.to_owned(),
-                data: data.to_vec(),
-                delivery,
-                timing,
-            })
-            .map_err(|error| match error {
-                std_mpsc::TrySendError::Full(_) => {
-                    crate::diagnostics::record_terminal_input_backpressure();
-                    anyhow::anyhow!(
-                        "terminal input queue is full; caller must retry instead of dropping bytes"
-                    )
-                }
-                std_mpsc::TrySendError::Disconnected(_) => {
-                    anyhow::anyhow!("persistent terminal input dispatcher is disconnected")
-                }
-            })
+        match self.input_tx.try_send(InputDispatch::Bytes {
+            input_id: self.next_input_id,
+            pane_id: pane_id.to_owned(),
+            data: data.to_vec(),
+            delivery,
+            timing,
+        }) {
+            Ok(()) => Ok(()),
+            Err(std_mpsc::TrySendError::Full(InputDispatch::Bytes { timing, .. })) => {
+                timing.finish_rejected("queueFull");
+                crate::diagnostics::record_terminal_input_backpressure();
+                bail!("terminal input queue is full; caller must retry instead of dropping bytes")
+            }
+            Err(std_mpsc::TrySendError::Disconnected(InputDispatch::Bytes { timing, .. })) => {
+                timing.finish_rejected("queueDisconnected");
+                bail!("persistent terminal input dispatcher is disconnected")
+            }
+            Err(_) => unreachable!("send_input only submits byte dispatches"),
+        }
     }
 
     pub(super) fn fence(&self) -> anyhow::Result<()> {
