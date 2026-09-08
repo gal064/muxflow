@@ -23,6 +23,7 @@ pub(crate) async fn handle_request(
         bulk_connection,
         bulk_available,
         connection_epoch,
+        perf_connection_epoch,
         connection_id,
         closed,
     } = context;
@@ -170,7 +171,7 @@ pub(crate) async fn handle_request(
                     topology_lock,
                     topology_baseline,
                     topology_signal,
-                    connection_epoch,
+                    connection_epoch: perf_connection_epoch,
                 },
             )
             .await;
@@ -296,7 +297,7 @@ pub(crate) async fn handle_request(
             };
             let timing = crate::diagnostics::HostInputTiming::begin(
                 request_id,
-                context.connection_epoch,
+                perf_connection_epoch,
                 &request.scope,
                 request.data.len(),
             );

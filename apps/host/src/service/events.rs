@@ -289,7 +289,7 @@ pub(super) fn coalesce_adjacent_terminal_output(
             return (message, Some(next));
         }
         crate::diagnostics::coalesce_terminal_output_admitted(
-            connection_epoch.get(),
+            connection_epoch,
             &first_terminal.pane_id,
             first_terminal.generation,
             next_terminal.generation,

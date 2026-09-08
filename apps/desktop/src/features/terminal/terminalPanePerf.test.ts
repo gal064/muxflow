@@ -119,4 +119,30 @@ describe("per-pane terminal performance accounting", () => {
     expect(record).toMatchObject({ connectionEpoch: 41, inputBytes: 5 });
     perf.dispose();
   });
+
+  it("waits for a stalled write to settle without polling at zero delay", async () => {
+    vi.useFakeTimers();
+    const lines: string[] = [];
+    enablePerfProbe(async (batch) => { lines.push(...batch); });
+    const perf = new TerminalPanePerf("%7", 41);
+    const observer = perf.observe;
+
+    observer({ kind: "writeStarted", bytes: 5, records: 1, pendingBytes: 5, queueDepth: 0 });
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(lines).toHaveLength(0);
+
+    observer({ kind: "writeSettled", bytes: 5, ms: 2_100, succeeded: true });
+    await flushPerfProbe();
+    expect(lines.map((line) => JSON.parse(line) as Record<string, unknown>)).toContainEqual(
+      expect.objectContaining({
+        kind: "perf.terminalPane",
+        connectionEpoch: 41,
+        xtermWrites: 1,
+        xtermWriteMs: 2_100,
+      }),
+    );
+    perf.dispose();
+  });
 });

@@ -166,6 +166,9 @@ fn rotate_recent_complete_lines(path: &PathBuf, max_file_bytes: u64) -> Result<(
     source
         .read_to_end(&mut recent)
         .map_err(|error| format!("read performance log for rotation: {error}"))?;
+    let can_rotate_by_rename = start == 0
+        && u64::try_from(recent.len()).ok() == Some(length)
+        && recent.last().is_none_or(|byte| *byte == b'\n');
     if start > 0 {
         recent = recent
             .iter()
@@ -183,14 +186,28 @@ fn rotate_recent_complete_lines(path: &PathBuf, max_file_bytes: u64) -> Result<(
 
     let rotated = suffixed_path(path, ".1");
     let temporary = suffixed_path(path, ".1.tmp");
-    // Retention is a total bound, including the unpublished replacement. Drop
-    // the older predecessor before materializing its successor so rotation
-    // never transiently holds active + predecessor + temporary (48 MiB).
-    match fs::remove_file(&rotated) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("remove previous performance log rotation: {error}")),
+    drop(source);
+    if can_rotate_by_rename {
+        // The common path replaces the predecessor atomically. A failed rename
+        // therefore leaves both the active file and the prior rotation intact,
+        // while success still occupies at most active + predecessor on disk.
+        return fs::rename(path, &rotated)
+            .map_err(|error| format!("rotate performance log: {error}"));
     }
+
+    // Oversized or partial legacy input must be trimmed instead of renamed.
+    // Release its on-disk bytes before materializing the bounded replacement:
+    // this keeps the total at two file caps while retaining the old `.1` until
+    // the new copy has been fully written and synced.
+    let active = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| format!("reset malformed performance log for rotation: {error}"))?;
+    active
+        .sync_all()
+        .map_err(|error| format!("sync reset performance log for rotation: {error}"))?;
+    drop(active);
     let mut backup = OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -203,20 +220,17 @@ fn rotate_recent_complete_lines(path: &PathBuf, max_file_bytes: u64) -> Result<(
         let _ = fs::remove_file(&temporary);
         return Err(format!("write rotated performance log: {error}"));
     }
-    fs::rename(&temporary, &rotated)
-        .map_err(|error| format!("publish rotated performance log: {error}"))?;
-    OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .map_err(|error| format!("reset performance log after rotation: {error}"))?;
+    if let Err(error) = fs::rename(&temporary, &rotated) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("publish rotated performance log: {error}"));
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{append_body, append_body_bounded, contract, suffixed_path};
-    use std::{fs, io::Write};
+    use std::{fs, io::Write, os::unix::fs::MetadataExt};
     use uuid::Uuid;
 
     #[test]
@@ -284,6 +298,23 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\"c\":3}\n");
 
         fs::remove_file(suffixed_path(&path, ".1")).unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_complete_bounded_log_rotates_by_atomic_rename() {
+        let path = std::env::temp_dir().join(format!("ade-perf-rename-{}.jsonl", Uuid::new_v4()));
+        fs::write(&path, b"{\"a\":1}\n").unwrap();
+        let active_inode = fs::metadata(&path).unwrap().ino();
+
+        append_body_bounded(&path, r#"{"b":2}"#, 12).unwrap();
+
+        let rotated = suffixed_path(&path, ".1");
+        assert_eq!(fs::metadata(&rotated).unwrap().ino(), active_inode);
+        assert_eq!(fs::read_to_string(&rotated).unwrap(), "{\"a\":1}\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"b\":2}\n");
+
+        fs::remove_file(rotated).unwrap();
         fs::remove_file(path).unwrap();
     }
 

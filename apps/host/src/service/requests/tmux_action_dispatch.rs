@@ -10,7 +10,7 @@ pub(super) struct TmuxActionContext<'a> {
     pub(super) topology_lock: &'a Arc<tokio::sync::Mutex<()>>,
     pub(super) topology_baseline: &'a Arc<Mutex<Option<(tmux_control::TmuxSnapshot, String)>>>,
     pub(super) topology_signal: &'a super::super::topology::TopologySignal,
-    pub(super) connection_epoch: u64,
+    pub(super) connection_epoch: crate::diagnostics::PerfConnectionEpoch,
 }
 
 pub(super) async fn handle(request_id: u64, request: v1::Request, context: TmuxActionContext<'_>) {
@@ -377,7 +377,7 @@ async fn publish_refreshed_baseline(
 /// `send_response` in every other dispatcher stays untimed.
 async fn send_timed_response(
     control_tx: &mpsc::Sender<SequencerControl>,
-    connection_epoch: u64,
+    connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     request_id: u64,
     response: v1::Response,
 ) -> usize {

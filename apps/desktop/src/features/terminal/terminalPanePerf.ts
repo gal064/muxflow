@@ -125,7 +125,6 @@ export class TerminalPanePerf {
       this.#flushTimer = undefined;
       if (interval !== this.#interval || interval.closing) return;
       this.#flush(interval, true);
-      if (interval.pendingWrites > 0) this.#armFlush(interval);
     }, Math.max(0, REPORT_INTERVAL_MS - elapsed));
   }
 
