@@ -54,6 +54,7 @@ function fakeHost() {
 /** A store stand-in: the state is set outright and `emit()` is the subscription. */
 function harness(options: { foreground?: boolean; viewedAgentId?: string | (() => string | undefined) } = {}) {
   const platform = fakeHost();
+  const logs: string[] = [];
   let state: SessionState = { ...initialSessionState(), connection: { state: "connected", attempt: 0 }, serverIdentity: "tmux:/s:1" };
   // A virtual clock: the post-settle guard is asserted, never waited on.
   let clock = 1_000;
@@ -78,6 +79,7 @@ function harness(options: { foreground?: boolean; viewedAgentId?: string | (() =
       slept.push(ms);
       clock += ms;
     },
+    log: (line) => logs.push(line),
   });
   notifier.start();
 
@@ -100,7 +102,7 @@ function harness(options: { foreground?: boolean; viewedAgentId?: string | (() =
   const advance = (ms: number): void => {
     clock += ms;
   };
-  return { ...platform, notifier, setState, put, transition, settle, slept, advance, state: () => state };
+  return { ...platform, notifier, setState, put, transition, settle, slept, logs, advance, state: () => state };
 }
 
 describe("agent notifier (§13)", () => {
@@ -265,6 +267,7 @@ describe("agent notifier (§13)", () => {
       await h.settle();
       expect(h.cancelled).toEqual(["a1"]);
       expect(h.tray.size).toBe(0);
+      expect(h.logs).toContain("notifications cancel tag=a1 agent=a1 event=blocked generation=2 reason=seen");
     });
 
     it("lets a post reach the status bar before cancelling it", async () => {
@@ -291,6 +294,7 @@ describe("agent notifier (§13)", () => {
       h.put(blocked({ lifecycle: "working" }));
       await h.settle();
       expect(h.cancelled).toEqual(["a1"]);
+      expect(h.logs).toContain("notifications cancel tag=a1 agent=a1 event=blocked generation=2 reason=blocked-resolved");
     });
 
     it("cancels when a connected host retires the agent", async () => {
@@ -298,6 +302,7 @@ describe("agent notifier (§13)", () => {
       h.setState({ agents: {} });
       await h.settle();
       expect(h.cancelled).toEqual(["a1"]);
+      expect(h.logs).toContain("notifications cancel tag=a1 agent=a1 event=blocked generation=2 reason=retired");
 
       const gone = harness();
       await gone.transition(agent(), blocked());
