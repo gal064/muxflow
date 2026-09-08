@@ -50,6 +50,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   // §9.5: the ⇧ chip arms Shift for the next chip only; Send also disarms it.
   const [shiftArmed, setShiftArmed] = useState(false);
   const pane = state.panes[paneId];
+  const panePresent = pane !== undefined;
   const connected = state.connection.state === "connected";
   // §9.5: the pane left the topology (window closed elsewhere), or never was
   // in it (a retained "gone" agent). New terminal waits for its pane before
@@ -61,6 +62,10 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const title = agent
     ? agentTitle(state, agent)
     : `${stripAgentStatusGlyphs(session?.name ?? sessionId)} · ${stripAgentStatusGlyphs(window?.name ?? "")}`.replace(/ · $/, "");
+
+  useEffect(() => {
+    log(`[muxflow] terminal.route pane=${paneId} session=${sessionId} connected=${connected ? "yes" : "no"} panePresent=${panePresent ? "yes" : "no"} decision=${gone ? "unavailable" : "attach"} topology=${sessionStore.getState().topologyGeneration}`);
+  }, [connected, gone, paneId, panePresent, sessionId]);
 
   // One controller per focus: hide on blur (Files, back), re-attach on focus (§7.6 steps 1, 4).
   useFocusEffect(useCallback(() => {

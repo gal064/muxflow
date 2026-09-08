@@ -13,6 +13,11 @@ export interface FrameScheduler {
   cancel(id: number): void;
 }
 
+export interface TouchScrollSummary {
+  durationMs: number;
+  cancelled: boolean;
+}
+
 const MAX_VELOCITY_ROWS_PER_MS = 0.25;
 const FLING_STOP_ROWS_PER_MS = 0.0025;
 const FLING_TIME_CONSTANT_MS = 325;
@@ -32,19 +37,26 @@ export class TouchScrollController {
   private velocityRowsPerMs = 0;
   private frame: number | undefined;
   private frameTimeMs: number | undefined;
+  private gestureStartedAt: number | undefined;
+  private gestureMoved = false;
 
   constructor(
     private readonly scrollLines: (rows: number) => void,
     private readonly scheduler: FrameScheduler,
+    private readonly onSettled?: (summary: TouchScrollSummary) => void,
   ) {}
 
   start(y: number, timeMs: number): void {
+    // A new touch interrupts any fling still settling from the prior gesture.
+    if (this.gestureStartedAt !== undefined) this.settle(timeMs, true);
     this.stopFrame();
     this.touchY = y;
     this.touchTimeMs = timeMs;
     this.pendingRows = 0;
     this.velocityRowsPerMs = 0;
     this.frameTimeMs = undefined;
+    this.gestureStartedAt = timeMs;
+    this.gestureMoved = false;
   }
 
   /** Returns false when the move cannot be converted into terminal rows. */
@@ -66,6 +78,7 @@ export class TouchScrollController {
     this.touchY = y;
     this.touchTimeMs = timeMs;
     this.pendingRows += deltaRows;
+    this.gestureMoved = true;
     this.scheduleFrame();
     return true;
   }
@@ -79,13 +92,14 @@ export class TouchScrollController {
     this.scheduleFrame();
   }
 
-  cancel(): void {
+  cancel(timeMs = this.touchTimeMs ?? this.gestureStartedAt ?? 0): void {
     this.stopFrame();
     this.touchY = undefined;
     this.touchTimeMs = undefined;
     this.pendingRows = 0;
     this.velocityRowsPerMs = 0;
     this.frameTimeMs = undefined;
+    this.settle(timeMs, true);
   }
 
   private scheduleFrame(): void {
@@ -115,6 +129,17 @@ export class TouchScrollController {
     }
 
     if (!dragging && Math.abs(this.velocityRowsPerMs) >= FLING_STOP_ROWS_PER_MS) this.scheduleFrame();
+    else if (!dragging) this.settle(timeMs, false);
+  }
+
+  private settle(timeMs: number, cancelled: boolean): void {
+    const startedAt = this.gestureStartedAt;
+    const moved = this.gestureMoved;
+    this.gestureStartedAt = undefined;
+    this.gestureMoved = false;
+    if (startedAt !== undefined && moved) {
+      this.onSettled?.({ durationMs: Math.max(0, Math.round(timeMs - startedAt)), cancelled });
+    }
   }
 
   private stopFrame(): void {

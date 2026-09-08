@@ -164,7 +164,8 @@ async fn speak_shapes_text_validates_voice_and_returns_the_body() {
         .unwrap();
     assert_eq!(speech.audio, b"MP3!!");
     assert_eq!(speech.audio_mime, "audio/mpeg");
-    assert_eq!(speech.text, "Done. ls works");
+    assert_eq!(speech.display_markdown, "# Done\n`ls` works");
+    assert_eq!(speech.speech_text, "Done. ls works");
     assert_eq!(speech.voice, DEFAULT_VOICE);
     assert_eq!(speech.provider, v1::VoiceProvider::EdgeTts as i32);
     for (text, voice, code) in [
@@ -356,7 +357,8 @@ async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection()
     assert_eq!(event.scope, "agent-7");
     let reply = event.voice.unwrap().reply.unwrap();
     assert_eq!(reply.audio, b"MP3!!");
-    assert_eq!(reply.text, "Done. All tests pass.");
+    assert_eq!(reply.display_markdown, "## Done\n\nAll **tests** pass.");
+    assert_eq!(reply.speech_text, "Done. All tests pass.");
     assert!(reply.truncated);
     assert_eq!(reply.agent_id, "agent-7");
     assert_eq!(reply.state_generation, 42);
@@ -470,7 +472,8 @@ async fn a_failed_synthesis_still_pushes_the_text_with_the_error_in_status() {
     let reply = voice.reply.unwrap();
     assert!(reply.audio.is_empty());
     assert!(reply.audio_mime.is_empty());
-    assert_eq!(reply.text, "Finished.");
+    assert_eq!(reply.display_markdown, "Finished.");
+    assert_eq!(reply.speech_text, "Finished.");
     assert!(
         voice
             .status

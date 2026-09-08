@@ -273,6 +273,28 @@ describe("TerminalController scrollback paging (§7.6.1)", () => {
   });
 });
 
+describe("TerminalController diagnostic summaries", () => {
+  it("records one content-free layout and scroll summary with correlation ids", async () => {
+    const lines: string[] = [];
+    const h = harness({ log: (line) => lines.push(line) });
+    h.store.getState().applySnapshot(topologySnapshot());
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 40, rows: 20, cellWidth: 8, cellHeight: 16 });
+    h.controller.onPageMessage({ t: "size", cols: 40, rows: 20, cellWidth: 8.25, cellHeight: 16.5 });
+    h.controller.onPageMessage({ t: "scroll", mode: "normal", rows: 12, durationMs: 180, cancelled: false });
+    h.registry.output("%1", new TextEncoder().encode("terminal contents must stay out"), 1n);
+    await h.controller.stop();
+    expect(lines.filter((line) => line.includes(" layout "))).toHaveLength(2);
+    expect(lines.filter((line) => line.includes(" layout ")).at(-1)).toContain("viewport=330x330 xterm=40x20 sent=none host=80x24");
+    expect(lines.filter((line) => line.includes(" scroll "))).toEqual([
+      "[muxflow] terminal pane=%1 session=$1 topology=1 scroll mode=normal rows=12 durationMs=180 cancelled=false viewport=330x330 xterm=40x20 sent=none host=80x24",
+    ]);
+    expect(lines).toContain("[muxflow] terminal pane=%1 session=$1 topology=1 screen.focus");
+    expect(lines).toContain("[muxflow] terminal pane=%1 session=$1 topology=1 screen.blur");
+    expect(lines.join("\n")).not.toContain("terminal contents must stay out");
+  });
+});
+
 describe("TerminalController attach lifecycle (§7.6)", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
@@ -496,6 +518,25 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     expect(frame.payload.value.terminalInputPaste).toBe(false);
     t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
     await expect(pending).resolves.toBeUndefined();
+  });
+
+  it("forwards alternate-screen wheel input from the page and drops it while disconnected", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    const wheel = "\x1b[<64;10;12M";
+    h.controller.onPageMessage({ t: "input", b64: btoa(wheel) });
+    const [frame] = t.drain();
+    if (frame?.payload.case !== "request") throw new Error("expected page input");
+    expect(frame.payload.value).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%1" });
+    expect(new TextDecoder().decode(frame.payload.value.data)).toBe(wheel);
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
+    await settle();
+
+    const disconnected = harness();
+    disconnected.controller.start();
+    disconnected.controller.onPageMessage({ t: "input", b64: btoa(wheel) });
+    expect(disconnected.transports).toHaveLength(0);
   });
 });
 
