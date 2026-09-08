@@ -52,7 +52,7 @@ function fakeHost() {
 }
 
 /** A store stand-in: the state is set outright and `emit()` is the subscription. */
-function harness(options: { foreground?: boolean; viewedAgentId?: string | (() => string | undefined) } = {}) {
+function harness(options: { foreground?: boolean; viewedAgentId?: string | (() => string | undefined); log?: (line: string) => void } = {}) {
   const platform = fakeHost();
   let state: SessionState = { ...initialSessionState(), connection: { state: "connected", attempt: 0 }, serverIdentity: "tmux:/s:1" };
   // A virtual clock: the post-settle guard is asserted, never waited on.
@@ -74,6 +74,7 @@ function harness(options: { foreground?: boolean; viewedAgentId?: string | (() =
     appInForeground: () => options.foreground ?? false,
     viewedAgentId: () => typeof options.viewedAgentId === "function" ? options.viewedAgentId() : options.viewedAgentId,
     now: () => clock,
+    log: options.log,
     sleep: async (ms) => {
       slept.push(ms);
       clock += ms;
@@ -132,6 +133,25 @@ describe("agent notifier (§13)", () => {
     await h.transition(agent({ lifecycle: "working", attentionGeneration: 1n }), completed());
     expect(h.presented).toHaveLength(1);
     expect(h.presented[0]?.body).toBe("Finished");
+  });
+
+  it("does not fill diagnostics with routine non-notification transitions", async () => {
+    const lines: string[] = [];
+    const quiet = harness({ log: (line) => lines.push(line) });
+
+    await quiet.transition(agent(), agent({ stateGeneration: 2n }));
+
+    expect(lines).toEqual([]);
+  });
+
+  it("retains diagnostics for actionable notification suppression", async () => {
+    const lines: string[] = [];
+    const focused = harness({ foreground: true, log: (line) => lines.push(line) });
+    focused.setState({ focusedPaneId: "%1" });
+
+    await focused.transition(agent(), blocked());
+
+    expect(lines).toEqual(["notifications skip agent=a1 reason=focused"]);
   });
 
   describe("step 4, what was already waiting when we arrived", () => {

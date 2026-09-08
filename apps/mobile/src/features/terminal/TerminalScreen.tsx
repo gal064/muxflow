@@ -1,7 +1,8 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
+import Animated, { KeyboardState, useAnimatedKeyboard, useAnimatedReaction, useAnimatedStyle } from "react-native-reanimated";
+import { runOnJS } from "react-native-worklets";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { agentForPane, agentStateLabel, agentTitle } from "../agents/agentViews";
@@ -29,6 +30,18 @@ export interface TerminalScreenProps {
   sessionId: string;
 }
 
+const KEYBOARD_STATE_NAMES: Record<KeyboardState, string> = {
+  [KeyboardState.UNKNOWN]: "unknown",
+  [KeyboardState.OPENING]: "opening",
+  [KeyboardState.OPEN]: "open",
+  [KeyboardState.CLOSING]: "closing",
+  [KeyboardState.CLOSED]: "closed",
+};
+
+function logKeyboardState(paneId: string, event: "focus" | "blur" | "state", state: KeyboardState, height: number): void {
+  log(`[muxflow] ime pane=${paneId} event=${event} state=${KEYBOARD_STATE_NAMES[state] ?? state} height=${Math.round(height)}`);
+}
+
 /** Terminal — design.md §9.5. Header, xterm WebView, key chips, input bar. */
 export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const router = useRouter();
@@ -41,6 +54,20 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   // RESIZE_TERMINAL (§7.6 step 6).
   const keyboard = useAnimatedKeyboard({ isStatusBarTranslucentAndroid: true, isNavigationBarTranslucentAndroid: true });
   const keyboardPadding = useAnimatedStyle(() => ({ paddingBottom: Math.max(insets.bottom, keyboard.height.value) }), [insets.bottom]);
+  // Observe lifecycle edges only. The reaction reads just `state`, so there is
+  // no work during the per-frame height animation and at most four JS log
+  // calls per open/close cycle.
+  useAnimatedReaction(
+    () => keyboard.state.value,
+    (state, previous) => {
+      if (state !== previous) runOnJS(logKeyboardState)(paneId, "state", state, keyboard.height.value);
+    },
+    [paneId],
+  );
+  useFocusEffect(useCallback(() => {
+    logKeyboardState(paneId, "focus", keyboard.state.value, keyboard.height.value);
+    return () => logKeyboardState(paneId, "blur", keyboard.state.value, keyboard.height.value);
+  }, [keyboard.height, keyboard.state, paneId]));
   const state = useSession((s) => s);
   const webview = useRef<TerminalWebViewHandle>(null);
   const controller = useRef<TerminalController | null>(null);
