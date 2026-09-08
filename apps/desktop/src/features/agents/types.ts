@@ -149,7 +149,6 @@ export interface AgentFocus {
   paneId?: string;
   appFocused: boolean;
   terminalVisible: boolean;
-  automaticSeen: boolean;
 }
 
 export interface AgentLaunchRequest {

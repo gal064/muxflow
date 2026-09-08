@@ -266,6 +266,8 @@ interface Props {
    * this one means a human touched the keyboard.
    */
   onKeyActivity?: (paneId: string) => void;
+  /** A pointer press inside this pane is deliberate acknowledgement, unlike focus alone. */
+  onPointerActivity?: (paneId: string) => void;
   onFocus: (paneId: string) => void;
   /**
    * Reports what this terminal turns pixels into. It describes a terminal, not
@@ -302,6 +304,7 @@ export function TerminalPane({
   hub,
   onInput,
   onKeyActivity,
+  onPointerActivity,
   onFocus,
   onMeasurements,
   onPaintSample,
@@ -330,6 +333,7 @@ export function TerminalPane({
   const paneRef = useRef(pane);
   const inputRef = useRef(onInput);
   const keyActivityRef = useRef(onKeyActivity);
+  const pointerActivityRef = useRef(onPointerActivity);
   const focusRef = useRef(onFocus);
   const measurementsRef = useRef(onMeasurements);
   const paintSampleRef = useRef(onPaintSample);
@@ -392,6 +396,7 @@ export function TerminalPane({
   paneRef.current = pane;
   inputRef.current = onInput;
   keyActivityRef.current = onKeyActivity;
+  pointerActivityRef.current = onPointerActivity;
   focusRef.current = onFocus;
   measurementsRef.current = onMeasurements;
   paintSampleRef.current = onPaintSample;
@@ -1559,6 +1564,7 @@ export function TerminalPane({
       data-terminal-surface="true"
       data-local-selection-modifier="Shift"
       onMouseDownCapture={(event) => {
+        pointerActivityRef.current?.(pane.id);
         rendererRef.current?.focus();
         if (isForcedLocalSelection(event.nativeEvent)) event.currentTarget.dataset.localSelectionActive = "true";
       }}

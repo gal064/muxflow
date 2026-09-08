@@ -110,7 +110,7 @@ export function agentMarkSeen(agentId: string, attentionGeneration: bigint, expe
   });
 }
 
-export function createWindow(sessionId: string, expectedServerIdentity: string, expectedGeneration: bigint, command = ""): Request {
+export function createWindow(sessionId: string, expectedServerIdentity: string, expectedGeneration: bigint): Request {
   return create(RequestSchema, {
     operation: Operation.TMUX_ACTION,
     tmuxAction: create(TmuxActionSchema, {
@@ -118,7 +118,6 @@ export function createWindow(sessionId: string, expectedServerIdentity: string, 
       sessionId,
       expectedServerIdentity,
       expectedGeneration,
-      command,
     }),
   });
 }

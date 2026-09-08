@@ -22,6 +22,7 @@ import {
   type VoiceResponse,
 } from "./gen/envelope_pb";
 import { logAgentTransitions } from "../features/agents/diagnostics";
+import { deriveAgentIdentityPromotion, type AgentIdentityPromotion } from "../features/agents/agentIdentityPromotion";
 import { requestTerminalSeed, subscribeFull } from "./requests";
 import { jsBackgroundTimer, type BackgroundTimer, type BackgroundTimerHandle } from "./backgroundTimer";
 import { TransportDialError, type Transport, type TransportClose, type TransportCloseReason } from "./Transport";
@@ -136,6 +137,8 @@ export interface HostConnectionOptions {
   terminals?: Partial<TerminalSink>;
   /** Every applied AGENT_STATE upsert and every agent in a reconciling snapshot (§13). */
   onAgentTransition?: (transition: AgentTransition) => void;
+  /** One atomic pane-derived → native agent identity handoff. */
+  onAgentIdentityPromotion?: (promotion: AgentIdentityPromotion) => void;
   /** ACTIVE_ROOT, DIRECTORY_SNAPSHOT, FILE_CHANGED (§11). */
   onFileEvent?: (event: HostEvent) => void;
   /** VOICE_PROVISION, VOICE_REPLY (docs/mobile/voice-mode-plan.md); payload in `event.voice`. */
@@ -651,9 +654,18 @@ export class HostConnection {
       case EventKind.AGENT_STATE: {
         if (event.agent) {
           const previousAgents = store.getState().agents;
+          const previousServerIdentity = store.getState().serverIdentity;
           const transition = store.getState().applyAgentEvent(event.agent);
           logAgentTransitions(previousAgents, store.getState().agents, `event:${event.agent.reason || "update"}`, store.getState().topologyGeneration, (line) => this.log(line));
-          if (transition) this.options.onAgentTransition?.(transition);
+          if (transition) {
+            const currentServerIdentity = store.getState().serverIdentity;
+            const promotion = previousServerIdentity === currentServerIdentity
+              && currentServerIdentity !== ""
+              ? deriveAgentIdentityPromotion(previousAgents, event.agent, transition.next)
+              : undefined;
+            if (promotion) this.options.onAgentIdentityPromotion?.(promotion);
+            this.options.onAgentTransition?.(transition);
+          }
         }
         break;
       }

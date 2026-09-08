@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, OpenOptions},
     io::Write,
     os::unix::fs::OpenOptionsExt,
@@ -64,6 +64,19 @@ pub(super) struct StoredAgent {
     /// notification cannot turn that live work into a false blocked state.
     #[serde(default)]
     pub claude_has_running_subagent: bool,
+    /// Codex has no aggregate child count on its parent `Stop`, so the stable
+    /// IDs from its start/stop hooks are retained across daemon restarts.
+    #[serde(default)]
+    pub codex_running_subagent_ids: BTreeSet<String>,
+    /// The Codex parent has stopped but remains live until the set above is
+    /// empty. A parent that waits for its children never sets this flag.
+    #[serde(default)]
+    pub codex_parent_stopped_for_subagents: bool,
+    /// When either vendor last supplied direct evidence for the retained child
+    /// guard. Kept separate from general lifecycle traffic so idle nags or
+    /// unrelated parent hooks cannot make a lost child stop live forever.
+    #[serde(default)]
+    pub subagent_evidence_observed_at_unix_millis: i64,
     /// The exact Codex turn whose start identified native auto-review. A
     /// permission request may reuse this only when its turn ID matches.
     #[serde(default)]
@@ -136,12 +149,25 @@ pub(super) fn load(path: &Path) -> StoredState {
         {
             record.attention_seen_at_unix_millis = record.lifecycle_changed_at_unix_millis;
         }
+        if record.subagent_evidence_observed_at_unix_millis == 0
+            && (record.claude_has_running_subagent || !record.codex_running_subagent_ids.is_empty())
+        {
+            record.subagent_evidence_observed_at_unix_millis =
+                if record.lifecycle_observed_at_unix_millis > 0 {
+                    record.lifecycle_observed_at_unix_millis
+                } else {
+                    record.updated_at_unix_millis
+                };
+        }
         // A terminal hook is proof that the turn ended. Normalize the invalid
         // combination observed in a live schema-2 store (`hook_terminal: true`
         // with `lifecycle: working`) so the next daemon snapshot repairs the
         // UI immediately instead of waiting up to the stale-working TTL.
         if record.hook_terminal {
             record.claude_has_running_subagent = false;
+            record.codex_running_subagent_ids.clear();
+            record.codex_parent_stopped_for_subagents = false;
+            record.subagent_evidence_observed_at_unix_millis = 0;
             if record.lifecycle != tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32 {
                 record.lifecycle = tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32;
             }
@@ -248,6 +274,9 @@ mod tests {
         assert_eq!(record.lifecycle_observed_at_unix_millis, 0);
         assert_eq!(record.lifecycle_changed_at_unix_millis, 1786000000000);
         assert!(!record.claude_has_running_subagent);
+        assert!(record.codex_running_subagent_ids.is_empty());
+        assert!(!record.codex_parent_stopped_for_subagents);
+        assert_eq!(record.subagent_evidence_observed_at_unix_millis, 0);
         fs::remove_file(path).unwrap();
     }
 
@@ -412,6 +441,9 @@ mod tests {
                 present: true,
                 hook_terminal: true,
                 claude_has_running_subagent: false,
+                codex_running_subagent_ids: BTreeSet::new(),
+                codex_parent_stopped_for_subagents: false,
+                subagent_evidence_observed_at_unix_millis: 0,
                 codex_auto_review_turn_id: String::new(),
                 lifecycle_observed_at_unix_millis: 1,
                 lifecycle_changed_at_unix_millis: 1,

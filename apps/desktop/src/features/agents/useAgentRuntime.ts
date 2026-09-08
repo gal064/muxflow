@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentClient } from "./api";
 import { compareAgentGenerations, generationIsAfter, zeroGeneration } from "./generation";
 import { emitNativeAgentNotification, decideAgentNotification } from "./notifications";
-import { agentsForScope, agentsMatchingFocusedPane, deriveAgentRollups } from "./selectors";
+import { agentsForScope, deriveAgentRollups } from "./selectors";
 import { agentReducer, initialAgentState, initialHostAgentState, wireEventHost, type AgentAction } from "./state";
 import { playAgentSound, type SoundInstrumentation } from "./sound";
 import { AgentRuntimeMemory } from "./runtimeMemory";
@@ -212,10 +212,6 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     requests.current.clear();
   }, []);
 
-  const focusScope = useMemo(
-    () => scopes.find((entry) => entry.scope.hostProfileId === options.focus.hostProfileId)?.scope,
-    [options.focus.hostProfileId, scopes],
-  );
   const focusHost = state.byHost[options.focus.hostProfileId];
   const projection = useMemo(() => {
     // Mutated during render on purpose: a discarded render can only evict
@@ -240,33 +236,42 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
   }, [options.focus.hostProfileId, options.focus.serverIdentity, scopes, state]);
   const agents = projection.active.agents;
 
-  useEffect(() => {
-    const scope = focusScope;
-    if (!scope || !options.focus.appFocused || !options.focus.terminalVisible || !options.focus.automaticSeen) return;
-    for (const current of agentsMatchingFocusedPane(agents, options.focus.paneId)) {
+  const acknowledgePane = useCallback((paneId: string) => {
+    const currentOptions = optionsRef.current;
+    const scope = activeScope(currentOptions);
+    if (!scope) return;
+    const currentAgents = agentsForScope(
+      stateRef.current.byHost[scope.hostProfileId],
+      scope.hostProfileId,
+      scope.serverIdentity,
+    );
+    for (const current of currentAgents) {
+      if (current.paneId !== paneId
+        || !generationIsAfter(current.attentionGeneration, current.seenGeneration)) continue;
       const key = [
         scope.hostProfileId,
         scope.serverIdentity,
         scope.connectionEpoch,
-        current.agentId,
+        current.id,
         current.attentionGeneration,
       ].join("\0");
       if (pendingSeen.current.has(key)) continue;
       pendingSeen.current.add(key);
-      void options.client.markSeen(scope, current.agentId, current.attentionGeneration).then((accepted) => {
+      void currentOptions.client.markSeen(scope, current.id, current.attentionGeneration).then((accepted) => {
         apply({
           type: "seenAck",
-          ...current,
+          agentId: current.id,
+          attentionGeneration: current.attentionGeneration,
           attentionSeenAt: accepted?.attentionSeenAt ?? Date.now(),
           hostProfileId: scope.hostProfileId,
           serverIdentity: scope.serverIdentity,
           connectionEpoch: scope.connectionEpoch,
         });
-      }).catch((error) => options.onStatus(`Could not mark agent attention seen: ${String(error)}`)).finally(() => {
+      }).catch((error) => currentOptions.onStatus(`Could not mark agent attention seen: ${String(error)}`)).finally(() => {
         pendingSeen.current.delete(key);
       });
     }
-  }, [agents, apply, focusScope, options.client, options.focus.appFocused, options.focus.automaticSeen, options.focus.paneId, options.focus.terminalVisible]);
+  }, [apply]);
 
   const launch = useCallback((request: AgentLaunchRequest) => {
     const scope = activeScope(optionsRef.current);
@@ -320,6 +325,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     agents, adapters: projection.active.adapters, rollups: projection.active.rollups,
     byHost: projection.byHost as ReadonlyMap<string, AgentHostProjection>,
     accept,
+    acknowledgePane,
     launch, resume, rename, reviewHooks, applyHooks, applyHostNaming, removeHostNaming, refreshSnapshot,
   };
 }

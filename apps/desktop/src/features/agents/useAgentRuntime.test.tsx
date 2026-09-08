@@ -24,16 +24,17 @@ function clientFor(snapshot: AgentSnapshot): AgentClient & { markSeen: ReturnTyp
   };
 }
 
-function Harness({ client, connected = true, focused = true, automaticSeen = true, connectionEpoch = 1, topologyGeneration = 9, topologyWindowIds = ["@1"], effects, onNotificationInstrumentation, onSoundInstrumentation }: { client: AgentClient; connected?: boolean; focused?: boolean; automaticSeen?: boolean; connectionEpoch?: number; topologyGeneration?: number; topologyWindowIds?: string[]; effects?: AgentRuntimeOptions["effects"]; onNotificationInstrumentation?: AgentRuntimeOptions["onNotificationInstrumentation"]; onSoundInstrumentation?: AgentRuntimeOptions["onSoundInstrumentation"] }) {
+function Harness({ client, connected = true, focused = true, connectionEpoch = 1, topologyGeneration = 9, topologyWindowIds = ["@1"], effects, onNotificationInstrumentation, onSoundInstrumentation, observe }: { client: AgentClient; connected?: boolean; focused?: boolean; connectionEpoch?: number; topologyGeneration?: number; topologyWindowIds?: string[]; effects?: AgentRuntimeOptions["effects"]; onNotificationInstrumentation?: AgentRuntimeOptions["onNotificationInstrumentation"]; onSoundInstrumentation?: AgentRuntimeOptions["onSoundInstrumentation"]; observe?(runtime: ReturnType<typeof useAgentRuntime>): void }) {
   const runtime = useAgentRuntime({
     client,
     scopes: connected ? [{ scope: { ...scope, connectionEpoch, topologyGeneration }, topologyWindowIds }] : [],
     shownHostIds: ["local"],
-    focus: { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@1", paneId: "%1", appFocused: focused, terminalVisible: true, automaticSeen },
+    focus: { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@1", paneId: "%1", appFocused: focused, terminalVisible: true },
     soundPreferences: defaultAgentSoundPreferences,
     onStatus: vi.fn(),
     effects, onNotificationInstrumentation, onSoundInstrumentation,
   });
+  observe?.(runtime);
   return <output
     data-names={runtime.agents.map((record) => record.displayName).join(",")}
     data-topology-generation={runtime.topologyAuthority?.topologyGeneration}
@@ -47,15 +48,20 @@ describe("useAgentRuntime focus semantics", () => {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   });
 
-  it("treats reconnect snapshot generations as replay and marks only the focused pane's exact unseen generation", async () => {
+  it("keeps a focused pane unread through app focus changes and marks its exact generation only after interaction", async () => {
     const snapshot: AgentSnapshot = {
       hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, revision: agentGeneration(8), eventSequence: agentGeneration(8), acceptedGeneration: agentGeneration(8), notificationWatermark: agentGeneration(8), authoritative: true, adapters: [],
       agents: [agent({ lifecycle: "idle", attentionGeneration: 8, seenGeneration: 3 })],
     };
     const client = clientFor(snapshot);
+    let latest!: ReturnType<typeof useAgentRuntime>;
     let renderer: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<Harness client={client} />); });
-    expect(client.markSeen).toHaveBeenCalledTimes(1);
+    await act(async () => { renderer = create(<Harness client={client} observe={(runtime) => { latest = runtime; }} />); });
+    expect(client.markSeen).not.toHaveBeenCalled();
+    await act(async () => renderer!.update(<Harness client={client} focused={false} observe={(runtime) => { latest = runtime; }} />));
+    await act(async () => renderer!.update(<Harness client={client} observe={(runtime) => { latest = runtime; }} />));
+    expect(client.markSeen).not.toHaveBeenCalled();
+    await act(async () => latest.acknowledgePane("%1"));
     expect(client.markSeen).toHaveBeenCalledWith(scope, "agent-1", "8");
     expect(renderer!.root.findByType("output").children.join("")).toBe("agent-1:idle");
     expect(invokeMock).not.toHaveBeenCalled();
@@ -87,15 +93,20 @@ describe("useAgentRuntime focus semantics", () => {
     await act(async () => renderer!.unmount());
   });
 
-  it("suppresses ordinary pane-wide seen marking during exact notification activation", async () => {
+  it("acknowledges every unseen agent in an explicitly selected pane", async () => {
     const snapshot: AgentSnapshot = {
       hostProfileId: "local", serverIdentity: "server-a", connectionEpoch: 1, revision: agentGeneration(9), eventSequence: agentGeneration(9), acceptedGeneration: agentGeneration(9), notificationWatermark: agentGeneration(9), authoritative: true, adapters: [],
       agents: [agent({ id: "clicked", attentionGeneration: 8, seenGeneration: 1 }), agent({ id: "same-pane", attentionGeneration: 9, seenGeneration: 1 })],
     };
     const client = clientFor(snapshot);
+    let latest!: ReturnType<typeof useAgentRuntime>;
     let renderer: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<Harness automaticSeen={false} client={client} />); });
+    await act(async () => { renderer = create(<Harness client={client} observe={(runtime) => { latest = runtime; }} />); });
     expect(client.markSeen).not.toHaveBeenCalled();
+    await act(async () => latest.acknowledgePane("%1"));
+    expect(client.markSeen).toHaveBeenCalledTimes(2);
+    expect(client.markSeen).toHaveBeenCalledWith(scope, "clicked", "8");
+    expect(client.markSeen).toHaveBeenCalledWith(scope, "same-pane", "9");
     await act(async () => renderer!.unmount());
   });
 
@@ -126,11 +137,14 @@ describe("useAgentRuntime focus semantics", () => {
     const client = clientFor(first);
     vi.mocked(client.snapshot).mockResolvedValueOnce(first).mockResolvedValue(replacement);
     vi.mocked(client.markSeen).mockImplementationOnce(() => firstSeen).mockResolvedValue(undefined);
+    let latest!: ReturnType<typeof useAgentRuntime>;
     let renderer: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<Harness client={client} connectionEpoch={1} />); });
+    await act(async () => { renderer = create(<Harness client={client} connectionEpoch={1} observe={(runtime) => { latest = runtime; }} />); });
+    await act(async () => latest.acknowledgePane("%1"));
     expect(client.markSeen).toHaveBeenCalledTimes(1);
 
-    await act(async () => renderer!.update(<Harness client={client} connectionEpoch={2} />));
+    await act(async () => renderer!.update(<Harness client={client} connectionEpoch={2} observe={(runtime) => { latest = runtime; }} />));
+    await act(async () => latest.acknowledgePane("%1"));
     expect(client.markSeen).toHaveBeenCalledTimes(2);
     expect(client.markSeen).toHaveBeenLastCalledWith(
       { ...scope, connectionEpoch: 2 }, "agent-1", "8",
@@ -281,7 +295,7 @@ function MultiHost({ client, hosts = ["local", "remote"], shown = hosts, focusHo
     shownHostIds: shown,
     focus: {
       hostProfileId: focusHost, serverIdentity: focusHost === "local" ? "server-a" : "server-r",
-      sessionId: "$1", windowId: "@1", paneId: "%1", appFocused: focused, terminalVisible: true, automaticSeen: true,
+      sessionId: "$1", windowId: "@1", paneId: "%1", appFocused: focused, terminalVisible: true,
     },
     soundPreferences: defaultAgentSoundPreferences,
     onStatus: vi.fn(),
@@ -359,16 +373,21 @@ describe("useAgentRuntime across hosts", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("marks seen only on the active host", async () => {
+  it("acknowledges interaction only on the active host", async () => {
     const client = multiHostClient({
       local: snapshotOf(scope, [agent({ lifecycle: "idle", attentionGeneration: 3, seenGeneration: 1 })]),
       remote: snapshotOf(remoteScope, [remoteAgent({ lifecycle: "idle", attentionGeneration: 3, seenGeneration: 1 })]),
     });
+    let latest!: ReturnType<typeof useAgentRuntime>;
     let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<MultiHost client={client} />); });
+    await act(async () => { renderer = create(<MultiHost client={client} observe={(runtime) => { latest = runtime; }} />); });
+    expect(client.markSeen).not.toHaveBeenCalled();
+    await act(async () => latest.acknowledgePane("%1"));
     expect(client.markSeen).toHaveBeenCalledTimes(1);
     expect(client.markSeen).toHaveBeenCalledWith(scope, "agent-1", "3");
-    await act(async () => renderer.update(<MultiHost client={client} focusHost="remote" />));
+    await act(async () => renderer.update(<MultiHost client={client} focusHost="remote" observe={(runtime) => { latest = runtime; }} />));
+    expect(client.markSeen).toHaveBeenCalledTimes(1);
+    await act(async () => latest.acknowledgePane("%1"));
     expect(client.markSeen).toHaveBeenCalledTimes(2);
     expect(client.markSeen).toHaveBeenLastCalledWith(remoteScope, "agent-1", "3");
     await act(async () => renderer.unmount());

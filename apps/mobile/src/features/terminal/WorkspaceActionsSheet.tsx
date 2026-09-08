@@ -1,5 +1,5 @@
 import { useRouter } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { useStore } from "zustand";
 
@@ -12,7 +12,7 @@ import { Hairline } from "../../ui/components/Button";
 import { Sheet } from "../../ui/components/Sheet";
 import { useSession } from "../../ui/hooks";
 import { colors, typeScale } from "../../ui/tokens";
-import { createTerminalWindow } from "./createWindow";
+import { createAgentWindow, createTerminalWindow, isConnectionScopeCurrent, type CreatedAgentWindow, type CreatedWindow } from "./createWindow";
 
 const NEW_PANE_TOPOLOGY_WAIT_MS = 3_000;
 
@@ -29,16 +29,17 @@ export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss }: 
   const connected = useSession((state) => state.connection.state === "connected");
   const agentCommand = useStore(prefsStore, (state) => state.agentCommand);
   const [creating, setCreating] = useState<"terminal" | "agent" | null>(null);
+  const creatingRef = useRef<"terminal" | "agent" | null>(null);
 
   const createWindow = useCallback(async (kind: "terminal" | "agent") => {
     const connection = getConnection();
-    const command = kind === "agent" ? agentCommand.trim() : "";
-    log(`create.window ui.press kind=${kind} session=${sessionId ?? "none"} connection=${connection ? "present" : "missing"} alreadyCreating=${creating ? "yes" : "no"} commandPresent=${command ? "yes" : "no"} prefsHydrated=${prefsStore.getState().hydrated ? "yes" : "no"} topology=${sessionStore.getState().topologyGeneration}`);
-    if (!sessionId || !connection || creating) {
+    const hasCommand = kind === "agent" && agentCommand.trim().length > 0;
+    log(`create.window ui.press kind=${kind} session=${sessionId ?? "none"} connection=${connection ? "present" : "missing"} alreadyCreating=${creatingRef.current ? "yes" : "no"} commandPresent=${hasCommand ? "yes" : "no"} prefsHydrated=${prefsStore.getState().hydrated ? "yes" : "no"} topology=${sessionStore.getState().topologyGeneration}`);
+    if (!sessionId || !connection || creatingRef.current) {
       log(`create.window ui.ignored kind=${kind} reason=${!sessionId ? "missing-session" : !connection ? "missing-connection" : "already-creating"}`);
       return;
     }
-    if (kind === "agent" && !command) {
+    if (kind === "agent" && !hasCommand) {
       log("create.window ui.ignored kind=agent reason=missing-command");
       onDismiss();
       toast("Set an agent command first.");
@@ -46,19 +47,37 @@ export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss }: 
       return;
     }
     onDismiss();
+    creatingRef.current = kind;
     setCreating(kind);
     try {
-      const created = await createTerminalWindow(connection, sessionStore, sessionId, command);
+      let created: CreatedWindow;
+      let agentCreated: CreatedAgentWindow | undefined;
+      if (kind === "agent") {
+        const startedAgent = await createAgentWindow(connection, sessionStore, sessionId, agentCommand, getConnection);
+        agentCreated = startedAgent;
+        created = startedAgent;
+        void startedAgent.commandDelivery.then((delivery) => {
+          if (delivery.ok) return;
+          toast(`Terminal opened, but the agent command could not be sent: ${delivery.error.message}`);
+        });
+      } else {
+        created = await createTerminalWindow(connection, sessionStore, sessionId);
+      }
       const paneObserved = await waitForPane(created.paneId, NEW_PANE_TOPOLOGY_WAIT_MS);
+      if (agentCreated && !isConnectionScopeCurrent(agentCreated.scope, getConnection)) {
+        log(`create.window ui.navigation-skipped kind=${kind} reason=connection_scope_changed pane=${created.paneId}`);
+        return;
+      }
       log(`create.window ui.navigate kind=${kind} session=${sessionId} window=${created.windowId} pane=${created.paneId} paneObserved=${paneObserved ? "yes" : "no"} topology=${sessionStore.getState().topologyGeneration}`);
       router.push({ pathname: "/terminal/[paneId]", params: { paneId: toRouteParam(created.paneId), sessionId: toRouteParam(sessionId) } });
     } catch (error) {
       log(`create.window ui.failed kind=${kind} code=${diagnosticErrorCode(error)} topology=${sessionStore.getState().topologyGeneration}`);
       toast(`Couldn't open ${kind === "agent" ? "an agent" : "a terminal"}: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      creatingRef.current = null;
       setCreating(null);
     }
-  }, [agentCommand, creating, onDismiss, router, sessionId]);
+  }, [agentCommand, onDismiss, router, sessionId]);
 
   return (
     <Sheet onDismiss={onDismiss} title={title} visible={visible}>

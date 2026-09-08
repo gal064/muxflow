@@ -5,6 +5,8 @@
  */
 export interface NotificationAttention {
   focusAgent(agentId: string): () => void;
+  /** Retarget the current focus owner synchronously during an accepted identity promotion. */
+  promoteAgent(oldAgentId: string, newAgentId: string): void;
   setAppActive(active: boolean): void;
   viewedAgentId(): string | undefined;
 }
@@ -21,6 +23,9 @@ export function createNotificationAttention(initiallyActive = true): Notificatio
         // A late blur from an old route must not clear the route now on top.
         if (focused?.owner === owner) focused = undefined;
       };
+    },
+    promoteAgent(oldAgentId, newAgentId) {
+      if (focused?.agentId === oldAgentId) focused.agentId = newAgentId;
     },
     setAppActive(active) {
       appActive = active;

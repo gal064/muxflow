@@ -5,9 +5,9 @@ import type { ComponentProps } from "react";
 import stylesCss from "../styles.css?raw";
 import type { Pane } from "./types";
 
-const terminal = vi.hoisted(() => ({ renders: 0 }));
+const terminal = vi.hoisted(() => ({ renders: 0, props: undefined as Record<string, unknown> | undefined }));
 vi.mock("../features/terminal/TerminalPane", () => ({
-  TerminalPane: () => { terminal.renders += 1; return <div>terminal</div>; },
+  TerminalPane: (props: Record<string, unknown>) => { terminal.renders += 1; terminal.props = props; return <div>terminal</div>; },
 }));
 
 import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
@@ -28,6 +28,8 @@ const surfaceProps = (windowName: string) => ({
   focusPane: vi.fn(),
   grid: { width: 80, height: 24 },
   handleInput: vi.fn(),
+  handleKeyActivity: vi.fn(),
+  handlePointerActivity: vi.fn(),
   hub: {},
   mountedPanes: [pane],
   onMeasurements: vi.fn(),
@@ -40,6 +42,15 @@ const surfaceProps = (windowName: string) => ({
 }) as unknown as ComponentProps<typeof TerminalWorkspaceSurface>;
 
 describe("TerminalWorkspaceSurface", () => {
+  it("forwards deliberate key and pointer activity with the pane identity", async () => {
+    const props = surfaceProps("shell");
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<TerminalWorkspaceSurface {...props} />); });
+    expect(terminal.props?.onKeyActivity).toBe(props.handleKeyActivity);
+    expect(terminal.props?.onPointerActivity).toBe(props.handlePointerActivity);
+    await act(async () => renderer.unmount());
+  });
+
   it("does not revisit live panes for an unrelated root notice render", async () => {
     terminal.renders = 0;
     const props = surfaceProps("shell");

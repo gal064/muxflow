@@ -41,11 +41,18 @@ use store::{StoredAgent, StoredRoute, StoredState};
 /// coffee break. Degrading is deliberately one-way per event: the next hook of
 /// any kind restores real state.
 const STALE_WORKING_TTL_MILLIS: i64 = 15 * 60 * 1_000;
+/// A vendor-reported child may legitimately be silent far longer than one
+/// tool call. Keep that stronger evidence for a day, but not forever: a lost
+/// terminal hook must still have a bounded recovery path.
+const STALE_SUBAGENT_WORKING_TTL_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 /** Three daemon maintenance passes (normally six seconds) make process absence conclusive. */
 const DEPARTURE_MISSES_REQUIRED: u8 = 3;
 
 pub(crate) struct AgentRuntime {
     state_path: PathBuf,
+    /// Orders persisted hook state through identity side effects and event
+    /// publication, so concurrent hook connections cannot publish backwards.
+    ingest_order: Mutex<()>,
     state: Mutex<StoredState>,
     /// What this host's agent configuration was last observed to do with
     /// lifecycle events. Re-read only when a configuration file changed.
@@ -55,9 +62,13 @@ pub(crate) struct AgentRuntime {
     /// Where a `Stop` hands the agent's final message. Voice mode in
     /// production; a recorder in tests, so no test needs the voice service.
     reply_sink: ReplySink,
+    /// Moves Voice registration before a promoted identity can dispatch its
+    /// Stop reply. Production uses Voice; tests can observe exact ordering.
+    identity_promotion_sink: IdentityPromotionSink,
 }
 
 type ReplySink = Box<dyn Fn(super::voice::AgentReply) + Send + Sync>;
+type IdentityPromotionSink = Box<dyn Fn(&[String], &str) + Send + Sync>;
 
 static GLOBAL: OnceLock<Arc<AgentRuntime>> = OnceLock::new();
 
@@ -71,17 +82,32 @@ impl AgentRuntime {
     }
 
     fn load(state_path: PathBuf) -> Self {
-        Self::load_with_sink(state_path, Box::new(super::voice::on_agent_reply))
+        Self::load_with_sinks(
+            state_path,
+            Box::new(super::voice::on_agent_reply),
+            Box::new(super::voice::on_agent_identity_promoted),
+        )
     }
 
+    #[cfg(test)]
     fn load_with_sink(state_path: PathBuf, reply_sink: ReplySink) -> Self {
+        Self::load_with_sinks(state_path, reply_sink, Box::new(|_, _| {}))
+    }
+
+    fn load_with_sinks(
+        state_path: PathBuf,
+        reply_sink: ReplySink,
+        identity_promotion_sink: IdentityPromotionSink,
+    ) -> Self {
         let state = store::load(&state_path);
         Self {
             state_path,
+            ingest_order: Mutex::new(()),
             state: Mutex::new(state),
             wiring: Mutex::new(hooks::WiringCache::default()),
             departure_misses: Mutex::new(BTreeMap::new()),
             reply_sink,
+            identity_promotion_sink,
         }
     }
 
@@ -93,6 +119,15 @@ impl AgentRuntime {
     #[cfg(test)]
     fn isolated_with_sink(state_path: PathBuf, reply_sink: ReplySink) -> Self {
         Self::load_with_sink(state_path, reply_sink)
+    }
+
+    #[cfg(test)]
+    fn isolated_with_sinks(
+        state_path: PathBuf,
+        reply_sink: ReplySink,
+        identity_promotion_sink: IdentityPromotionSink,
+    ) -> Self {
+        Self::load_with_sinks(state_path, reply_sink, identity_promotion_sink)
     }
 
     pub(super) fn snapshot(&self) -> v1::AgentSnapshot {
@@ -108,7 +143,8 @@ impl AgentRuntime {
     /// of the first. Nothing outside the record is touched either — no signal
     /// reaches the agent's process, and `notify` stays false, so a healthy
     /// agent that merely ran one long silent tool call loses a label and
-    /// regains it on its next hook.
+    /// regains it on its next hook. A retained vendor subagent guard is direct
+    /// evidence of live work and is exempt until its matching terminal event.
     pub(crate) fn sweep_stale(&self) -> Vec<v1::AgentEvent> {
         let now = now_millis();
         let mut state = self.state.lock().unwrap();
@@ -118,12 +154,22 @@ impl AgentRuntime {
             // The clock is the lifecycle observation, not `updated_at`, which
             // reconciliation also moves when the agent merely changes pane.
             .filter(|record| {
-                let observed = match record.lifecycle_observed_at_unix_millis {
+                let lifecycle_observed = match record.lifecycle_observed_at_unix_millis {
                     0 => record.updated_at_unix_millis,
                     value => value,
                 };
+                let subagent_evidence = record.claude_has_running_subagent
+                    || !record.codex_running_subagent_ids.is_empty();
+                let (observed, ttl) = if subagent_evidence {
+                    (
+                        record.subagent_evidence_observed_at_unix_millis,
+                        STALE_SUBAGENT_WORKING_TTL_MILLIS,
+                    )
+                } else {
+                    (lifecycle_observed, STALE_WORKING_TTL_MILLIS)
+                };
                 record.lifecycle == v1::AgentLifecycleState::Working as i32
-                    && now.saturating_sub(observed) > STALE_WORKING_TTL_MILLIS
+                    && now.saturating_sub(observed) > ttl
             })
             .map(|record| record.agent_id.clone())
             .collect();
@@ -137,6 +183,10 @@ impl AgentRuntime {
             let generation = state.generation;
             let record = state.agents.get_mut(&agent_id).expect("collected above");
             record.lifecycle = v1::AgentLifecycleState::Unknown as i32;
+            record.claude_has_running_subagent = false;
+            record.codex_running_subagent_ids.clear();
+            record.codex_parent_stopped_for_subagents = false;
+            record.subagent_evidence_observed_at_unix_millis = 0;
             record.lifecycle_changed_at_unix_millis = now;
             record.state_generation = generation;
             events.push(v1::AgentEvent {

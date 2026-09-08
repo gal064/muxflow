@@ -55,7 +55,7 @@ function Sidebar({ client: agentClient, connected, connectionEpoch }: { client: 
     shownHostIds: ["local"],
     // Deliberately not focused on either pane: catch-up must not be quietly
     // consumed by the same render that displays it.
-    focus: { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@9", paneId: "%9", appFocused: false, terminalVisible: true, automaticSeen: true },
+    focus: { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", windowId: "@9", paneId: "%9", appFocused: false, terminalVisible: true },
     soundPreferences: { ...defaultAgentSoundPreferences, enabled: false },
     onStatus: vi.fn(),
     effects: { emitNotification: vi.fn(async () => ({ id: 1, actionable: true })), playSound: vi.fn(async () => undefined) },
