@@ -235,13 +235,13 @@ export function createEchoLagProbe({
       clearTimeout(open.timer);
       const echoAt = now();
       const lagMs = echoAt - open.t0;
-      const outputIdentity = output
+      const outputIdentity = __MUXFLOW_PERF_BUILD__ && output
         ? {
           outputSequence: output.sequence,
           outputGeneration: output.generation,
           connectionEpoch: output.connectionEpoch,
         }
-        : {};
+        : undefined;
       onSample?.(paneId, lagMs);
       const outlier = lagMs > ECHO_LAG_THRESHOLD_MS;
       if (!open.before) {

@@ -355,7 +355,11 @@ export function useAppConnectionController({
       // the host the user is typing on may close its round trips.
       (paneId, sequence, generation, connectionEpoch) => {
         if (profileId === activeProfileIdRef.current) {
-          echoLagProbe.noteOutput(paneId, { sequence, generation, connectionEpoch });
+          if (__MUXFLOW_PERF_BUILD__ && sequence !== undefined && generation !== undefined) {
+            echoLagProbe.noteOutput(paneId, { sequence, generation, connectionEpoch });
+          } else {
+            echoLagProbe.noteOutput(paneId);
+          }
         }
       },
     );

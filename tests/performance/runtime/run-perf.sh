@@ -18,6 +18,8 @@
 #   ADE_PHASE12_FLOOD_SECONDS=n flood probe duration (default 10 for exploratory
 #                               runs and 60 when ADE_PHASE12_ENFORCE=1)
 #   ADE_PHASE12_LABEL=<name>    label written into every result file
+#   ADE_PHASE12_RUNTIME_ROOT=p   short directory for run artifacts when the
+#                               repository path would exceed Unix socket limits
 #   ADE_PHASE12_RUNTIME_FILE=p  write this invocation's exact artifact path to
 #                               p, in addition to the compatibility latest file
 set -euo pipefail
@@ -30,7 +32,8 @@ target_arch=$(phase8_linux_target_arch)
 docker_platform=$(phase8_docker_platform)
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 label="${ADE_PHASE12_LABEL:-$run_id}"
-runtime="$repo_root/tmp/phase12-perf-$run_id"
+runtime_root="${ADE_PHASE12_RUNTIME_ROOT:-$repo_root/tmp}"
+runtime="$runtime_root/phase12-perf-$run_id"
 main_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 driver_target="${CARGO_TARGET_DIR:-$repo_root/tests/performance/runtime/perf-driver/target}"
 host_binary="$main_target/release/muxflow-host"

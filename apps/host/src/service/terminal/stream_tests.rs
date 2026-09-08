@@ -88,7 +88,7 @@ impl Harness {
 
     fn runtime(&self) -> StreamRuntime<'_> {
         StreamRuntime {
-            connection_epoch: 0,
+            connection_epoch: crate::diagnostics::PerfConnectionEpoch::new(0),
             writer: &self.writer,
             sender: &self.sender,
             overflowed: &self.overflowed,
@@ -765,7 +765,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
     state.finish_block(
         tag,
         StreamRuntime {
-            connection_epoch: 0,
+            connection_epoch: crate::diagnostics::PerfConnectionEpoch::new(0),
             writer: &writer,
             sender: &sender,
             overflowed: &overflowed,

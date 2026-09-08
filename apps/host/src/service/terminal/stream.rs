@@ -61,7 +61,7 @@ fn send_capture(
 }
 
 pub(super) struct ControlStreamReader {
-    pub(super) connection_epoch: u64,
+    pub(super) connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     pub(super) stdout: ChildStdout,
     /// Writes the reader needs performed are handed to the input dispatch
     /// thread. The reader itself must never write to tmux's stdin: tmux stops
@@ -399,7 +399,7 @@ pub(super) struct PendingAlternateCapture {
 }
 
 struct StreamRuntime<'a> {
-    connection_epoch: u64,
+    connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     writer: &'a std_mpsc::Sender<super::ControlWrite>,
     sender: &'a mpsc::Sender<SequencerControl>,
     overflowed: &'a AtomicBool,

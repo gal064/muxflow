@@ -13,7 +13,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::Value;
@@ -31,6 +31,43 @@ struct Marks {
     newest_queue: Duration,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ControlWriteTiming {
+    pub(crate) queue_wait: Duration,
+    pub(crate) physical_write: Duration,
+    pub(crate) queue_depth_at_enqueue: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InputConnectionEpoch(u64);
+
+impl InputConnectionEpoch {
+    pub(crate) fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct DispatchedInput {
+    request_id: u64,
+    connection_epoch: InputConnectionEpoch,
+    control: ControlWriteTiming,
+}
+
+impl DispatchedInput {
+    pub(crate) fn new(
+        request_id: u64,
+        connection_epoch: InputConnectionEpoch,
+        control: ControlWriteTiming,
+    ) -> Self {
+        Self {
+            request_id,
+            connection_epoch,
+            control,
+        }
+    }
+}
+
 pub(crate) struct DesktopInputTiming(Option<Marks>);
 
 impl DesktopInputTiming {
@@ -38,12 +75,23 @@ impl DesktopInputTiming {
         pane_id: &str,
         bytes: usize,
         messages: usize,
-        oldest_queue: Duration,
-        newest_queue: Duration,
+        enqueued_at: Instant,
+        coalesced_at: &[Instant],
     ) -> Self {
         if configured_path().is_none() {
             return Self(None);
         }
+        let sampled_at = Instant::now();
+        let oldest_queue = std::iter::once(enqueued_at)
+            .chain(coalesced_at.iter().copied())
+            .map(|queued_at| sampled_at.saturating_duration_since(queued_at))
+            .max()
+            .unwrap_or_default();
+        let newest_queue = std::iter::once(enqueued_at)
+            .chain(coalesced_at.iter().copied())
+            .map(|queued_at| sampled_at.saturating_duration_since(queued_at))
+            .min()
+            .unwrap_or_default();
         Self(Some(Marks {
             pane_id: pane_id.to_owned(),
             bytes,
@@ -53,29 +101,22 @@ impl DesktopInputTiming {
         }))
     }
 
-    pub(crate) fn finish(
-        self,
-        request_id: u64,
-        connection_epoch: u64,
-        control_queue: Duration,
-        bridge_write: Duration,
-        control_queue_depth: usize,
-    ) {
+    pub(crate) fn finish(self, dispatched: DispatchedInput) {
         let Some(marks) = self.0 else { return };
         enqueue(serde_json::json!({
             "atUnixMillis": unix_millis(),
             "subsystem": "desktop_native",
             "event": "terminalInput",
-            "requestId": request_id,
-            "connectionEpoch": connection_epoch,
+            "requestId": dispatched.request_id,
+            "connectionEpoch": dispatched.connection_epoch.0,
             "paneId": marks.pane_id,
             "bytes": marks.bytes,
             "messageCount": marks.messages,
             "oldestQueueMs": millis(marks.oldest_queue),
             "newestQueueMs": millis(marks.newest_queue),
-            "controlQueueMs": millis(control_queue),
-            "bridgeWriteMs": millis(bridge_write),
-            "controlQueueDepth": control_queue_depth,
+            "controlQueueMs": millis(dispatched.control.queue_wait),
+            "bridgeWriteMs": millis(dispatched.control.physical_write),
+            "controlQueueDepth": dispatched.control.queue_depth_at_enqueue,
         }));
     }
 }
@@ -84,7 +125,7 @@ impl DesktopInputTiming {
 /// host stream, before it crosses the native-to-WebView channel. The host log
 /// carries the same connection epoch, sequence, pane and generation.
 pub(crate) fn record_terminal_output_received(
-    connection_epoch: u64,
+    connection_epoch: impl FnOnce() -> u64,
     sequence: u64,
     pane_id: &str,
     generation: u64,
@@ -93,6 +134,7 @@ pub(crate) fn record_terminal_output_received(
     if configured_path().is_none() {
         return;
     }
+    let connection_epoch = connection_epoch();
     enqueue(serde_json::json!({
         "atUnixMillis": unix_millis(),
         "subsystem": "desktop_native",

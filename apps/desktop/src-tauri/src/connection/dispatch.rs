@@ -276,23 +276,12 @@ pub(super) fn run_client_input_dispatch(
                     && !client.read_only.load(Ordering::Acquire)
                 {
                     let dispatched_bytes = data.len();
-                    let sampled_at = Instant::now();
-                    let oldest_queue = std::iter::once(enqueued_at)
-                        .chain(coalesced_at.iter().copied())
-                        .map(|queued_at| sampled_at.saturating_duration_since(queued_at))
-                        .max()
-                        .unwrap_or_default();
-                    let newest_queue = std::iter::once(enqueued_at)
-                        .chain(coalesced_at.iter().copied())
-                        .map(|queued_at| sampled_at.saturating_duration_since(queued_at))
-                        .min()
-                        .unwrap_or_default();
                     let timing = crate::perf_log::input_timing::DesktopInputTiming::begin(
                         &pane_id,
                         dispatched_bytes,
                         message_count,
-                        oldest_queue,
-                        newest_queue,
+                        enqueued_at,
+                        &coalesced_at,
                     );
                     let result = client.dispatch_request(v1::Request {
                         operation: v1::Operation::TerminalInput.into(),
@@ -307,18 +296,12 @@ pub(super) fn run_client_input_dispatch(
                         // failed write measures nothing — those bytes never
                         // left, and timing the failure would read as a fast
                         // keystroke.
-                        Ok((request_id, control)) => {
+                        Ok(dispatched) => {
                             client.record_input_latency(enqueued_at.elapsed());
                             for queued_at in &coalesced_at {
                                 client.record_input_latency(queued_at.elapsed());
                             }
-                            timing.finish(
-                                request_id,
-                                client.terminal_epoch.load(Ordering::Acquire),
-                                control.queue_wait,
-                                control.physical_write,
-                                control.queue_depth_at_enqueue,
-                            );
+                            timing.finish(dispatched);
                         }
                         Err(error) => {
                             if pending_error.is_none() {

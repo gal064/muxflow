@@ -200,17 +200,15 @@ fn run_input_dispatch_with(
                         Err(mpsc::TryRecvError::Disconnected) => break,
                     }
                 }
-                let dispatch_started = Instant::now();
+                let commit_timing = timing.begin_commit();
                 let result = send_batch(input_id, &pane_id, &data, delivery);
-                let tmux = dispatch_started.elapsed();
-                let path = match input_path(data.len(), delivery) {
-                    InputPath::InBand => "inBand",
-                    InputPath::Batch => "batch",
-                };
                 timing.finish(
                     dequeued,
-                    tmux,
-                    path,
+                    commit_timing,
+                    || match input_path(data.len(), delivery) {
+                        InputPath::InBand => "inBand",
+                        InputPath::Batch => "batch",
+                    },
                     data.len(),
                     if result.is_ok() { "ok" } else { "error" },
                 );

@@ -66,6 +66,8 @@ export interface TerminalRendererOptions {
    * cannot say *which* pane fell back is not worth reading.
    */
   paneId?: string;
+  /** Read only in an opted-in perf build to join pane work to one connection. */
+  perfConnectionEpoch?: () => number | undefined;
   onDiagnostic?: (message: string | undefined) => void;
   onOpenLink?: (url: string) => void;
   onOpenFilePath?: (path: string) => void;
@@ -107,6 +109,7 @@ export type GridOutcome =
   | { kind: "rejected"; reason: string };
 
 export interface TerminalRenderer {
+  setPerfConnectionEpoch(epoch: number | undefined): void;
   open(element: HTMLElement): void;
   seed(bytes: OwnedTerminalBytes, onRendered?: () => void, generation?: number): void;
   /**
@@ -409,7 +412,9 @@ export class XtermRenderer implements TerminalRenderer {
 
   constructor(options: TerminalRendererOptions = {}) {
     this.#options = options;
-    this.#panePerf = createTerminalPanePerf(options.paneId);
+    if (__MUXFLOW_PERF_BUILD__) {
+      this.#panePerf = createTerminalPanePerf(options.paneId, options.perfConnectionEpoch?.());
+    }
     // Font and palette both come from `tokens.css` (see ./theme.ts), so the
     // terminal is a Ghostty surface by derivation rather than by a second set
     // of literals that drifted from the chrome.
@@ -480,15 +485,20 @@ export class XtermRenderer implements TerminalRenderer {
       ),
       undefined,
       4096,
-      this.#panePerf?.observe,
+      __MUXFLOW_PERF_BUILD__ ? this.#panePerf?.observe : undefined,
     );
-    this.#disposables.push(this.#terminal.onRender(({ start, end }) => this.#panePerf?.render(start, end)));
-    if (!this.#panePerf && options.paneId) {
-      void terminalPanePerfWhenReady(options.paneId).then((panePerf) => {
-        if (!panePerf || this.#disposed) return;
-        this.#panePerf = panePerf;
-        this.#scheduler.setObservation(panePerf.observe);
-      });
+    if (__MUXFLOW_PERF_BUILD__) {
+      this.#disposables.push(this.#terminal.onRender(({ start, end }) => this.#panePerf?.render(start, end)));
+      if (!this.#panePerf && options.paneId) {
+        void terminalPanePerfWhenReady(
+          options.paneId,
+          options.perfConnectionEpoch ?? (() => undefined),
+        ).then((panePerf) => {
+          if (!panePerf || this.#disposed) return;
+          this.#panePerf = panePerf;
+          this.#scheduler.setObservation(panePerf.observe);
+        });
+      }
     }
     this.#disposables.push(this.#terminal.onScroll((viewportY) => {
       // xterm can emit several scroll positions while resize reflows wrapped
@@ -506,6 +516,13 @@ export class XtermRenderer implements TerminalRenderer {
     this.#disposables.push(this.#terminal.registerLinkProvider({
       provideLinks: (line, callback) => callback(this.#linksForLine(line)),
     }));
+  }
+
+  setPerfConnectionEpoch(epoch: number | undefined): void {
+    if (__MUXFLOW_PERF_BUILD__) {
+      this.#panePerf?.setConnectionEpoch(epoch);
+      this.#scheduler.setObservation(this.#panePerf?.observe);
+    }
   }
 
   open(element: HTMLElement): void {
@@ -1115,7 +1132,7 @@ export class XtermRenderer implements TerminalRenderer {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    this.#panePerf?.dispose();
+    if (__MUXFLOW_PERF_BUILD__) this.#panePerf?.dispose();
     this.#scheduler.dispose();
     this.disposeGpuRenderer();
     for (const disposable of this.#disposables) disposable.dispose();
