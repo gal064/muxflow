@@ -133,6 +133,10 @@ describe("per-pane terminal performance accounting", () => {
     expect(vi.getTimerCount()).toBe(0);
     expect(lines).toHaveLength(0);
 
+    observer({ kind: "enqueue", bytes: 3, pendingBytes: 8, queueDepth: 1 });
+    perf.render(0, 1);
+    expect(vi.getTimerCount()).toBe(0);
+
     observer({ kind: "writeSettled", bytes: 5, ms: 2_100, succeeded: true });
     await flushPerfProbe();
     expect(lines.map((line) => JSON.parse(line) as Record<string, unknown>)).toContainEqual(
@@ -141,6 +145,8 @@ describe("per-pane terminal performance accounting", () => {
         connectionEpoch: 41,
         xtermWrites: 1,
         xtermWriteMs: 2_100,
+        inputBytes: 3,
+        renderEvents: 1,
       }),
     );
     perf.dispose();

@@ -121,6 +121,7 @@ export class TerminalPanePerf {
   #armFlush(interval: PanePerfInterval): void {
     if (interval !== this.#interval || interval.closing || this.#flushTimer !== undefined) return;
     const elapsed = performance.now() - interval.startedAt;
+    if (interval.pendingWrites > 0 && elapsed >= REPORT_INTERVAL_MS) return;
     this.#flushTimer = setTimeout(() => {
       this.#flushTimer = undefined;
       if (interval !== this.#interval || interval.closing) return;

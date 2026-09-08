@@ -791,6 +791,7 @@ pub fn write_safe_log(class: SafeErrorClass) {
 #[derive(Clone, Copy)]
 pub(crate) struct PerfConnectionEpoch {
     client_epoch: u64,
+    daemon_run_id: uuid::Uuid,
     daemon_scope: u64,
 }
 
@@ -799,8 +800,10 @@ impl PerfConnectionEpoch {
     pub(crate) fn new(value: u64) -> Self {
         static NEXT_DAEMON_SCOPE: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
+        static DAEMON_RUN_ID: std::sync::OnceLock<uuid::Uuid> = std::sync::OnceLock::new();
         Self {
             client_epoch: value,
+            daemon_run_id: *DAEMON_RUN_ID.get_or_init(uuid::Uuid::new_v4),
             daemon_scope: NEXT_DAEMON_SCOPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -811,6 +814,10 @@ impl PerfConnectionEpoch {
 
     fn daemon_scope(self) -> u64 {
         self.daemon_scope
+    }
+
+    fn daemon_run_id(self) -> uuid::Uuid {
+        self.daemon_run_id
     }
 }
 
@@ -1091,6 +1098,7 @@ mod switch_timing {
             "event": "tmuxAction",
             "requestId": timing.request_id,
             "connectionEpoch": timing.connection_epoch.get(),
+            "daemonRunId": timing.connection_epoch.daemon_run_id(),
             "daemonConnectionScope": timing.connection_epoch.daemon_scope(),
             "kind": timing.kind,
             "sessionId": (!timing.session_id.is_empty()).then_some(timing.session_id),
@@ -1116,6 +1124,7 @@ mod switch_timing {
     struct InputMark {
         request_id: u64,
         connection_epoch: u64,
+        daemon_run_id: uuid::Uuid,
         daemon_connection_scope: u64,
         pane_id: String,
         bytes: usize,
@@ -1149,6 +1158,7 @@ mod switch_timing {
                 marks: Some(vec![InputMark {
                     request_id,
                     connection_epoch: connection_epoch.get(),
+                    daemon_run_id: connection_epoch.daemon_run_id(),
                     daemon_connection_scope: connection_epoch.daemon_scope(),
                     pane_id: pane_id.to_owned(),
                     bytes,
@@ -1197,6 +1207,7 @@ mod switch_timing {
                     "event": "terminalInput",
                     "requestId": mark.request_id,
                     "connectionEpoch": mark.connection_epoch,
+                    "daemonRunId": mark.daemon_run_id,
                     "daemonConnectionScope": mark.daemon_connection_scope,
                     "paneId": mark.pane_id,
                     "bytes": mark.bytes,
@@ -1235,6 +1246,7 @@ mod switch_timing {
                 "event": "terminalInput",
                 "requestId": mark.request_id,
                 "connectionEpoch": mark.connection_epoch,
+                "daemonRunId": mark.daemon_run_id,
                 "daemonConnectionScope": mark.daemon_connection_scope,
                 "paneId": mark.pane_id,
                 "bytes": mark.bytes,
@@ -1279,6 +1291,7 @@ mod switch_timing {
             "event": "responseWritten",
             "requestId": request_id,
             "connectionEpoch": connection_epoch.get(),
+            "daemonRunId": connection_epoch.daemon_run_id(),
             "daemonConnectionScope": connection_epoch.daemon_scope(),
             "writtenAtUnixMillis": written_at,
             "enqueueToWireMs": whole_millis(write_started.saturating_duration_since(enqueued)),
@@ -1336,6 +1349,7 @@ mod switch_timing {
                 "paneId": pane_id,
                 "requestId": request_id,
                 "connectionEpoch": connection_epoch.get(),
+                "daemonRunId": connection_epoch.daemon_run_id(),
                 "daemonConnectionScope": connection_epoch.daemon_scope(),
                 "operation": operation,
             }));
@@ -1353,6 +1367,7 @@ mod switch_timing {
             "eventKind": event_kind,
             "paneId": pane_id,
             "connectionEpoch": connection_epoch.get(),
+            "daemonRunId": connection_epoch.daemon_run_id(),
             "daemonConnectionScope": connection_epoch.daemon_scope(),
         }));
     }
@@ -1379,6 +1394,7 @@ mod switch_timing {
             "subsystem": "host_daemon",
             "event": "terminalOutput",
             "connectionEpoch": connection_epoch.get(),
+            "daemonRunId": connection_epoch.daemon_run_id(),
             "daemonConnectionScope": connection_epoch.daemon_scope(),
             "sequence": sequence,
             "paneId": pane_id,
@@ -1588,6 +1604,8 @@ mod switch_timing {
             let request_id = u64::MAX - 17;
             let first_epoch = PerfConnectionEpoch::new(u64::MAX - 18);
             let second_epoch = PerfConnectionEpoch::new(u64::MAX - 18);
+            assert_eq!(first_epoch.daemon_run_id(), second_epoch.daemon_run_id());
+            assert_ne!(first_epoch.daemon_scope(), second_epoch.daemon_scope());
             note_request_read(first_epoch, request_id, operation);
             note_request_read(second_epoch, request_id, operation);
 
