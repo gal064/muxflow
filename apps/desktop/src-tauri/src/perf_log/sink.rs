@@ -183,6 +183,14 @@ fn rotate_recent_complete_lines(path: &PathBuf, max_file_bytes: u64) -> Result<(
 
     let rotated = suffixed_path(path, ".1");
     let temporary = suffixed_path(path, ".1.tmp");
+    // Retention is a total bound, including the unpublished replacement. Drop
+    // the older predecessor before materializing its successor so rotation
+    // never transiently holds active + predecessor + temporary (48 MiB).
+    match fs::remove_file(&rotated) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("remove previous performance log rotation: {error}")),
+    }
     let mut backup = OpenOptions::new()
         .create(true)
         .truncate(true)

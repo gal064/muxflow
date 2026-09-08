@@ -1,8 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { enablePerfProbe, flushPerfProbe, resetPerfProbe } from "../../perf/probe";
 import { TerminalPanePerf } from "./terminalPanePerf";
 
-afterEach(() => resetPerfProbe());
+afterEach(() => {
+  vi.useRealTimers();
+  resetPerfProbe();
+});
 
 describe("per-pane terminal performance accounting", () => {
   it("emits one bounded aggregate rather than one record per write", async () => {
@@ -99,5 +102,21 @@ describe("per-pane terminal performance accounting", () => {
       xtermWriteMs: 0,
       incompleteWrites: 1,
     });
+  });
+
+  it("flushes an active interval after two seconds without another event", async () => {
+    vi.useFakeTimers();
+    const lines: string[] = [];
+    enablePerfProbe(async (batch) => { lines.push(...batch); });
+    const perf = new TerminalPanePerf("%7", 41);
+
+    perf.observe({ kind: "enqueue", bytes: 5, pendingBytes: 5, queueDepth: 1 });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushPerfProbe();
+
+    const record = lines.map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((candidate) => candidate.kind === "perf.terminalPane");
+    expect(record).toMatchObject({ connectionEpoch: 41, inputBytes: 5 });
+    perf.dispose();
   });
 });
