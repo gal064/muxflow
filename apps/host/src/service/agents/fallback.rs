@@ -8,7 +8,7 @@ use anyhow::Context;
 use prost::Message;
 use tmux_agent_protocol::v1;
 
-use super::{AgentRuntime, HookIngestFailure, ingest::MAX_HOOK_BYTES, publish};
+use super::{AgentRuntime, HookIngestFailure, ingest::MAX_HOOK_BYTES};
 
 static INGEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -41,11 +41,9 @@ pub(crate) fn ingest() -> anyhow::Result<usize> {
         swept.push(published);
     }
     consume_roots(&swept, |event| {
-        match AgentRuntime::global().ingest_hook(&event) {
-            Ok(agent_event) => {
-                publish(agent_event);
-                v1::HookIngestDisposition::Applied
-            }
+        let runtime = AgentRuntime::global();
+        match runtime.ingest_and_publish(&event) {
+            Ok(_) => v1::HookIngestDisposition::Applied,
             Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
                 v1::HookIngestDisposition::Discarded
             }

@@ -73,6 +73,8 @@ export interface AgentRoute {
 export interface Agent {
   id: string;
   adapterId: string;
+  /** Empty for process/pane detection; set only by an authoritative native hook identity. */
+  nativeSessionId: string;
   displayName: string;
   lifecycle: AgentLifecycle;
   attentionKind: AgentAttentionKind;
@@ -297,6 +299,7 @@ export function agentFromProto(record: ProtoAgentRecord): Agent {
   return {
     id: record.agentId,
     adapterId: record.adapterId,
+    nativeSessionId: record.nativeSessionId,
     displayName: record.displayName,
     lifecycle: lifecycleFromProto(record.lifecycle),
     attentionKind: attentionKindFromProto(record.attentionKind),

@@ -321,6 +321,110 @@ async fn sessions_are_bounded_cleared_by_connection_and_pruned_when_the_connecti
     );
 }
 
+#[test]
+fn identity_promotion_moves_the_newest_retired_registration_without_refreshing_its_ttl() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
+    let (old_tx, _old_rx) = mpsc::channel::<SequencerControl>(1);
+    let (new_tx, _new_rx) = mpsc::channel::<SequencerControl>(1);
+    let old_connection = register_control_event_sink(old_tx);
+    let newer_connection = register_control_event_sink(new_tx);
+    service
+        .register_session(old_connection.id, "manual-old")
+        .unwrap();
+    service
+        .register_session(newer_connection.id, "manual-newer")
+        .unwrap();
+    let original_since = {
+        let mut sessions = service.sessions.lock().unwrap();
+        sessions.get_mut("manual-old").unwrap().since -= Duration::from_secs(2);
+        sessions.get("manual-newer").unwrap().since
+    };
+
+    service.promote_sessions(&["manual-old".into(), "manual-newer".into()], "native");
+
+    let sessions = service.sessions.lock().unwrap();
+    assert!(!sessions.contains_key("manual-old"));
+    assert!(!sessions.contains_key("manual-newer"));
+    assert_eq!(sessions.len(), 1);
+    let promoted = sessions.get("native").unwrap();
+    assert_eq!(promoted.connection_id, newer_connection.id);
+    assert_eq!(promoted.since, original_since);
+}
+
+#[test]
+fn identity_promotion_preserves_an_existing_native_registration_and_removes_retired_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
+    let (manual_tx, _manual_rx) = mpsc::channel::<SequencerControl>(1);
+    let (native_tx, _native_rx) = mpsc::channel::<SequencerControl>(1);
+    let manual_connection = register_control_event_sink(manual_tx);
+    let native_connection = register_control_event_sink(native_tx);
+    service
+        .register_session(manual_connection.id, "manual")
+        .unwrap();
+    service
+        .register_session(native_connection.id, "native")
+        .unwrap();
+    let native_since = service.sessions.lock().unwrap()["native"].since;
+
+    service.promote_sessions(&["manual".into()], "native");
+
+    let sessions = service.sessions.lock().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert!(!sessions.contains_key("manual"));
+    assert_eq!(sessions["native"].connection_id, native_connection.id);
+    assert_eq!(sessions["native"].since, native_since);
+}
+
+#[test]
+fn identity_promotion_prunes_a_dead_native_registration_before_selecting_the_live_retired_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
+    let (manual_tx, _manual_rx) = mpsc::channel::<SequencerControl>(1);
+    let (native_tx, _native_rx) = mpsc::channel::<SequencerControl>(1);
+    let manual_connection = register_control_event_sink(manual_tx);
+    let native_connection = register_control_event_sink(native_tx);
+    service
+        .register_session(manual_connection.id, "manual")
+        .unwrap();
+    service
+        .register_session(native_connection.id, "native")
+        .unwrap();
+    drop(native_connection);
+
+    service.promote_sessions(&["manual".into()], "native");
+
+    let sessions = service.sessions.lock().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions["native"].connection_id, manual_connection.id);
+}
+
+#[tokio::test]
+async fn promoted_reply_reaches_the_connection_that_registered_the_retired_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
+    let (sender, mut receiver) = mpsc::channel::<SequencerControl>(4);
+    let registration = register_control_event_sink(sender);
+    service.register_session(registration.id, "manual").unwrap();
+    service.promote_sessions(&["manual".into()], "native");
+
+    service.push_reply(AgentReply {
+        agent_id: "native".into(),
+        text: "promoted reply".into(),
+        truncated: false,
+        state_generation: 9,
+        occurred_at_unix_millis: 10,
+    });
+
+    let event = tokio::time::timeout(Duration::from_secs(5), next_reply(&mut receiver))
+        .await
+        .expect("the promoted reply never reached the original connection");
+    let reply = event.voice.unwrap().reply.unwrap();
+    assert_eq!(reply.agent_id, "native");
+    assert_eq!(reply.display_markdown, "promoted reply");
+}
+
 #[tokio::test]
 async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection() {
     let dir = tempfile::tempdir().unwrap();

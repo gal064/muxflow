@@ -21,6 +21,7 @@ function agent(overrides: AgentOverrides & { id: string }): Agent {
   const { sessionId = "$1", windowId = "@1", ...rest } = overrides;
   return {
     adapterId: "codex",
+    nativeSessionId: "",
     displayName: overrides.id,
     lifecycle: "working",
     attentionKind: "",
