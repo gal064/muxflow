@@ -29,6 +29,7 @@ function context(overrides: Partial<NotificationContext> = {}): NotificationCont
     viewedAgentId: undefined,
     appInForeground: false,
     workspaceName: "muxflow",
+    agentName: "Fix tests",
     ...overrides,
   };
 }
@@ -88,7 +89,7 @@ describe("notification decision rule (§13), one case per step", () => {
     expect(decideAgentNotification(agent({ attentionGeneration: 1n }), blocked(2n), context())).toEqual({
       kind: "post",
       event: "blocked",
-      title: "muxflow · Claude",
+      title: "muxflow · Fix tests",
       body: "Needs your input",
       tag: "a1",
       data: { agentId: "a1", paneId: "%1", sessionId: "$1", attentionGeneration: 2n },

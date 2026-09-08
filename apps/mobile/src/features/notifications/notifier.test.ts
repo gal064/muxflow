@@ -110,19 +110,22 @@ describe("agent notifier (§13)", () => {
   });
 
   it("posts §13's exact title and body when an agent becomes blocked", async () => {
-    h.setState({ sessions: { $1: { id: "$1", name: "muxflow", windowCount: 1, order: 0, pinned: false } } });
+    h.setState({
+      sessions: { $1: { id: "$1", name: "muxflow", windowCount: 1, order: 0, pinned: false } },
+      windows: { "@1": { id: "@1", sessionId: "$1", index: 0, name: "⠦ Fix tests", active: true, pinned: false } },
+    });
     await h.transition(agent(), blocked());
     expect(h.presented).toEqual([{
       tag: "a1",
-      title: "muxflow · Claude",
+      title: "muxflow · Fix tests",
       body: "Needs your input",
       data: { agentId: "a1", paneId: "%1", sessionId: "$1", attentionGeneration: "2", serverIdentity: "tmux:/s:1" },
     }]);
   });
 
   it("falls back to the route's workspace name when the topology has no session", async () => {
-    await h.transition(agent(), blocked({ route: { ...agent().route, sessionNameFallback: "muxflow" } }));
-    expect(h.presented[0]?.title).toBe("muxflow · Claude");
+    await h.transition(agent(), blocked({ route: { ...agent().route, sessionNameFallback: "muxflow", windowNameFallback: "Review rollout" } }));
+    expect(h.presented[0]?.title).toBe("muxflow · Review rollout");
   });
 
   it("posts `Finished` for the working → idle completion", async () => {
