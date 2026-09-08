@@ -314,6 +314,7 @@ impl VoiceService {
     /// An explicit registration for the authoritative identity always wins.
     pub(crate) fn promote_sessions(&self, retired_ids: &[String], new_id: &str) {
         let mut sessions = self.sessions.lock().unwrap();
+        prune_sessions(&mut sessions);
         let mut newest_retired: Option<Session> = None;
         for retired_id in retired_ids {
             let Some(retired) = sessions.remove(retired_id) else {

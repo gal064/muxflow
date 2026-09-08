@@ -20,7 +20,7 @@ mod reconcile;
 mod snapshot;
 mod store;
 pub(crate) use hooks::HookManager;
-pub(crate) use ingest::HookIngestFailure;
+pub(crate) use ingest::{HookIngestFailure, IngestedHook};
 use store::{StoredAgent, StoredRoute, StoredState};
 
 /// How long a Working agent may go without a single lifecycle event before the
@@ -456,6 +456,13 @@ pub(crate) fn publish(event: v1::AgentEvent) {
         agent: Some(event),
         ..Default::default()
     });
+}
+
+/// Preserve per-connection event order: mobile must observe an identity
+/// promotion before a reply addressed to the replacement identity.
+pub(crate) fn publish_ingested(runtime: &AgentRuntime, ingested: IngestedHook) {
+    publish(ingested.event);
+    runtime.dispatch_reply(ingested.reply);
 }
 
 pub(crate) fn ingest_fallbacks() -> anyhow::Result<usize> {

@@ -23,6 +23,7 @@ function agent(id: string, paneId = "%1", sessionId = "$1"): Agent {
   return {
     id,
     adapterId: "codex",
+    nativeSessionId: "native-session",
     displayName: "Codex",
     lifecycle: "working",
     attentionKind: "",
@@ -121,6 +122,24 @@ describe("VoiceRegistry", () => {
     expect(h.registry.get("manual-b")).toBe(b);
     expect(h.registry.get("native")).toBeUndefined();
     expect(h.logs).toContain("[muxflow] voice identity.promotion.rejected reason=multiple-sessions new=native count=2");
+  });
+
+  it("allocates a distinct local key when a retired deterministic id is reused", () => {
+    const h = harness();
+    const original = h.registry.open({ agentId: "manual", paneId: "%1", sessionId: "$1", ...h.deps });
+    h.registry.promoteAgent(["manual"], agent("native"));
+
+    const replacement = h.registry.open({ agentId: "manual", paneId: "%1", sessionId: "$1", ...h.deps });
+
+    expect(replacement).not.toBe(original);
+    expect(original.sessionKey).toBe("manual");
+    expect(replacement.sessionKey).toBe("manual:2");
+    expect(h.registry.get("native")).toBe(original);
+    expect(h.registry.get("manual")).toBe(replacement);
+    expect(h.store.getState().sessions.manual).toMatchObject({ agentId: "native" });
+    expect(h.store.getState().sessions["manual:2"]).toMatchObject({ agentId: "manual", messages: [] });
+    h.registry.disposeAll();
+    expect(h.store.getState().sessions).toEqual({});
   });
 
   it.each(["recording", "recordingLocked", "transcribing", "sending"] as const)("preserves %s phase across promotion", (phase) => {

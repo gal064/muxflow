@@ -15,6 +15,7 @@ import { createSessionStore, sessionStore, type AgentTransition, type Connection
 import { terminalRegistry } from "../features/terminal/terminalRegistry";
 import { filesStore } from "../features/files/filesStore";
 import { connectedNotificationText, reconnectingNotificationText } from "../features/hosts/connectionLabels";
+import { notificationAttention } from "../features/notifications/attention";
 import type { MuxflowSsh } from "../ssh/MuxflowSsh";
 import { backgroundTimer } from "./backgroundTimer";
 import { voiceRegistry } from "../features/voice/voiceRegistry";
@@ -151,6 +152,7 @@ export async function connectHost(host: SavedHost): Promise<void> {
     onAgentIdentityPromotion: (promotion) => {
       const accepted = voiceRegistry.promoteAgent(promotion.retiredAgentIds, promotion.agent);
       if (accepted) {
+        notificationAttention.promoteAgent(accepted.oldAgentId, promotion.agent.id);
         log(`voice identity.promoted old=${accepted.oldAgentId} new=${promotion.agent.id} adapter=${promotion.agent.adapterId} pane=${promotion.agent.route.paneId}`);
       }
     },

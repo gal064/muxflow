@@ -21,6 +21,8 @@ import { latestReply, type VoiceMessage, type VoiceReadinessState, type VoiceSto
 
 export interface VoiceControllerOptions {
   agentId: string;
+  /** Registry-assigned immutable local identity; defaults to the initial agent id in direct tests. */
+  sessionKey?: string;
   paneId: string;
   sessionId: string;
   store: VoiceStore;
@@ -120,7 +122,7 @@ export class VoiceController {
   private workingAckedFor: string | undefined;
 
   constructor(private readonly options: VoiceControllerOptions) {
-    this.sessionKey = options.agentId;
+    this.sessionKey = options.sessionKey ?? options.agentId;
     this.currentAgentId = options.agentId;
     this.paneId = options.paneId;
     this.sessionId = options.sessionId;
@@ -130,7 +132,7 @@ export class VoiceController {
     this.submitDelayMs = options.submitDelayMs ?? SUBMIT_DELAY_MS;
     this.playbackRate = options.playbackRate ?? 1;
     this.autoPlay = options.autoPlay ?? true;
-    options.store.getState().ensureSession(options.agentId, options.paneId, options.sessionId, this.now());
+    options.store.getState().ensureSession(this.sessionKey, options.paneId, options.sessionId, this.now(), options.agentId);
     this.unsubscribePlayer = options.player.onStatus((status) => this.onPlayerStatus(status));
   }
 

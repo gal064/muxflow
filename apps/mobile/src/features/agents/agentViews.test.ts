@@ -8,6 +8,7 @@ function agent(overrides: Partial<Agent> & { id: string; sessionId: string }): A
   const { sessionId, ...rest } = overrides;
   return {
     adapterId: "codex",
+    nativeSessionId: "",
     displayName: overrides.id,
     lifecycle: "working",
     attentionKind: "",

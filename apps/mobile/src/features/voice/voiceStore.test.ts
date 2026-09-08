@@ -12,6 +12,7 @@ function promotedAgent(): Agent {
   return {
     id: "native",
     adapterId: "codex",
+    nativeSessionId: "native-session",
     displayName: "Codex",
     lifecycle: "working",
     attentionKind: "",

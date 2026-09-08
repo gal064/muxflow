@@ -12,7 +12,7 @@ import { VoiceController, type VoiceControllerOptions } from "./VoiceController"
 import { VoiceRecorderCoordinator } from "./recorderCoordinator";
 import { provisionFromProto, voiceStore, type VoiceStore } from "./voiceStore";
 
-export type VoiceSessionOptions = Omit<VoiceControllerOptions, "recorderCoordinator" | "store">;
+export type VoiceSessionOptions = Omit<VoiceControllerOptions, "recorderCoordinator" | "sessionKey" | "store">;
 
 export class VoiceRegistry {
   private readonly controllersBySessionKey = new Map<string, VoiceController>();
@@ -30,7 +30,8 @@ export class VoiceRegistry {
       existing.retarget(options.paneId, options.sessionId);
       return existing;
     }
-    const controller = new VoiceController({ ...options, recorderCoordinator: this.recorderCoordinator, store: this.store });
+    const sessionKey = this.availableSessionKey(options.agentId);
+    const controller = new VoiceController({ ...options, sessionKey, recorderCoordinator: this.recorderCoordinator, store: this.store });
     this.controllersBySessionKey.set(controller.sessionKey, controller);
     this.sessionKeyByCurrentAgentId.set(options.agentId, controller.sessionKey);
     return controller;
@@ -123,6 +124,14 @@ export class VoiceRegistry {
     this.controllersBySessionKey.clear();
     this.sessionKeyByCurrentAgentId.clear();
     this.store.getState().resetHostStatus();
+  }
+
+  /** Initial IDs are readable keys; a live retired key collision gets a bounded local suffix. */
+  private availableSessionKey(initialAgentId: string): string {
+    if (!this.controllersBySessionKey.has(initialAgentId)) return initialAgentId;
+    let suffix = 2;
+    while (this.controllersBySessionKey.has(`${initialAgentId}:${suffix}`)) suffix += 1;
+    return `${initialAgentId}:${suffix}`;
   }
 }
 
