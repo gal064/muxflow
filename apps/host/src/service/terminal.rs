@@ -428,6 +428,8 @@ fn membership_delta(
 pub(super) struct TerminalClients {
     /// Opaque connection identity used only to correlate safe diagnostic lines.
     connection_epoch: u64,
+    /// Daemon-unique twin of the client epoch, erased from ordinary builds.
+    perf_connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     clients: HashMap<String, TerminalAttachment>,
     visible_session: Option<String>,
     /// The last size the desktop asked for, kept so the *next* client to
@@ -493,16 +495,23 @@ impl TerminalClients {
         output_credit: Arc<OutputCredit>,
         topology_trigger: TopologyOutputTrigger,
     ) -> Self {
-        Self::for_connection(output_credit, topology_trigger, 0)
+        Self::for_connection(
+            output_credit,
+            topology_trigger,
+            0,
+            crate::diagnostics::PerfConnectionEpoch::new(0),
+        )
     }
 
     pub(super) fn for_connection(
         output_credit: Arc<OutputCredit>,
         topology_trigger: TopologyOutputTrigger,
         connection_epoch: u64,
+        perf_connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     ) -> Self {
         Self {
             connection_epoch,
+            perf_connection_epoch,
             topology_trigger,
             clients: HashMap::new(),
             visible_session: None,
@@ -582,9 +591,7 @@ impl TerminalClients {
             session_id,
             pane_ids,
             AttachmentRuntime {
-                connection_epoch: crate::diagnostics::PerfConnectionEpoch::new(
-                    self.connection_epoch,
-                ),
+                connection_epoch: self.perf_connection_epoch,
                 event_tx: event_tx.clone(),
                 overflowed: Arc::clone(&overflowed),
                 resources: Arc::clone(&self.resources),

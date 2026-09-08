@@ -467,8 +467,9 @@ async fn serve_connection(
     let writer_closed = Arc::clone(&closed);
     let (writer_stopped_tx, mut writer_stopped_rx) = mpsc::unbounded_channel::<WriterStop>();
     let writer_activity = Arc::clone(activity);
-    let writer_connection_epoch =
+    let perf_connection_epoch =
         crate::diagnostics::PerfConnectionEpoch::new(client_hello.connection_epoch);
+    let writer_connection_epoch = perf_connection_epoch;
     let mut writer_task = tokio::spawn(async move {
         let mut sequencer = ProtocolSequencer::default();
         let mut gap_fault = events::GapFaultInjector::for_connection();
@@ -525,14 +526,14 @@ async fn serve_connection(
                     let write_elapsed = write_started.elapsed();
                     if let Some(request_id) = timed_response {
                         crate::diagnostics::record_response_written(
-                            writer_connection_epoch.get(),
+                            writer_connection_epoch,
                             request_id,
                             write_started,
                             write_elapsed,
                         );
                     }
                     crate::diagnostics::record_frame_write(
-                        writer_connection_epoch.get(),
+                        writer_connection_epoch,
                         frame_kind,
                         frame_event_kind,
                         frame_pane_id,
@@ -541,7 +542,7 @@ async fn serve_connection(
                         write_elapsed,
                     );
                     crate::diagnostics::record_terminal_output_frame_written(
-                        || writer_connection_epoch.get(),
+                        writer_connection_epoch,
                         &frame,
                         write_elapsed,
                     );
@@ -587,6 +588,7 @@ async fn serve_connection(
         Arc::clone(&output_credit),
         TopologyOutputTrigger::new(topology_signal.clone(), tokio::runtime::Handle::current()),
         client_hello.connection_epoch,
+        perf_connection_epoch,
     )));
     let topology_lock = Arc::new(tokio::sync::Mutex::new(()));
     let topology_baseline = Arc::new(Mutex::new(None::<(tmux_control::TmuxSnapshot, String)>));
@@ -713,7 +715,7 @@ async fn serve_connection(
                 // for every operation but a tmux action, and compiled out of a
                 // plain release build — see `diagnostics::switch_timing`.
                 crate::diagnostics::note_request_read(
-                    client_hello.connection_epoch,
+                    perf_connection_epoch,
                     frame.request_id,
                     request.operation,
                 );
@@ -823,6 +825,7 @@ async fn serve_connection(
                     bulk_available: !read_only
                         && client_hello.requested_capabilities & CAP_BULK_DOWNLOAD != 0,
                     connection_epoch: client_hello.connection_epoch,
+                    perf_connection_epoch,
                     connection_id,
                     closed: Arc::clone(&closed),
                 };

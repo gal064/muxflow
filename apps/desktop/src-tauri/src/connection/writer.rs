@@ -368,6 +368,7 @@ mod tests {
     use tmux_agent_protocol::{envelope, v1::envelope::Payload};
 
     #[test]
+    #[cfg(any(debug_assertions, feature = "perf-log"))]
     fn a_full_queue_retry_preserves_the_original_wait_origin() {
         let depth = ControlQueueDepth::default();
         let mut measurement = depth.entered();

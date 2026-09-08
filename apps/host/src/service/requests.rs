@@ -55,6 +55,7 @@ pub(super) struct RequestContext {
     /// read-only host refuses one, so its Git diff bodies cannot be deferred.
     pub(super) bulk_available: bool,
     pub(super) connection_epoch: u64,
+    pub(super) perf_connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     /// This connection's id in the control-event hub, so a voice session can
     /// have its agent's spoken reply pushed to this connection alone.
     pub(super) connection_id: u64,

@@ -190,10 +190,10 @@ impl OutputEmission<'_> {
             // event cannot be overtaken by output that observes Visible.
             if visible {
                 crate::diagnostics::note_terminal_output_admitted(
-                    self.connection_epoch.get(),
+                    self.connection_epoch,
                     &leg_pane_id,
                     generation,
-                    self.read_started.elapsed(),
+                    self.read_started,
                 );
             }
             let admitted = visible
@@ -215,14 +215,14 @@ impl OutputEmission<'_> {
             let leg = admitted.then(|| self.read_started.elapsed());
             if let Some(elapsed) = leg {
                 crate::diagnostics::update_terminal_output_admitted(
-                    self.connection_epoch.get(),
+                    self.connection_epoch,
                     &leg_pane_id,
                     generation,
                     elapsed,
                 );
             } else if visible {
                 crate::diagnostics::forget_terminal_output_admitted(
-                    self.connection_epoch.get(),
+                    self.connection_epoch,
                     &leg_pane_id,
                     generation,
                 );
