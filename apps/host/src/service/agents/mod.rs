@@ -55,9 +55,13 @@ pub(crate) struct AgentRuntime {
     /// Where a `Stop` hands the agent's final message. Voice mode in
     /// production; a recorder in tests, so no test needs the voice service.
     reply_sink: ReplySink,
+    /// Moves Voice registration before a promoted identity can dispatch its
+    /// Stop reply. Production uses Voice; tests can observe exact ordering.
+    identity_promotion_sink: IdentityPromotionSink,
 }
 
 type ReplySink = Box<dyn Fn(super::voice::AgentReply) + Send + Sync>;
+type IdentityPromotionSink = Box<dyn Fn(&[String], &str) + Send + Sync>;
 
 static GLOBAL: OnceLock<Arc<AgentRuntime>> = OnceLock::new();
 
@@ -71,10 +75,23 @@ impl AgentRuntime {
     }
 
     fn load(state_path: PathBuf) -> Self {
-        Self::load_with_sink(state_path, Box::new(super::voice::on_agent_reply))
+        Self::load_with_sinks(
+            state_path,
+            Box::new(super::voice::on_agent_reply),
+            Box::new(super::voice::on_agent_identity_promoted),
+        )
     }
 
+    #[cfg(test)]
     fn load_with_sink(state_path: PathBuf, reply_sink: ReplySink) -> Self {
+        Self::load_with_sinks(state_path, reply_sink, Box::new(|_, _| {}))
+    }
+
+    fn load_with_sinks(
+        state_path: PathBuf,
+        reply_sink: ReplySink,
+        identity_promotion_sink: IdentityPromotionSink,
+    ) -> Self {
         let state = store::load(&state_path);
         Self {
             state_path,
@@ -82,6 +99,7 @@ impl AgentRuntime {
             wiring: Mutex::new(hooks::WiringCache::default()),
             departure_misses: Mutex::new(BTreeMap::new()),
             reply_sink,
+            identity_promotion_sink,
         }
     }
 
@@ -93,6 +111,15 @@ impl AgentRuntime {
     #[cfg(test)]
     fn isolated_with_sink(state_path: PathBuf, reply_sink: ReplySink) -> Self {
         Self::load_with_sink(state_path, reply_sink)
+    }
+
+    #[cfg(test)]
+    fn isolated_with_sinks(
+        state_path: PathBuf,
+        reply_sink: ReplySink,
+        identity_promotion_sink: IdentityPromotionSink,
+    ) -> Self {
+        Self::load_with_sinks(state_path, reply_sink, identity_promotion_sink)
     }
 
     pub(super) fn snapshot(&self) -> v1::AgentSnapshot {

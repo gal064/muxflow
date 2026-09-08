@@ -1,6 +1,7 @@
 import { create } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import { EventKind, HostEventSchema, Operation, VoiceEventSchema, VoiceProvisionProgressSchema, VoiceSpeechSchema, VoiceStatusSchema } from "../../protocol/gen/envelope_pb";
+import type { Agent } from "../../store/sessionStore";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder } from "./testing";
 import { VoiceRegistry } from "./voiceRegistry";
 import { createVoiceStore, latestReply } from "./voiceStore";
@@ -12,9 +13,28 @@ const settle = async () => {
 function harness() {
   const store = createVoiceStore();
   const connection = new FakeConnection();
-  const registry = new VoiceRegistry(store);
+  const logs: string[] = [];
+  const registry = new VoiceRegistry(store, (line) => logs.push(line));
   const deps = { tailHoldMs: 0, getConnection: () => connection.asHostConnection(), recorder: new FakeRecorder(), player: new FakePlayer(), files: new FakeFiles(), appInForeground: () => true };
-  return { store, connection, registry, deps };
+  return { store, connection, registry, deps, logs };
+}
+
+function agent(id: string, paneId = "%1", sessionId = "$1"): Agent {
+  return {
+    id,
+    adapterId: "codex",
+    displayName: "Codex",
+    lifecycle: "working",
+    attentionKind: "",
+    stateGeneration: 2n,
+    attentionGeneration: 0n,
+    seenGeneration: 0n,
+    updatedAtMs: 2,
+    lifecycleChangedAtMs: 2,
+    attentionSeenAtMs: 0,
+    present: true,
+    route: { sessionId, sessionNameFallback: "", windowId: "@1", windowNameFallback: "", paneId, paneIndexFallback: 0 },
+  };
 }
 
 describe("VoiceRegistry", () => {
@@ -58,6 +78,58 @@ describe("VoiceRegistry", () => {
     expect(h.registry.get("b")).toBeUndefined();
     expect(h.store.getState().sessions).toEqual({});
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(5);
+  });
+
+  it("keeps one controller and local session while routing the promoted id's registration and reply", async () => {
+    const h = harness();
+    const controller = h.registry.open({ agentId: "manual", paneId: "%1", sessionId: "$1", ...h.deps });
+    controller.focus();
+    await settle();
+    h.store.getState().appendMessage(controller.sessionKey, {
+      id: "turn-1", kind: "you", displayText: "hello", speechText: "hello", at: 1,
+      truncated: false, fileUri: undefined, audioError: undefined, played: true,
+    });
+
+    expect(h.registry.promoteAgent(["manual"], agent("native"))).toEqual({ oldAgentId: "manual" });
+    await settle();
+
+    expect(h.registry.get("manual")).toBeUndefined();
+    expect(h.registry.get("native")).toBe(controller);
+    expect(h.registry.open({ agentId: "native", paneId: "%1", sessionId: "$1", ...h.deps })).toBe(controller);
+    expect(h.store.getState().sessions.manual).toMatchObject({ agentId: "native" });
+    expect(h.store.getState().sessions.native).toBeUndefined();
+    expect(h.connection.of(Operation.VOICE_SESSION).map((request) => request.voice?.agentId)).toEqual(["manual", "native"]);
+
+    h.registry.onVoiceEvent(create(HostEventSchema, {
+      kind: EventKind.VOICE_REPLY,
+      voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "native", displayMarkdown: "done", speechText: "done", audio: new Uint8Array([1]), stateGeneration: 2n }) }),
+    }));
+    expect(h.store.getState().sessions.manual?.messages.map((message) => message.displayText)).toEqual(["hello", "done"]);
+
+    await h.registry.end(controller.sessionKey);
+    expect(h.registry.get("native")).toBeUndefined();
+    expect(h.store.getState().sessions).toEqual({});
+  });
+
+  it("rejects a promotion that would merge multiple live sessions", () => {
+    const h = harness();
+    const a = h.registry.open({ agentId: "manual-a", paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ agentId: "manual-b", paneId: "%1", sessionId: "$1", ...h.deps });
+
+    expect(h.registry.promoteAgent(["manual-b", "manual-a"], agent("native"))).toBeUndefined();
+    expect(h.registry.get("manual-a")).toBe(a);
+    expect(h.registry.get("manual-b")).toBe(b);
+    expect(h.registry.get("native")).toBeUndefined();
+    expect(h.logs).toContain("[muxflow] voice identity.promotion.rejected reason=multiple-sessions new=native count=2");
+  });
+
+  it.each(["recording", "recordingLocked", "transcribing", "sending"] as const)("preserves %s phase across promotion", (phase) => {
+    const h = harness();
+    const controller = h.registry.open({ agentId: "manual", paneId: "%1", sessionId: "$1", ...h.deps });
+    h.store.getState().setPhase(controller.sessionKey, phase);
+    h.registry.promoteAgent(["manual"], agent("native"));
+    expect(h.store.getState().sessions[controller.sessionKey]?.phase).toBe(phase);
+    expect(h.registry.get("native")).toBe(controller);
   });
 
   it("keeps B's reply manual-only when it arrives while A owns the listening microphone", async () => {

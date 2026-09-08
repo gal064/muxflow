@@ -309,6 +309,30 @@ impl VoiceService {
             .retain(|_, session| session.connection_id != connection_id);
     }
 
+    /// Move registrations from pane-derived identities to the authoritative
+    /// hook identity without creating the service or touching the sidecar.
+    /// An explicit registration for the authoritative identity always wins.
+    pub(crate) fn promote_sessions(&self, retired_ids: &[String], new_id: &str) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut newest_retired: Option<Session> = None;
+        for retired_id in retired_ids {
+            let Some(retired) = sessions.remove(retired_id) else {
+                continue;
+            };
+            if newest_retired
+                .as_ref()
+                .is_none_or(|current| retired.since > current.since)
+            {
+                newest_retired = Some(retired);
+            }
+        }
+        if !sessions.contains_key(new_id)
+            && let Some(retired) = newest_retired
+        {
+            sessions.insert(new_id.to_owned(), retired);
+        }
+    }
+
     #[cfg(test)]
     fn session_count(&self) -> usize {
         self.sessions.lock().unwrap().len()
@@ -1266,6 +1290,14 @@ fn valid_voice_id(voice: &str) -> bool {
 pub(crate) fn on_agent_reply(reply: AgentReply) {
     if let Some(service) = VoiceService::existing() {
         service.push_reply(reply);
+    }
+}
+
+/// Ingest's identity-promotion entry point. A host that has never handled a
+/// Voice request stays completely uninitialized.
+pub(crate) fn on_agent_identity_promoted(retired_ids: &[String], new_id: &str) {
+    if let Some(service) = VoiceService::existing() {
+        service.promote_sessions(retired_ids, new_id);
     }
 }
 

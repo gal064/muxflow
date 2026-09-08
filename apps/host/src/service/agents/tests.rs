@@ -253,6 +253,7 @@ fn persist_failure_rolls_back_runtime_mutations() {
         wiring: Mutex::new(hooks::WiringCache::default()),
         departure_misses: Mutex::new(BTreeMap::new()),
         reply_sink: Box::new(|_| {}),
+        identity_promotion_sink: Box::new(|_, _| {}),
     };
     let agent_id = baseline_state.agents.keys().next().unwrap().clone();
 
@@ -439,6 +440,67 @@ fn hook_atomically_promotes_manual_pane_identity_without_duplicates() {
     assert_ne!(snapshot.agents[0].agent_id, manual_id);
     assert_eq!(promoted.retired_agent_ids, [manual_id]);
     assert_eq!(snapshot.agents[0].route.as_ref().unwrap().pane_id, "%7");
+}
+
+#[test]
+fn promotion_sink_observes_persisted_identity_before_stop_reply_sink() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-promotion-order-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let promotion_calls = Arc::clone(&calls);
+    let promotion_path = path.clone();
+    let reply_calls = Arc::clone(&calls);
+    let runtime = AgentRuntime::isolated_with_sinks(
+        path,
+        Box::new(move |reply| {
+            reply_calls
+                .lock()
+                .unwrap()
+                .push(format!("reply:{}", reply.agent_id));
+        }),
+        Box::new(move |retired_ids, new_id| {
+            let persisted = fs::read_to_string(&promotion_path).unwrap();
+            assert!(persisted.contains(new_id));
+            assert!(
+                retired_ids
+                    .iter()
+                    .all(|retired| !persisted.contains(retired))
+            );
+            promotion_calls
+                .lock()
+                .unwrap()
+                .push(format!("promotion:{new_id}"));
+        }),
+    );
+    let topology = topology("codex");
+    runtime.reconcile_topology(&topology, "server-a").unwrap();
+    let manual_id = runtime.snapshot_for("server-a").agents[0].agent_id.clone();
+    let mut stop = event("promotion-stop", 0, "Stop");
+    stop.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "Stop",
+        adapters::LAST_ASSISTANT_MESSAGE_FIELD: "done",
+    }))
+    .unwrap();
+
+    let promoted = runtime
+        .ingest_hook_with_context(&stop, "server-a", Some(&topology))
+        .unwrap();
+    let native_id = promoted.agent.as_ref().unwrap().agent_id.clone();
+
+    assert_eq!(promoted.retired_agent_ids, [manual_id]);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            format!("promotion:{native_id}"),
+            format!("reply:{native_id}")
+        ]
+    );
 }
 
 #[test]

@@ -4,6 +4,7 @@ import { HOST_CAPABILITIES } from "./contract";
 import {
   AgentEventSchema,
   AgentLifecycleState,
+  AgentRouteSchema,
   AgentRecordSchema,
   EventKind,
   HostEventSchema,
@@ -273,6 +274,49 @@ describe("ordered events (§7.4)", () => {
     expect(h.store.getState().agents["a1"]?.lifecycle).toBe("blocked");
     transport.feed(event(EventKind.RESYNC_REQUIRED, 3n));
     expect(h.store.getState().connection.state).toBe("reconnecting");
+  });
+
+  it("delivers a same-event identity promotion before the replacement lifecycle transition", async () => {
+    const calls: string[] = [];
+    const h = harness({
+      onAgentIdentityPromotion: (promotion) => calls.push(`promote:${promotion.retiredAgentIds.join(",")}->${promotion.agent.id}`),
+      onAgentTransition: (transition) => calls.push(`transition:${transition.next.id}:${transition.next.lifecycle}`),
+    });
+    const transport = await connectHappily(h);
+    const route = create(AgentRouteSchema, { sessionId: "$1", windowId: "@1", paneId: "%7" });
+    transport.feed(event(EventKind.AGENT_STATE, 1n, {
+      agent: create(AgentEventSchema, {
+        agent: create(AgentRecordSchema, { agentId: "manual", adapterId: "codex", lifecycle: AgentLifecycleState.IDLE, stateGeneration: 1n, present: true, route }),
+      }),
+    }));
+    calls.length = 0;
+    transport.feed(event(EventKind.AGENT_STATE, 2n, {
+      agent: create(AgentEventSchema, {
+        agent: create(AgentRecordSchema, { agentId: "native", adapterId: "codex", lifecycle: AgentLifecycleState.WORKING, stateGeneration: 2n, present: true, route }),
+        retiredAgentIds: ["manual"],
+      }),
+    }));
+
+    expect(calls).toEqual(["promote:manual->native", "transition:native:working"]);
+    expect(h.store.getState().agents.manual).toBeUndefined();
+    expect(h.store.getState().agents.native?.route.paneId).toBe("%7");
+  });
+
+  it("does not promote for stale replacement events", async () => {
+    const promotions: string[] = [];
+    const h = harness({ onAgentIdentityPromotion: (promotion) => promotions.push(promotion.agent.id) });
+    const transport = await connectHappily(h);
+    const route = create(AgentRouteSchema, { sessionId: "$1", windowId: "@1", paneId: "%7" });
+    transport.feed(event(EventKind.AGENT_STATE, 1n, {
+      agent: create(AgentEventSchema, { agent: create(AgentRecordSchema, { agentId: "native", adapterId: "codex", stateGeneration: 5n, present: true, route }) }),
+    }));
+    transport.feed(event(EventKind.AGENT_STATE, 2n, {
+      agent: create(AgentEventSchema, {
+        agent: create(AgentRecordSchema, { agentId: "native", adapterId: "codex", stateGeneration: 4n, present: true, route }),
+        retiredAgentIds: ["manual"],
+      }),
+    }));
+    expect(promotions).toEqual([]);
   });
 
   it("routes VOICE_PROVISION and VOICE_REPLY to onVoiceEvent with their payloads intact", async () => {

@@ -57,14 +57,30 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const insets = useSafeAreaInsets();
   const animateAgentState = useAnimationsAllowed();
   const { height: windowHeight } = useWindowDimensions();
-  const agent = useSession((s) => s.agents[agentId]);
+  const open = useCallback((): VoiceController => voiceRegistry.open({
+    agentId,
+    paneId,
+    sessionId,
+    getConnection,
+    ...sharedAudio(),
+    appInForeground: () => AppState.currentState === "active",
+    canSubmit: (currentAgentId) => sessionStore.getState().agents[currentAgentId]?.present === true,
+    playbackRate: prefsStore.getState().voicePlaybackRate,
+    autoPlay: prefsStore.getState().voiceAutoPlay,
+    toast,
+    log,
+  }), [agentId, paneId, sessionId]);
+  const [controller, setController] = useState(open);
+  const sessionKey = controller.sessionKey;
+  const session = useVoice((s) => s.sessions[sessionKey]);
+  const effectiveAgentId = session?.agentId ?? controller.agentId;
+  const agent = useSession((s) => s.agents[effectiveAgentId]);
   const lifecycle = agent?.lifecycle;
   const windows = useSession((s) => s.windows);
   const adapters = useSession((s) => s.adapters);
   const connected = useSession((s) => s.connection.state === "connected");
   const readiness = useVoice((s) => s.hostStatus.readiness);
   const recorderError = useVoice((s) => s.recorderError);
-  const session = useVoice((s) => s.sessions[agentId]);
   const playbackRate = useStore(prefsStore, (s) => s.voicePlaybackRate);
   const autoPlay = useStore(prefsStore, (s) => s.voiceAutoPlay);
   const bigPane = useStore(prefsStore, (s) => s.voiceBigPane);
@@ -73,21 +89,6 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const [screenFocused, setScreenFocused] = useState(false);
   const [appActive, setAppActive] = useState(AppState.currentState === "active");
   const list = useRef<ScrollView>(null);
-
-  const open = useCallback((): VoiceController => voiceRegistry.open({
-    agentId,
-    paneId,
-    sessionId,
-    getConnection,
-    ...sharedAudio(),
-    appInForeground: () => AppState.currentState === "active",
-    canSubmit: () => sessionStore.getState().agents[agentId]?.present === true,
-    playbackRate: prefsStore.getState().voicePlaybackRate,
-    autoPlay: prefsStore.getState().voiceAutoPlay,
-    toast,
-    log,
-  }), [agentId, paneId, sessionId]);
-  const [controller, setController] = useState(open);
   // Set by End session: the screen is popping and must not resurrect the session it just ended.
   const ending = useRef(false);
 
@@ -98,16 +99,17 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   }, [connected, controller, open]);
   useFocusEffect(useCallback(() => {
     const live = controller.isDisposed ? open() : controller;
-    const clearViewedAgent = notificationAttention.focusAgent(agentId);
     if (live !== controller) setController(live);
     setScreenFocused(true);
     live.focus();
     return () => {
-      clearViewedAgent();
       setScreenFocused(false);
       live.blur();
     };
-  }, [agentId, controller, open]));
+  }, [controller, open]));
+  // Identity promotion moves notification suppression without blurring the
+  // stable controller (which could otherwise interrupt recording/playback).
+  useFocusEffect(useCallback(() => notificationAttention.focusAgent(effectiveAgentId), [effectiveAgentId]));
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (next) => {
@@ -156,9 +158,9 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const endSession = useCallback(() => {
     setConfirmEnd(false);
     ending.current = true;
-    void voiceRegistry.end(agentId);
+    void voiceRegistry.end(sessionKey);
     router.back();
-  }, [agentId, router]);
+  }, [router, sessionKey]);
 
   const scrollToEnd = useCallback((animated: boolean) => list.current?.scrollToEnd({ animated }), []);
 
@@ -185,7 +187,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         {messages.map((message) => (
           <MessageBubble controller={message.id === newest?.id ? controller : undefined} key={message.id} message={message} />
         ))}
-        <WorkingIndicator agentId={agentId} />
+        <WorkingIndicator agentId={effectiveAgentId} />
       </ScrollView>
 
       <VoiceStatusCard connected={connected} controller={controller} />
