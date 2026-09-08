@@ -164,7 +164,9 @@ export class VoiceController {
     this.paneId = agent.route.paneId;
     this.sessionId = agent.route.sessionId;
     this.options.store.getState().promoteSession(this.sessionKey, agent);
-    this.reregister();
+    // The host transferred a settled registration atomically. Only an old-ID
+    // request still in flight needs one coalesced new-ID follow-up when it settles.
+    if (this.registering) this.registerAgain = true;
   }
 
   // ---- lifecycle ------------------------------------------------------------

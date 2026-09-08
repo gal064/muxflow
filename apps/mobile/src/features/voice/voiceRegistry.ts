@@ -75,7 +75,10 @@ export class VoiceRegistry {
 
   /** End session: host registration cleared, file deleted, controller forgotten. */
   async end(agentIdOrSessionKey: string): Promise<void> {
-    const sessionKey = this.sessionKeyByCurrentAgentId.get(agentIdOrSessionKey) ?? agentIdOrSessionKey;
+    const sessionKey = this.controllersBySessionKey.has(agentIdOrSessionKey)
+      ? agentIdOrSessionKey
+      : this.sessionKeyByCurrentAgentId.get(agentIdOrSessionKey);
+    if (!sessionKey) return;
     const controller = this.controllersBySessionKey.get(sessionKey);
     if (!controller) return;
     this.controllersBySessionKey.delete(sessionKey);

@@ -99,6 +99,10 @@ describe("VoiceRegistry", () => {
     expect(h.registry.open({ agentId: "native", paneId: "%1", sessionId: "$1", ...h.deps })).toBe(controller);
     expect(h.store.getState().sessions.manual).toMatchObject({ agentId: "native" });
     expect(h.store.getState().sessions.native).toBeUndefined();
+    expect(h.connection.of(Operation.VOICE_SESSION).map((request) => request.voice?.agentId)).toEqual(["manual"]);
+
+    h.registry.onConnected();
+    await settle();
     expect(h.connection.of(Operation.VOICE_SESSION).map((request) => request.voice?.agentId)).toEqual(["manual", "native"]);
 
     h.registry.onVoiceEvent(create(HostEventSchema, {
@@ -124,7 +128,7 @@ describe("VoiceRegistry", () => {
     expect(h.logs).toContain("[muxflow] voice identity.promotion.rejected reason=multiple-sessions new=native count=2");
   });
 
-  it("allocates a distinct local key when a retired deterministic id is reused", () => {
+  it("allocates a distinct local key when a retired deterministic id is reused", async () => {
     const h = harness();
     const original = h.registry.open({ agentId: "manual", paneId: "%1", sessionId: "$1", ...h.deps });
     h.registry.promoteAgent(["manual"], agent("native"));
@@ -138,6 +142,12 @@ describe("VoiceRegistry", () => {
     expect(h.registry.get("manual")).toBe(replacement);
     expect(h.store.getState().sessions.manual).toMatchObject({ agentId: "native" });
     expect(h.store.getState().sessions["manual:2"]).toMatchObject({ agentId: "manual", messages: [] });
+
+    await h.registry.end(original.sessionKey);
+    expect(h.registry.get("native")).toBeUndefined();
+    expect(h.registry.get("manual")).toBe(replacement);
+    expect(h.store.getState().sessions.manual).toBeUndefined();
+    expect(h.store.getState().sessions["manual:2"]).toBeDefined();
     h.registry.disposeAll();
     expect(h.store.getState().sessions).toEqual({});
   });

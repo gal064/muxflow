@@ -250,6 +250,7 @@ fn persist_failure_rolls_back_runtime_mutations() {
     fs::write(&blocker, b"not a directory").unwrap();
     let failing = || AgentRuntime {
         state_path: blocker.join("agents.json"),
+        ingest_order: Mutex::new(()),
         state: Mutex::new(baseline_state.clone()),
         wiring: Mutex::new(hooks::WiringCache::default()),
         departure_misses: Mutex::new(BTreeMap::new()),
@@ -509,14 +510,11 @@ fn promotion_sink_observes_persisted_identity_before_stop_reply_sink() {
     }))
     .unwrap();
 
-    let ingested = runtime
-        .ingest_hook_with_context_deferred(&stop, "server-a", Some(&topology))
+    let promoted = runtime
+        .ingest_and_publish_with_context(&stop, "server-a", Some(&topology))
         .unwrap();
-    let promoted = ingested.event.clone();
     let native_id = promoted.agent.as_ref().unwrap().agent_id.clone();
 
-    assert_eq!(*calls.lock().unwrap(), [format!("promotion:{native_id}")]);
-    publish_ingested(&runtime, ingested);
     assert_eq!(promoted.retired_agent_ids, [manual_id]);
     assert_eq!(
         *calls.lock().unwrap(),
@@ -525,6 +523,47 @@ fn promotion_sink_observes_persisted_identity_before_stop_reply_sink() {
             format!("reply:{native_id}")
         ]
     );
+}
+
+#[test]
+fn ingest_order_remains_held_through_identity_promotion() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-promotion-lock-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let runtime = Arc::new(AgentRuntime::isolated_with_sinks(
+        path,
+        Box::new(|_| {}),
+        Box::new(move |_, _| {
+            entered_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+        }),
+    ));
+    let topology = topology("codex");
+    runtime.reconcile_topology(&topology, "server-a").unwrap();
+    let runtime_for_ingest = Arc::clone(&runtime);
+    let ingest = std::thread::spawn(move || {
+        runtime_for_ingest
+            .ingest_and_publish_with_context(
+                &event("promotion-lock", 0, "Stop"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+    });
+
+    entered_rx.recv().unwrap();
+    let promotion_is_ordered = runtime.ingest_order.try_lock().is_err();
+    release_tx.send(()).unwrap();
+    ingest.join().unwrap();
+    assert!(promotion_is_ordered);
 }
 
 #[test]
