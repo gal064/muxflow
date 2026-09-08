@@ -18,6 +18,8 @@ export interface NotificationContext {
   appInForeground: boolean;
   /** `agentWorkspaceName(state, next)` — the caller resolves it from the store. */
   workspaceName: string;
+  /** The canonical task/tab name shown beside this agent's status mark. */
+  agentName: string;
 }
 
 export interface NotificationToPost {
@@ -62,7 +64,7 @@ export function decideAgentNotification(
   return {
     kind: "post",
     event,
-    title: `${context.workspaceName} · ${next.displayName}`,
+    title: `${context.workspaceName} · ${context.agentName}`,
     body: event === "blocked" ? "Needs your input" : "Finished",
     tag: next.id,
     data: {

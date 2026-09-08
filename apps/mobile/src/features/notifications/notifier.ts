@@ -9,6 +9,7 @@
 import { decideAgentNotification, type NotificationEvent } from "./decide";
 import type { NotificationHost } from "./host";
 import { encodePayload } from "./payload";
+import { agentTitle } from "../agents/agentViews";
 import { agentWorkspaceName, needsAttention } from "../../store/selectors";
 import type { Agent, AgentTransition, SessionState } from "../../store/sessionStore";
 
@@ -135,6 +136,7 @@ export function createAgentNotifier(deps: AgentNotifierDeps): AgentNotifier {
       viewedAgentId: deps.viewedAgentId(),
       appInForeground: deps.appInForeground(),
       workspaceName: agentWorkspaceName(state, transition.next),
+      agentName: agentTitle(state, transition.next),
     });
     if (decision.kind === "skip") {
       log(`skip agent=${transition.next.id} reason=${decision.reason}`);
