@@ -11,7 +11,7 @@ import { newOperationId, terminalInput, voiceProvision, voiceSession, voiceSpeak
 import { utf8Encode } from "../terminal/bytes";
 import { CR } from "../terminal/chips";
 import { SUBMIT_DELAY_MS } from "../terminal/TerminalController";
-import type { AgentLifecycle } from "../../store/sessionStore";
+import type { Agent, AgentLifecycle } from "../../store/sessionStore";
 import { RECORDING_MIME, type PlayerStatus, type VoiceFiles, type VoicePlayer, type VoiceRecorder } from "./audioPorts";
 import type { VoiceHaptics } from "./haptics";
 import type { VoiceRecorderCoordinator } from "./recorderCoordinator";
@@ -21,6 +21,8 @@ import { latestReply, type VoiceMessage, type VoiceReadinessState, type VoiceSto
 
 export interface VoiceControllerOptions {
   agentId: string;
+  /** Registry-assigned immutable local identity; defaults to the initial agent id in direct tests. */
+  sessionKey?: string;
   paneId: string;
   sessionId: string;
   store: VoiceStore;
@@ -50,7 +52,7 @@ export interface VoiceControllerOptions {
   /** Gap between the transcript paste and the CR that submits it (`SUBMIT_DELAY_MS`); tests pass 0. */
   submitDelayMs?: number;
   /** Rechecked after transcription and before Enter so a departed agent's shell never receives a submission. */
-  canSubmit?: () => boolean;
+  canSubmit?: (agentId: string) => boolean;
 }
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
@@ -79,7 +81,9 @@ const READINESS_CODES: Record<string, VoiceReadinessState> = {
 };
 
 export class VoiceController {
-  readonly agentId: string;
+  /** Immutable key for local messages, audio ownership, and controller state. */
+  readonly sessionKey: string;
+  private currentAgentId: string;
   private paneId: string;
   private sessionId: string;
   private focused = false;
@@ -118,7 +122,8 @@ export class VoiceController {
   private workingAckedFor: string | undefined;
 
   constructor(private readonly options: VoiceControllerOptions) {
-    this.agentId = options.agentId;
+    this.sessionKey = options.sessionKey ?? options.agentId;
+    this.currentAgentId = options.agentId;
     this.paneId = options.paneId;
     this.sessionId = options.sessionId;
     this.now = options.now ?? Date.now;
@@ -127,12 +132,17 @@ export class VoiceController {
     this.submitDelayMs = options.submitDelayMs ?? SUBMIT_DELAY_MS;
     this.playbackRate = options.playbackRate ?? 1;
     this.autoPlay = options.autoPlay ?? true;
-    options.store.getState().ensureSession(options.agentId, options.paneId, options.sessionId, this.now());
+    options.store.getState().ensureSession(this.sessionKey, options.paneId, options.sessionId, this.now(), options.agentId);
     this.unsubscribePlayer = options.player.onStatus((status) => this.onPlayerStatus(status));
   }
 
   get isDisposed(): boolean {
     return this.disposed;
+  }
+
+  /** Current authoritative host identity used by every remote operation. */
+  get agentId(): string {
+    return this.currentAgentId;
   }
 
   get target(): { paneId: string; sessionId: string } {
@@ -144,7 +154,19 @@ export class VoiceController {
     if (this.disposed || (paneId === this.paneId && sessionId === this.sessionId)) return;
     this.paneId = paneId;
     this.sessionId = sessionId;
-    this.options.store.getState().ensureSession(this.agentId, paneId, sessionId, this.now());
+    this.options.store.getState().ensureSession(this.sessionKey, paneId, sessionId, this.now());
+  }
+
+  /** Follow one authoritative same-pane identity promotion in place. */
+  promoteAgent(agent: Agent): void {
+    if (this.disposed) return;
+    this.currentAgentId = agent.id;
+    this.paneId = agent.route.paneId;
+    this.sessionId = agent.route.sessionId;
+    this.options.store.getState().promoteSession(this.sessionKey, agent);
+    // The host transferred a settled registration atomically. Only an old-ID
+    // request still in flight needs one coalesced new-ID follow-up when it settles.
+    if (this.registering) this.registerAgain = true;
   }
 
   // ---- lifecycle ------------------------------------------------------------
@@ -231,9 +253,9 @@ export class VoiceController {
       store.setPlayback(undefined);
     }
     this.loadedMessageId = undefined;
-    const reply = latestReply(store.sessions[this.agentId]);
+    const reply = latestReply(store.sessions[this.sessionKey]);
     if (reply?.fileUri) this.options.files.delete(reply.fileUri);
-    store.removeSession(this.agentId);
+    store.removeSession(this.sessionKey);
   }
 
   // ---- host readiness ---------------------------------------------------------
@@ -288,13 +310,13 @@ export class VoiceController {
   beginUtterance(): void {
     if (this.disposed) return;
     const store = this.options.store.getState();
-    if (store.sessions[this.agentId]?.phase !== "idle" || store.recorderError) return;
+    if (store.sessions[this.sessionKey]?.phase !== "idle" || store.recorderError) return;
     // Whatever is playing, this session's reply or another's, yields to the voice.
     if (store.playback?.state === "playing") {
       this.options.player.stop();
       store.setPlayback({ ...store.playback, state: "stopped", positionMs: 0 });
     }
-    store.setPhase(this.agentId, "recording");
+    store.setPhase(this.sessionKey, "recording");
     this.setListening(true);
     this.log(`utterance.begin recorder=${this.recorderState()}`);
     // A press that lands while the recorder is still re-arming after the
@@ -328,7 +350,7 @@ export class VoiceController {
   /** A left swipe detaches the recording from the finger that started it. */
   lockUtterance(): void {
     if (this.recordingPhase() !== "recording") return;
-    this.options.store.getState().setPhase(this.agentId, "recordingLocked");
+    this.options.store.getState().setPhase(this.sessionKey, "recordingLocked");
     this.log("utterance.locked");
   }
 
@@ -336,7 +358,7 @@ export class VoiceController {
   async cancelUtterance(): Promise<void> {
     if (this.canceling) return this.canceling;
     if (this.recordingPhase() === undefined) return;
-    this.options.store.getState().setPhase(this.agentId, "canceling");
+    this.options.store.getState().setPhase(this.sessionKey, "canceling");
     this.log("utterance.canceled");
     const { recorder, files } = this.options;
     this.canceling = this.options.recorderCoordinator.teardown(this.recorderOwner, async () => {
@@ -365,7 +387,7 @@ export class VoiceController {
     if (this.disposed) return;
     const store = this.options.store.getState();
     if (this.recordingPhase() === undefined) return;
-    store.setPhase(this.agentId, "transcribing");
+    store.setPhase(this.sessionKey, "transcribing");
     const { recorder, files } = this.options;
     // The press may still be waiting for the recorder (see beginUtterance).
     await (this.arming ?? Promise.resolve()).catch(() => undefined);
@@ -443,15 +465,15 @@ export class VoiceController {
       this.setPhaseIfAlive("idle");
       return;
     }
-    if (this.options.canSubmit?.() === false) {
+    if (this.options.canSubmit?.(this.agentId) === false) {
       this.log("utterance.discarded agent-departed");
       this.setPhaseIfAlive("idle");
       return;
     }
     const live = this.options.store.getState();
-    live.setPhase(this.agentId, "sending");
+    live.setPhase(this.sessionKey, "sending");
     const outgoing = this.message("you", text);
-    live.appendMessage(this.agentId, outgoing);
+    live.appendMessage(this.sessionKey, outgoing);
     try {
       const connection = this.liveConnection();
       if (!connection) throw new Error("Not connected.");
@@ -463,7 +485,7 @@ export class VoiceController {
       const body = utf8Encode(text);
       await connection.request(terminalInput(this.paneId, body, { paste: true, agentId: this.agentId }));
       if (this.submitDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, this.submitDelayMs));
-      if (this.disposed || this.options.canSubmit?.() === false) {
+      if (this.disposed || this.options.canSubmit?.(this.agentId) === false) {
         this.log("input.submit.skipped agent-departed");
         this.setPhaseIfAlive("idle");
         return;
@@ -491,7 +513,7 @@ export class VoiceController {
     const previous = this.lastLifecycle;
     this.lastLifecycle = lifecycle;
     if (this.disposed || lifecycle !== "working" || previous === undefined || previous === "working") return;
-    const last = this.options.store.getState().sessions[this.agentId]?.messages.at(-1);
+    const last = this.options.store.getState().sessions[this.sessionKey]?.messages.at(-1);
     if (!last || last.kind !== "you" || this.workingAckedFor === last.id) return;
     this.workingAckedFor = last.id;
     this.log(`working.ack message=${last.id}`);
@@ -514,7 +536,7 @@ export class VoiceController {
     }
     this.lastReplyGeneration = speech.stateGeneration;
     const store = this.options.store.getState();
-    const previous = latestReply(store.sessions[this.agentId]);
+    const previous = latestReply(store.sessions[this.sessionKey]);
     if (previous?.fileUri) {
       // The shared player is stopped only if it still holds *this* reply; another
       // session may have taken it since (`loadedMessageId` alone would be stale).
@@ -541,7 +563,7 @@ export class VoiceController {
     } else {
       message.audioError = failureDetail || "The host couldn't synthesize this reply.";
     }
-    store.appendReply(this.agentId, message);
+    store.appendReply(this.sessionKey, message);
     this.log(`reply message=${message.id} stateGeneration=${speech.stateGeneration} audioBytes=${speech.audio.byteLength} markdownChars=${speech.displayMarkdown.length} speechChars=${speech.speechText.length} truncated=${speech.truncated} audioError=${message.audioError !== undefined}`);
     this.playUnplayedIfListening();
   }
@@ -552,7 +574,7 @@ export class VoiceController {
     if (!connection) return;
     const message = this.find(messageId);
     // Only the newest reply may hold the session's one file (§1).
-    if (!message || message.kind !== "agent" || latestReply(this.options.store.getState().sessions[this.agentId])?.id !== messageId) return;
+    if (!message || message.kind !== "agent" || latestReply(this.options.store.getState().sessions[this.sessionKey])?.id !== messageId) return;
     const operationId = newOperationId();
     this.log(`speak.request operation=${operationId} message=${messageId}`);
     try {
@@ -561,7 +583,7 @@ export class VoiceController {
       const speech = response.voice?.speech;
       if (!speech || speech.audio.byteLength === 0) throw new Error("The host returned no audio.");
       const uri = this.options.files.writeReply(this.agentId, speech.audio);
-      this.options.store.getState().setMessageAudio(this.agentId, messageId, uri);
+      this.options.store.getState().setMessageAudio(this.sessionKey, messageId, uri);
       this.log(`speak.retry ${speech.audio.byteLength} bytes`);
       this.play(messageId);
     } catch (error) {
@@ -586,7 +608,7 @@ export class VoiceController {
       store.setPlayback({ ...current, state: "playing" });
     }
     this.options.player.play();
-    store.markPlayed(this.agentId, messageId);
+    store.markPlayed(this.sessionKey, messageId);
     this.log(`play message=${messageId}`);
   }
 
@@ -658,7 +680,7 @@ export class VoiceController {
     if (this.disposed || !this.focused || !this.options.appInForeground() || this.options.recorderCoordinator.isListening) return;
     if (!this.autoPlay) return;
     const store = this.options.store.getState();
-    const reply = latestReply(store.sessions[this.agentId]);
+    const reply = latestReply(store.sessions[this.sessionKey]);
     if (reply && !reply.played && reply.fileUri && reply.id !== this.autoPlaySuppressedMessageId) this.play(reply.id);
   }
 
@@ -688,7 +710,7 @@ export class VoiceController {
     }
     void this.options.recorderCoordinator.release(this.recorderOwner, () => {
       if (this.focused) return false;
-      const phase = this.options.store.getState().sessions[this.agentId]?.phase;
+      const phase = this.options.store.getState().sessions[this.sessionKey]?.phase;
       return phase === undefined || phase === "idle";
     }, () => recorder.release());
   }
@@ -734,7 +756,7 @@ export class VoiceController {
   }
 
   private recordingPhase(): "recording" | "recordingLocked" | undefined {
-    const phase = this.options.store.getState().sessions[this.agentId]?.phase;
+    const phase = this.options.store.getState().sessions[this.sessionKey]?.phase;
     return phase === "recording" || phase === "recordingLocked" ? phase : undefined;
   }
 
@@ -747,11 +769,17 @@ export class VoiceController {
       return;
     }
     this.registering = true;
+    const registeredAgentId = this.agentId;
     try {
-      await connection.request(voiceSession(this.agentId));
+      await connection.request(voiceSession(registeredAgentId));
       if (this.disposed) return;
       this.everRegistered = true;
-      this.log("session.registered");
+      if (registeredAgentId !== this.agentId) {
+        this.registerAgain = true;
+        this.log(`session.registration.superseded registered=${registeredAgentId}`);
+      } else {
+        this.log("session.registered");
+      }
       this.refreshTimer ??= setInterval(() => void this.registerSession(), this.sessionRefreshMs);
       // The host just answered on this lane, so a status probe that never
       // settled (or was skipped) is not the host's fault: ask once more rather
@@ -800,19 +828,19 @@ export class VoiceController {
 
   private setPhaseIfAlive(phase: "idle"): void {
     if (this.disposed) return;
-    this.options.store.getState().setPhase(this.agentId, phase);
+    this.options.store.getState().setPhase(this.sessionKey, phase);
     // The screen may have been left while the host was transcribing: the recorder re-armed then is nobody's now.
     if (!this.focused) this.disarm();
   }
 
   private find(messageId: string): VoiceMessage | undefined {
-    return this.options.store.getState().sessions[this.agentId]?.messages.find((message) => message.id === messageId);
+    return this.options.store.getState().sessions[this.sessionKey]?.messages.find((message) => message.id === messageId);
   }
 
   private message(kind: VoiceMessage["kind"], text: string, overrides: Partial<VoiceMessage> = {}): VoiceMessage {
     this.messageCounter += 1;
     return {
-      id: `${this.agentId}:${this.now()}:${this.messageCounter}`,
+      id: `${this.sessionKey}:${this.now()}:${this.messageCounter}`,
       kind,
       displayText: text,
       speechText: text,

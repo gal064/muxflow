@@ -43,6 +43,8 @@ type TerminalWorkspaceSurfaceProps = {
   handleInput(paneId: string, input: TerminalInput): void;
   /** A physical key was pressed in a pane, which no `handleInput` can tell. */
   handleKeyActivity(paneId: string): void;
+  /** The user pressed inside a pane, including one that was already focused. */
+  handlePointerActivity(paneId: string): void;
   /** A terminal reported what it turns pixels into. */
   onMeasurements(measurements: TerminalMeasurements): void;
   onOpenFilePath(paneId: string, path: string): void;
@@ -88,6 +90,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         onFocus={(paneId) => { if (paneId !== activePane?.id) props.focusPane(pane); }}
         onInput={props.handleInput}
         onKeyActivity={props.handleKeyActivity}
+        onPointerActivity={props.handlePointerActivity}
         onMeasurements={props.onMeasurements}
         onOpenFilePath={props.onOpenFilePath}
         onPaintSample={props.onPaintSample}

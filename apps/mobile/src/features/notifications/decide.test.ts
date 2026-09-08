@@ -6,6 +6,7 @@ function agent(overrides: Partial<Agent> = {}): Agent {
   return {
     id: "a1",
     adapterId: "claude-code",
+    nativeSessionId: "",
     displayName: "Claude",
     lifecycle: "working",
     attentionKind: "",

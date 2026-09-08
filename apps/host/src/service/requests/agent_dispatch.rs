@@ -78,8 +78,7 @@ fn handle_inner(
                     .context("normalized hook envelope is required")?,
             ) {
                 Ok(event) => {
-                    response.agent = event.agent.clone();
-                    publish(event);
+                    response.agent = event.agent;
                 }
                 Err(failure) => {
                     let disposition = failure.disposition();

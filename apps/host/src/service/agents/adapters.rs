@@ -5,6 +5,10 @@ use tmux_agent_protocol::v1;
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
 pub(crate) const CODEX_APPROVAL_REVIEWER_FIELD: &str = "approval_reviewer";
 pub(crate) const CODEX_APPROVAL_TURN_ID_FIELD: &str = "approval_turn_id";
+/// Private, transient locator used only between a live hook and daemon. It is
+/// removed before an undelivered event enters the durable fallback mailbox.
+pub(crate) const CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD: &str = "approval_transcript_path";
+pub(crate) const CODEX_SUBAGENT_ID_FIELD: &str = "agent_id";
 pub(crate) const CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: &str = "has_running_subagent";
 /// The agent's final message, forwarded on `Stop` by both adapters for voice
 /// mode (docs/mobile/voice-mode-plan.md §4.5). Consumed by ingest and handed
@@ -16,7 +20,7 @@ pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed *event set* changes, not only the command
 /// string: an install from an older version covers fewer events, and reporting
 /// it as current would leave a transition that can never arrive.
-pub(crate) const MANAGED_VERSION: u32 = 3;
+pub(crate) const MANAGED_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedHook {
@@ -127,13 +131,14 @@ impl AgentAdapter for CodexAdapter {
     /// Two events Claude Code has are absent from that surface and are
     /// therefore gaps rather than omissions: there is no `StopFailure`, so a
     /// turn that ends in failure is indistinguishable from one that succeeds,
-    /// and there is no `Notification`. `UserPromptSubmit` captures the turn's
-    /// normalized reviewer before work starts; an unclassified or mismatched
-    /// `PermissionRequest` and `PreToolUse(request_user_input)` are the two
-    /// observed signals that a Codex agent is blocked. `SubagentStart` is
-    /// deliberately not taken: it
-    /// says nothing `PreToolUse` has not already said, and every hook costs a
-    /// daemon connection.
+    /// and there is no `Notification`. `UserPromptSubmit` seeds the turn's
+    /// positive auto-review cache before work starts; `PermissionRequest`
+    /// revalidates a cache miss. A request still unclassified or explicitly
+    /// user-reviewed and `PreToolUse(request_user_input)` are the two observed
+    /// signals that a Codex agent is blocked. Codex's parent `Stop` does not
+    /// report its live children, so `SubagentStart` and `SubagentStop` provide
+    /// the opaque IDs needed to keep an unwaited parent working until its last
+    /// child finishes.
     fn hook_events(&self) -> &'static [&'static str] {
         &[
             "SessionStart",
@@ -141,6 +146,7 @@ impl AgentAdapter for CodexAdapter {
             "PreToolUse",
             "PermissionRequest",
             "PostToolUse",
+            "SubagentStart",
             "SubagentStop",
             "Stop",
         ]
@@ -164,6 +170,15 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str> {
+        let event = hook_event_name(payload)?;
+        if matches!(event, "SubagentStart" | "SubagentStop")
+            && payload
+                .get(CODEX_SUBAGENT_ID_FIELD)
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        {
+            return Err("Codex subagent hook missing agent ID");
+        }
         let pre_tool_lifecycle =
             if payload.get("tool_name").and_then(Value::as_str) == Some("request_user_input") {
                 v1::AgentLifecycleState::Blocked
@@ -173,12 +188,13 @@ impl AgentAdapter for CodexAdapter {
         parse_common_hook(
             payload,
             &[
-                // Ingest may promote this to Working only when the request's
-                // turn matches the reviewer captured at UserPromptSubmit.
+                // Ingest may promote this to Working when the request's turn
+                // matches the positive cache or its own reviewer is auto-review.
                 ("PermissionRequest", v1::AgentLifecycleState::Blocked),
                 ("UserPromptSubmit", v1::AgentLifecycleState::Working),
                 ("PreToolUse", pre_tool_lifecycle),
                 ("PostToolUse", v1::AgentLifecycleState::Working),
+                ("SubagentStart", v1::AgentLifecycleState::Working),
                 // A subagent finishing says the parent is still mid-turn.
                 ("SubagentStop", v1::AgentLifecycleState::Working),
                 ("Stop", v1::AgentLifecycleState::Idle),
@@ -498,6 +514,28 @@ mod tests {
     }
 
     #[test]
+    fn codex_subagent_events_require_their_stable_id() {
+        let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
+        for event_name in ["SubagentStart", "SubagentStop"] {
+            assert!(
+                codex
+                    .parse_hook(&serde_json::json!({"hook_event_name": event_name}))
+                    .is_err()
+            );
+            assert_eq!(
+                codex
+                    .parse_hook(&serde_json::json!({
+                        "hook_event_name": event_name,
+                        "agent_id": "agent-1",
+                    }))
+                    .unwrap()
+                    .lifecycle,
+                v1::AgentLifecycleState::Working
+            );
+        }
+    }
+
+    #[test]
     fn registry_owns_descriptors_manifests_paths_and_commands() {
         let home = Path::new("/fixture/home");
         let observed: Vec<super::super::hooks::ObservedAdapter> = all()
@@ -518,11 +556,11 @@ mod tests {
         assert_eq!(descriptors.len(), 2);
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
-        assert_eq!(codex.hook_events().len(), 7);
+        assert_eq!(codex.hook_events().len(), 8);
         assert_eq!(codex.descriptor(home, &observed[0].1).id, "codex");
         assert_eq!(
             codex.hook_command(Path::new("/opt/muxflow-host")),
-            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 3"
+            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 4"
         );
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         assert!(claude.hook_events().contains(&"Notification"));

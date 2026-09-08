@@ -15,14 +15,14 @@ use serde_json::Value;
 const MAX_TRANSCRIPT_TAIL_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ApprovalReviewer {
+pub(crate) enum ApprovalReviewer {
     AutoReview,
     User,
     Unknown,
 }
 
 impl ApprovalReviewer {
-    pub(super) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::AutoReview => "auto_review",
             Self::User => "user",
@@ -39,7 +39,7 @@ impl ApprovalReviewer {
 /// later permission request fails closed rather than hiding a real approval
 /// from the user. A matched context with an unknown reviewer remains explicit
 /// so it clears an earlier cached auto-review result.
-pub(super) fn approval_reviewer(payload: &Value, home: &Path) -> Option<ApprovalReviewer> {
+pub(crate) fn approval_reviewer(payload: &Value, home: &Path) -> Option<ApprovalReviewer> {
     let turn_id = string_field(payload, &["turn_id", "turnId"])?;
     let supplied_path = Path::new(string_field(
         payload,

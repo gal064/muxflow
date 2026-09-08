@@ -10,6 +10,12 @@ pub(super) const MAX_HOOK_BYTES: usize = 256 * 1024;
 const MAX_DEDUPE_IDS: usize = 512;
 
 pub(crate) type HookIngestResult = Result<v1::AgentEvent, HookIngestFailure>;
+type DeferredHookIngestResult = Result<IngestedHook, HookIngestFailure>;
+
+struct IngestedHook {
+    event: v1::AgentEvent,
+    reply: Option<crate::service::voice::AgentReply>,
+}
 
 /// A failed ingest is final only when its variant says so. Callers retain
 /// `Retryable` input; duplicate and permanently malformed input are discarded.
@@ -32,16 +38,8 @@ impl HookIngestFailure {
 impl AgentRuntime {
     /// Older durable input always drains before a newer live hook is accepted.
     pub(crate) fn ingest_live_hook(&self, event: &v1::AgentHookEvent) -> HookIngestResult {
-        self.ingest_after_replay(event, super::ingest_fallbacks)
-    }
-
-    pub(super) fn ingest_after_replay(
-        &self,
-        event: &v1::AgentHookEvent,
-        replay: impl FnOnce() -> anyhow::Result<usize>,
-    ) -> HookIngestResult {
-        replay().map_err(HookIngestFailure::Retryable)?;
-        self.ingest_hook(event)
+        super::ingest_fallbacks().map_err(HookIngestFailure::Retryable)?;
+        self.ingest_and_publish(event)
     }
 
     #[cfg(test)]
@@ -56,22 +54,58 @@ impl AgentRuntime {
         self.ingest_hook_with_context(event, active_server_identity, topology)
     }
 
+    #[cfg(test)]
     pub(crate) fn ingest_hook(&self, event: &v1::AgentHookEvent) -> HookIngestResult {
+        let ingested = self.ingest_hook_deferred(event)?;
+        self.dispatch_reply(ingested.reply);
+        Ok(ingested.event)
+    }
+
+    #[cfg(test)]
+    fn ingest_hook_deferred(&self, event: &v1::AgentHookEvent) -> DeferredHookIngestResult {
         let identity = server_identity();
         let topology = discover_authoritative()
             .ok()
             .filter(|(_, discovered_identity)| discovered_identity == &identity)
             .map(|(topology, _)| topology);
-        self.ingest_hook_with_context(event, &identity, topology.as_ref())
+        self.try_ingest_hook_with_context(event, &identity, topology.as_ref())
     }
 
+    pub(super) fn ingest_and_publish(&self, event: &v1::AgentHookEvent) -> HookIngestResult {
+        let identity = server_identity();
+        let topology = discover_authoritative()
+            .ok()
+            .filter(|(_, discovered_identity)| discovered_identity == &identity)
+            .map(|(topology, _)| topology);
+        self.ingest_and_publish_with_context(event, &identity, topology.as_ref())
+    }
+
+    #[cfg(test)]
     pub(super) fn ingest_hook_with_context(
         &self,
         event: &v1::AgentHookEvent,
         active_server_identity: &str,
         topology: Option<&tmux_control::TmuxSnapshot>,
     ) -> HookIngestResult {
-        self.try_ingest_hook_with_context(event, active_server_identity, topology)
+        let ingested =
+            self.try_ingest_hook_with_context(event, active_server_identity, topology)?;
+        self.dispatch_reply(ingested.reply);
+        Ok(ingested.event)
+    }
+
+    pub(super) fn ingest_and_publish_with_context(
+        &self,
+        event: &v1::AgentHookEvent,
+        active_server_identity: &str,
+        topology: Option<&tmux_control::TmuxSnapshot>,
+    ) -> HookIngestResult {
+        let _order = self.ingest_order.lock().unwrap();
+        let ingested =
+            self.try_ingest_hook_with_context(event, active_server_identity, topology)?;
+        let event = ingested.event.clone();
+        super::publish(ingested.event);
+        self.dispatch_reply(ingested.reply);
+        Ok(event)
     }
 
     fn try_ingest_hook_with_context(
@@ -79,7 +113,7 @@ impl AgentRuntime {
         event: &v1::AgentHookEvent,
         active_server_identity: &str,
         topology: Option<&tmux_control::TmuxSnapshot>,
-    ) -> Result<v1::AgentEvent, HookIngestFailure> {
+    ) -> DeferredHookIngestResult {
         if event.payload_json.len() > MAX_HOOK_BYTES {
             return Err(HookIngestFailure::Permanent(anyhow::anyhow!(
                 "hook payload exceeds the {MAX_HOOK_BYTES}-byte limit"
@@ -194,6 +228,22 @@ impl AgentRuntime {
                 }
             }
         }
+        let voice_retired_agent_ids: Vec<String> = if native_session_id.is_empty() {
+            Vec::new()
+        } else {
+            [native_record_id.as_ref(), pane_record_id.as_ref()]
+                .into_iter()
+                .flatten()
+                .filter(|old_id| old_id.as_str() != agent_id)
+                .filter(|old_id| {
+                    state
+                        .agents
+                        .get(old_id.as_str())
+                        .is_some_and(|record| record.native_session_id.is_empty())
+                })
+                .cloned()
+                .collect()
+        };
         let mut retired_agent_ids = Vec::new();
         for old_id in [native_record_id, pane_record_id].into_iter().flatten() {
             if old_id != agent_id && state.agents.remove(&old_id).is_some() {
@@ -219,7 +269,7 @@ impl AgentRuntime {
         } else {
             ""
         };
-        let approval_reviewer = if codex_turn_start {
+        let embedded_approval_reviewer = if codex_turn_start || codex_permission {
             payload
                 .get(adapters::CODEX_APPROVAL_REVIEWER_FIELD)
                 .and_then(serde_json::Value::as_str)
@@ -231,9 +281,66 @@ impl AgentRuntime {
             && previous
                 .as_ref()
                 .is_some_and(|record| record.codex_auto_review_turn_id == approval_turn_id);
+        let permission_review = codex_permission.then(|| {
+            classify_permission_review(cached_auto_review, embedded_approval_reviewer, || {
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+                let transcript_path = payload
+                    .get(adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD)
+                    .and_then(serde_json::Value::as_str)?;
+                crate::hook::codex_transcript::approval_reviewer(
+                    &serde_json::json!({
+                        "turn_id": approval_turn_id,
+                        "transcript_path": transcript_path,
+                    }),
+                    &home,
+                )
+            })
+        });
+        let observed_auto_review = permission_review == Some(PermissionReview::ObservedAuto);
         let previous_claude_has_running_subagent = previous
             .as_ref()
             .is_some_and(|record| record.claude_has_running_subagent);
+        let previous_hook_terminal = previous.as_ref().is_some_and(|record| record.hook_terminal);
+        let previous_codex_parent_stopped = previous
+            .as_ref()
+            .is_some_and(|record| record.codex_parent_stopped_for_subagents);
+        let previous_subagent_evidence_observed_at = previous
+            .as_ref()
+            .map_or(0, |record| record.subagent_evidence_observed_at_unix_millis);
+        let mut codex_running_subagent_ids = previous
+            .as_ref()
+            .map(|record| record.codex_running_subagent_ids.clone())
+            .unwrap_or_default();
+        let codex_subagent_id = payload
+            .get(adapters::CODEX_SUBAGENT_ID_FIELD)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let codex_child_event = adapter.id() == "codex" && !codex_subagent_id.is_empty();
+        let codex_child_activity = codex_child_event && parsed.event_name != "SubagentStop";
+        if adapter.id() == "codex"
+            && (!previous_hook_terminal
+                || parsed.event_name == "SessionStart"
+                || codex_turn_start
+                || codex_child_activity)
+        {
+            match parsed.event_name.as_str() {
+                "SessionStart" => codex_running_subagent_ids.clear(),
+                "SubagentStop" => {
+                    codex_running_subagent_ids.remove(codex_subagent_id);
+                }
+                _ if codex_child_activity => {
+                    codex_running_subagent_ids.insert(codex_subagent_id.to_owned());
+                }
+                _ => {}
+            }
+        }
+        let codex_parent_stop_during_subagents = adapter.id() == "codex"
+            && parsed.event_name == "Stop"
+            && !codex_running_subagent_ids.is_empty();
+        let codex_final_unwaited_subagent_stop = adapter.id() == "codex"
+            && parsed.event_name == "SubagentStop"
+            && previous_codex_parent_stopped
+            && codex_running_subagent_ids.is_empty();
         let claude_idle_prompt_during_subagent = adapter.id() == "claude-code"
             && previous_claude_has_running_subagent
             && previous_lifecycle != v1::AgentLifecycleState::Blocked
@@ -242,16 +349,35 @@ impl AgentRuntime {
                 .get("notification_type")
                 .and_then(serde_json::Value::as_str)
                 == Some("idle_prompt");
-        let parsed_lifecycle = if cached_auto_review || claude_idle_prompt_during_subagent {
+        let subagent_bookkeeping_during_block = previous_lifecycle
+            == v1::AgentLifecycleState::Blocked
+            && (codex_child_event
+                || adapter.id() == "claude-code" && parsed.event_name == "SubagentStop"
+                || codex_parent_stop_during_subagents
+                || adapter.id() == "claude-code"
+                    && parsed.event_name == "Stop"
+                    && parsed.lifecycle == v1::AgentLifecycleState::Working);
+        let parsed_lifecycle = if codex_final_unwaited_subagent_stop {
+            v1::AgentLifecycleState::Idle
+        } else if subagent_bookkeeping_during_block {
+            v1::AgentLifecycleState::Blocked
+        } else if codex_parent_stop_during_subagents
+            || matches!(
+                permission_review,
+                Some(PermissionReview::CachedAuto | PermissionReview::ObservedAuto)
+            )
+            || claude_idle_prompt_during_subagent
+        {
             v1::AgentLifecycleState::Working
         } else {
             parsed.lifecycle
         };
-        let terminal_late = previous.as_ref().is_some_and(|record| record.hook_terminal)
+        let terminal_late = previous_hook_terminal
             && !matches!(
                 parsed.event_name.as_str(),
                 "SessionStart" | "UserPromptSubmit"
-            );
+            )
+            && !codex_child_activity;
         let lifecycle = if terminal_late {
             // `hook_terminal` means a terminal Stop was already committed.
             // A late tool/subagent event cannot revive that turn, and an
@@ -270,14 +396,16 @@ impl AgentRuntime {
         let hook_terminal = if matches!(
             parsed.event_name.as_str(),
             "SessionStart" | "UserPromptSubmit"
-        ) {
+        ) || codex_child_activity
+        {
             false
-        } else if matches!(parsed.event_name.as_str(), "Stop" | "StopFailure")
-            && parsed.lifecycle == v1::AgentLifecycleState::Idle
+        } else if codex_final_unwaited_subagent_stop
+            || matches!(parsed.event_name.as_str(), "Stop" | "StopFailure")
+                && parsed_lifecycle == v1::AgentLifecycleState::Idle
         {
             true
         } else {
-            previous.as_ref().is_some_and(|record| record.hook_terminal)
+            previous_hook_terminal
         };
         let attention_transition = lifecycle == v1::AgentLifecycleState::Blocked
             && previous_lifecycle != v1::AgentLifecycleState::Blocked
@@ -322,8 +450,10 @@ impl AgentRuntime {
         } else {
             latest_sequence
         };
-        let codex_auto_review_turn_id = if codex_turn_start {
-            if approval_reviewer == Some("auto_review") && !approval_turn_id.is_empty() {
+        let codex_auto_review_turn_id = if codex_turn_start || observed_auto_review {
+            if (embedded_approval_reviewer == Some("auto_review") || observed_auto_review)
+                && !approval_turn_id.is_empty()
+            {
                 approval_turn_id.to_owned()
             } else {
                 String::new()
@@ -349,6 +479,42 @@ impl AgentRuntime {
             false
         } else {
             previous_claude_has_running_subagent
+        };
+        let codex_parent_stopped_for_subagents = if adapter.id() != "codex" || terminal_late {
+            false
+        } else {
+            match parsed.event_name.as_str() {
+                "SessionStart" => false,
+                "UserPromptSubmit" if !codex_child_event => false,
+                "Stop" => !codex_running_subagent_ids.is_empty(),
+                "SubagentStop" if codex_running_subagent_ids.is_empty() => false,
+                _ if codex_child_activity && previous_hook_terminal => true,
+                _ => previous_codex_parent_stopped,
+            }
+        };
+        if hook_terminal {
+            codex_running_subagent_ids.clear();
+        }
+        let subagent_evidence_observed_at_unix_millis = if hook_terminal {
+            0
+        } else if adapter.id() == "codex" {
+            if codex_running_subagent_ids.is_empty() {
+                0
+            } else if codex_child_event {
+                observed_now
+            } else {
+                previous_subagent_evidence_observed_at
+            }
+        } else if adapter.id() == "claude-code" {
+            if !claude_has_running_subagent {
+                0
+            } else if parsed.event_name == "Stop" && !terminal_late {
+                observed_now
+            } else {
+                previous_subagent_evidence_observed_at
+            }
+        } else {
+            0
         };
         let record = StoredAgent {
             agent_id: agent_id.clone(),
@@ -383,6 +549,9 @@ impl AgentRuntime {
             present: true,
             hook_terminal,
             claude_has_running_subagent,
+            codex_running_subagent_ids,
+            codex_parent_stopped_for_subagents,
+            subagent_evidence_observed_at_unix_millis,
             codex_auto_review_turn_id,
             lifecycle_observed_at_unix_millis: observed_now,
             lifecycle_changed_at_unix_millis: lifecycle_changed_at,
@@ -393,19 +562,23 @@ impl AgentRuntime {
             return Err(HookIngestFailure::Retryable(error));
         }
         drop(state);
-        // Voice mode (docs/mobile/voice-mode-plan.md §4.5): a `Stop` that ends
-        // the turn hands the final message on, after the state is committed,
-        // and keeps none of it. Claude's Stop while subagents still run leaves
-        // the lifecycle Working and is skipped, so one turn speaks once.
-        if parsed.event_name == "Stop"
-            && lifecycle == v1::AgentLifecycleState::Idle
+        if !voice_retired_agent_ids.is_empty() {
+            (self.identity_promotion_sink)(&voice_retired_agent_ids, &agent_id);
+        }
+        // Voice mode (docs/mobile/voice-mode-plan.md §4.5): Claude produces a
+        // final aggregate Stop after its background children, so its
+        // intermediate Stop is skipped. Codex does not produce another parent
+        // Stop when an unwaited child finishes; speaking its one parent reply
+        // here preserves the existing voice behavior without storing content.
+        let reply = if parsed.event_name == "Stop"
+            && (lifecycle == v1::AgentLifecycleState::Idle || adapter.id() == "codex")
             && let Some(text) = payload
                 .get(adapters::LAST_ASSISTANT_MESSAGE_FIELD)
                 .and_then(serde_json::Value::as_str)
                 .filter(|text| !text.trim().is_empty())
         {
-            (self.reply_sink)(crate::service::voice::AgentReply {
-                agent_id,
+            Some(crate::service::voice::AgentReply {
+                agent_id: agent_id.clone(),
                 text: text.to_owned(),
                 truncated: payload
                     .get(adapters::LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD)
@@ -413,8 +586,10 @@ impl AgentRuntime {
                     == Some(true),
                 state_generation: generation,
                 occurred_at_unix_millis: occurred_at,
-            });
-        }
+            })
+        } else {
+            None
+        };
         let reason = if lifecycle == v1::AgentLifecycleState::Blocked {
             "blocked"
         } else if previous_lifecycle == v1::AgentLifecycleState::Working
@@ -424,12 +599,81 @@ impl AgentRuntime {
         } else {
             "state_changed"
         };
-        Ok(v1::AgentEvent {
-            agent: Some(snapshot::record(&record)),
-            generation,
-            notify: attention_transition,
-            reason: reason.into(),
-            retired_agent_ids,
+        Ok(IngestedHook {
+            event: v1::AgentEvent {
+                agent: Some(snapshot::record(&record)),
+                generation,
+                notify: attention_transition,
+                reason: reason.into(),
+                retired_agent_ids,
+            },
+            reply,
         })
+    }
+
+    pub(super) fn dispatch_reply(&self, reply: Option<crate::service::voice::AgentReply>) {
+        if let Some(reply) = reply {
+            (self.reply_sink)(reply);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionReview {
+    CachedAuto,
+    ObservedAuto,
+    Blocking,
+}
+
+fn classify_permission_review(
+    cached_auto_review: bool,
+    embedded_reviewer: Option<&str>,
+    revalidate: impl FnOnce() -> Option<crate::hook::codex_transcript::ApprovalReviewer>,
+) -> PermissionReview {
+    if cached_auto_review {
+        return PermissionReview::CachedAuto;
+    }
+    let auto_review = match embedded_reviewer {
+        Some(reviewer) => reviewer == "auto_review",
+        None => revalidate().is_some_and(|reviewer| reviewer.as_str() == "auto_review"),
+    };
+    if auto_review {
+        PermissionReview::ObservedAuto
+    } else {
+        PermissionReview::Blocking
+    }
+}
+
+#[cfg(test)]
+mod permission_review_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn exact_positive_cache_hit_never_runs_revalidation() {
+        let calls = Cell::new(0);
+        let review = classify_permission_review(true, None, || {
+            calls.set(calls.get() + 1);
+            Some(crate::hook::codex_transcript::ApprovalReviewer::User)
+        });
+
+        assert_eq!(review, PermissionReview::CachedAuto);
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn cache_miss_revalidates_once_and_only_positive_results_are_observed_auto() {
+        let calls = Cell::new(0);
+        let auto = classify_permission_review(false, None, || {
+            calls.set(calls.get() + 1);
+            Some(crate::hook::codex_transcript::ApprovalReviewer::AutoReview)
+        });
+        assert_eq!(auto, PermissionReview::ObservedAuto);
+        assert_eq!(calls.get(), 1);
+
+        let user = classify_permission_review(false, None, || {
+            Some(crate::hook::codex_transcript::ApprovalReviewer::User)
+        });
+        assert_eq!(user, PermissionReview::Blocking);
     }
 }

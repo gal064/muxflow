@@ -2,6 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HostError } from "../../protocol/HostConnection";
 import { Operation, ResponseSchema, VoiceReadiness, VoiceResponseSchema, VoiceSpeechSchema, type VoiceSpeech } from "../../protocol/gen/envelope_pb";
+import type { Agent } from "../../store/sessionStore";
 import type { VoiceHaptics } from "./haptics";
 import type { VoiceTones } from "./tones";
 import { VoiceRecorderCoordinator } from "./recorderCoordinator";
@@ -84,6 +85,25 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHold
 
 function reply(agentId: string, displayMarkdown: string, audio: Uint8Array = MP3, generation = 0n, speechText = displayMarkdown): VoiceSpeech {
   return create(VoiceSpeechSchema, { agentId, displayMarkdown, speechText, audio, audioMime: "audio/mpeg", stateGeneration: generation, replyAtUnixMillis: 1_700_000_000_000n });
+}
+
+function promotedAgent(id = "agent-native"): Agent {
+  return {
+    id,
+    adapterId: "codex",
+    nativeSessionId: "native-session",
+    displayName: "Codex",
+    lifecycle: "working",
+    attentionKind: "",
+    stateGeneration: 2n,
+    attentionGeneration: 0n,
+    seenGeneration: 0n,
+    updatedAtMs: 2,
+    lifecycleChangedAtMs: 2,
+    attentionSeenAtMs: 0,
+    present: true,
+    route: { sessionId: "$1", sessionNameFallback: "", windowId: "@1", windowNameFallback: "", paneId: "%3", paneIndexFallback: 0 },
+  };
 }
 
 describe("VoiceController", () => {
@@ -170,6 +190,97 @@ describe("VoiceController", () => {
     expect(h.files.deleted).toContain("file:///cache/voice/agent-a.mp3");
     expect(h.store.getState().sessions["agent-a"]).toBeUndefined();
     expect(h.store.getState().playback).toBeUndefined();
+  });
+
+  it("coalesces an in-flight old-id registration into one promoted-id refresh", async () => {
+    const h = harness();
+    let finishOld!: () => void;
+    let registration = 0;
+    h.connection.answer(Operation.VOICE_SESSION, () => {
+      registration += 1;
+      if (registration > 1) return create(ResponseSchema, { ok: true });
+      return new Promise((resolve) => { finishOld = () => resolve(create(ResponseSchema, { ok: true })); });
+    });
+    h.controller.focus();
+    await settle();
+    expect(h.connection.of(Operation.VOICE_SESSION).map((request) => request.voice?.agentId)).toEqual(["agent-a"]);
+
+    h.controller.promoteAgent(promotedAgent());
+    h.controller.reregister();
+    expect(h.controller.sessionKey).toBe("agent-a");
+    expect(h.controller.agentId).toBe("agent-native");
+    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(1);
+    finishOld();
+    await settle();
+
+    expect(h.connection.of(Operation.VOICE_SESSION).map((request) => request.voice?.agentId)).toEqual(["agent-a", "agent-native"]);
+    expect(h.store.getState().sessions["agent-a"]).toMatchObject({ agentId: "agent-native", paneId: "%3" });
+    expect(h.store.getState().sessions["agent-native"]).toBeUndefined();
+  });
+
+  it("keeps recording and autoplay suppression intact across promotion", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "arrived while listening"));
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recording");
+    expect(h.player.calls).not.toContain("play");
+
+    h.controller.promoteAgent(promotedAgent());
+    expect(h.recorder.recording).toBe(true);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recording");
+    await h.controller.cancelUtterance();
+    h.controller.blur();
+    h.controller.focus();
+    await settle();
+
+    expect(h.player.calls).not.toContain("play");
+    expect(latestReply(h.store.getState().sessions["agent-a"])?.played).toBe(false);
+  });
+
+  it("preserves lifecycle baselining so working is acknowledged once after promotion", () => {
+    const h = harness();
+    h.store.getState().appendMessage(h.controller.sessionKey, {
+      id: "turn-1", kind: "you", displayText: "hello", speechText: "hello", at: 1,
+      truncated: false, fileUri: undefined, audioError: undefined, played: true,
+    });
+    h.controller.onAgentLifecycle("idle");
+    h.controller.promoteAgent(promotedAgent());
+    h.controller.onAgentLifecycle("working");
+    h.controller.onAgentLifecycle("working");
+
+    expect(h.haptics.calls).toEqual(["working"]);
+    expect(h.tones.calls).toEqual(["working"]);
+    expect(h.logs.filter((line) => line.includes("working.ack"))).toHaveLength(1);
+  });
+
+  it("does not replay acknowledged input and uses the promoted id for the next turn", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    await h.controller.endUtterance();
+    await settle();
+    expect(h.connection.of(Operation.TERMINAL_INPUT).map((request) => request.terminalInputAgentId)).toEqual(["agent-a", "agent-a"]);
+
+    h.controller.promoteAgent(promotedAgent());
+    await settle();
+    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(2);
+    h.files.files.set("file:///cache/rec-1.m4a", new TextEncoder().encode("second-aac"));
+    h.controller.beginUtterance();
+    await settle();
+    await settle();
+    expect(h.recorder.recording).toBe(true);
+    await h.controller.endUtterance();
+    await settle();
+
+    expect(h.connection.of(Operation.TERMINAL_INPUT).map((request) => request.terminalInputAgentId)).toEqual([
+      "agent-a", "agent-a", "agent-native", "agent-native",
+    ]);
+    expect(h.store.getState().sessions["agent-a"]?.messages.filter((message) => message.kind === "you")).toHaveLength(2);
   });
 
   it("does not submit a transcript after the agent is confirmed gone", async () => {

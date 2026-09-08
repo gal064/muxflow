@@ -429,6 +429,8 @@ enum TmuxActionKind {
 }
 
 message TmuxAction {
+  reserved 17;
+  reserved "command";
   TmuxActionKind kind = 1;
   string session_id = 2;
   string window_id = 3;
@@ -449,9 +451,6 @@ message TmuxAction {
   // The pin state SET_PINNED writes for session_id, or for window_id inside it
   // when that is set.
   bool pinned = 16;
-  // The shell command a created window starts. Empty starts the user's shell.
-  // This is user-authored command text, not a name or path.
-  string command = 17;
   // NEXT FREE FIELD = 18.
 }
 
