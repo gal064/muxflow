@@ -31,12 +31,15 @@ export interface VoiceHostStatus {
   provision: ProvisionProgress | undefined;
 }
 
-export type VoicePhase = "idle" | "recording" | "transcribing" | "sending";
+export type VoicePhase = "idle" | "recording" | "recordingLocked" | "canceling" | "transcribing" | "sending";
 
 export interface VoiceMessage {
   id: string;
   kind: "you" | "agent";
-  text: string;
+  /** Original reply Markdown (plain transcript text for the user's turn). */
+  displayText: string;
+  /** Flattened, capped text used only for synthesis and replay. */
+  speechText: string;
   /** Epoch ms. */
   at: number;
   /** The host cut the spoken text (the rest of the reply is on screen). */
@@ -72,7 +75,6 @@ export interface VoiceState {
   hostStatus: VoiceHostStatus;
   sessions: Record<string, VoiceSession>;
   playback: Playback | undefined;
-  autoPlay: boolean;
   lastError: string | undefined;
   /** Why the microphone cannot be used on this phone (permission denied); disables the mic with a hint. */
   recorderError: string | undefined;
@@ -99,7 +101,6 @@ export interface VoiceActions {
   setMessageAudio(agentId: string, messageId: string, fileUri: string): void;
   setPlayback(playback: Playback | undefined): void;
   removeSession(agentId: string): void;
-  setAutoPlay(autoPlay: boolean): void;
   setLastError(message: string | undefined): void;
   setRecorderError(message: string | undefined): void;
   /** Another host (or none): what we knew about the previous one no longer applies. */
@@ -118,7 +119,7 @@ export const UNKNOWN_HOST_STATUS: VoiceHostStatus = {
 };
 
 export function initialVoiceState(): VoiceState {
-  return { hostStatus: UNKNOWN_HOST_STATUS, sessions: {}, playback: undefined, autoPlay: true, lastError: undefined, recorderError: undefined };
+  return { hostStatus: UNKNOWN_HOST_STATUS, sessions: {}, playback: undefined, lastError: undefined, recorderError: undefined };
 }
 
 export function createVoiceStore(): VoiceStore {
@@ -214,10 +215,6 @@ export function createVoiceStore(): VoiceStore {
         const playback = get().playback;
         const playingHere = playback && get().sessions[agentId]?.messages.some((message) => message.id === playback.messageId);
         set({ sessions, ...(playingHere ? { playback: undefined } : {}) });
-      },
-
-      setAutoPlay(autoPlay) {
-        set({ autoPlay });
       },
 
       setLastError(message) {

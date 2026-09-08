@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { log } from "./logBuffer";
+import { log } from "../../session/log";
 import { muxflowSsh } from "../../ssh/MuxflowSsh";
 
 export interface SshKeyHandle {

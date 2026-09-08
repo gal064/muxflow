@@ -4,7 +4,7 @@ import { VoiceProvisionProgressSchema, VoiceReadiness, VoiceStatusSchema } from 
 import { awaitingReply, createVoiceStore, hostStatusFromProto, latestReply, provisionFromProto, type VoiceMessage } from "./voiceStore";
 
 function message(id: string, kind: VoiceMessage["kind"], fileUri?: string): VoiceMessage {
-  return { id, kind, text: id, at: 1, truncated: false, fileUri, audioError: undefined, played: kind === "you" };
+  return { id, kind, displayText: id, speechText: id, at: 1, truncated: false, fileUri, audioError: undefined, played: kind === "you" };
 }
 
 describe("voiceStore", () => {

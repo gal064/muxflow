@@ -8,6 +8,7 @@ import { router } from "expo-router";
 import { AppState } from "react-native";
 
 import { createExpoNotificationHost, installForegroundPresentation } from "./expoHost";
+import { notificationAttention } from "./attention";
 import { createAgentNotifier } from "./notifier";
 import type { TapTarget } from "./payload";
 import { createPermissionFlow } from "./permissionFlow";
@@ -24,6 +25,7 @@ export function startNotifications(): void {
   if (started) return;
   started = true;
   const host = createExpoNotificationHost();
+  notificationAttention.setAppActive(AppState.currentState === "active");
   installForegroundPresentation();
   // §13: the channel exists from first launch, whether or not a host is added.
   void host.ensureChannel().catch(reportFailure("channel"));
@@ -34,6 +36,7 @@ export function startNotifications(): void {
     subscribe: (listener) => sessionStore.subscribe(listener),
     onAgentTransition,
     appInForeground: () => AppState.currentState === "active",
+    viewedAgentId: () => notificationAttention.viewedAgentId(),
     // The post-settle wait runs in the background too — a cancel for an agent
     // seen on the desktop must take the notification down without the app
     // being opened — and a JS timer would not (see `backgroundTimer.ts`).
@@ -48,11 +51,11 @@ export function startNotifications(): void {
     // different one, routing the tap would open an unrelated pane; hold the
     // acknowledgement instead and let it flush if that host comes back.
     if (identity && target.serverIdentity && identity !== target.serverIdentity) {
-      log(`notifications: tap ${target.agentId} ignored (other host)`);
+      log(`notifications tap agent=${target.agentId} pane=${target.paneId} outcome=ignored-other-host`);
       markSeen.request(target);
       return;
     }
-    log(`notifications: tap ${target.agentId} pane=${target.paneId}`);
+    log(`notifications tap agent=${target.agentId} pane=${target.paneId} outcome=navigate`);
     openTerminal(target);
     markSeen.request(target);
   });
@@ -60,7 +63,7 @@ export function startNotifications(): void {
   const permission = createPermissionFlow({
     host,
     setPermission: (outcome) => {
-      log(`notifications: permission ${outcome}`);
+      log(`notifications permission=${outcome}`);
       notificationsUiStore.getState().setPermission(outcome);
     },
   });
@@ -75,6 +78,7 @@ export function startNotifications(): void {
     void permission.onConnected().catch(reportFailure("permission"));
   });
   AppState.addEventListener("change", (next) => {
+    notificationAttention.setAppActive(next === "active");
     if (next === "active") void permission.onAppActive().catch(reportFailure("permission"));
   });
 }
@@ -89,10 +93,10 @@ function openTerminal(target: TapTarget): void {
   try {
     router.navigate(terminalRoute(target));
   } catch (error: unknown) {
-    log(`notifications: tap.navigate.failed ${error instanceof Error ? error.message : String(error)}`);
+    log(`notifications tap.navigate.failed ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 function reportFailure(what: string): (error: unknown) => void {
-  return (error) => log(`notifications: ${what}.failed ${error instanceof Error ? error.message : String(error)}`);
+  return (error) => log(`notifications ${what}.failed ${error instanceof Error ? error.message : String(error)}`);
 }
