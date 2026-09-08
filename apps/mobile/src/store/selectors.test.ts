@@ -5,6 +5,7 @@ import type { Agent, SessionState } from "./sessionStore";
 function agent(overrides: Partial<Agent> & { id: string }): Agent {
   return {
     adapterId: "codex",
+    nativeSessionId: "",
     displayName: overrides.id,
     lifecycle: "working",
     attentionKind: "",
