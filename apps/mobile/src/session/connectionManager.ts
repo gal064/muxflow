@@ -111,7 +111,9 @@ export function onToast(listener: (message: string) => void): () => void {
 }
 
 export function toast(message: string): void {
-  log(`toast: ${message}`);
+  // Toast text can be supplied by the connected host. Record the UI action,
+  // not arbitrary remote content that could contain user data or credentials.
+  log(`toast shown chars=${message.length}`);
   for (const listener of toasts) listener(message);
 }
 

@@ -117,7 +117,8 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
                 serde_json::json!({
                     "bytes": speech.audio.len(),
                     "mime": speech.audio_mime,
-                    "text": speech.text,
+                    "displayMarkdown": speech.display_markdown,
+                    "speechText": speech.speech_text,
                     "truncated": speech.truncated,
                     "voice": speech.voice,
                     "out": out,

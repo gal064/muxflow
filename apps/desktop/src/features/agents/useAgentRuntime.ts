@@ -85,6 +85,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
       replayed,
       reconciledSnapshot,
       previouslyNotifiedGeneration: runtimeMemory.current.processedGeneration(key),
+      adapters: stateRef.current.byHost[next.hostProfileId]?.adapters,
     });
     if (decision.kind === "ignore") return;
     runtimeMemory.current.markProcessed(key, next.attentionGeneration);

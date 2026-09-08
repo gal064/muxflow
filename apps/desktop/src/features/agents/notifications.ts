@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import { stripAgentStatusGlyphs } from "./agentLabels";
+import { agentSessionLabel, stripAgentStatusGlyphs } from "./agentLabels";
 import type { AgentClient } from "./api";
 import type {
+  AgentAdapterDescriptor,
   AgentFocus,
   AgentNativeNotification,
   AgentNotificationInstrumentation,
@@ -79,6 +80,7 @@ export interface NotificationTransitionContext {
   previouslyNotifiedGeneration?: AgentGeneration;
   workspaceName?: string;
   windowName?: string;
+  adapters?: readonly AgentAdapterDescriptor[];
   reconciledSnapshot?: boolean;
 }
 
@@ -121,7 +123,11 @@ export function decideAgentNotification(
   // report of the state this notification is already about, and the glyph has
   // no font behind it in a notification body either.
   const terminal = safeNotificationLabel(stripAgentStatusGlyphs(context.windowName ?? next.windowName), "Terminal", 96);
-  const agent = safeNotificationLabel(next.displayName, "Agent", 96);
+  const agent = safeNotificationLabel(
+    agentSessionLabel({ ...next, windowName: context.windowName ?? next.windowName }, context.adapters ?? []),
+    "Agent",
+    96,
+  );
   return {
     kind: "emit",
     instrumentation: { ...base, outcome: "emitted" },

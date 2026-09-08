@@ -155,12 +155,16 @@ describe("openSshTransport", () => {
   });
 
   it("reports the helper's first stderr line for an ordinary non-zero exit", async () => {
-    const { fake, transport, connectionId } = await connected();
+    const logs: string[] = [];
+    const { fake, transport, connectionId } = await connected({ log: (line) => logs.push(line) });
     const closes: TransportClose[] = [];
     transport.onClosed((close) => closes.push(close));
     fake.emit({ type: "stderr", connectionId, text: "muxflow-host: unknown flag\nusage: ...\n" });
     fake.emit({ type: "closed", connectionId, exitCode: 64, reason: "exited" });
     expect(closes[0]?.message).toBe("muxflow-host: unknown flag");
+    expect(logs.some((line) => /^\[muxflow\] ssh\.host\.control\.1 stderr chars=\d+$/.test(line))).toBe(true);
+    expect(logs.join("\n")).not.toContain("unknown flag");
+    expect(logs.join("\n")).not.toContain("usage:");
   });
 
   it("rejects the dial when the channel closes before it is running", async () => {
