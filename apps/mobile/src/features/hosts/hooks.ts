@@ -4,7 +4,7 @@ import { useStore } from "zustand";
 
 import { diagnosticsStore, type DiagnosticsActions, type DiagnosticsState } from "./connectionDiagnostics";
 import { hostKeyStore, type HostKeyActions, type HostKeyState } from "./hostKeyStore";
-import { logStore, type LogActions, type LogState } from "./logBuffer";
+import { logStore, type LogActions, type LogState } from "../../session/log";
 import { hostsStore, type HostsActions, type HostsState } from "../../store/hostsStore";
 import { sessionStore, type SessionActions, type SessionState } from "../../store/sessionStore";
 

@@ -1,5 +1,5 @@
 // Small user preferences (design.md §9.3.1: the Agents tab's list mode;
-// §9.11: the voice screen's playback speed and talk-pane size).
+// §9.11: the voice screen's playback speed, autoplay, wake lock and talk-pane size).
 // Persisted the way the hosts store is — one JSON value under one
 // expo-secure-store key — because that is the only persistence layer the app
 // has; the value is not a secret, the store is simply the one that exists.
@@ -24,8 +24,12 @@ export interface PrefsPersisted {
   agentCommand: string;
   /** How fast voice replies are read back. */
   voicePlaybackRate: VoicePlaybackRate;
+  /** Whether a new voice reply starts playing as soon as it arrives. */
+  voiceAutoPlay: boolean;
   /** The voice screen's talk pane takes most of the window. */
   voiceBigPane: boolean;
+  /** Prevent screen sleep while the focused Voice screen is in the foreground. */
+  voiceKeepAwake: boolean;
 }
 
 export interface PrefsState extends PrefsPersisted {
@@ -39,12 +43,14 @@ export interface PrefsActions {
   setAgentListMode(mode: AgentListMode): void;
   setAgentCommand(command: string): void;
   setVoicePlaybackRate(rate: VoicePlaybackRate): void;
+  setVoiceAutoPlay(autoPlay: boolean): void;
   setVoiceBigPane(big: boolean): void;
+  setVoiceKeepAwake(keepAwake: boolean): void;
 }
 
 export type PrefsStore = StoreApi<PrefsState & PrefsActions>;
 
-export const DEFAULT_PREFS: PrefsPersisted = { agentListMode: "priority", agentCommand: DEFAULT_AGENT_COMMAND, voicePlaybackRate: 1, voiceBigPane: false };
+export const DEFAULT_PREFS: PrefsPersisted = { agentListMode: "priority", agentCommand: DEFAULT_AGENT_COMMAND, voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false };
 
 /** Tolerates anything on disk: an unknown or missing field falls back to its default. */
 export function parsePersistedPrefs(raw: string | null): PrefsPersisted {
@@ -56,7 +62,9 @@ export function parsePersistedPrefs(raw: string | null): PrefsPersisted {
       agentListMode: isAgentListMode(fields.agentListMode) ? fields.agentListMode : DEFAULT_PREFS.agentListMode,
       agentCommand: typeof fields.agentCommand === "string" ? fields.agentCommand : DEFAULT_PREFS.agentCommand,
       voicePlaybackRate: isVoicePlaybackRate(fields.voicePlaybackRate) ? fields.voicePlaybackRate : DEFAULT_PREFS.voicePlaybackRate,
+      voiceAutoPlay: typeof fields.voiceAutoPlay === "boolean" ? fields.voiceAutoPlay : DEFAULT_PREFS.voiceAutoPlay,
       voiceBigPane: typeof fields.voiceBigPane === "boolean" ? fields.voiceBigPane : DEFAULT_PREFS.voiceBigPane,
+      voiceKeepAwake: typeof fields.voiceKeepAwake === "boolean" ? fields.voiceKeepAwake : DEFAULT_PREFS.voiceKeepAwake,
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -69,8 +77,8 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
 
   return createStore<PrefsState & PrefsActions>((set, get) => {
     const persist = (): void => {
-      const { agentListMode, agentCommand, voicePlaybackRate, voiceBigPane } = get();
-      const value = JSON.stringify({ agentListMode, agentCommand, voicePlaybackRate, voiceBigPane } satisfies PrefsPersisted);
+      const { agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake } = get();
+      const value = JSON.stringify({ agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake } satisfies PrefsPersisted);
       writes = writes.then(
         () =>
           storage.setItem(PREFS_STORAGE_KEY, value).catch((error: unknown) => {
@@ -117,9 +125,21 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
         persist();
       },
 
+      setVoiceAutoPlay(autoPlay) {
+        if (get().voiceAutoPlay === autoPlay && get().hydrated) return;
+        set({ voiceAutoPlay: autoPlay, hydrated: true });
+        persist();
+      },
+
       setVoiceBigPane(big) {
         if (get().voiceBigPane === big && get().hydrated) return;
         set({ voiceBigPane: big, hydrated: true });
+        persist();
+      },
+
+      setVoiceKeepAwake(keepAwake) {
+        if (get().voiceKeepAwake === keepAwake && get().hydrated) return;
+        set({ voiceKeepAwake: keepAwake, hydrated: true });
         persist();
       },
     };

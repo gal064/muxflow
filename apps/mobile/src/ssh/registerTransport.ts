@@ -6,7 +6,7 @@
 
 import { diagnosticsStore } from "../features/hosts/connectionDiagnostics";
 import { hostKeyStore } from "../features/hosts/hostKeyStore";
-import { log } from "../features/hosts/logBuffer";
+import { log } from "../session/log";
 import type { Lane as TransportLane } from "../session/connectionManager";
 import { hostLabel, hostsStore, type SavedHost } from "../store/hostsStore";
 import { sessionStore } from "../store/sessionStore";
@@ -53,4 +53,3 @@ export function sshTransportFactory(host: SavedHost, lane: TransportLane, signal
     log,
   });
 }
-

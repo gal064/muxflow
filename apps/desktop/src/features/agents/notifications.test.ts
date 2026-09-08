@@ -53,6 +53,7 @@ describe("agent native notification policy", () => {
     expect(decision.kind).toBe("emit");
     if (decision.kind !== "emit") return;
     expect(decision.notification.body).toContain("· Fix tests ·");
+    expect(decision.notification.title).toBe("Fix tests needs attention");
   });
 
   it("shows unmapped attention explicitly without requesting or reporting a native action", async () => {

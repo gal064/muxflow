@@ -34,6 +34,7 @@ function decodeBase64(b64: string): Uint8Array {
 let term: Terminal | undefined;
 let fit: FitAddon | undefined;
 let lastGrid: Grid | undefined;
+let lastViewport: { width: number; height: number } | undefined;
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 /** Last time the top of the buffer was reported (§7.6.1); one report per 2 s. */
 let lastAtTopMs = 0;
@@ -56,11 +57,15 @@ function measure(force = false): void {
   const grid = proposed && proposed.cols > 0 && proposed.rows > 0
     ? { cols: Math.max(2, proposed.cols), rows: Math.max(1, proposed.rows) }
     : computeGrid({ width: el.clientWidth, height: el.clientHeight }, NOMINAL_CELL);
-  if (!force && sameGrid(grid, lastGrid)) return;
+  const viewport = { width: el.clientWidth, height: el.clientHeight };
+  const gridChanged = !sameGrid(grid, lastGrid);
+  const viewportChanged = viewport.width !== lastViewport?.width || viewport.height !== lastViewport?.height;
+  if (!force && !gridChanged && !viewportChanged) return;
   lastGrid = grid;
+  lastViewport = viewport;
   if (term.cols !== grid.cols || term.rows !== grid.rows) term.resize(grid.cols, grid.rows);
-  const cellWidth = el.clientWidth / grid.cols;
-  const cellHeight = el.clientHeight / grid.rows;
+  const cellWidth = viewport.width / grid.cols;
+  const cellHeight = viewport.height / grid.rows;
   post({ t: "size", cols: grid.cols, rows: grid.rows, cellWidth, cellHeight });
 }
 
@@ -123,16 +128,20 @@ async function init(): Promise<void> {
   const el = root();
   let touchX = 0;
   let touchY = 0;
+  let gestureMode: "normal" | "alternate" = "normal";
+  let gestureRows = 0;
   const touchScroll = new TouchScrollController(
     (rows) => {
       if (!term) return;
       if (term.buffer.active.type === "normal") {
         term.scrollLines(rows);
+        gestureRows += rows;
         return;
       }
       const element = term.element;
       if (!element) return;
       const input: string[] = [];
+      const wheelEvents = Math.min(Math.abs(rows), MAX_ALTERNATE_WHEEL_EVENTS_PER_FRAME);
       capturedWheelInput = input;
       term.options.disableStdin = false;
       try {
@@ -140,7 +149,6 @@ async function init(): Promise<void> {
         // drag distance and fling while letting xterm select the active mouse
         // protocol and encoding. The events are collected into one bridge
         // message for this animation frame.
-        const wheelEvents = Math.min(Math.abs(rows), MAX_ALTERNATE_WHEEL_EVENTS_PER_FRAME);
         for (let row = 0; row < wheelEvents; row += 1) {
           element.dispatchEvent(new WheelEvent("wheel", {
             bubbles: true,
@@ -155,9 +163,16 @@ async function init(): Promise<void> {
         term.options.disableStdin = true;
         capturedWheelInput = undefined;
       }
-      if (input.length > 0) post({ t: "input", b64: btoa(input.join("")) });
+      if (input.length > 0) {
+        post({ t: "input", b64: btoa(input.join("")) });
+        gestureRows += Math.sign(rows) * wheelEvents;
+      }
     },
     { request: (callback) => requestAnimationFrame(callback), cancel: (id) => cancelAnimationFrame(id) },
+    (summary) => {
+      post({ t: "scroll", mode: gestureMode, rows: gestureRows, ...summary });
+      gestureRows = 0;
+    },
   );
   el.addEventListener("touchstart", (event) => {
     const touch = event.touches[0];
@@ -165,6 +180,8 @@ async function init(): Promise<void> {
       touchX = touch.clientX;
       touchY = touch.clientY;
       touchScroll.start(touch.clientY, event.timeStamp);
+      gestureMode = term?.buffer.active.type ?? "normal";
+      gestureRows = 0;
     }
   }, { passive: true });
   el.addEventListener("touchmove", (event) => {
@@ -173,12 +190,16 @@ async function init(): Promise<void> {
     touchX = touch.clientX;
     touchY = touch.clientY;
     const cellHeight = lastGrid ? el.clientHeight / lastGrid.rows : NOMINAL_CELL.height;
-    if (touchScroll.move(touch.clientY, event.timeStamp, cellHeight)) event.preventDefault();
+    if (touchScroll.move(touch.clientY, event.timeStamp, cellHeight)) {
+      event.preventDefault();
+    }
   }, { passive: false });
   el.addEventListener("touchend", (event) => {
     touchScroll.end(event.timeStamp);
   }, { passive: true });
-  el.addEventListener("touchcancel", () => touchScroll.cancel(), { passive: true });
+  el.addEventListener("touchcancel", (event) => {
+    touchScroll.cancel(event.timeStamp);
+  }, { passive: true });
   term.onScroll(() => {
     if (!term || term.buffer.active.type === "alternate") return;
     if (term.buffer.active.viewportY > 0) return;

@@ -12,10 +12,14 @@ use super::snapshot::tmux_command;
 /// needed.
 ///
 /// This is that declaration, reduced to the single thing that produces the
-/// behaviour: when a pane changes its title — which is how Claude Code and
-/// Codex announce what they are working on — the window takes that title.
-/// Nothing cosmetic is included. The status bar, key bindings and colours
-/// remain entirely the user's business.
+/// behaviour: when the first pane changes its title — which is how Claude Code
+/// and Codex announce what they are working on — the window takes that title.
+/// A window has one name but may have several panes, so letting every agent
+/// pane write it makes the tab oscillate between their titles. Tmux's first
+/// pane is the top-left one in layout order; it is unique, follows pane moves,
+/// and is replaced naturally when that pane closes. Nothing cosmetic is
+/// included. The status bar, key bindings and colours remain entirely the
+/// user's business.
 ///
 /// One consequence is worth stating. Every window, the workspace's first one
 /// included, starts with the name tmux gives it and keeps following the command
@@ -25,6 +29,7 @@ use super::snapshot::tmux_command;
 /// either side, is final until the next one.
 const PANE_TITLE_HOOK: &str = "pane-title-changed";
 const AUTOMATIC_RENAME_FORMAT: &str = "automatic-rename-format";
+const TITLE_OWNER_CONDITION: &str = "#{==:#{pane_index},#{pane-base-index}}";
 
 /// The hook, built from the adapter registry so it cannot drift from the set of
 /// agents this app understands.
@@ -41,20 +46,21 @@ fn recommended_hook_command() -> String {
     format!("if -F \"{}\" \"{OWNED_HOOK_BODY}\"", guard_condition())
 }
 
-/// The tmux format that is true exactly for a pane running an agent this app
-/// understands. Built from the registry, so adding an adapter changes it — and
-/// that change is what `AlreadyCurrent` has to be able to notice.
+/// The tmux format that is true exactly for the first pane when it is running
+/// an agent this app understands. Built from the registry, so adding an
+/// adapter changes it — and that change is what `AlreadyCurrent` has to be able
+/// to notice.
 fn guard_condition() -> String {
-    let mut condition = String::new();
+    let mut agent_condition = String::new();
     for adapter in super::agents::adapters::all() {
         let test = format!("#{{==:#{{pane_current_command}},{}}}", adapter.executable());
-        condition = if condition.is_empty() {
+        agent_condition = if agent_condition.is_empty() {
             test
         } else {
-            format!("#{{||:{condition},{test}}}")
+            format!("#{{||:{agent_condition},{test}}}")
         };
     }
-    condition
+    format!("#{{&&:{TITLE_OWNER_CONDITION},{agent_condition}}}")
 }
 
 /// The body that identifies a `pane-title-changed` hook as this app's.
@@ -252,6 +258,10 @@ mod tests {
             );
         }
         assert!(command.starts_with("if -F "), "{command}");
+        assert!(
+            command.contains(TITLE_OWNER_CONDITION),
+            "only the first pane may own the window title: {command}"
+        );
         assert!(command.contains(OWNED_HOOK_BODY));
         assert!(!command.contains("status"), "nothing cosmetic: {command}");
         assert_eq!(NamingOutcome::Applied.label(), "applied");

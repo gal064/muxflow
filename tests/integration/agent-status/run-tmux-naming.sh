@@ -50,10 +50,14 @@ echo "tmux: $(tmux -V)"
 # happens. A shell is used for the negative case below.
 mkdir -p "$work/bin"
 cp "$helper" "$work/bin/claude"
+cp "$helper" "$work/bin/codex"
 tmux -f /dev/null -L "$socket" new-session -d -s ade-phase13 -x 80 -y 24 \
   "$work/bin/claude hook ingest --adapter codex"
+tmux -L "$socket" set-option -wg pane-base-index 1
 sleep 1
 pane=$(tmux -L "$socket" list-panes -t ade-phase13 -F '#{pane_id}' | head -1)
+[[ "$(tmux -L "$socket" display-message -p -t "$pane" '#{pane_index}')" == "1" ]] \
+  || fail "the stock fixture did not take its nondefault pane-base-index"
 before=$(tmux -L "$socket" display-message -p '#{window_name}')
 echo "stock default window name: $before"
 
@@ -74,10 +78,42 @@ named=$(tmux -L "$socket" display-message -p -t "$pane" '#{window_name}')
 echo "window name after the pane announced itself: $named"
 [[ "$named" == "inductive" ]] || fail "window name did not follow the pane title (got '$named')"
 
+# A window has one name even when it has several panes. Only the first pane in
+# layout order owns that name; otherwise two agents independently updating
+# their titles make the tab and every Agents row for it oscillate between the
+# two values. Use a second real agent process and alternate title events to
+# prove that its updates cannot race the owner.
+second_pane=$(tmux -L "$socket" split-window -d -h -t "$pane" -P -F '#{pane_id}' \
+  "$work/bin/codex hook ingest --adapter codex")
+sleep 0.5
+tmux -L "$socket" select-pane -t "$second_pane" -T competing
+sleep 0.5
+named=$(tmux -L "$socket" display-message -p -t "$pane" '#{window_name}')
+[[ "$named" == "inductive" ]] \
+  || fail "a non-owner agent pane replaced the window name (got '$named')"
+
+tmux -L "$socket" select-pane -t "$pane" -T stable-owner
+tmux -L "$socket" select-pane -t "$second_pane" -T competing-again
+sleep 0.5
+named=$(tmux -L "$socket" display-message -p -t "$pane" '#{window_name}')
+[[ "$named" == "stable-owner" ]] \
+  || fail "alternating agent title events moved the window away from its owner (got '$named')"
+echo "multi-pane owner kept the window name stable: $named"
+
+# Closing the owner compacts the pane indexes, so the remaining pane becomes
+# the first one without any sidecar state or cleanup hook.
+tmux -L "$socket" kill-pane -t "$pane"
+tmux -L "$socket" select-pane -t "$second_pane" -T promoted-owner
+sleep 0.5
+named=$(tmux -L "$socket" display-message -p -t "$second_pane" '#{window_name}')
+[[ "$named" == "promoted-owner" ]] \
+  || fail "the surviving pane did not take ownership after the first pane closed (got '$named')"
+echo "surviving pane took ownership: $named"
+
 # And what a plain tmux client would print for that window, since the contract
 # is that the name is right in tmux rather than prettified in the app.
 listed=$(tmux -L "$socket" list-windows -F '#{window_name}')
-[[ "$listed" == *"inductive"* ]] || fail "a plain client does not see the name (got '$listed')"
+[[ "$listed" == *"promoted-owner"* ]] || fail "a plain client does not see the name (got '$listed')"
 echo "plain client sees: $listed"
 
 # A non-agent pane must be left alone. An unscoped hook renamed *every* window

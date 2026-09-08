@@ -1030,13 +1030,14 @@ fn voice_operations_and_payloads_are_append_only() {
             speech: Some(v1::VoiceSpeech {
                 audio: vec![0xff, 0xfb, 0x90, 0x00, 0, 1, 2],
                 audio_mime: "audio/mpeg".into(),
-                text: "Done. The rest of the reply is on screen.".into(),
+                display_markdown: "## Done\n\nMore details follow.".into(),
                 truncated: true,
                 voice: "en-US-AvaNeural".into(),
                 provider: v1::VoiceProvider::EdgeTts.into(),
                 agent_id: "codex:native-7".into(),
                 state_generation: (1_u64 << 53) + 5,
                 reply_at_unix_millis: 1_786_000_000_000,
+                speech_text: "Done. The rest of the reply is on screen.".into(),
             }),
             retryable: true,
         }),
@@ -1085,10 +1086,11 @@ fn voice_operations_and_payloads_are_append_only() {
             reply: Some(v1::VoiceSpeech {
                 audio: vec![0xff, 0xfb, 0x90],
                 audio_mime: "audio/mpeg".into(),
-                text: "Done.".into(),
+                display_markdown: "**Done.**".into(),
                 agent_id: "codex:native-7".into(),
                 state_generation: 9,
                 reply_at_unix_millis: 1_786_000_000_000,
+                speech_text: "Done.".into(),
                 ..Default::default()
             }),
             ..Default::default()
