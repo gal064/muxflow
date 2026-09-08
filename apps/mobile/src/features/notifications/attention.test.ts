@@ -32,4 +32,15 @@ describe("notification attention", () => {
     clearSecond();
     expect(attention.viewedAgentId()).toBeUndefined();
   });
+
+  it("retargets the current focus owner synchronously and leaves other focus untouched", () => {
+    const attention = createNotificationAttention();
+    const clear = attention.focusAgent("manual");
+    attention.promoteAgent("other", "ignored");
+    expect(attention.viewedAgentId()).toBe("manual");
+    attention.promoteAgent("manual", "native");
+    expect(attention.viewedAgentId()).toBe("native");
+    clear();
+    expect(attention.viewedAgentId()).toBeUndefined();
+  });
 });
