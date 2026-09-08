@@ -8,7 +8,7 @@ use tmux_agent_protocol::v1;
 
 use super::super::{
     SequencerControl,
-    agents::{AgentRuntime, HookIngestFailure, HookManager, publish, publish_ingested},
+    agents::{AgentRuntime, HookIngestFailure, HookManager, publish},
     filesystem::validate_root_token,
     snapshot::{server_identity, tmux_command},
 };
@@ -77,9 +77,8 @@ fn handle_inner(
                     .as_ref()
                     .context("normalized hook envelope is required")?,
             ) {
-                Ok(ingested) => {
-                    response.agent = ingested.event.agent.clone();
-                    publish_ingested(&runtime, ingested);
+                Ok(event) => {
+                    response.agent = event.agent;
                 }
                 Err(failure) => {
                     let disposition = failure.disposition();

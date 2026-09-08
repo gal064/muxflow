@@ -9,13 +9,12 @@ use crate::service::snapshot::{discover_authoritative, server_identity};
 pub(super) const MAX_HOOK_BYTES: usize = 256 * 1024;
 const MAX_DEDUPE_IDS: usize = 512;
 
-#[cfg(test)]
 pub(crate) type HookIngestResult = Result<v1::AgentEvent, HookIngestFailure>;
-pub(crate) type DeferredHookIngestResult = Result<IngestedHook, HookIngestFailure>;
+type DeferredHookIngestResult = Result<IngestedHook, HookIngestFailure>;
 
-pub(crate) struct IngestedHook {
-    pub(crate) event: v1::AgentEvent,
-    pub(crate) reply: Option<crate::service::voice::AgentReply>,
+struct IngestedHook {
+    event: v1::AgentEvent,
+    reply: Option<crate::service::voice::AgentReply>,
 }
 
 /// A failed ingest is final only when its variant says so. Callers retain
@@ -38,9 +37,9 @@ impl HookIngestFailure {
 
 impl AgentRuntime {
     /// Older durable input always drains before a newer live hook is accepted.
-    pub(crate) fn ingest_live_hook(&self, event: &v1::AgentHookEvent) -> DeferredHookIngestResult {
+    pub(crate) fn ingest_live_hook(&self, event: &v1::AgentHookEvent) -> HookIngestResult {
         super::ingest_fallbacks().map_err(HookIngestFailure::Retryable)?;
-        self.ingest_hook_deferred(event)
+        self.ingest_and_publish(event)
     }
 
     #[cfg(test)]
@@ -62,16 +61,23 @@ impl AgentRuntime {
         Ok(ingested.event)
     }
 
-    pub(super) fn ingest_hook_deferred(
-        &self,
-        event: &v1::AgentHookEvent,
-    ) -> DeferredHookIngestResult {
+    #[cfg(test)]
+    fn ingest_hook_deferred(&self, event: &v1::AgentHookEvent) -> DeferredHookIngestResult {
         let identity = server_identity();
         let topology = discover_authoritative()
             .ok()
             .filter(|(_, discovered_identity)| discovered_identity == &identity)
             .map(|(topology, _)| topology);
         self.try_ingest_hook_with_context(event, &identity, topology.as_ref())
+    }
+
+    pub(super) fn ingest_and_publish(&self, event: &v1::AgentHookEvent) -> HookIngestResult {
+        let identity = server_identity();
+        let topology = discover_authoritative()
+            .ok()
+            .filter(|(_, discovered_identity)| discovered_identity == &identity)
+            .map(|(topology, _)| topology);
+        self.ingest_and_publish_with_context(event, &identity, topology.as_ref())
     }
 
     #[cfg(test)]
@@ -87,14 +93,19 @@ impl AgentRuntime {
         Ok(ingested.event)
     }
 
-    #[cfg(test)]
-    pub(super) fn ingest_hook_with_context_deferred(
+    pub(super) fn ingest_and_publish_with_context(
         &self,
         event: &v1::AgentHookEvent,
         active_server_identity: &str,
         topology: Option<&tmux_control::TmuxSnapshot>,
-    ) -> DeferredHookIngestResult {
-        self.try_ingest_hook_with_context(event, active_server_identity, topology)
+    ) -> HookIngestResult {
+        let _order = self.ingest_order.lock().unwrap();
+        let ingested =
+            self.try_ingest_hook_with_context(event, active_server_identity, topology)?;
+        let event = ingested.event.clone();
+        super::publish(ingested.event);
+        self.dispatch_reply(ingested.reply);
+        Ok(event)
     }
 
     fn try_ingest_hook_with_context(

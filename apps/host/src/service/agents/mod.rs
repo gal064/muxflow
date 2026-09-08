@@ -20,7 +20,7 @@ mod reconcile;
 mod snapshot;
 mod store;
 pub(crate) use hooks::HookManager;
-pub(crate) use ingest::{HookIngestFailure, IngestedHook};
+pub(crate) use ingest::HookIngestFailure;
 use store::{StoredAgent, StoredRoute, StoredState};
 
 /// How long a Working agent may go without a single lifecycle event before the
@@ -46,6 +46,9 @@ const DEPARTURE_MISSES_REQUIRED: u8 = 3;
 
 pub(crate) struct AgentRuntime {
     state_path: PathBuf,
+    /// Orders persisted hook state through identity side effects and event
+    /// publication, so concurrent hook connections cannot publish backwards.
+    ingest_order: Mutex<()>,
     state: Mutex<StoredState>,
     /// What this host's agent configuration was last observed to do with
     /// lifecycle events. Re-read only when a configuration file changed.
@@ -95,6 +98,7 @@ impl AgentRuntime {
         let state = store::load(&state_path);
         Self {
             state_path,
+            ingest_order: Mutex::new(()),
             state: Mutex::new(state),
             wiring: Mutex::new(hooks::WiringCache::default()),
             departure_misses: Mutex::new(BTreeMap::new()),
@@ -456,13 +460,6 @@ pub(crate) fn publish(event: v1::AgentEvent) {
         agent: Some(event),
         ..Default::default()
     });
-}
-
-/// Preserve per-connection event order: mobile must observe an identity
-/// promotion before a reply addressed to the replacement identity.
-pub(crate) fn publish_ingested(runtime: &AgentRuntime, ingested: IngestedHook) {
-    publish(ingested.event);
-    runtime.dispatch_reply(ingested.reply);
 }
 
 pub(crate) fn ingest_fallbacks() -> anyhow::Result<usize> {
