@@ -1,7 +1,8 @@
 // Voice-mode state that outlives one screen (docs/mobile/voice-mode-plan.md
-// §5.2, design.md §9.11). Sessions are keyed by agent so several can coexist;
-// each lives in memory until `endSession`, which is the only thing that
-// forgets it. Nothing here is persisted across app restarts.
+// §5.2, design.md §9.11). Sessions are keyed by an immutable local session key
+// (initially the agent id), while `VoiceSession.agentId` follows an
+// authoritative identity promotion. Each lives in memory until `endSession`,
+// which is the only thing that forgets it. Nothing is persisted across restarts.
 //
 // One player app-wide: `playback` describes whichever message is loaded in it.
 // Only the newest agent reply of a session keeps its MP3 (`fileUri`); older
@@ -9,6 +10,7 @@
 
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { VoiceReadiness, type VoiceProvisionProgress, type VoiceStatus } from "../../protocol/gen/envelope_pb";
+import type { Agent } from "../../store/sessionStore";
 
 export type VoiceReadinessState = "unknown" | "uvMissing" | "modelMissing" | "provisioning" | "ready";
 
@@ -87,20 +89,22 @@ export interface VoiceActions {
   /** One EVENT_KIND_VOICE_PROVISION line; `ready` / `failed` also move `readiness`. */
   applyProvisionProgress(progress: ProvisionProgress): void;
   /** Creates the session when absent; an existing one keeps its history. */
-  ensureSession(agentId: string, paneId: string, sessionId: string, now: number): void;
-  setPhase(agentId: string, phase: VoicePhase): void;
-  appendMessage(agentId: string, message: VoiceMessage): void;
+  ensureSession(sessionKey: string, paneId: string, sessionId: string, now: number): void;
+  /** Retargets only the remote identity and route; all local session state stays put. */
+  promoteSession(sessionKey: string, agent: Agent): void;
+  setPhase(sessionKey: string, phase: VoicePhase): void;
+  appendMessage(sessionKey: string, message: VoiceMessage): void;
   /**
    * The next agent reply: the previous agent message loses its `fileUri` (the
    * caller deletes the file) and the new one is appended. Returns the uri that
    * was dropped, if any.
    */
-  appendReply(agentId: string, message: VoiceMessage): string | undefined;
-  markPlayed(agentId: string, messageId: string): void;
+  appendReply(sessionKey: string, message: VoiceMessage): string | undefined;
+  markPlayed(sessionKey: string, messageId: string): void;
   /** A retried VOICE_SPEAK filled in the audio. */
-  setMessageAudio(agentId: string, messageId: string, fileUri: string): void;
+  setMessageAudio(sessionKey: string, messageId: string, fileUri: string): void;
   setPlayback(playback: Playback | undefined): void;
-  removeSession(agentId: string): void;
+  removeSession(sessionKey: string): void;
   setLastError(message: string | undefined): void;
   setRecorderError(message: string | undefined): void;
   /** Another host (or none): what we knew about the previous one no longer applies. */
@@ -124,15 +128,15 @@ export function initialVoiceState(): VoiceState {
 
 export function createVoiceStore(): VoiceStore {
   return createStore<VoiceState & VoiceActions>((set, get) => {
-    function updateSession(agentId: string, update: (session: VoiceSession) => VoiceSession): void {
-      const session = get().sessions[agentId];
+    function updateSession(sessionKey: string, update: (session: VoiceSession) => VoiceSession): void {
+      const session = get().sessions[sessionKey];
       if (!session) return;
       const next = update(session);
-      if (next !== session) set({ sessions: { ...get().sessions, [agentId]: next } });
+      if (next !== session) set({ sessions: { ...get().sessions, [sessionKey]: next } });
     }
 
-    function updateMessage(agentId: string, messageId: string, update: (message: VoiceMessage) => VoiceMessage): void {
-      updateSession(agentId, (session) => {
+    function updateMessage(sessionKey: string, messageId: string, update: (message: VoiceMessage) => VoiceMessage): void {
+      updateSession(sessionKey, (session) => {
         const index = session.messages.findIndex((message) => message.id === messageId);
         const existing = session.messages[index];
         if (!existing) return session;
@@ -165,14 +169,22 @@ export function createVoiceStore(): VoiceStore {
         set({ hostStatus: { ...current, readiness, provision: provision.phase === "ready" ? undefined : provision } });
       },
 
-      ensureSession(agentId, paneId, sessionId, now) {
-        const existing = get().sessions[agentId];
+      ensureSession(sessionKey, paneId, sessionId, now) {
+        const existing = get().sessions[sessionKey];
         if (existing) {
           if (existing.paneId === paneId && existing.sessionId === sessionId) return;
-          set({ sessions: { ...get().sessions, [agentId]: { ...existing, paneId, sessionId } } });
+          set({ sessions: { ...get().sessions, [sessionKey]: { ...existing, paneId, sessionId } } });
           return;
         }
-        set({ sessions: { ...get().sessions, [agentId]: { agentId, paneId, sessionId, startedAt: now, messages: [], phase: "idle" } } });
+        set({ sessions: { ...get().sessions, [sessionKey]: { agentId: sessionKey, paneId, sessionId, startedAt: now, messages: [], phase: "idle" } } });
+      },
+
+      promoteSession(sessionKey, agent) {
+        updateSession(sessionKey, (session) => {
+          const { paneId, sessionId } = agent.route;
+          if (session.agentId === agent.id && session.paneId === paneId && session.sessionId === sessionId) return session;
+          return { ...session, agentId: agent.id, paneId, sessionId };
+        });
       },
 
       setPhase(agentId, phase) {
@@ -209,11 +221,11 @@ export function createVoiceStore(): VoiceStore {
         set({ playback });
       },
 
-      removeSession(agentId) {
+      removeSession(sessionKey) {
         const sessions = { ...get().sessions };
-        delete sessions[agentId];
+        delete sessions[sessionKey];
         const playback = get().playback;
-        const playingHere = playback && get().sessions[agentId]?.messages.some((message) => message.id === playback.messageId);
+        const playingHere = playback && get().sessions[sessionKey]?.messages.some((message) => message.id === playback.messageId);
         set({ sessions, ...(playingHere ? { playback: undefined } : {}) });
       },
 

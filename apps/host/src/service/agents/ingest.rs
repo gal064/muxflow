@@ -393,6 +393,9 @@ impl AgentRuntime {
             return Err(HookIngestFailure::Retryable(error));
         }
         drop(state);
+        if !retired_agent_ids.is_empty() {
+            (self.identity_promotion_sink)(&retired_agent_ids, &agent_id);
+        }
         // Voice mode (docs/mobile/voice-mode-plan.md §4.5): a `Stop` that ends
         // the turn hands the final message on, after the state is committed,
         // and keeps none of it. Claude's Stop while subagents still run leaves
