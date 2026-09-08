@@ -4,6 +4,7 @@ import { HostError } from "../../protocol/HostConnection";
 import { Operation, ResponseSchema, VoiceReadiness, VoiceResponseSchema, VoiceSpeechSchema, type VoiceSpeech } from "../../protocol/gen/envelope_pb";
 import type { VoiceHaptics } from "./haptics";
 import type { VoiceTones } from "./tones";
+import { VoiceRecorderCoordinator } from "./recorderCoordinator";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, speechResponse, statusResponse, transcriptResponse } from "./testing";
 import { MIN_UTTERANCE_MS, SESSION_REFRESH_MS, VoiceController } from "./VoiceController";
 import { createVoiceStore, latestReply } from "./voiceStore";
@@ -26,7 +27,7 @@ class FakeTones implements VoiceTones {
   failed() { this.calls.push("failed"); }
 }
 
-function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
+function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHoldMs = 0) {
   const haptics = new FakeHaptics();
   const tones = new FakeTones();
   const store = createVoiceStore();
@@ -34,13 +35,16 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
   connection.answer(Operation.VOICE_STATUS, () => statusResponse(VoiceReadiness.READY));
   connection.answer(Operation.VOICE_TRANSCRIBE, () => transcriptResponse("list the files in this directory"));
   const recorder = new FakeRecorder();
+  const recorderCoordinator = new VoiceRecorderCoordinator();
   const player = new FakePlayer();
   const files = new FakeFiles();
   let foreground = true;
   let canSubmit = true;
+  let autoPlay = true;
   const toasts: string[] = [];
+  const logs: string[] = [];
   const controller = new VoiceController({
-    tailHoldMs: 0,
+    tailHoldMs,
     submitDelayMs,
     agentId,
     paneId,
@@ -48,32 +52,38 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0) {
     store,
     getConnection: () => connection.asHostConnection(),
     recorder,
+    recorderCoordinator,
     player,
     files,
     appInForeground: () => foreground,
+    autoPlay,
     canSubmit: () => canSubmit,
     haptics,
     tones,
     toast: (message) => toasts.push(message),
+    log: (line) => logs.push(line),
     now: () => Date.now(),
   });
   return {
     store,
     connection,
     recorder,
+    recorderCoordinator,
     player,
     files,
     haptics,
     tones,
     controller,
     toasts,
+    logs,
     setForeground: (value: boolean) => { foreground = value; },
     setCanSubmit: (value: boolean) => { canSubmit = value; },
+    setAutoPlay: (value: boolean) => { autoPlay = value; controller.setAutoPlay(value); },
   };
 }
 
-function reply(agentId: string, text: string, audio: Uint8Array = MP3, generation = 0n): VoiceSpeech {
-  return create(VoiceSpeechSchema, { agentId, text, audio, audioMime: "audio/mpeg", stateGeneration: generation, replyAtUnixMillis: 1_700_000_000_000n });
+function reply(agentId: string, displayMarkdown: string, audio: Uint8Array = MP3, generation = 0n, speechText = displayMarkdown): VoiceSpeech {
+  return create(VoiceSpeechSchema, { agentId, displayMarkdown, speechText, audio, audioMime: "audio/mpeg", stateGeneration: generation, replyAtUnixMillis: 1_700_000_000_000n });
 }
 
 describe("VoiceController", () => {
@@ -112,7 +122,7 @@ describe("VoiceController", () => {
     expect(input[1]!.terminalInputPaste).toBe(false);
     const session = h.store.getState().sessions["agent-a"]!;
     expect(session.phase).toBe("idle");
-    expect(session.messages.map((m) => [m.kind, m.text])).toEqual([["you", "list the files in this directory"]]);
+    expect(session.messages.map((m) => [m.kind, m.displayText])).toEqual([["you", "list the files in this directory"]]);
     // The recording was consumed and the recorder re-armed for the next press.
     expect(h.files.deleted).toContain("file:///cache/rec-1.m4a");
     expect(h.recorder.prepared).toBe(2);
@@ -120,12 +130,20 @@ describe("VoiceController", () => {
     // A pushed reply while focused and in the foreground: written, appended, auto-played once, marked played.
     h.controller.onVoiceReply(reply("agent-a", "Here are the files."));
     let latest = latestReply(h.store.getState().sessions["agent-a"])!;
-    expect(latest.text).toBe("Here are the files.");
+    expect(latest.displayText).toBe("Here are the files.");
     expect(latest.fileUri).toBe("file:///cache/voice/agent-a.mp3");
     expect(latest.played).toBe(true);
     expect(h.player.loaded).toBe("file:///cache/voice/agent-a.mp3");
     expect(h.player.calls.filter((c) => c === "play")).toHaveLength(1);
     expect(h.store.getState().playback).toMatchObject({ messageId: latest.id, state: "playing" });
+    const diagnostics = h.logs.join("\n");
+    expect(diagnostics).toContain("voice agent=agent-a pane=%3 session=$1 recorder.started actual=recording");
+    expect(diagnostics).toContain("submission.ack message=agent-a:");
+    expect(diagnostics).toContain("reply message=agent-a:");
+    expect(diagnostics).not.toContain("list the files in this directory");
+    expect(diagnostics).not.toContain("Here are the files.");
+    expect(diagnostics).not.toContain("aac-bytes");
+    expect(diagnostics).not.toContain("mp3-bytes");
 
     // Background: the second reply replaces the first file, stops its playback, and stays unplayed.
     h.setForeground(false);
@@ -133,7 +151,7 @@ describe("VoiceController", () => {
     expect(h.files.deleted).toContain("file:///cache/voice/agent-a.mp3");
     expect(h.player.calls.at(-1)).toBe("stop");
     latest = latestReply(h.store.getState().sessions["agent-a"])!;
-    expect(latest.text).toBe("Second answer.");
+    expect(latest.displayText).toBe("Second answer.");
     expect(latest.played).toBe(false);
     expect(latest.fileUri).toBe("file:///cache/voice/agent-a.mp3");
     expect(h.store.getState().playback).toBeUndefined();
@@ -218,6 +236,147 @@ describe("VoiceController", () => {
     expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
   });
 
+  it("keeps a left-swiped utterance recording until the next tap sends it", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    h.controller.lockUtterance();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recordingLocked");
+    expect(h.recorder.recording).toBe(true);
+
+    await h.controller.endUtterance();
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
+    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(2);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+  });
+
+  it("discards a right-swiped utterance without transcription or terminal input", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+
+    await h.controller.cancelUtterance();
+    expect(h.recorder.recording).toBe(false);
+    expect(h.files.deleted).toContain("file:///cache/rec-1.m4a");
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(0);
+    expect(h.store.getState().sessions["agent-a"]?.messages).toEqual([]);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+  });
+
+  it("does not accept a new hold until a canceled recorder has stopped", async () => {
+    const h = harness();
+    let finishStop!: () => void;
+    const stop = h.recorder.stop.bind(h.recorder);
+    h.recorder.stop = async () => {
+      await new Promise<void>((resolve) => { finishStop = resolve; });
+      return stop();
+    };
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+
+    const canceling = h.controller.cancelUtterance();
+    await settle();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("canceling");
+    h.controller.beginUtterance();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("canceling");
+
+    finishStop();
+    await canceling;
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+    h.controller.beginUtterance();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recording");
+  });
+
+  it("does not put recorder stop rejection details in copied diagnostics while canceling", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    h.recorder.stop = async () => {
+      const error = new Error("private transcript and token sk-proj-abcdefghijklmnop");
+      error.name = "sk-proj-qrstuvwxyzabcdef";
+      throw error;
+    };
+
+    await h.controller.cancelUtterance();
+
+    const diagnostics = h.logs.join("\n");
+    expect(diagnostics).toContain("recorder.stop.failed type=Error messageChars=");
+    expect(diagnostics).not.toContain("private transcript");
+    expect(diagnostics).not.toContain("sk-proj-");
+  });
+
+  it("cancels and releases a locked recording on blur or background", async () => {
+    const blurred = harness();
+    blurred.controller.focus();
+    await settle();
+    blurred.controller.beginUtterance();
+    await settle();
+    blurred.controller.lockUtterance();
+    blurred.controller.blur();
+    await settle();
+    expect(blurred.recorder.recording).toBe(false);
+    expect(blurred.recorder.released).toBe(1);
+    expect(blurred.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+
+    const backgrounded = harness();
+    backgrounded.controller.focus();
+    await settle();
+    backgrounded.controller.beginUtterance();
+    await settle();
+    backgrounded.controller.lockUtterance();
+    backgrounded.setForeground(false);
+    backgrounded.controller.onAppInactive();
+    await settle();
+    expect(backgrounded.recorder.recording).toBe(false);
+    expect(backgrounded.recorder.released).toBe(1);
+    expect(backgrounded.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+  });
+
+  it("keeps a reply that arrives while listening manual-play only", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    h.controller.lockUtterance();
+    h.controller.onVoiceReply(reply("agent-a", "Reply during recording."));
+    const message = latestReply(h.store.getState().sessions["agent-a"])!;
+    expect(message.played).toBe(false);
+    expect(h.player.calls).not.toContain("play");
+
+    await h.controller.endUtterance();
+    h.controller.onAppActive();
+    h.controller.blur();
+    h.controller.focus();
+    expect(h.player.calls).not.toContain("play");
+    h.controller.play(message.id);
+    expect(h.player.calls).toContain("play");
+  });
+
+  it("suppresses autoplay until recorder.stop settles after a normal release", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    const ending = h.controller.endUtterance();
+    h.controller.onVoiceReply(reply("agent-a", "Reply during recorder stop."));
+    const message = latestReply(h.store.getState().sessions["agent-a"])!;
+    await ending;
+    h.controller.onAppActive();
+    expect(message.played).toBe(false);
+    expect(h.player.calls).not.toContain("play");
+  });
+
   it("a reply while the screen is unfocused is stored unplayed and plays on focus", async () => {
     const h = harness();
     h.controller.focus();
@@ -234,7 +393,7 @@ describe("VoiceController", () => {
 
   it("auto-play off keeps the reply unplayed until tapped", async () => {
     const h = harness();
-    h.store.getState().setAutoPlay(false);
+    h.setAutoPlay(false);
     h.controller.focus();
     await settle();
     h.controller.onVoiceReply(reply("agent-a", "Quiet."));
@@ -243,6 +402,17 @@ describe("VoiceController", () => {
     h.controller.play(message.id);
     expect(h.player.playing).toBe(true);
     expect(latestReply(h.store.getState().sessions["agent-a"])!.played).toBe(true);
+  });
+
+  it("enabling auto-play starts the newest unplayed reply", async () => {
+    const h = harness();
+    h.setAutoPlay(false);
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "Waiting."));
+    expect(h.player.playing).toBe(false);
+    h.setAutoPlay(true);
+    expect(h.player.playing).toBe(true);
   });
 
   it("two sessions receive their own replies and share the one player", async () => {
@@ -256,6 +426,7 @@ describe("VoiceController", () => {
       store: a.store,
       getConnection: () => a.connection.asHostConnection(),
       recorder: a.recorder,
+      recorderCoordinator: a.recorderCoordinator,
       player: a.player,
       files: a.files,
       appInForeground: () => true,
@@ -264,8 +435,8 @@ describe("VoiceController", () => {
     await settle();
     a.controller.onVoiceReply(reply("agent-a", "For A."));
     b.onVoiceReply(reply("agent-b", "For B."));
-    expect(a.store.getState().sessions["agent-a"]!.messages.map((m) => m.text)).toEqual(["For A."]);
-    expect(a.store.getState().sessions["agent-b"]!.messages.map((m) => m.text)).toEqual(["For B."]);
+    expect(a.store.getState().sessions["agent-a"]!.messages.map((m) => m.displayText)).toEqual(["For A."]);
+    expect(a.store.getState().sessions["agent-b"]!.messages.map((m) => m.displayText)).toEqual(["For B."]);
     // Only the focused one auto-played; B's stays unplayed with its own file.
     expect(latestReply(a.store.getState().sessions["agent-a"])!.played).toBe(true);
     expect(latestReply(a.store.getState().sessions["agent-b"])!.played).toBe(false);
@@ -333,14 +504,16 @@ describe("VoiceController", () => {
     h.connection.answer(Operation.VOICE_SPEAK, () => speechResponse(MP3, "Spoken."));
     h.controller.focus();
     await settle();
-    h.controller.onVoiceReply(reply("agent-a", "Spoken.", new Uint8Array(0)), "edge-tts: network unreachable");
+    h.controller.onVoiceReply(reply("agent-a", "## Spoken\n\n- one\n- two", new Uint8Array(0), 0n, "Spoken. one. two"), "edge-tts: network unreachable");
     const message = latestReply(h.store.getState().sessions["agent-a"])!;
+    expect(message.displayText).toBe("## Spoken\n\n- one\n- two");
+    expect(message.speechText).toBe("Spoken. one. two");
     expect(message.fileUri).toBeUndefined();
     expect(message.audioError).toBe("edge-tts: network unreachable");
     expect(message.played).toBe(false);
     expect(h.player.calls).toEqual([]);
     await h.controller.retrySpeak(message.id);
-    expect(h.connection.of(Operation.VOICE_SPEAK)[0]!.voice?.text).toBe("Spoken.");
+    expect(h.connection.of(Operation.VOICE_SPEAK)[0]!.voice?.text).toBe("Spoken. one. two");
     const retried = latestReply(h.store.getState().sessions["agent-a"])!;
     expect(retried.fileUri).toBe("file:///cache/voice/agent-a.mp3");
     expect(retried.audioError).toBeUndefined();
@@ -407,6 +580,8 @@ describe("VoiceController against a host that is not set up (review round 1)", (
     await settle();
     expect(h.store.getState().hostStatus).toMatchObject({ readiness: "modelMissing", detail: "model not provisioned" });
     expect(h.toasts).toEqual([]);
+    expect(h.logs.join("\n")).toContain("session.refused type=HostError code=voice_model_missing");
+    expect(h.logs.join("\n")).not.toContain("model not provisioned");
     await vi.advanceTimersByTimeAsync(SESSION_REFRESH_MS * 2);
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(1);
     expect(h.toasts).toEqual([]);
@@ -417,6 +592,7 @@ describe("VoiceController against a host that is not set up (review round 1)", (
     await settle();
     expect(h.store.getState().hostStatus).toMatchObject({ readiness: "uvMissing", detail: "install uv: curl ..." });
     expect(h.toasts).toEqual([]);
+    expect(h.logs.join("\n")).not.toContain("install uv: curl");
     // End on a never-registered session sends no clear.
     await h.controller.endSession();
     expect(h.connection.of(Operation.VOICE_SESSION).every((r) => r.voice?.agentId === "agent-a")).toBe(true);
@@ -478,6 +654,7 @@ describe("VoiceController against a host that is not set up (review round 1)", (
       store: a.store,
       getConnection: () => a.connection.asHostConnection(),
       recorder: a.recorder,
+      recorderCoordinator: a.recorderCoordinator,
       player: a.player,
       files: a.files,
       appInForeground: () => true,
@@ -517,6 +694,7 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
       store: a.store,
       getConnection: () => a.connection.asHostConnection(),
       recorder: a.recorder,
+      recorderCoordinator: a.recorderCoordinator,
       player: a.player,
       files: a.files,
       appInForeground: () => true,
@@ -547,6 +725,7 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
     h.controller.focus();
     h.controller.beginUtterance();
     const released = h.controller.endUtterance();
+    await settle();
     armed!();
     await released;
     expect(h.recorder.recording).toBe(false);
@@ -729,6 +908,47 @@ describe("VoiceController recorder release races (QA fix review)", () => {
     expect(h.files.deleted).toContain("file:///cache/rec-1.m4a");
     await h.controller.endUtterance(); // the lift after End is a no-op
     expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+  });
+
+  it("disposal during the tail hold stops A before B can claim the shared recorder", async () => {
+    const h = harness("agent-a", "%3", 0, 350);
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    const ending = h.controller.endUtterance();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("transcribing");
+    expect(h.recorder.recording).toBe(true);
+
+    h.controller.dispose();
+    await settle();
+    expect(h.recorder.recording).toBe(false);
+    expect(h.recorder.released).toBe(1);
+    const b = new VoiceController({
+      tailHoldMs: 0,
+      submitDelayMs: 0,
+      agentId: "agent-b",
+      paneId: "%4",
+      sessionId: "$1",
+      store: h.store,
+      getConnection: () => h.connection.asHostConnection(),
+      recorder: h.recorder,
+      recorderCoordinator: h.recorderCoordinator,
+      player: h.player,
+      files: h.files,
+      appInForeground: () => true,
+    });
+    b.focus();
+    await settle();
+    b.beginUtterance();
+    await settle();
+    expect(h.recorder.recording).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(350);
+    await ending;
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+    b.dispose();
+    await settle();
   });
 
   it("leaving during the transcription releases the recorder once the utterance settles", async () => {

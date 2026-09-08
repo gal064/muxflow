@@ -68,7 +68,7 @@ export const connectionMarkSeenSink: MarkSeenSink = (target) => {
   connection
     .request(agentMarkSeen(target.agentId, target.attentionGeneration, connection.serverIdentity))
     .catch((error: unknown) => {
-      log(`notifications: markSeen.failed ${target.agentId} ${error instanceof Error ? error.message : String(error)}`);
+      log(`notifications markSeen.failed agent=${target.agentId} pane=${target.paneId} ${error instanceof Error ? error.message : String(error)}`);
     });
   return true;
 };

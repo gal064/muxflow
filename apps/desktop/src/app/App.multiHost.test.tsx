@@ -465,7 +465,7 @@ describe("the shell over several hosts", () => {
     });
     expect(calls("emit_agent_notification")).toEqual([expect.objectContaining({
       notification: expect.objectContaining({
-        title: "Codex on qa needs attention",
+        title: "work needs attention",
         route: expect.objectContaining({ hostProfile: "remote-a", sessionId: "$2", paneId: "%1" }),
       }),
     })]);

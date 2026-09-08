@@ -10,6 +10,8 @@ export interface VoiceRecorder {
   /** Stops and returns the file and its length; `uri` is null when nothing was captured. */
   stop(): Promise<{ uri: string | null; durationMs: number }>;
   release(): void;
+  /** Actual adapter state for transition-only diagnostics. */
+  state?(): "unprepared" | "preparing" | "prepared" | "recording" | "stopping";
 }
 
 /** `Request.voice.audioMime` for expo-audio's `.m4a` recordings. */

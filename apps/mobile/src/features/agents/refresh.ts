@@ -2,7 +2,9 @@
 
 import { agentSnapshot } from "../../protocol/requests";
 import { emitAgentTransition, getConnection, toast } from "../../session/connectionManager";
+import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
+import { logAgentTransitions } from "./diagnostics";
 
 export async function refreshAgents(): Promise<void> {
   const connection = getConnection();
@@ -12,7 +14,10 @@ export async function refreshAgents(): Promise<void> {
     const snapshot = response.agent?.snapshot;
     if (!snapshot) return;
     // A reconciling snapshot feeds §13's decision rule like any AGENT_STATE.
-    for (const transition of sessionStore.getState().applyAgentSnapshot(snapshot)) {
+    const previousAgents = sessionStore.getState().agents;
+    const transitions = sessionStore.getState().applyAgentSnapshot(snapshot);
+    logAgentTransitions(previousAgents, sessionStore.getState().agents, "refresh", sessionStore.getState().topologyGeneration, log);
+    for (const transition of transitions) {
       emitAgentTransition(transition);
     }
   } catch (error) {

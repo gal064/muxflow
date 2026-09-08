@@ -13,9 +13,13 @@ export interface NotificationContext {
   alreadyNotified: (agentId: string, attentionGeneration: bigint) => boolean;
   /** Step 6. */
   focusedPaneId: string | undefined;
+  /** Agent shown by a focused agent-specific screen, such as Voice. */
+  viewedAgentId: string | undefined;
   appInForeground: boolean;
   /** `agentWorkspaceName(state, next)` — the caller resolves it from the store. */
   workspaceName: string;
+  /** The canonical task/tab name shown beside this agent's status mark. */
+  agentName: string;
 }
 
 export interface NotificationToPost {
@@ -51,14 +55,16 @@ export function decideAgentNotification(
   // 5.
   if (context.alreadyNotified(next.id, next.attentionGeneration)) return { kind: "skip", reason: "alreadyNotified" };
   // 6.
-  if (context.appInForeground && context.focusedPaneId !== undefined && context.focusedPaneId === next.route.paneId) {
+  const viewingAgent = context.viewedAgentId === next.id;
+  const viewingTerminal = context.focusedPaneId !== undefined && context.focusedPaneId === next.route.paneId;
+  if (context.appInForeground && (viewingAgent || viewingTerminal)) {
     return { kind: "skip", reason: "focused" };
   }
   // 7.
   return {
     kind: "post",
     event,
-    title: `${context.workspaceName} · ${next.displayName}`,
+    title: `${context.workspaceName} · ${context.agentName}`,
     body: event === "blocked" ? "Needs your input" : "Finished",
     tag: next.id,
     data: {
