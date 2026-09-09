@@ -1,7 +1,7 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import Animated, { KeyboardState, useAnimatedKeyboard, useAnimatedReaction, useAnimatedStyle } from "react-native-reanimated";
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import Animated, { KeyboardState, useAnimatedKeyboard, useAnimatedReaction, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 import { runOnJS } from "react-native-worklets";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -21,6 +21,7 @@ import { useAnimationsAllowed } from "../../ui/useAnimationsAllowed";
 import { appForeground } from "./appForeground";
 import type { FromPageMessage } from "./bridgeMessages";
 import { KEY_CHIPS, SHIFT_CHIP, pressChip } from "./chips";
+import { terminalKeyboardInset } from "./keyboardInset";
 import { TerminalController, type TerminalSnapshot } from "./TerminalController";
 import { terminalRegistry } from "./terminalRegistry";
 import { TerminalWebView, type TerminalWebViewHandle } from "./TerminalWebView";
@@ -53,7 +54,10 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   // input bar visible and shrinks the WebView, which re-measures and sends
   // RESIZE_TERMINAL (§7.6 step 6).
   const keyboard = useAnimatedKeyboard({ isStatusBarTranslucentAndroid: true, isNavigationBarTranslucentAndroid: true });
-  const keyboardPadding = useAnimatedStyle(() => ({ paddingBottom: Math.max(insets.bottom, keyboard.height.value) }), [insets.bottom]);
+  const inputFocused = useSharedValue(false);
+  const keyboardPadding = useAnimatedStyle(() => ({
+    paddingBottom: terminalKeyboardInset(insets.bottom, keyboard.height.value, inputFocused.value),
+  }), [insets.bottom]);
   // Observe lifecycle edges only. The reaction reads just `state`, so there is
   // no work during the per-frame height animation and at most four JS log
   // calls per open/close cycle.
@@ -66,8 +70,12 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   );
   useFocusEffect(useCallback(() => {
     logKeyboardState(paneId, "focus", keyboard.state.value, keyboard.height.value);
-    return () => logKeyboardState(paneId, "blur", keyboard.state.value, keyboard.height.value);
-  }, [keyboard.height, keyboard.state, paneId]));
+    return () => {
+      inputFocused.value = false;
+      Keyboard.dismiss();
+      logKeyboardState(paneId, "blur", keyboard.state.value, keyboard.height.value);
+    };
+  }, [inputFocused, keyboard.height, keyboard.state, paneId]));
   const state = useSession((s) => s);
   const webview = useRef<TerminalWebViewHandle>(null);
   const controller = useRef<TerminalController | null>(null);
@@ -237,7 +245,9 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
             autoCorrect={false}
             editable={inputEnabled}
             maxFontSizeMultiplier={fixedChromeText.maxFontSizeMultiplier}
+            onBlur={() => { inputFocused.value = false; }}
             onChangeText={setText}
+            onFocus={() => { inputFocused.value = true; }}
             onSubmitEditing={sendText}
             placeholder="Type, then Send"
             placeholderTextColor={colors.chromeFaint}
