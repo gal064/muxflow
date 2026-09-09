@@ -1,10 +1,10 @@
 use super::*;
 
 #[test]
-fn porcelain_parser_preserves_raw_rename_conflict_and_ignored_records() {
-    let data = b"2 R. S.M. 100644 100644 100644 aaa bbb R100 new\xff\0old name\0u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict\0? raw\xff\0! ignored/\0";
+fn porcelain_parser_preserves_raw_rename_conflict_and_directory_records() {
+    let data = b"2 R. S.M. 100644 100644 100644 aaa bbb R100 new\xff\0old name\0u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict\0? raw\xff\0? nested-repository/\0! ignored/\0";
     let parsed = parse_porcelain_v2_z(data).unwrap();
-    assert_eq!(parsed.len(), 4);
+    assert_eq!(parsed.len(), 5);
     assert_eq!(parsed[0].path, b"new\xff");
     assert_eq!(parsed[0].original_path, b"old name");
     assert_eq!(parsed[0].rename_score, "R100");
@@ -13,8 +13,10 @@ fn porcelain_parser_preserves_raw_rename_conflict_and_ignored_records() {
     assert!(parsed[1].conflicted);
     assert_eq!(parsed[1].conflict_code, "UU");
     assert!(parsed[2].untracked);
-    assert!(parsed[3].ignored);
-    assert_eq!(parsed[3].path, b"ignored");
+    assert!(parsed[3].untracked);
+    assert_eq!(parsed[3].path, b"nested-repository");
+    assert!(parsed[4].ignored);
+    assert_eq!(parsed[4].path, b"ignored");
 }
 
 #[tokio::test]
@@ -36,6 +38,26 @@ async fn ignored_directory_status_uses_a_canonical_repository_path() {
             .entries
             .iter()
             .any(|entry| { entry.ignored && entry.path == b"ignored-directory" })
+    );
+}
+
+#[tokio::test]
+async fn untracked_nested_repository_status_uses_a_canonical_repository_path() {
+    let fixture = Fixture::new("untracked-nested-repository");
+    fs::create_dir(fixture.root.join("nested-repository")).unwrap();
+    fixture.git(&["-C", "nested-repository", "init", "-q", "-b", "master"]);
+
+    let status = GitService::new(Arc::new(AtomicBool::new(false)), 0)
+        .status(&fixture.request(), None)
+        .await
+        .unwrap();
+
+    assert!(status.authoritative);
+    assert!(
+        status
+            .entries
+            .iter()
+            .any(|entry| { entry.untracked && entry.path == b"nested-repository" })
     );
 }
 
