@@ -4,7 +4,7 @@ import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { CLICK_SLOP_PX, selectionHolds, useSanitizedMarkdown } from "../files/markdownPreview";
 import { renderSafeSvg } from "../files/markdown";
 import { useOpenFileTab } from "../files/useOpenFileTab";
-import { IMAGE_PREVIEW_LIMIT_BYTES, isTerminalSingleFileRoot, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
+import { IMAGE_PREVIEW_LIMIT_BYTES, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
 import { DelayedLoading } from "../../ui/DelayedLoading";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { SaveState } from "../files/autosave";
@@ -66,11 +66,9 @@ export function AppTabSurface(props: Props) {
   const { content, editorRequested, view } = file;
   const editor = useEditorPaint(file.paint, editorRequested, true);
   const editFile = file.edit;
-  // A terminal click outside the workspace carries a host-enforced one-file
-  // read capability. Keep the surface honest about that capability: no editor
-  // writes and no save-state claim for a token the host will never accept on a
-  // mutating operation.
-  const canWrite = props.canWrite && !isTerminalSingleFileRoot(root);
+  // The host enforces whether this is a full workspace root or a capability
+  // for exactly one terminal-linked file. Both support editor saves.
+  const canWrite = props.canWrite;
   const onEditorChange = useCallback((typed: string) => {
     if (canWrite) editFile(typed);
   }, [canWrite, editFile]);

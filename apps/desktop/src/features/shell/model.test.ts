@@ -474,7 +474,7 @@ describe("application shell model", () => {
       sessions[1],
       "/tmp/scratchpad/prompt.md",
       "markdown",
-      { path: "/tmp/scratchpad", token: "file-v1:old", revision: "1" },
+      { path: "/tmp/scratchpad", token: "file-v2:old", revision: "1" },
     );
     const preview = setMarkdownViewMode(opened, "local", opened.appTabs[0].id, "preview");
     const refreshed = openFileTab(
@@ -484,14 +484,14 @@ describe("application shell model", () => {
       sessions[1],
       "/tmp/scratchpad/prompt.md",
       "markdown",
-      { path: "/tmp/scratchpad", token: "file-v1:new", revision: "2" },
+      { path: "/tmp/scratchpad", token: "file-v2:new", revision: "2" },
       { preview: false, refreshRoot: true },
     );
 
     expect(refreshed.appTabs).toHaveLength(1);
     expect(refreshed.appTabs[0]).toMatchObject({
       rootPath: "/tmp/scratchpad",
-      rootToken: "file-v1:new",
+      rootToken: "file-v2:new",
       viewMode: "preview",
     });
   });
@@ -504,7 +504,7 @@ describe("application shell model", () => {
       sessions[1],
       "/tmp/scratchpad/prompt.md",
       "markdown",
-      { path: "/tmp/scratchpad", token: "file-v1:old", revision: "1" },
+      { path: "/tmp/scratchpad", token: "file-v2:old", revision: "1" },
     );
     const liveSession = { ...sessions[1], id: "$99" };
     const recovered = recoverAppTabsFromPreviousServer(
@@ -523,13 +523,13 @@ describe("application shell model", () => {
       liveSession,
       "/tmp/scratchpad/prompt.md",
       "markdown",
-      { path: "/tmp/scratchpad", token: "file-v1:new", revision: "1" },
+      { path: "/tmp/scratchpad", token: "file-v2:new", revision: "1" },
       { preview: false, refreshRoot: true },
     );
     expect(refreshed.appTabs[0]).toMatchObject({
       sessionId: "$99",
       rootPath: "/tmp/scratchpad",
-      rootToken: "file-v1:new",
+      rootToken: "file-v2:new",
     });
   });
 
@@ -707,4 +707,3 @@ describe("application shell model", () => {
     expect(shellNavigationMode(false)).toBe("cached");
   });
 });
-

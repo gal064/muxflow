@@ -306,7 +306,7 @@ pub(super) async fn handle(
             let Some(file) = require_file(&request, request_id, control_tx).await else {
                 return;
             };
-            let response = if let Err(error) = validate_root_token(&file.root, &file.root_token) {
+            let response = if let Err(error) = validate_write_token(&file.root, &file.root_token) {
                 response_error("invalid_root_token", &error.to_string())
             } else {
                 let service = Arc::clone(files);
@@ -597,9 +597,9 @@ pub(super) async fn require_rooted_file(
     Some(file)
 }
 
-/// The same payload, admitted for a content read. This is the only admission
-/// path that accepts terminal-link single-file tokens; directory, mutation and
-/// write handlers continue through `require_rooted_file` and reject them.
+/// The same payload, admitted for a content read. Terminal-link single-file
+/// tokens enter here; directory and mutation handlers continue through
+/// `require_rooted_file` and reject them.
 pub(super) async fn require_readable_file(
     request: &v1::Request,
     request_id: u64,
@@ -625,7 +625,7 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex};
 
     #[tokio::test]
-    async fn single_file_tokens_enter_only_the_read_admission_path() {
+    async fn single_file_tokens_enter_read_and_exact_file_write_admission_only() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("prompt.md");
         fs::write(&file, "prompt").unwrap();
@@ -642,6 +642,8 @@ mod tests {
         let (tx, _rx) = mpsc::channel(2);
 
         assert!(require_readable_file(&request, 1, &tx).await.is_some());
+        let requested = request.file.as_ref().unwrap();
+        assert!(validate_write_token(&requested.root, &requested.root_token).is_ok());
         assert!(require_rooted_file(&request, 2, &tx).await.is_none());
     }
 
