@@ -169,4 +169,35 @@ describe("App orchestration", () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === "start_terminal")).toHaveLength(2);
     await act(async () => renderer!.unmount());
   });
+
+  // The keydown wiring, not the decision behind it: `shortcutDisposition` is
+  // unit-tested next door, but the bug this guards lived in the handler, where
+  // an unavailable command returned before `preventDefault` and handed the
+  // chord to the platform. On macOS the platform answers an unclaimed close-tab
+  // chord by closing the only window, which quits the app mid-session. jsdom
+  // reports a non-Mac user agent, so the Linux binding is the one in force
+  // here; the wiring under test is the same on both.
+  it("consumes a claimed shortcut whose command cannot run", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "load_app_state") return Promise.resolve(defaultAppState);
+      if (command === "list_host_profiles") return Promise.resolve({ lastProfileId: undefined, profiles: [] });
+      return Promise.resolve(undefined);
+    });
+    let renderer: ReactTestRenderer;
+    await act(async () => { renderer = create(<App />); });
+
+    const close = (key: string, code: string) => {
+      const event = new KeyboardEvent("keydown", {
+        key, code, ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      });
+      act(() => { window.dispatchEvent(event); });
+      return event;
+    };
+    // Nothing is connected, so there is no tab for "Close current tab" to act
+    // on. The keystroke is still the app's, and must not travel any further.
+    expect(close("W", "KeyW").defaultPrevented).toBe(true);
+    // A chord the keymap never claimed still belongs to whoever comes next.
+    expect(close("Y", "KeyY").defaultPrevented).toBe(false);
+    await act(async () => renderer!.unmount());
+  });
 });

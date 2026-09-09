@@ -89,6 +89,22 @@ export interface CommandDefinition {
    * rows would bury every command the palette exists to surface.
    */
   paletteHidden?: boolean;
+  /**
+   * Whether the platform's own binding for this chord is the right answer when
+   * the command cannot run.
+   *
+   * A claimed shortcut is normally swallowed whether or not its command is
+   * available, so it never reaches a platform binding for the same chord. ⌘C
+   * and ⌘V are the exception: they are spent on the terminal's copy and paste,
+   * and while a document tab is open there is no pane for those to act on, but
+   * there *is* a selection the native Edit menu can copy. Swallowing there
+   * would break copying out of a rendered Markdown file.
+   *
+   * The flag sits on the command, so it covers the Linux bindings too. There it
+   * is merely inert: Ctrl+Shift+C is not what Linux copies with, so yielding it
+   * reaches nothing either way.
+   */
+  nativeFallback?: boolean;
 }
 
 const DIGITS: readonly IndexDigit[] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
@@ -186,8 +202,8 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "pane.resizeDown", title: "Resize pane down", group: "Pane", defaults: { linux: "Ctrl+Shift+ArrowDown" }, mutates: true, requires: "pane" },
   { id: "pane.zoom", title: "Toggle pane zoom", group: "Pane", defaults: { mac: "Meta+E", linux: "Ctrl+Shift+Enter" }, mutates: true, requires: "pane" },
   { id: "pane.close", title: "Close pane…", group: "Pane", mutates: true, requires: "pane", destructive: true },
-  { id: "terminal.copy", title: "Copy terminal selection", group: "Terminal", defaults: { mac: "Meta+C", linux: "Ctrl+Shift+C" }, requires: "pane" },
-  { id: "terminal.paste", title: "Paste into terminal", group: "Terminal", defaults: { mac: "Meta+V", linux: "Ctrl+Shift+V" }, requires: "pane" },
+  { id: "terminal.copy", title: "Copy terminal selection", group: "Terminal", defaults: { mac: "Meta+C", linux: "Ctrl+Shift+C" }, requires: "pane", nativeFallback: true },
+  { id: "terminal.paste", title: "Paste into terminal", group: "Terminal", defaults: { mac: "Meta+V", linux: "Ctrl+Shift+V" }, requires: "pane", nativeFallback: true },
   { id: "terminal.search", title: "Find in terminal", group: "Terminal", defaults: { mac: "Meta+F", linux: "Ctrl+Shift+F" }, requires: "pane" },
   { id: "terminal.scrollBottom", title: "Scroll terminal to bottom", group: "Terminal", requires: "pane" },
   // Row commands. `destructive` is deliberately absent from the two that
@@ -402,6 +418,42 @@ export function globalShortcutAllowed(
   if (!target?.closest) return true;
   const editable = target.closest("input, textarea, select, [contenteditable=true], [role=textbox]");
   return !editable || Boolean(target.closest("[data-terminal-surface]"));
+}
+
+/**
+ * What the app intends to do with a keystroke, decided before anything acts on
+ * it.
+ *
+ * The middle arm is the one with history. A bound shortcut whose command cannot
+ * run right now used to leave the event alone, which handed it to the platform:
+ * ⌘W is `window.close` here, and macOS answered an unclaimed ⌘W by closing the
+ * window — the only window, so the app exited mid-session and looked like a
+ * crash. A shortcut this keymap claims is the app's whether or not the command
+ * can run, so it is swallowed either way.
+ *
+ * That narrows the leak rather than closing it: `ignore` still hands ⌘W over
+ * while an overlay is open, while a text field has focus, and whenever a user
+ * rebinding leaves the chord ambiguous. Those are deliberate — ⌘C and ⌘V are
+ * spent on `terminal.copy`/`terminal.paste`, and native editing needs them to
+ * reach the platform — so what actually makes the window safe is that the menu
+ * offers nothing for a stray ⌘W to reach. See `src-tauri/src/menu.rs`.
+ */
+export type ShortcutDisposition =
+  | { kind: "ignore" }
+  | { kind: "swallow" }
+  | { kind: "run"; commandId: CommandId };
+
+export function shortcutDisposition(
+  event: KeyboardEvent,
+  platform: Platform,
+  overrides: ShortcutOverrides,
+  overlayOpen: boolean,
+  context: CommandContext,
+): ShortcutDisposition {
+  const command = commandForKeyboardEvent(event, platform, overrides);
+  if (!command || !globalShortcutAllowed(event, overlayOpen, command.id)) return { kind: "ignore" };
+  if (!commandAvailable(command, context)) return command.nativeFallback ? { kind: "ignore" } : { kind: "swallow" };
+  return { kind: "run", commandId: command.id };
 }
 
 export interface ShortcutCollision {

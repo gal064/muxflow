@@ -11,6 +11,7 @@ import {
   normalizeShortcut,
   repairShortcutCollisions,
   selectionIndex,
+  shortcutDisposition,
   shortcutFromEvent,
   shortcutFor,
   shortcutCollisions,
@@ -29,6 +30,18 @@ const context = (overrides: Partial<CommandContext> = {}): CommandContext => ({
   rowCommands: [],
   run: () => undefined, ...overrides,
 });
+
+/**
+ * A DOM-free stand-in for the two questions `globalShortcutAllowed` asks of an
+ * event target: is it a form field, and does it sit inside the terminal
+ * surface. Keyed on the terminal selector rather than on the first name in the
+ * editable one, which is a list and may be reordered.
+ */
+const eventTarget = (editable: boolean, terminal: boolean) => ({
+  closest: (selector: string) => selector.includes("data-terminal-surface")
+    ? (terminal ? {} : null)
+    : (editable ? {} : null),
+}) as unknown as EventTarget;
 
 describe("command registry", () => {
   it("uses conventional Linux shortcuts without a tmux prefix", () => {
@@ -226,11 +239,8 @@ describe("command registry", () => {
   });
 
   it("never steals shortcuts from forms or overlays but keeps xterm's hidden textarea routable", () => {
-    const target = (editable: boolean, terminal: boolean) => ({
-      closest: (selector: string) => selector.startsWith("input") ? (editable ? {} : null) : (terminal ? {} : null),
-    });
     const event = (editable: boolean, terminal: boolean, key = "1", code = "Digit1") => ({
-      target: target(editable, terminal) as unknown as EventTarget,
+      target: eventTarget(editable, terminal),
       key, code, keyCode: key.charCodeAt(0), altKey: false, ctrlKey: true, metaKey: false,
     });
     expect(globalShortcutAllowed(event(true, false), false)).toBe(false);
@@ -342,5 +352,62 @@ describe("command registry", () => {
     const close = commandRegistry.find((command) => command.id === "window.close")!;
     expect(commandAvailable(close, context({ canMutate: false, hasWindow: false, hasPane: false, hasTab: true }))).toBe(true);
     expect(commandAvailable(close, context({ canMutate: false, hasWindow: true, hasTab: true }))).toBe(false);
+  });
+});
+
+describe("keyboard disposition", () => {
+  const press = (key: string, options: { editable?: boolean; terminal?: boolean } = {}) => ({
+    key, code: `Key${key.toUpperCase()}`, metaKey: true, ctrlKey: false, altKey: false, shiftKey: false,
+    isComposing: false, keyCode: 0,
+    target: eventTarget(options.editable ?? false, options.terminal ?? false),
+  }) as KeyboardEvent;
+
+  const disposition = (
+    event: KeyboardEvent,
+    overlayOpen: boolean,
+    overrides: Partial<CommandContext> = {},
+  ) => shortcutDisposition(event, "mac", {}, overlayOpen, context(overrides));
+
+  it("runs a bound shortcut whose command can act", () => {
+    expect(disposition(press("w"), false, { hasTab: true })).toEqual({ kind: "run", commandId: "window.close" });
+  });
+
+  // The regression this whole pairing exists for. ⌘W is the app's, and macOS
+  // closes the only window — quitting Muxflow mid-session — the moment the app
+  // hands the chord back. An unavailable command is still the app's answer.
+  it("swallows a bound shortcut whose command cannot act, rather than yielding it to the platform", () => {
+    expect(disposition(press("w"), false, { hasTab: false, hasWindow: false })).toEqual({ kind: "swallow" });
+    // A terminal window close while the link is frozen: refused, still consumed.
+    expect(disposition(press("w"), false, { canMutate: false, hasWindow: true, hasTab: true }))
+      .toEqual({ kind: "swallow" });
+  });
+
+  it("leaves chords the keymap never claimed alone", () => {
+    expect(disposition(press("y"), false)).toEqual({ kind: "ignore" });
+  });
+
+  // Native editing has to keep working in a dialog and in the sidebar, and
+  // ⌘C/⌘V are spent on the terminal's own copy and paste. The menu is what
+  // makes yielding safe: it carries no close-window item for a stray ⌘W to
+  // find. See `src-tauri/src/menu.rs`.
+  it("yields editing chords to a text field but claims them on the terminal surface", () => {
+    expect(disposition(press("c", { editable: true }), false)).toEqual({ kind: "ignore" });
+    expect(disposition(press("c", { editable: true, terminal: true }), false))
+      .toEqual({ kind: "run", commandId: "terminal.copy" });
+  });
+
+  it("yields every chord while an overlay owns the screen", () => {
+    expect(disposition(press("w"), true, { hasTab: true })).toEqual({ kind: "ignore" });
+  });
+
+  // A document tab has no pane for `terminal.copy` to act on, but it does have
+  // a selection, and the native Edit menu is what copies it. Swallowing ⌘C here
+  // would take copying out of a rendered Markdown file away.
+  it("yields a chord whose command has a native fallback rather than swallowing it", () => {
+    expect(disposition(press("c"), false, { hasPane: false })).toEqual({ kind: "ignore" });
+    expect(disposition(press("v"), false, { hasPane: false })).toEqual({ kind: "ignore" });
+    // Every command flagged that way has to be one the platform can answer.
+    expect(commandRegistry.filter((command) => command.nativeFallback).map((command) => command.id))
+      .toEqual(["terminal.copy", "terminal.paste"]);
   });
 });
