@@ -3,6 +3,8 @@ mod connection;
 mod external_links;
 mod incidents;
 mod macos_window;
+#[cfg(target_os = "macos")]
+mod menu;
 mod notifications;
 mod perf_log;
 mod power_events;
@@ -165,7 +167,12 @@ fn valid_notification_content(title: &str, body: &str) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Only macOS: Tauri's default menu is itself macOS-gated, so replacing it
+    // anywhere else would add a menu bar to a window that never had one.
+    #[cfg(target_os = "macos")]
+    let builder = builder.menu(menu::build);
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("navigation-policy")

@@ -7,10 +7,8 @@ import {
 import { ConfirmationDialog } from "../commands/ConfirmationDialog";
 import type { PendingTmuxConfirmation } from "../commands/destructiveConfirmation";
 import {
-  commandAvailable,
-  commandForKeyboardEvent,
   currentPlatform,
-  globalShortcutAllowed,
+  shortcutDisposition,
   type ShortcutOverrides,
 } from "../commands/registry";
 import { useRowCommands } from "../commands/rowCommands";
@@ -1240,12 +1238,13 @@ export function App() {
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      const command = commandForKeyboardEvent(event, platform, shortcuts);
-      if (!command || !globalShortcutAllowed(event, modalOpen, command.id)) return;
-      if (!commandAvailable(command, commandContext)) return;
+      const disposition = shortcutDisposition(event, platform, shortcuts, modalOpen, commandContext);
+      if (disposition.kind === "ignore") return;
+      // A claimed shortcut is consumed even when its command cannot run, so it
+      // never reaches the platform's own binding for the same chord.
       event.preventDefault();
       event.stopPropagation();
-      void runCommand(command.id);
+      if (disposition.kind === "run") void runCommand(disposition.commandId);
     };
     window.addEventListener("keydown", handleKey, true);
     return () => window.removeEventListener("keydown", handleKey, true);
