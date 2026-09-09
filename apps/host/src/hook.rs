@@ -1022,8 +1022,6 @@ fn build_event_from_payload(
     let event_name = payload.hook_event_name.clone().unwrap_or_default();
     let codex_turn_start =
         adapter == v1::AgentAdapterKind::Codex && event_name == "UserPromptSubmit";
-    let codex_permission =
-        adapter == v1::AgentAdapterKind::Codex && event_name == "PermissionRequest";
     let codex_pre_tool = adapter == v1::AgentAdapterKind::Codex && event_name == "PreToolUse";
     let codex_child_event = adapter == v1::AgentAdapterKind::Codex && payload.agent_id.is_some();
     let claude_stop = adapter == v1::AgentAdapterKind::ClaudeCode && event_name == "Stop";
@@ -1100,18 +1098,18 @@ fn build_event_from_payload(
             reviewer.as_str().into(),
         );
     }
-    if codex_permission
+    if adapter == v1::AgentAdapterKind::Codex
         && let Some(path) = payload
             .transcript_path
             .as_ref()
             .filter(|path| !path.is_empty())
     {
         // This locator crosses only the private hook-to-daemon socket. The
-        // daemon consults the exact-turn positive cache before opening it, and
-        // the fallback path below resolves it to a reviewer and removes it
-        // before writing a mailbox event.
+        // daemon uses the same confined reader for permission and child-state
+        // reconciliation. The fallback path below materializes only sanitized
+        // lifecycle edges and removes the locator before writing a mailbox.
         normalized.insert(
-            crate::service::agents::adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD.into(),
+            crate::service::agents::adapters::CODEX_TRANSCRIPT_PATH_FIELD.into(),
             path.clone().into(),
         );
     }
@@ -1144,24 +1142,22 @@ fn event_for_fallback(
         return Ok(event);
     }
     let mut payload: serde_json::Value = serde_json::from_slice(&event.payload_json)?;
-    if payload
+    let event_name = payload
         .get("hook_event_name")
         .and_then(serde_json::Value::as_str)
-        != Some("PermissionRequest")
-    {
-        return Ok(event);
-    }
+        .unwrap_or_default();
     let turn_id = payload
         .get(crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD)
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
     let transcript_path = payload
-        .get(crate::service::agents::adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD)
+        .get(crate::service::agents::adapters::CODEX_TRANSCRIPT_PATH_FIELD)
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
-    if payload
-        .get(crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD)
-        .is_none()
+    if event_name == "PermissionRequest"
+        && payload
+            .get(crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD)
+            .is_none()
         && let (Some(home), Some(turn_id), Some(transcript_path)) =
             (home, turn_id.as_deref(), transcript_path.as_deref())
         && let Some(reviewer) = codex_transcript::approval_reviewer(
@@ -1175,8 +1171,48 @@ fn event_for_fallback(
         payload[crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD] =
             reviewer.as_str().into();
     }
+    if let (Some(home), Some(transcript_path)) = (home, transcript_path.as_deref())
+        && let Some(mut monitor) = codex_transcript::TurnMonitor::open(
+            &serde_json::json!({
+                "turn_id": turn_id.as_deref(),
+                "transcript_path": transcript_path,
+            }),
+            home,
+        )
+    {
+        let mut child_states = std::collections::VecDeque::new();
+        for transition in monitor.poll_children().transitions {
+            if let Some(index) =
+                child_states
+                    .iter()
+                    .position(|pending: &codex_transcript::ChildTransition| {
+                        pending.child_id == transition.child_id
+                    })
+            {
+                child_states.remove(index);
+            }
+            child_states.push_back(transition);
+            while child_states.len() > crate::service::agents::MAX_CODEX_CHILDREN {
+                child_states.pop_front();
+            }
+        }
+        if !child_states.is_empty() {
+            payload[crate::service::agents::adapters::CODEX_CHILD_TRANSITIONS_FIELD] =
+                serde_json::Value::Array(
+                    child_states
+                        .into_iter()
+                        .map(|transition| {
+                            serde_json::json!({
+                                "agent_id": transition.child_id,
+                                "active": transition.active,
+                            })
+                        })
+                        .collect(),
+                );
+        }
+    }
     if let Some(object) = payload.as_object_mut() {
-        object.remove(crate::service::agents::adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD);
+        object.remove(crate::service::agents::adapters::CODEX_TRANSCRIPT_PATH_FIELD);
     }
     event.payload_json = serde_json::to_vec(&payload)?;
     if event.payload_json.len() > MAX_NORMALIZED_HOOK_BYTES {
@@ -2059,8 +2095,14 @@ mod tests {
             payload.get(crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD),
             Some(&serde_json::Value::String("turn-1".into()))
         );
+        assert_eq!(
+            payload.get(crate::service::agents::adapters::CODEX_TRANSCRIPT_PATH_FIELD),
+            Some(&serde_json::Value::String(
+                transcript.to_string_lossy().into_owned()
+            ))
+        );
         let serialized = payload.to_string();
-        for private in ["transcript_path", "private prompt", "secret"] {
+        for private in ["private prompt", "secret"] {
             assert!(!serialized.contains(private));
         }
         assert!(payload.get("turn_id").is_none());
@@ -2102,7 +2144,7 @@ mod tests {
                 "hook_event_name": "PermissionRequest",
                 "session_id": "session-1",
                 crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-1",
-                crate::service::agents::adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD: transcript,
+                crate::service::agents::adapters::CODEX_TRANSCRIPT_PATH_FIELD: transcript,
             })
         );
 
@@ -2119,6 +2161,80 @@ mod tests {
             })
         );
         assert!(!String::from_utf8_lossy(&fallback.payload_json).contains("rollout.jsonl"));
+    }
+
+    #[test]
+    fn fallback_materializes_only_sanitized_codex_child_transitions() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join(".codex/sessions/2026/09/09");
+        fs::create_dir_all(&sessions).unwrap();
+        let transcript = sessions.join("rollout.jsonl");
+        let child_record = |agent_id: &str, kind: &str, private: &str| {
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "SubAgentActivity",
+                        "kind": kind,
+                        "agent_thread_id": agent_id,
+                        "agent_path": private,
+                        "message": private,
+                    }
+                }
+            })
+        };
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n{}\n",
+                child_record("child-a", "started", "private-start"),
+                child_record("child-b", "interacted", "private-interaction"),
+                child_record("child-a", "interrupted", "private-cancel"),
+            ),
+        )
+        .unwrap();
+        let live = build_event(
+            v1::AgentAdapterKind::Codex,
+            serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": "SubagentStart",
+                "session_id": "session-1",
+                "turn_id": "turn-1",
+                "agent_id": "child-b",
+                "transcript_path": transcript,
+            }))
+            .unwrap(),
+            "%12",
+            "tmux:server-a",
+            7,
+            Some(home.path()),
+        )
+        .unwrap();
+
+        let fallback = event_for_fallback(&live, Some(home.path())).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&fallback.payload_json).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "hook_event_name": "SubagentStart",
+                "session_id": "session-1",
+                "agent_id": "child-b",
+                crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-1",
+                crate::service::agents::adapters::CODEX_CHILD_TRANSITIONS_FIELD: [
+                    {"agent_id": "child-b", "active": true},
+                    {"agent_id": "child-a", "active": false},
+                ],
+            })
+        );
+        let serialized = String::from_utf8(fallback.payload_json).unwrap();
+        for private in [
+            "rollout.jsonl",
+            "private-start",
+            "private-interaction",
+            "private-cancel",
+        ] {
+            assert!(!serialized.contains(private));
+        }
     }
 
     #[tokio::test]

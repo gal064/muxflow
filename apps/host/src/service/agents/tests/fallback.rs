@@ -112,6 +112,74 @@ fn replay_preserves_an_auto_review_permission_as_working() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn replayed_sanitized_transcript_edges_repair_a_missing_child_stop() {
+    let dir = std::env::current_dir().unwrap().join("tmp").join(format!(
+        "phase13-child-transcript-replay-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let runtime = AgentRuntime::isolated(dir.join("agents.json"));
+    let topology = topology("codex");
+
+    let mut child_start = event("child-start", 0, "SubagentStart");
+    child_start.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        adapters::CODEX_SUBAGENT_ID_FIELD: "child",
+        adapters::CODEX_CHILD_TRANSITIONS_FIELD: [
+            {"agent_id": "older-child", "active": false},
+            {"agent_id": "child", "active": true},
+        ],
+    }))
+    .unwrap();
+    let mut repaired = event("transcript-repair", 0, "PostToolUse");
+    repaired.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        adapters::CODEX_CHILD_TRANSITIONS_FIELD: [
+            {"agent_id": "child", "active": false},
+        ],
+    }))
+    .unwrap();
+    for (name, hook) in [
+        (
+            "hook-fallback-codex-7-00000000000000000001-a.pb",
+            event("prompt", 0, "UserPromptSubmit"),
+        ),
+        (
+            "hook-fallback-codex-7-00000000000000000002-b.pb",
+            child_start,
+        ),
+        (
+            "hook-fallback-codex-7-00000000000000000003-c.pb",
+            event("parent-stop", 0, "Stop"),
+        ),
+        ("hook-fallback-codex-7-00000000000000000004-d.pb", repaired),
+    ] {
+        fs::write(dir.join(name), hook.encode_to_vec()).unwrap();
+    }
+
+    let report = fallback::consume(&dir, |event| {
+        match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
+            Ok(_) => fallback::HookReplayDisposition::Applied,
+            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
+                fallback::HookReplayDisposition::Discarded
+            }
+            Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
+        }
+    })
+    .unwrap();
+
+    assert_eq!(report.applied, 4);
+    let record = &runtime.snapshot_for("server-a").agents[0];
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(record.attention_kind, "completed");
+    let stored = runtime.state.lock().unwrap();
+    let stored = stored.agents.values().next().unwrap();
+    assert!(stored.codex_running_subagent_ids.is_empty());
+    assert!(stored.hook_terminal);
+    fs::remove_dir_all(dir).unwrap();
+}
+
 /// The configuration probe reads the *daemon process's* `PATH`, and a
 /// daemon started by launchd or a non-login SSH exec has one without
 /// `~/.local/bin`. A running agent is proof its vendor is installed here —
@@ -320,6 +388,67 @@ fn incomplete_mailbox_sweep_rejects_live_input_after_partial_progress() {
     );
     drop(state);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ambiguous_duplicate_replay_still_applies_its_sanitized_child_terminal() {
+    let dir = std::env::current_dir().unwrap().join("tmp").join(format!(
+        "phase14-duplicate-child-repair-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let runtime = AgentRuntime::isolated(dir.join("agents.json"));
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let mut started = event("possibly-applied", 0, "SubagentStart");
+    started.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "SubagentStart",
+        adapters::CODEX_SUBAGENT_ID_FIELD: "child",
+    }))
+    .unwrap();
+    runtime
+        .ingest_hook_with_context(&started, "server-a", Some(&topology))
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event("parent-stop", 0, "Stop"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+
+    let mut fallback = started;
+    let mut payload: serde_json::Value = serde_json::from_slice(&fallback.payload_json).unwrap();
+    payload[adapters::CODEX_CHILD_TRANSITIONS_FIELD] =
+        serde_json::json!([{"agent_id": "child", "active": false}]);
+    fallback.payload_json = serde_json::to_vec(&payload).unwrap();
+    let repaired = runtime
+        .ingest_hook_with_context(&fallback, "server-a", Some(&topology))
+        .unwrap();
+
+    assert!(repaired.notify);
+    assert_eq!(
+        repaired.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .hook_terminal
+    );
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
