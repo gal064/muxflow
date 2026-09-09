@@ -27,6 +27,18 @@ pub(crate) enum TurnTerminal {
     Aborted,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChildTransition {
+    pub child_id: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChildPoll {
+    pub readable: bool,
+    pub transitions: Vec<ChildTransition>,
+}
+
 /// In-memory observation of one exact Codex turn.
 ///
 /// The validated file descriptor is retained instead of the supplied path, so
@@ -36,12 +48,16 @@ pub(crate) enum TurnTerminal {
 pub(crate) struct TurnMonitor {
     transcript: File,
     turn_id: String,
+    /// File length at the last poll, used to avoid rereading an unchanged
+    /// partial append every maintenance pass.
     observed_len: u64,
+    /// Absolute byte immediately after the last complete JSONL newline.
+    completed_len: u64,
 }
 
 impl TurnMonitor {
     pub(crate) fn open(payload: &Value, home: &Path) -> Option<Self> {
-        let turn_id = string_field(payload, &["turn_id", "turnId"])?;
+        let turn_id = string_field(payload, &["turn_id", "turnId"]).unwrap_or_default();
         let supplied_path = Path::new(string_field(
             payload,
             &["transcript_path", "transcriptPath"],
@@ -51,6 +67,7 @@ impl TurnMonitor {
             transcript,
             turn_id: turn_id.to_owned(),
             observed_len: 0,
+            completed_len: 0,
         })
     }
 
@@ -95,12 +112,77 @@ impl TurnMonitor {
         None
     }
 
+    /// Read exact Codex child activity records in append order.
+    ///
+    /// `SubAgentActivity` is an internal transcript item rather than hook
+    /// input. Keep its parser intentionally narrow: accepting a similarly
+    /// named object elsewhere would let arbitrary tool output drive lifecycle
+    /// state. The returned values contain only the opaque child ID and its
+    /// active/inactive edge.
+    pub(crate) fn poll_children(&mut self) -> ChildPoll {
+        let Some((tail, offset)) = self.read_tail(true) else {
+            return ChildPoll {
+                readable: self
+                    .transcript
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.nlink() > 0),
+                transitions: Vec::new(),
+            };
+        };
+        let transitions = complete_records_chronological(&tail, offset)
+            .filter_map(|record| {
+                if record.get("type").and_then(Value::as_str) != Some("event_msg")
+                    || record.pointer("/payload/type").and_then(Value::as_str)
+                        != Some("item_completed")
+                    || record.pointer("/payload/item/type").and_then(Value::as_str)
+                        != Some("SubAgentActivity")
+                {
+                    return None;
+                }
+                let child_id = record
+                    .pointer("/payload/item/agent_thread_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| {
+                        !id.is_empty()
+                            && id.len()
+                                <= crate::service::agents::adapters::MAX_CODEX_SUBAGENT_ID_BYTES
+                    })?;
+                let active = match record.pointer("/payload/item/kind").and_then(Value::as_str) {
+                    Some("started" | "interacted") => true,
+                    Some("completed" | "interrupted") => false,
+                    _ => return None,
+                };
+                Some(ChildTransition {
+                    child_id: child_id.to_owned(),
+                    active,
+                })
+            })
+            .collect();
+        ChildPoll {
+            readable: true,
+            transitions,
+        }
+    }
+
     fn read_tail(&mut self, only_if_grown: bool) -> Option<(Vec<u8>, u64)> {
         let metadata = self.transcript.metadata().ok()?;
+        if !metadata.is_file() || metadata.nlink() == 0 {
+            return None;
+        }
         if only_if_grown && metadata.len() <= self.observed_len {
             return None;
         }
-        let offset = metadata.len().saturating_sub(MAX_TRANSCRIPT_TAIL_BYTES);
+        let tail_floor = metadata.len().saturating_sub(MAX_TRANSCRIPT_TAIL_BYTES);
+        // For a monitor poll, start one byte before the previous EOF. A
+        // well-formed JSONL file leaves a newline there, so the existing
+        // leading-fragment rule begins at the first newly appended record.
+        // If the previous write was partial, that same rule safely discards
+        // the remainder when it eventually receives its newline.
+        let offset = if only_if_grown && self.completed_len > 0 {
+            self.completed_len.saturating_sub(1).max(tail_floor)
+        } else {
+            tail_floor
+        };
         self.transcript.seek(SeekFrom::Start(offset)).ok()?;
         let mut tail = Vec::with_capacity(
             metadata
@@ -114,7 +196,16 @@ impl TurnMonitor {
             .take(MAX_TRANSCRIPT_TAIL_BYTES)
             .read_to_end(&mut tail)
             .ok()?;
+        // Advance only through the last complete JSONL record. If maintenance
+        // catches Codex mid-write, the next growth poll rereads that bounded
+        // suffix and can parse the record after its terminating newline lands.
         self.observed_len = metadata.len();
+        self.completed_len = tail
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(offset, |newline| {
+                offset.saturating_add(newline as u64).saturating_add(1)
+            });
         Some((tail, offset))
     }
 }
@@ -142,17 +233,33 @@ pub(crate) fn approval_reviewer(payload: &Value, home: &Path) -> Option<Approval
     TurnMonitor::open(payload, home)?.approval_reviewer()
 }
 
-fn complete_records(tail: &[u8], offset: u64) -> impl Iterator<Item = Value> + '_ {
-    let complete_lines = if offset > 0 {
+fn complete_lines(tail: &[u8], offset: u64) -> &[u8] {
+    let after_partial_prefix = if offset > 0 {
         tail.iter()
             .position(|byte| *byte == b'\n')
             .map_or(&[][..], |first_newline| &tail[first_newline + 1..])
     } else {
         tail
     };
-    complete_lines
+    after_partial_prefix
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(&[][..], |last_newline| {
+            &after_partial_prefix[..last_newline]
+        })
+}
+
+fn complete_records(tail: &[u8], offset: u64) -> impl Iterator<Item = Value> + '_ {
+    complete_lines(tail, offset)
         .split(|byte| *byte == b'\n')
         .rev()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+}
+
+fn complete_records_chronological(tail: &[u8], offset: u64) -> impl Iterator<Item = Value> + '_ {
+    complete_lines(tail, offset)
+        .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
 }
@@ -168,6 +275,12 @@ struct TranscriptTarget {
 impl TranscriptTarget {
     fn resolve(home: &Path, supplied_path: &Path) -> Option<Self> {
         if !supplied_path.is_absolute() {
+            return None;
+        }
+        if supplied_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
             return None;
         }
         let sessions_path = fs::canonicalize(home.join(".codex").join("sessions")).ok()?;
@@ -281,6 +394,22 @@ mod tests {
             "payload": {
                 "type": kind,
                 "turn_id": turn_id,
+            }
+        })
+        .to_string()
+    }
+
+    fn child(child_id: &str, kind: &str) -> String {
+        serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "SubAgentActivity",
+                    "kind": kind,
+                    "agent_thread_id": child_id,
+                    "agent_path": "/private/not-retained",
+                }
             }
         })
         .to_string()
@@ -434,6 +563,24 @@ mod tests {
     }
 
     #[test]
+    fn an_unlinked_transcript_descriptor_is_no_longer_live_evidence() {
+        let home = tempfile::tempdir().unwrap();
+        let transcript = sessions(home.path()).join("unlinked.jsonl");
+        fs::write(&transcript, format!("{}\n", child("child", "started"))).unwrap();
+        let mut monitor = TurnMonitor::open(&payload(&transcript, "turn"), home.path()).unwrap();
+        assert!(monitor.poll_children().readable);
+
+        fs::remove_file(transcript).unwrap();
+        assert_eq!(
+            monitor.poll_children(),
+            ChildPoll {
+                readable: false,
+                transitions: Vec::new()
+            }
+        );
+    }
+
+    #[test]
     fn never_scans_past_the_bounded_tail() {
         let home = tempfile::tempdir().unwrap();
         let transcript = sessions(home.path()).join("large.jsonl");
@@ -458,5 +605,201 @@ mod tests {
             approval_reviewer(&payload(&transcript, "wanted"), home.path()),
             Some(ApprovalReviewer::AutoReview)
         );
+    }
+
+    #[test]
+    fn child_transitions_preserve_order_duplicates_and_resume_activity() {
+        let home = tempfile::tempdir().unwrap();
+        let transcript = sessions(home.path()).join("children.jsonl");
+        fs::write(
+            &transcript,
+            [
+                child("child-a", "started"),
+                child("child-a", "started"),
+                child("child-b", "interacted"),
+                child("child-a", "completed"),
+                child("child-a", "interacted"),
+                child("child-b", "interrupted"),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let mut monitor = TurnMonitor::open(&payload(&transcript, "turn"), home.path()).unwrap();
+
+        assert_eq!(
+            monitor.poll_children(),
+            ChildPoll {
+                readable: true,
+                transitions: vec![
+                    ChildTransition {
+                        child_id: "child-a".into(),
+                        active: true
+                    },
+                    ChildTransition {
+                        child_id: "child-a".into(),
+                        active: true
+                    },
+                    ChildTransition {
+                        child_id: "child-b".into(),
+                        active: true
+                    },
+                    ChildTransition {
+                        child_id: "child-a".into(),
+                        active: false
+                    },
+                    ChildTransition {
+                        child_id: "child-a".into(),
+                        active: true
+                    },
+                    ChildTransition {
+                        child_id: "child-b".into(),
+                        active: false
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            monitor.poll_children(),
+            ChildPoll {
+                readable: true,
+                transitions: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn growth_poll_uses_the_previous_eof_as_its_causal_watermark() {
+        let home = tempfile::tempdir().unwrap();
+        let transcript = sessions(home.path()).join("watermark.jsonl");
+        fs::write(&transcript, format!("{}\n", child("child", "completed"))).unwrap();
+        let mut monitor = TurnMonitor::open(&payload(&transcript, "turn"), home.path()).unwrap();
+        assert_eq!(monitor.poll_children().transitions.len(), 1);
+
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        writeln!(file, "{}", child("child", "interacted")).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(
+            monitor.poll_children().transitions,
+            vec![ChildTransition {
+                child_id: "child".into(),
+                active: true
+            }]
+        );
+    }
+
+    #[test]
+    fn a_record_completed_after_a_partial_poll_is_not_lost() {
+        let home = tempfile::tempdir().unwrap();
+        let transcript = sessions(home.path()).join("partial-growth.jsonl");
+        let line = child("child", "interrupted");
+        let split = line.len() / 2;
+        fs::write(&transcript, &line.as_bytes()[..split]).unwrap();
+        let mut monitor = TurnMonitor::open(&payload(&transcript, "turn"), home.path()).unwrap();
+        assert!(monitor.poll_children().transitions.is_empty());
+
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        file.write_all(&line.as_bytes()[split..]).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.sync_all().unwrap();
+
+        assert_eq!(
+            monitor.poll_children().transitions,
+            vec![ChildTransition {
+                child_id: "child".into(),
+                active: false
+            }]
+        );
+    }
+
+    #[test]
+    fn child_parser_rejects_near_matches_malformed_and_partial_records() {
+        let home = tempfile::tempdir().unwrap();
+        let transcript = sessions(home.path()).join("strict-children.jsonl");
+        fs::write(
+            &transcript,
+            format!(
+                "not-json\n{}\n{}\n{}\n{}",
+                serde_json::json!({
+                    "type": "tool_output",
+                    "payload": {"type": "item_completed", "item": {
+                        "type": "SubAgentActivity", "kind": "started",
+                        "agent_thread_id": "from-tool-output"
+                    }}
+                }),
+                child("unknown-kind", "paused"),
+                child("accepted", "completed"),
+                child("partial", "started"),
+            ),
+        )
+        .unwrap();
+        let mut monitor = TurnMonitor::open(&payload(&transcript, "turn"), home.path()).unwrap();
+
+        assert_eq!(
+            monitor.poll_children().transitions,
+            vec![ChildTransition {
+                child_id: "accepted".into(),
+                active: false
+            }]
+        );
+    }
+
+    #[test]
+    fn child_parser_rejects_an_oversized_opaque_id() {
+        let home = tempfile::tempdir().unwrap();
+        let transcript = sessions(home.path()).join("oversized-child-id.jsonl");
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                child(
+                    &"x".repeat(crate::service::agents::adapters::MAX_CODEX_SUBAGENT_ID_BYTES + 1),
+                    "started"
+                )
+            ),
+        )
+        .unwrap();
+        let mut monitor = TurnMonitor::open(&payload(&transcript, "turn"), home.path()).unwrap();
+
+        assert!(monitor.poll_children().transitions.is_empty());
+    }
+
+    #[test]
+    fn oversized_records_and_the_one_mib_tail_cannot_hide_a_later_child_event() {
+        let home = tempfile::tempdir().unwrap();
+        let transcript = sessions(home.path()).join("large-children.jsonl");
+        let old = child("outside-tail", "started");
+        let oversized = serde_json::json!({
+            "type": "tool_output",
+            "payload": "x".repeat(MAX_TRANSCRIPT_TAIL_BYTES as usize + 128),
+        });
+        let recent = child("inside-tail", "interrupted");
+        fs::write(&transcript, format!("{old}\n{oversized}\n{recent}\n")).unwrap();
+        let mut monitor = TurnMonitor::open(&payload(&transcript, "turn"), home.path()).unwrap();
+
+        assert_eq!(
+            monitor.poll_children().transitions,
+            vec![ChildTransition {
+                child_id: "inside-tail".into(),
+                active: false
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_a_supplied_parent_traversal_even_when_it_resolves_inside_sessions() {
+        let home = tempfile::tempdir().unwrap();
+        let session_dir = sessions(home.path());
+        let transcript = session_dir.join("traversal.jsonl");
+        fs::write(&transcript, format!("{}\n", child("child", "started"))).unwrap();
+        let supplied = session_dir.join("nested/../traversal.jsonl");
+
+        assert!(TurnMonitor::open(&payload(&supplied, "turn"), home.path()).is_none());
     }
 }

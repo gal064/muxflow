@@ -128,6 +128,7 @@ pub(super) fn topology(
                 hook_terminal: false,
                 claude_has_running_subagent: false,
                 codex_running_subagent_ids: Default::default(),
+                codex_subagent_capacity_exceeded: false,
                 codex_parent_stopped_for_subagents: false,
                 subagent_evidence_observed_at_unix_millis: 0,
                 codex_turn_reviews: VecDeque::new(),

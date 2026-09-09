@@ -188,16 +188,34 @@ impl AgentRuntime {
         let pane_record_id = candidates.pane;
         let native_record_id = candidates.native;
         let previous_id = native_record_id.clone().or(pane_record_id.clone());
-        for candidate in [native_record_id.as_ref(), pane_record_id.as_ref()]
+        let duplicate_id = [native_record_id.as_ref(), pane_record_id.as_ref()]
             .into_iter()
             .flatten()
-        {
-            if state.agents[candidate]
-                .source_event_ids
-                .contains(&event.source_event_id)
+            .find(|candidate| {
+                state.agents[*candidate]
+                    .source_event_ids
+                    .contains(&event.source_event_id)
+            })
+            .cloned();
+        if let Some(duplicate_id) = duplicate_id {
+            if adapter.id() == "codex"
+                && let Some(reconciled) = reconcile_duplicate_transcript_child_states(
+                    &mut state,
+                    &duplicate_id,
+                    &payload,
+                    observed_now,
+                )
             {
-                return Err(HookIngestFailure::Duplicate);
+                if let Err(error) = self.persist_locked(&state) {
+                    *state = original;
+                    return Err(HookIngestFailure::Retryable(error));
+                }
+                return Ok(IngestedHook {
+                    event: reconciled,
+                    reply: None,
+                });
             }
+            return Err(HookIngestFailure::Duplicate);
         }
         let latest_sequence = [native_record_id.as_ref(), pane_record_id.as_ref()]
             .into_iter()
@@ -319,7 +337,7 @@ impl AgentRuntime {
                 &serde_json::json!({
                     "turn_id": approval_turn_id,
                     "transcript_path": payload
-                        .get(adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD)
+                        .get(adapters::CODEX_TRANSCRIPT_PATH_FIELD)
                         .and_then(serde_json::Value::as_str)?,
                 }),
                 &home,
@@ -347,12 +365,59 @@ impl AgentRuntime {
             .as_ref()
             .map(|record| record.codex_running_subagent_ids.clone())
             .unwrap_or_default();
+        let mut codex_subagent_capacity_exceeded = previous
+            .as_ref()
+            .is_some_and(|record| record.codex_subagent_capacity_exceeded);
         let codex_subagent_id = payload
             .get(adapters::CODEX_SUBAGENT_ID_FIELD)
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         let codex_child_event = adapter.id() == "codex" && !codex_subagent_id.is_empty();
         let codex_child_activity = codex_child_event && parsed.event_name != "SubagentStop";
+        let pre_hook_child_poll = (adapter.id() == "codex")
+            .then(|| self.poll_codex_children_before_hook(&agent_id))
+            .flatten();
+        let already_monitored = pre_hook_child_poll
+            .as_ref()
+            .is_some_and(|(_, readable)| *readable);
+        let (child_monitor, initial_child_transitions) = (adapter.id() == "codex"
+            && !already_monitored
+            && (codex_child_event || !codex_running_subagent_ids.is_empty()))
+        .then(|| {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+            let mut monitor = crate::hook::codex_transcript::TurnMonitor::open(
+                &serde_json::json!({
+                    "transcript_path": payload
+                        .get(adapters::CODEX_TRANSCRIPT_PATH_FIELD)
+                        .and_then(serde_json::Value::as_str)?,
+                }),
+                &home,
+            )?;
+            let transitions = monitor.poll_children().transitions;
+            Some((monitor, transitions))
+        })
+        .flatten()
+        .map_or((None, Vec::new()), |(monitor, transitions)| {
+            (Some(monitor), transitions)
+        });
+        let mut transcript_transitions = pre_hook_child_poll
+            .as_ref()
+            .map(|(transitions, _)| transitions.clone())
+            .unwrap_or_default();
+        transcript_transitions.extend(initial_child_transitions);
+        for transition in transcript_transitions {
+            if transition.active {
+                if codex_running_subagent_ids.contains(&transition.child_id)
+                    || codex_running_subagent_ids.len() < super::MAX_CODEX_CHILDREN
+                {
+                    codex_running_subagent_ids.insert(transition.child_id);
+                } else {
+                    codex_subagent_capacity_exceeded = true;
+                }
+            } else {
+                codex_running_subagent_ids.remove(&transition.child_id);
+            }
+        }
         if adapter.id() == "codex"
             && (!previous_hook_terminal
                 || parsed.event_name == "SessionStart"
@@ -360,23 +425,51 @@ impl AgentRuntime {
                 || codex_child_activity)
         {
             match parsed.event_name.as_str() {
-                "SessionStart" => codex_running_subagent_ids.clear(),
+                "SessionStart" => {
+                    codex_running_subagent_ids.clear();
+                    codex_subagent_capacity_exceeded = false;
+                }
                 "SubagentStop" => {
                     codex_running_subagent_ids.remove(codex_subagent_id);
                 }
-                _ if codex_child_activity => {
+                _ if codex_child_activity
+                    && (codex_running_subagent_ids.contains(codex_subagent_id)
+                        || codex_running_subagent_ids.len() < super::MAX_CODEX_CHILDREN) =>
+                {
                     codex_running_subagent_ids.insert(codex_subagent_id.to_owned());
                 }
+                _ if codex_child_activity => codex_subagent_capacity_exceeded = true,
                 _ => {}
+            }
+        }
+        let mut transcript_child_activity = false;
+        let mut transcript_child_event = false;
+        if adapter.id() == "codex" {
+            for (child_id, active) in sanitized_child_transitions(&payload) {
+                transcript_child_event = true;
+                transcript_child_activity |= active;
+                if active {
+                    if codex_running_subagent_ids.contains(&child_id)
+                        || codex_running_subagent_ids.len() < super::MAX_CODEX_CHILDREN
+                    {
+                        codex_running_subagent_ids.insert(child_id);
+                    } else {
+                        codex_subagent_capacity_exceeded = true;
+                    }
+                } else {
+                    codex_running_subagent_ids.remove(&child_id);
+                }
             }
         }
         let codex_parent_stop_during_subagents = adapter.id() == "codex"
             && parsed.event_name == "Stop"
-            && !codex_running_subagent_ids.is_empty();
+            && (!codex_running_subagent_ids.is_empty() || codex_subagent_capacity_exceeded);
         let codex_final_unwaited_subagent_stop = adapter.id() == "codex"
-            && parsed.event_name == "SubagentStop"
+            && (parsed.event_name == "SubagentStop" || transcript_child_event)
             && previous_codex_parent_stopped
-            && codex_running_subagent_ids.is_empty();
+            && previous_lifecycle != v1::AgentLifecycleState::Blocked
+            && codex_running_subagent_ids.is_empty()
+            && !codex_subagent_capacity_exceeded;
         let claude_idle_prompt_during_subagent = adapter.id() == "claude-code"
             && previous_claude_has_running_subagent
             && previous_lifecycle != v1::AgentLifecycleState::Blocked
@@ -388,36 +481,52 @@ impl AgentRuntime {
         let subagent_bookkeeping_during_block = previous_lifecycle
             == v1::AgentLifecycleState::Blocked
             && (codex_child_event
+                || transcript_child_event
                 || adapter.id() == "claude-code" && parsed.event_name == "SubagentStop"
                 || codex_parent_stop_during_subagents
                 || adapter.id() == "claude-code"
                     && parsed.event_name == "Stop"
                     && parsed.lifecycle == v1::AgentLifecycleState::Working);
-        let parsed_lifecycle = if codex_final_unwaited_subagent_stop {
-            v1::AgentLifecycleState::Idle
-        } else if subagent_bookkeeping_during_block {
-            v1::AgentLifecycleState::Blocked
-        } else if codex_parent_stop_during_subagents
-            || matches!(
-                permission_review,
-                Some(
-                    PermissionReview::CachedAuto
-                        | PermissionReview::ObservedAuto
-                        | PermissionReview::Unknown
-                )
+        let codex_resolved_block_after_children = adapter.id() == "codex"
+            && previous_lifecycle == v1::AgentLifecycleState::Blocked
+            && previous_codex_parent_stopped
+            && codex_running_subagent_ids.is_empty()
+            && !codex_subagent_capacity_exceeded
+            && parsed.lifecycle != v1::AgentLifecycleState::Blocked
+            && !matches!(
+                parsed.event_name.as_str(),
+                "SessionStart" | "UserPromptSubmit"
             )
-            || claude_idle_prompt_during_subagent
-        {
-            v1::AgentLifecycleState::Working
-        } else {
-            parsed.lifecycle
-        };
+            && !codex_child_event
+            && !transcript_child_event
+            && !codex_child_activity;
+        let parsed_lifecycle =
+            if codex_final_unwaited_subagent_stop || codex_resolved_block_after_children {
+                v1::AgentLifecycleState::Idle
+            } else if subagent_bookkeeping_during_block {
+                v1::AgentLifecycleState::Blocked
+            } else if codex_parent_stop_during_subagents
+                || matches!(
+                    permission_review,
+                    Some(
+                        PermissionReview::CachedAuto
+                            | PermissionReview::ObservedAuto
+                            | PermissionReview::Unknown
+                    )
+                )
+                || claude_idle_prompt_during_subagent
+            {
+                v1::AgentLifecycleState::Working
+            } else {
+                parsed.lifecycle
+            };
         let terminal_late = previous_hook_terminal
             && !matches!(
                 parsed.event_name.as_str(),
                 "SessionStart" | "UserPromptSubmit"
             )
-            && !codex_child_activity;
+            && !codex_child_activity
+            && !transcript_child_activity;
         let lifecycle = if terminal_late {
             // `hook_terminal` means a terminal Stop was already committed.
             // A late tool/subagent event cannot revive that turn, and an
@@ -437,9 +546,11 @@ impl AgentRuntime {
             parsed.event_name.as_str(),
             "SessionStart" | "UserPromptSubmit"
         ) || codex_child_activity
+            || transcript_child_activity
         {
             false
         } else if codex_final_unwaited_subagent_stop
+            || codex_resolved_block_after_children
             || matches!(parsed.event_name.as_str(), "Stop" | "StopFailure")
                 && parsed_lifecycle == v1::AgentLifecycleState::Idle
         {
@@ -544,25 +655,40 @@ impl AgentRuntime {
         };
         let codex_parent_stopped_for_subagents = if adapter.id() != "codex" || terminal_late {
             false
+        } else if lifecycle == v1::AgentLifecycleState::Blocked {
+            previous_codex_parent_stopped
         } else {
             match parsed.event_name.as_str() {
                 "SessionStart" => false,
                 "UserPromptSubmit" if !codex_child_event => false,
-                "Stop" => !codex_running_subagent_ids.is_empty(),
-                "SubagentStop" if codex_running_subagent_ids.is_empty() => false,
-                _ if codex_child_activity && previous_hook_terminal => true,
+                "Stop" => {
+                    !codex_running_subagent_ids.is_empty() || codex_subagent_capacity_exceeded
+                }
+                "SubagentStop"
+                    if codex_running_subagent_ids.is_empty()
+                        && !codex_subagent_capacity_exceeded =>
+                {
+                    false
+                }
+                _ if codex_resolved_block_after_children => false,
+                _ if (codex_child_activity || transcript_child_activity)
+                    && previous_hook_terminal =>
+                {
+                    true
+                }
                 _ => previous_codex_parent_stopped,
             }
         };
         if hook_terminal {
             codex_running_subagent_ids.clear();
+            codex_subagent_capacity_exceeded = false;
         }
         let subagent_evidence_observed_at_unix_millis = if hook_terminal {
             0
         } else if adapter.id() == "codex" {
-            if codex_running_subagent_ids.is_empty() {
+            if codex_running_subagent_ids.is_empty() && !codex_subagent_capacity_exceeded {
                 0
-            } else if codex_child_event {
+            } else if codex_child_event || transcript_child_event {
                 observed_now
             } else {
                 previous_subagent_evidence_observed_at
@@ -612,6 +738,7 @@ impl AgentRuntime {
             hook_terminal,
             claude_has_running_subagent,
             codex_running_subagent_ids,
+            codex_subagent_capacity_exceeded,
             codex_parent_stopped_for_subagents,
             subagent_evidence_observed_at_unix_millis,
             codex_turn_reviews,
@@ -625,6 +752,9 @@ impl AgentRuntime {
         }
         drop(state);
         if adapter.id() == "codex" {
+            if let Some((_, readable)) = pre_hook_child_poll {
+                self.acknowledge_codex_children_before_hook(&agent_id, readable);
+            }
             self.track_codex_permission(
                 &agent_id,
                 &parsed.event_name,
@@ -637,6 +767,11 @@ impl AgentRuntime {
                 .flatten(),
                 lifecycle_changed_at,
                 observed_now,
+            );
+            self.track_codex_children(
+                &agent_id,
+                child_monitor,
+                !record.codex_running_subagent_ids.is_empty(),
             );
         }
         if !voice_retired_agent_ids.is_empty() {
@@ -693,6 +828,140 @@ impl AgentRuntime {
             (self.reply_sink)(reply);
         }
     }
+}
+
+fn sanitized_child_transitions(payload: &serde_json::Value) -> Vec<(String, bool)> {
+    let Some(transitions) = payload
+        .get(adapters::CODEX_CHILD_TRANSITIONS_FIELD)
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut latest: VecDeque<(String, bool)> = VecDeque::new();
+    for transition in transitions {
+        let Some(child_id) = transition
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= adapters::MAX_CODEX_SUBAGENT_ID_BYTES)
+        else {
+            continue;
+        };
+        let Some(active) = transition
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+        else {
+            continue;
+        };
+        if let Some(index) = latest.iter().position(|(id, _)| id == child_id) {
+            latest.remove(index);
+        }
+        latest.push_back((child_id.to_owned(), active));
+        while latest.len() > super::MAX_CODEX_CHILDREN {
+            latest.pop_front();
+        }
+    }
+    latest.into()
+}
+
+fn reconcile_duplicate_transcript_child_states(
+    state: &mut super::StoredState,
+    record_id: &str,
+    payload: &serde_json::Value,
+    now: i64,
+) -> Option<v1::AgentEvent> {
+    let transitions = sanitized_child_transitions(payload);
+    if transitions.is_empty() {
+        return None;
+    }
+    let before = state.agents.get(record_id)?.clone();
+    let mut child_ids = before.codex_running_subagent_ids.clone();
+    let mut capacity_exceeded = before.codex_subagent_capacity_exceeded;
+    for (child_id, active) in transitions {
+        if active {
+            if child_ids.contains(&child_id) || child_ids.len() < super::MAX_CODEX_CHILDREN {
+                child_ids.insert(child_id);
+            } else {
+                capacity_exceeded = true;
+            }
+        } else {
+            child_ids.remove(&child_id);
+        }
+    }
+    let has_children = !child_ids.is_empty() || capacity_exceeded;
+    let was_blocked = before.lifecycle == v1::AgentLifecycleState::Blocked as i32;
+    let resumed = has_children && before.hook_terminal;
+    let completed = !has_children && before.codex_parent_stopped_for_subagents && !was_blocked;
+    let lifecycle = if was_blocked {
+        v1::AgentLifecycleState::Blocked
+    } else if has_children {
+        v1::AgentLifecycleState::Working
+    } else if completed {
+        v1::AgentLifecycleState::Idle
+    } else {
+        v1::AgentLifecycleState::try_from(before.lifecycle).unwrap_or_default()
+    };
+    let changed = child_ids != before.codex_running_subagent_ids
+        || capacity_exceeded != before.codex_subagent_capacity_exceeded
+        || lifecycle as i32 != before.lifecycle
+        || resumed
+        || completed;
+    if !changed {
+        return None;
+    }
+    state.generation = state.generation.saturating_add(1);
+    let generation = state.generation;
+    let record = state.agents.get_mut(record_id)?;
+    let previous_lifecycle =
+        v1::AgentLifecycleState::try_from(record.lifecycle).unwrap_or_default();
+    record.codex_running_subagent_ids = child_ids;
+    record.codex_subagent_capacity_exceeded = capacity_exceeded;
+    record.codex_parent_stopped_for_subagents = if completed {
+        false
+    } else if resumed {
+        true
+    } else {
+        record.codex_parent_stopped_for_subagents
+    };
+    record.hook_terminal = if completed {
+        true
+    } else if resumed {
+        false
+    } else {
+        record.hook_terminal
+    };
+    record.lifecycle = lifecycle as i32;
+    record.lifecycle_observed_at_unix_millis = now;
+    record.updated_at_unix_millis = now;
+    record.state_generation = generation;
+    record.subagent_evidence_observed_at_unix_millis = if has_children { now } else { 0 };
+    if previous_lifecycle != lifecycle {
+        record.lifecycle_changed_at_unix_millis = now;
+    }
+    let notify = previous_lifecycle == v1::AgentLifecycleState::Working
+        && lifecycle == v1::AgentLifecycleState::Idle;
+    if notify {
+        record.attention_generation = record.attention_generation.saturating_add(1);
+        record.attention_kind = "completed".into();
+        record.attention_seen_at_unix_millis = 0;
+    } else if lifecycle == v1::AgentLifecycleState::Working
+        && record.attention_kind == "completed"
+        && record.seen_generation >= record.attention_generation
+    {
+        record.attention_kind.clear();
+        record.attention_seen_at_unix_millis = 0;
+    }
+    Some(v1::AgentEvent {
+        agent: Some(snapshot::record(record)),
+        generation,
+        notify,
+        reason: if notify {
+            "completed"
+        } else {
+            "transcript_child_state"
+        }
+        .into(),
+        retired_agent_ids: Vec::new(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
