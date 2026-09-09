@@ -17,13 +17,18 @@ fn runtime(name: &str) -> AgentRuntime {
 }
 
 fn event(id: &str, generation: u64, name: &str) -> v1::AgentHookEvent {
+    let mut payload = serde_json::json!({"hook_event_name": name});
+    if name == "PermissionRequest" {
+        payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "user".into();
+        payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = format!("turn-{id}").into();
+    }
     v1::AgentHookEvent {
         adapter: v1::AgentAdapterKind::Codex.into(),
         source_event_id: id.into(),
         source_generation: generation,
         native_session_id: "native-1".into(),
         pane_id: "%7".into(),
-        payload_json: serde_json::to_vec(&serde_json::json!({"hook_event_name": name})).unwrap(),
+        payload_json: serde_json::to_vec(&payload).unwrap(),
         occurred_at_unix_millis: now_millis(),
         origin_server_identity: "server-a".into(),
         ..Default::default()
@@ -254,6 +259,7 @@ fn persist_failure_rolls_back_runtime_mutations() {
         state: Mutex::new(baseline_state.clone()),
         wiring: Mutex::new(hooks::WiringCache::default()),
         departure_misses: Mutex::new(BTreeMap::new()),
+        pending_codex_permissions: Mutex::new(BTreeMap::new()),
         reply_sink: Box::new(|_| {}),
         identity_promotion_sink: Box::new(|_, _| {}),
     };

@@ -94,9 +94,13 @@ is present, preventing silently broken agent configuration.
 Hooks submit compact state JSON through the private daemon socket and never send
 prompt text, terminal output, tool input, file contents, or credentials. The
 only transient locator is Codex's transcript path on a live
-`PermissionRequest`: the daemon opens it only after an exact-turn positive-cache
-miss. If no daemon accepts the event, the hook resolves the reviewer and strips
-the path before placing the event in the durable fallback mailbox. The
+`PermissionRequest`: the daemon opens it only after an exact-turn reviewer-cache
+miss. For a confirmed user-reviewed request it retains only the validated open
+file handle in memory, checks its length during the existing maintenance pass,
+and clears Blocked when that exact turn appends `turn_aborted` or
+`task_complete`. This covers Codex cancellation, which emits no clearing hook.
+If no daemon accepts the event, the hook resolves the reviewer and strips the
+path before placing the event in the durable fallback mailbox. The
 hook process accepts a bounded vendor envelope up to 64 MiB because tool-complete
 events can include the full result, including base64 image data. It parses that
 envelope as a stream and retains only the lifecycle allowlist, so large tool
@@ -104,10 +108,13 @@ results do not become large daemon messages or durable mailbox entries.
 Retained lifecycle strings are individually limited to 16 KiB and the compact
 daemon payload remains limited to 256 KiB. The
 normalized Codex `PreToolUse` payload retains only the tool name needed to
-distinguish a question from ordinary work. The normalized turn-start and
-permission payloads retain only the opaque turn ID and reviewer needed for the
-positive cache and its revalidation. Codex child-scoped events retain only
-their opaque agent ID; the daemon keeps those IDs as a set so duplicate events
+distinguish a question from ordinary work. Normalized Codex lifecycle events
+retain only the opaque turn ID, and turn-start/permission events retain the
+reviewer needed for exact-turn revalidation. The daemon keeps a bounded set of
+parent and child reviewer decisions so concurrent children cannot evict one
+another. An unresolved permission reviewer stays Working; only an exact `user`
+decision raises Blocked. Codex child-scoped events retain only their opaque
+agent ID; the daemon keeps those IDs as a set so duplicate events
 cannot miscount concurrent children and later child activity can reopen an
 existing child. A parent `Stop` remains Working until that set is empty,
 including across daemon restarts. A Claude `Stop` retains only a boolean

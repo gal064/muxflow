@@ -23,6 +23,25 @@ pub(super) struct StoredRoute {
     pub pane_index_fallback: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(super) struct CodexTurnKey {
+    pub agent_id: String,
+    pub turn_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CodexReviewer {
+    AutoReview,
+    User,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct CodexTurnReview {
+    pub turn: CodexTurnKey,
+    pub reviewer: CodexReviewer,
+}
+
 /// Deliberately tolerant of keys it does not know: **do not add
 /// `#[serde(deny_unknown_fields)]`.**
 ///
@@ -77,10 +96,11 @@ pub(super) struct StoredAgent {
     /// unrelated parent hooks cannot make a lost child stop live forever.
     #[serde(default)]
     pub subagent_evidence_observed_at_unix_millis: i64,
-    /// The exact Codex turn whose start identified native auto-review. A
-    /// permission request may reuse this only when its turn ID matches.
+    /// Exact Codex turns whose context identified native auto-review. Child
+    /// turns overlap, so one scalar would let the latest child evict valid
+    /// evidence for its siblings. Ingest keeps this deque strictly bounded.
     #[serde(default)]
-    pub codex_auto_review_turn_id: String,
+    pub codex_turn_reviews: VecDeque<CodexTurnReview>,
     /// When something last said what this agent was *doing*.
     ///
     /// Distinct from `updated_at_unix_millis`, which also moves when the agent
@@ -397,7 +417,7 @@ mod tests {
             "an already-seen completion uses its transition as the migration baseline"
         );
         assert_eq!(record.route.pane_id, "%1");
-        assert!(record.codex_auto_review_turn_id.is_empty());
+        assert!(record.codex_turn_reviews.is_empty());
         fs::remove_file(path).unwrap();
     }
 
@@ -444,7 +464,7 @@ mod tests {
                 codex_running_subagent_ids: BTreeSet::new(),
                 codex_parent_stopped_for_subagents: false,
                 subagent_evidence_observed_at_unix_millis: 0,
-                codex_auto_review_turn_id: String::new(),
+                codex_turn_reviews: VecDeque::new(),
                 lifecycle_observed_at_unix_millis: 1,
                 lifecycle_changed_at_unix_millis: 1,
             },

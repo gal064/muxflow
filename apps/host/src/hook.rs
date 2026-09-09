@@ -1077,7 +1077,7 @@ fn build_event_from_payload(
             normalized.insert("tool_name".into(), tool_name.into());
         }
     }
-    if codex_turn_start || codex_permission {
+    if adapter == v1::AgentAdapterKind::Codex {
         let turn_id = payload.turn_id.clone().unwrap_or_default();
         if !turn_id.is_empty() {
             normalized.insert(
@@ -1699,6 +1699,34 @@ mod tests {
         let serialized = payload.to_string();
         assert!(!serialized.contains("private-role"));
         assert!(!serialized.contains("private command"));
+    }
+
+    #[test]
+    fn codex_lifecycle_events_retain_the_exact_turn_for_pending_permission_cleanup() {
+        for event_name in ["PreToolUse", "PostToolUse", "SubagentStop", "Stop"] {
+            let event = build_event(
+                v1::AgentAdapterKind::Codex,
+                serde_json::to_vec(&serde_json::json!({
+                    "hook_event_name": event_name,
+                    "session_id": "session-1",
+                    "agent_id": "agent-1",
+                    "turn_id": "turn-1",
+                    "tool_input": {"command": "private command"},
+                }))
+                .unwrap(),
+                "%12",
+                "tmux:server-a",
+                7,
+                None,
+            )
+            .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+            assert_eq!(
+                payload[crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD],
+                "turn-1"
+            );
+            assert!(!payload.to_string().contains("private command"));
+        }
     }
 
     #[test]
