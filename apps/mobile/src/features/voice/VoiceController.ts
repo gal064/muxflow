@@ -210,6 +210,7 @@ export class VoiceController {
   /** A live take never keeps the microphone when the app leaves the foreground. */
   onAppInactive(): void {
     if (this.recordingPhase() !== undefined) void this.cancelUtterance();
+    else this.disarm();
   }
 
   /** Every reconnect is a new connection, and the host's registration is per connection (§4.3). */
@@ -691,7 +692,8 @@ export class VoiceController {
 
   /**
    * Nobody is listening: an armed recorder holds an open (empty) file in the
-   * cache, so release it once idle. The next focus arms again.
+   * cache, so release it when this screen is no longer usable. The next active
+   * focus arms again. An already captured utterance may keep transcribing.
    */
   private disarm(disposing = false): void {
     const { recorder, files } = this.options;
@@ -712,9 +714,8 @@ export class VoiceController {
       return;
     }
     void this.options.recorderCoordinator.release(this.recorderOwner, () => {
-      if (this.focused) return false;
-      const phase = this.options.store.getState().sessions[this.sessionKey]?.phase;
-      return phase === undefined || phase === "idle";
+      if (this.focused && this.options.appInForeground()) return false;
+      return !this.options.recorderCoordinator.isListeningFor(this.recorderOwner);
     }, () => recorder.release());
   }
 
@@ -732,7 +733,10 @@ export class VoiceController {
     this.log(`recorder.prepare.requested actual=${this.recorderState()}`);
     this.arming = this.options.recorderCoordinator.claim(
       this.recorderOwner,
-      () => !this.disposed && this.focused,
+      // A claim may wait behind another voice session. Re-check foreground
+      // state when it is eventually retried so a canceled background session
+      // cannot acquire and retain the shared recorder later.
+      () => !this.disposed && this.focused && this.options.appInForeground(),
       () => this.options.recorder.prepare(),
     )
       .then((claimed) => {

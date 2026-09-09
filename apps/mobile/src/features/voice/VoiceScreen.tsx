@@ -225,7 +225,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
           onCancel={() => void controller.cancelUtterance()}
           onLock={() => controller.lockUtterance()}
           onPressIn={() => controller.beginUtterance()}
-          onPressOut={() => void controller.endUtterance()}
+          onSubmit={() => void controller.endUtterance()}
           phase={phase}
         />
       </View>

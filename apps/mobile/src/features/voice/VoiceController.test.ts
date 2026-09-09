@@ -1070,7 +1070,7 @@ describe("VoiceController recorder release races (QA fix review)", () => {
     await settle();
   });
 
-  it("leaving during the transcription releases the recorder once the utterance settles", async () => {
+  it("leaving during transcription releases the re-armed recorder while the captured utterance finishes", async () => {
     const h = harness();
     let answer: ((response: ReturnType<typeof transcriptResponse>) => void) | undefined;
     h.connection.answer(Operation.VOICE_TRANSCRIBE, () => new Promise((resolve) => { answer = resolve; }));
@@ -1084,7 +1084,8 @@ describe("VoiceController recorder release races (QA fix review)", () => {
     expect(h.recorder.prepared).toBe(2); // re-armed while still focused
     h.controller.blur();
     await settle();
-    expect(h.recorder.released).toBe(0); // not from under a transcription
+    expect(h.recorder.released).toBe(1);
+    expect(h.recorder.prepared).toBe(0);
     answer!(transcriptResponse("hello"));
     await released;
     await settle();

@@ -12,7 +12,7 @@ export interface MicButtonProps {
   /** Why it is disabled, shown under the button; empty when enabled. */
   hint: string;
   onPressIn: () => void;
-  onPressOut: () => void;
+  onSubmit: () => void;
   onLock: () => void;
   onCancel: () => void;
 }
@@ -26,7 +26,7 @@ const DRAG_PREVIEW_LIMIT = VOICE_GESTURE_THRESHOLD - 8;
  * screen works without looking at it. The disc is the visual anchor (pulsing
  * ring while recording, spinner while the host works), not the hit area.
  */
-export function MicButton({ phase, disabled, hint, onPressIn, onPressOut, onLock, onCancel }: MicButtonProps) {
+export function MicButton({ phase, disabled, hint, onPressIn, onSubmit, onLock, onCancel }: MicButtonProps) {
   const pulse = useRef(new Animated.Value(0)).current;
   const dragX = useRef(new Animated.Value(0)).current;
   const [gestureDirection, setGestureDirection] = useState<VoiceGestureDirection>();
@@ -34,6 +34,7 @@ export function MicButton({ phase, disabled, hint, onPressIn, onPressOut, onLock
   const locked = phase === "recordingLocked";
   const busy = phase === "canceling" || phase === "transcribing" || phase === "sending";
   const gesture = useRef<{ x: number; y: number; action?: "lock" | "cancel" } | undefined>(undefined);
+  const completedAction = useRef<"lock" | "cancel" | undefined>(undefined);
 
   useEffect(() => {
     if (!recording) {
@@ -92,18 +93,25 @@ export function MicButton({ phase, disabled, hint, onPressIn, onPressOut, onLock
       accessibilityRole="button"
       accessibilityState={{ disabled: disabled || busy, busy }}
       disabled={disabled || busy}
+      onPress={() => {
+        // Unlike onPressOut, onPress is not fired when the native responder is
+        // terminated by navigation or backgrounding. Only a genuine release
+        // may submit, and a completed horizontal gesture already handled itself.
+        const action = completedAction.current;
+        completedAction.current = undefined;
+        if (!action) onSubmit();
+      }}
       onPressIn={(event) => {
+        completedAction.current = undefined;
         gesture.current = { x: event.nativeEvent.pageX, y: event.nativeEvent.pageY };
         resetGesturePreview();
         onPressIn();
       }}
       onPressOut={(event) => {
         const action = classify(event);
+        completedAction.current = action;
         gesture.current = undefined;
-        if (!action) {
-          resetGesturePreview();
-          onPressOut();
-        }
+        if (!action) resetGesturePreview();
       }}
       onTouchMove={classify}
       // A thumb drifting well outside the pane mid-sentence must not count as a release.

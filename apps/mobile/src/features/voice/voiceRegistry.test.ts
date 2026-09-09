@@ -2,7 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import { EventKind, HostEventSchema, Operation, VoiceEventSchema, VoiceProvisionProgressSchema, VoiceSpeechSchema, VoiceStatusSchema } from "../../protocol/gen/envelope_pb";
 import type { Agent } from "../../store/sessionStore";
-import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder } from "./testing";
+import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, transcriptResponse } from "./testing";
 import { VoiceRegistry } from "./voiceRegistry";
 import { createVoiceStore, latestReply } from "./voiceStore";
 
@@ -14,9 +14,10 @@ function harness() {
   const store = createVoiceStore();
   const connection = new FakeConnection();
   const logs: string[] = [];
+  let foreground = true;
   const registry = new VoiceRegistry(store, (line) => logs.push(line));
-  const deps = { tailHoldMs: 0, getConnection: () => connection.asHostConnection(), recorder: new FakeRecorder(), player: new FakePlayer(), files: new FakeFiles(), appInForeground: () => true };
-  return { store, connection, registry, deps, logs };
+  const deps = { tailHoldMs: 0, getConnection: () => connection.asHostConnection(), recorder: new FakeRecorder(), player: new FakePlayer(), files: new FakeFiles(), appInForeground: () => foreground };
+  return { store, connection, registry, deps, logs, setForeground: (active: boolean) => { foreground = active; } };
 }
 
 function agent(id: string, paneId = "%1", sessionId = "$1"): Agent {
@@ -276,6 +277,73 @@ describe("VoiceRegistry", () => {
 
     expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
     expect(h.store.getState().sessions.b?.phase).toBe("idle");
+    h.registry.disposeAll();
+    await settle();
+  });
+
+  it("does not grant a canceled recorder claim after the app enters the background", async () => {
+    const h = harness();
+    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    a.focus();
+    await settle();
+    b.focus();
+    b.beginUtterance();
+    await settle();
+    expect(h.store.getState().sessions.b?.phase).toBe("recording");
+    expect(h.deps.recorder.recording).toBe(false); // B is waiting behind A's prepared recorder.
+
+    h.setForeground(false);
+    b.onAppInactive();
+    a.blur();
+    await settle();
+
+    expect(h.store.getState().sessions.b?.phase).toBe("idle");
+    expect(h.deps.recorder.prepared).toBe(0);
+    expect(h.deps.recorder.recording).toBe(false);
+
+    h.setForeground(true);
+    b.onAppActive();
+    await settle();
+    expect(h.deps.recorder.prepared).toBe(1);
+    h.registry.disposeAll();
+    await settle();
+  });
+
+  it("lets B record while A's captured utterance is still transcribing", async () => {
+    const h = harness();
+    let transcriptions = 0;
+    let answerA: ((response: ReturnType<typeof transcriptResponse>) => void) | undefined;
+    h.connection.answer(Operation.VOICE_TRANSCRIBE, () => {
+      transcriptions += 1;
+      if (transcriptions === 1) return new Promise((resolve) => { answerA = resolve; });
+      return transcriptResponse("from B");
+    });
+    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    a.focus();
+    await settle();
+    a.beginUtterance();
+    await settle();
+    const endingA = a.endUtterance();
+    await settle();
+    expect(h.store.getState().sessions.a?.phase).toBe("transcribing");
+
+    a.blur();
+    b.focus();
+    await settle();
+    h.deps.recorder.nextUri = "file:///cache/rec-2.m4a";
+    h.deps.files.files.set("file:///cache/rec-2.m4a", new TextEncoder().encode("second-aac"));
+    b.beginUtterance();
+    await settle();
+    expect(h.deps.recorder.recording).toBe(true);
+    await b.endUtterance();
+
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(2);
+    expect(h.store.getState().sessions.b?.phase).toBe("idle");
+    answerA!(transcriptResponse("from A"));
+    await endingA;
+    expect(h.store.getState().sessions.a?.phase).toBe("idle");
     h.registry.disposeAll();
     await settle();
   });
