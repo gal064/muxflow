@@ -74,12 +74,12 @@ fn untracked_entry(record: &[u8]) -> anyhow::Result<v1::GitStatusEntry> {
     }
     let mut path = record[2..].to_vec();
     let ignored = record[0] == b'!';
-    // With `--ignored=matching`, Git appends a slash to ignored directory
-    // records. The slash is a status presentation marker rather than part of
-    // the repository-relative path. Remove it here so every path that leaves
-    // the parser has the same canonical spelling required by mutations and
-    // the worktree capability checks.
-    if ignored && path.len() > 1 && path.last() == Some(&b'/') {
+    // Git appends a slash to directory-only status records, including ignored
+    // directories and untracked nested repositories. The slash is a status
+    // presentation marker rather than part of the repository-relative path.
+    // Remove it here so every path that leaves the parser has the same
+    // canonical spelling required by mutations and worktree capability checks.
+    if path.len() > 1 && path.last() == Some(&b'/') {
         path.pop();
     }
     Ok(v1::GitStatusEntry {
