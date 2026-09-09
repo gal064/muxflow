@@ -119,9 +119,13 @@ export function log(line: string): void {
   console.log(logStore.getState().append(line));
 }
 
-/** The buffer as one copyable block, optionally preceded by copy-time snapshot lines. */
+/**
+ * The buffer as one copyable block, optionally preceded by copy-time snapshot
+ * lines. Events are newest-first so a downstream paste limit preserves the
+ * failure closest to the moment Copy was tapped.
+ */
 export function logText(state: LogState = logStore.getState(), header: readonly string[] = []): string {
-  return [...header.map(singleLine), ...state.lines].join("\n");
+  return [...header.map(singleLine), ...[...state.lines].reverse()].join("\n");
 }
 
 export function logLines(): readonly string[] {

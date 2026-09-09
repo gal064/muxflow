@@ -13,7 +13,7 @@ describe("the memory-only diagnostic flight recorder", () => {
     expect(LOG_BYTE_CAPACITY).toBe(256 * 1024);
   });
 
-  it("keeps the newest events by count and preserves timestamp/sequence ordering", () => {
+  it("keeps the newest events by count and copies them newest-first", () => {
     let now = Date.parse("2026-09-05T12:00:00.000Z");
     const store = createLogStore({ eventCapacity: 3, now: () => now++ });
     for (const line of ["a", "b", "c", "d"]) store.getState().append(line);
@@ -22,7 +22,19 @@ describe("the memory-only diagnostic flight recorder", () => {
       "2026-09-05T12:00:00.002Z #000003 [muxflow] c",
       "2026-09-05T12:00:00.003Z #000004 [muxflow] d",
     ]);
-    expect(logText(store.getState())).toBe(store.getState().lines.join("\n"));
+    expect(logText(store.getState())).toBe([...store.getState().lines].reverse().join("\n"));
+  });
+
+  it("puts the copy-time header before newest-first events", () => {
+    const store = createLogStore({ now: () => 0 });
+    store.getState().append("older");
+    store.getState().append("newer");
+
+    expect(logText(store.getState(), ["diagnostics copied=now"])).toBe([
+      "diagnostics copied=now",
+      "1970-01-01T00:00:00.000Z #000002 [muxflow] newer",
+      "1970-01-01T00:00:00.000Z #000001 [muxflow] older",
+    ].join("\n"));
   });
 
   it("overwrites oldest events when the UTF-8 byte bound is reached", () => {
