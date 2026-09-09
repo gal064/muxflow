@@ -425,31 +425,39 @@ describe("VoiceController", () => {
     expect(diagnostics).not.toContain("sk-proj-");
   });
 
-  it("cancels and releases a locked recording on blur or background", async () => {
-    const blurred = harness();
-    blurred.controller.focus();
+  it.each([false, true])("cancels and releases an active recording on blur (locked=%s)", async (locked) => {
+    const h = harness();
+    h.controller.focus();
     await settle();
-    blurred.controller.beginUtterance();
+    h.controller.beginUtterance();
     await settle();
-    blurred.controller.lockUtterance();
-    blurred.controller.blur();
-    await settle();
-    expect(blurred.recorder.recording).toBe(false);
-    expect(blurred.recorder.released).toBe(1);
-    expect(blurred.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+    if (locked) h.controller.lockUtterance();
 
-    const backgrounded = harness();
-    backgrounded.controller.focus();
+    h.controller.blur();
     await settle();
-    backgrounded.controller.beginUtterance();
+
+    expect(h.recorder.recording).toBe(false);
+    expect(h.recorder.released).toBe(1);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+  });
+
+  it.each([false, true])("cancels and releases an active recording in the background (locked=%s)", async (locked) => {
+    const h = harness();
+    h.controller.focus();
     await settle();
-    backgrounded.controller.lockUtterance();
-    backgrounded.setForeground(false);
-    backgrounded.controller.onAppInactive();
+    h.controller.beginUtterance();
     await settle();
-    expect(backgrounded.recorder.recording).toBe(false);
-    expect(backgrounded.recorder.released).toBe(1);
-    expect(backgrounded.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+    if (locked) h.controller.lockUtterance();
+
+    h.setForeground(false);
+    h.controller.onAppInactive();
+    await settle();
+
+    expect(h.recorder.recording).toBe(false);
+    expect(h.recorder.released).toBe(1);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
   });
 
   it("keeps a reply that arrives while listening manual-play only", async () => {
@@ -973,7 +981,7 @@ describe("VoiceController recording hygiene (integration QA)", () => {
     expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
   });
 
-  it("leaving the screen releases an idle recorder; the next focus arms it again; End releases too", async () => {
+  it("leaving the screen releases idle and active recorders; the next focus arms again; End releases too", async () => {
     const h = harness();
     h.controller.focus();
     await settle();
@@ -984,12 +992,12 @@ describe("VoiceController recording hygiene (integration QA)", () => {
     h.controller.focus();
     await settle();
     expect(h.recorder.prepared).toBe(1);
-    // Mid-utterance the recorder is not released from under the controller.
+    // If the control unmounts without a press-out, blur cancels the take.
     h.controller.beginUtterance();
     await settle();
     h.controller.blur();
     await settle();
-    expect(h.recorder.released).toBe(1);
+    expect(h.recorder.released).toBe(2);
     await h.controller.endUtterance();
     await settle();
     expect(h.recorder.released).toBe(2);
