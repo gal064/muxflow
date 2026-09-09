@@ -43,6 +43,14 @@ fn codex_subagent_event(id: &str, event_name: &str, agent_id: &str) -> v1::Agent
     hook
 }
 
+fn has_auto_review_turn(record: &StoredAgent, agent_id: &str, turn_id: &str) -> bool {
+    record.codex_turn_reviews.iter().any(|review| {
+        review.turn.agent_id == agent_id
+            && review.turn.turn_id == turn_id
+            && review.reviewer == CodexReviewer::AutoReview
+    })
+}
+
 #[test]
 fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
     let path = std::env::current_dir()
@@ -101,10 +109,10 @@ fn auto_review_cache_is_durable_and_scoped_to_one_exact_turn() {
             Some(&topology),
         )
         .unwrap();
-    assert!(cold_turn.notify);
+    assert!(!cold_turn.notify);
     assert_eq!(
         cold_turn.agent.unwrap().lifecycle,
-        v1::AgentLifecycleState::Blocked as i32
+        v1::AgentLifecycleState::Working as i32
     );
 }
 
@@ -131,7 +139,7 @@ fn permission_revalidates_auto_review_after_prompt_cache_miss() {
             .unwrap()
             .agents
             .values()
-            .all(|record| record.codex_auto_review_turn_id.is_empty())
+            .all(|record| record.codex_turn_reviews.is_empty())
     );
 
     let mut permission = permission_for_turn("permission-with-context", "turn-1");
@@ -153,7 +161,7 @@ fn permission_revalidates_auto_review_after_prompt_cache_miss() {
             .unwrap()
             .agents
             .values()
-            .all(|record| record.codex_auto_review_turn_id == "turn-1")
+            .all(|record| has_auto_review_turn(record, "", "turn-1"))
     );
 
     let cached = runtime
@@ -168,6 +176,114 @@ fn permission_revalidates_auto_review_after_prompt_cache_miss() {
         cached.agent.unwrap().lifecycle,
         v1::AgentLifecycleState::Working as i32
     );
+}
+
+#[test]
+fn overlapping_subagents_keep_independent_auto_review_evidence() {
+    let runtime = runtime("overlapping-auto-review-turns");
+    let topology = topology("codex");
+    for (event_id, agent_id, turn_id) in [
+        ("child-1-observed", "child-1", "turn-1"),
+        ("child-2-observed", "child-2", "turn-2"),
+    ] {
+        let mut permission = permission_for_turn(event_id, turn_id);
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&permission.payload_json).unwrap();
+        payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "auto_review".into();
+        payload[adapters::CODEX_SUBAGENT_ID_FIELD] = agent_id.into();
+        permission.payload_json = serde_json::to_vec(&payload).unwrap();
+        assert!(
+            !runtime
+                .ingest_hook_with_context(&permission, "server-a", Some(&topology))
+                .unwrap()
+                .notify
+        );
+    }
+
+    for (event_id, agent_id, turn_id) in [
+        ("child-1-cached", "child-1", "turn-1"),
+        ("child-2-cached", "child-2", "turn-2"),
+    ] {
+        let mut permission = permission_for_turn(event_id, turn_id);
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&permission.payload_json).unwrap();
+        payload[adapters::CODEX_SUBAGENT_ID_FIELD] = agent_id.into();
+        permission.payload_json = serde_json::to_vec(&payload).unwrap();
+        let cached = runtime
+            .ingest_hook_with_context(&permission, "server-a", Some(&topology))
+            .unwrap();
+        assert!(!cached.notify);
+        assert_eq!(
+            cached.agent.unwrap().lifecycle,
+            v1::AgentLifecycleState::Working as i32
+        );
+    }
+}
+
+#[test]
+fn transcript_terminal_clears_a_cancelled_manual_permission_without_a_stop_hook() {
+    use std::io::Write as _;
+
+    let runtime = runtime("manual-permission-transcript-terminal");
+    let topology = topology("codex");
+    let mut permission = permission_for_turn("manual", "turn-1");
+    let mut payload: serde_json::Value = serde_json::from_slice(&permission.payload_json).unwrap();
+    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "user".into();
+    permission.payload_json = serde_json::to_vec(&payload).unwrap();
+    let blocked = runtime
+        .ingest_hook_with_context(&permission, "server-a", Some(&topology))
+        .unwrap();
+    let blocked = blocked.agent.unwrap();
+    assert_eq!(blocked.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/08");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    std::fs::write(&transcript, b"\n").unwrap();
+    let monitor = crate::hook::codex_transcript::TurnMonitor::open(
+        &serde_json::json!({
+            "turn_id": "turn-1",
+            "transcript_path": transcript,
+        }),
+        home.path(),
+    )
+    .unwrap();
+    runtime.track_codex_permission(
+        &blocked.agent_id,
+        "PermissionRequest",
+        Some(CodexTurnKey {
+            agent_id: String::new(),
+            turn_id: "turn-1".into(),
+        }),
+        Some(monitor),
+        runtime.state.lock().unwrap().agents[&blocked.agent_id].lifecycle_changed_at_unix_millis,
+        now_millis(),
+    );
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "type": "event_msg",
+            "payload": {"type": "turn_aborted", "turn_id": "turn-1"},
+        })
+    )
+    .unwrap();
+    file.sync_all().unwrap();
+
+    let resolved = runtime.sweep_codex_permission_terminals();
+    assert_eq!(resolved.len(), 1);
+    assert!(!resolved[0].notify);
+    assert_eq!(resolved[0].reason, "permission_turn_aborted");
+    let idle = resolved[0].agent.as_ref().unwrap();
+    assert_eq!(idle.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert!(runtime.state.lock().unwrap().agents[&blocked.agent_id].hook_terminal);
+    assert!(runtime.sweep_codex_permission_terminals().is_empty());
 }
 
 #[test]
@@ -189,10 +305,10 @@ fn permission_cache_miss_is_not_a_cached_block_decision() {
             Some(&topology),
         )
         .unwrap();
-    assert!(unclassified.notify);
+    assert!(!unclassified.notify);
     assert_eq!(
         unclassified.agent.unwrap().lifecycle,
-        v1::AgentLifecycleState::Blocked as i32
+        v1::AgentLifecycleState::Working as i32
     );
     assert!(
         runtime
@@ -201,7 +317,7 @@ fn permission_cache_miss_is_not_a_cached_block_decision() {
             .unwrap()
             .agents
             .values()
-            .all(|record| record.codex_auto_review_turn_id.is_empty())
+            .all(|record| record.codex_turn_reviews.is_empty())
     );
 
     let mut permission = permission_for_turn("permission-after-context", "turn-1");
@@ -223,7 +339,7 @@ fn permission_cache_miss_is_not_a_cached_block_decision() {
             .unwrap()
             .agents
             .values()
-            .all(|record| record.codex_auto_review_turn_id == "turn-1")
+            .all(|record| has_auto_review_turn(record, "", "turn-1"))
     );
 }
 
@@ -251,15 +367,6 @@ fn explicit_non_auto_turn_start_clears_the_same_turn_cache() {
             prompt.agent.unwrap().lifecycle,
             v1::AgentLifecycleState::Working as i32
         );
-        assert!(
-            runtime
-                .state
-                .lock()
-                .unwrap()
-                .agents
-                .values()
-                .all(|record| record.codex_auto_review_turn_id.is_empty())
-        );
         let permission = runtime
             .ingest_hook_with_context(
                 &permission_for_turn("permission", "turn-1"),
@@ -267,10 +374,14 @@ fn explicit_non_auto_turn_start_clears_the_same_turn_cache() {
                 Some(&topology),
             )
             .unwrap();
-        assert!(permission.notify);
+        assert_eq!(permission.notify, reviewer == "user");
         assert_eq!(
             permission.agent.unwrap().lifecycle,
-            v1::AgentLifecycleState::Blocked as i32
+            if reviewer == "user" {
+                v1::AgentLifecycleState::Blocked as i32
+            } else {
+                v1::AgentLifecycleState::Working as i32
+            }
         );
     }
 }
@@ -303,19 +414,19 @@ fn malformed_reviewer_cannot_reuse_the_same_turn_cache() {
             .unwrap()
             .agents
             .values()
-            .all(|record| record.codex_auto_review_turn_id.is_empty())
+            .all(|record| record.codex_turn_reviews.is_empty())
     );
-    let blocked = runtime
+    let unclassified = runtime
         .ingest_hook_with_context(
             &permission_for_turn("permission", "turn-1"),
             "server-a",
             Some(&topology),
         )
         .unwrap();
-    assert!(blocked.notify);
+    assert!(!unclassified.notify);
     assert_eq!(
-        blocked.agent.unwrap().lifecycle,
-        v1::AgentLifecycleState::Blocked as i32
+        unclassified.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
     );
 }
 
@@ -348,10 +459,10 @@ fn incomplete_turn_start_cannot_reuse_the_cache() {
                 Some(&topology),
             )
             .unwrap();
-        assert!(missed.notify);
+        assert!(!missed.notify);
         assert_eq!(
             missed.agent.unwrap().lifecycle,
-            v1::AgentLifecycleState::Blocked as i32
+            v1::AgentLifecycleState::Working as i32
         );
     }
 }
@@ -1507,12 +1618,13 @@ fn a_codex_sibling_finishing_cannot_hide_a_permission_block() {
             .ingest_hook_with_context(&hook, "server-a", Some(&topology))
             .unwrap();
     }
+    let mut permission = permission_for_turn("permission", "child-turn");
+    let mut payload: serde_json::Value = serde_json::from_slice(&permission.payload_json).unwrap();
+    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "user".into();
+    payload[adapters::CODEX_SUBAGENT_ID_FIELD] = "child-2".into();
+    permission.payload_json = serde_json::to_vec(&payload).unwrap();
     let blocked = runtime
-        .ingest_hook_with_context(
-            &event("permission", 0, "PermissionRequest"),
-            "server-a",
-            Some(&topology),
-        )
+        .ingest_hook_with_context(&permission, "server-a", Some(&topology))
         .unwrap();
     assert!(blocked.notify);
     let attention = blocked.agent.unwrap().attention_generation;

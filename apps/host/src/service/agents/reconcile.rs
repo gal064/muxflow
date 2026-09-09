@@ -130,7 +130,7 @@ pub(super) fn topology(
                 codex_running_subagent_ids: Default::default(),
                 codex_parent_stopped_for_subagents: false,
                 subagent_evidence_observed_at_unix_millis: 0,
-                codex_auto_review_turn_id: String::new(),
+                codex_turn_reviews: VecDeque::new(),
                 // Process detection proves a process exists; it is not an
                 // observation of what that process is doing, so it starts no
                 // staleness clock.

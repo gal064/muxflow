@@ -132,10 +132,11 @@ impl AgentAdapter for CodexAdapter {
     /// therefore gaps rather than omissions: there is no `StopFailure`, so a
     /// turn that ends in failure is indistinguishable from one that succeeds,
     /// and there is no `Notification`. `UserPromptSubmit` seeds the turn's
-    /// positive auto-review cache before work starts; `PermissionRequest`
-    /// revalidates a cache miss. A request still unclassified or explicitly
-    /// user-reviewed and `PreToolUse(request_user_input)` are the two observed
-    /// signals that a Codex agent is blocked. Codex's parent `Stop` does not
+    /// reviewer cache before work starts; `PermissionRequest`
+    /// revalidates a cache miss. Only an explicitly user-reviewed request and
+    /// `PreToolUse(request_user_input)` are treated as blocked; an unresolved
+    /// reviewer stays Working because transient transcript races are common in
+    /// auto-review. Codex's parent `Stop` does not
     /// report its live children, so `SubagentStart` and `SubagentStop` provide
     /// the opaque IDs needed to keep an unwaited parent working until its last
     /// child finishes.

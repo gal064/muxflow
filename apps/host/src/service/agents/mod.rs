@@ -21,7 +21,7 @@ mod snapshot;
 mod store;
 pub(crate) use hooks::HookManager;
 pub(crate) use ingest::HookIngestFailure;
-use store::{StoredAgent, StoredRoute, StoredState};
+use store::{CodexReviewer, CodexTurnKey, CodexTurnReview, StoredAgent, StoredRoute, StoredState};
 
 /// How long a Working agent may go without a single lifecycle event before the
 /// daemon stops claiming to know what it is doing.
@@ -47,6 +47,21 @@ const STALE_WORKING_TTL_MILLIS: i64 = 15 * 60 * 1_000;
 const STALE_SUBAGENT_WORKING_TTL_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 /** Three daemon maintenance passes (normally six seconds) make process absence conclusive. */
 const DEPARTURE_MISSES_REQUIRED: u8 = 3;
+const MAX_PENDING_CODEX_PERMISSIONS: usize = 64;
+const PENDING_CODEX_PERMISSION_TTL_MILLIS: i64 = 24 * 60 * 60 * 1_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PendingCodexPermissionKey {
+    record_id: String,
+    turn: CodexTurnKey,
+}
+
+struct PendingCodexPermission {
+    monitor: crate::hook::codex_transcript::TurnMonitor,
+    terminal: Option<crate::hook::codex_transcript::TurnTerminal>,
+    lifecycle_changed_at_unix_millis: i64,
+    observed_at_unix_millis: i64,
+}
 
 pub(crate) struct AgentRuntime {
     state_path: PathBuf,
@@ -59,6 +74,10 @@ pub(crate) struct AgentRuntime {
     wiring: Mutex<hooks::WiringCache>,
     /** Consecutive process-scan misses, reset by detection or a newer hook generation. */
     departure_misses: Mutex<BTreeMap<String, (u64, u8)>>,
+    /// Confirmed manual Codex permissions that need transcript-terminal
+    /// recovery because Codex emits no hook when the user cancels its dialog.
+    /// Entries and transcript handles are memory-only and strictly bounded.
+    pending_codex_permissions: Mutex<BTreeMap<PendingCodexPermissionKey, PendingCodexPermission>>,
     /// Where a `Stop` hands the agent's final message. Voice mode in
     /// production; a recorder in tests, so no test needs the voice service.
     reply_sink: ReplySink,
@@ -106,6 +125,7 @@ impl AgentRuntime {
             state: Mutex::new(state),
             wiring: Mutex::new(hooks::WiringCache::default()),
             departure_misses: Mutex::new(BTreeMap::new()),
+            pending_codex_permissions: Mutex::new(BTreeMap::new()),
             reply_sink,
             identity_promotion_sink,
         }
@@ -132,6 +152,183 @@ impl AgentRuntime {
 
     pub(super) fn snapshot(&self) -> v1::AgentSnapshot {
         self.snapshot_for(&server_identity())
+    }
+
+    fn track_codex_permission(
+        &self,
+        record_id: &str,
+        event_name: &str,
+        turn: Option<CodexTurnKey>,
+        monitor: Option<crate::hook::codex_transcript::TurnMonitor>,
+        lifecycle_changed_at_unix_millis: i64,
+        observed_at_unix_millis: i64,
+    ) {
+        let mut pending = self.pending_codex_permissions.lock().unwrap();
+        pending.retain(|_, value| {
+            observed_at_unix_millis.saturating_sub(value.observed_at_unix_millis)
+                <= PENDING_CODEX_PERMISSION_TTL_MILLIS
+        });
+        if matches!(event_name, "SessionStart" | "UserPromptSubmit") {
+            pending.retain(|key, _| key.record_id != record_id);
+        }
+        let Some(turn) = turn else {
+            return;
+        };
+        let key = PendingCodexPermissionKey {
+            record_id: record_id.to_owned(),
+            turn,
+        };
+        pending.remove(&key);
+        if event_name == "PermissionRequest"
+            && let Some(monitor) = monitor
+        {
+            pending.insert(
+                key,
+                PendingCodexPermission {
+                    monitor,
+                    terminal: None,
+                    lifecycle_changed_at_unix_millis,
+                    observed_at_unix_millis,
+                },
+            );
+        }
+        while pending.len() > MAX_PENDING_CODEX_PERMISSIONS {
+            let Some(oldest) = pending
+                .iter()
+                .min_by_key(|(_, value)| value.observed_at_unix_millis)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            pending.remove(&oldest);
+        }
+    }
+
+    /// Resolve confirmed manual permission turns that Codex terminated without
+    /// a lifecycle hook. Codex 0.153.4 appends an exact-turn `turn_aborted` on
+    /// Escape and `task_complete` on completion, but emits neither PostToolUse
+    /// nor Stop for the cancelled dialog. The open transcript handle is
+    /// memory-only; maintenance reads only after its length changes.
+    fn sweep_codex_permission_terminals(&self) -> Vec<v1::AgentEvent> {
+        // The ordinary auto-review/yolo path pays one uncontended mutex check,
+        // then no state clone, filesystem metadata call or transcript read.
+        if self.pending_codex_permissions.lock().unwrap().is_empty() {
+            return Vec::new();
+        }
+        let now = now_millis();
+        let current: BTreeMap<String, (i32, i64)> = self
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .iter()
+            .map(|(id, record)| {
+                (
+                    id.clone(),
+                    (record.lifecycle, record.lifecycle_changed_at_unix_millis),
+                )
+            })
+            .collect();
+        let mut pending = self.pending_codex_permissions.lock().unwrap();
+        pending.retain(|key, value| {
+            now.saturating_sub(value.observed_at_unix_millis) <= PENDING_CODEX_PERMISSION_TTL_MILLIS
+                && current
+                    .get(&key.record_id)
+                    .is_some_and(|(lifecycle, changed_at)| {
+                        *lifecycle == v1::AgentLifecycleState::Blocked as i32
+                            && *changed_at == value.lifecycle_changed_at_unix_millis
+                    })
+        });
+        let resolved: Vec<_> = pending
+            .iter_mut()
+            .filter_map(|(key, value)| {
+                if value.terminal.is_none() {
+                    value.terminal = value.monitor.poll_terminal();
+                }
+                value.terminal.map(|terminal| {
+                    (
+                        key.clone(),
+                        terminal,
+                        value.lifecycle_changed_at_unix_millis,
+                    )
+                })
+            })
+            .collect();
+        drop(pending);
+        if resolved.is_empty() {
+            return Vec::new();
+        }
+
+        let mut state = self.state.lock().unwrap();
+        let original = state.clone();
+        let mut events = Vec::new();
+        let resolved_keys: Vec<_> = resolved.iter().map(|(key, _, _)| key.clone()).collect();
+        for (key, terminal, expected_changed_at) in resolved {
+            let Some(current) = state.agents.get(&key.record_id) else {
+                continue;
+            };
+            if current.lifecycle != v1::AgentLifecycleState::Blocked as i32
+                || current.lifecycle_changed_at_unix_millis != expected_changed_at
+            {
+                continue;
+            }
+            state.generation = state.generation.saturating_add(1);
+            let generation = state.generation;
+            let record = state.agents.get_mut(&key.record_id).unwrap();
+            if !key.turn.agent_id.is_empty() {
+                record.codex_running_subagent_ids.remove(&key.turn.agent_id);
+            }
+            let idle = key.turn.agent_id.is_empty()
+                || record.codex_parent_stopped_for_subagents
+                    && record.codex_running_subagent_ids.is_empty();
+            record.lifecycle = if idle {
+                v1::AgentLifecycleState::Idle as i32
+            } else {
+                v1::AgentLifecycleState::Working as i32
+            };
+            record.hook_terminal = idle;
+            if idle {
+                record.codex_parent_stopped_for_subagents = false;
+            }
+            record
+                .codex_turn_reviews
+                .retain(|cached| cached.turn != key.turn);
+            record.lifecycle_observed_at_unix_millis = now;
+            record.lifecycle_changed_at_unix_millis = now;
+            record.updated_at_unix_millis = now;
+            record.state_generation = generation;
+            events.push(v1::AgentEvent {
+                agent: Some(snapshot::record(record)),
+                generation,
+                notify: false,
+                reason: match terminal {
+                    crate::hook::codex_transcript::TurnTerminal::Completed => {
+                        "permission_turn_completed"
+                    }
+                    crate::hook::codex_transcript::TurnTerminal::Aborted => {
+                        "permission_turn_aborted"
+                    }
+                }
+                .into(),
+                retired_agent_ids: Vec::new(),
+            });
+        }
+        if events.is_empty() {
+            let mut pending = self.pending_codex_permissions.lock().unwrap();
+            for key in resolved_keys {
+                pending.remove(&key);
+            }
+            return events;
+        }
+        if self.persist_locked(&state).is_err() {
+            *state = original;
+            return Vec::new();
+        }
+        let mut pending = self.pending_codex_permissions.lock().unwrap();
+        for key in resolved_keys {
+            pending.remove(&key);
+        }
+        events
     }
 
     /// Withdraw Working from agents that have gone silent past
@@ -500,6 +697,9 @@ pub(crate) fn ingest_fallbacks() -> anyhow::Result<usize> {
 /// is about to disappear in the same pass.
 pub(crate) fn maintain() {
     let runtime = AgentRuntime::global();
+    for event in runtime.sweep_codex_permission_terminals() {
+        publish(event);
+    }
     for event in runtime.retire_departed() {
         publish(event);
     }

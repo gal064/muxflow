@@ -3,11 +3,15 @@ use std::collections::VecDeque;
 use anyhow::Context;
 use tmux_agent_protocol::v1;
 
-use super::{AgentRuntime, StoredAgent, adapters, identity, snapshot};
+use super::{
+    AgentRuntime, CodexReviewer, CodexTurnKey, CodexTurnReview, StoredAgent, adapters, identity,
+    snapshot,
+};
 use crate::service::snapshot::{discover_authoritative, server_identity};
 
 pub(super) const MAX_HOOK_BYTES: usize = 256 * 1024;
 const MAX_DEDUPE_IDS: usize = 512;
+const MAX_CODEX_TURN_REVIEWS: usize = 64;
 
 pub(crate) type HookIngestResult = Result<v1::AgentEvent, HookIngestFailure>;
 type DeferredHookIngestResult = Result<IngestedHook, HookIngestFailure>;
@@ -261,7 +265,7 @@ impl AgentRuntime {
             .map_or(0, |record| record.attention_generation);
         let codex_turn_start = adapter.id() == "codex" && parsed.event_name == "UserPromptSubmit";
         let codex_permission = adapter.id() == "codex" && parsed.event_name == "PermissionRequest";
-        let approval_turn_id = if codex_turn_start || codex_permission {
+        let approval_turn_id = if adapter.id() == "codex" {
             payload
                 .get(adapters::CODEX_APPROVAL_TURN_ID_FIELD)
                 .and_then(serde_json::Value::as_str)
@@ -269,6 +273,14 @@ impl AgentRuntime {
         } else {
             ""
         };
+        let approval_turn = (!approval_turn_id.is_empty()).then(|| CodexTurnKey {
+            agent_id: payload
+                .get(adapters::CODEX_SUBAGENT_ID_FIELD)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            turn_id: approval_turn_id.to_owned(),
+        });
         let embedded_approval_reviewer = if codex_turn_start || codex_permission {
             payload
                 .get(adapters::CODEX_APPROVAL_REVIEWER_FIELD)
@@ -276,27 +288,51 @@ impl AgentRuntime {
         } else {
             None
         };
-        let cached_auto_review = codex_permission
-            && !approval_turn_id.is_empty()
-            && previous
-                .as_ref()
-                .is_some_and(|record| record.codex_auto_review_turn_id == approval_turn_id);
+        let cached_reviewer = codex_permission
+            .then(|| {
+                previous
+                    .as_ref()?
+                    .codex_turn_reviews
+                    .iter()
+                    .find_map(|review| {
+                        (Some(&review.turn) == approval_turn.as_ref()).then_some(
+                            match review.reviewer {
+                                CodexReviewer::AutoReview => {
+                                    crate::hook::codex_transcript::ApprovalReviewer::AutoReview
+                                }
+                                CodexReviewer::User => {
+                                    crate::hook::codex_transcript::ApprovalReviewer::User
+                                }
+                            },
+                        )
+                    })
+            })
+            .flatten();
+        let cached_auto_review =
+            cached_reviewer == Some(crate::hook::codex_transcript::ApprovalReviewer::AutoReview);
+        let mut permission_monitor = (codex_permission
+            && !cached_auto_review
+            && matches!(embedded_approval_reviewer, None | Some("user")))
+        .then(|| {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+            crate::hook::codex_transcript::TurnMonitor::open(
+                &serde_json::json!({
+                    "turn_id": approval_turn_id,
+                    "transcript_path": payload
+                        .get(adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD)
+                        .and_then(serde_json::Value::as_str)?,
+                }),
+                &home,
+            )
+        })
+        .flatten();
         let permission_review = codex_permission.then(|| {
-            classify_permission_review(cached_auto_review, embedded_approval_reviewer, || {
-                let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
-                let transcript_path = payload
-                    .get(adapters::CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD)
-                    .and_then(serde_json::Value::as_str)?;
-                crate::hook::codex_transcript::approval_reviewer(
-                    &serde_json::json!({
-                        "turn_id": approval_turn_id,
-                        "transcript_path": transcript_path,
-                    }),
-                    &home,
-                )
+            classify_permission_review(cached_reviewer, embedded_approval_reviewer, || {
+                permission_monitor.as_mut()?.approval_reviewer()
             })
         });
         let observed_auto_review = permission_review == Some(PermissionReview::ObservedAuto);
+        let observed_user_review = permission_review == Some(PermissionReview::ObservedUser);
         let previous_claude_has_running_subagent = previous
             .as_ref()
             .is_some_and(|record| record.claude_has_running_subagent);
@@ -364,7 +400,11 @@ impl AgentRuntime {
         } else if codex_parent_stop_during_subagents
             || matches!(
                 permission_review,
-                Some(PermissionReview::CachedAuto | PermissionReview::ObservedAuto)
+                Some(
+                    PermissionReview::CachedAuto
+                        | PermissionReview::ObservedAuto
+                        | PermissionReview::Unknown
+                )
             )
             || claude_idle_prompt_during_subagent
         {
@@ -450,20 +490,42 @@ impl AgentRuntime {
         } else {
             latest_sequence
         };
-        let codex_auto_review_turn_id = if codex_turn_start || observed_auto_review {
-            if (embedded_approval_reviewer == Some("auto_review") || observed_auto_review)
-                && !approval_turn_id.is_empty()
+        let mut codex_turn_reviews = previous
+            .as_ref()
+            .map(|record| record.codex_turn_reviews.clone())
+            .unwrap_or_default();
+        if adapter.id() == "codex" {
+            if parsed.event_name == "SessionStart"
+                || codex_turn_start
+                    && approval_turn
+                        .as_ref()
+                        .is_none_or(|turn| turn.agent_id.is_empty())
             {
-                approval_turn_id.to_owned()
-            } else {
-                String::new()
+                codex_turn_reviews.clear();
             }
-        } else {
-            previous
-                .as_ref()
-                .map(|record| record.codex_auto_review_turn_id.clone())
-                .unwrap_or_default()
-        };
+            if let Some(turn) = approval_turn.as_ref()
+                && (codex_turn_start || observed_auto_review || observed_user_review)
+            {
+                codex_turn_reviews.retain(|cached| &cached.turn != turn);
+                let reviewer =
+                    if embedded_approval_reviewer == Some("auto_review") || observed_auto_review {
+                        Some(CodexReviewer::AutoReview)
+                    } else if embedded_approval_reviewer == Some("user") || observed_user_review {
+                        Some(CodexReviewer::User)
+                    } else {
+                        None
+                    };
+                if let Some(reviewer) = reviewer {
+                    codex_turn_reviews.push_back(CodexTurnReview {
+                        turn: turn.clone(),
+                        reviewer,
+                    });
+                }
+            }
+            while codex_turn_reviews.len() > MAX_CODEX_TURN_REVIEWS {
+                codex_turn_reviews.pop_front();
+            }
+        }
         let claude_has_running_subagent = if adapter.id() != "claude-code" {
             false
         } else if parsed.event_name == "Stop" {
@@ -552,7 +614,7 @@ impl AgentRuntime {
             codex_running_subagent_ids,
             codex_parent_stopped_for_subagents,
             subagent_evidence_observed_at_unix_millis,
-            codex_auto_review_turn_id,
+            codex_turn_reviews,
             lifecycle_observed_at_unix_millis: observed_now,
             lifecycle_changed_at_unix_millis: lifecycle_changed_at,
         };
@@ -562,6 +624,21 @@ impl AgentRuntime {
             return Err(HookIngestFailure::Retryable(error));
         }
         drop(state);
+        if adapter.id() == "codex" {
+            self.track_codex_permission(
+                &agent_id,
+                &parsed.event_name,
+                approval_turn,
+                (matches!(
+                    permission_review,
+                    Some(PermissionReview::CachedUser | PermissionReview::ObservedUser)
+                ))
+                .then_some(permission_monitor)
+                .flatten(),
+                lifecycle_changed_at,
+                observed_now,
+            );
+        }
         if !voice_retired_agent_ids.is_empty() {
             (self.identity_promotion_sink)(&voice_retired_agent_ids, &agent_id);
         }
@@ -621,26 +698,41 @@ impl AgentRuntime {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PermissionReview {
     CachedAuto,
+    CachedUser,
     ObservedAuto,
-    Blocking,
+    ObservedUser,
+    Unknown,
 }
 
 fn classify_permission_review(
-    cached_auto_review: bool,
+    cached_reviewer: Option<crate::hook::codex_transcript::ApprovalReviewer>,
     embedded_reviewer: Option<&str>,
     revalidate: impl FnOnce() -> Option<crate::hook::codex_transcript::ApprovalReviewer>,
 ) -> PermissionReview {
-    if cached_auto_review {
-        return PermissionReview::CachedAuto;
+    match cached_reviewer {
+        Some(crate::hook::codex_transcript::ApprovalReviewer::AutoReview) => {
+            return PermissionReview::CachedAuto;
+        }
+        Some(crate::hook::codex_transcript::ApprovalReviewer::User) => {
+            return PermissionReview::CachedUser;
+        }
+        Some(crate::hook::codex_transcript::ApprovalReviewer::Unknown) | None => {}
     }
-    let auto_review = match embedded_reviewer {
-        Some(reviewer) => reviewer == "auto_review",
-        None => revalidate().is_some_and(|reviewer| reviewer.as_str() == "auto_review"),
-    };
-    if auto_review {
-        PermissionReview::ObservedAuto
-    } else {
-        PermissionReview::Blocking
+    let reviewer = embedded_reviewer.map(|reviewer| match reviewer {
+        "auto_review" => crate::hook::codex_transcript::ApprovalReviewer::AutoReview,
+        "user" => crate::hook::codex_transcript::ApprovalReviewer::User,
+        _ => crate::hook::codex_transcript::ApprovalReviewer::Unknown,
+    });
+    match reviewer.or_else(revalidate) {
+        Some(crate::hook::codex_transcript::ApprovalReviewer::AutoReview) => {
+            PermissionReview::ObservedAuto
+        }
+        Some(crate::hook::codex_transcript::ApprovalReviewer::User) => {
+            PermissionReview::ObservedUser
+        }
+        Some(crate::hook::codex_transcript::ApprovalReviewer::Unknown) | None => {
+            PermissionReview::Unknown
+        }
     }
 }
 
@@ -652,10 +744,14 @@ mod permission_review_tests {
     #[test]
     fn exact_positive_cache_hit_never_runs_revalidation() {
         let calls = Cell::new(0);
-        let review = classify_permission_review(true, None, || {
-            calls.set(calls.get() + 1);
-            Some(crate::hook::codex_transcript::ApprovalReviewer::User)
-        });
+        let review = classify_permission_review(
+            Some(crate::hook::codex_transcript::ApprovalReviewer::AutoReview),
+            None,
+            || {
+                calls.set(calls.get() + 1);
+                Some(crate::hook::codex_transcript::ApprovalReviewer::User)
+            },
+        );
 
         assert_eq!(review, PermissionReview::CachedAuto);
         assert_eq!(calls.get(), 0);
@@ -664,16 +760,21 @@ mod permission_review_tests {
     #[test]
     fn cache_miss_revalidates_once_and_only_positive_results_are_observed_auto() {
         let calls = Cell::new(0);
-        let auto = classify_permission_review(false, None, || {
+        let auto = classify_permission_review(None, None, || {
             calls.set(calls.get() + 1);
             Some(crate::hook::codex_transcript::ApprovalReviewer::AutoReview)
         });
         assert_eq!(auto, PermissionReview::ObservedAuto);
         assert_eq!(calls.get(), 1);
 
-        let user = classify_permission_review(false, None, || {
+        let user = classify_permission_review(None, None, || {
             Some(crate::hook::codex_transcript::ApprovalReviewer::User)
         });
-        assert_eq!(user, PermissionReview::Blocking);
+        assert_eq!(user, PermissionReview::ObservedUser);
+
+        assert_eq!(
+            classify_permission_review(None, None, || None),
+            PermissionReview::Unknown
+        );
     }
 }

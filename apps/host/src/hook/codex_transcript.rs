@@ -21,6 +21,104 @@ pub(crate) enum ApprovalReviewer {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TurnTerminal {
+    Completed,
+    Aborted,
+}
+
+/// In-memory observation of one exact Codex turn.
+///
+/// The validated file descriptor is retained instead of the supplied path, so
+/// a later pathname replacement cannot redirect maintenance outside the
+/// sessions root. Polling first compares the file length and only reads the
+/// bounded tail after Codex appended another transcript record.
+pub(crate) struct TurnMonitor {
+    transcript: File,
+    turn_id: String,
+    observed_len: u64,
+}
+
+impl TurnMonitor {
+    pub(crate) fn open(payload: &Value, home: &Path) -> Option<Self> {
+        let turn_id = string_field(payload, &["turn_id", "turnId"])?;
+        let supplied_path = Path::new(string_field(
+            payload,
+            &["transcript_path", "transcriptPath"],
+        )?);
+        let transcript = TranscriptTarget::resolve(home, supplied_path)?.open()?;
+        Some(Self {
+            transcript,
+            turn_id: turn_id.to_owned(),
+            observed_len: 0,
+        })
+    }
+
+    pub(crate) fn approval_reviewer(&mut self) -> Option<ApprovalReviewer> {
+        let (tail, offset) = self.read_tail(false)?;
+        for record in complete_records(&tail, offset) {
+            if record.get("type").and_then(Value::as_str) != Some("turn_context")
+                || record.pointer("/payload/turn_id").and_then(Value::as_str)
+                    != Some(self.turn_id.as_str())
+            {
+                continue;
+            }
+            return Some(
+                match record
+                    .pointer("/payload/approvals_reviewer")
+                    .and_then(Value::as_str)
+                {
+                    Some("auto_review") => ApprovalReviewer::AutoReview,
+                    Some("user") => ApprovalReviewer::User,
+                    _ => ApprovalReviewer::Unknown,
+                },
+            );
+        }
+        None
+    }
+
+    pub(crate) fn poll_terminal(&mut self) -> Option<TurnTerminal> {
+        let (tail, offset) = self.read_tail(true)?;
+        for record in complete_records(&tail, offset) {
+            if record.get("type").and_then(Value::as_str) != Some("event_msg")
+                || record.pointer("/payload/turn_id").and_then(Value::as_str)
+                    != Some(self.turn_id.as_str())
+            {
+                continue;
+            }
+            match record.pointer("/payload/type").and_then(Value::as_str) {
+                Some("turn_aborted") => return Some(TurnTerminal::Aborted),
+                Some("task_complete") => return Some(TurnTerminal::Completed),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn read_tail(&mut self, only_if_grown: bool) -> Option<(Vec<u8>, u64)> {
+        let metadata = self.transcript.metadata().ok()?;
+        if only_if_grown && metadata.len() <= self.observed_len {
+            return None;
+        }
+        let offset = metadata.len().saturating_sub(MAX_TRANSCRIPT_TAIL_BYTES);
+        self.transcript.seek(SeekFrom::Start(offset)).ok()?;
+        let mut tail = Vec::with_capacity(
+            metadata
+                .len()
+                .saturating_sub(offset)
+                .try_into()
+                .unwrap_or(0),
+        );
+        self.transcript
+            .by_ref()
+            .take(MAX_TRANSCRIPT_TAIL_BYTES)
+            .read_to_end(&mut tail)
+            .ok()?;
+        self.observed_len = metadata.len();
+        Some((tail, offset))
+    }
+}
+
 impl ApprovalReviewer {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -35,63 +133,28 @@ impl ApprovalReviewer {
 ///
 /// Hook input is untrusted. The transcript must resolve to a regular JSONL file
 /// below this user's Codex session root, and only a bounded tail is inspected.
-/// Every failure returns `None`; ingest leaves that turn unclassified so a
-/// later permission request fails closed rather than hiding a real approval
-/// from the user. A matched context with an unknown reviewer remains explicit
-/// so it clears an earlier cached auto-review result.
+/// Every failure returns `None`; ingest leaves that turn unclassified and
+/// keeps it Working. Only an exact `user` result may raise Blocked, avoiding a
+/// false notification when Codex writes the context just after its hook. A
+/// matched context with an unknown reviewer remains explicit so it clears an
+/// earlier cached result.
 pub(crate) fn approval_reviewer(payload: &Value, home: &Path) -> Option<ApprovalReviewer> {
-    let turn_id = string_field(payload, &["turn_id", "turnId"])?;
-    let supplied_path = Path::new(string_field(
-        payload,
-        &["transcript_path", "transcriptPath"],
-    )?);
-    let mut transcript = TranscriptTarget::resolve(home, supplied_path)?.open()?;
-    let metadata = transcript.metadata().ok()?;
-    let offset = metadata.len().saturating_sub(MAX_TRANSCRIPT_TAIL_BYTES);
-    transcript.seek(SeekFrom::Start(offset)).ok()?;
-    let mut tail = Vec::with_capacity(
-        metadata
-            .len()
-            .saturating_sub(offset)
-            .try_into()
-            .unwrap_or(0),
-    );
-    transcript
-        .take(MAX_TRANSCRIPT_TAIL_BYTES)
-        .read_to_end(&mut tail)
-        .ok()?;
+    TurnMonitor::open(payload, home)?.approval_reviewer()
+}
 
+fn complete_records(tail: &[u8], offset: u64) -> impl Iterator<Item = Value> + '_ {
     let complete_lines = if offset > 0 {
-        let first_newline = tail.iter().position(|byte| *byte == b'\n')?;
-        &tail[first_newline + 1..]
+        tail.iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(&[][..], |first_newline| &tail[first_newline + 1..])
     } else {
-        tail.as_slice()
+        tail
     };
-    for line in complete_lines
+    complete_lines
         .split(|byte| *byte == b'\n')
         .rev()
         .filter(|line| !line.is_empty())
-    {
-        let Ok(record) = serde_json::from_slice::<Value>(line) else {
-            continue;
-        };
-        if record.get("type").and_then(Value::as_str) != Some("turn_context")
-            || record.pointer("/payload/turn_id").and_then(Value::as_str) != Some(turn_id)
-        {
-            continue;
-        }
-        return Some(
-            match record
-                .pointer("/payload/approvals_reviewer")
-                .and_then(Value::as_str)
-            {
-                Some("auto_review") => ApprovalReviewer::AutoReview,
-                Some("user") => ApprovalReviewer::User,
-                _ => ApprovalReviewer::Unknown,
-            },
-        );
-    }
-    None
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
 }
 
 /// A transcript path resolved relative to an inode-bound sessions directory.
@@ -185,7 +248,7 @@ fn string_field<'a>(payload: &'a Value, names: &[&str]) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::symlink};
+    use std::{fs, io::Write as _, os::unix::fs::symlink};
 
     fn sessions(home: &Path) -> std::path::PathBuf {
         let sessions = home.join(".codex/sessions/2026/08/22");
@@ -207,6 +270,17 @@ mod tests {
                 "turn_id": turn_id,
                 "approval_policy": "on-request",
                 "approvals_reviewer": reviewer,
+            }
+        })
+        .to_string()
+    }
+
+    fn terminal(turn_id: &str, kind: &str) -> String {
+        serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": kind,
+                "turn_id": turn_id,
             }
         })
         .to_string()
@@ -317,6 +391,46 @@ mod tests {
         symlink(&outside, &session_dir).unwrap();
 
         assert!(target.open().is_none());
+    }
+
+    #[test]
+    fn monitor_reads_only_growth_and_matches_the_exact_turn_terminal() {
+        let home = tempfile::tempdir().unwrap();
+        let transcript = sessions(home.path()).join("monitor.jsonl");
+        fs::write(&transcript, format!("{}\n", context("wanted", "user"))).unwrap();
+        let mut monitor = TurnMonitor::open(&payload(&transcript, "wanted"), home.path()).unwrap();
+        assert_eq!(monitor.approval_reviewer(), Some(ApprovalReviewer::User));
+        assert_eq!(monitor.poll_terminal(), None);
+
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        writeln!(file, "{}", terminal("other", "turn_aborted")).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(monitor.poll_terminal(), None);
+        assert_eq!(monitor.poll_terminal(), None);
+
+        writeln!(file, "{}", terminal("wanted", "turn_aborted")).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(monitor.poll_terminal(), Some(TurnTerminal::Aborted));
+    }
+
+    #[test]
+    fn monitor_recognizes_normal_completion() {
+        let home = tempfile::tempdir().unwrap();
+        let transcript = sessions(home.path()).join("completed.jsonl");
+        fs::write(&transcript, format!("{}\n", context("turn", "user"))).unwrap();
+        let mut monitor = TurnMonitor::open(&payload(&transcript, "turn"), home.path()).unwrap();
+        assert_eq!(monitor.approval_reviewer(), Some(ApprovalReviewer::User));
+
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        writeln!(file, "{}", terminal("turn", "task_complete")).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(monitor.poll_terminal(), Some(TurnTerminal::Completed));
     }
 
     #[test]
