@@ -109,6 +109,28 @@ jq -e --arg pane "$remote_hook_pane" '[.agents[] | select(
   .route.window_id != ""
 )] | length == 1' "$runtime/actual-hook-agents.json" >/dev/null
 
+# Exercise the installed hook and daemon against captured Codex transcript
+# record shapes. The hook starts the child immediately; the transcript-only
+# interruption must repair the missing SubagentStop on the maintenance pass.
+ssh -F "$runtime/ssh-config" ade-phase6-docker '
+  set -eu
+  pane=$(cat "$HOME/phase6-runtime/actual-hook-pane.txt")
+  sessions="$HOME/phase6-home/.codex/sessions/2026/09/09"
+  transcript="$sessions/rollout-agent-status.jsonl"
+  mkdir -p "$sessions"
+  printf "%s\n" "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"SubAgentActivity\",\"kind\":\"started\",\"agent_thread_id\":\"captured-child\",\"agent_path\":\"private-path-must-not-persist\"}}}" >"$transcript"
+  printf "%s" "{\"hook_event_name\":\"SubagentStart\",\"session_id\":\"remote-transcript-proof\",\"turn_id\":\"captured-turn\",\"agent_id\":\"captured-child\",\"transcript_path\":\"$transcript\"}" | env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime" ADE_TMUX_SOCKET_NAME=ade-phase6 TMUX_PANE="$pane" "$HOME/.local/bin/muxflow-host" hook ingest --adapter codex
+  printf "%s" "{\"hook_event_name\":\"Stop\",\"session_id\":\"remote-transcript-proof\",\"turn_id\":\"captured-turn\",\"transcript_path\":\"$transcript\"}" | env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime" ADE_TMUX_SOCKET_NAME=ade-phase6 TMUX_PANE="$pane" "$HOME/.local/bin/muxflow-host" hook ingest --adapter codex
+  jq -e ".agents[] | select(.native_session_id == \"remote-transcript-proof\") | .lifecycle == 1 and (.codex_running_subagent_ids == [\"captured-child\"])" "$HOME/phase6-runtime/agents.json" >/dev/null
+  printf "%s\n" "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"SubAgentActivity\",\"kind\":\"interrupted\",\"agent_thread_id\":\"captured-child\",\"agent_path\":\"private-path-must-not-persist\"}}}" >>"$transcript"
+  for _ in $(seq 1 50); do
+    if jq -e ".agents[] | select(.native_session_id == \"remote-transcript-proof\") | .lifecycle == 3 and (.codex_running_subagent_ids | length == 0)" "$HOME/phase6-runtime/agents.json" >/dev/null; then break; fi
+    sleep 0.1
+  done
+  jq -e ".agents[] | select(.native_session_id == \"remote-transcript-proof\") | .lifecycle == 3 and (.codex_running_subagent_ids | length == 0)" "$HOME/phase6-runtime/agents.json" >/dev/null
+  ! grep -aE "rollout-agent-status|private-path-must-not-persist|codex_transcript_path" "$HOME/phase6-runtime/agents.json"
+'
+
 # The helper exposes only its mode-0700 Unix socket. SSH is the sole TCP listener
 # added by this disposable target; no hook or daemon port is public.
 ssh -F "$runtime/ssh-config" ade-phase6-docker 'ss -H -ltnp; stat -c "%a %U %F" "$HOME/phase6-runtime/host.sock"' >"$runtime/listeners.txt"

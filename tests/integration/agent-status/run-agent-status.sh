@@ -22,6 +22,7 @@ stock=${ADE_STOCK:-0}
 run_id=$$
 socket_name="ade-phase13-$run_id"
 runtime=$(mktemp -d "${TMPDIR:-/tmp}/ade13.XXXXXX")
+test_home="$runtime/home"
 session="ade-phase13-$run_id"
 
 cleanup() {
@@ -36,6 +37,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 export ADE_HOST_RUNTIME_DIR="$runtime"
 export ADE_TMUX_SOCKET_NAME="$socket_name"
+mkdir -p "$test_home/.codex/sessions/2026/09/09"
 
 if [[ "$stock" == "1" ]]; then
   tmux -f /dev/null -L "$socket_name" new-session -d -s "$session" -x 100 -y 30
@@ -48,7 +50,7 @@ echo "tmux: $(tmux -V)"
 echo "base-index: $(tmux -L "$socket_name" show-options -gv base-index)"
 echo "allow-rename: $(tmux -L "$socket_name" show-options -gv allow-rename 2>/dev/null || echo unset)"
 
-"$helper" daemon --socket "$runtime/host.sock" >"$runtime/daemon.log" 2>&1 &
+env HOME="$test_home" "$helper" daemon --socket "$runtime/host.sock" >"$runtime/daemon.log" 2>&1 &
 daemon_pid=$!
 for _ in $(seq 1 50); do
   [[ -S "$runtime/host.sock" ]] && break
@@ -74,6 +76,25 @@ send() {
     "$helper" hook ingest --adapter claude-code
   ended=$(date +%s%N)
   echo "  $name -> $(( (ended - started) / 1000000 )) ms"
+}
+
+send_codex() {
+  local name=$1 extra=${2:-}
+  local payload="{\"hook_event_name\":\"$name\",\"session_id\":\"phase13-codex\"$extra}"
+  printf '%s' "$payload" | env HOME="$test_home" TMUX_PANE="$pane" TMUX="$(tmux -L "$socket_name" display-message -p '#{socket_path},0,0')" \
+    "$helper" hook ingest --adapter codex
+}
+
+codex_field() {
+  local key=$1
+  jq -r --arg key "$key" '.agents[] | select(.adapter_id == "codex" and .native_session_id == "phase13-codex") | .[$key]' "$store"
+}
+
+expect_codex() {
+  local key=$1 want=$2 got
+  got=$(codex_field "$key")
+  [[ "$got" == "$want" ]] || fail "Codex $key was '$got', expected '$want'"
+  echo "  Codex $key = $got"
 }
 
 field() {
@@ -164,5 +185,35 @@ send UserPromptSubmit
 expect lifecycle working
 send StopFailure
 expect lifecycle idle
+
+echo "== Codex transcript repairs a missing interrupted-child hook =="
+transcript="$test_home/.codex/sessions/2026/09/09/rollout-agent-status.jsonl"
+printf '%s\n' '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","kind":"started","agent_thread_id":"captured-child","agent_path":"private-path-must-not-persist"}}}' >"$transcript"
+send_codex SubagentStart ",\"turn_id\":\"captured-turn\",\"agent_id\":\"captured-child\",\"transcript_path\":\"$transcript\""
+send_codex Stop ",\"turn_id\":\"captured-turn\",\"transcript_path\":\"$transcript\""
+expect_codex lifecycle 1
+printf '%s\n' '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","kind":"interrupted","agent_thread_id":"captured-child","agent_path":"private-path-must-not-persist"}}}' >>"$transcript"
+for _ in $(seq 1 50); do
+  [[ "$(codex_field lifecycle)" == "3" ]] && break
+  sleep 0.1
+done
+expect_codex lifecycle 3
+expect_codex hook_terminal true
+[[ "$(codex_field codex_running_subagent_ids)" == "[]" ]] || fail "interrupted child remained active"
+if grep -Fq "$transcript" "$store" || grep -Fq 'private-path-must-not-persist' "$store"; then
+  fail "the agent store retained a Codex transcript path or content"
+fi
+
+echo "== resumed Codex child returns the stopped parent to working =="
+printf '%s\n' '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","kind":"interacted","agent_thread_id":"captured-child"}}}' >>"$transcript"
+send_codex UserPromptSubmit ",\"turn_id\":\"resumed-turn\",\"agent_id\":\"captured-child\",\"transcript_path\":\"$transcript\""
+expect_codex lifecycle 1
+expect_codex hook_terminal false
+printf '%s\n' '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","kind":"completed","agent_thread_id":"captured-child"}}}' >>"$transcript"
+for _ in $(seq 1 50); do
+  [[ "$(codex_field lifecycle)" == "3" ]] && break
+  sleep 0.1
+done
+expect_codex lifecycle 3
 
 echo "PASS: agent status end to end"

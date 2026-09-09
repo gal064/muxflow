@@ -260,6 +260,7 @@ fn persist_failure_rolls_back_runtime_mutations() {
         wiring: Mutex::new(hooks::WiringCache::default()),
         departure_misses: Mutex::new(BTreeMap::new()),
         pending_codex_permissions: Mutex::new(BTreeMap::new()),
+        codex_child_monitors: Mutex::new(BTreeMap::new()),
         reply_sink: Box::new(|_| {}),
         identity_promotion_sink: Box::new(|_, _| {}),
     };

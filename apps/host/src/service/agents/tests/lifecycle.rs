@@ -43,6 +43,44 @@ fn codex_subagent_event(id: &str, event_name: &str, agent_id: &str) -> v1::Agent
     hook
 }
 
+fn codex_child_transcript_line(agent_id: &str, kind: &str) -> String {
+    serde_json::json!({
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "item": {
+                "type": "SubAgentActivity",
+                "kind": kind,
+                "agent_thread_id": agent_id,
+            }
+        }
+    })
+    .to_string()
+}
+
+fn attach_child_monitor(
+    runtime: &AgentRuntime,
+    home: &std::path::Path,
+    transcript: &std::path::Path,
+) -> String {
+    let record_id = runtime
+        .state
+        .lock()
+        .unwrap()
+        .agents
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let monitor = crate::hook::codex_transcript::TurnMonitor::open(
+        &serde_json::json!({"transcript_path": transcript}),
+        home,
+    )
+    .unwrap();
+    runtime.track_codex_children(&record_id, Some(monitor), true);
+    record_id
+}
+
 fn has_auto_review_turn(record: &StoredAgent, agent_id: &str, turn_id: &str) -> bool {
     record.codex_turn_reviews.iter().any(|review| {
         review.turn.agent_id == agent_id
@@ -1666,6 +1704,46 @@ fn a_codex_sibling_finishing_cannot_hide_a_permission_block() {
 }
 
 #[test]
+fn the_final_codex_child_cannot_terminalize_a_blocked_parent() {
+    let runtime = runtime("codex-final-child-permission");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "child"),
+        event("parent-stop", 0, "Stop"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let mut permission = permission_for_turn("permission", "child-turn");
+    let mut payload: serde_json::Value = serde_json::from_slice(&permission.payload_json).unwrap();
+    payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "user".into();
+    payload[adapters::CODEX_SUBAGENT_ID_FIELD] = "child".into();
+    permission.payload_json = serde_json::to_vec(&payload).unwrap();
+    runtime
+        .ingest_hook_with_context(&permission, "server-a", Some(&topology))
+        .unwrap();
+
+    let final_child = runtime
+        .ingest_hook_with_context(
+            &codex_subagent_event("stop", "SubagentStop", "child"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert_eq!(
+        final_child.agent.as_ref().unwrap().lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert!(record.codex_running_subagent_ids.is_empty());
+    assert!(record.codex_parent_stopped_for_subagents);
+    assert!(!record.hook_terminal);
+}
+
+#[test]
 fn a_new_codex_prompt_owns_completion_while_an_older_child_finishes() {
     let runtime = runtime("codex-overlapping-prompt");
     let topology = topology("codex");
@@ -1762,6 +1840,433 @@ fn continued_codex_child_activity_reopens_a_stopped_parent() {
     assert_eq!(
         final_stop.agent.unwrap().lifecycle,
         v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn transcript_interruption_finishes_a_stopped_parent_without_a_subagent_stop_hook() {
+    use std::io::Write as _;
+
+    let runtime = runtime("codex-transcript-interruption");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "child"),
+        event("parent-stop", 0, "Stop"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/09");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
+    let record_id = attach_child_monitor(&runtime, home.path(), &transcript);
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        codex_child_transcript_line("child", "interrupted")
+    )
+    .unwrap();
+    file.sync_all().unwrap();
+    let events = runtime.sweep_codex_child_transitions();
+
+    assert_eq!(events.len(), 1);
+    assert!(events[0].notify);
+    assert_eq!(events[0].reason, "completed");
+    assert_eq!(
+        events[0].agent.as_ref().unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+    let record = &runtime.state.lock().unwrap().agents[&record_id];
+    assert!(record.codex_running_subagent_ids.is_empty());
+    assert!(record.hook_terminal);
+    assert!(runtime.codex_child_monitors.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_resume_hook_wins_over_an_older_unpolled_interruption() {
+    use std::io::Write as _;
+
+    let runtime = runtime("codex-transcript-resume-ordering");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "child"),
+        event("parent-stop", 0, "Stop"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/09");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
+    let record_id = attach_child_monitor(&runtime, home.path(), &transcript);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        codex_child_transcript_line("child", "interrupted")
+    )
+    .unwrap();
+    file.sync_all().unwrap();
+
+    let resumed = runtime
+        .ingest_hook_with_context(
+            &codex_subagent_event("resume", "UserPromptSubmit", "child"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert_eq!(
+        resumed.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    {
+        let state = runtime.state.lock().unwrap();
+        let record = &state.agents[&record_id];
+        assert_eq!(
+            record.codex_running_subagent_ids,
+            std::collections::BTreeSet::from(["child".to_owned()])
+        );
+        assert!(!record.hook_terminal);
+    }
+    assert!(runtime.sweep_codex_child_transitions().is_empty());
+}
+
+#[test]
+fn recent_child_terminal_is_not_starved_by_sixty_four_historical_ids() {
+    use std::io::Write as _;
+
+    let runtime = runtime("codex-transcript-recent-cap");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "current-child"),
+        event("parent-stop", 0, "Stop"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/09");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
+    attach_child_monitor(&runtime, home.path(), &transcript);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    for index in 0..MAX_CODEX_CHILDREN {
+        writeln!(
+            file,
+            "{}",
+            codex_child_transcript_line(&format!("old-{index}"), "completed")
+        )
+        .unwrap();
+    }
+    writeln!(
+        file,
+        "{}",
+        codex_child_transcript_line("current-child", "interrupted")
+    )
+    .unwrap();
+    file.sync_all().unwrap();
+
+    let events = runtime.sweep_codex_child_transitions();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].agent.as_ref().unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn transcript_completion_before_parent_stop_leaves_completion_to_the_parent() {
+    use std::io::Write as _;
+
+    let runtime = runtime("codex-transcript-parent-ordering");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "child"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/09");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
+    attach_child_monitor(&runtime, home.path(), &transcript);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        codex_child_transcript_line("child", "completed")
+    )
+    .unwrap();
+    file.sync_all().unwrap();
+
+    let reconciled = runtime.sweep_codex_child_transitions();
+    assert_eq!(reconciled.len(), 1);
+    assert!(!reconciled[0].notify);
+    assert_eq!(
+        reconciled[0].agent.as_ref().unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    let stopped = runtime
+        .ingest_hook_with_context(
+            &event("parent-stop", 0, "Stop"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(stopped.notify);
+    assert_eq!(
+        stopped.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn transcript_reconciles_parallel_and_nested_children_without_hiding_a_block() {
+    use std::io::Write as _;
+
+    let runtime = runtime("codex-transcript-parallel-nested-blocked");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("direct", "SubagentStart", "direct-child"),
+        codex_subagent_event("nested", "SubagentStart", "nested-child"),
+        event("parent-stop", 0, "Stop"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let blocked = runtime
+        .ingest_hook_with_context(
+            &event("blocked", 0, "PermissionRequest"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert_eq!(
+        blocked.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/09");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
+    attach_child_monitor(&runtime, home.path(), &transcript);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    for (child, kind) in [
+        ("direct-child", "completed"),
+        ("nested-child", "interrupted"),
+    ] {
+        writeln!(file, "{}", codex_child_transcript_line(child, kind)).unwrap();
+    }
+    file.sync_all().unwrap();
+
+    let reconciled = runtime.sweep_codex_child_transitions();
+    assert_eq!(reconciled.len(), 1);
+    let blocked = reconciled[0].agent.as_ref().unwrap();
+    assert_eq!(blocked.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+    assert_eq!(blocked.attention_kind, "blocked");
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .codex_running_subagent_ids
+            .is_empty()
+    );
+    {
+        let state = runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        assert!(record.codex_parent_stopped_for_subagents);
+        assert!(!record.hook_terminal);
+    }
+    let resolved = runtime
+        .ingest_hook_with_context(
+            &event("permission-resolved", 0, "PostToolUse"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(!resolved.notify);
+    assert_eq!(
+        resolved.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn child_ids_and_transcript_monitors_are_bounded() {
+    let runtime = runtime("codex-child-limits");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    for index in 0..(MAX_CODEX_CHILDREN + 10) {
+        runtime
+            .ingest_hook_with_context(
+                &codex_subagent_event(
+                    &format!("start-{index}"),
+                    "SubagentStart",
+                    &format!("child-{index}"),
+                ),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .codex_running_subagent_ids
+            .len(),
+        MAX_CODEX_CHILDREN
+    );
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .codex_subagent_capacity_exceeded
+    );
+
+    let mut homes = Vec::new();
+    for index in 0..(MAX_CODEX_TRANSCRIPT_MONITORS + 10) {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join(".codex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let transcript = sessions.join(format!("{index}.jsonl"));
+        std::fs::write(&transcript, b"").unwrap();
+        let monitor = crate::hook::codex_transcript::TurnMonitor::open(
+            &serde_json::json!({"transcript_path": transcript}),
+            home.path(),
+        )
+        .unwrap();
+        runtime.track_codex_children(&format!("record-{index}"), Some(monitor), true);
+        homes.push(home);
+    }
+    assert_eq!(
+        runtime.codex_child_monitors.lock().unwrap().len(),
+        MAX_CODEX_TRANSCRIPT_MONITORS
+    );
+}
+
+#[test]
+fn daemon_load_bounds_an_older_oversized_child_set_without_false_idle() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("codex-oversized-restart-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let topology = topology("codex");
+    {
+        let runtime = AgentRuntime::isolated(path.clone());
+        runtime
+            .ingest_hook_with_context(
+                &event("prompt", 0, "UserPromptSubmit"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        let mut state = runtime.state.lock().unwrap();
+        let record = state.agents.values_mut().next().unwrap();
+        record.codex_running_subagent_ids = (0..80)
+            .map(|index| format!("legacy-child-{index}"))
+            .collect();
+        record.codex_parent_stopped_for_subagents = true;
+        runtime.persist_locked(&state).unwrap();
+    }
+
+    let restarted = AgentRuntime::isolated(path);
+    let state = restarted.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.codex_running_subagent_ids.len(), MAX_CODEX_CHILDREN);
+    assert!(record.codex_subagent_capacity_exceeded);
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+}
+
+#[test]
+fn a_readable_child_transcript_is_stronger_than_the_twenty_four_hour_backstop() {
+    let runtime = runtime("codex-readable-transcript-stale");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "child"),
+        event("parent-stop", 0, "Stop"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/09");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    std::fs::write(&transcript, b"").unwrap();
+    attach_child_monitor(&runtime, home.path(), &transcript);
+    {
+        let mut state = runtime.state.lock().unwrap();
+        let record = state.agents.values_mut().next().unwrap();
+        record.subagent_evidence_observed_at_unix_millis =
+            now_millis() - STALE_SUBAGENT_WORKING_TTL_MILLIS - 1_000;
+    }
+
+    assert!(runtime.sweep_codex_child_transitions().is_empty());
+    assert!(runtime.sweep_stale().is_empty());
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Working as i32
     );
 }
 

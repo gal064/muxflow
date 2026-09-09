@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -49,6 +49,8 @@ const STALE_SUBAGENT_WORKING_TTL_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 const DEPARTURE_MISSES_REQUIRED: u8 = 3;
 const MAX_PENDING_CODEX_PERMISSIONS: usize = 64;
 const PENDING_CODEX_PERMISSION_TTL_MILLIS: i64 = 24 * 60 * 60 * 1_000;
+pub(crate) const MAX_CODEX_CHILDREN: usize = 64;
+const MAX_CODEX_TRANSCRIPT_MONITORS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PendingCodexPermissionKey {
@@ -61,6 +63,14 @@ struct PendingCodexPermission {
     terminal: Option<crate::hook::codex_transcript::TurnTerminal>,
     lifecycle_changed_at_unix_millis: i64,
     observed_at_unix_millis: i64,
+}
+
+struct CodexChildMonitor {
+    monitor: crate::hook::codex_transcript::TurnMonitor,
+    /// Latest unread transition per opaque ID. Replacing an older deque entry
+    /// makes duplicate transcript records free and bounds retry state even
+    /// when persistence is failing.
+    pending: VecDeque<crate::hook::codex_transcript::ChildTransition>,
 }
 
 pub(crate) struct AgentRuntime {
@@ -78,6 +88,9 @@ pub(crate) struct AgentRuntime {
     /// recovery because Codex emits no hook when the user cancels its dialog.
     /// Entries and transcript handles are memory-only and strictly bounded.
     pending_codex_permissions: Mutex<BTreeMap<PendingCodexPermissionKey, PendingCodexPermission>>,
+    /// Transcript descriptors for Codex parents that currently have active
+    /// descendants. Paths and transcript contents never enter this map.
+    codex_child_monitors: Mutex<BTreeMap<String, CodexChildMonitor>>,
     /// Where a `Stop` hands the agent's final message. Voice mode in
     /// production; a recorder in tests, so no test needs the voice service.
     reply_sink: ReplySink,
@@ -126,6 +139,7 @@ impl AgentRuntime {
             wiring: Mutex::new(hooks::WiringCache::default()),
             departure_misses: Mutex::new(BTreeMap::new()),
             pending_codex_permissions: Mutex::new(BTreeMap::new()),
+            codex_child_monitors: Mutex::new(BTreeMap::new()),
             reply_sink,
             identity_promotion_sink,
         }
@@ -204,6 +218,272 @@ impl AgentRuntime {
         }
     }
 
+    /// Drain transcript edges that happened before a live hook while the hook
+    /// still owns the global ingest fence. The caller applies these edges
+    /// first, then lets the hook itself be the causal winner.
+    fn poll_codex_children_before_hook(
+        &self,
+        record_id: &str,
+    ) -> Option<(Vec<crate::hook::codex_transcript::ChildTransition>, bool)> {
+        let mut monitors = self.codex_child_monitors.lock().unwrap();
+        let entry = monitors.get_mut(record_id)?;
+        let poll = entry.monitor.poll_children();
+        for transition in poll.transitions {
+            if let Some(index) = entry
+                .pending
+                .iter()
+                .position(|pending| pending.child_id == transition.child_id)
+            {
+                entry.pending.remove(index);
+            }
+            entry.pending.push_back(transition);
+            while entry.pending.len() > MAX_CODEX_CHILDREN {
+                entry.pending.pop_front();
+            }
+        }
+        Some((entry.pending.iter().cloned().collect(), poll.readable))
+    }
+
+    /// Acknowledge only after the hook and all older transcript edges were
+    /// persisted together. Retryable persistence failures keep the deque for
+    /// the next hook or maintenance pass.
+    fn acknowledge_codex_children_before_hook(&self, record_id: &str, readable: bool) {
+        let mut monitors = self.codex_child_monitors.lock().unwrap();
+        if !readable {
+            monitors.remove(record_id);
+        } else if let Some(entry) = monitors.get_mut(record_id) {
+            entry.pending.clear();
+        }
+    }
+
+    fn track_codex_children(
+        &self,
+        record_id: &str,
+        monitor: Option<crate::hook::codex_transcript::TurnMonitor>,
+        has_active_children: bool,
+    ) {
+        let mut monitors = self.codex_child_monitors.lock().unwrap();
+        if !has_active_children {
+            monitors.remove(record_id);
+            return;
+        }
+        let Some(monitor) = monitor else {
+            return;
+        };
+        if monitors.contains_key(record_id) {
+            return;
+        }
+        if monitors.len() < MAX_CODEX_TRANSCRIPT_MONITORS {
+            monitors.insert(
+                record_id.to_owned(),
+                CodexChildMonitor {
+                    monitor,
+                    pending: VecDeque::new(),
+                },
+            );
+        }
+    }
+
+    /// Reconcile Codex's exact transcript child records with hook state.
+    /// Hooks remain the immediate path; this pass repairs missing terminal
+    /// events (notably cancellation) and publishes only lifecycle state.
+    fn sweep_codex_child_transitions(&self) -> Vec<v1::AgentEvent> {
+        let monitored_records: BTreeSet<String> = self
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .iter()
+            .filter(|(_, record)| {
+                record.adapter_id == "codex" && !record.codex_running_subagent_ids.is_empty()
+            })
+            .map(|(record_id, _)| record_id.clone())
+            .collect();
+        let no_monitors = {
+            let mut monitors = self.codex_child_monitors.lock().unwrap();
+            monitors.retain(|record_id, _| monitored_records.contains(record_id));
+            monitors.is_empty()
+        };
+        if no_monitors {
+            return Vec::new();
+        }
+        let (pending_by_record, unreadable): (BTreeMap<_, _>, Vec<_>) = {
+            let mut monitors = self.codex_child_monitors.lock().unwrap();
+            let mut unreadable = Vec::new();
+            for (record_id, entry) in monitors.iter_mut() {
+                let poll = entry.monitor.poll_children();
+                if !poll.readable {
+                    unreadable.push(record_id.clone());
+                }
+                for transition in poll.transitions {
+                    if let Some(index) = entry
+                        .pending
+                        .iter()
+                        .position(|pending| pending.child_id == transition.child_id)
+                    {
+                        entry.pending.remove(index);
+                    }
+                    entry.pending.push_back(transition);
+                    while entry.pending.len() > MAX_CODEX_CHILDREN {
+                        entry.pending.pop_front();
+                    }
+                }
+            }
+            let pending = monitors
+                .iter()
+                .filter(|(_, entry)| !entry.pending.is_empty())
+                .map(|(id, entry)| (id.clone(), entry.pending.clone()))
+                .collect();
+            (pending, unreadable)
+        };
+        if pending_by_record.is_empty() {
+            if !unreadable.is_empty() {
+                let mut monitors = self.codex_child_monitors.lock().unwrap();
+                for record_id in unreadable {
+                    monitors.remove(&record_id);
+                }
+            }
+            return Vec::new();
+        }
+
+        let now = now_millis();
+        let mut state = self.state.lock().unwrap();
+        let original = state.clone();
+        let mut events = Vec::new();
+        let mut processed = Vec::new();
+        let mut inactive = Vec::new();
+        for (record_id, transitions) in &pending_by_record {
+            let Some(before) = state.agents.get(record_id).cloned() else {
+                processed.push(record_id.clone());
+                inactive.push(record_id.clone());
+                continue;
+            };
+            if before.adapter_id != "codex" {
+                processed.push(record_id.clone());
+                inactive.push(record_id.clone());
+                continue;
+            }
+            let mut child_ids = before.codex_running_subagent_ids.clone();
+            let mut capacity_exceeded = before.codex_subagent_capacity_exceeded;
+            for transition in transitions {
+                if transition.active {
+                    if child_ids.contains(&transition.child_id)
+                        || child_ids.len() < MAX_CODEX_CHILDREN
+                    {
+                        child_ids.insert(transition.child_id.clone());
+                    } else {
+                        capacity_exceeded = true;
+                    }
+                } else {
+                    child_ids.remove(&transition.child_id);
+                }
+            }
+            let has_children = !child_ids.is_empty() || capacity_exceeded;
+            let was_blocked = before.lifecycle == v1::AgentLifecycleState::Blocked as i32;
+            let resumed_after_terminal = has_children && before.hook_terminal;
+            let idle_after_parent_stop = !has_children && before.codex_parent_stopped_for_subagents;
+            let finalized_after_parent_stop = idle_after_parent_stop && !was_blocked;
+            let lifecycle = if was_blocked {
+                v1::AgentLifecycleState::Blocked
+            } else if has_children {
+                v1::AgentLifecycleState::Working
+            } else if finalized_after_parent_stop {
+                v1::AgentLifecycleState::Idle
+            } else {
+                v1::AgentLifecycleState::try_from(before.lifecycle).unwrap_or_default()
+            };
+            let parent_stopped = if finalized_after_parent_stop {
+                false
+            } else if resumed_after_terminal {
+                true
+            } else {
+                before.codex_parent_stopped_for_subagents
+            };
+            let hook_terminal = if resumed_after_terminal {
+                false
+            } else if finalized_after_parent_stop {
+                true
+            } else {
+                before.hook_terminal
+            };
+            let changed = child_ids != before.codex_running_subagent_ids
+                || capacity_exceeded != before.codex_subagent_capacity_exceeded
+                || lifecycle as i32 != before.lifecycle
+                || parent_stopped != before.codex_parent_stopped_for_subagents
+                || hook_terminal != before.hook_terminal;
+            processed.push(record_id.clone());
+            if !has_children {
+                inactive.push(record_id.clone());
+            }
+            if !changed {
+                continue;
+            }
+            state.generation = state.generation.saturating_add(1);
+            let generation = state.generation;
+            let record = state.agents.get_mut(record_id).unwrap();
+            let previous_lifecycle =
+                v1::AgentLifecycleState::try_from(record.lifecycle).unwrap_or_default();
+            record.codex_running_subagent_ids = child_ids;
+            record.codex_subagent_capacity_exceeded = capacity_exceeded;
+            record.codex_parent_stopped_for_subagents = parent_stopped;
+            record.hook_terminal = hook_terminal;
+            record.lifecycle = lifecycle as i32;
+            record.lifecycle_observed_at_unix_millis = now;
+            record.updated_at_unix_millis = now;
+            record.state_generation = generation;
+            if has_children {
+                record.subagent_evidence_observed_at_unix_millis = now;
+            } else {
+                record.subagent_evidence_observed_at_unix_millis = 0;
+            }
+            let completed = previous_lifecycle == v1::AgentLifecycleState::Working
+                && lifecycle == v1::AgentLifecycleState::Idle;
+            if previous_lifecycle != lifecycle {
+                record.lifecycle_changed_at_unix_millis = now;
+            }
+            if completed {
+                record.attention_generation = record.attention_generation.saturating_add(1);
+                record.attention_kind = "completed".into();
+                record.attention_seen_at_unix_millis = 0;
+            } else if lifecycle == v1::AgentLifecycleState::Working
+                && record.attention_kind == "completed"
+                && record.seen_generation >= record.attention_generation
+            {
+                record.attention_kind.clear();
+                record.attention_seen_at_unix_millis = 0;
+            }
+            events.push(v1::AgentEvent {
+                agent: Some(snapshot::record(record)),
+                generation,
+                notify: completed,
+                reason: if completed {
+                    "completed"
+                } else {
+                    "transcript_child_state"
+                }
+                .into(),
+                retired_agent_ids: Vec::new(),
+            });
+        }
+        if !events.is_empty()
+            && let Err(_error) = self.persist_locked(&state)
+        {
+            *state = original;
+            return Vec::new();
+        }
+        drop(state);
+        let mut monitors = self.codex_child_monitors.lock().unwrap();
+        for record_id in processed {
+            if let Some(entry) = monitors.get_mut(&record_id) {
+                entry.pending.clear();
+            }
+        }
+        for record_id in unreadable.into_iter().chain(inactive) {
+            monitors.remove(&record_id);
+        }
+        events
+    }
+
     /// Resolve confirmed manual permission turns that Codex terminated without
     /// a lifecycle hook. Codex 0.153.4 appends an exact-turn `turn_aborted` on
     /// Escape and `task_complete` on completion, but emits neither PostToolUse
@@ -280,7 +560,8 @@ impl AgentRuntime {
             }
             let idle = key.turn.agent_id.is_empty()
                 || record.codex_parent_stopped_for_subagents
-                    && record.codex_running_subagent_ids.is_empty();
+                    && record.codex_running_subagent_ids.is_empty()
+                    && !record.codex_subagent_capacity_exceeded;
             record.lifecycle = if idle {
                 v1::AgentLifecycleState::Idle as i32
             } else {
@@ -344,6 +625,13 @@ impl AgentRuntime {
     /// evidence of live work and is exempt until its matching terminal event.
     pub(crate) fn sweep_stale(&self) -> Vec<v1::AgentEvent> {
         let now = now_millis();
+        let monitored_codex: BTreeSet<String> = self
+            .codex_child_monitors
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         let mut state = self.state.lock().unwrap();
         let stale: Vec<String> = state
             .agents
@@ -356,7 +644,8 @@ impl AgentRuntime {
                     value => value,
                 };
                 let subagent_evidence = record.claude_has_running_subagent
-                    || !record.codex_running_subagent_ids.is_empty();
+                    || !record.codex_running_subagent_ids.is_empty()
+                    || record.codex_subagent_capacity_exceeded;
                 let (observed, ttl) = if subagent_evidence {
                     (
                         record.subagent_evidence_observed_at_unix_millis,
@@ -366,6 +655,7 @@ impl AgentRuntime {
                     (lifecycle_observed, STALE_WORKING_TTL_MILLIS)
                 };
                 record.lifecycle == v1::AgentLifecycleState::Working as i32
+                    && !monitored_codex.contains(&record.agent_id)
                     && now.saturating_sub(observed) > ttl
             })
             .map(|record| record.agent_id.clone())
@@ -382,6 +672,7 @@ impl AgentRuntime {
             record.lifecycle = v1::AgentLifecycleState::Unknown as i32;
             record.claude_has_running_subagent = false;
             record.codex_running_subagent_ids.clear();
+            record.codex_subagent_capacity_exceeded = false;
             record.codex_parent_stopped_for_subagents = false;
             record.subagent_evidence_observed_at_unix_millis = 0;
             record.lifecycle_changed_at_unix_millis = now;
@@ -697,8 +988,18 @@ pub(crate) fn ingest_fallbacks() -> anyhow::Result<usize> {
 /// is about to disappear in the same pass.
 pub(crate) fn maintain() {
     let runtime = AgentRuntime::global();
-    for event in runtime.sweep_codex_permission_terminals() {
-        publish(event);
+    {
+        // A transcript observation and a live hook update the same lifecycle
+        // record. Hold the hook ingest fence through publication so an older
+        // transcript edge can neither overwrite nor publish after a newer
+        // hook. Reads are bounded to one MiB per growing monitored file.
+        let _order = runtime.ingest_order.lock().unwrap();
+        for event in runtime.sweep_codex_permission_terminals() {
+            publish(event);
+        }
+        for event in runtime.sweep_codex_child_transitions() {
+            publish(event);
+        }
     }
     for event in runtime.retire_departed() {
         publish(event);

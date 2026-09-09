@@ -3,11 +3,15 @@
 Codex and Claude Code are the only V1 agent adapters. The app can launch them or
 detect manually started processes.
 
-**Hooks are the only source of lifecycle state.** An agent whose hooks are not
-installed appears in the list and reads `unknown` — the app says which agents
-exist and nothing about what they are doing. Process detection proves an agent
-is there, and its absence retires the row when the process exits; neither ever
-decides whether the agent is working, blocked, or idle.
+**Hooks are the primary source of lifecycle state.** For Codex, the daemon also
+reconciles exact child-activity records from the transcript identified by a
+live hook. That read-only repair path covers transitions such as cancellation
+that have no matching hook; it does not infer state from prompt or tool text.
+An agent whose hooks are not installed appears in the list and reads `unknown`
+— the app says which agents exist and nothing about what they are doing.
+Process detection proves an agent is there, and its absence retires the row
+when the process exits; neither ever decides whether the agent is working,
+blocked, or idle.
 
 Hook installation is always a separate, reviewable action from remote-helper
 installation. The review shows every touched file, before/after hashes, a
@@ -79,12 +83,14 @@ that check and `PreToolUse(request_user_input)` are the observed blocked
 signals. Recorded rather than faked.
 
 A `Working` state that receives no further event for fifteen minutes decays to
-`Unknown`. Direct evidence of a running subagent extends that recovery window
-to 24 hours, so long child tasks remain Working without letting one lost stop
-hook create a permanent claim. Attention already earned survives; only the
-claim about right now is dropped. The ordinary bound is the longest gap a
-healthy agent can otherwise leave — one tool call, at Claude's maximum
-configurable `Bash` timeout of 600s — with half again for headroom.
+`Unknown`. Direct evidence of a running subagent stays authoritative while its
+bounded transcript monitor remains readable. The 24-hour recovery window is a
+final backstop only when neither hooks nor a readable transcript remain, so
+long child tasks with a readable transcript stay Working until their exact
+terminal edge. Attention already earned survives; only the claim about right
+now is dropped when the backstop applies. The ordinary bound is the longest gap a healthy agent can
+otherwise leave — one tool call, at Claude's maximum configurable `Bash`
+timeout of 600s — with half again for headroom.
 
 Use the same review flow with Uninstall to remove only entries labeled
 `muxflow-managed`. Do this before uninstalling the desktop package. The
@@ -93,13 +99,18 @@ is present, preventing silently broken agent configuration.
 
 Hooks submit compact state JSON through the private daemon socket and never send
 prompt text, terminal output, tool input, file contents, or credentials. The
-only transient locator is Codex's transcript path on a live
-`PermissionRequest`: the daemon opens it only after an exact-turn reviewer-cache
-miss. For a confirmed user-reviewed request it retains only the validated open
-file handle in memory, checks its length during the existing maintenance pass,
-and clears Blocked when that exact turn appends `turn_aborted` or
-`task_complete`. This covers Codex cancellation, which emits no clearing hook.
-If no daemon accepts the event, the hook resolves the reviewer and strips the
+only transient locator is Codex's transcript path on a live hook. The daemon
+opens it through the confined transcript reader and retains only the validated
+open file handle in memory. For a confirmed user-reviewed request it checks the
+file length during the existing maintenance pass and clears Blocked when that
+exact turn appends `turn_aborted` or `task_complete`. For a parent with active
+descendants, the same pass recognizes only exact `SubAgentActivity` records:
+`started` and `interacted` make that opaque child ID active; `completed` and
+`interrupted` make only that ID inactive. This covers Codex cancellation, which
+can emit no clearing hook. Monitors, pending transitions, and retained child
+IDs are capped at 64, every opaque child ID is capped at 1 KiB, and each read
+is limited to the final 1 MiB after file growth. If no daemon accepts the event, the hook materializes only those
+sanitized child transitions, resolves the reviewer when needed, and strips the
 path before placing the event in the durable fallback mailbox. The
 hook process accepts a bounded vendor envelope up to 64 MiB because tool-complete
 events can include the full result, including base64 image data. It parses that
@@ -114,10 +125,12 @@ reviewer needed for exact-turn revalidation. The daemon keeps a bounded set of
 parent and child reviewer decisions so concurrent children cannot evict one
 another. An unresolved permission reviewer stays Working; only an exact `user`
 decision raises Blocked. Codex child-scoped events retain only their opaque
-agent ID; the daemon keeps those IDs as a set so duplicate events
-cannot miscount concurrent children and later child activity can reopen an
-existing child. A parent `Stop` remains Working until that set is empty,
-including across daemon restarts. A Claude `Stop` retains only a boolean
+agent ID; the daemon keeps those IDs as a set so duplicate events cannot
+miscount concurrent children and later child activity can reopen an existing
+child. Hooks update that set immediately and transcript records reconcile
+missed transitions. A parent `Stop` remains Working until that set is empty,
+including across daemon restarts, while a real Blocked state remains Blocked
+until its own question or permission resolves. A Claude `Stop` retains only a boolean
 saying whether a subagent is still running; task descriptions, commands, IDs,
 and the rest of Claude's background-task payload are discarded. The daemon
 retains that boolean until the final `Stop`, including across restarts, so
