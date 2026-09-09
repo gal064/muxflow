@@ -251,6 +251,35 @@ describe("VoiceRegistry", () => {
     await settle();
   });
 
+  it("releases an abandoned recording before the next session transcribes", async () => {
+    const h = harness();
+    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    a.focus();
+    await settle();
+    a.beginUtterance();
+    await settle();
+
+    // Navigating away can unmount the mic before React Native sends press-out.
+    // The old session must not retain the one native recorder.
+    a.blur();
+    b.focus();
+    await settle();
+    expect(h.store.getState().sessions.a?.phase).toBe("idle");
+
+    h.deps.recorder.nextUri = "file:///cache/rec-2.m4a";
+    h.deps.files.files.set("file:///cache/rec-2.m4a", new TextEncoder().encode("second-aac"));
+    b.beginUtterance();
+    await settle();
+    expect(h.deps.recorder.recording).toBe(true);
+    await b.endUtterance();
+
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
+    expect(h.store.getState().sessions.b?.phase).toBe("idle");
+    h.registry.disposeAll();
+    await settle();
+  });
+
   it("does not let A's delayed cancellation release the recorder after B claims it", async () => {
     const h = harness();
     const events: string[] = [];

@@ -194,7 +194,10 @@ export class VoiceController {
     // The next mount re-baselines the lifecycle: an edge that happened while
     // another screen was up is not acknowledged late, or for the wrong turn.
     this.lastLifecycle = undefined;
-    if (this.recordingPhase() === "recordingLocked") void this.cancelUtterance();
+    // React Native can unmount the pressed control without delivering
+    // `onPressOut`. Stop either kind of live take so this session cannot keep
+    // the process-global recorder from the next voice screen.
+    if (this.recordingPhase() !== undefined) void this.cancelUtterance();
     else this.disarm();
   }
 
@@ -204,9 +207,9 @@ export class VoiceController {
     this.playUnplayedIfListening();
   }
 
-  /** A locked take never keeps the microphone when the app leaves the foreground. */
+  /** A live take never keeps the microphone when the app leaves the foreground. */
   onAppInactive(): void {
-    if (this.recordingPhase() === "recordingLocked") void this.cancelUtterance();
+    if (this.recordingPhase() !== undefined) void this.cancelUtterance();
   }
 
   /** Every reconnect is a new connection, and the host's registration is per connection (§4.3). */
