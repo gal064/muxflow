@@ -13,7 +13,7 @@ use tokio::{sync::mpsc, time::sleep};
 use super::active_root::resolve_cached;
 use super::filesystem::{
     FileService, root_generation, root_token, single_file_root, validate_read_token,
-    validate_root_token,
+    validate_root_token, validate_write_token,
 };
 use super::snapshot::discover_authoritative;
 use super::terminal::VisibilityChange;

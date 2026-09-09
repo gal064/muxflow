@@ -184,26 +184,33 @@ describe("AppTabSurface", () => {
     await act(async () => { surface.renderer.unmount(); });
   });
 
-  it("opens a terminal single-file capability read-only without watching its parent directory", async () => {
+  it("edits and repeatedly saves a terminal single-file capability without watching its parent", async () => {
+    vi.useFakeTimers();
     const outsideTab: AppOwnedTab = {
       ...tab,
       resource: "/tmp/claude-1000/session/scratchpad/prompt.md",
       title: "prompt.md",
       rootPath: "/tmp/claude-1000/session/scratchpad",
-      rootToken: `file-v1:${"a".repeat(64)}:${"b".repeat(64)}`,
+      rootToken: `file-v2:${"a".repeat(64)}`,
     };
     const surface = await mount({ bootstrap: listing([]) }, { tab: outsideTab });
 
     expect(surface.opens).toEqual(["g1"]);
     expect(
       surface.client.acquireDirectoryWatch,
-      "the one-file token enumerated its parent through a watch bootstrap",
+      "the exact-file token enumerated its parent through a watch bootstrap",
     ).not.toHaveBeenCalled();
     const editor = surface.renderer.root.findByType(EditorStub);
-    expect(editor.props.options?.readOnly).toBe(true);
-    await act(async () => { editor.props.onChange("attempted edit"); });
-    expect(surface.writes, "a read-only outside file scheduled an autosave").toEqual([]);
+    expect(editor.props.options?.readOnly).toBe(false);
+
+    await act(async () => { editor.props.onChange("first edit"); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    await act(async () => { editor.props.onChange("second edit"); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(150); });
+    expect(surface.writes).toHaveLength(2);
+
     await act(async () => { surface.renderer.unmount(); });
+    vi.useRealTimers();
   });
 
   it("never re-opens the file because a watch it merely joined disagrees", async () => {

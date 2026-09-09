@@ -38,11 +38,14 @@ export interface ActiveRoot {
  * Host-issued capability for one terminal-linked file outside the pane root.
  *
  * It deliberately looks unlike an ordinary root token so a persisted file tab
- * can recover its read-only/no-directory-watch behavior after reconnecting,
- * without storing a second piece of capability metadata that could drift from
- * the token which actually enforces it.
+ * can recover its no-directory-watch behavior after reconnecting, without
+ * storing a second piece of capability metadata that could drift from the
+ * token which actually enforces it.
+ *
+ * The token may save the exact linked file but cannot enumerate its parent or
+ * access a sibling.
  */
-export const TERMINAL_SINGLE_FILE_TOKEN_PREFIX = "file-v1:";
+export const TERMINAL_SINGLE_FILE_TOKEN_PREFIX = "file-v2:";
 
 export function isTerminalSingleFileRoot(root: Pick<ActiveRoot, "token"> | undefined): boolean {
   return root?.token.startsWith(TERMINAL_SINGLE_FILE_TOKEN_PREFIX) ?? false;

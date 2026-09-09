@@ -107,7 +107,7 @@ pub(super) async fn handle(
 /// Resolves a terminal-output path on the host that owns the pane.
 ///
 /// A path inside the pane's root reuses that ordinary root capability. A path
-/// outside it receives a read-only capability bound to that one canonical file:
+/// outside it receives an editable capability bound to that one canonical file:
 /// its parent is carried only because file streaming is root-relative, and the
 /// token cannot enumerate the directory or resolve a sibling. This is the
 /// distinction that lets a deliberate Cmd-click open a Claude scratchpad under
@@ -234,7 +234,7 @@ fn pane_matches_terminal_file_route(
 /// The canonical regular file a terminal path names.
 ///
 /// Capability selection happens after this returns: an in-root path keeps the
-/// pane root, while an outside path gets a read-only capability for this exact
+/// pane root, while an outside path gets an editable capability for this exact
 /// canonical leaf. Canonicalizing here makes a symlink's target — not its
 /// user-controlled spelling — the identity the capability binds.
 fn canonical_terminal_file(
@@ -491,7 +491,7 @@ mod terminal_file_tests {
         .unwrap();
         assert_eq!(inside.0, root.to_str().unwrap());
         assert!(inside.1);
-        assert!(!inside.3.starts_with("file-v1:"));
+        assert!(!inside.3.starts_with("file-v2:"));
 
         let outside = terminal_file_capability(
             root.to_str().unwrap().to_owned(),
@@ -502,7 +502,7 @@ mod terminal_file_tests {
         assert_eq!(outside.0, outside_file.parent().unwrap().to_str().unwrap());
         assert!(!outside.1);
         assert_eq!(outside.2, outside_file.to_str().unwrap());
-        assert!(outside.3.starts_with("file-v1:"));
+        assert!(outside.3.starts_with("file-v2:"));
     }
 
     #[test]

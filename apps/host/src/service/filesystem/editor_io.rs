@@ -42,7 +42,7 @@ impl FileService {
         if self.uploads.lock().unwrap().contains_key(transfer_id) {
             bail!("file-write transfer ID is already active");
         }
-        let root = RootCapability::validate(root, root_token)?;
+        let root = RootCapability::validate_write(root, root_token)?;
         let (logical_target, target) = root.resolve_existing(path)?;
         reject_root_target(root.logical_root(), &logical_target)?;
         let (logical_write_target, _) = root.regular_file_target(&logical_target, &target)?;

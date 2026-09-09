@@ -78,22 +78,19 @@ fn one_open_classifies_and_carries_exactly_the_content_policy_allows() {
 }
 
 #[test]
-fn terminal_single_file_capability_opens_one_outside_file_and_nothing_else() {
+fn terminal_single_file_capability_opens_and_saves_one_outside_file_and_nothing_else() {
     let (directory, service) = fixture();
     let allowed = directory.join("claude-scratchpad.md");
     let sibling = directory.join("other-secret.md");
     fs::write(&allowed, "prompt").unwrap();
     fs::write(&sibling, "secret").unwrap();
     let (root, token) = single_file_root(&allowed).unwrap();
-    let exposed_digests = token
-        .strip_prefix("file-v1:")
-        .unwrap()
-        .split(':')
-        .collect::<Vec<_>>();
+    let exposed_digest = token.strip_prefix("file-v2:").unwrap();
 
     let opened = service
         .open_file_stream_authorized(&root, &token, allowed.to_str().unwrap(), &NEVER_CANCELLED)
         .unwrap();
+    let opened_generation = opened.header().generation;
     let body: Vec<u8> = opened
         .chunks()
         .flat_map(|(_, chunk)| chunk.to_vec())
@@ -110,57 +107,91 @@ fn terminal_single_file_capability_opens_one_outside_file_and_nothing_else() {
             )
             .is_err()
     );
-    for (index, exposed_digest) in exposed_digests.iter().enumerate() {
-        assert!(
-            service
-                .open_file_stream_authorized(
-                    &root,
-                    exposed_digest,
-                    allowed.to_str().unwrap(),
-                    &NEVER_CANCELLED,
-                )
-                .is_err()
-        );
-        assert!(
-            service
-                .list_directory_page_authorized(
-                    &root,
-                    exposed_digest,
-                    &root,
-                    &format!("extracted-token-{index}"),
-                    "",
-                    0,
-                    &NEVER_CANCELLED,
-                )
-                .is_err()
-        );
-        assert!(
-            service
-                .begin_file_write_authorized(
-                    &root,
-                    exposed_digest,
-                    allowed.to_str().unwrap(),
-                    &format!("extracted-write-{index}"),
-                    "operation",
-                    3,
-                    0,
-                )
-                .is_err()
-        );
-    }
+    assert!(
+        service
+            .open_file_stream_authorized(
+                &root,
+                exposed_digest,
+                allowed.to_str().unwrap(),
+                &NEVER_CANCELLED,
+            )
+            .is_err()
+    );
+    assert!(
+        service
+            .list_directory_page_authorized(
+                &root,
+                exposed_digest,
+                &root,
+                "extracted-token",
+                "",
+                0,
+                &NEVER_CANCELLED,
+            )
+            .is_err()
+    );
     assert!(
         service
             .begin_file_write_authorized(
                 &root,
-                &token,
+                exposed_digest,
                 allowed.to_str().unwrap(),
-                "write",
+                "extracted-write",
                 "operation",
                 3,
                 0,
             )
             .is_err()
     );
+    assert!(
+        service
+            .begin_file_write_authorized(
+                &root,
+                &token,
+                sibling.to_str().unwrap(),
+                "sibling-write",
+                "operation",
+                3,
+                0,
+            )
+            .is_err()
+    );
+
+    service
+        .begin_file_write_authorized(
+            &root,
+            &token,
+            allowed.to_str().unwrap(),
+            "write-one",
+            "operation-one",
+            6,
+            opened_generation,
+        )
+        .unwrap();
+    service.write_file_chunk("write-one", 0, b"edited").unwrap();
+    let (metadata, _) = service
+        .commit_file_write_authorized("write-one", &blake3::hash(b"edited").to_hex().to_string())
+        .unwrap();
+    assert_eq!(fs::read_to_string(&allowed).unwrap(), "edited");
+
+    // Atomic save replaces the inode. The exact-path capability must remain
+    // useful for the next edit while still authorizing no other path.
+    service
+        .begin_file_write_authorized(
+            &root,
+            &token,
+            allowed.to_str().unwrap(),
+            "write-two",
+            "operation-two",
+            5,
+            metadata.generation,
+        )
+        .unwrap();
+    service.write_file_chunk("write-two", 0, b"again").unwrap();
+    service
+        .commit_file_write_authorized("write-two", &blake3::hash(b"again").to_hex().to_string())
+        .unwrap();
+    assert_eq!(fs::read_to_string(&allowed).unwrap(), "again");
     fs::remove_dir_all(directory).unwrap();
 }
 

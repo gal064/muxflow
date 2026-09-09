@@ -101,7 +101,7 @@ describe("useAppFileActions", () => {
       ...root,
       path: "/tmp/claude/session/scratchpad",
       cwd: "/tmp/claude/session/scratchpad",
-      token: `file-v1:${"a".repeat(64)}:${"b".repeat(64)}`,
+      token: `file-v2:${"a".repeat(64)}`,
     };
     const transfer: TransferStatus = {
       id: "outside-transfer",
