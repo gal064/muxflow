@@ -87,6 +87,11 @@ pub(super) struct StoredAgent {
     /// IDs from its start/stop hooks are retained across daemon restarts.
     #[serde(default)]
     pub codex_running_subagent_ids: BTreeSet<String>,
+    /// More children were observed than the bounded ID set can represent.
+    /// Keep Working conservatively until a fresh session or stale-evidence
+    /// recovery; guessing which unmatched stop clears overflow would lie.
+    #[serde(default)]
+    pub codex_subagent_capacity_exceeded: bool,
     /// The Codex parent has stopped but remains live until the set above is
     /// empty. A parent that waits for its children never sets this flag.
     #[serde(default)]
@@ -151,6 +156,15 @@ pub(super) fn load(path: &Path) -> StoredState {
         .filter(|state: &StoredState| state.schema_version == STATE_SCHEMA_VERSION)
         .unwrap_or_default();
     for record in state.agents.values_mut() {
+        if record.codex_running_subagent_ids.len() > super::MAX_CODEX_CHILDREN {
+            record.codex_running_subagent_ids = record
+                .codex_running_subagent_ids
+                .iter()
+                .take(super::MAX_CODEX_CHILDREN)
+                .cloned()
+                .collect();
+            record.codex_subagent_capacity_exceeded = true;
+        }
         if record.lifecycle_changed_at_unix_millis == 0 {
             record.lifecycle_changed_at_unix_millis =
                 if record.lifecycle_observed_at_unix_millis > 0 {
@@ -170,7 +184,9 @@ pub(super) fn load(path: &Path) -> StoredState {
             record.attention_seen_at_unix_millis = record.lifecycle_changed_at_unix_millis;
         }
         if record.subagent_evidence_observed_at_unix_millis == 0
-            && (record.claude_has_running_subagent || !record.codex_running_subagent_ids.is_empty())
+            && (record.claude_has_running_subagent
+                || !record.codex_running_subagent_ids.is_empty()
+                || record.codex_subagent_capacity_exceeded)
         {
             record.subagent_evidence_observed_at_unix_millis =
                 if record.lifecycle_observed_at_unix_millis > 0 {
@@ -186,6 +202,7 @@ pub(super) fn load(path: &Path) -> StoredState {
         if record.hook_terminal {
             record.claude_has_running_subagent = false;
             record.codex_running_subagent_ids.clear();
+            record.codex_subagent_capacity_exceeded = false;
             record.codex_parent_stopped_for_subagents = false;
             record.subagent_evidence_observed_at_unix_millis = 0;
             if record.lifecycle != tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32 {
@@ -295,6 +312,7 @@ mod tests {
         assert_eq!(record.lifecycle_changed_at_unix_millis, 1786000000000);
         assert!(!record.claude_has_running_subagent);
         assert!(record.codex_running_subagent_ids.is_empty());
+        assert!(!record.codex_subagent_capacity_exceeded);
         assert!(!record.codex_parent_stopped_for_subagents);
         assert_eq!(record.subagent_evidence_observed_at_unix_millis, 0);
         fs::remove_file(path).unwrap();
@@ -462,6 +480,7 @@ mod tests {
                 hook_terminal: true,
                 claude_has_running_subagent: false,
                 codex_running_subagent_ids: BTreeSet::new(),
+                codex_subagent_capacity_exceeded: false,
                 codex_parent_stopped_for_subagents: false,
                 subagent_evidence_observed_at_unix_millis: 0,
                 codex_turn_reviews: VecDeque::new(),

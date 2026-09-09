@@ -5,10 +5,15 @@ use tmux_agent_protocol::v1;
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
 pub(crate) const CODEX_APPROVAL_REVIEWER_FIELD: &str = "approval_reviewer";
 pub(crate) const CODEX_APPROVAL_TURN_ID_FIELD: &str = "approval_turn_id";
-/// Private, transient locator used only between a live hook and daemon. It is
-/// removed before an undelivered event enters the durable fallback mailbox.
-pub(crate) const CODEX_APPROVAL_TRANSCRIPT_PATH_FIELD: &str = "approval_transcript_path";
+/// Private, transient locator used only between a live Codex hook and daemon.
+/// It is removed before an undelivered event enters the durable fallback
+/// mailbox.
+pub(crate) const CODEX_TRANSCRIPT_PATH_FIELD: &str = "codex_transcript_path";
+/// Sanitized transcript-derived child edges carried only when a hook has to
+/// enter the durable fallback mailbox.
+pub(crate) const CODEX_CHILD_TRANSITIONS_FIELD: &str = "child_transitions";
 pub(crate) const CODEX_SUBAGENT_ID_FIELD: &str = "agent_id";
+pub(crate) const MAX_CODEX_SUBAGENT_ID_BYTES: usize = 1024;
 pub(crate) const CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: &str = "has_running_subagent";
 /// The agent's final message, forwarded on `Stop` by both adapters for voice
 /// mode (docs/mobile/voice-mode-plan.md §4.5). Consumed by ingest and handed
@@ -172,13 +177,15 @@ impl AgentAdapter for CodexAdapter {
 
     fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str> {
         let event = hook_event_name(payload)?;
-        if matches!(event, "SubagentStart" | "SubagentStop")
-            && payload
+        if matches!(event, "SubagentStart" | "SubagentStop") {
+            let child_id = payload
                 .get(CODEX_SUBAGENT_ID_FIELD)
                 .and_then(Value::as_str)
-                .is_none_or(str::is_empty)
-        {
-            return Err("Codex subagent hook missing agent ID");
+                .filter(|id| !id.is_empty())
+                .ok_or("Codex subagent hook missing agent ID")?;
+            if child_id.len() > MAX_CODEX_SUBAGENT_ID_BYTES {
+                return Err("Codex subagent hook agent ID exceeds its bound");
+            }
         }
         let pre_tool_lifecycle =
             if payload.get("tool_name").and_then(Value::as_str) == Some("request_user_input") {
@@ -532,6 +539,14 @@ mod tests {
                     .unwrap()
                     .lifecycle,
                 v1::AgentLifecycleState::Working
+            );
+            assert!(
+                codex
+                    .parse_hook(&serde_json::json!({
+                        "hook_event_name": event_name,
+                        "agent_id": "x".repeat(MAX_CODEX_SUBAGENT_ID_BYTES + 1),
+                    }))
+                    .is_err()
             );
         }
     }
