@@ -1148,7 +1148,13 @@ fn event_for_fallback(
         payload[crate::service::agents::adapters::CODEX_APPROVAL_REVIEWER_FIELD] =
             reviewer.as_str().into();
     }
-    if let (Some(home), Some(transcript_path)) = (home, transcript_path.as_deref())
+    // Only a root transcript describes child relationships. A child-scoped
+    // hook points at that child's transcript, where `interacted` describes
+    // communication with its parent and must never create a self-child.
+    if payload
+        .get(crate::service::agents::adapters::CODEX_SUBAGENT_ID_FIELD)
+        .is_none()
+        && let (Some(home), Some(transcript_path)) = (home, transcript_path.as_deref())
         && let Some(mut monitor) = codex_transcript::TurnMonitor::open(
             &serde_json::json!({
                 "turn_id": turn_id.as_deref(),
@@ -1173,10 +1179,16 @@ fn event_for_fallback(
                 child_states.pop_front();
             }
         }
-        if !child_states.is_empty() {
+        let terminal_children: Vec<_> = child_states
+            .into_iter()
+            .filter(|transition| {
+                !transition.active && transition.child_id != event.native_session_id
+            })
+            .collect();
+        if !terminal_children.is_empty() {
             payload[crate::service::agents::adapters::CODEX_CHILD_TRANSITIONS_FIELD] =
                 serde_json::Value::Array(
-                    child_states
+                    terminal_children
                         .into_iter()
                         .map(|transition| {
                             serde_json::json!({
@@ -2168,20 +2180,20 @@ mod tests {
         fs::write(
             &transcript,
             format!(
-                "{}\n{}\n{}\n",
+                "{}\n{}\n{}\n{}\n",
                 child_record("child-a", "started", "private-start"),
                 child_record("child-b", "interacted", "private-interaction"),
                 child_record("child-a", "interrupted", "private-cancel"),
+                child_record("session-1", "interacted", "private-parent"),
             ),
         )
         .unwrap();
         let live = build_event(
             v1::AgentAdapterKind::Codex,
             serde_json::to_vec(&serde_json::json!({
-                "hook_event_name": "SubagentStart",
+                "hook_event_name": "Stop",
                 "session_id": "session-1",
                 "turn_id": "turn-1",
-                "agent_id": "child-b",
                 "transcript_path": transcript,
             }))
             .unwrap(),
@@ -2197,12 +2209,10 @@ mod tests {
         assert_eq!(
             payload,
             serde_json::json!({
-                "hook_event_name": "SubagentStart",
+                "hook_event_name": "Stop",
                 "session_id": "session-1",
-                "agent_id": "child-b",
                 crate::service::agents::adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-1",
                 crate::service::agents::adapters::CODEX_CHILD_TRANSITIONS_FIELD: [
-                    {"agent_id": "child-b", "active": true},
                     {"agent_id": "child-a", "active": false},
                 ],
             })
@@ -2213,6 +2223,7 @@ mod tests {
             "private-start",
             "private-interaction",
             "private-cancel",
+            "private-parent",
         ] {
             assert!(!serialized.contains(private));
         }

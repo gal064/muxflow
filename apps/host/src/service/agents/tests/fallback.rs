@@ -126,9 +126,9 @@ fn replayed_sanitized_transcript_edges_repair_a_missing_child_stop() {
     child_start.payload_json = serde_json::to_vec(&serde_json::json!({
         "hook_event_name": "SubagentStart",
         adapters::CODEX_SUBAGENT_ID_FIELD: "child",
+        adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-child",
         adapters::CODEX_CHILD_TRANSITIONS_FIELD: [
             {"agent_id": "older-child", "active": false},
-            {"agent_id": "child", "active": true},
         ],
     }))
     .unwrap();
@@ -175,7 +175,7 @@ fn replayed_sanitized_transcript_edges_repair_a_missing_child_stop() {
     assert_eq!(record.attention_kind, "completed");
     let stored = runtime.state.lock().unwrap();
     let stored = stored.agents.values().next().unwrap();
-    assert!(stored.codex_running_subagent_ids.is_empty());
+    assert!(stored.codex_running_subagents.is_empty());
     assert!(stored.hook_terminal);
     fs::remove_dir_all(dir).unwrap();
 }
@@ -410,6 +410,7 @@ fn ambiguous_duplicate_replay_still_applies_its_sanitized_child_terminal() {
     started.payload_json = serde_json::to_vec(&serde_json::json!({
         "hook_event_name": "SubagentStart",
         adapters::CODEX_SUBAGENT_ID_FIELD: "child",
+        adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-child",
     }))
     .unwrap();
     runtime

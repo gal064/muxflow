@@ -35,8 +35,8 @@ run() {
 }
 
 before=$(run status)
-echo "$before" | grep -q '"wiring":"notWired"' \
-  || fail "expected the real configuration to be unwired, got $before"
+echo "$before" | grep -Eq '"wiring":"(notWired|partial)"' \
+  || fail "expected the real configuration to need installation or upgrade, got $before"
 
 installed=$(run install)
 echo "$installed" | grep -q '"changed":true' || fail "install reported no change"
@@ -52,6 +52,7 @@ echo "$repeat" | grep -q '"changed":false' || fail "a second install was not ide
 missing=0
 while IFS= read -r command_line; do
   [[ -n "$command_line" ]] || continue
+  [[ "$command_line" == *"muxflow-host"*"managed-owner muxflow"* ]] && continue
   grep -qF -- "$command_line" "$copy" || { echo "lost: $command_line" >&2; missing=1; }
 done < <(grep -o '"command": *"[^"]*"' "$work/before.json" | sort -u)
 [[ "$missing" == "0" ]] || fail "install lost or altered a pre-existing hook command"
@@ -69,6 +70,7 @@ echo "$removed" | grep -q '"wiring":"notWired"' || fail "uninstall left it wired
 ! grep -qF 'muxflow' "$copy" || fail "a managed entry survived the uninstall"
 while IFS= read -r command_line; do
   [[ -n "$command_line" ]] || continue
+  [[ "$command_line" == *"muxflow-host"*"managed-owner muxflow"* ]] && continue
   grep -qF -- "$command_line" "$copy" || fail "uninstall lost $command_line"
 done < <(grep -o '"command": *"[^"]*"' "$work/before.json" | sort -u)
 # Whitespace and key order are not compared here: the installer rewrites the

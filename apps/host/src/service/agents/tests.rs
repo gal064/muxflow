@@ -1028,6 +1028,7 @@ fn an_unwaited_codex_parent_reply_is_handed_on_at_its_only_stop() {
     start.payload_json = serde_json::to_vec(&serde_json::json!({
         "hook_event_name": "SubagentStart",
         adapters::CODEX_SUBAGENT_ID_FIELD: "child",
+        adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-child",
     }))
     .unwrap();
     runtime
@@ -1053,6 +1054,7 @@ fn an_unwaited_codex_parent_reply_is_handed_on_at_its_only_stop() {
     child_stop.payload_json = serde_json::to_vec(&serde_json::json!({
         "hook_event_name": "SubagentStop",
         adapters::CODEX_SUBAGENT_ID_FIELD: "child",
+        adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-child",
     }))
     .unwrap();
     let finished = runtime

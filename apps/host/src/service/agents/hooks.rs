@@ -971,9 +971,9 @@ mod tests {
         );
         assert_eq!(
             review.proposed_command,
-            "'/opt/muxflow/bin/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 4"
+            "'/opt/muxflow/bin/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 5"
         );
-        assert_eq!(review.ownership_marker, "owner=muxflow;version=4");
+        assert_eq!(review.ownership_marker, "owner=muxflow;version=5");
         assert!(review.trust_guidance.contains("never edits or bypasses"));
         assert!(review.before_preview.contains("keep-me"));
         assert!(review.after_preview.contains("--managed-owner"));
@@ -1256,7 +1256,7 @@ mod tests {
         let installed = String::from_utf8(fs::read(&path).unwrap()).unwrap();
         assert!(!installed.contains(&format!("\"command\": \"{legacy}\"")));
         assert!(installed.contains(&format!("{legacy} lookalike")));
-        assert!(installed.contains("--managed-version 4"));
+        assert!(installed.contains("--managed-version 5"));
         fs::remove_dir_all(home).unwrap();
     }
 

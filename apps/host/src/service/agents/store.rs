@@ -83,16 +83,22 @@ pub(super) struct StoredAgent {
     /// notification cannot turn that live work into a false blocked state.
     #[serde(default)]
     pub claude_has_running_subagent: bool,
-    /// Codex has no aggregate child count on its parent `Stop`, so the stable
-    /// IDs from its start/stop hooks are retained across daemon restarts.
-    #[serde(default)]
-    pub codex_running_subagent_ids: BTreeSet<String>,
+    /// Codex has no aggregate child count on its parent `Stop`, so each stable
+    /// child ID is retained with its exact active turn across daemon restarts.
+    /// The turn prevents a late terminal hook from clearing a resumed child.
+    /// An empty turn is the bounded migration state for a version-4 ID set.
+    #[serde(
+        default,
+        alias = "codex_running_subagent_ids",
+        deserialize_with = "deserialize_codex_running_subagents"
+    )]
+    pub codex_running_subagents: BTreeMap<String, String>,
     /// More children were observed than the bounded ID set can represent.
     /// Keep Working conservatively until a fresh session or stale-evidence
     /// recovery; guessing which unmatched stop clears overflow would lie.
     #[serde(default)]
     pub codex_subagent_capacity_exceeded: bool,
-    /// The Codex parent has stopped but remains live until the set above is
+    /// The Codex parent has stopped but remains live until the map above is
     /// empty. A parent that waits for its children never sets this flag.
     #[serde(default)]
     pub codex_parent_stopped_for_subagents: bool,
@@ -131,6 +137,25 @@ pub(super) struct StoredAgent {
     pub attention_seen_at_unix_millis: i64,
 }
 
+fn deserialize_codex_running_subagents<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredChildren {
+        Turns(BTreeMap<String, String>),
+        LegacyIds(BTreeSet<String>),
+    }
+
+    Ok(match StoredChildren::deserialize(deserializer)? {
+        StoredChildren::Turns(turns) => turns,
+        StoredChildren::LegacyIds(ids) => ids.into_iter().map(|id| (id, String::new())).collect(),
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct StoredState {
     #[serde(default)]
@@ -156,12 +181,12 @@ pub(super) fn load(path: &Path) -> StoredState {
         .filter(|state: &StoredState| state.schema_version == STATE_SCHEMA_VERSION)
         .unwrap_or_default();
     for record in state.agents.values_mut() {
-        if record.codex_running_subagent_ids.len() > super::MAX_CODEX_CHILDREN {
-            record.codex_running_subagent_ids = record
-                .codex_running_subagent_ids
+        if record.codex_running_subagents.len() > super::MAX_CODEX_CHILDREN {
+            record.codex_running_subagents = record
+                .codex_running_subagents
                 .iter()
                 .take(super::MAX_CODEX_CHILDREN)
-                .cloned()
+                .map(|(child, turn)| (child.clone(), turn.clone()))
                 .collect();
             record.codex_subagent_capacity_exceeded = true;
         }
@@ -185,7 +210,7 @@ pub(super) fn load(path: &Path) -> StoredState {
         }
         if record.subagent_evidence_observed_at_unix_millis == 0
             && (record.claude_has_running_subagent
-                || !record.codex_running_subagent_ids.is_empty()
+                || !record.codex_running_subagents.is_empty()
                 || record.codex_subagent_capacity_exceeded)
         {
             record.subagent_evidence_observed_at_unix_millis =
@@ -201,7 +226,7 @@ pub(super) fn load(path: &Path) -> StoredState {
         // UI immediately instead of waiting up to the stale-working TTL.
         if record.hook_terminal {
             record.claude_has_running_subagent = false;
-            record.codex_running_subagent_ids.clear();
+            record.codex_running_subagents.clear();
             record.codex_subagent_capacity_exceeded = false;
             record.codex_parent_stopped_for_subagents = false;
             record.subagent_evidence_observed_at_unix_millis = 0;
@@ -311,7 +336,7 @@ mod tests {
         assert_eq!(record.lifecycle_observed_at_unix_millis, 0);
         assert_eq!(record.lifecycle_changed_at_unix_millis, 1786000000000);
         assert!(!record.claude_has_running_subagent);
-        assert!(record.codex_running_subagent_ids.is_empty());
+        assert!(record.codex_running_subagents.is_empty());
         assert!(!record.codex_subagent_capacity_exceeded);
         assert!(!record.codex_parent_stopped_for_subagents);
         assert_eq!(record.subagent_evidence_observed_at_unix_millis, 0);
@@ -415,7 +440,8 @@ mod tests {
                   "updated_at_unix_millis": 1786000000000,
                   "hook_authority_expires_at_unix_millis": 0,
                   "detected_manually": false,
-                  "present": true
+                  "present": true,
+                  "codex_running_subagent_ids": ["legacy-child"]
                 }
               }
             }"#,
@@ -427,6 +453,10 @@ mod tests {
             .agents
             .get("codex:kept")
             .expect("the record survived the removed field");
+        assert_eq!(
+            record.codex_running_subagents.get("legacy-child"),
+            Some(&String::new())
+        );
         assert_eq!(record.lifecycle, 3);
         assert_eq!(record.attention_kind, "completed");
         assert_eq!(record.seen_generation, 2);
@@ -479,7 +509,7 @@ mod tests {
                 present: true,
                 hook_terminal: true,
                 claude_has_running_subagent: false,
-                codex_running_subagent_ids: BTreeSet::new(),
+                codex_running_subagents: BTreeMap::new(),
                 codex_subagent_capacity_exceeded: false,
                 codex_parent_stopped_for_subagents: false,
                 subagent_evidence_observed_at_unix_millis: 0,
