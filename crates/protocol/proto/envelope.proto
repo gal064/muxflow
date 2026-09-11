@@ -59,6 +59,10 @@ message ServerHello {
   uint64 connection_epoch = 10;
   uint64 terminal_output_window_bytes = 11;
   uint32 terminal_output_window_records = 12;
+  // Exact SHA-256 of the running helper executable. The stdio bridge compares
+  // this with its own executable so a same-version daemon from an older build
+  // is retired instead of silently reused.
+  string helper_build_digest = 13;
 }
 
 // Reverse-direction, one-way credit release. It is deliberately not a

@@ -5,7 +5,7 @@
 import type { ServerHello } from "./gen/envelope_pb";
 
 export const PROTOCOL_MAJOR = 2;
-export const PROTOCOL_MINOR = 0;
+export const PROTOCOL_MINOR = 1;
 
 /** Every required capability, with the name a refusal reports it by (bits 0..18). */
 export const CAPABILITY_NAMES: ReadonlyArray<readonly [bigint, string]> = [

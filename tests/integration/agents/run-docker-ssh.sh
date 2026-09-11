@@ -77,6 +77,49 @@ ssh -F "$runtime/ssh-config" ade-phase6-docker '
 "$driver_binary" ssh "$runtime/ssh-config" ade-phase6-docker >"$runtime/result.json"
 jq -e '.privateUnixSocket and .adapterRegistry and .manualDetection and .launchWindow and .launchSplit and .activeRootInherited and .workingBlockedDone and .duplicateRejected and .outOfOrderRejected and .seenExact and .exactDirectRoute and .foreignUnmapped and (.hooks.codex.staleRejected) and (.hooks["claude-code"].staleRejected)' "$runtime/result.json" >/dev/null
 
+# Production uses one literal /tmp socket even when the SSH bridge and tmux
+# hook inherit different XDG/TMPDIR values. Durable state belongs under HOME,
+# and the daemon must be the exact build the installed bridge reports.
+ssh -F "$runtime/ssh-config" ade-phase6-docker '
+  set -eu
+  pane=$(tmux -L ade-phase6 list-panes -a -f "#{==:#{pane_current_command},bash}" -F "#{pane_id}" | head -n 1)
+  mkdir -p "$HOME/phase6-xdg" "$HOME/phase6-tmp"
+  cp "$HOME/.local/bin/muxflow-host" "$HOME/phase6-stale-host"
+  printf x >>"$HOME/phase6-stale-host"
+  chmod 0700 "$HOME/phase6-stale-host"
+  stale_build=$("$HOME/phase6-stale-host" version | jq -r .helperBuildDigest)
+  installed_build=$("$HOME/.local/bin/muxflow-host" version | jq -r .helperBuildDigest)
+  test ${#stale_build} -eq 64
+  test ${#installed_build} -eq 64
+  test "$stale_build" != "$installed_build"
+
+  # Start a same-version, different-build daemon from an SSH-like environment
+  # with no XDG/TMPDIR. The installed bridge must retire it before connecting.
+  env -u XDG_RUNTIME_DIR -u TMPDIR "$HOME/phase6-stale-host" bridge --stdio \
+    </dev/null >"$HOME/phase6-stale-bridge.log" 2>&1
+  stale_daemon_build=$("$HOME/phase6-stale-host" protocol-check | jq -r .helperBuildDigest)
+  test "$stale_daemon_build" = "$stale_build"
+  env -u XDG_RUNTIME_DIR -u TMPDIR "$HOME/.local/bin/muxflow-host" bridge --stdio \
+    </dev/null >"$HOME/phase6-current-bridge.log" 2>&1
+
+  printf "%s" "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"production-path-proof\"}" \
+    | env XDG_RUNTIME_DIR="$HOME/phase6-xdg" TMPDIR="$HOME/phase6-tmp" \
+        ADE_TMUX_SOCKET_NAME=ade-phase6 TMUX_PANE="$pane" \
+        "$HOME/.local/bin/muxflow-host" hook ingest --adapter codex
+  test -S /tmp/muxflow-$(id -u)/host.sock
+  for _ in $(seq 1 50); do
+    test -s "$HOME/.local/state/muxflow/agents.json" && break
+    sleep 0.1
+  done
+  jq -e ".agents[] | select(.native_session_id == \"production-path-proof\") | .lifecycle == 1" \
+    "$HOME/.local/state/muxflow/agents.json" >/dev/null
+  test ! -e /tmp/muxflow-$(id -u)/agents.json
+  test ! -S "$HOME/phase6-xdg/muxflow/host.sock"
+  test ! -S "$HOME/phase6-tmp/muxflow/host.sock"
+  daemon_build=$("$HOME/.local/bin/muxflow-host" protocol-check | jq -r .helperBuildDigest)
+  test "$installed_build" = "$daemon_build"
+'
+
 # Prove the actual remote hook executable delivers only to the remote daemon's
 # private Unix socket. The protocol driver above deliberately exercises the
 # stdio bridge separately, so start a daemon and invoke the CLI as a hook would.
@@ -87,6 +130,15 @@ for _ in $(seq 1 50); do
   if ssh -F "$runtime/ssh-config" ade-phase6-docker 'test -S "$HOME/phase6-runtime/host.sock"'; then break; fi
   sleep 0.1
 done
+ssh -F "$runtime/ssh-config" ade-phase6-docker '
+  set -eu
+  install -d -m 0700 "$HOME/phase6-runtime-2"
+  env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime-2" ADE_TMUX_SOCKET_NAME=ade-phase6 "$HOME/.local/bin/muxflow-host" daemon >"$HOME/phase6-runtime-2/daemon.log" 2>&1 </dev/null &
+  for _ in $(seq 1 50); do test -S "$HOME/phase6-runtime-2/host.sock" && break; sleep 0.1; done
+  test -S "$HOME/phase6-runtime/host.sock"
+  test -S "$HOME/phase6-runtime-2/host.sock"
+  env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime-2" "$HOME/.local/bin/muxflow-host" daemon-stop
+'
 ssh -F "$runtime/ssh-config" ade-phase6-docker '
   pane=$(tmux -L ade-phase6 list-panes -a -f "#{==:#{pane_current_command},bash}" -F "#{pane_id}" | head -n 1)
   test -n "$pane"
@@ -148,8 +200,10 @@ ssh -F "$runtime/ssh-config" ade-phase6-docker '
   done
   test ! -S "$HOME/phase6-runtime/host.sock"
   printf "%s" "{\"hook_event_name\":\"Stop\",\"session_id\":\"offline\",\"prompt\":\"do-not-store\",\"api_token\":\"secret\"}" | env HOME="$HOME/phase6-home" ADE_HOST_RUNTIME_DIR="$HOME/phase6-runtime" ADE_TMUX_SOCKET_NAME=ade-phase6 TMUX_PANE=%777 "$HOME/.local/bin/muxflow-host" hook ingest --adapter codex
-  test -f "$HOME/phase6-runtime/hook-fallback-codex-777.pb"
-  ! grep -aE "do-not-store|secret" "$HOME/phase6-runtime/hook-fallback-codex-777.pb"
+  set -- "$HOME/phase6-runtime"/hook-fallback-codex-777-*.pb
+  test "$#" -eq 1
+  test -f "$1"
+  ! grep -aE "do-not-store|secret" "$1"
 '
 
 ssh -F "$runtime/ssh-config" ade-phase6-docker '

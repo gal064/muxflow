@@ -21,26 +21,13 @@ pub(super) struct HookReplayReport {
     pub(super) retained: usize,
 }
 
-/// Replay everything a stopped daemon was told about.
-///
-/// This daemon's own directory first, and then the one it last published —
-/// which is where a hook leaves an event it could not deliver, so that the
-/// daemon coming back finds it. Nothing beyond those two: sweeping consumes
-/// and deletes, and a directory no daemon on this machine has claimed is not
-/// this one's to empty (M13-E003 was fixed once by a scan that did exactly
-/// that, and drained a developer's real mailbox from a test).
+/// Replay everything a stopped daemon was told about from its durable mailbox.
 pub(crate) fn ingest() -> anyhow::Result<usize> {
     // Startup replay and pre-live drains share one consumer. Concurrent hook
     // connections may observe the same mailbox names, but only one is allowed
     // to apply/delete them at a time.
     let _guard = INGEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-    let mut swept = vec![crate::paths::runtime_dir()];
-    if let Some(published) = crate::paths::published_runtime_dir()
-        && !swept.contains(&published)
-    {
-        swept.push(published);
-    }
-    consume_roots(&swept, |event| {
+    consume_roots(&[crate::paths::state_dir()], |event| {
         let runtime = AgentRuntime::global();
         match runtime.ingest_and_publish(&event) {
             Ok(_) => v1::HookIngestDisposition::Applied,

@@ -231,15 +231,10 @@ fn a_hook_outside_tmux_is_silent_and_files_nothing() {
     fs::remove_dir_all(runtime).unwrap();
 }
 
-/// M13-E003, end to end: the hook and the daemon disagreed about which runtime
-/// directory this machine has, and every event was filed where nobody read it.
-///
-/// The split is reproduced as the field machine had it: the daemon is in a
-/// directory the hook's own environment would never name — on the field machine
-/// an `ssh` command with no `XDG_RUNTIME_DIR` against a tmux server that had
-/// one. Only `HOME` is common to both, which is the whole basis of the fix.
+/// The development override is authoritative even when the daemon and hook
+/// inherit conflicting XDG runtime environments.
 #[test]
-fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
+fn a_hook_reaches_the_overridden_daemon_across_different_shell_environments() {
     // Short, because the daemon's socket has to fit `sockaddr_un::sun_path`.
     let root = if cfg!(target_os = "macos") {
         PathBuf::from("/private/tmp")
@@ -252,21 +247,6 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
     let daemon_runtime = root.join("dr");
     fs::create_dir_all(&hook_xdg).unwrap();
     fs::create_dir_all(&daemon_runtime).unwrap();
-    // The daemon is pinned, and the pointer it would have published is written
-    // here instead. Both halves are deliberate. Pinning is what keeps this
-    // fixture off every real directory on the machine running it — an unpinned
-    // daemon consults, and its fallback sweep *deletes from*, the directories a
-    // real one could be in. And publishing is not what this test is about: that
-    // a daemon publishes only its own unpinned directory is asserted in
-    // `paths.rs`, so writing the pointer by hand states the one fact this test
-    // depends on without borrowing the machine to produce it.
-    let pointer = if cfg!(target_os = "macos") {
-        home.join("Library/Caches/dev.muxflow.desktop/daemon-runtime-dir")
-    } else {
-        home.join(".local/state/muxflow/daemon-runtime-dir")
-    };
-    fs::create_dir_all(pointer.parent().unwrap()).unwrap();
-    fs::write(&pointer, daemon_runtime.as_os_str().as_encoded_bytes()).unwrap();
     let socket = daemon_runtime.join("host.sock");
 
     // Detached from the harness's pipes and killed on any exit path: a daemon
@@ -295,8 +275,8 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
             .env("HOME", &home)
             // What a tmux pane inherits, and what the daemon never saw.
             .env("XDG_RUNTIME_DIR", &hook_xdg)
+            .env("ADE_HOST_RUNTIME_DIR", &daemon_runtime)
             .env("TMUX_PANE", "%91")
-            .env_remove("ADE_HOST_RUNTIME_DIR")
             .env_remove("TMUX")
             .stdin(Stdio::piped())
             .spawn()
@@ -308,11 +288,6 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
             .write_all(br#"{"hook_event_name":"Stop","session_id":"s"}"#)
             .unwrap();
         assert!(child.wait().unwrap().success());
-        let stranded = mailbox_entries(&hook_xdg.join("muxflow"));
-        assert!(
-            stranded.is_empty(),
-            "the event was filed in the hook's own directory, where no daemon reads: {stranded:?}"
-        );
         assert_eq!(
             mailbox_entries(&daemon_runtime).is_empty(),
             !mailbox_expected,
@@ -322,8 +297,7 @@ fn a_hook_reaches_a_daemon_that_resolved_a_different_runtime_directory() {
 
     ingest(false);
 
-    // And with the daemon gone, the event waits in the directory that daemon
-    // will come back to rather than in the one the hook happened to resolve.
+    // With the daemon gone, the event waits in the same isolated state root.
     let stopped = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
         .args(["daemon-stop"])
         .arg("--socket")

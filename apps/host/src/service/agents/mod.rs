@@ -108,7 +108,7 @@ impl AgentRuntime {
     pub(crate) fn global() -> Arc<Self> {
         Arc::clone(
             GLOBAL.get_or_init(|| {
-                Arc::new(Self::load(crate::paths::runtime_dir().join("agents.json")))
+                Arc::new(Self::load(crate::paths::state_dir().join("agents.json")))
             }),
         )
     }

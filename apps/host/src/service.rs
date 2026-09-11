@@ -421,6 +421,9 @@ async fn serve_connection(
         0,
         Payload::ServerHello(v1::ServerHello {
             helper_version: host_helper_version,
+            helper_build_digest: crate::build_identity::digest()
+                .expect("daemon initializes its executable digest before serving")
+                .to_owned(),
             operating_system: std::env::consts::OS.into(),
             architecture: std::env::consts::ARCH.into(),
             tmux_version: daemon_command_version(CommandVersion::Tmux),

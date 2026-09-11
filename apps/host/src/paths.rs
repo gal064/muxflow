@@ -1,10 +1,9 @@
 use std::{
-    ffi::OsString,
-    fs::{self, OpenOptions},
-    io::Write,
+    ffi::{CStr, OsStr, OsString},
+    fs,
     os::unix::{
         ffi::OsStrExt,
-        fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+        fs::{FileTypeExt, PermissionsExt},
     },
     path::{Path, PathBuf},
 };
@@ -26,13 +25,10 @@ fn resolved_runtime_dir(
     if let Some(path) = environment("ADE_HOST_RUNTIME_DIR") {
         return PathBuf::from(path);
     }
-    if let Some(path) = environment("XDG_RUNTIME_DIR") {
-        return PathBuf::from(path).join("muxflow");
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(home) = environment("HOME") {
-        return PathBuf::from(home).join("Library/Caches/dev.muxflow.desktop/runtime");
-    }
+    // Deliberately literal rather than `temp_dir()`: TMPDIR can differ between
+    // an SSH command, a login shell and a tmux hook just like XDG_RUNTIME_DIR.
+    // Only the socket and process-local diagnostics live here; the installed
+    // executable and durable state do not.
     PathBuf::from(format!("/tmp/muxflow-{uid}"))
 }
 
@@ -40,19 +36,32 @@ pub fn default_socket_path() -> PathBuf {
     default_runtime_dir().join("host.sock")
 }
 
-/// The directory this process is actually using.
-///
-/// The daemon's is decided by its socket's parent, which `--socket` can put
-/// somewhere the environment would never resolve — and its state did not follow
-/// it there: `agents.json`, the session order and the fallback mailbox all
-/// asked the environment again, independently. That is the same class of split
-/// as M13-E003, one process wide instead of two processes wide. The daemon
-/// adopts its directory once, at startup, and everything below it agrees by
-/// construction.
+/// The temporary communication and durable state roots adopted by this daemon.
+/// An explicit socket keeps both together for fixture isolation; production
+/// separates the short-lived endpoint from state that survives restarts.
 static ADOPTED_RUNTIME_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static ADOPTED_STATE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-pub fn adopt_runtime_dir(runtime: &Path) {
+pub fn adopt_socket_path(socket: &Path) -> anyhow::Result<()> {
+    let runtime = socket
+        .parent()
+        .context("daemon socket has no parent directory")?;
+    let state = state_dir_for_socket(socket)?;
     let _ = ADOPTED_RUNTIME_DIR.set(runtime.to_path_buf());
+    let _ = ADOPTED_STATE_DIR.set(state);
+    Ok(())
+}
+
+fn state_dir_for_socket(socket: &Path) -> anyhow::Result<PathBuf> {
+    if socket == default_socket_path() {
+        return default_state_dir();
+    }
+    // An explicit --socket and ADE_HOST_RUNTIME_DIR are isolation tools. Their
+    // state stays beside their socket rather than touching production state.
+    Ok(socket
+        .parent()
+        .context("daemon socket has no parent directory")?
+        .to_path_buf())
 }
 
 pub fn runtime_dir() -> PathBuf {
@@ -62,176 +71,81 @@ pub fn runtime_dir() -> PathBuf {
         .unwrap_or_else(default_runtime_dir)
 }
 
-/// Where the daemon records the runtime directory it actually chose.
-///
-/// M13-E003: a hook and the daemon resolved the runtime directory from
-/// `XDG_RUNTIME_DIR`, which is *not* the same in the two contexts that matter.
-/// The desktop starts the daemon over a non-interactive `ssh` command, where
-/// systemd's user environment is not applied and the variable is unset, so the
-/// daemon lived in `/tmp/muxflow-<uid>`. The hooks run inside the user's
-/// tmux server, whose global environment carries `XDG_RUNTIME_DIR`, so
-/// `hook ingest` looked in `/run/user/<uid>/muxflow`, found no socket,
-/// and wrote its events to a fallback mailbox in that other directory that no
-/// daemon has ever read. Every lifecycle event on the field machine was
-/// delivered correctly and filed somewhere nobody was listening.
-///
-/// `HOME` is the one variable that *is* the same in both contexts — an ssh
-/// command, a login shell and a tmux pane all agree on it — so the daemon
-/// leaves a pointer under it and the hook reads it. Deliberately not removed on
-/// shutdown: a stopped daemon's last directory is also the right place to leave
-/// a fallback event for it to find when it comes back.
-fn runtime_pointer_path(environment: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let home = PathBuf::from(environment("HOME")?);
-    if cfg!(target_os = "macos") {
-        Some(home.join("Library/Caches/dev.muxflow.desktop/daemon-runtime-dir"))
+pub fn default_state_dir() -> anyhow::Result<PathBuf> {
+    if let Some(path) = environment("ADE_HOST_RUNTIME_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    resolved_state_dir(
+        environment,
+        account_home_dir(unsafe { libc::geteuid() })?,
+        cfg!(target_os = "macos"),
+    )
+}
+
+fn resolved_state_dir(
+    environment: impl Fn(&str) -> Option<OsString>,
+    account_home: PathBuf,
+    macos: bool,
+) -> anyhow::Result<PathBuf> {
+    if let Some(path) = environment("ADE_HOST_RUNTIME_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(if macos {
+        account_home.join("Library/Application Support/dev.muxflow.desktop")
     } else {
-        Some(home.join(".local/state/muxflow/daemon-runtime-dir"))
+        account_home.join(".local/state/muxflow")
+    })
+}
+
+/// The effective account's home, independent of shell environment. OpenSSH,
+/// GUI launchers and tmux hooks can inherit different (or no) `HOME`; the
+/// account database is the machine-wide answer all of them share.
+fn account_home_dir(uid: libc::uid_t) -> anyhow::Result<PathBuf> {
+    let configured = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let mut size = usize::try_from(configured)
+        .unwrap_or(16 * 1024)
+        .clamp(1024, 1024 * 1024);
+    loop {
+        let mut record = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0_u8; size];
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                record.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE && size < 1024 * 1024 {
+            size *= 2;
+            continue;
+        }
+        if status != 0 {
+            return Err(std::io::Error::from_raw_os_error(status))
+                .context("resolve effective account home");
+        }
+        if result.is_null() {
+            bail!("effective user {uid} has no account home");
+        }
+        let record = unsafe { record.assume_init() };
+        if record.pw_dir.is_null() {
+            bail!("effective user {uid} has no account home");
+        }
+        let bytes = unsafe { CStr::from_ptr(record.pw_dir) }.to_bytes();
+        if bytes.is_empty() {
+            bail!("effective user {uid} has an empty account home");
+        }
+        return Ok(PathBuf::from(OsStr::from_bytes(bytes)));
     }
 }
 
-pub fn record_runtime_dir(runtime: &Path) -> anyhow::Result<()> {
-    publish_runtime_dir(runtime, environment, unsafe { libc::geteuid() })
-}
-
-fn publish_runtime_dir(
-    runtime: &Path,
-    environment: impl Fn(&str) -> Option<OsString> + Copy,
-    uid: libc::uid_t,
-) -> anyhow::Result<()> {
-    if !placed_by_environment(runtime, environment, uid) {
-        return Ok(());
-    }
-    let Some(pointer) = runtime_pointer_path(environment) else {
-        return Ok(());
-    };
-    let parent = pointer.parent().context("runtime pointer has no parent")?;
-    fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(".daemon-runtime-dir-{}", std::process::id()));
-    let result = (|| -> anyhow::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(runtime.as_os_str().as_encoded_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temporary, &pointer)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
-/// Where a daemon on this machine could be, best first — normally two entries.
-///
-/// This process's own directory leads, because a daemon sitting in it is
-/// unambiguously the one this process belongs to. The recorded pointer comes
-/// next and *ends* the list: a daemon that published where it is has answered
-/// the question, and reaching past that answer into directories nobody claimed
-/// is how a process starts touching files it does not own. The guesses below
-/// are for one case only — no daemon on this machine has published yet — which
-/// after this change means a helper old enough to predate the pointer.
-///
-/// An explicit `ADE_HOST_RUNTIME_DIR` is answered exactly and alone: it is how
-/// every test fixture isolates itself, and a fixture that fell back to a
-/// neighbouring directory would talk to the developer's real daemon.
-pub fn runtime_dir_candidates() -> Vec<PathBuf> {
-    candidate_runtime_dirs(environment, unsafe { libc::geteuid() })
-}
-
-fn candidate_runtime_dirs(
-    environment: impl Fn(&str) -> Option<OsString> + Copy,
-    uid: libc::uid_t,
-) -> Vec<PathBuf> {
-    let mut candidates = vec![resolved_runtime_dir(environment, uid)];
-    if environment("ADE_HOST_RUNTIME_DIR").is_some() {
-        return candidates;
-    }
-    if let Some(recorded) = recorded_runtime_dir(environment) {
-        add_unique(&mut candidates, recorded);
-        return candidates;
-    }
-    if let Some(path) = environment("XDG_RUNTIME_DIR") {
-        add_unique(&mut candidates, PathBuf::from(path).join("muxflow"));
-    }
-    // Both platform defaults, not only this platform's: `XDG_RUNTIME_DIR` set
-    // on a Mac takes the resolution above away from the cache directory, and a
-    // daemon that had it unset is then unreachable with nothing to fall back
-    // on — the asymmetry Linux does not have.
-    if let Some(home) = environment("HOME") {
-        add_unique(
-            &mut candidates,
-            PathBuf::from(home).join("Library/Caches/dev.muxflow.desktop/runtime"),
-        );
-    }
-    add_unique(
-        &mut candidates,
-        PathBuf::from(format!("/run/user/{uid}/muxflow")),
-    );
-    add_unique(
-        &mut candidates,
-        PathBuf::from(format!("/tmp/muxflow-{uid}")),
-    );
-    candidates
-}
-
-/// Whether `runtime` is where this process's own environment places a daemon,
-/// rather than somewhere it was pinned — by `ADE_HOST_RUNTIME_DIR` or by an
-/// explicit `--socket`.
-///
-/// The one predicate that decides whether a process owns the shared pointer
-/// under `HOME`. Every test fixture on this machine pins its directory one of
-/// those two ways while inheriting the developer's real `HOME`: a pinned
-/// process that *wrote* the pointer would send the user's hooks to a directory
-/// that is deleted when the lane ends, and one that *read* it would sweep — and
-/// `consume` deletes — the user's own pending events. Stated once, because it
-/// was stated twice and omitted on the read.
-fn placed_by_environment(
-    runtime: &Path,
-    environment: impl Fn(&str) -> Option<OsString> + Copy,
-    uid: libc::uid_t,
-) -> bool {
-    environment("ADE_HOST_RUNTIME_DIR").is_none()
-        && runtime == resolved_runtime_dir(environment, uid)
-}
-
-/// The directory a daemon last published, for a process entitled to read it.
-pub fn published_runtime_dir() -> Option<PathBuf> {
-    let uid = unsafe { libc::geteuid() };
-    placed_by_environment(&runtime_dir(), environment, uid)
-        .then(|| recorded_runtime_dir(environment))
-        .flatten()
-}
-
-/// Read back as the bytes it was written as. A path is not text: decoding it
-/// lossily produces a path that exists nowhere, and trimming it corrupts the
-/// legal ones that end in a space.
-fn recorded_runtime_dir(environment: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let recorded = fs::read(runtime_pointer_path(environment)?).ok()?;
-    (!recorded.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&recorded).to_owned()))
-}
-
-fn add_unique(candidates: &mut Vec<PathBuf>, path: PathBuf) {
-    if !candidates.contains(&path) {
-        candidates.push(path);
-    }
-}
-
-/// Where an event goes when no daemon answered anywhere.
-///
-/// A directory that has held a daemon is worth more than the one this process
-/// would have picked: the daemon that comes back is the one that reads it.
-pub fn fallback_runtime_dir(candidates: &[PathBuf]) -> PathBuf {
-    candidates
-        .iter()
-        .find(|candidate| candidate.join("daemon.json").exists())
-        .or_else(|| candidates.iter().find(|candidate| candidate.is_dir()))
-        .or_else(|| candidates.first())
+pub fn state_dir() -> PathBuf {
+    ADOPTED_STATE_DIR
+        .get()
         .cloned()
-        .unwrap_or_else(default_runtime_dir)
+        .unwrap_or_else(|| default_state_dir().expect("resolve effective account state directory"))
 }
 
 /// Where voice mode keeps the sidecar script, its log and the ~487 MB speech
@@ -266,8 +180,8 @@ pub fn prepare_voice_cache_dir(path: &Path) -> anyhow::Result<()> {
 
 /// A Unix socket bind must fit `sockaddr_un::sun_path` including its
 /// terminator: 104 bytes on Darwin, 108 on Linux. The default runtime
-/// directory is short, but `ADE_HOST_RUNTIME_DIR` and `XDG_RUNTIME_DIR` can
-/// both point somewhere deep, and the kernel's own refusal
+/// directory is short, but `ADE_HOST_RUNTIME_DIR` can point somewhere deep,
+/// and the kernel's own refusal
 /// (`path must be shorter than SUN_LEN`) never named the limit or the length.
 /// This is the same bound the desktop already enforces for SSH control sockets
 /// (M10-E040); M10-E058 is it going unchecked on the daemon's own socket.
@@ -388,154 +302,62 @@ mod tests {
         fs::remove_dir(root).unwrap();
     }
 
-    /// The exact split that lost every hook event on the field machine: the
-    /// daemon was started over `ssh` with no `XDG_RUNTIME_DIR`, the hooks ran
-    /// inside a tmux server that had one, and the two never named the same
-    /// directory. The candidate list has to close the gap from *either* side.
     #[test]
-    fn a_hook_with_xdg_set_still_reaches_a_daemon_started_without_it() {
-        let home = std::env::temp_dir().join(format!("ade-pointer-{}", uuid::Uuid::new_v4()));
-        let daemon_runtime = home.join("daemon-runtime");
-        fs::create_dir_all(&daemon_runtime).unwrap();
-        let hook_environment = |name: &str| match name {
-            "HOME" => Some(OsString::from(home.as_os_str())),
+    fn production_runtime_is_literal_tmp_regardless_of_shell_environment() {
+        let with_xdg = |name: &str| match name {
             "XDG_RUNTIME_DIR" => Some(OsString::from("/run/user/4242")),
+            "TMPDIR" => Some(OsString::from("/private/session/tmp")),
             _ => None,
         };
-
-        // Before any daemon has published: the directories one could have
-        // chosen, on either platform, because a hook cannot know which of them
-        // a helper too old to publish picked.
-        let guesses = candidate_runtime_dirs(hook_environment, 4242);
         assert_eq!(
-            guesses.first(),
-            Some(&PathBuf::from("/run/user/4242/muxflow")),
-            "this process's own resolution still comes first"
+            resolved_runtime_dir(with_xdg, 4242),
+            PathBuf::from("/tmp/muxflow-4242")
         );
-        for guess in ["/tmp/muxflow-4242", "/run/user/4242/muxflow"] {
-            assert!(guesses.contains(&PathBuf::from(guess)), "{guesses:?}");
-        }
-        assert!(guesses.contains(&home.join("Library/Caches/dev.muxflow.desktop/runtime")));
-
-        // And once a daemon has: its answer, and nothing else. The guesses stop
-        // — a directory nobody claimed is one this process must not connect to,
-        // file events in, or (as the daemon) delete from.
-        let pointer = runtime_pointer_path(hook_environment).unwrap();
-        fs::create_dir_all(pointer.parent().unwrap()).unwrap();
-        fs::write(&pointer, daemon_runtime.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(
-            candidate_runtime_dirs(hook_environment, 4242),
-            vec![PathBuf::from("/run/user/4242/muxflow"), daemon_runtime],
-            "the recorded directory must end the list"
+            resolved_runtime_dir(|_| None, 4242),
+            PathBuf::from("/tmp/muxflow-4242")
         );
-        fs::remove_dir_all(home).unwrap();
     }
 
-    /// A fixture must not publish. Every lane in `tests/` pins its runtime
-    /// directory — with `ADE_HOST_RUNTIME_DIR` or an explicit `--socket` — while
-    /// inheriting the developer's real `HOME`, so a daemon that published
-    /// whatever directory it was given would point that developer's own hooks
-    /// at a directory that is deleted when the lane ends. This one was found
-    /// after it had already happened on the machine the fix was written on.
     #[test]
-    fn only_a_daemon_this_environment_placed_itself_publishes_where_it_is() {
-        let home = std::env::temp_dir().join(format!("ade-publish-{}", uuid::Uuid::new_v4()));
-        let fixture = home.join("fixture-runtime");
-        fs::create_dir_all(&home).unwrap();
-        let unpinned = |name: &str| match name {
-            "HOME" => Some(OsString::from(home.as_os_str())),
-            "XDG_RUNTIME_DIR" => Some(OsString::from(home.as_os_str())),
-            _ => None,
-        };
-        let pointer = runtime_pointer_path(unpinned).unwrap();
+    fn runtime_override_is_the_one_development_root() {
         let pinned = |name: &str| match name {
-            "HOME" => Some(OsString::from(home.as_os_str())),
-            "ADE_HOST_RUNTIME_DIR" => Some(OsString::from(fixture.as_os_str())),
-            _ => None,
-        };
-
-        publish_runtime_dir(&fixture, pinned, 11).unwrap();
-        assert!(
-            !pointer.exists(),
-            "a pinned fixture published its directory"
-        );
-        // Pinned the other way: the directory came from `--socket`, not from
-        // anything this environment would have resolved.
-        publish_runtime_dir(&fixture, unpinned, 11).unwrap();
-        assert!(
-            !pointer.exists(),
-            "a daemon published a directory its environment does not name"
-        );
-
-        // And a pinned process must not *read* it either: the sweep that
-        // follows the pointer deletes what it finds, so a fixture that read the
-        // developer's pointer would drain their pending events. This is the
-        // same predicate, and it was once stated only on the write.
-        adopt_runtime_dir(&fixture);
-        assert!(
-            !placed_by_environment(&fixture, pinned, 11),
-            "a pinned fixture claimed the pointer it must not read"
-        );
-
-        publish_runtime_dir(&home.join("muxflow"), unpinned, 11).unwrap();
-        assert_eq!(
-            fs::read(&pointer).unwrap(),
-            home.join("muxflow").as_os_str().as_encoded_bytes(),
-            "the real daemon's own directory was not published"
-        );
-        // And it round-trips as bytes rather than as text.
-        assert!(candidate_runtime_dirs(unpinned, 11).contains(&home.join("muxflow")));
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    /// A fixture that names its directory must never be widened into a scan:
-    /// the neighbouring candidate on a developer's machine is their real daemon.
-    #[test]
-    fn an_explicit_runtime_directory_is_the_only_candidate() {
-        let environment = |name: &str| match name {
             "ADE_HOST_RUNTIME_DIR" => Some(OsString::from("/fixture/runtime")),
-            "XDG_RUNTIME_DIR" => Some(OsString::from("/run/user/7")),
             "HOME" => Some(OsString::from("/home/someone")),
+            "XDG_RUNTIME_DIR" => Some(OsString::from("/run/user/7")),
             _ => None,
         };
         assert_eq!(
-            candidate_runtime_dirs(environment, 7),
-            vec![PathBuf::from("/fixture/runtime")]
+            resolved_runtime_dir(pinned, 7),
+            PathBuf::from("/fixture/runtime")
+        );
+        assert_eq!(
+            resolved_state_dir(pinned, PathBuf::from("/account/home"), false).unwrap(),
+            PathBuf::from("/fixture/runtime")
         );
     }
 
     #[test]
-    fn an_undeliverable_event_waits_where_a_daemon_has_lived() {
-        let root = std::env::temp_dir().join(format!("ade-fallback-{}", uuid::Uuid::new_v4()));
-        let empty = root.join("empty");
-        let used = root.join("used");
-        fs::create_dir_all(&empty).unwrap();
-        fs::create_dir_all(&used).unwrap();
-        fs::write(used.join("daemon.json"), b"{}").unwrap();
-        assert_eq!(
-            fallback_runtime_dir(&[root.join("missing"), empty.clone(), used.clone()]),
-            used
-        );
-        // Nothing has ever run: the first directory that exists still beats a
-        // path this process would have to create.
-        assert_eq!(
-            fallback_runtime_dir(&[root.join("missing"), empty.clone()]),
-            empty
-        );
-        fs::remove_dir_all(root).unwrap();
+    fn a_custom_socket_in_the_production_runtime_still_isolates_state() {
+        let runtime = default_runtime_dir();
+        let socket = runtime.join("development.sock");
+        assert_ne!(socket, default_socket_path());
+        assert_eq!(state_dir_for_socket(&socket).unwrap(), runtime);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn macos_default_runtime_uses_user_cache_instead_of_shared_tmp() {
-        if std::env::var_os("ADE_HOST_RUNTIME_DIR").is_none()
-            && std::env::var_os("XDG_RUNTIME_DIR").is_none()
-            && let Some(home) = std::env::var_os("HOME")
-        {
-            assert_eq!(
-                default_runtime_dir(),
-                PathBuf::from(home).join("Library/Caches/dev.muxflow.desktop/runtime")
-            );
-        }
+    fn durable_state_uses_platform_account_home_conventions() {
+        let environment = |name: &str| match name {
+            "HOME" => Some(OsString::from("/misleading/inherited-home")),
+            _ => None,
+        };
+        assert_eq!(
+            resolved_state_dir(environment, PathBuf::from("/home/someone"), false).unwrap(),
+            PathBuf::from("/home/someone/.local/state/muxflow")
+        );
+        assert_eq!(
+            resolved_state_dir(environment, PathBuf::from("/home/someone"), true).unwrap(),
+            PathBuf::from("/home/someone/Library/Application Support/dev.muxflow.desktop")
+        );
     }
 }

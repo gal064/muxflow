@@ -64,6 +64,7 @@ export function ConnectionSheet() {
         <Row label="Host" value={connection.host ? hostAddress(connection.host) : "—"} mono />
         <Hairline />
         <Row label="Helper" value={hello?.helperVersion || "—"} />
+        <Row label="Helper build" value={hello?.helperBuildDigest ? hello.helperBuildDigest.slice(0, 12) : "—"} />
         <Hairline />
         <Row label="tmux" value={hello?.tmuxVersion || "—"} />
         <Hairline />

@@ -170,7 +170,7 @@ fn terminal_single_file_capability_opens_and_saves_one_outside_file_and_nothing_
         .unwrap();
     service.write_file_chunk("write-one", 0, b"edited").unwrap();
     let (metadata, _) = service
-        .commit_file_write_authorized("write-one", &blake3::hash(b"edited").to_hex().to_string())
+        .commit_file_write_authorized("write-one", blake3::hash(b"edited").to_hex().as_ref())
         .unwrap();
     assert_eq!(fs::read_to_string(&allowed).unwrap(), "edited");
 
@@ -189,7 +189,7 @@ fn terminal_single_file_capability_opens_and_saves_one_outside_file_and_nothing_
         .unwrap();
     service.write_file_chunk("write-two", 0, b"again").unwrap();
     service
-        .commit_file_write_authorized("write-two", &blake3::hash(b"again").to_hex().to_string())
+        .commit_file_write_authorized("write-two", blake3::hash(b"again").to_hex().as_ref())
         .unwrap();
     assert_eq!(fs::read_to_string(&allowed).unwrap(), "again");
     fs::remove_dir_all(directory).unwrap();

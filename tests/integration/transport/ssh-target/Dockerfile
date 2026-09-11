@@ -6,6 +6,7 @@ RUN apt-get update \
       coreutils \
       git \
       iproute2 \
+      jq \
       openssh-server \
       tmux \
     && rm -rf /var/lib/apt/lists/* \
@@ -25,4 +26,3 @@ COPY entrypoint.sh /usr/local/bin/phase0-ssh-entrypoint
 
 EXPOSE 22
 ENTRYPOINT ["/usr/local/bin/phase0-ssh-entrypoint"]
-

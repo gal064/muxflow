@@ -149,9 +149,9 @@ service to speak to a phone that registered a voice session for that agent,
 and stores none of it: `AgentRecord`, `agents.json` and every agent event are
 shaped by the lifecycle alone. The one place it can rest on disk is the same
 place every other hook payload can: the private (0600) fallback mailbox in the
-runtime directory, written only when no daemon answered and deleted when the
-daemon drains it. No other event forwards it, `StopFailure` included. A host
-that never opened voice mode receives the field and drops it.
+durable per-user state directory, written only when no daemon answered and
+deleted when the daemon drains it. No other event forwards it, `StopFailure`
+included. A host that never opened voice mode receives the field and drops it.
 
 For validation, use installed `codex --version` / `codex --help` and
 `claude --version` / `claude --help` only. Release QA must not send prompts or

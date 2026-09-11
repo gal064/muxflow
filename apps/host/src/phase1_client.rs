@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, bail};
 use serde::Serialize;
 use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, envelope, read_frame_sync,
+    HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, PROTOCOL_MINOR, envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -47,7 +47,7 @@ pub fn run(arguments: Vec<String>) -> anyhow::Result<()> {
         value_after(&arguments, "--expected-helper").unwrap_or_else(|| HELPER_VERSION.into());
     let hello_request = v1::Envelope {
         protocol_major: requested_major,
-        protocol_minor: 0,
+        protocol_minor: PROTOCOL_MINOR,
         request_id: 1,
         sequence: 0,
         stream_id: 0,

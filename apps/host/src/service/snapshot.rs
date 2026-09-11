@@ -435,11 +435,11 @@ const SESSION_ORDER_LABEL: &str = "session order";
 const PINS_LABEL: &str = "pins";
 
 fn session_order_path() -> std::path::PathBuf {
-    crate::paths::runtime_dir().join("session-order.json")
+    crate::paths::state_dir().join("session-order.json")
 }
 
 fn pins_path() -> std::path::PathBuf {
-    crate::paths::runtime_dir().join("pins.json")
+    crate::paths::state_dir().join("pins.json")
 }
 
 fn load_sidecar<T: Default + serde::de::DeserializeOwned>(

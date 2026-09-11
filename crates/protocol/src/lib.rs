@@ -52,7 +52,7 @@ pub mod v1 {
 // deliberately makes older helpers read-only until the user accepts the
 // existing explicit helper-upgrade flow.
 pub const PROTOCOL_MAJOR: u32 = 2;
-pub const PROTOCOL_MINOR: u32 = 0;
+pub const PROTOCOL_MINOR: u32 = 1;
 pub const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 

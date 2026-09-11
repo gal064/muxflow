@@ -12,6 +12,7 @@ use anyhow::bail;
 use uuid::Uuid;
 
 mod bridge;
+mod build_identity;
 mod daemon;
 mod diagnostics;
 mod hook;
@@ -88,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
                 "{}",
                 serde_json::json!({
                     "helperVersion": tmux_agent_protocol::HELPER_VERSION,
+                    "helperBuildDigest": build_identity::digest()?,
                     "protocolMajor": tmux_agent_protocol::PROTOCOL_MAJOR,
                     "protocolMinor": tmux_agent_protocol::PROTOCOL_MINOR,
                     "os": std::env::consts::OS,

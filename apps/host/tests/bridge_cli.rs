@@ -1,10 +1,15 @@
 use std::{
     fs,
     io::{Read, Write},
-    os::unix::net::UnixListener,
+    os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
+};
+use tmux_agent_protocol::{
+    HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, envelope, read_frame_sync,
+    v1::{self, envelope::Payload},
+    write_frame_sync,
 };
 
 /// A short root, not the default tempdir: the sockets bound below must stay
@@ -38,6 +43,33 @@ fn wait_for_exit(child: &mut Child, within: Duration, whose_failure: &str) -> Ex
     }
 }
 
+/// Answer the bridge's private compatibility probe, then return the separate
+/// stream whose first frame still belongs to the app-side client.
+fn accept_compatible_bridge(listener: &UnixListener) -> UnixStream {
+    let (mut probe, _) = listener.accept().unwrap();
+    let _ = read_frame_sync(&mut probe).unwrap().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_muxflow-host"))
+        .arg("version")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let version: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mut hello = envelope(
+        1,
+        0,
+        Payload::ServerHello(v1::ServerHello {
+            helper_version: HELPER_VERSION.into(),
+            helper_build_digest: version["helperBuildDigest"].as_str().unwrap().into(),
+            capabilities: HOST_CAPABILITIES,
+            ..Default::default()
+        }),
+    );
+    hello.protocol_major = PROTOCOL_MAJOR;
+    write_frame_sync(&mut probe, &hello).unwrap();
+    drop(probe);
+    listener.accept().unwrap().0
+}
+
 /// The incident this guards: a bridge whose client died kept draining a daemon
 /// that never closed its side of the socket, and the process survived as an
 /// orphan for days. After stdin EOF the bridge owes the daemon one idle window
@@ -58,7 +90,7 @@ fn bridge_reaps_itself_when_the_daemon_never_closes_after_client_eof() {
         .unwrap();
     let mut child_stdin = child.stdin.take().unwrap();
     let mut child_stdout = child.stdout.take().unwrap();
-    let (mut daemon_side, _) = listener.accept().unwrap();
+    let mut daemon_side = accept_compatible_bridge(&listener);
 
     // Both pump directions work before the client leaves.
     child_stdin.write_all(b"request-bytes").unwrap();
@@ -111,7 +143,7 @@ fn bridge_exits_when_the_daemon_hangs_up_while_stdin_never_eofs() {
         .unwrap();
     // Held for the whole test: this is the stdin that never delivers EOF.
     let mut child_stdin = child.stdin.take().unwrap();
-    let (mut daemon_side, _) = listener.accept().unwrap();
+    let mut daemon_side = accept_compatible_bridge(&listener);
     // A bridge that stopped forwarding would otherwise hang the whole suite
     // here rather than fail this test.
     daemon_side

@@ -93,6 +93,7 @@ export function hostEnvelope(
 export function serverHello(overrides: MessageInitShape<typeof ServerHelloSchema> = {}): ServerHello {
   return create(ServerHelloSchema, {
     helperVersion: "0.1.0",
+    helperBuildDigest: "a".repeat(64),
     operatingSystem: "linux",
     architecture: "x86_64",
     tmuxVersion: "tmux 3.7b",

@@ -1908,6 +1908,7 @@ struct PlatformReport {
 #[serde(rename_all = "camelCase")]
 struct HelperReport {
     version: &'static str,
+    build_digest: String,
     protocol_major: u32,
     protocol_minor: u32,
     capability_bits: u64,
@@ -2001,6 +2002,9 @@ fn build_report() -> DiagnosticsReport {
         },
         helper: HelperReport {
             version: tmux_agent_protocol::HELPER_VERSION,
+            build_digest: crate::build_identity::digest()
+                .unwrap_or("unavailable")
+                .to_owned(),
             protocol_major: tmux_agent_protocol::PROTOCOL_MAJOR,
             protocol_minor: tmux_agent_protocol::PROTOCOL_MINOR,
             capability_bits: tmux_agent_protocol::HOST_CAPABILITIES,
@@ -2037,8 +2041,15 @@ fn build_report() -> DiagnosticsReport {
 
 fn print_human_report(report: &DiagnosticsReport) {
     println!(
-        "muxflow helper {} (protocol {}.{})",
-        report.helper.version, report.helper.protocol_major, report.helper.protocol_minor
+        "muxflow helper {} build {} (protocol {}.{})",
+        report.helper.version,
+        report
+            .helper
+            .build_digest
+            .get(..12)
+            .unwrap_or("unavailable"),
+        report.helper.protocol_major,
+        report.helper.protocol_minor
     );
     println!(
         "platform: {}/{}",

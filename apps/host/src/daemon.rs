@@ -26,11 +26,16 @@ use crate::{
 };
 
 pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
+    let helper_build_digest = crate::build_identity::digest()?.to_owned();
     let runtime = socket_path
         .parent()
         .context("daemon socket has no parent directory")?;
     paths::check_socket_path_length(&socket_path)?;
     paths::prepare_runtime_dir(runtime)?;
+    // Resolve the process's temporary and durable roots before any subsystem
+    // opens state. Explicit socket fixtures keep both roots together.
+    paths::adopt_socket_path(&socket_path)?;
+    paths::prepare_runtime_dir(&paths::state_dir())?;
 
     if socket_path.exists() {
         let metadata = fs::symlink_metadata(&socket_path)?;
@@ -60,18 +65,7 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
             return Err(error).context("initialize private runtime diagnostics");
         }
     };
-    // Before anything reads it: this process's state belongs beside its
-    // socket, not beside whatever its environment would have resolved.
-    paths::adopt_runtime_dir(runtime);
     diagnostics.install_process_recorder();
-    // Published before the first connection is accepted, so a hook that fires
-    // the instant an agent starts can already find this directory rather than
-    // the one its own environment would have derived (M13-E003). Non-fatal: a
-    // daemon that cannot write the pointer still serves every client that
-    // resolves the same directory it did, which is the common case.
-    if let Err(error) = paths::record_runtime_dir(runtime) {
-        eprintln!("could not record the runtime directory for hooks: {error}");
-    }
     let metadata_path = runtime.join("daemon.json");
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let process_start_time = process_start_time(std::process::id())?;
@@ -80,6 +74,7 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
         serde_json::to_vec(&serde_json::json!({
             "pid": std::process::id(),
             "helperVersion": tmux_agent_protocol::HELPER_VERSION,
+            "helperBuildDigest": helper_build_digest,
             "protocolMajor": tmux_agent_protocol::PROTOCOL_MAJOR,
             "processStartTime": process_start_time,
             "executable": executable,
@@ -362,10 +357,14 @@ pub async fn check(socket_path: PathBuf) -> anyhow::Result<()> {
     if hello.helper_version != tmux_agent_protocol::HELPER_VERSION {
         bail!("daemon helper version handshake is incompatible");
     }
+    if hello.helper_build_digest != crate::build_identity::digest()? {
+        bail!("daemon helper build handshake is incompatible");
+    }
     println!(
         "{}",
         serde_json::json!({
             "helperVersion": hello.helper_version,
+            "helperBuildDigest": hello.helper_build_digest,
             "protocolMajor": PROTOCOL_MAJOR,
             "serverIdentity": hello.server_identity,
         })
