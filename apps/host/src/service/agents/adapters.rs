@@ -22,10 +22,10 @@ pub(crate) const LAST_ASSISTANT_MESSAGE_FIELD: &str = "last_assistant_message";
 /// Set when the hook cut the message at its 32 KiB bound.
 pub(crate) const LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD: &str = "last_assistant_message_truncated";
 pub(crate) const MANAGED_OWNER: &str = "muxflow";
-/// Bumped whenever the managed *event set* changes, not only the command
-/// string: an install from an older version covers fewer events, and reporting
-/// it as current would leave a transition that can never arrive.
-pub(crate) const MANAGED_VERSION: u32 = 5;
+/// Bumped whenever the managed event set or entry configuration changes. An
+/// older install can otherwise look current while missing an event or carrying
+/// vendor-invalid settings such as an excessive timeout.
+pub(crate) const MANAGED_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedHook {
@@ -49,6 +49,10 @@ pub(crate) trait AgentAdapter: Send + Sync {
     fn executable(&self) -> &'static str;
     fn hook_relative_path(&self) -> &'static str;
     fn hook_events(&self) -> &'static [&'static str];
+    /// Vendor-specific wall-clock allowance written into the managed entry.
+    fn hook_timeout_seconds(&self, _event: &str) -> u64 {
+        5
+    }
     fn hook_trust_guidance(&self) -> &'static str;
     fn identifies_process(&self, command: &str) -> bool;
     fn launch(&self, native_session_id: Option<&str>) -> LaunchSpec;
@@ -158,6 +162,15 @@ impl AgentAdapter for CodexAdapter {
             "Interrupt",
             "SessionEnd",
         ]
+    }
+
+    fn hook_timeout_seconds(&self, event: &str) -> u64 {
+        match event {
+            // Codex clamps terminal lifecycle hooks to three seconds and
+            // warns whenever their configured timeout is higher.
+            "Interrupt" | "SessionEnd" => 3,
+            _ => 5,
+        }
     }
 
     fn hook_trust_guidance(&self) -> &'static str {
@@ -587,12 +600,21 @@ mod tests {
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
         assert_eq!(codex.hook_events().len(), 10);
         assert_eq!(codex.descriptor(home, &observed[0].1).id, "codex");
+        assert_eq!(codex.hook_timeout_seconds("Interrupt"), 3);
+        assert_eq!(codex.hook_timeout_seconds("SessionEnd"), 3);
+        assert_eq!(codex.hook_timeout_seconds("Stop"), 5);
         assert_eq!(
             codex.hook_command(Path::new("/opt/muxflow-host")),
-            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 5"
+            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 6"
         );
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         assert!(claude.hook_events().contains(&"Notification"));
+        assert!(
+            claude
+                .hook_events()
+                .iter()
+                .all(|event| claude.hook_timeout_seconds(event) == 5)
+        );
         assert!(claude.descriptor(home, &observed[1].1).supports_resume);
         // Each descriptor carries its own adapter's observation and no other's,
         // and the host is what decides whether an install would act on it.

@@ -94,6 +94,11 @@ now is dropped when the backstop applies. The ordinary bound is the longest gap 
 otherwise leave — one tool call, at Claude's maximum configurable `Bash`
 timeout of 600s — with half again for headroom.
 
+Managed Codex hooks use its three-second maximum for `Interrupt` and
+`SessionEnd`; the other managed hooks use five seconds. Codex already clamps
+the terminal lifecycle hooks to three seconds, so matching that limit avoids a
+startup warning without changing their effective runtime allowance.
+
 Use the same review flow with Uninstall to remove only entries labeled
 `muxflow-managed`. Do this before uninstalling the desktop package. The
 package uninstaller refuses to remove the helper while a known managed marker
