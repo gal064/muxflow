@@ -15,7 +15,7 @@ Common report states:
   and Nix locations. For another layout, set `MUXFLOW_TMUX_PATH` to the absolute
   executable path and restart the helper daemon.
 - `daemon.state: not_running` — start or reconnect the desktop app, which starts the user daemon.
-- `daemon.state: unsafe_or_invalid_endpoint` — a non-socket or non-private object occupies the daemon endpoint. Stop and inspect the user runtime directory rather than deleting an unknown object automatically.
+- `daemon.state: unsafe_or_invalid_endpoint` — a non-socket or non-private object occupies the daemon endpoint. Stop and inspect `/tmp/muxflow-<uid>` rather than deleting an unknown object automatically.
 - `daemon.runtimeState: invalid_or_unsafe` — runtime diagnostics had unsafe permissions, an unsupported/corrupt schema, or a symlink. Restarting the daemon creates a clean bounded state only when the runtime directory itself is private.
 - A dependency marked `unavailable` or `failed` — install or repair that program and run the doctor again. Raw command errors are intentionally excluded; run the program's version command directly if you need its local detail.
 - Nonzero connection or accept error counts — reconnect and check network/SSH/tmux availability. The report intentionally records only safe error classes, so local application logs may be needed for deeper investigation.
@@ -81,8 +81,9 @@ permission then has no sound permission now and cannot be re-prompted from
 inside the app. Turn sound on in System Settings → Notifications → Muxflow,
 or revoke and re-grant.
 
-The local helper uses a private runtime under
-`~/Library/Caches/dev.muxflow.desktop/runtime` unless
-`ADE_HOST_RUNTIME_DIR` is explicitly set. Remote Linux helpers are ELF files in
-the application Resources directory; a macOS Mach-O helper is never uploaded
-to Linux.
+The local helper executable remains in the application bundle. Its private
+communication socket is `/tmp/muxflow-<uid>/host.sock` unless
+`ADE_HOST_RUNTIME_DIR` is explicitly set; durable macOS helper state is under
+`~/Library/Application Support/dev.muxflow.desktop`. Remote Linux helpers are
+ELF files in the application Resources directory; a macOS Mach-O helper is
+never uploaded to Linux.

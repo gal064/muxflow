@@ -125,44 +125,73 @@ pub async fn run(socket_path: PathBuf, auto_start: bool) -> anyhow::Result<ExitR
 }
 
 async fn connect(path: &Path, auto_start: bool) -> anyhow::Result<UnixStream> {
-    if let Some(stream) = existing_daemon(path, auto_start).await? {
+    if let ExistingDaemon::Connected(stream) = inspect_existing_daemon(path, auto_start).await? {
         return Ok(stream);
     }
     if !auto_start {
         bail!("host daemon is not available at {}", path.display());
     }
 
-    let executable = std::env::current_exe().context("resolve host helper executable")?;
-    Command::new(executable)
-        .arg("daemon")
-        .arg("--socket")
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(daemon_stderr(path))
-        .spawn()
-        .context("start host daemon")?;
+    // Binding the socket is the daemon-ownership election. Another helper can
+    // win between the preflight above and our child reaching bind, so every
+    // winner is re-probed before its stream is forwarded to the app. If that
+    // winner is stale, retire it and hold a fresh election.
+    for _ in 0..3 {
+        let executable = std::env::current_exe().context("resolve host helper executable")?;
+        Command::new(executable)
+            .arg("daemon")
+            .arg("--socket")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(daemon_stderr(path))
+            .spawn()
+            .context("start host daemon")?;
 
+        match wait_for_spawned_daemon(path).await? {
+            SpawnedDaemon::Compatible(stream) => return Ok(stream),
+            SpawnedDaemon::RetiredIncompatible => continue,
+        }
+    }
+    bail!(
+        "could not elect a compatible host daemon at {}",
+        path.display()
+    )
+}
+
+enum SpawnedDaemon {
+    Compatible(UnixStream),
+    RetiredIncompatible,
+}
+
+async fn wait_for_spawned_daemon(path: &Path) -> anyhow::Result<SpawnedDaemon> {
     for _ in 0..100 {
-        if let Ok(stream) = UnixStream::connect(path).await {
-            return Ok(stream);
+        match inspect_existing_daemon(path, true).await? {
+            ExistingDaemon::Connected(stream) => {
+                return Ok(SpawnedDaemon::Compatible(stream));
+            }
+            ExistingDaemon::Retired => return Ok(SpawnedDaemon::RetiredIncompatible),
+            ExistingDaemon::Missing => {}
         }
         sleep(Duration::from_millis(20)).await;
     }
     bail!("host daemon did not create {}", path.display())
 }
 
-/// Uses a current daemon as-is and cooperatively retires one that is outdated —
-/// or that could not prove it is not — before the packaged helper starts its
-/// replacement. The probe has its own connection because the desktop must still
-/// own the real connection's first ClientHello.
-async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option<UnixStream>> {
+/// Verifies a daemon before returning a stream from that same process. With
+/// auto-start enabled, an outdated or unproven daemon is cooperatively retired
+/// before the packaged helper starts its replacement. The probe has its own
+/// connection because the desktop must still own the real connection's first
+/// ClientHello.
+async fn inspect_existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<ExistingDaemon> {
     let Ok(mut probe) = UnixStream::connect(path).await else {
-        return Ok(None);
+        return Ok(ExistingDaemon::Missing);
     };
-    if !auto_start {
-        return Ok(Some(probe));
-    }
+    let probe_pid = probe
+        .peer_cred()
+        .context("inspect daemon compatibility peer credentials")?
+        .pid()
+        .context("daemon compatibility peer omitted its process ID")?;
     // A probe that timed out, died mid-frame or answered with something other
     // than a ServerHello carries no evidence about versions. Failing the
     // connection on it made every later reconnect fail the same way until the
@@ -177,13 +206,33 @@ async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option
         };
     drop(probe);
     match compatibility {
-        DaemonCompatibility::Compatible => return Ok(UnixStream::connect(path).await.ok()),
+        DaemonCompatibility::Compatible => {
+            return Ok(match UnixStream::connect(path).await {
+                Ok(stream)
+                    if stream
+                        .peer_cred()
+                        .context("inspect forwarded daemon peer credentials")?
+                        .pid()
+                        == Some(probe_pid) =>
+                {
+                    ExistingDaemon::Connected(stream)
+                }
+                // The socket owner changed after the probe. Never forward the
+                // unverified peer; the caller will inspect the new owner on
+                // its next pass.
+                Ok(_) => ExistingDaemon::Missing,
+                Err(_) => ExistingDaemon::Missing,
+            });
+        }
         DaemonCompatibility::AppOutdated => {
             bail!(
                 "the running host daemon is newer than this app; update the app before reconnecting"
             )
         }
         DaemonCompatibility::Unknown | DaemonCompatibility::DaemonOutdated { force: false } => {
+            if !auto_start {
+                bail!("host daemon is incompatible and --no-start forbids replacing it");
+            }
             let stopped = timeout(Duration::from_secs(2), daemon::stop(path.to_owned())).await;
             if !matches!(stopped, Ok(Ok(()))) {
                 daemon::retire_verified(path)
@@ -192,6 +241,9 @@ async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option
             }
         }
         DaemonCompatibility::DaemonOutdated { force: true } => {
+            if !auto_start {
+                bail!("host daemon is incompatible and --no-start forbids replacing it");
+            }
             daemon::retire_verified(path)
                 .await
                 .context("retire old-protocol host daemon")?;
@@ -199,7 +251,7 @@ async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option
     }
     for _ in 0..100 {
         if UnixStream::connect(path).await.is_err() {
-            return Ok(None);
+            return Ok(ExistingDaemon::Retired);
         }
         sleep(Duration::from_millis(20)).await;
     }
@@ -209,12 +261,26 @@ async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option
     )
 }
 
+#[cfg(test)]
+async fn existing_daemon(path: &Path, auto_start: bool) -> anyhow::Result<Option<UnixStream>> {
+    Ok(match inspect_existing_daemon(path, auto_start).await? {
+        ExistingDaemon::Connected(stream) => Some(stream),
+        ExistingDaemon::Missing | ExistingDaemon::Retired => None,
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DaemonCompatibility {
     Compatible,
     DaemonOutdated { force: bool },
     AppOutdated,
     Unknown,
+}
+
+enum ExistingDaemon {
+    Connected(UnixStream),
+    Missing,
+    Retired,
 }
 
 async fn daemon_compatibility(stream: &mut UnixStream) -> anyhow::Result<DaemonCompatibility> {
@@ -254,6 +320,9 @@ async fn daemon_compatibility(stream: &mut UnixStream) -> anyhow::Result<DaemonC
     if missing_host_capabilities(hello.capabilities) != 0 {
         // Required bits are append-only. A same-release daemon missing one is
         // an older build of that release, never evidence that the app is old.
+        return Ok(DaemonCompatibility::DaemonOutdated { force: false });
+    }
+    if hello.helper_build_digest != crate::build_identity::digest()? {
         return Ok(DaemonCompatibility::DaemonOutdated { force: false });
     }
     Ok(if hello.read_only {
@@ -329,6 +398,19 @@ mod tests {
         let root = PathBuf::from("/tmp").join(format!("ade-bridge-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[tokio::test]
+    async fn an_unconnectable_socket_is_missing_not_a_retired_live_daemon() {
+        let root = temporary_runtime();
+        let socket = root.join("host.sock");
+        drop(UnixListener::bind(&socket).unwrap());
+
+        assert!(matches!(
+            inspect_existing_daemon(&socket, true).await.unwrap(),
+            ExistingDaemon::Missing
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -440,6 +522,117 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        server.await.unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_same_version_daemon_from_another_build_is_stopped() {
+        let root = temporary_runtime();
+        let socket = root.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut probe, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut probe).await.unwrap().unwrap();
+            let mut hello = envelope(
+                1,
+                0,
+                Payload::ServerHello(v1::ServerHello {
+                    helper_version: HELPER_VERSION.into(),
+                    helper_build_digest: "0".repeat(64),
+                    capabilities: HOST_CAPABILITIES,
+                    ..Default::default()
+                }),
+            );
+            hello.protocol_major = PROTOCOL_MAJOR;
+            write_frame(&mut probe, &hello).await.unwrap();
+            drop(probe);
+
+            let (mut shutdown, _) = listener.accept().await.unwrap();
+            answer_cooperative_shutdown(&mut shutdown).await;
+            drop(shutdown);
+            drop(listener);
+            fs::remove_file(&socket).unwrap();
+        });
+
+        assert!(
+            existing_daemon(&root.join("host.sock"), true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.await.unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_start_refuses_a_stale_build_without_retiring_it() {
+        let root = temporary_runtime();
+        let socket = root.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut probe, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut probe).await.unwrap().unwrap();
+            let mut hello = envelope(
+                1,
+                0,
+                Payload::ServerHello(v1::ServerHello {
+                    helper_version: HELPER_VERSION.into(),
+                    helper_build_digest: "0".repeat(64),
+                    capabilities: HOST_CAPABILITIES,
+                    ..Default::default()
+                }),
+            );
+            hello.protocol_major = PROTOCOL_MAJOR;
+            write_frame(&mut probe, &hello).await.unwrap();
+            assert!(read_frame(&mut probe).await.unwrap().is_none());
+        });
+
+        let error = existing_daemon(&socket, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--no-start"), "{error}");
+        server.await.unwrap();
+        assert!(socket.exists(), "no-start retired the daemon socket");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stale_process_that_wins_the_spawn_race_is_never_forwarded() {
+        let root = temporary_runtime();
+        let socket = root.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut probe, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut probe).await.unwrap().unwrap();
+            let mut hello = envelope(
+                1,
+                0,
+                Payload::ServerHello(v1::ServerHello {
+                    helper_version: HELPER_VERSION.into(),
+                    helper_build_digest: "0".repeat(64),
+                    capabilities: HOST_CAPABILITIES,
+                    ..Default::default()
+                }),
+            );
+            hello.protocol_major = PROTOCOL_MAJOR;
+            write_frame(&mut probe, &hello).await.unwrap();
+            drop(probe);
+
+            let (mut shutdown, _) = listener.accept().await.unwrap();
+            answer_cooperative_shutdown(&mut shutdown).await;
+            drop(shutdown);
+            drop(listener);
+            fs::remove_file(&socket).unwrap();
+        });
+
+        assert!(matches!(
+            wait_for_spawned_daemon(&root.join("host.sock"))
+                .await
+                .unwrap(),
+            SpawnedDaemon::RetiredIncompatible
+        ));
         server.await.unwrap();
         fs::remove_dir_all(root).unwrap();
     }

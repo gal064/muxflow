@@ -7,7 +7,20 @@ use tmux_agent_protocol::{
 #[test]
 fn terminal_upload_reconciliation_operation_is_append_only() {
     assert_eq!(v1::Operation::ReconcileTerminalUpload as i32, 41);
-    assert_eq!((PROTOCOL_MAJOR, PROTOCOL_MINOR), (2, 0));
+    assert_eq!((PROTOCOL_MAJOR, PROTOCOL_MINOR), (2, 1));
+}
+
+#[test]
+fn server_hello_round_trips_exact_helper_build_identity() {
+    let hello = v1::ServerHello {
+        helper_version: tmux_agent_protocol::HELPER_VERSION.into(),
+        helper_build_digest: "a".repeat(64),
+        ..Default::default()
+    };
+    assert_eq!(
+        v1::ServerHello::decode(hello.encode_to_vec().as_slice()).unwrap(),
+        hello
+    );
 }
 
 #[test]

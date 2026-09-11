@@ -69,8 +69,6 @@ fi
 
 if [[ -n "${ADE_HOST_RUNTIME_DIR:-}" ]]; then
   runtime=$ADE_HOST_RUNTIME_DIR
-elif [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
-  runtime="$XDG_RUNTIME_DIR/muxflow"
 else
   runtime="/tmp/muxflow-$(id -u)"
 fi

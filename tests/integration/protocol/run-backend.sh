@@ -290,7 +290,7 @@ jq -e '.transport == "ssh" and .sessions == 2 and .offlineOutputReseeded and .ov
   "$runtime/remote-network-recovered.json" >/dev/null
 
 [[ "$(remote_tmux list-sessions -F '#{session_name}' | sort | tr '\n' ' ')" == "external primary " ]]
-[[ "$(ssh -F "$ssh_config" ade-phase2-docker "stat -c '%a' /tmp/muxflow-1000/session-order.json")" == "600" ]]
+[[ "$(ssh -F "$ssh_config" ade-phase2-docker "stat -c '%a' \"\$HOME/.local/state/muxflow/session-order.json\"")" == "600" ]]
 if remote_tmux show-options -Aqv @tmux_agent_ide_order | rg .; then
   echo 'remote Phase 2 mutated a tmux user option' >&2
   exit 1

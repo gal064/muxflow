@@ -77,7 +77,7 @@ describe.skipIf(!availability.available)(`live host (${availability.reason ?? "c
     connection.connect();
     await waitFor("connected", () => (store.getState().connection.state === "connected" ? true : undefined));
     const hello = connection.serverHello!;
-    say(`ServerHello helper=${hello.helperVersion} tmux="${hello.tmuxVersion}" identity=${hello.serverIdentity} window=${hello.terminalOutputWindowBytes}B/${hello.terminalOutputWindowRecords}rec readOnly=${hello.readOnly}`);
+    say(`ServerHello helper=${hello.helperVersion} build=${hello.helperBuildDigest.slice(0, 12)} tmux="${hello.tmuxVersion}" identity=${hello.serverIdentity} window=${hello.terminalOutputWindowBytes}B/${hello.terminalOutputWindowRecords}rec readOnly=${hello.readOnly}`);
     expect(hello.readOnly).toBe(false);
     expect(hello.terminalOutputWindowBytes).toBeGreaterThan(0n);
     expect(hello.connectionEpoch).toBe(1n);

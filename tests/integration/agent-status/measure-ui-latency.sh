@@ -20,7 +20,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 
 socket=$(grep -o "ADE_TMUX_SOCKET_NAME='[^']*'" "$run_root/launch.sh" | cut -d"'" -f2)
 tmux_tmpdir=$(grep -o "TMUX_TMPDIR='[^']*'" "$run_root/launch.sh" | cut -d"'" -f2)
-runtime=$(grep -o "XDG_RUNTIME_DIR='[^']*'" "$run_root/launch.sh" | cut -d"'" -f2)
+runtime=$(grep -o "ADE_HOST_RUNTIME_DIR='[^']*'" "$run_root/launch.sh" | cut -d"'" -f2)
 helper=$(grep -o "ADE_HOST_HELPER_PATH='[^']*'" "$run_root/launch.sh" | cut -d"'" -f2)
 
 T() { env -u TMUX TMUX_TMPDIR="$tmux_tmpdir" tmux -L "$socket" "$@"; }
@@ -29,8 +29,7 @@ tmux_env="$(T display-message -p '#{socket_path},0,0')"
 [[ -n "$pane" ]] || { echo "no agent pane in the fixture" >&2; exit 1; }
 
 # The app's own daemon, in the fixture's runtime directory.
-export ADE_HOST_RUNTIME_DIR="$runtime/muxflow"
-[[ -S "$ADE_HOST_RUNTIME_DIR/host.sock" ]] || ADE_HOST_RUNTIME_DIR="$runtime"
+export ADE_HOST_RUNTIME_DIR="$runtime"
 
 agent_state() {
   cua-driver call get_window_state \

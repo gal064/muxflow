@@ -105,6 +105,7 @@ export XDG_CONFIG_HOME='$config'
 export XDG_DATA_HOME='$data'
 export XDG_CACHE_HOME='$cache'
 export XDG_RUNTIME_DIR='$runtime'
+export ADE_HOST_RUNTIME_DIR='$runtime'
 export TMUX_TMPDIR='$tmux_runtime'
 export ADE_TMUX_SOCKET_NAME='$tmux_socket'
 unset TMUX

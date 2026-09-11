@@ -699,7 +699,8 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
         home.as_deref(),
     )?;
     deliver(
-        &crate::paths::runtime_dir_candidates(),
+        &crate::paths::runtime_dir(),
+        &crate::paths::default_state_dir()?,
         &event,
         home.as_deref(),
     )
@@ -722,58 +723,34 @@ fn read_vendor_hook_bounded(
     parsed.context("parse hook JSON")
 }
 
-/// Hand the event to whichever daemon is actually running.
-///
-/// The candidate list exists because "the runtime directory" is not a property
-/// of the machine but of the environment a process happened to inherit, and a
-/// hook inherits a different one from the daemon (see `paths::record_runtime_dir`).
-/// Only a connection error moves on to the next candidate: a daemon that
-/// answered and then rejected the event is the daemon, and retrying the same
-/// event against another directory would either duplicate it or hide the
-/// rejection.
+/// Hand the event to the one production daemon or preserve it in durable state.
 async fn deliver(
-    candidates: &[std::path::PathBuf],
+    runtime: &Path,
+    mailbox: &Path,
     event: &v1::AgentHookEvent,
     home: Option<&Path>,
 ) -> anyhow::Result<()> {
-    for runtime in candidates {
-        let socket = runtime.join("host.sock");
-        if !socket.exists() {
-            continue;
-        }
+    let socket = runtime.join("host.sock");
+    if socket.exists() {
         match send(&socket, event).await {
             Ok(v1::HookIngestDisposition::Applied | v1::HookIngestDisposition::Discarded) => {
                 return Ok(());
             }
-            Ok(v1::HookIngestDisposition::Retryable | v1::HookIngestDisposition::Unspecified) => {
-                // The daemon answered, so do not probe another candidate and
-                // risk delivering twice. One rejection produces one durable
-                // mailbox entry for the daemon to replay later.
-                return persist_latest_fallback(runtime, &event_for_fallback(event, home)?);
-            }
-            Err(HookDeliveryFailure::PreDelivery(error)) => {
+            Ok(v1::HookIngestDisposition::Retryable | v1::HookIngestDisposition::Unspecified) => {}
+            Err(
+                HookDeliveryFailure::PreDelivery(error) | HookDeliveryFailure::Ambiguous(error),
+            ) => {
                 drop(error);
-                continue;
-            }
-            Err(HookDeliveryFailure::Ambiguous(error)) => {
-                // The request may already have committed. Never probe another
-                // daemon after that boundary; persist beside the one that may
-                // have applied it and let source-ID dedupe reconcile replay.
-                drop(error);
-                return persist_latest_fallback(runtime, &event_for_fallback(event, home)?);
             }
         }
     }
-    persist_latest_fallback(
-        &crate::paths::fallback_runtime_dir(candidates),
-        &event_for_fallback(event, home)?,
-    )
+    persist_latest_fallback(mailbox, &event_for_fallback(event, home)?)
 }
 
 #[derive(Debug)]
 enum HookDeliveryFailure {
-    /// No ingest request bytes were attempted; another runtime candidate is
-    /// still safe to try.
+    /// No ingest request bytes were attempted, so durable fallback cannot
+    /// duplicate an event the daemon already accepted.
     PreDelivery(anyhow::Error),
     /// Request delivery began, so absence of an acknowledgement is not proof
     /// that the daemon did not apply it.
@@ -1282,6 +1259,9 @@ async fn connect_and_handshake(socket: &Path) -> anyhow::Result<UnixStream> {
     if hello.read_only || hello.capabilities & tmux_agent_protocol::CAP_AGENTS == 0 {
         bail!("private daemon does not accept this hook protocol version");
     }
+    if hello.helper_build_digest != crate::build_identity::digest()? {
+        bail!("private daemon is not the same helper build as this hook");
+    }
     Ok(stream)
 }
 
@@ -1500,6 +1480,7 @@ mod tests {
                     0,
                     v1::envelope::Payload::ServerHello(v1::ServerHello {
                         capabilities: tmux_agent_protocol::CAP_AGENTS,
+                        helper_build_digest: crate::build_identity::digest().unwrap().into(),
                         ..Default::default()
                     }),
                 ),
@@ -2255,9 +2236,7 @@ mod tests {
         )
         .unwrap();
 
-        deliver(std::slice::from_ref(&runtime), &event, None)
-            .await
-            .unwrap();
+        deliver(&runtime, &runtime, &event, None).await.unwrap();
         server.await.unwrap();
         assert_eq!(fallback_count(&runtime), 1);
         fs::remove_dir_all(runtime).unwrap();
@@ -2281,27 +2260,70 @@ mod tests {
         )
         .unwrap();
 
-        deliver(std::slice::from_ref(&runtime), &event, None)
-            .await
-            .unwrap();
+        deliver(&runtime, &runtime, &event, None).await.unwrap();
         server.await.unwrap();
         assert_eq!(fallback_count(&runtime), 0);
         fs::remove_dir_all(runtime).unwrap();
     }
 
     #[tokio::test]
-    async fn ambiguous_ack_never_retries_a_second_daemon() {
+    async fn a_same_version_stale_daemon_cannot_consume_a_hook_event() {
+        let root = std::env::temp_dir().join(format!("ade-hs-{}", uuid::Uuid::new_v4()));
+        let runtime = root.join("runtime");
+        let mailbox = root.join("state");
+        fs::create_dir_all(&runtime).unwrap();
+        let listener = tokio::net::UnixListener::bind(runtime.join("host.sock")).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let hello = read_frame(&mut stream).await.unwrap().unwrap();
+            assert!(matches!(
+                hello.payload,
+                Some(v1::envelope::Payload::ClientHello(_))
+            ));
+            write_frame(
+                &mut stream,
+                &envelope(
+                    1,
+                    0,
+                    v1::envelope::Payload::ServerHello(v1::ServerHello {
+                        helper_version: tmux_agent_protocol::HELPER_VERSION.into(),
+                        helper_build_digest: "0".repeat(64),
+                        capabilities: tmux_agent_protocol::CAP_AGENTS,
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(read_frame(&mut stream).await.unwrap().is_none());
+        });
+        let event = build_event(
+            v1::AgentAdapterKind::Codex,
+            br#"{"hook_event_name":"UserPromptSubmit","event_id":"stale-build"}"#.to_vec(),
+            "%7",
+            "server-a",
+            7,
+            None,
+        )
+        .unwrap();
+
+        deliver(&runtime, &mailbox, &event, None).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(fallback_count(&mailbox), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ambiguous_ack_is_preserved_in_the_durable_mailbox() {
         // A short root, not the default tempdir: the sockets below must stay
         // under the platform's 104/108-byte bind limit, and macOS puts the
         // default tempdir 50+ bytes deep under /var/folders.
         let root =
             std::path::PathBuf::from("/tmp").join(format!("ade-ha-{}", uuid::Uuid::new_v4()));
-        let first = root.join("first");
-        let second = root.join("second");
-        fs::create_dir_all(&first).unwrap();
-        fs::create_dir_all(&second).unwrap();
-        let first_listener = tokio::net::UnixListener::bind(first.join("host.sock")).unwrap();
-        let second_listener = tokio::net::UnixListener::bind(second.join("host.sock")).unwrap();
+        let runtime = root.join("runtime");
+        let mailbox = root.join("state");
+        fs::create_dir_all(&runtime).unwrap();
+        let first_listener = tokio::net::UnixListener::bind(runtime.join("host.sock")).unwrap();
         let first_server = tokio::spawn(async move {
             let (mut stream, _) = first_listener.accept().await.unwrap();
             let _hello = read_frame(&mut stream).await.unwrap().unwrap();
@@ -2312,6 +2334,7 @@ mod tests {
                     0,
                     v1::envelope::Payload::ServerHello(v1::ServerHello {
                         capabilities: tmux_agent_protocol::CAP_AGENTS,
+                        helper_build_digest: crate::build_identity::digest().unwrap().into(),
                         ..Default::default()
                     }),
                 ),
@@ -2331,17 +2354,9 @@ mod tests {
             None,
         )
         .unwrap();
-        deliver(&[first.clone(), second.clone()], &event, None)
-            .await
-            .unwrap();
+        deliver(&runtime, &mailbox, &event, None).await.unwrap();
         first_server.await.unwrap();
-        assert!(
-            timeout(Duration::from_millis(100), second_listener.accept())
-                .await
-                .is_err()
-        );
-        assert_eq!(fallback_count(&first), 1);
-        assert_eq!(fallback_count(&second), 0);
+        assert_eq!(fallback_count(&mailbox), 1);
         fs::remove_dir_all(root).unwrap();
     }
 

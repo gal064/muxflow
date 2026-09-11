@@ -897,17 +897,17 @@ fn run_matrix(transport: Transport, primary_name: &str, ordinary_client: &str) -
         snapshot.generation > stale.generation
             && assert_layout_matches(&transport, snapshot, &external_window).is_ok()
     })?;
-    let mut stale_focus = action(v1::TmuxActionKind::FocusPane);
-    stale_focus.pane_id = external_down.clone();
-    let rejection = client.action_with_snapshot(&stale, stale_focus)?;
+    let mut stale_resize = action(v1::TmuxActionKind::ResizePaneLeft);
+    stale_resize.pane_id = external_down.clone();
+    let rejection = client.action_with_snapshot(&stale, stale_resize)?;
     ensure!(
         !rejection.ok && rejection.error_code == "stale_topology",
         "stale layout action was not rejected"
     );
-    let mut fresh_focus = action(v1::TmuxActionKind::FocusPane);
-    fresh_focus.pane_id = external_down.clone();
+    let mut fresh_resize = action(v1::TmuxActionKind::ResizePaneLeft);
+    fresh_resize.pane_id = external_down.clone();
     let fresh = client.snapshot()?;
-    let fresh_response = client.action_with_snapshot(&fresh, fresh_focus)?;
+    let fresh_response = client.action_with_snapshot(&fresh, fresh_resize)?;
     ensure!(
         fresh_response.ok,
         "fresh layout retry failed: {} ({})",

@@ -324,9 +324,7 @@ fn main() -> Result<(), String> {
         &codex_pane,
         &server_identity,
     )))?;
-    if !duplicate.display_message.contains("duplicate")
-        && !duplicate.display_message.contains("older")
-    {
+    if duplicate.hook_ingest_disposition != v1::HookIngestDisposition::Discarded as i32 {
         return Err("duplicate hook accepted".into());
     }
     let out_of_order = connection.request_error(hook_request(hook(
@@ -338,7 +336,7 @@ fn main() -> Result<(), String> {
         &codex_pane,
         &server_identity,
     )))?;
-    if !out_of_order.display_message.contains("older") {
+    if out_of_order.hook_ingest_disposition != v1::HookIngestDisposition::Discarded as i32 {
         return Err("out-of-order hook accepted".into());
     }
     let working = ingest(
@@ -633,10 +631,30 @@ fn hook(
     pane: &str,
     origin_server_identity: &str,
 ) -> v1::AgentHookEvent {
+    let mut payload = serde_json::json!({
+        "hook_event_name": event,
+        "notification_type": "permission_prompt",
+        "session_id": native,
+    });
+    if adapter == v1::AgentAdapterKind::Codex {
+        // Sequence 1/2 is one user-reviewed turn; 3/4 is the next. Codex
+        // permission events without a turn/reviewer are intentionally
+        // conservative and stay Working, so the fixture must carry the same
+        // normalized evidence as the installed hook.
+        payload["approval_turn_id"] =
+            format!("phase6-turn-{}", if sequence <= 2 { 1 } else { 2 }).into();
+        payload["approval_reviewer"] = "user".into();
+    }
     v1::AgentHookEvent {
-        adapter: adapter.into(), adapter_id: adapter_id.into(), source_event_id: source_id.into(), source_generation: sequence,
-        source_sequence_authoritative: authoritative, native_session_id: native.into(), pane_id: pane.into(), origin_server_identity: origin_server_identity.into(),
-        payload_json: serde_json::to_vec(&serde_json::json!({"hook_event_name": event, "notification_type": "permission_prompt", "session_id": native})).unwrap(),
+        adapter: adapter.into(),
+        adapter_id: adapter_id.into(),
+        source_event_id: source_id.into(),
+        source_generation: sequence,
+        source_sequence_authoritative: authoritative,
+        native_session_id: native.into(),
+        pane_id: pane.into(),
+        origin_server_identity: origin_server_identity.into(),
+        payload_json: serde_json::to_vec(&payload).unwrap(),
         occurred_at_unix_millis: now(),
     }
 }

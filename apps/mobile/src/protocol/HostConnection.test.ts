@@ -101,7 +101,7 @@ describe("handshake (§7.3)", () => {
     const [hello, subscribe] = transport.drain();
     expect(hello?.requestId).toBe(1n);
     expect(hello?.protocolMajor).toBe(2);
-    expect(hello?.protocolMinor).toBe(0);
+    expect(hello?.protocolMinor).toBe(1);
     expect(hello?.payload.case).toBe("clientHello");
     if (hello?.payload.case !== "clientHello") throw new Error("unreachable");
     expect(hello.payload.value.requestedCapabilities).toBe(HOST_CAPABILITIES);

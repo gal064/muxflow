@@ -85,6 +85,7 @@ export XDG_CONFIG_HOME='$config'
 export XDG_DATA_HOME='$data'
 export XDG_CACHE_HOME='$cache'
 export XDG_RUNTIME_DIR='$runtime'
+export ADE_HOST_RUNTIME_DIR='$runtime'
 export TMUX_TMPDIR='$tmux_runtime'
 export ADE_TMUX_SOCKET_NAME='$tmux_socket'
 export ADE_HOST_HELPER_PATH='$helper'
@@ -118,11 +119,8 @@ if [[ -r '$run_root/desktop.pid' ]]; then
   fi
   rm -f '$run_root/desktop.pid'
 fi
-# The same resolution the app was launched with. Naming the directory here
-# instead resolved $runtime while the app's daemon, which only had
-# XDG_RUNTIME_DIR, was in $runtime/muxflow — so cleanup could not
-# reach it and every run left a daemon behind.
-HOME='$home' XDG_RUNTIME_DIR='$runtime' \\
+# The same explicit development runtime the app was launched with.
+HOME='$home' XDG_RUNTIME_DIR='$runtime' ADE_HOST_RUNTIME_DIR='$runtime' \\
   ADE_TMUX_SOCKET_NAME='$tmux_socket' '$helper' daemon-stop >/dev/null 2>&1 || true
 env -u TMUX HOME='$home' TMUX_TMPDIR='$tmux_runtime' tmux -L '$tmux_socket' kill-server >/dev/null 2>&1 || true
 EOF

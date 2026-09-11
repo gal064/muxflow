@@ -231,7 +231,7 @@ ADE_HOST_RUNTIME_DIR="$runtime/installer-runtime" \
 # shutdown operation. Its private metadata must be verified before fallback
 # termination, and the replacement must still pass a fresh handshake.
 ssh -F "$ssh_config" ade-phase1-docker \
-  '"$HOME/.local/bin/muxflow-host" daemon-stop >/dev/null 2>&1 || true; runtime=${XDG_RUNTIME_DIR:-/tmp/muxflow-$(id -u)}; for i in $(seq 1 100); do [ ! -S "$runtime/host.sock" ] && break; sleep 0.05; done; [ ! -S "$runtime/host.sock" ]; ADE_PHASE1_TESTING=1 ADE_PHASE1_TEST_PROTOCOL_MAJOR=99 nohup "$HOME/.local/bin/muxflow-host" daemon </dev/null >/dev/null 2>&1 &'
+  '"$HOME/.local/bin/muxflow-host" daemon-stop >/dev/null 2>&1 || true; runtime=/tmp/muxflow-$(id -u); for i in $(seq 1 100); do [ ! -S "$runtime/host.sock" ] && break; sleep 0.05; done; [ ! -S "$runtime/host.sock" ]; ADE_PHASE1_TESTING=1 ADE_PHASE1_TEST_PROTOCOL_MAJOR=99 nohup "$HOME/.local/bin/muxflow-host" daemon </dev/null >/dev/null 2>&1 &'
 for _ in $(seq 1 100); do
   phase8_timeout 5 5 ssh -F "$ssh_config" ade-phase1-docker \
     'test -S /tmp/muxflow-1000/host.sock' && break

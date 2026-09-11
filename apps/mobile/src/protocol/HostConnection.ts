@@ -456,6 +456,7 @@ export class HostConnection {
       return;
     }
     attempt.hello = hello;
+    this.log(`handshake.ok helper=${hello.helperVersion} build=${hello.helperBuildDigest.slice(0, 12) || "unknown"}`);
     if (bulk) {
       this.goLive(attempt);
       this.options.onConnected?.();
