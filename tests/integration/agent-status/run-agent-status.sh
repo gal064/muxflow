@@ -188,28 +188,27 @@ expect lifecycle idle
 
 echo "== Codex transcript repairs a missing interrupted-child hook =="
 transcript="$test_home/.codex/sessions/2026/09/09/rollout-agent-status.jsonl"
-printf '%s\n' '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","kind":"started","agent_thread_id":"captured-child","agent_path":"private-path-must-not-persist"}}}' >"$transcript"
+printf '%s\n' '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","kind":"interacted","agent_thread_id":"parent-session","agent_path":"private-path-must-not-persist"}}}' >"$transcript"
 send_codex SubagentStart ",\"turn_id\":\"captured-turn\",\"agent_id\":\"captured-child\",\"transcript_path\":\"$transcript\""
 send_codex Stop ",\"turn_id\":\"captured-turn\",\"transcript_path\":\"$transcript\""
 expect_codex lifecycle 1
-printf '%s\n' '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","kind":"interrupted","agent_thread_id":"captured-child","agent_path":"private-path-must-not-persist"}}}' >>"$transcript"
+printf '%s\n' '{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"captured-turn"}}' >>"$transcript"
 for _ in $(seq 1 50); do
   [[ "$(codex_field lifecycle)" == "3" ]] && break
   sleep 0.1
 done
 expect_codex lifecycle 3
 expect_codex hook_terminal true
-[[ "$(codex_field codex_running_subagent_ids)" == "[]" ]] || fail "interrupted child remained active"
+[[ "$(codex_field codex_running_subagents)" == "{}" ]] || fail "interrupted child remained active"
 if grep -Fq "$transcript" "$store" || grep -Fq 'private-path-must-not-persist' "$store"; then
   fail "the agent store retained a Codex transcript path or content"
 fi
 
 echo "== resumed Codex child returns the stopped parent to working =="
-printf '%s\n' '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","kind":"interacted","agent_thread_id":"captured-child"}}}' >>"$transcript"
-send_codex UserPromptSubmit ",\"turn_id\":\"resumed-turn\",\"agent_id\":\"captured-child\",\"transcript_path\":\"$transcript\""
+send_codex PreToolUse ",\"turn_id\":\"resumed-turn\",\"agent_id\":\"captured-child\",\"transcript_path\":\"$transcript\""
 expect_codex lifecycle 1
 expect_codex hook_terminal false
-printf '%s\n' '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","kind":"completed","agent_thread_id":"captured-child"}}}' >>"$transcript"
+printf '%s\n' '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"resumed-turn"}}' >>"$transcript"
 for _ in $(seq 1 50); do
   [[ "$(codex_field lifecycle)" == "3" ]] && break
   sleep 0.1

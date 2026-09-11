@@ -25,7 +25,7 @@ pub(crate) const MANAGED_OWNER: &str = "muxflow";
 /// Bumped whenever the managed *event set* changes, not only the command
 /// string: an install from an older version covers fewer events, and reporting
 /// it as current would leave a transition that can never arrive.
-pub(crate) const MANAGED_VERSION: u32 = 4;
+pub(crate) const MANAGED_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedHook {
@@ -128,10 +128,10 @@ impl AgentAdapter for CodexAdapter {
         ".codex/hooks.json"
     }
 
-    /// Measured against a real `~/.codex/hooks.json` (Codex CLI 0.128, 0.147
-    /// and 0.149.1): Codex fires `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
-    /// `PermissionRequest`, `PostToolUse`, `Stop`, `SubagentStart` and
-    /// `SubagentStop`.
+    /// Measured against a real `~/.codex/hooks.json` (Codex CLI 0.128 through
+    /// 0.154.0): Codex fires `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+    /// `PermissionRequest`, `PostToolUse`, `Stop`, `Interrupt`, `SessionEnd`,
+    /// `SubagentStart` and `SubagentStop`.
     ///
     /// Two events Claude Code has are absent from that surface and are
     /// therefore gaps rather than omissions: there is no `StopFailure`, so a
@@ -155,6 +155,8 @@ impl AgentAdapter for CodexAdapter {
             "SubagentStart",
             "SubagentStop",
             "Stop",
+            "Interrupt",
+            "SessionEnd",
         ]
     }
 
@@ -206,6 +208,8 @@ impl AgentAdapter for CodexAdapter {
                 // A subagent finishing says the parent is still mid-turn.
                 ("SubagentStop", v1::AgentLifecycleState::Working),
                 ("Stop", v1::AgentLifecycleState::Idle),
+                ("Interrupt", v1::AgentLifecycleState::Idle),
+                ("SessionEnd", v1::AgentLifecycleState::Idle),
                 ("SessionStart", v1::AgentLifecycleState::Idle),
             ],
         )
@@ -463,6 +467,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(blocked.lifecycle, v1::AgentLifecycleState::Blocked);
+        for event_name in ["Interrupt", "SessionEnd"] {
+            assert_eq!(
+                codex
+                    .parse_hook(&serde_json::json!({"hook_event_name": event_name}))
+                    .unwrap()
+                    .lifecycle,
+                v1::AgentLifecycleState::Idle
+            );
+        }
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         let idle = claude
             .parse_hook(
@@ -572,11 +585,11 @@ mod tests {
         assert_eq!(descriptors.len(), 2);
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
-        assert_eq!(codex.hook_events().len(), 8);
+        assert_eq!(codex.hook_events().len(), 10);
         assert_eq!(codex.descriptor(home, &observed[0].1).id, "codex");
         assert_eq!(
             codex.hook_command(Path::new("/opt/muxflow-host")),
-            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 4"
+            "'/opt/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 5"
         );
         let claude = adapter(v1::AgentAdapterKind::ClaudeCode).unwrap();
         assert!(claude.hook_events().contains(&"Notification"));

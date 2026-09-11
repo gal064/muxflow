@@ -112,6 +112,12 @@ impl TurnMonitor {
         None
     }
 
+    pub(crate) fn is_readable(&self) -> bool {
+        self.transcript
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.nlink() > 0)
+    }
+
     /// Read exact Codex child activity records in append order.
     ///
     /// `SubAgentActivity` is an internal transcript item rather than hook

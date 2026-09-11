@@ -4,9 +4,10 @@ Codex and Claude Code are the only V1 agent adapters. The app can launch them or
 detect manually started processes.
 
 **Hooks are the primary source of lifecycle state.** For Codex, the daemon also
-reconciles exact child-activity records from the transcript identified by a
-live hook. That read-only repair path covers transitions such as cancellation
-that have no matching hook; it does not infer state from prompt or tool text.
+watches each active child's exact turn in the transcript identified by that
+child's live hook. That read-only repair path covers terminal transitions such
+as cancellation that have no matching hook; it does not infer state from prompt
+or tool text.
 An agent whose hooks are not installed appears in the list and reads `unknown`
 — the app says which agents exist and nothing about what they are doing.
 Process detection proves an agent is there, and its absence retires the row
@@ -72,9 +73,10 @@ Claude Code: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
 `Notification`.
 
 Codex: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`,
-`PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`. It has no
+`PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`, `Interrupt`,
+`SessionEnd`. It has no
 `StopFailure` or `Notification` (measured against Codex CLI 0.128, 0.147,
-0.149.1 and 0.153.4), so a turn that ends in failure is indistinguishable from
+0.149.1, 0.153.4 and 0.154.0), so a turn that ends in failure is indistinguishable from
 one that succeeds. `UserPromptSubmit` caches a positive auto-review result for
 the exact turn before tool work begins. A `PermissionRequest` trusts that
 positive cache; on a cache miss it re-reads the request's turn context rather
@@ -103,15 +105,17 @@ only transient locator is Codex's transcript path on a live hook. The daemon
 opens it through the confined transcript reader and retains only the validated
 open file handle in memory. For a confirmed user-reviewed request it checks the
 file length during the existing maintenance pass and clears Blocked when that
-exact turn appends `turn_aborted` or `task_complete`. For a parent with active
-descendants, the same pass recognizes only exact `SubAgentActivity` records:
-`started` and `interacted` make that opaque child ID active; `completed` and
-`interrupted` make only that ID inactive. This covers Codex cancellation, which
-can emit no clearing hook. Monitors, pending transitions, and retained child
-IDs are capped at 64, every opaque child ID is capped at 1 KiB, and each read
+exact turn appends `turn_aborted` or `task_complete`. Each child-scoped hook
+identifies one opaque child ID and exact turn ID. Any activity on a newer child
+turn reopens that child; `SubagentStop` or a matching transcript terminal clears
+only that turn. This covers Codex cancellation, which can emit no clearing hook,
+without treating the parent-directed `SubAgentActivity(interacted)` record in a
+child transcript as another child. Monitors and retained child IDs are capped
+at 64, every opaque child ID is capped at 1 KiB, and each read
 is limited to the final 1 MiB after file growth. If no daemon accepts the event, the hook materializes only those
-sanitized child transitions, resolves the reviewer when needed, and strips the
-path before placing the event in the durable fallback mailbox. The
+sanitized terminal transitions found in the root transcript, resolves the
+reviewer when needed, and strips the path before placing the event in the
+durable fallback mailbox. The
 hook process accepts a bounded vendor envelope up to 64 MiB because tool-complete
 events can include the full result, including base64 image data. It parses that
 envelope as a stream and retains only the lifecycle allowlist, so large tool
@@ -125,10 +129,11 @@ reviewer needed for exact-turn revalidation. The daemon keeps a bounded set of
 parent and child reviewer decisions so concurrent children cannot evict one
 another. An unresolved permission reviewer stays Working; only an exact `user`
 decision raises Blocked. Codex child-scoped events retain only their opaque
-agent ID; the daemon keeps those IDs as a set so duplicate events cannot
-miscount concurrent children and later child activity can reopen an existing
-child. Hooks update that set immediately and transcript records reconcile
-missed transitions. A parent `Stop` remains Working until that set is empty,
+agent and turn IDs; the daemon keeps a bounded child-to-turn map so duplicate
+events cannot miscount concurrent children, a resumed turn replaces its prior
+turn, and a late terminal event cannot clear the resumed child. Hooks update
+that map immediately and exact-turn transcript terminals repair missing stops.
+A parent `Stop` remains Working until that map is empty,
 including across daemon restarts, while a real Blocked state remains Blocked
 until its own question or permission resolves. A Claude `Stop` retains only a boolean
 saying whether a subagent is still running; task descriptions, commands, IDs,

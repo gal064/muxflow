@@ -34,25 +34,31 @@ fn codex_tool_event(id: &str, event_name: &str, tool_name: &str) -> v1::AgentHoo
 }
 
 fn codex_subagent_event(id: &str, event_name: &str, agent_id: &str) -> v1::AgentHookEvent {
+    codex_subagent_turn_event(id, event_name, agent_id, &format!("turn-{agent_id}"))
+}
+
+fn codex_subagent_turn_event(
+    id: &str,
+    event_name: &str,
+    agent_id: &str,
+    turn_id: &str,
+) -> v1::AgentHookEvent {
     let mut hook = event(id, 0, event_name);
     hook.payload_json = serde_json::to_vec(&serde_json::json!({
         "hook_event_name": event_name,
         "agent_id": agent_id,
+        adapters::CODEX_APPROVAL_TURN_ID_FIELD: turn_id,
     }))
     .unwrap();
     hook
 }
 
-fn codex_child_transcript_line(agent_id: &str, kind: &str) -> String {
+fn codex_turn_terminal(turn_id: &str, kind: &str) -> String {
     serde_json::json!({
         "type": "event_msg",
         "payload": {
-            "type": "item_completed",
-            "item": {
-                "type": "SubAgentActivity",
-                "kind": kind,
-                "agent_thread_id": agent_id,
-            }
+            "type": kind,
+            "turn_id": turn_id,
         }
     })
     .to_string()
@@ -62,6 +68,8 @@ fn attach_child_monitor(
     runtime: &AgentRuntime,
     home: &std::path::Path,
     transcript: &std::path::Path,
+    agent_id: &str,
+    turn_id: &str,
 ) -> String {
     let record_id = runtime
         .state
@@ -73,11 +81,20 @@ fn attach_child_monitor(
         .unwrap()
         .clone();
     let monitor = crate::hook::codex_transcript::TurnMonitor::open(
-        &serde_json::json!({"transcript_path": transcript}),
+        &serde_json::json!({"turn_id": turn_id, "transcript_path": transcript}),
         home,
     )
     .unwrap();
-    runtime.track_codex_children(&record_id, Some(monitor), true);
+    runtime.track_codex_child(
+        &record_id,
+        Some(CodexTurnKey {
+            agent_id: agent_id.into(),
+            turn_id: turn_id.into(),
+        }),
+        Some(monitor),
+        true,
+        false,
+    );
     record_id
 }
 
@@ -1502,7 +1519,7 @@ fn unwaited_codex_subagents_keep_the_parent_working_until_the_last_one_stops() {
     {
         let state = runtime.state.lock().unwrap();
         let stored = state.agents.values().next().unwrap();
-        assert_eq!(stored.codex_running_subagent_ids.len(), 3);
+        assert_eq!(stored.codex_running_subagents.len(), 3);
         assert!(stored.codex_parent_stopped_for_subagents);
         assert!(!stored.hook_terminal);
     }
@@ -1533,7 +1550,7 @@ fn unwaited_codex_subagents_keep_the_parent_working_until_the_last_one_stops() {
                 .values()
                 .next()
                 .unwrap()
-                .codex_running_subagent_ids
+                .codex_running_subagents
                 .len(),
             remaining
         );
@@ -1553,9 +1570,96 @@ fn unwaited_codex_subagents_keep_the_parent_working_until_the_last_one_stops() {
     assert_eq!(finished.attention_kind, "completed");
     let state = runtime.state.lock().unwrap();
     let stored = state.agents.values().next().unwrap();
-    assert!(stored.codex_running_subagent_ids.is_empty());
+    assert!(stored.codex_running_subagents.is_empty());
     assert!(!stored.codex_parent_stopped_for_subagents);
     assert!(stored.hook_terminal);
+}
+
+#[test]
+fn codex_interrupt_and_session_end_clear_unwaited_subagents() {
+    for terminal_event in ["Interrupt", "SessionEnd"] {
+        let runtime = runtime(&format!(
+            "codex-{}-clears-unwaited-subagents",
+            terminal_event.to_ascii_lowercase()
+        ));
+        let topology = topology("codex");
+        for hook in [
+            event("prompt", 0, "UserPromptSubmit"),
+            codex_subagent_event("start", "SubagentStart", "child"),
+            event("parent-stop", 0, "Stop"),
+        ] {
+            runtime
+                .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+                .unwrap();
+        }
+
+        let terminal = runtime
+            .ingest_hook_with_context(
+                &event("terminal", 0, terminal_event),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        assert_eq!(
+            terminal.agent.unwrap().lifecycle,
+            v1::AgentLifecycleState::Idle as i32
+        );
+
+        let state = runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        assert!(record.codex_running_subagents.is_empty());
+        assert!(!record.codex_parent_stopped_for_subagents);
+        assert!(record.hook_terminal);
+    }
+}
+
+#[test]
+fn a_child_stop_clears_an_active_id_loaded_without_a_turn() {
+    let runtime = runtime("codex-legacy-child-id-stop");
+    let topology = topology("codex");
+    for hook in [
+        event("prompt", 0, "UserPromptSubmit"),
+        codex_subagent_event("start", "SubagentStart", "child"),
+        event("parent-stop", 0, "Stop"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    runtime
+        .state
+        .lock()
+        .unwrap()
+        .agents
+        .values_mut()
+        .next()
+        .unwrap()
+        .codex_running_subagents
+        .insert("child".into(), String::new());
+
+    let stopped = runtime
+        .ingest_hook_with_context(
+            &codex_subagent_event("stop", "SubagentStop", "child"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert_eq!(
+        stopped.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .codex_running_subagents
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1656,7 +1760,7 @@ fn a_codex_sibling_finishing_cannot_hide_a_permission_block() {
             .ingest_hook_with_context(&hook, "server-a", Some(&topology))
             .unwrap();
     }
-    let mut permission = permission_for_turn("permission", "child-turn");
+    let mut permission = permission_for_turn("permission", "turn-child-2");
     let mut payload: serde_json::Value = serde_json::from_slice(&permission.payload_json).unwrap();
     payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "user".into();
     payload[adapters::CODEX_SUBAGENT_ID_FIELD] = "child-2".into();
@@ -1716,7 +1820,7 @@ fn the_final_codex_child_cannot_terminalize_a_blocked_parent() {
             .ingest_hook_with_context(&hook, "server-a", Some(&topology))
             .unwrap();
     }
-    let mut permission = permission_for_turn("permission", "child-turn");
+    let mut permission = permission_for_turn("permission", "turn-child");
     let mut payload: serde_json::Value = serde_json::from_slice(&permission.payload_json).unwrap();
     payload[adapters::CODEX_APPROVAL_REVIEWER_FIELD] = "user".into();
     payload[adapters::CODEX_SUBAGENT_ID_FIELD] = "child".into();
@@ -1738,7 +1842,7 @@ fn the_final_codex_child_cannot_terminalize_a_blocked_parent() {
     );
     let state = runtime.state.lock().unwrap();
     let record = state.agents.values().next().unwrap();
-    assert!(record.codex_running_subagent_ids.is_empty());
+    assert!(record.codex_running_subagents.is_empty());
     assert!(record.codex_parent_stopped_for_subagents);
     assert!(!record.hook_terminal);
 }
@@ -1811,7 +1915,12 @@ fn continued_codex_child_activity_reopens_a_stopped_parent() {
 
     let resumed = runtime
         .ingest_hook_with_context(
-            &codex_subagent_event("child-resumed", "UserPromptSubmit", "child"),
+            &codex_subagent_turn_event(
+                "child-resumed",
+                "PreToolUse",
+                "child",
+                "turn-child-resumed",
+            ),
             "server-a",
             Some(&topology),
         )
@@ -1824,14 +1933,19 @@ fn continued_codex_child_activity_reopens_a_stopped_parent() {
     {
         let state = runtime.state.lock().unwrap();
         let record = state.agents.values().next().unwrap();
-        assert!(record.codex_running_subagent_ids.contains("child"));
+        assert!(record.codex_running_subagents.contains_key("child"));
         assert!(record.codex_parent_stopped_for_subagents);
         assert!(!record.hook_terminal);
     }
 
     let final_stop = runtime
         .ingest_hook_with_context(
-            &codex_subagent_event("child-stop-2", "SubagentStop", "child"),
+            &codex_subagent_turn_event(
+                "child-stop-2",
+                "SubagentStop",
+                "child",
+                "turn-child-resumed",
+            ),
             "server-a",
             Some(&topology),
         )
@@ -1863,7 +1977,7 @@ fn transcript_interruption_finishes_a_stopped_parent_without_a_subagent_stop_hoo
     std::fs::create_dir_all(&sessions).unwrap();
     let transcript = sessions.join("rollout.jsonl");
     std::fs::write(&transcript, b"").unwrap();
-    let record_id = attach_child_monitor(&runtime, home.path(), &transcript);
+    let record_id = attach_child_monitor(&runtime, home.path(), &transcript, "child", "turn-child");
 
     let mut file = std::fs::OpenOptions::new()
         .append(true)
@@ -1872,21 +1986,21 @@ fn transcript_interruption_finishes_a_stopped_parent_without_a_subagent_stop_hoo
     writeln!(
         file,
         "{}",
-        codex_child_transcript_line("child", "interrupted")
+        codex_turn_terminal("turn-child", "turn_aborted")
     )
     .unwrap();
     file.sync_all().unwrap();
-    let events = runtime.sweep_codex_child_transitions();
+    let events = runtime.sweep_codex_child_terminals();
 
     assert_eq!(events.len(), 1);
     assert!(events[0].notify);
-    assert_eq!(events[0].reason, "completed");
+    assert_eq!(events[0].reason, "child_turn_aborted");
     assert_eq!(
         events[0].agent.as_ref().unwrap().lifecycle,
         v1::AgentLifecycleState::Idle as i32
     );
     let record = &runtime.state.lock().unwrap().agents[&record_id];
-    assert!(record.codex_running_subagent_ids.is_empty());
+    assert!(record.codex_running_subagents.is_empty());
     assert!(record.hook_terminal);
     assert!(runtime.codex_child_monitors.lock().unwrap().is_empty());
 }
@@ -1911,7 +2025,7 @@ fn a_resume_hook_wins_over_an_older_unpolled_interruption() {
     std::fs::create_dir_all(&sessions).unwrap();
     let transcript = sessions.join("rollout.jsonl");
     std::fs::write(&transcript, b"").unwrap();
-    let record_id = attach_child_monitor(&runtime, home.path(), &transcript);
+    let record_id = attach_child_monitor(&runtime, home.path(), &transcript, "child", "turn-child");
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(&transcript)
@@ -1919,14 +2033,14 @@ fn a_resume_hook_wins_over_an_older_unpolled_interruption() {
     writeln!(
         file,
         "{}",
-        codex_child_transcript_line("child", "interrupted")
+        codex_turn_terminal("turn-child", "turn_aborted")
     )
     .unwrap();
     file.sync_all().unwrap();
 
     let resumed = runtime
         .ingest_hook_with_context(
-            &codex_subagent_event("resume", "UserPromptSubmit", "child"),
+            &codex_subagent_turn_event("resume", "PreToolUse", "child", "turn-child-resumed"),
             "server-a",
             Some(&topology),
         )
@@ -1939,12 +2053,15 @@ fn a_resume_hook_wins_over_an_older_unpolled_interruption() {
         let state = runtime.state.lock().unwrap();
         let record = &state.agents[&record_id];
         assert_eq!(
-            record.codex_running_subagent_ids,
-            std::collections::BTreeSet::from(["child".to_owned()])
+            record.codex_running_subagents,
+            std::collections::BTreeMap::from([(
+                "child".to_owned(),
+                "turn-child-resumed".to_owned(),
+            )])
         );
         assert!(!record.hook_terminal);
     }
-    assert!(runtime.sweep_codex_child_transitions().is_empty());
+    assert!(runtime.sweep_codex_child_terminals().is_empty());
 }
 
 #[test]
@@ -1967,7 +2084,13 @@ fn recent_child_terminal_is_not_starved_by_sixty_four_historical_ids() {
     std::fs::create_dir_all(&sessions).unwrap();
     let transcript = sessions.join("rollout.jsonl");
     std::fs::write(&transcript, b"").unwrap();
-    attach_child_monitor(&runtime, home.path(), &transcript);
+    attach_child_monitor(
+        &runtime,
+        home.path(),
+        &transcript,
+        "current-child",
+        "turn-current-child",
+    );
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(&transcript)
@@ -1976,19 +2099,19 @@ fn recent_child_terminal_is_not_starved_by_sixty_four_historical_ids() {
         writeln!(
             file,
             "{}",
-            codex_child_transcript_line(&format!("old-{index}"), "completed")
+            codex_turn_terminal(&format!("old-{index}"), "task_complete")
         )
         .unwrap();
     }
     writeln!(
         file,
         "{}",
-        codex_child_transcript_line("current-child", "interrupted")
+        codex_turn_terminal("turn-current-child", "turn_aborted")
     )
     .unwrap();
     file.sync_all().unwrap();
 
-    let events = runtime.sweep_codex_child_transitions();
+    let events = runtime.sweep_codex_child_terminals();
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].agent.as_ref().unwrap().lifecycle,
@@ -2015,7 +2138,7 @@ fn transcript_completion_before_parent_stop_leaves_completion_to_the_parent() {
     std::fs::create_dir_all(&sessions).unwrap();
     let transcript = sessions.join("rollout.jsonl");
     std::fs::write(&transcript, b"").unwrap();
-    attach_child_monitor(&runtime, home.path(), &transcript);
+    attach_child_monitor(&runtime, home.path(), &transcript, "child", "turn-child");
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(&transcript)
@@ -2023,12 +2146,12 @@ fn transcript_completion_before_parent_stop_leaves_completion_to_the_parent() {
     writeln!(
         file,
         "{}",
-        codex_child_transcript_line("child", "completed")
+        codex_turn_terminal("turn-child", "task_complete")
     )
     .unwrap();
     file.sync_all().unwrap();
 
-    let reconciled = runtime.sweep_codex_child_transitions();
+    let reconciled = runtime.sweep_codex_child_terminals();
     assert_eq!(reconciled.len(), 1);
     assert!(!reconciled[0].notify);
     assert_eq!(
@@ -2082,22 +2205,35 @@ fn transcript_reconciles_parallel_and_nested_children_without_hiding_a_block() {
     std::fs::create_dir_all(&sessions).unwrap();
     let transcript = sessions.join("rollout.jsonl");
     std::fs::write(&transcript, b"").unwrap();
-    attach_child_monitor(&runtime, home.path(), &transcript);
+    attach_child_monitor(
+        &runtime,
+        home.path(),
+        &transcript,
+        "direct-child",
+        "turn-direct-child",
+    );
+    attach_child_monitor(
+        &runtime,
+        home.path(),
+        &transcript,
+        "nested-child",
+        "turn-nested-child",
+    );
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .open(&transcript)
         .unwrap();
-    for (child, kind) in [
-        ("direct-child", "completed"),
-        ("nested-child", "interrupted"),
+    for (turn, kind) in [
+        ("turn-direct-child", "task_complete"),
+        ("turn-nested-child", "turn_aborted"),
     ] {
-        writeln!(file, "{}", codex_child_transcript_line(child, kind)).unwrap();
+        writeln!(file, "{}", codex_turn_terminal(turn, kind)).unwrap();
     }
     file.sync_all().unwrap();
 
-    let reconciled = runtime.sweep_codex_child_transitions();
-    assert_eq!(reconciled.len(), 1);
-    let blocked = reconciled[0].agent.as_ref().unwrap();
+    let reconciled = runtime.sweep_codex_child_terminals();
+    assert_eq!(reconciled.len(), 2);
+    let blocked = reconciled.last().unwrap().agent.as_ref().unwrap();
     assert_eq!(blocked.lifecycle, v1::AgentLifecycleState::Blocked as i32);
     assert_eq!(blocked.attention_kind, "blocked");
     assert!(
@@ -2109,7 +2245,7 @@ fn transcript_reconciles_parallel_and_nested_children_without_hiding_a_block() {
             .values()
             .next()
             .unwrap()
-            .codex_running_subagent_ids
+            .codex_running_subagents
             .is_empty()
     );
     {
@@ -2165,7 +2301,7 @@ fn child_ids_and_transcript_monitors_are_bounded() {
             .values()
             .next()
             .unwrap()
-            .codex_running_subagent_ids
+            .codex_running_subagents
             .len(),
         MAX_CODEX_CHILDREN
     );
@@ -2189,11 +2325,20 @@ fn child_ids_and_transcript_monitors_are_bounded() {
         let transcript = sessions.join(format!("{index}.jsonl"));
         std::fs::write(&transcript, b"").unwrap();
         let monitor = crate::hook::codex_transcript::TurnMonitor::open(
-            &serde_json::json!({"transcript_path": transcript}),
+            &serde_json::json!({"turn_id": format!("turn-{index}"), "transcript_path": transcript}),
             home.path(),
         )
         .unwrap();
-        runtime.track_codex_children(&format!("record-{index}"), Some(monitor), true);
+        runtime.track_codex_child(
+            &format!("record-{index}"),
+            Some(CodexTurnKey {
+                agent_id: format!("child-{index}"),
+                turn_id: format!("turn-{index}"),
+            }),
+            Some(monitor),
+            true,
+            false,
+        );
         homes.push(home);
     }
     assert_eq!(
@@ -2221,8 +2366,13 @@ fn daemon_load_bounds_an_older_oversized_child_set_without_false_idle() {
             .unwrap();
         let mut state = runtime.state.lock().unwrap();
         let record = state.agents.values_mut().next().unwrap();
-        record.codex_running_subagent_ids = (0..80)
-            .map(|index| format!("legacy-child-{index}"))
+        record.codex_running_subagents = (0..80)
+            .map(|index| {
+                (
+                    format!("legacy-child-{index}"),
+                    format!("legacy-turn-{index}"),
+                )
+            })
             .collect();
         record.codex_parent_stopped_for_subagents = true;
         runtime.persist_locked(&state).unwrap();
@@ -2231,7 +2381,7 @@ fn daemon_load_bounds_an_older_oversized_child_set_without_false_idle() {
     let restarted = AgentRuntime::isolated(path);
     let state = restarted.state.lock().unwrap();
     let record = state.agents.values().next().unwrap();
-    assert_eq!(record.codex_running_subagent_ids.len(), MAX_CODEX_CHILDREN);
+    assert_eq!(record.codex_running_subagents.len(), MAX_CODEX_CHILDREN);
     assert!(record.codex_subagent_capacity_exceeded);
     assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
 }
@@ -2254,7 +2404,7 @@ fn a_readable_child_transcript_is_stronger_than_the_twenty_four_hour_backstop() 
     std::fs::create_dir_all(&sessions).unwrap();
     let transcript = sessions.join("rollout.jsonl");
     std::fs::write(&transcript, b"").unwrap();
-    attach_child_monitor(&runtime, home.path(), &transcript);
+    attach_child_monitor(&runtime, home.path(), &transcript, "child", "turn-child");
     {
         let mut state = runtime.state.lock().unwrap();
         let record = state.agents.values_mut().next().unwrap();
@@ -2262,7 +2412,7 @@ fn a_readable_child_transcript_is_stronger_than_the_twenty_four_hour_backstop() 
             now_millis() - STALE_SUBAGENT_WORKING_TTL_MILLIS - 1_000;
     }
 
-    assert!(runtime.sweep_codex_child_transitions().is_empty());
+    assert!(runtime.sweep_codex_child_terminals().is_empty());
     assert!(runtime.sweep_stale().is_empty());
     assert_eq!(
         runtime.snapshot_for("server-a").agents[0].lifecycle,
@@ -2496,7 +2646,7 @@ fn staleness_never_overrides_direct_evidence_of_a_running_subagent() {
     let state = claude.state.lock().unwrap();
     let record = state.agents.values().next().unwrap();
     assert!(!record.claude_has_running_subagent);
-    assert!(record.codex_running_subagent_ids.is_empty());
+    assert!(record.codex_running_subagents.is_empty());
     assert!(!record.codex_parent_stopped_for_subagents);
     assert_eq!(record.subagent_evidence_observed_at_unix_millis, 0);
 }
@@ -2528,7 +2678,7 @@ fn expired_codex_subagent_evidence_cannot_poison_the_next_turn() {
     {
         let state = runtime.state.lock().unwrap();
         let record = state.agents.values().next().unwrap();
-        assert!(record.codex_running_subagent_ids.is_empty());
+        assert!(record.codex_running_subagents.is_empty());
         assert!(!record.codex_parent_stopped_for_subagents);
     }
 
