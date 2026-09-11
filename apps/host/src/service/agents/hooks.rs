@@ -576,6 +576,7 @@ fn add_managed(value: &mut Value, adapter: &dyn adapters::AgentAdapter, helper_p
         .expect("review validated hooks object");
     let command = adapter.hook_command(helper_path);
     for event in adapter.hook_events() {
+        let timeout = adapter.hook_timeout_seconds(event);
         let groups = hooks
             .entry((*event).to_owned())
             .or_insert_with(|| Value::Array(Vec::new()));
@@ -583,7 +584,7 @@ fn add_managed(value: &mut Value, adapter: &dyn adapters::AgentAdapter, helper_p
             .as_array_mut()
             .expect("review validated event array")
             .push(serde_json::json!({
-                "hooks": [{"type": "command", "command": command, "timeout": 5}]
+                "hooks": [{"type": "command", "command": command, "timeout": timeout}]
             }));
     }
 }
@@ -665,10 +666,10 @@ fn managed_entries_are_current(
                         .flatten()
                 })
                 .any(|command| {
-                    command
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .is_some_and(|command| command == expected)
+                    command.get("type").and_then(Value::as_str) == Some("command")
+                        && command.get("command").and_then(Value::as_str) == Some(expected.as_str())
+                        && command.get("timeout").and_then(Value::as_u64)
+                            == Some(adapter.hook_timeout_seconds(event))
                 })
         })
 }
@@ -971,9 +972,9 @@ mod tests {
         );
         assert_eq!(
             review.proposed_command,
-            "'/opt/muxflow/bin/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 5"
+            "'/opt/muxflow/bin/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 6"
         );
-        assert_eq!(review.ownership_marker, "owner=muxflow;version=5");
+        assert_eq!(review.ownership_marker, "owner=muxflow;version=6");
         assert!(review.trust_guidance.contains("never edits or bypasses"));
         assert!(review.before_preview.contains("keep-me"));
         assert!(review.after_preview.contains("--managed-owner"));
@@ -994,6 +995,24 @@ mod tests {
             adapter.hook_events().len()
         );
         assert!(installed["hooks"].get("Notification").is_none());
+        assert_eq!(installed["hooks"]["Interrupt"][0]["hooks"][0]["timeout"], 3);
+        assert_eq!(
+            installed["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"],
+            3
+        );
+        assert_eq!(installed["hooks"]["Stop"][1]["hooks"][0]["timeout"], 5);
+        assert!(managed_entries_are_current(
+            &installed,
+            adapter,
+            Path::new("/opt/muxflow/bin/muxflow-host")
+        ));
+        let mut wrong_timeout = installed.clone();
+        wrong_timeout["hooks"]["Interrupt"][0]["hooks"][0]["timeout"] = serde_json::json!(5);
+        assert!(!managed_entries_are_current(
+            &wrong_timeout,
+            adapter,
+            Path::new("/opt/muxflow/bin/muxflow-host")
+        ));
         assert!(installed.to_string().contains("keep-me"));
         let repeated = manager
             .review(
@@ -1217,14 +1236,14 @@ mod tests {
     }
 
     #[test]
-    fn install_migrates_exact_legacy_owner_and_redacts_bounded_review() {
+    fn install_migrates_version_five_owner_and_redacts_bounded_review() {
         let home = std::env::current_dir()
             .unwrap()
             .join("tmp")
             .join(format!("phase6-hook-migrate-{}", uuid::Uuid::new_v4()));
         let path = home.join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let legacy = "muxflow-host hook ingest --adapter codex # muxflow-managed:v1";
+        let legacy = "'/opt/muxflow/bin/muxflow-host' hook ingest --adapter codex --managed-owner muxflow --managed-version 5";
         fs::write(
             &path,
             serde_json::to_vec(&serde_json::json!({
@@ -1256,7 +1275,7 @@ mod tests {
         let installed = String::from_utf8(fs::read(&path).unwrap()).unwrap();
         assert!(!installed.contains(&format!("\"command\": \"{legacy}\"")));
         assert!(installed.contains(&format!("{legacy} lookalike")));
-        assert!(installed.contains("--managed-version 5"));
+        assert!(installed.contains("--managed-version 6"));
         fs::remove_dir_all(home).unwrap();
     }
 
