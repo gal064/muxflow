@@ -55,10 +55,11 @@ describe("agent icon geometry matches the desktop's AgentIdentity.tsx byte-for-b
   });
 
   it("adapter ids resolve the way the desktop's AgentIcon branches do", () => {
-    expect(identity).toContain('adapterId === "claude-code" || adapterId === "claude"');
+    expect(identity).toContain('adapterId === "claude-code"');
+    expect(identity).not.toContain('adapterId === "claude"');
     expect(identity).toContain('adapterId === "codex"');
     expect(isClaudeAdapter("claude-code")).toBe(true);
-    expect(isClaudeAdapter("claude")).toBe(true);
+    expect(isClaudeAdapter("claude")).toBe(false);
     expect(isClaudeAdapter("codex")).toBe(false);
     expect(isCodexAdapter("codex")).toBe(true);
     expect(isCodexAdapter("claude-code")).toBe(false);

@@ -50,6 +50,7 @@ describe("agentSessionLabel (the row's name: the tab, not the adapter)", () => {
     expect(agentSessionLabel(agent({ windowName: "⠋", displayName: "", adapterId: "codex" }), []))
       .toBe("Codex");
     expect(agentSessionLabel(agent({ windowName: "", displayName: "", adapterId: "claude-code" }), [])).toBe("Claude");
+    expect(agentSessionLabel(agent({ windowName: "", displayName: "", adapterId: "claude" }), [])).toBe("Agent");
     expect(agentSessionLabel(agent({ windowName: "", displayName: "", adapterId: "other" }), [])).toBe("Agent");
   });
 

@@ -44,7 +44,7 @@ export const PIN_ICON = {
 } as const;
 
 export function isClaudeAdapter(adapterId: string): boolean {
-  return adapterId === "claude-code" || adapterId === "claude";
+  return adapterId === "claude-code";
 }
 
 export function isCodexAdapter(adapterId: string): boolean {
