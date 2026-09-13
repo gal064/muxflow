@@ -15,7 +15,13 @@ cargo test -p tmux-control >"$evidence/tmux-control.log" 2>&1 & tmux_pid=$!
 cargo test -p muxflow-host --bin muxflow-host -- --test-threads=1 >"$evidence/host.log" 2>&1 & host_pid=$!
 cargo test -p muxflow connection::agent >"$evidence/desktop-bridge.log" 2>&1 & desktop_pid=$!
 
-wait "$fmt_pid" "$protocol_pid" "$tmux_pid" "$host_pid" "$desktop_pid"
+parallel_failed=0
+for pid in "$fmt_pid" "$protocol_pid" "$tmux_pid" "$host_pid" "$desktop_pid"; do
+  if ! wait "$pid"; then
+    parallel_failed=1
+  fi
+done
+((parallel_failed == 0))
 # hook_cli launches the built helper repeatedly. Run it after the host test
 # build so Cargo cannot replace that executable between a daemon launch and a
 # hook launch, which is now correctly detected as an exact-build mismatch.
