@@ -1,83 +1,79 @@
 use std::{
     env, fs,
     io::{BufReader, Read},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{ChildStdin, ChildStdout, Command},
     time::Instant,
 };
 
+use protocol_driver_support::{
+    Bridge, Hello, local_bridge_command, request, request_error, request_with_events,
+    ssh_bridge_command,
+};
 use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, envelope, read_frame_sync,
+    HOST_CAPABILITIES,
     v1::{self, envelope::Payload},
-    write_frame_sync,
 };
 use uuid::Uuid;
 
 fn main() -> Result<(), String> {
     let arguments: Vec<_> = std::env::args().collect();
-    let mut control = spawn_bridge(&arguments)?;
-    let mut bulk = spawn_bridge(&arguments)?;
+    let (mut control, hello) = connect_bridge(&arguments, false, "", 0)?;
+    let (mut bulk, _) = connect_bridge(
+        &arguments,
+        true,
+        &hello.server_identity,
+        9_007_199_254_740_993,
+    )?;
     if arguments.get(1).map(String::as_str) == Some("large-local") {
         run_large_download(&mut control, &mut bulk)?;
     } else {
         run(&mut control, &mut bulk)?;
     }
-    let _ = control.kill();
-    let _ = control.wait();
-    let _ = bulk.kill();
-    let _ = bulk.wait();
     Ok(())
 }
 
-fn spawn_bridge(arguments: &[String]) -> Result<Child, String> {
-    match arguments.get(1).map(String::as_str) {
+fn bridge_command(arguments: &[String]) -> Result<Command, String> {
+    let command = match arguments.get(1).map(String::as_str) {
         Some("local" | "large-local") => {
-            Command::new(arguments.get(2).ok_or("host binary is required")?)
-                .args(["bridge", "--stdio"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .map_err(|error| error.to_string())
+            local_bridge_command(arguments.get(2).ok_or("host binary is required")?)
         }
-        Some("ssh") => Command::new("ssh")
-            .arg("-F")
-            .arg(arguments.get(2).ok_or("SSH config is required")?)
-            .arg("-T")
-            .arg(arguments.get(3).ok_or("SSH target is required")?)
-            .arg("$HOME/.local/bin/muxflow-host bridge --stdio")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| error.to_string()),
-        _ => Err("usage: filesystem-test-driver <local HOST|ssh CONFIG TARGET>".into()),
-    }
+        Some("ssh") => ssh_bridge_command(
+            arguments.get(2).ok_or("SSH config is required")?,
+            arguments.get(3).ok_or("SSH target is required")?,
+            "$HOME/.local/bin/muxflow-host bridge --stdio",
+            &[],
+        ),
+        _ => return Err("usage: filesystem-test-driver <local HOST|ssh CONFIG TARGET>".into()),
+    };
+    Ok(command)
+}
+
+fn connect_bridge(
+    arguments: &[String],
+    bulk: bool,
+    expected_server_identity: &str,
+    connection_epoch: u64,
+) -> Result<(Bridge, v1::ServerHello), String> {
+    Bridge::connect(
+        &mut bridge_command(arguments)?,
+        Hello {
+            desktop_version: "phase4-driver",
+            requested_capabilities: HOST_CAPABILITIES,
+            bulk_connection: bulk,
+            expected_server_identity,
+            connection_epoch,
+        },
+        2,
+    )
 }
 
 const FIVE_GIB: u64 = 5 * 1024 * 1024 * 1024;
 
-fn run_large_download(control: &mut Child, bulk: &mut Child) -> Result<(), String> {
+#[allow(clippy::needless_borrow)]
+fn run_large_download(control: &mut Bridge, bulk: &mut Bridge) -> Result<(), String> {
     let started_at = Instant::now();
-    let mut control_stdin = control
-        .stdin
-        .take()
-        .ok_or("control bridge stdin unavailable")?;
-    let control_stdout = control
-        .stdout
-        .take()
-        .ok_or("control bridge stdout unavailable")?;
-    let mut control_reader = BufReader::new(control_stdout);
-    let control_hello = handshake(&mut control_stdin, &mut control_reader, false, "", 0)?;
-    let mut bulk_stdin = bulk.stdin.take().ok_or("bulk bridge stdin unavailable")?;
-    let bulk_stdout = bulk.stdout.take().ok_or("bulk bridge stdout unavailable")?;
-    let mut bulk_reader = BufReader::new(bulk_stdout);
-    handshake(
-        &mut bulk_stdin,
-        &mut bulk_reader,
-        true,
-        &control_hello.server_identity,
-        9_007_199_254_740_993,
-    )?;
+    let (mut control_stdin, mut control_reader) = (&mut control.stdin, &mut control.reader);
+    let (mut bulk_stdin, mut bulk_reader) = (&mut bulk.stdin, &mut bulk.reader);
 
     let active = active_root(&mut control_stdin, &mut control_reader)?;
     let path = env::var("ADE_PHASE4_LARGE_FILE").unwrap_or_else(|_| "five-gib.bin".into());
@@ -406,27 +402,10 @@ fn process_hwm_kib(pid: u32) -> Result<u64, String> {
     ))
 }
 
-fn run(control: &mut Child, bulk: &mut Child) -> Result<(), String> {
-    let mut stdin = control
-        .stdin
-        .take()
-        .ok_or("control bridge stdin unavailable")?;
-    let stdout = control
-        .stdout
-        .take()
-        .ok_or("control bridge stdout unavailable")?;
-    let mut reader = BufReader::new(stdout);
-    let control_hello = handshake(&mut stdin, &mut reader, false, "", 0)?;
-    let mut bulk_stdin = bulk.stdin.take().ok_or("bulk bridge stdin unavailable")?;
-    let bulk_stdout = bulk.stdout.take().ok_or("bulk bridge stdout unavailable")?;
-    let mut bulk_reader = BufReader::new(bulk_stdout);
-    handshake(
-        &mut bulk_stdin,
-        &mut bulk_reader,
-        true,
-        &control_hello.server_identity,
-        9_007_199_254_740_993,
-    )?;
+#[allow(clippy::needless_borrow)]
+fn run(control: &mut Bridge, bulk: &mut Bridge) -> Result<(), String> {
+    let (mut stdin, mut reader) = (&mut control.stdin, &mut control.reader);
+    let (mut bulk_stdin, mut bulk_reader) = (&mut bulk.stdin, &mut bulk.reader);
     let subscribe = request(
         &mut stdin,
         &mut reader,
@@ -492,47 +471,6 @@ fn run(control: &mut Child, bulk: &mut Child) -> Result<(), String> {
         root,
         token,
     )
-}
-
-fn handshake(
-    stdin: &mut ChildStdin,
-    reader: &mut BufReader<ChildStdout>,
-    bulk_connection: bool,
-    expected_server_identity: &str,
-    connection_epoch: u64,
-) -> Result<v1::ServerHello, String> {
-    write_frame_sync(
-        stdin,
-        &envelope(
-            1,
-            0,
-            Payload::ClientHello(v1::ClientHello {
-                desktop_version: "phase4-driver".into(),
-                requested_capabilities: HOST_CAPABILITIES,
-                expected_helper_version: HELPER_VERSION.into(),
-                bulk_connection,
-                expected_server_identity: expected_server_identity.into(),
-                connection_epoch,
-            }),
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    let hello = read_frame_sync(reader)
-        .map_err(|error| error.to_string())?
-        .ok_or("bridge closed during handshake")?;
-    let Some(Payload::ServerHello(hello)) = hello.payload else {
-        return Err("missing ServerHello".into());
-    };
-    if hello.read_only {
-        return Err(hello.incompatibility);
-    }
-    if bulk_connection
-        && (hello.server_identity != expected_server_identity
-            || hello.connection_epoch != connection_epoch)
-    {
-        return Err("bulk identity/epoch binding was not echoed exactly".into());
-    }
-    Ok(hello)
 }
 
 #[allow(clippy::too_many_arguments, clippy::needless_borrow)]
@@ -1251,59 +1189,6 @@ fn mutation_request(
             ..Default::default()
         }),
         ..Default::default()
-    }
-}
-
-fn request(
-    stdin: &mut ChildStdin,
-    reader: &mut BufReader<ChildStdout>,
-    request_id: u64,
-    request: v1::Request,
-) -> Result<v1::Response, String> {
-    let (response, _) = request_with_events(stdin, reader, request_id, request)?;
-    if response.ok {
-        Ok(response)
-    } else {
-        Err(format!(
-            "{}: {}",
-            response.error_code, response.display_message
-        ))
-    }
-}
-
-fn request_error(
-    stdin: &mut ChildStdin,
-    reader: &mut BufReader<ChildStdout>,
-    request_id: u64,
-    request: v1::Request,
-) -> Result<v1::Response, String> {
-    let (response, _) = request_with_events(stdin, reader, request_id, request)?;
-    if response.ok {
-        Err("request unexpectedly succeeded".into())
-    } else {
-        Ok(response)
-    }
-}
-
-fn request_with_events(
-    stdin: &mut ChildStdin,
-    reader: &mut BufReader<ChildStdout>,
-    request_id: u64,
-    request: v1::Request,
-) -> Result<(v1::Response, Vec<v1::Envelope>), String> {
-    write_frame_sync(stdin, &envelope(request_id, 0, Payload::Request(request)))
-        .map_err(|error| error.to_string())?;
-    let mut events = Vec::new();
-    loop {
-        let frame = read_frame_sync(reader)
-            .map_err(|error| error.to_string())?
-            .ok_or("bridge disconnected")?;
-        if frame.request_id == request_id
-            && let Some(Payload::Response(response)) = frame.payload.clone()
-        {
-            return Ok((response, events));
-        }
-        events.push(frame);
     }
 }
 

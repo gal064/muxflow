@@ -13,7 +13,7 @@ printf '%s\n' "$evidence" >"$repo_root/tmp/phase7-backend-latest"
 cd "$repo_root"
 
 cargo fmt --all -- --check >"$evidence/fmt.log" 2>&1 & fmt_pid=$!
-cargo fmt --manifest-path tests/integration/transfers/protocol-driver/Cargo.toml -- --check \
+cargo fmt --manifest-path tests/integration/Cargo.toml --all -- --check \
   >"$evidence/driver-fmt.log" 2>&1 & driver_fmt_pid=$!
 cargo test -p tmux-agent-protocol \
   >"$evidence/protocol.log" 2>&1 & protocol_pid=$!
@@ -36,7 +36,7 @@ pnpm --dir apps/desktop test -- \
   src/features/terminal/TerminalTransferSurface.test.tsx \
   src/features/terminal/terminalTransferApi.test.ts \
   >"$evidence/frontend-transfer.log" 2>&1 & frontend_pid=$!
-cargo check --manifest-path tests/integration/transfers/protocol-driver/Cargo.toml \
+cargo check --manifest-path tests/integration/Cargo.toml --workspace \
   >"$evidence/driver-check.log" 2>&1 & driver_pid=$!
 bash tests/integration/transfers/package-scripts.sh \
   >"$evidence/package-scripts.log" 2>&1 & package_scripts_pid=$!
@@ -60,7 +60,7 @@ fi
 rg -Fq "test result: ok. $expected_upload_tests passed; 0 failed" "$evidence/host-upload.log"
 cargo clippy -p tmux-agent-protocol -p muxflow-host -p muxflow \
   --all-targets -- -D warnings >"$evidence/clippy.log" 2>&1 & clippy_pid=$!
-cargo clippy --manifest-path tests/integration/transfers/protocol-driver/Cargo.toml -- -D warnings \
+cargo clippy --manifest-path tests/integration/Cargo.toml --workspace -- -D warnings \
   >"$evidence/driver-clippy.log" 2>&1 & driver_clippy_pid=$!
 phase7_wait_all "$clippy_pid" "$driver_clippy_pid"
 phase7_assert_source_tree_unchanged "$repo_root" "$evidence"

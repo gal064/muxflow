@@ -1,18 +1,15 @@
 use std::{
     env, fs,
-    io::{BufReader, Read},
+    io::Read,
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::Command,
     sync::mpsc,
     time::{Duration, Instant},
 };
 
-use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, envelope, read_frame_sync,
-    v1::{self, envelope::Payload},
-    write_frame_sync,
-};
+use protocol_driver_support::{Bridge, Hello, local_bridge_command, ssh_bridge_command};
+use tmux_agent_protocol::{HOST_CAPABILITIES, v1};
 use uuid::Uuid;
 
 const CHUNK_BYTES: usize = 1024 * 1024;
@@ -23,20 +20,6 @@ const CLEANUP_THRESHOLD: u64 = 1024 * 1024 * 1024;
 enum Mode {
     Local { host: String },
     Ssh { config: String, target: String },
-}
-
-struct Bridge {
-    child: Child,
-    stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
-    next_request: u64,
-}
-
-impl Drop for Bridge {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 #[derive(Debug)]
@@ -80,31 +63,23 @@ fn parse_arguments(arguments: &[String]) -> Result<(String, Mode), String> {
     Ok((action.clone(), mode))
 }
 
-fn spawn_bridge(mode: &Mode, bulk: bool) -> Result<Child, String> {
-    let mut command = match mode {
-        Mode::Local { host } => {
-            let mut command = Command::new(host);
-            command.args(["bridge", "--stdio"]);
-            command
-        }
+fn bridge_command(mode: &Mode, bulk: bool) -> Command {
+    match mode {
+        Mode::Local { host } => local_bridge_command(host),
         Mode::Ssh { config, target } => {
-            let mut command = Command::new("ssh");
-            command.args(["-F", config, "-T"]);
-            if bulk {
-                command.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
-            }
-            command
-                .arg(target)
-                .arg("$HOME/.local/bin/muxflow-host bridge --stdio");
-            command
+            let options = if bulk {
+                ["-o", "ControlMaster=no", "-o", "ControlPath=none"].as_slice()
+            } else {
+                &[]
+            };
+            ssh_bridge_command(
+                config,
+                target,
+                "$HOME/.local/bin/muxflow-host bridge --stdio",
+                options,
+            )
         }
-    };
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|error| format!("could not spawn bridge: {error}"))
+    }
 }
 
 fn connect(
@@ -113,49 +88,17 @@ fn connect(
     expected_server: &str,
     connection_epoch: u64,
 ) -> Result<(Bridge, v1::ServerHello), String> {
-    let mut child = spawn_bridge(mode, bulk)?;
-    let mut stdin = child.stdin.take().ok_or("bridge stdin unavailable")?;
-    let stdout = child.stdout.take().ok_or("bridge stdout unavailable")?;
-    let mut reader = BufReader::new(stdout);
-    write_frame_sync(
-        &mut stdin,
-        &envelope(
-            1,
-            0,
-            Payload::ClientHello(v1::ClientHello {
-                desktop_version: "phase7-deterministic-driver".into(),
-                requested_capabilities: HOST_CAPABILITIES,
-                expected_helper_version: HELPER_VERSION.into(),
-                bulk_connection: bulk,
-                expected_server_identity: expected_server.into(),
-                connection_epoch,
-            }),
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    let frame = read_frame_sync(&mut reader)
-        .map_err(|error| error.to_string())?
-        .ok_or("bridge closed during handshake")?;
-    let Some(Payload::ServerHello(hello)) = frame.payload else {
-        return Err("bridge omitted ServerHello".into());
-    };
-    if hello.read_only {
-        return Err(format!("helper is read-only: {}", hello.incompatibility));
-    }
-    if bulk
-        && (hello.server_identity != expected_server || hello.connection_epoch != connection_epoch)
-    {
-        return Err("bulk identity/epoch was not echoed exactly".into());
-    }
-    Ok((
-        Bridge {
-            child,
-            stdin,
-            reader,
-            next_request: 2,
+    Bridge::connect(
+        &mut bridge_command(mode, bulk),
+        Hello {
+            desktop_version: "phase7-deterministic-driver",
+            requested_capabilities: HOST_CAPABILITIES,
+            bulk_connection: bulk,
+            expected_server_identity: expected_server,
+            connection_epoch,
         },
-        hello,
-    ))
+        2,
+    )
 }
 
 fn run_acceptance(mode: Mode) -> Result<(), String> {
@@ -903,39 +846,7 @@ fn remote_command(mode: &Mode, script: &str) -> Result<std::process::Output, Str
 }
 
 fn active_root(control: &mut Bridge) -> Result<v1::ActiveRoot, String> {
-    let snapshot = lane_request(
-        control,
-        v1::Request {
-            operation: v1::Operation::Subscribe.into(),
-            scope: "full".into(),
-            ..Default::default()
-        },
-    )?
-    .snapshot
-    .ok_or("subscribe omitted snapshot")?;
-    let pane = snapshot
-        .panes
-        .iter()
-        .find(|pane| pane.active)
-        .or_else(|| snapshot.panes.first())
-        .ok_or("fixture has no tmux pane")?;
-    lane_request(
-        control,
-        v1::Request {
-            operation: v1::Operation::ResolveActiveRoot.into(),
-            file: Some(v1::FileServiceRequest {
-                operation_id: Uuid::new_v4().to_string(),
-                pane_id: pane.id.clone(),
-                expected_server_identity: snapshot.server_identity,
-                expected_topology_generation: snapshot.generation,
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    )?
-    .file
-    .and_then(|file| file.active_root)
-    .ok_or("active-root response omitted payload".into())
+    control.active_root(Uuid::new_v4().to_string())
 }
 
 fn list_root(control: &mut Bridge, active: &v1::ActiveRoot) -> Result<(), String> {
@@ -1116,47 +1027,11 @@ fn cancel_upload(lane: &mut Bridge, transfer_id: &str) -> Result<(), String> {
 }
 
 fn lane_request(lane: &mut Bridge, request: v1::Request) -> Result<v1::Response, String> {
-    let response = lane_response(lane, request)?;
-    if response.ok {
-        Ok(response)
-    } else {
-        Err(format!(
-            "{}: {}",
-            response.error_code, response.display_message
-        ))
-    }
+    lane.request(request)
 }
 
 fn lane_error(lane: &mut Bridge, request: v1::Request) -> Result<v1::Response, String> {
-    let response = lane_response(lane, request)?;
-    if response.ok {
-        Err("request unexpectedly succeeded".into())
-    } else {
-        Ok(response)
-    }
-}
-
-fn lane_response(lane: &mut Bridge, request: v1::Request) -> Result<v1::Response, String> {
-    let request_id = lane.next_request;
-    lane.next_request = lane
-        .next_request
-        .checked_add(1)
-        .ok_or("request ID overflow")?;
-    write_frame_sync(
-        &mut lane.stdin,
-        &envelope(request_id, 0, Payload::Request(request)),
-    )
-    .map_err(|error| error.to_string())?;
-    loop {
-        let frame = read_frame_sync(&mut lane.reader)
-            .map_err(|error| error.to_string())?
-            .ok_or("bridge disconnected")?;
-        if frame.request_id == request_id
-            && let Some(Payload::Response(response)) = frame.payload
-        {
-            return Ok(response);
-        }
-    }
+    lane.request_error(request)
 }
 
 fn require_error(response: &v1::Response, code: &str, text: &str) -> Result<(), String> {
