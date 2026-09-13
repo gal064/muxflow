@@ -1,0 +1,296 @@
+{
+  "admissions": [
+    {
+      "capabilities": "524287",
+      "major": 2,
+      "readOnly": false,
+      "refusal": null
+    },
+    {
+      "capabilities": "18446744073709551615",
+      "major": 2,
+      "readOnly": false,
+      "refusal": null
+    },
+    {
+      "capabilities": "0",
+      "major": 3,
+      "readOnly": true,
+      "refusal": {
+        "kind": "protocolMajor"
+      }
+    },
+    {
+      "capabilities": "0",
+      "major": 2,
+      "readOnly": true,
+      "refusal": {
+        "kind": "readOnly"
+      }
+    },
+    {
+      "capabilities": "0",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "524287",
+        "names": [
+          "snapshots",
+          "orderedEvents",
+          "cancellation",
+          "terminalStream",
+          "resync",
+          "tmuxActions",
+          "terminalResources",
+          "activeRoot",
+          "fileService",
+          "textEditor",
+          "bulkDownload",
+          "git",
+          "agents",
+          "terminalUpload",
+          "terminalOutputCredit",
+          "fileStream",
+          "terminalFileResolution",
+          "tmuxExecutableResolution",
+          "voice"
+        ]
+      }
+    },
+    {
+      "capabilities": "524286",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "1",
+        "names": [
+          "snapshots"
+        ]
+      }
+    },
+    {
+      "capabilities": "524285",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "2",
+        "names": [
+          "orderedEvents"
+        ]
+      }
+    },
+    {
+      "capabilities": "524283",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "4",
+        "names": [
+          "cancellation"
+        ]
+      }
+    },
+    {
+      "capabilities": "524279",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "8",
+        "names": [
+          "terminalStream"
+        ]
+      }
+    },
+    {
+      "capabilities": "524271",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "16",
+        "names": [
+          "resync"
+        ]
+      }
+    },
+    {
+      "capabilities": "524255",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "32",
+        "names": [
+          "tmuxActions"
+        ]
+      }
+    },
+    {
+      "capabilities": "524223",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "64",
+        "names": [
+          "terminalResources"
+        ]
+      }
+    },
+    {
+      "capabilities": "524159",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "128",
+        "names": [
+          "activeRoot"
+        ]
+      }
+    },
+    {
+      "capabilities": "524031",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "256",
+        "names": [
+          "fileService"
+        ]
+      }
+    },
+    {
+      "capabilities": "523775",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "512",
+        "names": [
+          "textEditor"
+        ]
+      }
+    },
+    {
+      "capabilities": "523263",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "1024",
+        "names": [
+          "bulkDownload"
+        ]
+      }
+    },
+    {
+      "capabilities": "522239",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "2048",
+        "names": [
+          "git"
+        ]
+      }
+    },
+    {
+      "capabilities": "520191",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "4096",
+        "names": [
+          "agents"
+        ]
+      }
+    },
+    {
+      "capabilities": "516095",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "8192",
+        "names": [
+          "terminalUpload"
+        ]
+      }
+    },
+    {
+      "capabilities": "507903",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "16384",
+        "names": [
+          "terminalOutputCredit"
+        ]
+      }
+    },
+    {
+      "capabilities": "491519",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "32768",
+        "names": [
+          "fileStream"
+        ]
+      }
+    },
+    {
+      "capabilities": "458751",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "65536",
+        "names": [
+          "terminalFileResolution"
+        ]
+      }
+    },
+    {
+      "capabilities": "393215",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "131072",
+        "names": [
+          "tmuxExecutableResolution"
+        ]
+      }
+    },
+    {
+      "capabilities": "262143",
+      "major": 2,
+      "readOnly": false,
+      "refusal": {
+        "kind": "missingCapabilities",
+        "missing": "262144",
+        "names": [
+          "voice"
+        ]
+      }
+    }
+  ],
+  "frames": {
+    "file": "000000400802100118ffffffffffffffffff012089808080808080103001a201230a066f70656e2d3118ffffffffffffffffff012204009f929628013206646967657374",
+    "git": "000000330802100118ffffffffffffffffff0120898080808080801030016217081e72133889808080808080104203610aff4a036209fe",
+    "terminal": "000000330802100118ffffffffffffffffff0120898080808080801030018a01160a022533120500ff1b5b481887808080808080102801",
+    "voice": "000000320802100118ffffffffffffffffff012089808080808080103001721608156a121a100a03fffb903001408580808080808010"
+  }
+}

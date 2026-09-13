@@ -4,8 +4,9 @@
 
 import { fromBinary, toBinary } from "@bufbuild/protobuf";
 import { EnvelopeSchema, type Envelope } from "./gen/envelope_pb";
+import contract from "./gen/host_contract.json";
 
-export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+export const MAX_FRAME_BYTES = contract.maxFrameBytes;
 
 export class FrameTooLargeError extends Error {
   constructor(readonly length: number) {

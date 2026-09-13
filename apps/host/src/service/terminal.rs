@@ -995,7 +995,7 @@ impl TerminalClients {
             None => bail!("pane has no attached session control client"),
         };
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let (mut resource, requires_seed) = {
+        let (resource, requires_seed) = {
             let mut resources = self.resources.lock().unwrap();
             let resource = if visible {
                 // The checkpoint is passed only when the renderer says it is
@@ -1018,18 +1018,7 @@ impl TerminalClients {
                 resource.state == StoredResourceState::Released || resource.requires_seed;
             (resource, requires_seed)
         };
-        if visible {
-            resource.state = StoredResourceState::Visible;
-        } else {
-            // A hide answers with no bytes at all. The store keeps the tail —
-            // this is a clone of it — because the *reveal* is what hands it
-            // back, and it is the only side that can. Shipping it here as well
-            // paid for the same output twice on the way out of a workspace the
-            // user has already left: the renderer ignores a `hiddenBuffered`
-            // echo, so those bytes were never drawn, and a second hide against
-            // the same checkpoint returned them a third time.
-            resource.raw_tail.clear();
-        }
+        let resource = resource.into_visibility_response(visible);
         // The tail is the whole payload: the host stores no screen to charge
         // for, a hide carries nothing, and a reveal it cannot verify carries no
         // bytes at all.

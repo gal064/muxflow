@@ -4370,6 +4370,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
 ]

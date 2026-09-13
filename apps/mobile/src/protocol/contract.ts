@@ -1,37 +1,12 @@
-// Handshake contract constants, copied from crates/protocol/src/lib.rs
-// (PROTOCOL_MAJOR, PROTOCOL_MINOR, HOST_CAPABILITIES, CAPABILITY_NAMES,
-// validate_host_contract). Keep them in sync with that file.
-
+// Constants generated and checked by crates/protocol/tests/mobile_contract.rs.
 import type { ServerHello } from "./gen/envelope_pb";
+import contract from "./gen/host_contract.json";
 
-export const PROTOCOL_MAJOR = 2;
-export const PROTOCOL_MINOR = 1;
-
-/** Every required capability, with the name a refusal reports it by (bits 0..18). */
-export const CAPABILITY_NAMES: ReadonlyArray<readonly [bigint, string]> = [
-  [1n << 0n, "snapshots"],
-  [1n << 1n, "orderedEvents"],
-  [1n << 2n, "cancellation"],
-  [1n << 3n, "terminalStream"],
-  [1n << 4n, "resync"],
-  [1n << 5n, "tmuxActions"],
-  [1n << 6n, "terminalResources"],
-  [1n << 7n, "activeRoot"],
-  [1n << 8n, "fileService"],
-  [1n << 9n, "textEditor"],
-  [1n << 10n, "bulkDownload"],
-  [1n << 11n, "git"],
-  [1n << 12n, "agents"],
-  [1n << 13n, "terminalUpload"],
-  [1n << 14n, "terminalOutputCredit"],
-  [1n << 15n, "fileStream"],
-  [1n << 16n, "terminalFileResolution"],
-  [1n << 17n, "tmuxExecutableResolution"],
-  [1n << 18n, "voice"],
-];
-
-/** `HOST_CAPABILITIES` in crates/protocol/src/lib.rs: bits 0..18 all set (0x7FFFF = 524287). */
-export const HOST_CAPABILITIES: bigint = CAPABILITY_NAMES.reduce((all, [bit]) => all | bit, 0n);
+export const PROTOCOL_MAJOR = contract.protocolMajor;
+export const PROTOCOL_MINOR = contract.protocolMinor;
+export const HOST_CAPABILITIES = BigInt(contract.hostCapabilities);
+export const CAPABILITY_NAMES: ReadonlyArray<readonly [bigint, string]> =
+  contract.capabilities.map(({ bit, name }) => [BigInt(bit), name] as const);
 
 export function missingHostCapabilities(advertised: bigint): bigint {
   return HOST_CAPABILITIES & ~advertised;
