@@ -45,6 +45,6 @@ export function agentSessionLabel(agent: SessionLabelInput, adapters: readonly P
 
 function adapterFallback(adapterId: string): string {
   if (adapterId === "codex") return "Codex";
-  if (adapterId === "claude-code" || adapterId === "claude") return "Claude";
+  if (adapterId === "claude-code") return "Claude";
   return "Agent";
 }
