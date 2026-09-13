@@ -1,15 +1,15 @@
 use std::{
     collections::BTreeMap,
-    io::BufReader,
-    process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio},
+    process::{Command, Output},
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail, ensure};
+use protocol_driver_support::{Bridge, Hello, local_bridge_command, ssh_bridge_command};
 use serde_json::json;
 use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, envelope, read_frame_sync,
+    HOST_CAPABILITIES, envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -28,41 +28,27 @@ enum Transport {
 }
 
 impl Transport {
-    fn bridge(&self) -> Result<Child> {
-        let mut command = match self {
+    fn bridge_command(&self) -> Command {
+        match self {
             Self::Local {
                 host_binary,
                 runtime,
                 tmux_socket,
             } => {
-                let mut command = Command::new(host_binary);
+                let mut command = local_bridge_command(host_binary);
                 command
-                    .args(["bridge", "--stdio"])
                     .env("ADE_PHASE1_TESTING", "1")
                     .env("ADE_HOST_RUNTIME_DIR", runtime)
                     .env("ADE_TMUX_SOCKET_NAME", tmux_socket);
                 command
             }
-            Self::Ssh { config, target } => {
-                let mut command = Command::new("ssh");
-                command.args([
-                    "-F",
-                    config,
-                    "-T",
-                    "-o",
-                    "BatchMode=yes",
-                    target,
-                    "env ADE_PHASE1_TESTING=1 $HOME/.local/bin/muxflow-host bridge --stdio",
-                ]);
-                command
-            }
-        };
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .context("start Phase 2 protocol bridge")
+            Self::Ssh { config, target } => ssh_bridge_command(
+                config,
+                target,
+                "env ADE_PHASE1_TESTING=1 $HOME/.local/bin/muxflow-host bridge --stdio",
+                &["-o", "BatchMode=yes"],
+            ),
+        }
     }
 
     fn command(&self, program: &str, arguments: &[&str]) -> Result<Output> {
@@ -209,52 +195,22 @@ impl Observations {
 }
 
 struct ProtocolClient {
-    child: Child,
-    stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
-    next_request: u64,
+    bridge: Bridge,
     observations: Observations,
     server_identity: String,
 }
 
 impl ProtocolClient {
     fn connect(transport: &Transport) -> Result<Self> {
-        let mut child = transport.bridge()?;
-        let mut stdin = child.stdin.take().context("bridge stdin unavailable")?;
-        let stdout = child.stdout.take().context("bridge stdout unavailable")?;
-        write_frame_sync(
-            &mut stdin,
-            &v1::Envelope {
-                protocol_major: tmux_agent_protocol::PROTOCOL_MAJOR,
-                protocol_minor: tmux_agent_protocol::PROTOCOL_MINOR,
-                request_id: 1,
-                sequence: 0,
-                stream_id: 0,
-                priority: v1::Priority::Control.into(),
-                payload: Some(Payload::ClientHello(v1::ClientHello {
-                    desktop_version: "protocol-test-driver".into(),
-                    requested_capabilities: HOST_CAPABILITIES,
-                    expected_helper_version: HELPER_VERSION.into(),
-                    bulk_connection: false,
-                    ..Default::default()
-                })),
-            },
-        )?;
-        let mut reader = BufReader::new(stdout);
-        let hello = read_frame_sync(&mut reader)?.context("bridge closed during handshake")?;
-        let Some(Payload::ServerHello(hello)) = hello.payload else {
-            bail!("host did not return ServerHello");
-        };
-        ensure!(!hello.read_only, "Phase 2 bridge unexpectedly read-only");
-        ensure!(
-            hello.capabilities & HOST_CAPABILITIES == HOST_CAPABILITIES,
-            "Phase 2 bridge omitted required capabilities"
-        );
+        let (bridge, hello) = Bridge::connect(
+            &mut transport.bridge_command(),
+            Hello::control("protocol-test-driver", HOST_CAPABILITIES),
+            11,
+        )
+        .map_err(anyhow::Error::msg)
+        .context("start Phase 2 protocol bridge")?;
         Ok(Self {
-            child,
-            stdin,
-            reader,
-            next_request: 10,
+            bridge,
             observations: Observations::default(),
             server_identity: hello.server_identity,
         })
@@ -265,15 +221,14 @@ impl ProtocolClient {
         operation: v1::Operation,
         mut request: v1::Request,
     ) -> Result<v1::Response> {
-        self.next_request += 1;
-        let request_id = self.next_request;
+        let request_id = self.bridge.next_request_id().map_err(anyhow::Error::msg)?;
         request.operation = operation.into();
         write_frame_sync(
-            &mut self.stdin,
+            &mut self.bridge.stdin,
             &envelope(request_id, 0, Payload::Request(request)),
         )?;
         loop {
-            let frame = read_frame_sync(&mut self.reader)?
+            let frame = read_frame_sync(&mut self.bridge.reader)?
                 .context("bridge closed while awaiting Phase 2 response")?;
             if frame.request_id == request_id
                 && let Some(Payload::Response(response)) = frame.payload.clone()
@@ -413,12 +368,12 @@ impl ProtocolClient {
         let started = Instant::now();
         let mut pending = BTreeMap::new();
         for data in chunks {
-            self.next_request += 1;
-            pending.insert(self.next_request, ());
+            let request_id = self.bridge.next_request_id().map_err(anyhow::Error::msg)?;
+            pending.insert(request_id, ());
             write_frame_sync(
-                &mut self.stdin,
+                &mut self.bridge.stdin,
                 &envelope(
-                    self.next_request,
+                    request_id,
                     0,
                     Payload::Request(v1::Request {
                         operation: v1::Operation::TerminalInput.into(),
@@ -430,7 +385,7 @@ impl ProtocolClient {
             )?;
         }
         while !pending.is_empty() {
-            let frame = read_frame_sync(&mut self.reader)?
+            let frame = read_frame_sync(&mut self.bridge.reader)?
                 .context("bridge closed while draining pipelined input")?;
             if pending.contains_key(&frame.request_id)
                 && let Some(Payload::Response(response)) = frame.payload.clone()
@@ -505,16 +460,8 @@ impl ProtocolClient {
         )
     }
 
-    fn close(mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl Drop for ProtocolClient {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+    fn close(self) {
+        self.bridge.close();
     }
 }
 
@@ -1130,10 +1077,12 @@ fn run_matrix(transport: Transport, primary_name: &str, ordinary_client: &str) -
     // explicit overflow signal, authoritative resync, and fresh screen seed.
     let flood =
         b"yes PHASE2_FLOOD_LINE_0123456789 | head -c 16777216; printf '\\nPHASE2_FLOOD_DONE\\n'\r";
-    client.next_request += 1;
-    let flood_request = client.next_request;
+    let flood_request = client
+        .bridge
+        .next_request_id()
+        .map_err(anyhow::Error::msg)?;
     write_frame_sync(
-        &mut client.stdin,
+        &mut client.bridge.stdin,
         &envelope(
             flood_request,
             0,
@@ -1147,7 +1096,8 @@ fn run_matrix(transport: Transport, primary_name: &str, ordinary_client: &str) -
     )?;
     thread::sleep(Duration::from_secs(2));
     loop {
-        let frame = read_frame_sync(&mut client.reader)?.context("bridge closed during flood")?;
+        let frame =
+            read_frame_sync(&mut client.bridge.reader)?.context("bridge closed during flood")?;
         if frame.request_id == flood_request && matches!(frame.payload, Some(Payload::Response(_)))
         {
             break;
