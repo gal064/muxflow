@@ -17,6 +17,9 @@ importers:
       '@monaco-editor/react':
         specifier: 4.7.0
         version: 4.7.0(monaco-editor@0.56.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@muxflow/terminal-interactions':
+        specifier: workspace:*
+        version: link:../../packages/terminal-interactions
       '@tauri-apps/api':
         specifier: 2.11.1
         version: 2.11.1
@@ -96,6 +99,9 @@ importers:
       '@bufbuild/protobuf':
         specifier: 2.14.0
         version: 2.14.0
+      '@muxflow/terminal-interactions':
+        specifier: workspace:*
+        version: link:../../packages/terminal-interactions
       expo:
         specifier: 57.0.16
         version: 57.0.16(aac1ce22dd95f42101a7dfc80e0e58b4)
@@ -211,6 +217,21 @@ importers:
       marked:
         specifier: 18.0.9
         version: 18.0.9
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@26.3.0)(jsdom@30.0.1)(vite@7.3.6(@types/node@26.3.0)(lightningcss@1.33.0)(terser@5.50.0)(yaml@2.9.0))
+
+  packages/terminal-interactions:
+    devDependencies:
+      '@xterm/headless':
+        specifier: 6.0.0
+        version: 6.0.0
+      '@xterm/xterm':
+        specifier: 6.0.0
+        version: 6.0.0(patch_hash=2d72a78c3f0e59895f61c47732f6cceccd230620d83c905f7eacd8aea6eddcb1)
       typescript:
         specifier: 6.0.3
         version: 6.0.3

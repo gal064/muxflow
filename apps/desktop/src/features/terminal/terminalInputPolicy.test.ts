@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it, vi } from "vitest";
+import type { TerminalSelectionSnapshot } from "@muxflow/terminal-interactions";
 import {
   decodeOsc52ClipboardWrite,
   installOsc52ClipboardWrite,
@@ -12,7 +13,6 @@ import {
   translateTerminalKey,
   type TerminalKeyContext,
 } from "./terminalInputPolicy";
-import type { TerminalSelectionSnapshot } from "./terminalSelection";
 
 const key = (overrides: Partial<KeyboardEvent> = {}) => ({
   altKey: false,

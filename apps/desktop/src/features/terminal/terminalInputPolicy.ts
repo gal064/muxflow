@@ -1,6 +1,6 @@
 import { keyboardEventIsComposing, type Platform } from "../../commands/registry";
+import { cleanWrappedCommandSelection } from "@muxflow/terminal-interactions";
 import type { TerminalRenderer } from "./TerminalRenderer";
-import { cleanWrappedCommandSelection } from "./terminalSelection";
 
 type TerminalKeyEvent = Pick<KeyboardEvent,
   "altKey" | "code" | "ctrlKey" | "isComposing" | "key" | "keyCode" | "metaKey" | "shiftKey"

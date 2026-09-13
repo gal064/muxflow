@@ -134,6 +134,36 @@ export function resolveActiveRoot(
   });
 }
 
+export interface TerminalFileRoute {
+  sessionId: string;
+  windowId: string;
+  cwd: string;
+}
+
+/** Resolves one terminal-emitted path against the exact pane route the user tapped. */
+export function resolveTerminalFile(
+  operationId: string,
+  paneId: string,
+  path: string,
+  expectedServerIdentity: string,
+  expectedTopologyGeneration: bigint,
+  route: TerminalFileRoute,
+): Request {
+  return create(RequestSchema, {
+    operation: Operation.RESOLVE_TERMINAL_FILE,
+    file: create(FileServiceRequestSchema, {
+      operationId,
+      paneId,
+      path,
+      expectedServerIdentity,
+      expectedTopologyGeneration,
+      expectedSessionId: route.sessionId,
+      expectedWindowId: route.windowId,
+      expectedCwd: route.cwd,
+    }),
+  });
+}
+
 export interface RootedPath {
   root: string;
   rootToken: string;
