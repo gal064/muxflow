@@ -32,25 +32,6 @@ fn latest_codex_child_turn<'a>(
         .map(|turn| turn.turn_id.as_str())
 }
 
-fn codex_session_record_precedence(left: &StoredAgent, right: &StoredAgent) -> std::cmp::Ordering {
-    let root_terminal = |record: &StoredAgent| {
-        !record.codex_active_root_turn_id.is_empty()
-            && record
-                .codex_terminal_root_turn_ids
-                .contains(&record.codex_active_root_turn_id)
-    };
-    super::codex_authority::turn_precedence(
-        &left.codex_active_root_turn_id,
-        &right.codex_active_root_turn_id,
-    )
-    .then_with(|| root_terminal(left).cmp(&root_terminal(right)))
-    .then_with(|| left.state_generation.cmp(&right.state_generation))
-    .then_with(|| {
-        left.lifecycle_observed_at_unix_millis
-            .cmp(&right.lifecycle_observed_at_unix_millis)
-    })
-}
-
 fn remember_codex_child_turn(turns: &mut VecDeque<CodexTurnKey>, turn: &CodexTurnKey) {
     if latest_codex_child_turn(turns, &turn.agent_id)
         .and_then(|latest| super::codex_authority::turn_order(&turn.turn_id, latest))
@@ -226,10 +207,19 @@ impl AgentRuntime {
         let original = state.clone();
         let route_verified = origin_matches && !route.pane_id.is_empty();
         let mut restored_route_authority = false;
-        let mut agent_id = if route_verified && native_session_id.is_empty() {
-            identity::manual_agent_id(adapter_id, active_server_identity, &event.pane_id)
+        // A native session has one identity for its entire lifetime. Topology
+        // decides whether its route is usable; it must never decide identity.
+        // Keeping those concerns separate prevents a brief tmux outage from
+        // creating a second agent that later has to be ranked and merged.
+        let identity_server = if origin_matches {
+            active_server_identity
+        } else {
+            &event.origin_server_identity
+        };
+        let mut agent_id = if !native_session_id.is_empty() {
+            identity::native_agent_id(adapter_id, identity_server, &native_session_id)
         } else if route_verified {
-            identity::native_agent_id(adapter_id, active_server_identity, &native_session_id)
+            identity::manual_agent_id(adapter_id, active_server_identity, &event.pane_id)
         } else {
             identity::unmapped_hook_agent_id(
                 adapter_id,
@@ -248,326 +238,47 @@ impl AgentRuntime {
             route_verified,
         );
         let mut pane_record_id = candidates.pane;
-        let mut native_record_id = candidates.native;
+        let mut native_record_id = if adapter.id() == "codex" && !native_session_id.is_empty() {
+            state
+                .agents
+                .contains_key(&agent_id)
+                .then(|| agent_id.clone())
+        } else {
+            candidates.native
+        };
         // Session authority is decided before dedupe repair or any other state
         // mutation. A delayed fork hook must not use a coincident event ID or
         // transcript edge to mutate the interactive pane owner's turn state.
-        let same_native_record_ids: Vec<String> = if origin_matches && !native_session_id.is_empty()
-        {
-            state
-                .agents
-                .values()
-                .filter(|record| {
-                    record.adapter_id == adapter.id()
-                        && record.route.server_identity == active_server_identity
-                        && record.native_session_id == native_session_id
-                })
-                .map(|record| record.agent_id.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let canonical_native_agent_id = (!native_session_id.is_empty()).then(|| {
-            identity::native_agent_id(adapter_id, active_server_identity, &native_session_id)
-        });
-        let incoming_root_turn_id = payload
-            .get(adapters::CODEX_SUBAGENT_ID_FIELD)
-            .and_then(serde_json::Value::as_str)
-            .is_none_or(str::is_empty)
-            .then(|| {
-                payload
-                    .get(adapters::CODEX_APPROVAL_TURN_ID_FIELD)
-                    .and_then(serde_json::Value::as_str)
-            })
-            .flatten();
-        let exact_unmapped_agent_id = (!native_session_id.is_empty()).then(|| {
-            identity::unmapped_hook_agent_id(
-                adapter_id,
-                &event.origin_server_identity,
-                &event.pane_id,
-                &native_session_id,
-            )
-        });
-        // Missing-pane hooks can leave several identities for one native
-        // session. Route authority and turn authority are separate: prefer a
-        // mapped record unless this exact hook proves that an unmapped alias
-        // owns a newer root turn. With no mapped identity, the newest root
-        // turn wins and the exact encoded pane breaks ties.
-        let mapped_native_record_id = canonical_native_agent_id
-            .as_ref()
-            .filter(|canonical_id| {
-                same_native_record_ids.contains(canonical_id) && state.agents[*canonical_id].present
-            })
-            .cloned()
-            .or_else(|| {
-                same_native_record_ids
-                    .iter()
-                    .find(|record_id| {
-                        state.agents[*record_id].present
-                            && !state.agents[*record_id].route.pane_id.is_empty()
-                    })
-                    .cloned()
-            });
-        let newest_unmapped_record_id = same_native_record_ids
-            .iter()
-            .filter(|record_id| {
-                state.agents[*record_id].present
-                    && state.agents[*record_id].route.pane_id.is_empty()
-            })
-            .max_by(|left_id, right_id| {
-                let left = &state.agents[*left_id];
-                let right = &state.agents[*right_id];
-                codex_session_record_precedence(left, right)
-                    .then_with(|| {
-                        (Some(*left_id) == exact_unmapped_agent_id.as_ref())
-                            .cmp(&(Some(*right_id) == exact_unmapped_agent_id.as_ref()))
-                    })
-                    .then_with(|| left_id.cmp(right_id))
-            })
-            .cloned();
-        let authority_baseline_record_id = match (
-            mapped_native_record_id.as_ref(),
-            newest_unmapped_record_id.as_ref(),
-        ) {
-            (Some(mapped_id), Some(unmapped_id))
-                if codex_session_record_precedence(
-                    &state.agents[unmapped_id],
-                    &state.agents[mapped_id],
-                ) == std::cmp::Ordering::Greater =>
-            {
-                Some(unmapped_id)
-            }
-            (Some(mapped_id), _) => Some(mapped_id),
-            (None, Some(unmapped_id)) => Some(unmapped_id),
-            (None, None) => None,
-        };
-        let authoritative_exact_unmapped_record_id =
-            exact_unmapped_agent_id.as_ref().and_then(|alias_id| {
-                let alias = state.agents.get(alias_id)?;
-                if !alias.present {
-                    return None;
-                }
-                let baseline =
-                    authority_baseline_record_id.and_then(|record_id| state.agents.get(record_id));
-                (baseline.is_none_or(|record| {
-                    record.agent_id == alias.agent_id
-                        || super::codex_authority::turn_precedence(
-                            &alias.codex_active_root_turn_id,
-                            &record.codex_active_root_turn_id,
-                        ) == std::cmp::Ordering::Greater
-                }))
-                .then(|| alias_id.clone())
-            });
-        let known_native_record_id = authoritative_exact_unmapped_record_id
-            .or_else(|| authority_baseline_record_id.cloned());
-        let known_mapped_native_session = same_native_record_ids.iter().any(|record_id| {
-            state.agents[record_id].present && !state.agents[record_id].route.pane_id.is_empty()
-        });
-        if adapter.id() == "codex"
-            && let Some(tombstone) = exact_unmapped_agent_id
-                .as_ref()
-                .and_then(|exact_id| state.agents.get(exact_id))
-                .filter(|record| !record.present)
-        {
-            let authority = authority_baseline_record_id
-                .and_then(|record_id| state.agents.get(record_id))
-                .unwrap_or(tombstone);
-            let proves_newer_turn = incoming_root_turn_id.is_some_and(|incoming_turn| {
-                super::codex_authority::turn_precedence(
-                    incoming_turn,
-                    &authority.codex_active_root_turn_id,
-                ) == std::cmp::Ordering::Greater
-            });
-            if !proves_newer_turn {
-                crate::diagnostics::write_codex_hook_superseded_log(
-                    &event.pane_id,
-                    Some(&authority.agent_id),
-                    &tombstone.agent_id,
-                    &parsed.event_name,
-                );
-                return Ok(IngestedHook {
-                    event: v1::AgentEvent {
-                        agent: Some(snapshot::record(tombstone)),
-                        generation: state.generation,
-                        notify: false,
-                        reason: "superseded".into(),
-                        retired_agent_ids: Vec::new(),
-                    },
-                    reply: None,
-                });
-            }
-        }
-        if adapter.id() == "codex" {
-            native_record_id.clone_from(&known_native_record_id);
-        }
+        let canonical_native_agent_id = (!native_session_id.is_empty())
+            .then(|| identity::native_agent_id(adapter_id, identity_server, &native_session_id));
         // Topology discovery can fail while the hook still carries the exact
         // same-server pane inherited from tmux. That pane is not trusted as a
         // destination, but an existing mapped owner may use it as negative
         // evidence that a different logical session is a superseded emitter.
-        let stored_pane_owner = origin_matches
+        let stored_pane_owner_id = origin_matches
             .then(|| {
                 state
-                    .agents
-                    .values()
-                    .filter(|record| {
-                        record.adapter_id == adapter.id()
-                            && record.present
-                            && record.route.server_identity == active_server_identity
-                            && record.route.pane_id == event.pane_id
-                    })
-                    .max_by_key(|record| {
-                        (
-                            record.lifecycle_observed_at_unix_millis,
-                            record.agent_id.as_str(),
-                        )
-                    })
-                    .or_else(|| {
-                        state
-                            .agents
-                            .values()
-                            .filter(|record| {
-                                record.adapter_id == adapter.id()
-                                    && record.present
-                                    && record.route.server_identity == active_server_identity
-                                    && record.route.pane_id.is_empty()
-                                    && record.agent_id
-                                        == identity::unmapped_hook_agent_id(
-                                            adapter_id,
-                                            active_server_identity,
-                                            &event.pane_id,
-                                            &record.native_session_id,
-                                        )
-                            })
-                            .max_by_key(|record| {
-                                (
-                                    record.lifecycle_observed_at_unix_millis,
-                                    record.agent_id.as_str(),
-                                )
-                            })
-                    })
+                    .pane_owner_id(adapter.id(), active_server_identity, &event.pane_id)
+                    .map(str::to_owned)
             })
             .flatten();
-        // Prefer an actual mapped owner over the incoming identity's unmapped
-        // record. During a topology outage, an allowed start hook can create
-        // that record; it must not mask the pane owner on a later terminal
-        // hook from the same fork.
-        let observed_pane_owner = stored_pane_owner.or_else(|| {
-            pane_record_id
-                .as_ref()
-                .and_then(|pane_id| state.agents.get(pane_id))
-        });
+        let observed_pane_owner = stored_pane_owner_id
+            .as_ref()
+            .and_then(|owner_id| state.agents.get(owner_id))
+            .or_else(|| {
+                (adapter.id() != "codex")
+                    .then(|| {
+                        pane_record_id
+                            .as_ref()
+                            .and_then(|pane_id| state.agents.get(pane_id))
+                    })
+                    .flatten()
+            });
         let observed_pane_owner_id = observed_pane_owner.map(|owner| owner.agent_id.clone());
         let observed_pane_owner_record = observed_pane_owner.cloned();
-        let stale_event_on_newer_alias = (adapter.id() == "codex" && route_verified)
-            .then(|| {
-                let incoming_turn = incoming_root_turn_id?;
-                let exact_id = exact_unmapped_agent_id.as_ref()?;
-                let exact = state.agents.get(exact_id)?;
-                let mapped_id = mapped_native_record_id.as_ref()?;
-                let mapped = state.agents.get(mapped_id)?;
-                (exact.codex_active_root_turn_id != incoming_turn
-                    && mapped.codex_terminal_root_turn_ids.contains(incoming_turn))
-                .then(|| exact.clone())
-            })
-            .flatten();
-        if let Some(current) = stale_event_on_newer_alias {
-            crate::diagnostics::write_codex_hook_superseded_log(
-                &event.pane_id,
-                Some(&current.agent_id),
-                &current.agent_id,
-                &parsed.event_name,
-            );
-            return Ok(IngestedHook {
-                event: v1::AgentEvent {
-                    agent: Some(snapshot::record(&current)),
-                    generation: state.generation,
-                    notify: false,
-                    reason: "superseded".into(),
-                    retired_agent_ids: Vec::new(),
-                },
-                reply: None,
-            });
-        }
-        let stale_alias_current_id = (adapter.id() == "codex" && route_verified)
-            .then(|| {
-                let exact_id = exact_unmapped_agent_id.as_ref()?;
-                let exact = state.agents.get(exact_id)?;
-                if let Some(mapped_id) = mapped_native_record_id.as_ref()
-                    && mapped_id != exact_id
-                    && incoming_root_turn_id.is_some_and(|incoming_turn| {
-                        exact.codex_active_root_turn_id == incoming_turn
-                            && state.agents[mapped_id]
-                                .codex_terminal_root_turn_ids
-                                .contains(incoming_turn)
-                    })
-                {
-                    return Some(mapped_id.clone());
-                }
-                let baseline_id = authority_baseline_record_id?;
-                let baseline = state.agents.get(baseline_id)?;
-                (exact.agent_id != baseline.agent_id
-                    && codex_session_record_precedence(exact, baseline) == std::cmp::Ordering::Less
-                    && incoming_root_turn_id.is_none_or(|incoming_turn| {
-                        super::codex_authority::turn_precedence(
-                            incoming_turn,
-                            &baseline.codex_active_root_turn_id,
-                        ) != std::cmp::Ordering::Greater
-                    }))
-                .then(|| baseline_id.clone())
-            })
-            .flatten();
-        if let Some(current_id) = stale_alias_current_id {
-            let stale_id = exact_unmapped_agent_id
-                .as_ref()
-                .expect("stale alias has an exact identity")
-                .clone();
-            crate::diagnostics::write_codex_hook_superseded_log(
-                &event.pane_id,
-                Some(&current_id),
-                &stale_id,
-                &parsed.event_name,
-            );
-            if !state.agents[&stale_id].present {
-                let tombstone = state.agents[&stale_id].clone();
-                return Ok(IngestedHook {
-                    event: v1::AgentEvent {
-                        agent: Some(snapshot::record(&tombstone)),
-                        generation: state.generation,
-                        notify: false,
-                        reason: "superseded".into(),
-                        retired_agent_ids: Vec::new(),
-                    },
-                    reply: None,
-                });
-            }
-            state.generation = state.generation.saturating_add(1);
-            let generation = state.generation;
-            let tombstone = state
-                .agents
-                .get_mut(&stale_id)
-                .expect("stale alias remains stored as routing evidence");
-            tombstone.present = false;
-            tombstone.lifecycle = v1::AgentLifecycleState::Unknown as i32;
-            tombstone.state_generation = generation;
-            let tombstone = tombstone.clone();
-            if let Err(error) = self.persist_locked(&state) {
-                *state = original;
-                return Err(HookIngestFailure::Retryable(error));
-            }
-            drop(state);
-            self.retire_codex_runtime_state(std::slice::from_ref(&stale_id));
-            (self.identity_promotion_sink)(std::slice::from_ref(&stale_id), &current_id);
-            return Ok(IngestedHook {
-                event: v1::AgentEvent {
-                    agent: Some(snapshot::record(&tombstone)),
-                    generation,
-                    notify: false,
-                    reason: "superseded".into(),
-                    retired_agent_ids: Vec::new(),
-                },
-                reply: None,
-            });
-        }
+        let known_mapped_native_session = native_record_id.as_ref().is_some_and(|record_id| {
+            state.agents[record_id].present && state.agent_is_bound(record_id)
+        });
         let session_authority = if adapter.id() == "codex" {
             super::codex_authority::session(
                 &native_session_id,
@@ -593,24 +304,22 @@ impl AgentRuntime {
         // this owner, but never becomes a new unverified destination.
         if adapter.id() == "codex"
             && session_authority == super::codex_authority::SessionAuthority::Current
-            && topology.is_none()
+            && !route_verified
         {
-            let exact_pane_owner = observed_pane_owner.filter(|owner| {
-                !owner.route.pane_id.is_empty() && owner.route.pane_id == event.pane_id
-            });
+            let exact_pane_owner = observed_pane_owner;
             let continuity_id = exact_pane_owner
                 .filter(|owner| owner.native_session_id == native_session_id)
                 .map(|owner| owner.agent_id.clone())
-                .or_else(|| known_native_record_id.clone());
-            if exact_pane_owner.is_some_and(|owner| owner.native_session_id.is_empty())
-                && !native_session_id.is_empty()
+                .or_else(|| native_record_id.clone());
+            if exact_pane_owner.is_some_and(|owner| {
+                owner.native_session_id.is_empty() && !owner.route.pane_id.is_empty()
+            }) && !native_session_id.is_empty()
             {
                 let owner = exact_pane_owner.expect("manual pane owner is present");
                 agent_id = canonical_native_agent_id
                     .clone()
                     .expect("nonempty native session has a canonical identity");
                 route = owner.route.clone();
-                native_record_id.clone_from(&known_native_record_id);
                 pane_record_id = Some(owner.agent_id.clone());
                 restored_route_authority = true;
             } else if let Some(continuity_id) = continuity_id {
@@ -645,93 +354,15 @@ impl AgentRuntime {
                 }
             }
         }
-        let mut related_record_ids = session_record_ids.clone();
-        for record_id in &same_native_record_ids {
-            if !related_record_ids.contains(&record_id) {
-                related_record_ids.push(record_id);
-            }
-        }
-        let duplicate_record_ids: Vec<String> = related_record_ids
+        let duplicate_id = session_record_ids
             .iter()
-            .copied()
-            .filter(|candidate| {
-                state.agents[*candidate]
+            .find(|candidate| {
+                state.agents[candidate.as_str()]
                     .source_event_ids
                     .contains(&event.source_event_id)
             })
-            .cloned()
-            .collect();
-        let duplicate_id = duplicate_record_ids.first().cloned();
-        let verified_alias_replay = adapter.id() == "codex"
-            && trusted_route
-            && matches!(
-                session_authority,
-                super::codex_authority::SessionAuthority::Current
-                    | super::codex_authority::SessionAuthority::Move
-            )
-            && duplicate_record_ids.iter().any(|duplicate_id| {
-                duplicate_id != &agent_id
-                    && state.agents.get(duplicate_id).is_some_and(|record| {
-                        record.native_session_id == native_session_id
-                            && record.route.pane_id.is_empty()
-                    })
-            });
-        let cleanup_only_alias_replay = verified_alias_replay
-            && native_record_id.as_ref() == Some(&agent_id)
-            && state.agents.contains_key(&agent_id);
-        if cleanup_only_alias_replay {
-            let mut source_ids = VecDeque::new();
-            for record_id in same_native_record_ids
-                .iter()
-                .filter(|record_id| *record_id != &agent_id)
-                .chain(std::iter::once(&agent_id))
-            {
-                for source_id in &state.agents[record_id].source_event_ids {
-                    if !source_ids.contains(source_id) {
-                        source_ids.push_back(source_id.clone());
-                    }
-                }
-            }
-            while source_ids.len() > MAX_DEDUPE_IDS {
-                source_ids.pop_front();
-            }
-            let retired_agent_ids: Vec<String> = same_native_record_ids
-                .iter()
-                .filter(|record_id| *record_id != &agent_id)
-                .cloned()
-                .collect();
-            let mut record = state.agents[&agent_id].clone();
-            for retired_id in &retired_agent_ids {
-                state.agents.remove(retired_id);
-            }
-            state.generation = state.generation.saturating_add(1);
-            let generation = state.generation;
-            record.state_generation = generation;
-            record.source_event_ids = source_ids;
-            state.agents.insert(agent_id.clone(), record.clone());
-            if let Err(error) = self.persist_locked(&state) {
-                *state = original;
-                return Err(HookIngestFailure::Retryable(error));
-            }
-            drop(state);
-            self.retire_codex_runtime_state(&retired_agent_ids);
-            if !retired_agent_ids.is_empty() {
-                (self.identity_promotion_sink)(&retired_agent_ids, &agent_id);
-            }
-            return Ok(IngestedHook {
-                event: v1::AgentEvent {
-                    agent: Some(snapshot::record(&record)),
-                    generation,
-                    notify: false,
-                    reason: "identity_reconciled".into(),
-                    retired_agent_ids,
-                },
-                reply: None,
-            });
-        }
-        if let Some(duplicate_id) = duplicate_id
-            && !verified_alias_replay
-        {
+            .map(|id| (*id).clone());
+        if let Some(duplicate_id) = duplicate_id {
             if adapter.id() == "codex"
                 && let Some(reconciled) = reconcile_duplicate_transcript_child_states(
                     &mut state,
@@ -764,9 +395,7 @@ impl AgentRuntime {
                     "authoritative hook source sequence must be nonzero"
                 )));
             }
-            if event.source_generation < latest_sequence
-                || event.source_generation == latest_sequence && !verified_alias_replay
-            {
+            if event.source_generation <= latest_sequence {
                 return Err(HookIngestFailure::Duplicate);
             }
         }
@@ -784,19 +413,9 @@ impl AgentRuntime {
                     .cloned()
             };
         let mut source_ids = VecDeque::new();
-        let mut source_record_ids: Vec<&String> = if trusted_route {
-            related_record_ids
-                .iter()
-                .copied()
-                .filter(|record_id| !session_record_ids.contains(record_id))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        source_record_ids.extend(session_record_ids.iter());
-        for candidate in source_record_ids
-            .into_iter()
-            .filter_map(|id| state.agents.get(id))
+        for candidate in session_record_ids
+            .iter()
+            .filter_map(|id| state.agents.get(id.as_str()))
         {
             for id in &candidate.source_event_ids {
                 if !source_ids.contains(id) {
@@ -822,28 +441,7 @@ impl AgentRuntime {
         {
             retirement_candidates.push(owner_id);
         }
-        if adapter.id() == "codex" && trusted_route {
-            for alias_id in &same_native_record_ids {
-                if !retirement_candidates.contains(alias_id) {
-                    retirement_candidates.push(alias_id.clone());
-                }
-            }
-        }
-        let runtime_migration_source = (adapter.id() == "codex"
-            && trusted_route
-            && session_authority == super::codex_authority::SessionAuthority::Current)
-            .then_some(native_record_id.as_ref())
-            .flatten()
-            .filter(|old_id| old_id.as_str() != agent_id)
-            .filter(|old_id| {
-                state
-                    .agents
-                    .get(*old_id)
-                    .is_some_and(|record| record.native_session_id == native_session_id)
-            })
-            .cloned();
         let mut voice_preferred_retired_agent_ids = Vec::new();
-        let mut voice_cleanup_retired_agent_ids = Vec::new();
         if !native_session_id.is_empty() {
             for old_id in &retirement_candidates {
                 if old_id == &agent_id {
@@ -855,12 +453,8 @@ impl AgentRuntime {
                 if !record.present {
                     continue;
                 }
-                if record.native_session_id.is_empty()
-                    || runtime_migration_source.as_ref() == Some(old_id)
-                {
+                if record.native_session_id.is_empty() {
                     voice_preferred_retired_agent_ids.push(old_id.clone());
-                } else if record.native_session_id == native_session_id {
-                    voice_cleanup_retired_agent_ids.push(old_id.clone());
                 }
             }
         }
@@ -873,6 +467,7 @@ impl AgentRuntime {
                 retired_agent_ids.push(old_id);
             }
         }
+        state.unbind_agents(&retired_agent_ids);
         state.generation = state.generation.saturating_add(1);
         let generation = state.generation;
         let previous_lifecycle = previous
@@ -1578,15 +1173,25 @@ impl AgentRuntime {
             lifecycle_changed_at_unix_millis: lifecycle_changed_at,
         };
         state.agents.insert(agent_id.clone(), record.clone());
+        let explicit_session_claim = adapter.id() == "codex"
+            && matches!(
+                parsed.event_name.as_str(),
+                "SessionStart" | "UserPromptSubmit"
+            );
+        if origin_matches && (trusted_route || explicit_session_claim && topology.is_none()) {
+            state.bind_pane(
+                adapter.id(),
+                active_server_identity,
+                &event.pane_id,
+                &agent_id,
+            );
+        }
         if let Err(error) = self.persist_locked(&state) {
             *state = original;
             return Err(HookIngestFailure::Retryable(error));
         }
         drop(state);
         if adapter.id() == "codex" {
-            if let Some(old_id) = runtime_migration_source.as_deref() {
-                self.migrate_codex_runtime_state(old_id, &agent_id);
-            }
             self.retire_codex_runtime_state(&retired_agent_ids);
         }
         if adapter.id() == "codex" {
@@ -1625,9 +1230,6 @@ impl AgentRuntime {
         }
         if !voice_preferred_retired_agent_ids.is_empty() {
             (self.identity_promotion_sink)(&voice_preferred_retired_agent_ids, &agent_id);
-        }
-        if !voice_cleanup_retired_agent_ids.is_empty() {
-            (self.identity_promotion_sink)(&voice_cleanup_retired_agent_ids, &agent_id);
         }
         // Voice mode (docs/mobile/voice-mode-plan.md §4.5): Claude produces a
         // final aggregate Stop after its background children, so its

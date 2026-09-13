@@ -29,6 +29,14 @@ pub(super) struct CodexTurnKey {
     pub turn_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(super) struct StoredPaneBinding {
+    pub adapter_id: String,
+    pub server_identity: String,
+    pub pane_id: String,
+    pub agent_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum CodexReviewer {
@@ -190,6 +198,12 @@ pub(super) struct StoredState {
     pub schema_version: u32,
     pub generation: u64,
     pub agents: BTreeMap<String, StoredAgent>,
+    /// Which logical session owns each physical pane. This is deliberately
+    /// separate from `StoredAgent::route`: topology may be unavailable while
+    /// a hook still proves session continuity, but an unverified pane must
+    /// never become a navigation destination.
+    #[serde(default)]
+    pub pane_bindings: BTreeSet<StoredPaneBinding>,
 }
 
 impl Default for StoredState {
@@ -198,7 +212,118 @@ impl Default for StoredState {
             schema_version: STATE_SCHEMA_VERSION,
             generation: 0,
             agents: BTreeMap::new(),
+            pane_bindings: BTreeSet::new(),
         }
+    }
+}
+
+impl StoredState {
+    pub(super) fn pane_owner_id(
+        &self,
+        adapter_id: &str,
+        server_identity: &str,
+        pane_id: &str,
+    ) -> Option<&str> {
+        self.pane_bindings
+            .iter()
+            .find(|binding| {
+                binding.adapter_id == adapter_id
+                    && binding.server_identity == server_identity
+                    && binding.pane_id == pane_id
+            })
+            .map(|binding| binding.agent_id.as_str())
+    }
+
+    pub(super) fn agent_is_bound(&self, agent_id: &str) -> bool {
+        self.pane_bindings
+            .iter()
+            .any(|binding| binding.agent_id == agent_id)
+    }
+
+    pub(super) fn bind_pane(
+        &mut self,
+        adapter_id: &str,
+        server_identity: &str,
+        pane_id: &str,
+        agent_id: &str,
+    ) -> bool {
+        if pane_id.is_empty() {
+            return false;
+        }
+        let changed = self.pane_owner_id(adapter_id, server_identity, pane_id) != Some(agent_id)
+            || self.pane_bindings.iter().any(|binding| {
+                binding.adapter_id == adapter_id
+                    && binding.server_identity == server_identity
+                    && binding.agent_id == agent_id
+                    && binding.pane_id != pane_id
+            });
+        self.pane_bindings.retain(|binding| {
+            !(binding.adapter_id == adapter_id
+                && binding.server_identity == server_identity
+                && (binding.pane_id == pane_id || binding.agent_id == agent_id))
+        });
+        self.pane_bindings.insert(StoredPaneBinding {
+            adapter_id: adapter_id.to_owned(),
+            server_identity: server_identity.to_owned(),
+            pane_id: pane_id.to_owned(),
+            agent_id: agent_id.to_owned(),
+        });
+        changed
+    }
+
+    pub(super) fn unbind_agents(&mut self, agent_ids: &[String]) {
+        self.pane_bindings
+            .retain(|binding| !agent_ids.contains(&binding.agent_id));
+    }
+
+    fn normalize_pane_bindings(&mut self) {
+        let mut owners = BTreeMap::<(String, String, String), (u64, String)>::new();
+        let mut consider =
+            |adapter_id: &str, server_identity: &str, pane_id: &str, agent_id: &str| {
+                let Some(record) = self.agents.get(agent_id).filter(|record| record.present) else {
+                    return;
+                };
+                let key = (
+                    adapter_id.to_owned(),
+                    server_identity.to_owned(),
+                    pane_id.to_owned(),
+                );
+                let candidate = (record.state_generation, agent_id.to_owned());
+                if owners.get(&key).is_none_or(|current| candidate > *current) {
+                    owners.insert(key, candidate);
+                }
+            };
+        for binding in &self.pane_bindings {
+            consider(
+                &binding.adapter_id,
+                &binding.server_identity,
+                &binding.pane_id,
+                &binding.agent_id,
+            );
+        }
+        for record in self.agents.values().filter(|record| {
+            !record.adapter_id.is_empty()
+                && !record.route.server_identity.is_empty()
+                && !record.route.pane_id.is_empty()
+        }) {
+            consider(
+                &record.adapter_id,
+                &record.route.server_identity,
+                &record.route.pane_id,
+                &record.agent_id,
+            );
+        }
+        self.pane_bindings = owners
+            .into_iter()
+            .map(
+                |((adapter_id, server_identity, pane_id), (_, agent_id))| StoredPaneBinding {
+                    adapter_id,
+                    server_identity,
+                    pane_id,
+                    agent_id,
+                },
+            )
+            .collect();
     }
 }
 
@@ -283,6 +408,7 @@ pub(super) fn load(path: &Path) -> StoredState {
             }
         }
     }
+    state.normalize_pane_bindings();
     state
 }
 

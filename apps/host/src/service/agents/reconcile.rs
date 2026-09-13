@@ -72,18 +72,30 @@ pub(super) fn topology(
         }
         retain
     });
+    state.unbind_agents(&retired);
 
     let mut changed = !retired.is_empty();
     for ((pane_id, adapter_id), (_pane, adapter)) in detected {
         let existing_id = state
-            .agents
-            .values()
-            .find(|record| {
-                record.route.server_identity == server_identity
-                    && record.route.pane_id == pane_id
-                    && record.adapter_id == adapter_id
+            .pane_owner_id(&adapter_id, server_identity, &pane_id)
+            .filter(|agent_id| {
+                state
+                    .agents
+                    .get(*agent_id)
+                    .is_some_and(|record| record.present && record.adapter_id == adapter_id)
             })
-            .map(|record| record.agent_id.clone());
+            .map(str::to_owned)
+            .or_else(|| {
+                state
+                    .agents
+                    .values()
+                    .find(|record| {
+                        record.route.server_identity == server_identity
+                            && record.route.pane_id == pane_id
+                            && record.adapter_id == adapter_id
+                    })
+                    .map(|record| record.agent_id.clone())
+            });
         if let Some(existing_id) = existing_id {
             let fresh_route = identity::direct_route(snapshot, server_identity, &pane_id)
                 .expect("detected pane belongs to snapshot");
@@ -96,6 +108,7 @@ pub(super) fn topology(
                 record.updated_at_unix_millis = now;
                 changed = true;
             }
+            changed |= state.bind_pane(adapter.id(), server_identity, &pane_id, &existing_id);
             // Process discovery proves presence, not lifecycle: it never
             // erases the lifecycle or attention a hook established.
             continue;
@@ -106,7 +119,7 @@ pub(super) fn topology(
         state.agents.insert(
             agent_id.clone(),
             StoredAgent {
-                agent_id,
+                agent_id: agent_id.clone(),
                 adapter: adapter.legacy_kind() as i32,
                 adapter_id,
                 native_session_id: String::new(),
@@ -145,6 +158,7 @@ pub(super) fn topology(
                 lifecycle_changed_at_unix_millis: now,
             },
         );
+        state.bind_pane(adapter.kind(), server_identity, &pane_id, &agent_id);
         changed = true;
     }
 
