@@ -12,7 +12,7 @@ const settle = () => vi.advanceTimersByTimeAsync(0);
 async function connected() {
   const store = createSessionStore();
   const transport = new FakeTransport();
-  const connection = new HostConnection({ dial: async () => transport, appVersion: "t", nextConnectionEpoch: () => 1, store });
+  const connection = new HostConnection({ dial: async () => transport, nextConnectionEpoch: () => 1, store });
   connection.connect();
   await settle();
   transport.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n }));

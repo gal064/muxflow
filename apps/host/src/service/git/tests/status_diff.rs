@@ -408,7 +408,7 @@ async fn diff_requires_repository_and_fresh_status_and_honors_pre_cancel() {
     // A diff no longer needs the client's status expectation to still hold: the
     // response states the authoritative status it was actually read against, so
     // the client reconciles instead of paying another round trip to retry.
-    let (diff, carried) = service.diff(&request, true, None).await.unwrap();
+    let (diff, carried) = service.diff(&request, None).await.unwrap();
     assert_eq!(diff.new_content, b"newer!!\n");
     assert!(carried.authoritative);
     assert_ne!(carried.generation, request.expected_status_generation);
@@ -422,7 +422,7 @@ async fn diff_requires_repository_and_fresh_status_and_honors_pre_cancel() {
     request.expected_status_generation = carried.generation;
     assert!(
         service
-            .diff(&request, true, Some(Arc::new(AtomicBool::new(true))))
+            .diff(&request, Some(Arc::new(AtomicBool::new(true))))
             .await
             .unwrap_err()
             .to_string()

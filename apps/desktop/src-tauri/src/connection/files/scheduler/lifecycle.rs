@@ -31,9 +31,7 @@ impl BulkBinding {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if !self.client.ready.load(Ordering::Acquire)
-            || self.client.read_only.load(Ordering::Acquire)
-        {
+        if !self.client.ready.load(Ordering::Acquire) {
             return Err("bulk job is not bound to a writable live control connection".into());
         }
         if self.client.terminal_epoch.load(Ordering::Acquire) != self.connection_epoch {

@@ -46,7 +46,7 @@ export function NewWorkspaceDialog(props: NewWorkspaceDialogProps) {
   // own Escape handler had a chance to close only the dropdown.
   const dialog = useModalDialog<HTMLElement>(props.onCancel, true, menu === undefined);
   const selected = props.hosts.find((host) => host.profileId === props.selectedHostProfileId);
-  const selectedPhase = selected && selected.phase !== "connected" ? `, ${phaseWord(selected.phase)}` : "";
+  const selectedPhase = selected && selected.phase !== "connected" ? `, ${selected.phase}` : "";
 
   return <div className="modal-backdrop" role="presentation">
     <section aria-labelledby={titleId} aria-modal="true" className="confirmation new-workspace-dialog" ref={dialog} role="dialog">
@@ -80,7 +80,7 @@ export function NewWorkspaceDialog(props: NewWorkspaceDialogProps) {
               <span aria-hidden="true" className={`link-dot ${selected.phase}`} />
               <span aria-hidden="true" className="host-letter">{selected.letter}</span>
               <span className="new-workspace-host-label">{selected.label}</span>
-              {selected.phase !== "connected" && <span className="new-workspace-host-phase">{phaseWord(selected.phase)}</span>}
+              {selected.phase !== "connected" && <span className="new-workspace-host-phase">{selected.phase}</span>}
               <span aria-hidden="true" className="new-workspace-host-caret" />
             </> : <span className="new-workspace-host-label">No host available</span>}
           </button>
@@ -94,7 +94,7 @@ export function NewWorkspaceDialog(props: NewWorkspaceDialogProps) {
         anchor={menu}
         items={props.hosts.map((host) => ({
           id: `new-workspace-host-${host.profileId}`,
-          label: `${host.letter} ${host.label}${host.phase === "connected" ? "" : ` · ${phaseWord(host.phase)}`}`,
+          label: `${host.letter} ${host.label}${host.phase === "connected" ? "" : ` · ${host.phase}`}`,
           checked: host.profileId === selected?.profileId,
           disabled: !host.canMutate,
           dot: host.phase,
@@ -108,7 +108,6 @@ export function NewWorkspaceDialog(props: NewWorkspaceDialogProps) {
   </div>;
 }
 
-/** A phase as a word in a label; only read-only is not already one. */
 function phaseWord(phase: ConnectionPhase): string {
-  return phase === "readOnly" ? "read-only" : phase;
+  return phase;
 }

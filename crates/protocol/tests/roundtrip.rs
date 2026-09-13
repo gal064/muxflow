@@ -1,12 +1,12 @@
 // Framing and schema invariants. Cross-language byte/u64 coverage lives in
 // mobile_contract.rs and the mobile Rust-contract test.
 use prost::Message;
-use tmux_agent_protocol::{PROTOCOL_MAJOR, PROTOCOL_MINOR, encode_frame, read_frame_sync, v1};
+use tmux_agent_protocol::{PROTOCOL_MAJOR, encode_frame, read_frame_sync, v1};
 
 #[test]
 fn assigned_operation_and_enum_numbers_do_not_move() {
     use v1::Operation::*;
-    assert_eq!((PROTOCOL_MAJOR, PROTOCOL_MINOR), (2, 1));
+    assert_eq!(PROTOCOL_MAJOR, 3);
     for (operation, number) in [
         (ReconcileTerminalUpload, 41),
         (SelectTerminalSession, 43),
@@ -95,41 +95,6 @@ fn field_numbers_and_wire_types_do_not_move() {
     );
 }
 
-#[test]
-fn every_required_capability_is_named_and_enforced() {
-    use tmux_agent_protocol::*;
-    for (bit, index) in [
-        (CAP_TERMINAL_OUTPUT_CREDIT, 14),
-        (CAP_FILE_STREAM, 15),
-        (CAP_TERMINAL_FILE_RESOLUTION, 16),
-        (CAP_TMUX_EXECUTABLE_RESOLUTION, 17),
-        (CAP_VOICE, 18),
-    ] {
-        assert_eq!(bit, 1 << index);
-    }
-    assert_eq!(missing_host_capabilities(HOST_CAPABILITIES), 0);
-    assert_eq!(
-        capability_names(HOST_CAPABILITIES).len(),
-        HOST_CAPABILITIES.count_ones() as usize
-    );
-    assert!(!capability_names(HOST_CAPABILITIES).contains(&"unknown"));
-    for index in 0..64 {
-        let bit = 1_u64 << index;
-        if HOST_CAPABILITIES & bit == 0 {
-            continue;
-        }
-        let hello = v1::ServerHello {
-            capabilities: HOST_CAPABILITIES & !bit,
-            ..Default::default()
-        };
-        assert_eq!(
-            validate_host_contract(PROTOCOL_MAJOR, &hello),
-            Err(HostContractError::MissingCapabilities(bit))
-        );
-        assert_eq!(capability_names(bit).len(), 1);
-    }
-}
-
 #[tokio::test]
 async fn frame_readers_distinguish_disconnect_truncation_corruption_and_oversize() {
     use tmux_agent_protocol::{FrameAccumulator, FrameError, MAX_FRAME_BYTES, read_frame};
@@ -189,9 +154,6 @@ fn length_delimited_frame_round_trips() {
         7,
         3,
         v1::envelope::Payload::ClientHello(v1::ClientHello {
-            desktop_version: "test".into(),
-            requested_capabilities: u64::MAX,
-            expected_helper_version: tmux_agent_protocol::HELPER_VERSION.into(),
             bulk_connection: false,
             ..Default::default()
         }),
@@ -205,58 +167,6 @@ fn length_delimited_frame_round_trips() {
 fn truncated_length_prefix_is_an_error_not_a_clean_disconnect() {
     let error = read_frame_sync(&mut [0_u8, 0].as_slice()).unwrap_err();
     assert!(error.to_string().contains("frame I/O failed"));
-}
-
-#[test]
-fn a_renderer_handoff_across_a_version_skew_degrades_to_a_seed() {
-    // Old desktop, new host: the hide still uploads a screen and neither the
-    // hide nor the reveal carries the flag. The host's rule — a tail only for a
-    // renderer that says it is still holding the screen the tail continues —
-    // is therefore never satisfied, and every reveal is answered with a seed.
-    let old_desktop_reveal = v1::Request {
-        operation: v1::Operation::SetTerminalVisibility.into(),
-        scope: "%2".into(),
-        visible: true,
-        data: b"a screen the host ignores".to_vec(),
-        terminal_epoch: 7,
-        terminal_generation_cutoff: 42,
-        ..Default::default()
-    };
-    let decoded = v1::Request::decode(old_desktop_reveal.encode_to_vec().as_slice()).unwrap();
-    assert!(!decoded.terminal_renderer_holds_snapshot);
-    assert_eq!(decoded, old_desktop_reveal);
-
-    // New desktop, old host: the flag rides in a field number the old host has
-    // never heard of, and an unknown field is skipped rather than refused — so
-    // the request is still a valid hide, just one whose empty payload that host
-    // reads as "no recoverable screen". Its answer sets no
-    // `resume_from_renderer`, which the desktop reads as seed debt.
-    let new_desktop_hide = v1::Request {
-        operation: v1::Operation::SetTerminalVisibility.into(),
-        scope: "%2".into(),
-        visible: false,
-        terminal_epoch: 7,
-        terminal_generation_cutoff: 42,
-        terminal_renderer_holds_snapshot: true,
-        ..Default::default()
-    };
-    let mut bytes = new_desktop_hide.encode_to_vec();
-    // A field number neither peer assigns, to state the tolerance itself.
-    bytes.extend_from_slice(&[0xf8, 0x06, 0x01]);
-    let decoded = v1::Request::decode(bytes.as_slice()).unwrap();
-    assert!(decoded.terminal_renderer_holds_snapshot);
-    assert!(decoded.data.is_empty());
-
-    let old_host_answer = v1::PaneResource {
-        pane_id: "%2".into(),
-        state: v1::PaneResourceState::Released.into(),
-        requires_seed: true,
-        recovery_reason: "renderer handoff omitted a recoverable snapshot".into(),
-        ..Default::default()
-    };
-    let decoded = v1::PaneResource::decode(old_host_answer.encode_to_vec().as_slice()).unwrap();
-    assert!(!decoded.resume_from_renderer);
-    assert!(decoded.requires_seed);
 }
 
 #[test]

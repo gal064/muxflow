@@ -168,35 +168,6 @@ pub(super) async fn handle(
             );
             send_response(control_tx, request_id, response).await;
         }
-        v1::Operation::ReadFile => {
-            // The staircase this replaced: a stat, a preflight, then a chunk
-            // request per mebibyte, each of which could answer about a
-            // different file. `OpenFileStream` does all of it from one
-            // descriptor. Refused rather than kept working, because a second
-            // way to open a file that nobody exercises is how the one people
-            // do use goes quietly wrong — the two had already drifted apart on
-            // re-stat and generation.
-            send_response(
-                control_tx,
-                request_id,
-                response_error(
-                    "open_file_stream_required",
-                    "editor opens must use OpenFileStream on a bulk connection",
-                ),
-            )
-            .await;
-        }
-        v1::Operation::WriteFile => {
-            send_response(
-                control_tx,
-                request_id,
-                response_error(
-                    "chunked_write_required",
-                    "editor writes must use begin/chunk/commit on a bulk connection",
-                ),
-            )
-            .await;
-        }
         v1::Operation::FileMutation => {
             let Some(file) = require_rooted_file(&request, request_id, control_tx).await else {
                 return;

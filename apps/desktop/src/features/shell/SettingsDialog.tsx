@@ -231,11 +231,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
             {helperCanInstall(props.helper) && <button className="primary" onClick={props.onRequestHelperInstall} type="button">
               {props.helper.probe.installed ? "Upgrade helper…" : "Install helper…"}
             </button>}
-            {helperNeedsNewerApp(props.helper) && <p role="status">
-              This host runs a newer helper ({props.helper.probe.helperVersion}) than this app
-              expects ({props.helper.probe.expectedHelperVersion}). Update the app — installing
-              from here would downgrade the host.
-            </p>}
             {props.helper.phase === "ready" && <HelperDetails probe={props.helper.probe} />}
             {props.helper.phase === "upgrading" && <p role="status">Upgrading the remote helper; the previous one is retained until the new handshake succeeds.</p>}
             {props.helper.phase === "failed" && <SurfaceError
@@ -535,11 +530,7 @@ function hostDeleteHint(props: Pick<SettingsDialogProps, "deletableProfile" | "p
 }
 
 function helperCanInstall(state: HelperUpgradeState): state is Extract<HelperUpgradeState, { phase: "ready" }> {
-  return state.phase === "ready" && !state.probe.compatible && !state.probe.appOutdated;
-}
-
-function helperNeedsNewerApp(state: HelperUpgradeState): state is Extract<HelperUpgradeState, { phase: "ready" }> {
-  return state.phase === "ready" && !state.probe.compatible && Boolean(state.probe.appOutdated);
+  return state.phase === "ready" && !state.probe.compatible;
 }
 
 function HelperDetails({ probe }: { probe: RemoteHelperProbe }) {

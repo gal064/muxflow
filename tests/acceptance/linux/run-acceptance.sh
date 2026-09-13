@@ -28,7 +28,6 @@ run_gate() {
 
 : >"$run_root/results.tsv"
 run_gate source-scan bash tests/acceptance/linux/run-source-scan.sh
-run_gate protocol1-helper01-upgrade bash tests/acceptance/linux/run-helper-compat.sh
 # This is the existing bounded 28-lane Phase 0–8 gate. It uses 16/64 MiB
 # representative transfer lanes and never enables the exact 5 GiB release lane.
 run_gate phase0-through-8-bounded bash tests/release/run-regressions.sh

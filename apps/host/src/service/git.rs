@@ -232,7 +232,6 @@ impl GitService {
     pub(in crate::service) async fn diff(
         &self,
         request: &v1::GitRequest,
-        bulk_available: bool,
         cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<(v1::GitDiff, v1::GitStatusSnapshot)> {
         require_repository_id(request)?;
@@ -261,7 +260,7 @@ impl GitService {
                 &read_capabilities.stable_root(),
                 repository,
                 &work,
-                DiffAudience::for_client(bulk_available),
+                DiffAudience::Client,
                 read_cancellation.as_deref(),
             )
         })
@@ -309,9 +308,7 @@ impl GitService {
         request: &v1::GitRequest,
         cancellation: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<v1::GitDiff> {
-        self.diff(request, true, cancellation)
-            .await
-            .map(|(diff, _)| diff)
+        self.diff(request, cancellation).await.map(|(diff, _)| diff)
     }
 
     pub(in crate::service) async fn prepare_discard(

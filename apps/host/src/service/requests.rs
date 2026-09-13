@@ -51,9 +51,6 @@ pub(super) struct RequestContext {
     pub(super) files: Arc<FileService>,
     pub(super) git: Arc<super::git::GitService>,
     pub(super) bulk_connection: bool,
-    /// Whether this connection may open the independent bulk lane at all. A
-    /// read-only host refuses one, so its Git diff bodies cannot be deferred.
-    pub(super) bulk_available: bool,
     pub(super) connection_epoch: u64,
     pub(super) perf_connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     /// This connection's id in the control-event hub, so a voice session can

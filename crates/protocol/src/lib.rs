@@ -48,11 +48,9 @@ pub mod v1 {
     }
 }
 
-// Phase 9 removes obsolete topology and agent-route fields. The major bump
-// deliberately makes older helpers read-only until the user accepts the
-// existing explicit helper-upgrade flow.
-pub const PROTOCOL_MAJOR: u32 = 2;
-pub const PROTOCOL_MINOR: u32 = 1;
+// Mobile is independently released. A differing contract is rejected at admission;
+// desktop and host are shipped together and have no version-skew mode.
+pub const PROTOCOL_MAJOR: u32 = 3;
 pub const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
@@ -93,128 +91,9 @@ impl std::error::Error for PublishFailure {}
 
 pub type PublishResult<T> = Result<Published<T>, PublishFailure>;
 
-pub const CAP_SNAPSHOTS: u64 = 1 << 0;
-pub const CAP_ORDERED_EVENTS: u64 = 1 << 1;
-pub const CAP_CANCELLATION: u64 = 1 << 2;
-pub const CAP_TERMINAL_STREAM: u64 = 1 << 3;
-pub const CAP_RESYNC: u64 = 1 << 4;
-pub const CAP_TMUX_ACTIONS: u64 = 1 << 5;
-pub const CAP_TERMINAL_RESOURCES: u64 = 1 << 6;
-pub const CAP_ACTIVE_ROOT: u64 = 1 << 7;
-pub const CAP_FILE_SERVICE: u64 = 1 << 8;
-pub const CAP_TEXT_EDITOR: u64 = 1 << 9;
-pub const CAP_BULK_DOWNLOAD: u64 = 1 << 10;
-pub const CAP_GIT: u64 = 1 << 11;
-pub const CAP_AGENTS: u64 = 1 << 12;
-pub const CAP_TERMINAL_UPLOAD: u64 = 1 << 13;
-pub const CAP_TERMINAL_OUTPUT_CREDIT: u64 = 1 << 14;
-/// One descriptor-bound editor open per request, replacing the metadata +
-/// preflight + per-chunk staircase.
-///
-/// A *required* capability, not an optional one: it is part of
-/// [`HOST_CAPABILITIES`], which the desktop demands in full, so a helper
-/// without it is refused at the handshake with the missing bit named. There is
-/// deliberately no fallback to the staircase — the daemon already has to match
-/// the desktop's helper version, and a second code path for opening files that
-/// nobody exercises is how the one people do use goes quietly wrong.
-///
-/// The bit exists so that refusal says *what* is missing. Without it, a helper
-/// that passed version checks but predated this operation would connect
-/// cleanly and then fail every file open with an unknown-operation error.
-pub const CAP_FILE_STREAM: u64 = 1 << 15;
-/// Resolves explicit terminal-output paths against the authoritative pane cwd.
-/// Required so a desktop cannot offer operation 46 to a helper that predates it.
-pub const CAP_TERMINAL_FILE_RESOLUTION: u64 = 1 << 16;
-/// The helper resolves tmux independently of an interactive shell `PATH`.
-///
-/// Required even though it adds no request type: a daemon survives desktop
-/// upgrades, and a same-version daemon predating this behavior would otherwise
-/// remain "compatible" while every local tmux operation still failed from a
-/// Dock-launched app. The required bit makes the bridge retire that daemon and
-/// start the helper shipped with the desktop.
-pub const CAP_TMUX_EXECUTABLE_RESOLUTION: u64 = 1 << 17;
-/// The helper serves the five `OPERATION_VOICE_*` operations and pushes
-/// `VOICE_REPLY` events (docs/mobile/voice-mode-plan.md).
-///
-/// Required, like every other bit: the phone demands the full set, so a
-/// helper without it is refused at the handshake with "voice" named rather
-/// than failing the first utterance with an unknown-operation error. Whether
-/// voice is *usable* on the host (uv installed, model provisioned) is a
-/// runtime answer from `OPERATION_VOICE_STATUS`, not a capability.
-pub const CAP_VOICE: u64 = 1 << 18;
-pub const HOST_CAPABILITIES: u64 = CAP_SNAPSHOTS
-    | CAP_ORDERED_EVENTS
-    | CAP_CANCELLATION
-    | CAP_TERMINAL_STREAM
-    | CAP_RESYNC
-    | CAP_TMUX_ACTIONS
-    | CAP_TERMINAL_RESOURCES
-    | CAP_ACTIVE_ROOT
-    | CAP_FILE_SERVICE
-    | CAP_TEXT_EDITOR
-    | CAP_BULK_DOWNLOAD
-    | CAP_GIT
-    | CAP_AGENTS
-    | CAP_TERMINAL_UPLOAD
-    | CAP_TERMINAL_OUTPUT_CREDIT
-    | CAP_FILE_STREAM
-    | CAP_TERMINAL_FILE_RESOLUTION
-    | CAP_TMUX_EXECUTABLE_RESOLUTION
-    | CAP_VOICE;
-
-/// Every required capability, with the name a refusal reports it by.
-const CAPABILITY_NAMES: [(u64, &str); 19] = [
-    (CAP_SNAPSHOTS, "snapshots"),
-    (CAP_ORDERED_EVENTS, "orderedEvents"),
-    (CAP_CANCELLATION, "cancellation"),
-    (CAP_TERMINAL_STREAM, "terminalStream"),
-    (CAP_RESYNC, "resync"),
-    (CAP_TMUX_ACTIONS, "tmuxActions"),
-    (CAP_TERMINAL_RESOURCES, "terminalResources"),
-    (CAP_ACTIVE_ROOT, "activeRoot"),
-    (CAP_FILE_SERVICE, "fileService"),
-    (CAP_TEXT_EDITOR, "textEditor"),
-    (CAP_BULK_DOWNLOAD, "bulkDownload"),
-    (CAP_GIT, "git"),
-    (CAP_AGENTS, "agents"),
-    (CAP_TERMINAL_UPLOAD, "terminalUpload"),
-    (CAP_TERMINAL_OUTPUT_CREDIT, "terminalOutputCredit"),
-    (CAP_FILE_STREAM, "fileStream"),
-    (CAP_TERMINAL_FILE_RESOLUTION, "terminalFileResolution"),
-    (CAP_TMUX_EXECUTABLE_RESOLUTION, "tmuxExecutableResolution"),
-    (CAP_VOICE, "voice"),
-];
-
-/// Which required capabilities `advertised` does not carry.
-///
-/// The admission rule itself, in one place. Restating it — even in a comment
-/// beside a test — is how a helper that cannot serve an operation ends up
-/// admitted by one copy of the rule and refused by another.
-pub fn missing_host_capabilities(advertised: u64) -> u64 {
-    HOST_CAPABILITIES & !advertised
-}
-
-/// Names the capabilities in `mask`, so a refusal can say what is missing.
-///
-/// A bare hex mask names the *bit*, which is not a fact anyone outside this
-/// file can act on.
-pub fn capability_names(mask: u64) -> Vec<&'static str> {
-    let mut named: Vec<&'static str> = CAPABILITY_NAMES
-        .iter()
-        .filter(|(bit, _)| mask & bit != 0)
-        .map(|(_, name)| *name)
-        .collect();
-    if mask & !CAPABILITY_NAMES.iter().fold(0, |all, (bit, _)| all | bit) != 0 {
-        named.push("unknown");
-    }
-    named
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostContractError {
     ProtocolMajor { advertised: u32, required: u32 },
-    ReadOnly(String),
-    MissingCapabilities(u64),
 }
 
 impl std::fmt::Display for HostContractError {
@@ -229,38 +108,19 @@ impl std::fmt::Display for HostContractError {
                     "host protocol major {advertised} does not match required {required}"
                 )
             }
-            Self::ReadOnly(reason) if reason.is_empty() => {
-                formatter.write_str("host bridge is read-only")
-            }
-            Self::ReadOnly(reason) => write!(formatter, "host bridge is read-only: {reason}"),
-            Self::MissingCapabilities(mask) => write!(
-                formatter,
-                "host helper is missing required capabilities: {}",
-                capability_names(*mask).join(", "),
-            ),
         }
     }
 }
 
 impl std::error::Error for HostContractError {}
 
-/** The common writable-host admission contract for control and bulk lanes. */
-pub fn validate_host_contract(
-    envelope_major: u32,
-    hello: &v1::ServerHello,
-) -> Result<(), HostContractError> {
+/// Fail closed when an independently released client speaks a different contract.
+pub fn validate_host_contract(envelope_major: u32) -> Result<(), HostContractError> {
     if envelope_major != PROTOCOL_MAJOR {
         return Err(HostContractError::ProtocolMajor {
             advertised: envelope_major,
             required: PROTOCOL_MAJOR,
         });
-    }
-    if hello.read_only {
-        return Err(HostContractError::ReadOnly(hello.incompatibility.clone()));
-    }
-    let missing = missing_host_capabilities(hello.capabilities);
-    if missing != 0 {
-        return Err(HostContractError::MissingCapabilities(missing));
     }
     Ok(())
 }
@@ -375,7 +235,6 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
 pub fn envelope(request_id: u64, sequence: u64, payload: v1::envelope::Payload) -> v1::Envelope {
     v1::Envelope {
         protocol_major: PROTOCOL_MAJOR,
-        protocol_minor: PROTOCOL_MINOR,
         request_id,
         sequence,
         stream_id: 0,

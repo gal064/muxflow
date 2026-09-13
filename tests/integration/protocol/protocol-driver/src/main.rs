@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use protocol_driver_support::{Bridge, Hello, local_bridge_command, ssh_bridge_command};
 use serde_json::json;
 use tmux_agent_protocol::{
-    HOST_CAPABILITIES, envelope, read_frame_sync,
+    envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -202,13 +202,10 @@ struct ProtocolClient {
 
 impl ProtocolClient {
     fn connect(transport: &Transport) -> Result<Self> {
-        let (bridge, hello) = Bridge::connect(
-            &mut transport.bridge_command(),
-            Hello::control("protocol-test-driver", HOST_CAPABILITIES),
-            11,
-        )
-        .map_err(anyhow::Error::msg)
-        .context("start Phase 2 protocol bridge")?;
+        let (bridge, hello) =
+            Bridge::connect(&mut transport.bridge_command(), Hello::control(), 11)
+                .map_err(anyhow::Error::msg)
+                .context("start Phase 2 protocol bridge")?;
         Ok(Self {
             bridge,
             observations: Observations::default(),

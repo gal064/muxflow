@@ -7,7 +7,6 @@ use std::{
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tmux_agent_protocol::HELPER_VERSION;
 
 use super::{
     ConnectionSpec, SshLease, acquire_control_master, acquire_control_master_for_socket,
@@ -25,73 +24,26 @@ pub fn probe_remote_helper(connection: ConnectionSpec) -> Result<serde_json::Val
         return Err("remote helper probing requires an SSH profile".into());
     };
     let mut probe = run_remote_probe(&profile_id, &target, config_path.as_deref())?;
-    settle_compatibility(&mut probe);
+    compare_installed_artifact(&mut probe)?;
     Ok(probe)
 }
 
-/// The single source of truth for "is the host running the helper this desktop
-/// ships": the bytes match, or they do not.
-///
-/// The helper version string used to decide this, and it silently lied. A
-/// release that changed the helper's behaviour without bumping `HELPER_VERSION`
-/// left the probe reporting `compatible` while the bridge refused the same
-/// helper at the handshake, so the upgrade button the user needed was hidden
-/// exactly when it was required. A digest cannot drift from what it describes,
-/// and the packaged Linux helpers are built reproducibly for this reason: the
-/// same source produces the same bytes, so an equal digest is a real match and
-/// not a coincidence.
-///
-/// An unreadable artifact leaves the probe's own answer alone: no packaged
-/// artifact means there is nothing to install, and claiming a mismatch would
-/// offer an upgrade that cannot run.
-fn settle_compatibility(probe: &mut serde_json::Value) {
-    let Some(architecture) = probe
+/// Match the installed executable against the artifact this desktop can install.
+fn compare_installed_artifact(probe: &mut serde_json::Value) -> Result<(), String> {
+    let architecture = probe
         .get("architecture")
         .and_then(serde_json::Value::as_str)
-    else {
-        return;
-    };
-    let Ok(expected) = helper_artifact_for_arch(architecture).and_then(|path| sha256_file(&path))
-    else {
-        return;
-    };
+        .ok_or("remote helper probe omitted architecture")?;
+    let expected = sha256_file(&helper_artifact_for_arch(architecture)?)?;
     let matches = probe
         .get("digest")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|installed| installed == expected);
-    // A mismatch says the helper is not ours; it does not say ours is newer.
-    // Pushing on that alone lets an older desktop overwrite a helper a newer one
-    // installed, and with two desktops on one host each would keep reinstalling
-    // over the other. Direction decides who moves: if the host already runs a
-    // newer helper, this app is the stale side and must be updated instead.
-    let app_outdated = probe
-        .get("helperVersion")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|installed| {
-            Some((
-                release_ordinal(installed)?,
-                release_ordinal(HELPER_VERSION)?,
-            ))
-        })
-        .is_some_and(|(installed, ours)| installed > ours);
-    if let Some(object) = probe.as_object_mut() {
-        object.insert("compatible".into(), serde_json::Value::Bool(matches));
-        object.insert("appOutdated".into(), serde_json::Value::Bool(app_outdated));
-        object.insert(
-            "expectedHelperVersion".into(),
-            serde_json::Value::String(HELPER_VERSION.into()),
-        );
-    }
-}
-
-/// `major.minor.patch` as one comparable number, or `None` when it is not that
-/// shape — an unreadable version orders against nothing, so the caller keeps its
-/// existing answer rather than guessing a direction from a string it cannot parse.
-fn release_ordinal(version: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = version.trim().split('.');
-    let mut next = || parts.next()?.parse::<u64>().ok();
-    let ordinal = (next()?, next()?, next()?);
-    parts.next().is_none().then_some(ordinal)
+    probe
+        .as_object_mut()
+        .ok_or("remote helper probe is not an object")?
+        .insert("compatible".into(), serde_json::Value::Bool(matches));
+    Ok(())
 }
 
 #[tauri::command]
@@ -156,22 +108,7 @@ fn install_remote_helper_inner(
         return Err("remote helper installation requires an SSH profile".into());
     };
     validate_ssh_target(&target)?;
-    let mut probe = run_remote_probe_with_lease(&target, config_path.as_deref(), &lease)?;
-    settle_compatibility(&mut probe);
-    if probe
-        .get("appOutdated")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err(format!(
-            "remote helper {} is newer than this app expects {}; refusing downgrade",
-            probe
-                .get("helperVersion")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown"),
-            HELPER_VERSION,
-        ));
-    }
+    let probe = run_remote_probe_with_lease(&target, config_path.as_deref(), &lease)?;
     let remote_arch = probe
         .get("architecture")
         .and_then(serde_json::Value::as_str)
@@ -187,8 +124,6 @@ fn install_remote_helper_inner(
             &digest,
             "--expected-arch",
             normalize_architecture(remote_arch),
-            "--expected-version",
-            HELPER_VERSION,
         ]);
     if let Some(control_socket) = lease.control_socket() {
         command.arg("--control-socket").arg(control_socket);

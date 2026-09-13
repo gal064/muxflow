@@ -88,7 +88,6 @@ function harness() {
       connection: controller.connection,
       connectionEpoch: controller.connectionEpoch,
       dispatchHelper,
-      setConnectionDetail: controller.setConnectionDetail,
     });
     onHandshakeFailure.current = recovery.onHandshakeFailure;
     onConnectionStateChanged.current = recovery.onConnectionStateChanged;
@@ -163,7 +162,7 @@ describe("remote helper reconciliation", () => {
 
   it("checks a successful SSH connection once and prompts for a same-version digest mismatch", async () => {
     const { observed, publish, renderer } = await connected(async () => probe({
-      installed: true, compatible: false, helperVersion: "0.2.0", expectedHelperVersion: "0.2.0",
+      installed: true, compatible: false, helperVersion: "0.2.0",
     }));
     await act(async () => {
       publish({ kind: "connectionState", state: "connected", sequence: 0 });
@@ -181,20 +180,6 @@ describe("remote helper reconciliation", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("probes a contract-refused read-only helper and offers the compatible replacement", async () => {
-    const { observed, publish, renderer } = await connected(async () => probe({
-      installed: true, compatible: false, helperVersion: "0.1.0", expectedHelperVersion: "0.2.0",
-    }));
-    await act(async () => {
-      publish({ kind: "error", message: "host helper is missing required capabilities: terminal-output-credit", sequence: 0 });
-      publish({ kind: "connectionState", state: "readOnly", sequence: 1 });
-    });
-
-    expect(probeCalls()).toHaveLength(1);
-    expect(observed.phase).toBe("readOnly");
-    expect(observed.helper).toMatchObject({ phase: "confirming", operation: "upgrade" });
-    await act(async () => renderer.unmount());
-  });
 
   it("re-probes a native in-place reconnect and ignores the old transport's pending answer", async () => {
     let resolveOld!: (value: RemoteHelperProbe) => void;
@@ -256,7 +241,7 @@ describe("remote helper reconciliation", () => {
 
     await act(async () => {
       resolveProbe(probe({
-        installed: true, compatible: false, helperVersion: "0.2.0", expectedHelperVersion: "0.2.0",
+        installed: true, compatible: false, helperVersion: "0.2.0",
       }));
       await pending;
     });
@@ -324,7 +309,7 @@ describe("remote helper reconciliation", () => {
 
   it("keeps the Settings check informational instead of opening an upgrade prompt", async () => {
     const mismatched = probe({
-      installed: true, compatible: false, helperVersion: "0.2.0", expectedHelperVersion: "0.2.0",
+      installed: true, compatible: false, helperVersion: "0.2.0",
     });
     const { observed, renderer } = await connected(async () => mismatched);
     await act(async () => { observed.probeManually(); });
@@ -400,15 +385,6 @@ describe("remote helper reconciliation", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("says nothing about installing when the host is the newer side", async () => {
-    const { observed, publish, renderer } = await connected(async () => probe({
-      installed: true, compatible: false, appOutdated: true, helperVersion: "9", expectedHelperVersion: "8",
-    }));
-    await act(async () => { publish(handshakeFailure); });
-    expect(observed.helper.phase).toBe("ready");
-    expect(observed.detail).toContain("This host runs a newer helper (9) than this app expects (8)");
-    await act(async () => renderer.unmount());
-  });
 
   it("leaves an unreachable host with the error it actually gave", async () => {
     // A refused key, a password prompt and a host that is simply not there all

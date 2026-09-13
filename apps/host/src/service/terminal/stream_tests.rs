@@ -79,7 +79,7 @@ impl Harness {
                 generation: Arc::new(AtomicU64::new(0)),
                 stopped: AtomicBool::new(false),
                 capture_in_flight: Mutex::new(HashSet::new()),
-                output_credit: Arc::new(super::OutputCredit::negotiated(false)),
+                output_credit: Arc::new(super::OutputCredit::new()),
                 emission_order: Arc::new(Mutex::new(())),
                 topology_trigger: TopologyOutputTrigger::default(),
             },
@@ -759,7 +759,7 @@ fn a_clean_resume_block_is_not_treated_as_an_acknowledgement() {
     let generation = Arc::new(AtomicU64::new(0));
     let (writer, _writes) = std_mpsc::channel();
     let stopped = Arc::new(AtomicBool::new(false));
-    let output_credit = super::OutputCredit::negotiated(false);
+    let output_credit = super::OutputCredit::new();
     let emission_order = Arc::new(Mutex::new(()));
     let topology_trigger = TopologyOutputTrigger::default();
     state.finish_block(
@@ -798,7 +798,7 @@ fn terminal_output_waits_for_bounded_sequencer_capacity_without_marking_overflow
     let overflowed = Arc::new(AtomicBool::new(false));
     let thread_overflowed = Arc::clone(&overflowed);
     let emitted = std::thread::spawn(move || {
-        let output_credit = super::OutputCredit::negotiated(false);
+        let output_credit = super::OutputCredit::new();
         super::stream_helpers::emit_terminal(
             &sender,
             &thread_overflowed,
@@ -839,7 +839,7 @@ fn dropping_the_sequencer_receiver_releases_a_parked_terminal_emitter() {
     let overflowed = Arc::new(AtomicBool::new(false));
     let thread_overflowed = Arc::clone(&overflowed);
     let emitted = std::thread::spawn(move || {
-        let output_credit = super::OutputCredit::negotiated(false);
+        let output_credit = super::OutputCredit::new();
         super::stream_helpers::emit_terminal(
             &sender,
             &thread_overflowed,

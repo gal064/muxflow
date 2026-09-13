@@ -415,10 +415,7 @@ fn process_exit_debounces_while_pane_close_and_adapter_replacement_reconcile() {
     let replaced = runtime.snapshot_for("server-a");
     assert_eq!(replaced.agents.len(), 1);
     assert_ne!(replaced.agents[0].agent_id, codex_id);
-    assert_eq!(
-        replaced.agents[0].adapter,
-        v1::AgentAdapterKind::ClaudeCode as i32
-    );
+    assert_eq!(replaced.agents[0].adapter_id, "claude-code");
 
     let departed = topology("bash");
     assert!(!runtime.reconcile_topology(&departed, "server-a").unwrap());

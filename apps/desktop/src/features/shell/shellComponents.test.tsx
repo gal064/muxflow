@@ -1324,16 +1324,6 @@ describe("application shell accessibility contracts", () => {
       act(() => { renderer.update(strip("connected")); });
       expect(renderer.toJSON()).toBeNull();
 
-      act(() => { renderer.update(strip("readOnly")); });
-      act(() => { vi.advanceTimersByTime(STRIP_APPEAR_DELAY_MS); });
-      const frozen = rendered(renderer);
-      // `status`, not `alert`: read-only is a persistent condition, and an
-      // assertive region would re-interrupt on every detail re-render.
-      expect(frozen).toContain('"role":"status"');
-      expect(frozen).toContain("Connected read-only");
-      expect(frozen).toContain("writes are frozen");
-      // Read-only is not something "Reconnect" fixes, so it is not offered.
-      expect(frozen).not.toContain("Reconnect");
       act(() => { renderer.unmount(); });
     } finally {
       vi.useRealTimers();

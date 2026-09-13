@@ -25,7 +25,6 @@ export type Lane = "control" | "bulk";
 export type TransportFactory = (host: SavedHost, lane: Lane, signal?: AbortSignal) => Promise<Transport>;
 export type ForegroundService = Pick<MuxflowSsh, "setServiceNotification" | "addDisconnectListener">;
 
-export const APP_VERSION = "0.1.0";
 /** §6.3: the ongoing notification's title. */
 export const SERVICE_NOTIFICATION_TITLE = "Muxflow";
 
@@ -133,7 +132,6 @@ export async function connectHost(host: SavedHost): Promise<void> {
   controlHost = host;
   const connection = new HostConnection({
     dial: (signal) => dial(host, "control", signal),
-    appVersion: APP_VERSION,
     // The stored record wins over the caller's copy so the epoch stays monotonic.
     nextConnectionEpoch: () => hostsStore.getState().takeConnectionEpoch(host.id),
     store: sessionStore,
@@ -197,7 +195,6 @@ export function openBulkConnection(): Promise<HostConnection> {
   const store = createSessionStore();
   const lane = new HostConnection({
     dial: (signal) => dial(host, "bulk", signal),
-    appVersion: APP_VERSION,
     nextConnectionEpoch: () => { throw new Error("bulk lanes reuse the control epoch"); },
     store,
     bulk: { expectedServerIdentity: connection.serverIdentity, connectionEpoch: epoch },

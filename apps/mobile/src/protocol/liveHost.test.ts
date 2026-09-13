@@ -56,7 +56,6 @@ describe.skipIf(!availability.available)(`live host (${availability.reason ?? "c
     harness = await startHostHarness();
     connection = new HostConnection({
       dial: async () => harness.transport,
-      appVersion: "0.1.0-live-test",
       nextConnectionEpoch: () => (epoch += 1),
       store,
       terminals: {
@@ -77,8 +76,7 @@ describe.skipIf(!availability.available)(`live host (${availability.reason ?? "c
     connection.connect();
     await waitFor("connected", () => (store.getState().connection.state === "connected" ? true : undefined));
     const hello = connection.serverHello!;
-    say(`ServerHello helper=${hello.helperVersion} build=${hello.helperBuildDigest.slice(0, 12)} tmux="${hello.tmuxVersion}" identity=${hello.serverIdentity} window=${hello.terminalOutputWindowBytes}B/${hello.terminalOutputWindowRecords}rec readOnly=${hello.readOnly}`);
-    expect(hello.readOnly).toBe(false);
+    say(`ServerHello helper=${hello.helperVersion} build=${hello.helperBuildDigest.slice(0, 12)} tmux="${hello.tmuxVersion}" identity=${hello.serverIdentity} window=${hello.terminalOutputWindowBytes}B/${hello.terminalOutputWindowRecords}rec`);
     expect(hello.terminalOutputWindowBytes).toBeGreaterThan(0n);
     expect(hello.connectionEpoch).toBe(1n);
 
@@ -179,7 +177,6 @@ describe.skipIf(!availability.available)(`live host (${availability.reason ?? "c
     const bulkStore = createSessionStore();
     const bulk = new HostConnection({
       dial: async () => harness.dial(),
-      appVersion: "0.1.0-live-test",
       nextConnectionEpoch: () => { throw new Error("bulk lanes reuse the control epoch"); },
       store: bulkStore,
       bulk: { expectedServerIdentity: hello.serverIdentity, connectionEpoch: connection.connectionEpoch },
@@ -187,7 +184,7 @@ describe.skipIf(!availability.available)(`live host (${availability.reason ?? "c
     });
     bulk.connect();
     await waitFor("bulk connected", () => (bulkStore.getState().connection.state === "connected" ? true : undefined));
-    say(`bulk ClientHello{bulkConnection=true, expectedServerIdentity, connectionEpoch=${connection.connectionEpoch}} → ServerHello readOnly=${bulk.serverHello!.readOnly} epoch=${bulk.serverHello!.connectionEpoch} window=${bulk.serverHello!.terminalOutputWindowBytes}B`);
+    say(`bulk ClientHello{bulkConnection=true, expectedServerIdentity, connectionEpoch=${connection.connectionEpoch}} → ServerHello epoch=${bulk.serverHello!.connectionEpoch} window=${bulk.serverHello!.terminalOutputWindowBytes}B`);
     const frames: FileStreamFrame[] = [];
     const streamed = await bulk.request(openFileStream(newOperationId(), target, hello.serverIdentity), { onFileStream: (frame) => frames.push(frame) });
     const header = frames[0]!.header!;

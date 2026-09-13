@@ -10,7 +10,7 @@ use std::{
 use serde_json::{Value, json};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, envelope, read_frame_sync,
+    envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -60,9 +60,6 @@ impl ControlLane {
                 1,
                 0,
                 Payload::ClientHello(v1::ClientHello {
-                    desktop_version: env!("CARGO_PKG_VERSION").into(),
-                    requested_capabilities: HOST_CAPABILITIES,
-                    expected_helper_version: HELPER_VERSION.into(),
                     bulk_connection: false,
                     ..Default::default()
                 }),
@@ -75,12 +72,8 @@ impl ControlLane {
         let Some(Payload::ServerHello(hello)) = frame.payload else {
             return Err("control bridge omitted ServerHello".into());
         };
-        if hello.read_only {
-            return Err(format!(
-                "control bridge is read-only: {}",
-                hello.incompatibility
-            ));
-        }
+        tmux_agent_protocol::validate_host_contract(frame.protocol_major)
+            .map_err(|error| error.to_string())?;
         Ok((
             Self {
                 child,
