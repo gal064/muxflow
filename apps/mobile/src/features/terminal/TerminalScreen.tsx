@@ -1,6 +1,7 @@
 import { useFocusEffect, useRouter } from "expo-router";
+import * as Clipboard from "expo-clipboard";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Keyboard, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import Animated, { KeyboardState, useAnimatedKeyboard, useAnimatedReaction, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 import { runOnJS } from "react-native-worklets";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -15,9 +16,14 @@ import { log } from "../../session/log";
 import { sessionStore } from "../../store/sessionStore";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { BackIcon, FolderIcon, MicIcon, ShiftIcon } from "../../ui/components/MediaIcons";
+import { externalLinkTarget } from "../../ui/externalLinks";
 import { useSession } from "../../ui/hooks";
 import { colors, fixedChromeText, metrics, radii, typeScale } from "../../ui/tokens";
 import { useAnimationsAllowed } from "../../ui/useAnimationsAllowed";
+import { displayMessageFor } from "../files/errors";
+import { filesStore } from "../files/filesStore";
+import { FILE_VIEWER_COPY } from "../files/presentation";
+import { resolveTerminalFile, terminalFileCaptureIsCurrent, type TerminalFileCapture } from "../files/terminalFile";
 import { appForeground } from "./appForeground";
 import type { FromPageMessage } from "./bridgeMessages";
 import { KEY_CHIPS, SHIFT_CHIP, pressChip } from "./chips";
@@ -79,6 +85,8 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const state = useSession((s) => s);
   const webview = useRef<TerminalWebViewHandle>(null);
   const controller = useRef<TerminalController | null>(null);
+  const screenActive = useRef(false);
+  const fileActivation = useRef(0);
   const [snapshot, setSnapshot] = useState<TerminalSnapshot>({ phase: "preparing", grid: undefined, lastError: undefined });
   const [pageLoaded, setPageLoaded] = useState(false);
   const [text, setText] = useState("");
@@ -97,6 +105,14 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
   const title = agent
     ? agentTitle(state, agent)
     : `${stripAgentStatusGlyphs(session?.name ?? sessionId)} · ${stripAgentStatusGlyphs(window?.name ?? "")}`.replace(/ · $/, "");
+
+  useFocusEffect(useCallback(() => {
+    screenActive.current = true;
+    return () => {
+      screenActive.current = false;
+      fileActivation.current += 1;
+    };
+  }, []));
 
   useEffect(() => {
     log(`[muxflow] terminal.route pane=${paneId} session=${sessionId} connected=${connected ? "yes" : "no"} panePresent=${panePresent ? "yes" : "no"} decision=${gone ? "unavailable" : "attach"} topology=${sessionStore.getState().topologyGeneration}`);
@@ -125,11 +141,71 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
     };
   }, [gone, pageLoaded, paneId, sessionId]));
 
-  const onPageMessage = useCallback((message: FromPageMessage) => {
-    controller.current?.onPageMessage(message);
-  }, []);
-
   const toastError = (error: unknown) => toast(error instanceof Error ? error.message : String(error));
+
+  const openTerminalFile = useCallback(async (candidate: string) => {
+    const activation = ++fileActivation.current;
+    const connection = getConnection();
+    const capturedState = sessionStore.getState();
+    const capturedPane = capturedState.panes[paneId];
+    if (!connection || capturedState.connection.state !== "connected" || !capturedPane
+      || connection.serverIdentity !== capturedState.serverIdentity) {
+      toast("Reconnect the terminal before opening a file path.");
+      return;
+    }
+    const capture: TerminalFileCapture = {
+      pane: {
+        id: capturedPane.id,
+        sessionId: capturedPane.sessionId,
+        windowId: capturedPane.windowId,
+        currentPath: capturedPane.currentPath,
+      },
+      serverIdentity: capturedState.serverIdentity,
+      topologyGeneration: capturedState.topologyGeneration,
+    };
+    const connectionEpoch = connection.connectionEpoch;
+    try {
+      const resolved = await resolveTerminalFile(connection.request.bind(connection), candidate, capture);
+      if (!screenActive.current || !appForeground.inForeground() || activation !== fileActivation.current) return;
+      const liveConnection = getConnection();
+      if (liveConnection !== connection || liveConnection.connectionEpoch !== connectionEpoch) return;
+      if (!terminalFileCaptureIsCurrent(capture, sessionStore.getState(), resolved.topologyGeneration)) return;
+      filesStore.getState().setTerminalFileRoot(resolved.path, resolved.root);
+      router.push({
+        pathname: "/file/[paneId]",
+        params: {
+          paneId: toRouteParam(paneId),
+          path: toRouteParam(resolved.path),
+          name: toRouteParam(resolved.name),
+        },
+      });
+    } catch (error) {
+      if (screenActive.current && appForeground.inForeground() && activation === fileActivation.current) {
+        toast(FILE_VIEWER_COPY.error(displayMessageFor(error)));
+      }
+    }
+  }, [paneId, router]);
+
+  const onPageMessage = useCallback((message: FromPageMessage) => {
+    switch (message.t) {
+      case "copy":
+        fileActivation.current += 1;
+        Clipboard.setStringAsync(message.text).catch(() => toast("Couldn't copy the terminal selection."));
+        return;
+      case "openLink": {
+        fileActivation.current += 1;
+        const target = externalLinkTarget(message.href);
+        if (!target || !/^https?:/iu.test(target)) return;
+        Linking.openURL(target).catch(() => toast("Couldn't open the link."));
+        return;
+      }
+      case "openFile":
+        void openTerminalFile(message.path);
+        return;
+      default:
+        controller.current?.onPageMessage(message);
+    }
+  }, [openTerminalFile]);
 
   const send = useCallback((bytes: Uint8Array) => {
     const instance = controller.current;
