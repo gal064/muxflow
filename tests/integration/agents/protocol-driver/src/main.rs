@@ -1,74 +1,41 @@
 use std::{
-    io::BufReader,
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use tmux_agent_protocol::{
-    CAP_AGENTS, HELPER_VERSION, envelope, read_frame_sync,
-    v1::{self, envelope::Payload},
-    write_frame_sync,
-};
+use protocol_driver_support::{Bridge, Hello, ssh_bridge_command};
+use tmux_agent_protocol::{CAP_AGENTS, v1};
 
 const REMOTE_ENV: &str = "HOME=$HOME/phase6-home PATH=$HOME/phase6-bin:/usr/local/bin:/usr/bin:/bin ADE_HOST_RUNTIME_DIR=$HOME/phase6-runtime ADE_TMUX_SOCKET_NAME=ade-phase6";
 
 struct Connection {
-    child: Child,
-    stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
+    bridge: Bridge,
     epoch: u64,
-    next_request: u64,
 }
 
 impl Connection {
     fn open(arguments: &[String], epoch: u64) -> Result<Self, String> {
-        let mut child = spawn_bridge(arguments)?;
-        let mut stdin = child.stdin.take().ok_or("bridge stdin unavailable")?;
-        let stdout = child.stdout.take().ok_or("bridge stdout unavailable")?;
-        let mut reader = BufReader::new(stdout);
-        handshake(&mut stdin, &mut reader, epoch)?;
-        Ok(Self {
-            child,
-            stdin,
-            reader,
-            epoch,
-            next_request: 10,
-        })
+        let mut command = bridge_command(arguments)?;
+        let (bridge, _) = Bridge::connect(
+            &mut command,
+            Hello {
+                desktop_version: "phase6-driver",
+                requested_capabilities: CAP_AGENTS,
+                bulk_connection: false,
+                expected_server_identity: "",
+                connection_epoch: epoch,
+            },
+            10,
+        )?;
+        Ok(Self { bridge, epoch })
     }
 
     fn request(&mut self, request: v1::Request) -> Result<v1::Response, String> {
-        self.request_with_expectation(request, true)
+        self.bridge.request(request)
     }
 
     fn request_error(&mut self, request: v1::Request) -> Result<v1::Response, String> {
-        self.request_with_expectation(request, false)
-    }
-
-    fn request_with_expectation(
-        &mut self,
-        request: v1::Request,
-        ok: bool,
-    ) -> Result<v1::Response, String> {
-        let id = self.next_request;
-        self.next_request = self.next_request.saturating_add(1);
-        write_frame_sync(&mut self.stdin, &envelope(id, 0, Payload::Request(request)))
-            .map_err(|error| error.to_string())?;
-        loop {
-            let frame = read_frame_sync(&mut self.reader)
-                .map_err(|error| error.to_string())?
-                .ok_or("bridge disconnected")?;
-            if frame.request_id == id
-                && let Some(Payload::Response(response)) = frame.payload
-            {
-                if response.ok == ok {
-                    return Ok(response);
-                }
-                return Err(format!(
-                    "{}: {}",
-                    response.error_code, response.display_message
-                ));
-            }
-        }
+        self.bridge.request_error(request)
     }
 
     fn subscribe(&mut self) -> Result<v1::Snapshot, String> {
@@ -89,7 +56,7 @@ impl Connection {
         self.request(v1::Request {
             operation: v1::Operation::ResolveActiveRoot.into(),
             file: Some(v1::FileServiceRequest {
-                operation_id: format!("phase6-root-{}", self.next_request),
+                operation_id: format!("phase6-root-{}", self.bridge.upcoming_request_id()),
                 pane_id: pane_id.to_owned(),
                 expected_server_identity: snapshot.server_identity.clone(),
                 expected_topology_generation: snapshot.generation,
@@ -111,13 +78,6 @@ impl Connection {
         .agent
         .and_then(|value| value.snapshot)
         .ok_or("agent snapshot omitted".into())
-    }
-}
-
-impl Drop for Connection {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -721,50 +681,11 @@ fn remote(arguments: &[String], command: &str) -> Result<(), String> {
     }
 }
 
-fn spawn_bridge(arguments: &[String]) -> Result<Child, String> {
-    Command::new("ssh")
-        .arg("-F")
-        .arg(&arguments[2])
-        .arg("-T")
-        .arg(&arguments[3])
-        .arg(format!(
-            "{REMOTE_ENV} $HOME/.local/bin/muxflow-host bridge --stdio"
-        ))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|error| error.to_string())
-}
-
-fn handshake(
-    stdin: &mut ChildStdin,
-    reader: &mut BufReader<ChildStdout>,
-    epoch: u64,
-) -> Result<(), String> {
-    write_frame_sync(
-        stdin,
-        &envelope(
-            1,
-            0,
-            Payload::ClientHello(v1::ClientHello {
-                desktop_version: "phase6-driver".into(),
-                requested_capabilities: CAP_AGENTS,
-                expected_helper_version: HELPER_VERSION.into(),
-                connection_epoch: epoch,
-                ..Default::default()
-            }),
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    let frame = read_frame_sync(reader)
-        .map_err(|error| error.to_string())?
-        .ok_or("bridge closed during handshake")?;
-    let Some(Payload::ServerHello(hello)) = frame.payload else {
-        return Err("missing ServerHello".into());
-    };
-    if hello.read_only || hello.connection_epoch != epoch || hello.capabilities & CAP_AGENTS == 0 {
-        return Err(format!("handshake rejected: {}", hello.incompatibility));
-    }
-    Ok(())
+fn bridge_command(arguments: &[String]) -> Result<Command, String> {
+    Ok(ssh_bridge_command(
+        &arguments[2],
+        &arguments[3],
+        &format!("{REMOTE_ENV} $HOME/.local/bin/muxflow-host bridge --stdio"),
+        &[],
+    ))
 }

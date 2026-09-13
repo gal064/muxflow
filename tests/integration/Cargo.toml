@@ -1,0 +1,10 @@
+[workspace]
+members = [
+  "agents/protocol-driver",
+  "filesystem/protocol-driver",
+  "git/protocol-driver",
+  "protocol/protocol-driver",
+  "protocol-driver-support",
+  "transfers/protocol-driver",
+]
+resolver = "2"

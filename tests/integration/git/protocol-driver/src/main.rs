@@ -1,60 +1,46 @@
-use std::{
-    fs,
-    io::BufReader,
-    os::unix::fs::PermissionsExt,
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-};
+use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
-use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, envelope, read_frame_sync,
-    v1::{self, envelope::Payload},
-    write_frame_sync,
-};
+use protocol_driver_support::{Bridge, Hello, local_bridge_command, ssh_bridge_command};
+use tmux_agent_protocol::{HOST_CAPABILITIES, v1};
 use uuid::Uuid;
 
 struct Connection {
-    child: Child,
-    stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
+    bridge: Bridge,
     hello: v1::ServerHello,
     epoch: u64,
-    next_request: u64,
 }
 
 impl Connection {
     fn open(arguments: &[String], epoch: u64) -> Result<Self, String> {
-        let mut child = spawn_bridge(arguments)?;
-        let mut stdin = child.stdin.take().ok_or("bridge stdin unavailable")?;
-        let stdout = child.stdout.take().ok_or("bridge stdout unavailable")?;
-        let mut reader = BufReader::new(stdout);
-        let hello = handshake(&mut stdin, &mut reader, epoch)?;
+        let mut command = bridge_command(arguments)?;
+        let (bridge, hello) = Bridge::connect(
+            &mut command,
+            Hello {
+                desktop_version: "phase5-driver",
+                requested_capabilities: HOST_CAPABILITIES,
+                bulk_connection: false,
+                expected_server_identity: "",
+                connection_epoch: epoch,
+            },
+            10,
+        )?;
         Ok(Self {
-            child,
-            stdin,
-            reader,
+            bridge,
             hello,
             epoch,
-            next_request: 10,
         })
     }
 
     fn request(&mut self, request: v1::Request) -> Result<v1::Response, String> {
-        let id = self.next_request;
-        self.next_request = self.next_request.saturating_add(1);
-        request_value(&mut self.stdin, &mut self.reader, id, request, true)
+        self.bridge.request(request)
     }
 
     fn request_error(&mut self, request: v1::Request) -> Result<v1::Response, String> {
-        let id = self.next_request;
-        self.next_request = self.next_request.saturating_add(1);
-        request_value(&mut self.stdin, &mut self.reader, id, request, false)
+        self.bridge.request_error(request)
     }
 
     fn send_without_response(&mut self, request: v1::Request) -> Result<(), String> {
-        let id = self.next_request;
-        self.next_request = self.next_request.saturating_add(1);
-        write_frame_sync(&mut self.stdin, &envelope(id, 0, Payload::Request(request)))
-            .map_err(|error| error.to_string())
+        self.bridge.send(request).map(|_| ())
     }
 
     fn active_root(&mut self) -> Result<v1::ActiveRoot, String> {
@@ -91,13 +77,6 @@ impl Connection {
         .file
         .and_then(|file| file.active_root)
         .ok_or("active-root response omitted payload".into())
-    }
-}
-
-impl Drop for Connection {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -455,85 +434,17 @@ fn git_mutation(
         .ok_or("Git mutation omitted command result".into())
 }
 
-fn spawn_bridge(arguments: &[String]) -> Result<Child, String> {
+fn bridge_command(arguments: &[String]) -> Result<Command, String> {
     match arguments.get(1).map(String::as_str) {
-        Some("local") => Command::new(arguments.get(2).ok_or("host binary required")?)
-            .args(["bridge", "--stdio"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| error.to_string()),
-        Some("ssh") => Command::new("ssh")
-            .arg("-F")
-            .arg(arguments.get(2).ok_or("SSH config required")?)
-            .arg("-T")
-            .arg(arguments.get(3).ok_or("SSH target required")?)
-            .arg("$HOME/.local/bin/muxflow-host bridge --stdio")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| error.to_string()),
+        Some("local") => Ok(local_bridge_command(
+            arguments.get(2).ok_or("host binary required")?,
+        )),
+        Some("ssh") => Ok(ssh_bridge_command(
+            arguments.get(2).ok_or("SSH config required")?,
+            arguments.get(3).ok_or("SSH target required")?,
+            "$HOME/.local/bin/muxflow-host bridge --stdio",
+            &[],
+        )),
         _ => Err("unsupported driver mode".into()),
-    }
-}
-
-fn handshake(
-    stdin: &mut ChildStdin,
-    reader: &mut BufReader<ChildStdout>,
-    epoch: u64,
-) -> Result<v1::ServerHello, String> {
-    write_frame_sync(
-        stdin,
-        &envelope(
-            1,
-            0,
-            Payload::ClientHello(v1::ClientHello {
-                desktop_version: "phase5-driver".into(),
-                requested_capabilities: HOST_CAPABILITIES,
-                expected_helper_version: HELPER_VERSION.into(),
-                connection_epoch: epoch,
-                ..Default::default()
-            }),
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    let frame = read_frame_sync(reader)
-        .map_err(|error| error.to_string())?
-        .ok_or("bridge closed during handshake")?;
-    let Some(Payload::ServerHello(hello)) = frame.payload else {
-        return Err("missing ServerHello".into());
-    };
-    if hello.read_only || hello.connection_epoch != epoch {
-        return Err(format!("handshake rejected: {}", hello.incompatibility));
-    }
-    Ok(hello)
-}
-
-fn request_value(
-    stdin: &mut ChildStdin,
-    reader: &mut BufReader<ChildStdout>,
-    request_id: u64,
-    request: v1::Request,
-    expect_ok: bool,
-) -> Result<v1::Response, String> {
-    write_frame_sync(stdin, &envelope(request_id, 0, Payload::Request(request)))
-        .map_err(|error| error.to_string())?;
-    loop {
-        let frame = read_frame_sync(reader)
-            .map_err(|error| error.to_string())?
-            .ok_or("bridge disconnected")?;
-        if frame.request_id == request_id
-            && let Some(Payload::Response(response)) = frame.payload
-        {
-            if response.ok == expect_ok {
-                return Ok(response);
-            }
-            return Err(format!(
-                "{}: {}",
-                response.error_code, response.display_message
-            ));
-        }
     }
 }
