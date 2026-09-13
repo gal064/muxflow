@@ -78,6 +78,34 @@ pub(super) struct StoredAgent {
     pub present: bool,
     #[serde(default)]
     pub hook_terminal: bool,
+    /// The latest root-scoped Codex turn that produced lifecycle activity.
+    /// Automatic goal continuations start a fresh turn without emitting
+    /// `UserPromptSubmit`, so this cannot be derived from the terminal bit.
+    #[serde(default)]
+    pub codex_active_root_turn_id: String,
+    /// Root turns for which a terminal hook has already been observed. This
+    /// session-scoped history lets a fresh automatic continuation reopen
+    /// Working without allowing late activity from an older turn to do so.
+    #[serde(default)]
+    pub codex_terminal_root_turn_ids: BTreeSet<String>,
+    /// Root turn that owned each active child when its latest activity arrived.
+    /// Transcript fallback edges carry the root turn, so an old root cannot
+    /// clear a same-ID child that resumed under its successor.
+    #[serde(default)]
+    pub codex_subagent_root_turn_ids: BTreeMap<String, String>,
+    /// Resumed children observed after the active root had already completed.
+    /// Their new owner is the next root hook, not that completed root.
+    #[serde(default)]
+    pub codex_subagents_awaiting_root: BTreeSet<String>,
+    /// Bounded recent exact child turns, including inactive children.
+    /// Retaining them distinguishes a same-ID resume from a first-seen child
+    /// whose parent root is unknowable.
+    #[serde(default)]
+    pub codex_latest_subagent_turns: VecDeque<CodexTurnKey>,
+    /// Recently completed exact child turns. A late activity hook for one of
+    /// these turns cannot resurrect the child after its terminal arrived.
+    #[serde(default)]
+    pub codex_terminal_subagent_turns: VecDeque<CodexTurnKey>,
     /// Claude's parent has stopped while at least one background subagent is
     /// still running. Retained across daemon restarts so Claude's routine idle
     /// notification cannot turn that live work into a false blocked state.
@@ -181,6 +209,12 @@ pub(super) fn load(path: &Path) -> StoredState {
         .filter(|state: &StoredState| state.schema_version == STATE_SCHEMA_VERSION)
         .unwrap_or_default();
     for record in state.agents.values_mut() {
+        while record.codex_terminal_root_turn_ids.len() > super::MAX_CODEX_TERMINAL_ROOT_TURNS {
+            let Some(oldest) = record.codex_terminal_root_turn_ids.first().cloned() else {
+                break;
+            };
+            record.codex_terminal_root_turn_ids.remove(&oldest);
+        }
         if record.codex_running_subagents.len() > super::MAX_CODEX_CHILDREN {
             record.codex_running_subagents = record
                 .codex_running_subagents
@@ -189,6 +223,18 @@ pub(super) fn load(path: &Path) -> StoredState {
                 .map(|(child, turn)| (child.clone(), turn.clone()))
                 .collect();
             record.codex_subagent_capacity_exceeded = true;
+        }
+        record
+            .codex_subagent_root_turn_ids
+            .retain(|child_id, _| record.codex_running_subagents.contains_key(child_id));
+        record
+            .codex_subagents_awaiting_root
+            .retain(|child_id| record.codex_running_subagents.contains_key(child_id));
+        while record.codex_latest_subagent_turns.len() > super::MAX_CODEX_CHILD_TURN_HISTORY {
+            record.codex_latest_subagent_turns.pop_front();
+        }
+        while record.codex_terminal_subagent_turns.len() > super::MAX_CODEX_CHILD_TURN_HISTORY {
+            record.codex_terminal_subagent_turns.pop_front();
         }
         if record.lifecycle_changed_at_unix_millis == 0 {
             record.lifecycle_changed_at_unix_millis =
@@ -227,6 +273,8 @@ pub(super) fn load(path: &Path) -> StoredState {
         if record.hook_terminal {
             record.claude_has_running_subagent = false;
             record.codex_running_subagents.clear();
+            record.codex_subagent_root_turn_ids.clear();
+            record.codex_subagents_awaiting_root.clear();
             record.codex_subagent_capacity_exceeded = false;
             record.codex_parent_stopped_for_subagents = false;
             record.subagent_evidence_observed_at_unix_millis = 0;
@@ -508,6 +556,14 @@ mod tests {
                 latest_source_generation: 0,
                 present: true,
                 hook_terminal: true,
+                codex_active_root_turn_id: String::new(),
+                codex_terminal_root_turn_ids: (0..100)
+                    .map(|index| format!("00000000-{index:04x}-7000-8000-000000000000"))
+                    .collect(),
+                codex_subagent_root_turn_ids: BTreeMap::new(),
+                codex_subagents_awaiting_root: BTreeSet::new(),
+                codex_latest_subagent_turns: VecDeque::new(),
+                codex_terminal_subagent_turns: VecDeque::new(),
                 claude_has_running_subagent: false,
                 codex_running_subagents: BTreeMap::new(),
                 codex_subagent_capacity_exceeded: false,
@@ -524,6 +580,19 @@ mod tests {
         assert_eq!(
             loaded.agents["codex:field"].lifecycle,
             tmux_agent_protocol::v1::AgentLifecycleState::Idle as i32,
+        );
+        assert_eq!(
+            loaded.agents["codex:field"]
+                .codex_terminal_root_turn_ids
+                .len(),
+            crate::service::agents::MAX_CODEX_TERMINAL_ROOT_TURNS
+        );
+        assert_eq!(
+            loaded.agents["codex:field"]
+                .codex_terminal_root_turn_ids
+                .first()
+                .map(String::as_str),
+            Some("00000000-0024-7000-8000-000000000000")
         );
         assert_eq!(
             loaded.agents["codex:field"].lifecycle_changed_at_unix_millis, 1,

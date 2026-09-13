@@ -756,6 +756,51 @@ pub fn write_safe_log(class: SafeErrorClass) {
     eprintln!("{line}");
 }
 
+/// Records a late logical Codex session losing pane authority. Agent IDs are
+/// already content-free hashes and tmux pane IDs are server-local ordinals;
+/// native session/turn IDs and hook payloads never enter this line.
+pub fn write_codex_hook_superseded_log(
+    pane_id: &str,
+    owner_agent_id: Option<&str>,
+    incoming_agent_id: &str,
+    event_name: &str,
+) {
+    eprintln!(
+        "{}",
+        codex_hook_superseded_line(pane_id, owner_agent_id, incoming_agent_id, event_name)
+    );
+}
+
+fn codex_hook_superseded_line(
+    pane_id: &str,
+    owner_agent_id: Option<&str>,
+    incoming_agent_id: &str,
+    event_name: &str,
+) -> String {
+    let event_name = match event_name {
+        "SessionStart" => "SessionStart",
+        "UserPromptSubmit" => "UserPromptSubmit",
+        "PreToolUse" => "PreToolUse",
+        "PermissionRequest" => "PermissionRequest",
+        "PostToolUse" => "PostToolUse",
+        "SubagentStart" => "SubagentStart",
+        "SubagentStop" => "SubagentStop",
+        "Stop" => "Stop",
+        "Interrupt" => "Interrupt",
+        "SessionEnd" => "SessionEnd",
+        _ => "Unknown",
+    };
+    serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "codexHookSuperseded",
+        "paneId": pane_id,
+        "ownerAgentId": owner_agent_id,
+        "incomingAgentId": incoming_agent_id,
+        "hookEvent": event_name,
+    })
+    .to_string()
+}
+
 // ---------------------------------------------------------------------------
 // `switch_timing`: the host half of the opt-in perf-log timeline.
 //
@@ -2787,6 +2832,37 @@ mod tests {
             serialized,
             r#"{"atUnixMillis":1700000000000,"event":"connectionEnded","lifetimeMs":9000,"msSinceLastClientFrame":120,"msSinceLastHostFrame":7,"reason":"writer-deadline","subsystem":"host_daemon"}"#
         );
+    }
+
+    #[test]
+    fn the_superseded_codex_hook_line_contains_only_routing_evidence() {
+        let serialized = codex_hook_superseded_line(
+            "%7",
+            Some("codex:ownerhash"),
+            "codex:incominghash",
+            "SessionEnd",
+        );
+        for private in [
+            "native-session-id",
+            "turn-id",
+            "prompt text",
+            "terminal content",
+            "/home/alice/project",
+        ] {
+            assert!(!serialized.contains(private));
+        }
+        assert_eq!(
+            serialized,
+            r#"{"event":"codexHookSuperseded","hookEvent":"SessionEnd","incomingAgentId":"codex:incominghash","ownerAgentId":"codex:ownerhash","paneId":"%7","subsystem":"host_daemon"}"#
+        );
+        let unknown = codex_hook_superseded_line(
+            "%7",
+            Some("codex:ownerhash"),
+            "codex:incominghash",
+            "private prompt text",
+        );
+        assert!(!unknown.contains("private prompt text"));
+        assert!(unknown.contains(r#""hookEvent":"Unknown""#));
     }
 
     /// Agent hooks open a connection, ingest one event and hang up, hundreds
