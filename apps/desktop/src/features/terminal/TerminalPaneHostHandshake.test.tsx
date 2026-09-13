@@ -1,32 +1,8 @@
 // @vitest-environment jsdom
-/**
- * The visibility handshake, end to end, against a host that plays by the real
- * rules.
- *
- * Every other test in this directory stubs one side of the handshake, and a
- * whole class of pane bugs lives in the seam between them: a pane that is
- * painted but never revealed, a screen the host hands back that is not the one
- * this side cached, output deferred forever by a reveal answer nothing in the
- * reducer had a rule for. None of those can be expressed against a fanout stub
- * with a hard-coded checkpoint, which is why 1000 passing tests said nothing
- * about the tab-switch regression this file exists to pin.
- *
- * So three things here are real rather than mocked:
- *
- *  - the real `TerminalEventHub`, including its backlog replay at subscribe,
- *    its generation ordering and its seed-debt latches;
- *  - a renderer that keeps xterm at arm's length but delegates every ordering
- *    decision to the production `TerminalWriteScheduler`,
- *    `TerminalGenerationWatermark` and `restoreDecision` — so empty-write
- *    barriers, ESC c replacement and refused restores behave as they ship;
- *  - `FakeHost`, a port of `PaneResourceStore` from
- *    `crates/tmux-control/src/replay.rs` plus the emission rules in
- *    `apps/host/src/service/terminal.rs`, so `snapshot_generation`,
- *    `raw_tail` and the state the desktop actually receives are decided by the
- *    host's logic instead of by the test's convenience.
- *
- * When the host's rules change, change `FakeHost` and let the failures show
- * which desktop assumption the change broke. That is the whole point of it.
+/** Desktop visibility ordering against Rust's authoritative PaneResourceStore.
+ * The hub, scheduler, generation watermark and restore decisions are real.
+ * The renderer replaces xterm, and RustPaneHost supplies synthetic tmux screens
+ * and transport delivery; host service routing is tested in Rust.
  */
 import { StrictMode } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
@@ -218,6 +194,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => {
 
 import { REVEAL_VOID_MAX_ATTEMPTS, REVEAL_VOID_TIMEOUT_MS, TerminalPane } from "./TerminalPane";
 import { TerminalEventHub } from "./TerminalEventHub";
+import { RustPaneHost } from "./testing/RustPaneHost";
 import { terminalCacheKey, terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
 import { resetPerfProbe } from "../../perf/probe";
@@ -231,254 +208,6 @@ const encoder = new TextEncoder();
 const EPOCH = 7;
 /** `TerminalPane`'s own reveal backstop, plus room for the timers around it. */
 const PAST_REVEAL_FALLBACK_MS = 400;
-
-type PaneResourceState = "visible" | "hiddenBuffered" | "released" | "unspecified";
-
-interface HostResource {
-  state: PaneResourceState;
-  rawTail: string;
-  generation: number;
-  snapshotGeneration: number;
-  tailThroughGeneration: number;
-  requiresSeed: boolean;
-  resumeFromRenderer: boolean;
-  recoveryReason: string;
-}
-
-/**
- * `PaneResourceStore` (crates/tmux-control/src/replay.rs) and the emission
- * rules that wrap it (apps/host/src/service/terminal.rs).
- *
- * Only the parts the desktop can observe are modelled, and each one names the
- * Rust it mirrors. The generation counter is global and strictly increasing,
- * exactly as `self.generation.fetch_add` makes it — several desktop assumptions
- * rest on that, and a test that hands out generations by hand would not test
- * them at all.
- */
-class FakeHost {
-  generation = 0;
-  sequence = 0;
-  readonly resources = new Map<string, HostResource>();
-  readonly journals = new Map<string, Array<{ generation: number; bytes: string }>>();
-  readonly checkpoints = new Map<string, string>();
-  /** What tmux itself holds, i.e. what a `capture-pane` would return. */
-  readonly tmux = new Map<string, string>();
-  /** Every event this host put on the wire, for asserting on the exchange. */
-  readonly emitted: string[] = [];
-
-  constructor(readonly hub: TerminalEventHub) {}
-
-  #nextGeneration(): number { return (this.generation += 1); }
-  #nextSequence(): number { return (this.sequence += 1); }
-
-  #publish(event: TerminalEvent): void {
-    this.hub.publish(event);
-  }
-
-  /** `PaneResourceStore::ensure`. */
-  #ensure(paneId: string, visible: boolean, generation: number): HostResource {
-    const existing = this.resources.get(paneId);
-    if (existing) return existing;
-    const resource: HostResource = {
-      state: visible ? "visible" : "hiddenBuffered",
-      rawTail: "",
-      generation, snapshotGeneration: generation, tailThroughGeneration: generation,
-      requiresSeed: false, resumeFromRenderer: false, recoveryReason: "",
-    };
-    this.resources.set(paneId, resource);
-    return resource;
-  }
-
-  announceEpoch(): void {
-    this.#publish({ kind: "generationEpoch", epoch: EPOCH, sequence: this.#nextSequence() });
-  }
-
-  /**
-   * `record_output`. A visible pane's output is emitted and journalled — the
-   * journal is only ever read to compute the tail at hide time. A hidden pane's
-   * output goes straight onto the resource's `raw_tail` (`append_hidden`), and
-   * a released pane's is dropped.
-   */
-  output(paneId: string, text: string): number {
-    const generation = this.#nextGeneration();
-    const resource = this.#ensure(paneId, false, generation);
-    this.tmux.set(paneId, (this.tmux.get(paneId) ?? "") + text);
-    resource.generation = generation;
-    if (resource.state === "visible") {
-      const journal = this.journals.get(paneId) ?? [];
-      journal.push({ generation, bytes: text });
-      this.journals.set(paneId, journal);
-      resource.tailThroughGeneration = generation;
-      this.emitted.push(`output@${generation}`);
-      this.#publish({
-        kind: "output", paneId, generation, sequence: this.#nextSequence(),
-        data: ownTerminalBytes(encoder.encode(text)),
-      });
-    } else if (resource.state === "hiddenBuffered") {
-      resource.rawTail += text;
-      resource.tailThroughGeneration = generation;
-    }
-    return generation;
-  }
-
-  /**
-   * `PaneResourceStore::seeded` — the stream's capture path. The screen goes to
-   * the renderer and nowhere else; what the host keeps is the boundary it is
-   * current through, against a brand-new generation
-   * (`terminal_generation.fetch_add`). It is only put on the wire when the pane
-   * is already visible to the host, which is why a pane the desktop has not
-   * revealed yet gets its first screen from the seed its reveal asks for.
-   */
-  capture(paneId: string): void {
-    const generation = this.#nextGeneration();
-    const resource = this.#ensure(paneId, false, generation);
-    const screen = this.tmux.get(paneId) ?? "";
-    this.journals.delete(paneId);
-    resource.rawTail = "";
-    resource.snapshotGeneration = generation;
-    resource.tailThroughGeneration = generation;
-    resource.requiresSeed = false;
-    resource.recoveryReason = "";
-    resource.generation = generation;
-    if (resource.state === "visible") {
-      this.emitted.push(`seed@${generation}`);
-      this.#publish({
-        kind: "seed", paneId, generation, sequence: this.#nextSequence(),
-        data: ownTerminalBytes(encoder.encode(screen)),
-      });
-    }
-  }
-
-  /** The seed the desktop asks for: forced visible, then emitted. */
-  seedOnRequest(paneId: string): void {
-    const resource = this.resources.get(paneId);
-    // `reveal_for_seed_request`: asking for a screen is a statement of
-    // visibility, so the resource is forced visible before the capture.
-    if (resource) {
-      resource.state = "visible";
-      resource.rawTail = "";
-      resource.requiresSeed = false;
-      resource.resumeFromRenderer = false;
-      resource.recoveryReason = "";
-      this.checkpoints.delete(paneId);
-    } else this.#ensure(paneId, true, this.generation);
-    this.capture(paneId);
-  }
-
-  /**
-   * `PaneResourceStore::reveal`, then `set_terminal_visibility`'s
-   * `if visible { resource.state = Visible }` and its
-   * `if requires_seed { request_seed }` — the emitted state is always `visible`
-   * on this path however the stored resource was parked.
-   *
-   * The tail is handed back only to the renderer that says it is still holding
-   * the screen this host recorded the handoff at. Anything else — a renderer
-   * holding nothing, a checkpoint this host never recorded, a released pane —
-   * is answered with a seed and no bytes, and the host is the one that asks
-   * tmux for it.
-   */
-  reveal(
-    paneId: string,
-    rendererHoldsSnapshot: boolean,
-    checkpoint: { terminalEpoch: number; outputGeneration: number },
-  ): void {
-    const generation = this.#nextGeneration();
-    const resource = this.#ensure(paneId, true, generation);
-    const resumes = rendererHoldsSnapshot
-      && this.checkpoints.get(paneId) === `${checkpoint.terminalEpoch}:${checkpoint.outputGeneration}`
-      && resource.state === "hiddenBuffered"
-      && !resource.requiresSeed;
-    const recovery: HostResource = resumes
-      ? {
-        ...resource, state: "visible", generation,
-        requiresSeed: false, resumeFromRenderer: true, recoveryReason: "",
-      }
-      : {
-        state: "visible", rawTail: "",
-        generation, snapshotGeneration: generation, tailThroughGeneration: generation,
-        requiresSeed: true, resumeFromRenderer: false,
-        recoveryReason: "the reveal did not match the renderer handoff this host recorded",
-      };
-    resource.state = "visible";
-    resource.rawTail = "";
-    resource.generation = generation;
-    resource.snapshotGeneration = generation;
-    resource.tailThroughGeneration = generation;
-    resource.requiresSeed = !resumes;
-    resource.recoveryReason = recovery.recoveryReason;
-    this.journals.delete(paneId);
-    this.checkpoints.delete(paneId);
-    this.emitted.push(`reveal(resume=${resumes},bytes=${recovery.rawTail.length})`);
-    this.#publishResource(paneId, recovery);
-    if (!resumes) this.capture(paneId);
-  }
-
-  /**
-   * `PaneResourceStore::hide_with_checkpoint`, including its release rules.
-   *
-   * It stores no screen: the renderer keeps that, and this records the
-   * checkpoint it was kept at plus the output since.
-   */
-  hide(paneId: string, checkpoint: { terminalEpoch: number; outputGeneration: number }): void {
-    const generation = this.#nextGeneration();
-    const resource = this.#ensure(paneId, true, generation);
-    const key = `${checkpoint.terminalEpoch}:${checkpoint.outputGeneration}`;
-    if (this.checkpoints.get(paneId) === key) {
-      // Idempotent re-hide: the stored resource is returned untouched, which is
-      // one of the two ways the host can hand back a snapshot that is not the
-      // one this side has since serialized under the same generation.
-      this.#publishResource(paneId, { ...resource });
-      return;
-    }
-    if (resource.state !== "visible") throw new Error("pane renderer ownership is already held by the host");
-    if (checkpoint.outputGeneration > resource.generation) {
-      throw new Error("renderer visibility cutoff is newer than host-observed pane output");
-    }
-    const journal = this.journals.get(paneId) ?? [];
-    this.journals.delete(paneId);
-    let tail = "";
-    let tailThrough = checkpoint.outputGeneration;
-    for (const entry of journal) {
-      if (entry.generation > checkpoint.outputGeneration) {
-        tail += entry.bytes;
-        tailThrough = entry.generation;
-      }
-    }
-    resource.generation = Math.max(tailThrough, generation);
-    resource.snapshotGeneration = checkpoint.outputGeneration;
-    resource.tailThroughGeneration = tailThrough;
-    resource.state = "hiddenBuffered";
-    resource.rawTail = tail;
-    resource.requiresSeed = false;
-    resource.recoveryReason = "";
-    this.checkpoints.set(paneId, key);
-    this.emitted.push(`hide(state=${resource.state},snapshot=${resource.snapshotGeneration})`);
-    this.#publishResource(paneId, { ...resource });
-  }
-
-  /** A resource event in a state this desktop build has no rule for. */
-  publishUnusableResource(paneId: string, state: PaneResourceState): void {
-    const generation = this.#nextGeneration();
-    this.emitted.push(`unusable(${state})`);
-    this.#publishResource(paneId, {
-      state, rawTail: "",
-      generation, snapshotGeneration: generation, tailThroughGeneration: generation,
-      requiresSeed: false, resumeFromRenderer: false, recoveryReason: "",
-    });
-  }
-
-  #publishResource(paneId: string, resource: HostResource): void {
-    this.#publish({
-      kind: "paneResource", paneId, state: resource.state, requiresSeed: resource.requiresSeed,
-      resumeFromRenderer: resource.resumeFromRenderer,
-      recoveryReason: resource.recoveryReason, generation: resource.generation,
-      snapshotGeneration: resource.snapshotGeneration,
-      tailThroughGeneration: resource.tailThroughGeneration,
-      sequence: this.#nextSequence(),
-      rawTail: ownTerminalBytes(encoder.encode(resource.rawTail)),
-    });
-  }
-}
 
 const paneNodes: HTMLElement[] = [];
 function paneNode(): HTMLElement {
@@ -505,7 +234,7 @@ function fixturePane(id: string): Pane {
   };
 }
 
-let host: FakeHost;
+let host: RustPaneHost;
 let hub: TerminalEventHub;
 
 function paneElement(pane: Pane, strict: boolean) {
@@ -570,7 +299,7 @@ beforeEach(() => {
   api.requestTerminalSeed.mockReset();
   journal.recordIncident.mockReset();
   hub = new TerminalEventHub((paneId) => { host.seedOnRequest(paneId); pumpAll(); });
-  host = new FakeHost(hub);
+  host = new RustPaneHost(hub);
   // The transport, with one turn of latency so nothing in the pane can rely on
   // the host answering inside its own call stack.
   api.setTerminalVisibility.mockImplementation(async (_client, paneId, visible, holdsSnapshot, checkpoint) => {
