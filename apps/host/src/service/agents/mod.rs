@@ -336,41 +336,6 @@ impl AgentRuntime {
             .retain(|(record_id, _), _| !record_ids.contains(record_id));
     }
 
-    fn migrate_codex_runtime_state(&self, old_record_id: &str, new_record_id: &str) {
-        if old_record_id == new_record_id {
-            return;
-        }
-        let mut pending = self.pending_codex_permissions.lock().unwrap();
-        let old_keys: Vec<_> = pending
-            .keys()
-            .filter(|key| key.record_id == old_record_id)
-            .cloned()
-            .collect();
-        for old_key in old_keys {
-            let Some(value) = pending.remove(&old_key) else {
-                continue;
-            };
-            let mut new_key = old_key;
-            new_key.record_id = new_record_id.to_owned();
-            pending.insert(new_key, value);
-        }
-        drop(pending);
-
-        let mut monitors = self.codex_child_monitors.lock().unwrap();
-        let old_keys: Vec<_> = monitors
-            .keys()
-            .filter(|(record_id, _)| record_id == old_record_id)
-            .cloned()
-            .collect();
-        for old_key in old_keys {
-            let Some(value) = monitors.remove(&old_key) else {
-                continue;
-            };
-            let new_key = (new_record_id.to_owned(), old_key.1);
-            monitors.insert(new_key, value);
-        }
-    }
-
     /// Reconcile the terminal record for each exact Codex child turn. Codex
     /// writes `turn_aborted` when a child is interrupted but emits no matching
     /// `SubagentStop`; the child transcript is the authoritative repair path.
@@ -839,6 +804,7 @@ impl AgentRuntime {
         for agent_id in &departed {
             state.agents.remove(agent_id);
         }
+        state.unbind_agents(&departed);
         state.generation = state.generation.saturating_add(1);
         let generation = state.generation;
         if self.persist_locked(&state).is_err() {

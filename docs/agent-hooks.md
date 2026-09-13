@@ -92,11 +92,11 @@ Codex session may replace the pane's current native owner only with
 session or turn. A known native session may continue reporting after it moves
 panes. A continuation or terminal hook from an unknown, superseded thread is
 discarded, so delayed fork teardown cannot make the interactive root disappear
-and then reappear. When fresh topology is temporarily unavailable, the exact
-same-server pane already stored on the current owner is used only to reject a
-different logical session or retire it for an explicit replacement; it is
-never trusted as a new routing destination. A hook matching the current native
-owner keeps that owner's last verified identity and route through the outage.
+and then reappear. Pane ownership is stored separately from the verified
+navigation route. When fresh topology is temporarily unavailable, that binding
+can reject a different logical session or transfer ownership for an explicit
+replacement without inventing a routing destination. A hook matching the
+current native owner keeps that owner's last verified route through the outage.
 An explicit replacement starts with clean session/turn state, while a verified
 move keeps the moving session's state and retires the other pane owner.
 The initial pane-derived record may still be promoted by any first native hook,
@@ -104,12 +104,12 @@ including `Stop`; that is the separate discovery handoff needed when hooks
 become authoritative late in a turn, and it preserves the last verified route
 even if topology discovery fails during that hook.
 
-If missing-pane hooks create more than one record for the same native session,
-state authority follows the newest root turn, then its terminal watermark, then
-the host's monotonic ingest generation. Verified routing collapses the winning
-record into the canonical identity. A losing alias becomes a non-present
-routing tombstone until a current event can retire it, preventing repeated late
-child or terminal hooks from reclaiming the pane while keeping it out of the UI.
+Every native session has one canonical identity whether its pane is currently
+visible in topology or not. A missing-pane hook therefore updates that one
+session or is rejected by its pane binding; it cannot create an alias that later
+needs ranking, merging, tombstoning, or voice-session migration. Only the
+initial pane-derived manual identity is promoted when the first native hook
+arrives.
 
 Session and turn handling form one authority hierarchy: pane, native session,
 root turn, then child turn. Session authority is resolved before deduplication,

@@ -10,31 +10,24 @@ pub(super) enum SessionAuthority {
 
 pub(super) fn session(
     native_session_id: &str,
-    known_mapped_native_session: bool,
+    known_bound_session: bool,
     pane_owner_native_session_id: Option<&str>,
     route_verified: bool,
     event_name: &str,
 ) -> SessionAuthority {
-    let pane_owner_native_session_id = pane_owner_native_session_id.unwrap_or_default();
-    if native_session_id.is_empty() && !pane_owner_native_session_id.is_empty() {
+    let explicit_claim = matches!(event_name, "SessionStart" | "UserPromptSubmit");
+    if native_session_id.is_empty()
+        && pane_owner_native_session_id.is_some_and(|owner| !owner.is_empty())
+    {
         return SessionAuthority::Superseded;
     }
-    let owned_by_another_native_session = !pane_owner_native_session_id.is_empty()
-        && pane_owner_native_session_id != native_session_id;
-    if known_mapped_native_session && owned_by_another_native_session {
-        return if route_verified {
-            SessionAuthority::Move
-        } else {
-            SessionAuthority::Current
-        };
-    }
-    if !owned_by_another_native_session {
-        return SessionAuthority::Current;
-    }
-    if matches!(event_name, "SessionStart" | "UserPromptSubmit") {
-        SessionAuthority::Replacement
-    } else {
-        SessionAuthority::Superseded
+    match pane_owner_native_session_id {
+        Some(owner) if owner == native_session_id || owner.is_empty() => SessionAuthority::Current,
+        Some(_) if known_bound_session && route_verified => SessionAuthority::Move,
+        Some(_) if explicit_claim => SessionAuthority::Replacement,
+        Some(_) => SessionAuthority::Superseded,
+        None if known_bound_session && !route_verified => SessionAuthority::Superseded,
+        None => SessionAuthority::Current,
     }
 }
 
@@ -101,11 +94,6 @@ pub(super) fn turn_order(candidate: &str, active: &str) -> Option<Ordering> {
         .then(|| candidate.as_u128().cmp(&active.as_u128()))
 }
 
-pub(super) fn turn_precedence(candidate: &str, current: &str) -> Ordering {
-    turn_order(candidate, current)
-        .unwrap_or_else(|| (!candidate.is_empty()).cmp(&!current.is_empty()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,10 +131,14 @@ mod tests {
         );
         assert_eq!(
             session("root", true, Some("fork"), false, "PreToolUse"),
-            SessionAuthority::Current
+            SessionAuthority::Superseded
         );
         assert_eq!(
             session("", false, Some("root"), true, "Stop"),
+            SessionAuthority::Superseded
+        );
+        assert_eq!(
+            session("root", true, None, false, "PreToolUse"),
             SessionAuthority::Superseded
         );
     }
