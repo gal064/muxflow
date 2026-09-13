@@ -43,7 +43,9 @@ phase7_transfer_component_manifest() {
       apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/build.rs \
       apps/desktop/src-tauri/src/connection/files.rs \
       apps/desktop/src-tauri/src/connection/files \
-      crates/protocol tests/integration/transfers/protocol-driver/Cargo.toml \
+      crates/protocol tests/integration/Cargo.lock tests/integration/Cargo.toml \
+      tests/integration/protocol-driver-support \
+      tests/integration/transfers/protocol-driver/Cargo.toml \
       tests/integration/transfers/protocol-driver/src \
       -type f -not -path '*/target/*' -not -path '*/tmp/*' -print0 \
       | LC_ALL=C sort -z \
