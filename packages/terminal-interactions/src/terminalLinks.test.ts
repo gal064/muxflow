@@ -63,26 +63,28 @@ describe("terminal links across rendered rows", () => {
   });
 
   it.each([
-    ["ordinary prose", "Stored at /home/user/report-", "  final.ts:11."],
-    ["a bullet", "• Stored /home/user/report-", "  final.ts:11."],
-    ["an indented list item", "    - Stored /home/user/report-", "      final.ts:11."],
-    ["a numbered item", "  1. Stored /home/user/report-", "     final.ts:11."],
-    ["a standalone target", "  /home/user/report-", "  final.ts:11."],
-  ])("joins a recognized path across hard rows in %s", async (_context, origin, continuation) => {
-    const path = "/home/user/report-final.ts";
-    const terminal = await terminalWith(`${origin}\r\n${continuation}`, 80);
-    const expected = {
-      kind: "file",
-      text: path,
-      range: {
-        start: { x: origin.indexOf("/home") + 1, y: 1 },
-        end: { x: continuation.indexOf(":11"), y: 2 },
-      },
-    };
+    ["ordinary prose", "Stored at /home/user/report-", "  final.ts:11.", "/home/user/report-final.ts", "/home"],
+    ["a bullet", "• Stored ~/reports/report-", "  final.ts:11.", "~/reports/report-final.ts", "~/"],
+    ["an indented list item", "    - Stored src/report-", "      final.ts:11.", "src/report-final.ts", "src/"],
+    ["a numbered item", "  1. Stored /home/user/report-", "     final.ts:11.", "/home/user/report-final.ts", "/home"],
+    ["a standalone target", "  /home/user/report-", "  final.ts:11.", "/home/user/report-final.ts", "/home"],
+  ])(
+    "joins a recognized path across hard rows in %s",
+    async (_context, origin, continuation, path, firstFragment) => {
+      const terminal = await terminalWith(`${origin}\r\n${continuation}`, 80);
+      const expected = {
+        kind: "file",
+        text: path,
+        range: {
+          start: { x: origin.indexOf(firstFragment) + 1, y: 1 },
+          end: { x: continuation.indexOf(":11"), y: 2 },
+        },
+      };
 
-    expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 1)).toEqual([expected]);
-    expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 2)).toEqual([expected]);
-  });
+      expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 1)).toEqual([expected]);
+      expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 2)).toEqual([expected]);
+    },
+  );
 
   it("joins the reported migration path embedded in a hard-wrapped paragraph", async () => {
     const lines = [
