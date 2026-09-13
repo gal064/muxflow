@@ -9,10 +9,7 @@ use protocol_driver_support::{
     Bridge, Hello, local_bridge_command, request, request_error, request_with_events,
     ssh_bridge_command,
 };
-use tmux_agent_protocol::{
-    HOST_CAPABILITIES,
-    v1::{self, envelope::Payload},
-};
+use tmux_agent_protocol::v1::{self, envelope::Payload};
 use uuid::Uuid;
 
 fn main() -> Result<(), String> {
@@ -57,8 +54,6 @@ fn connect_bridge(
     Bridge::connect(
         &mut bridge_command(arguments)?,
         Hello {
-            desktop_version: "phase4-driver",
-            requested_capabilities: HOST_CAPABILITIES,
             bulk_connection: bulk,
             expected_server_identity,
             connection_epoch,

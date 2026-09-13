@@ -13,7 +13,7 @@ import type { AgentAdapterId, AgentDisplayState } from "./types";
  * its four longest spokes, the other is scaled about its own centre.
  */
 export function AgentIcon({ adapterId }: { adapterId: AgentAdapterId }) {
-  if (adapterId === "claude-code" || adapterId === "claude") {
+  if (adapterId === "claude-code") {
     return <svg aria-hidden="true" className="agent-icon claude" data-agent-icon="claude" viewBox="0 0 16 16">
       <path d="M8 1.5v13M1.5 8h13M3.4 3.4l9.2 9.2M12.6 3.4l-9.2 9.2" />
     </svg>;

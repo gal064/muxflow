@@ -271,10 +271,7 @@ pub(super) fn run_client_input_dispatch(
                 }
                 // Input accepted by an older connection must not poison the
                 // replacement connection's ordered stream.
-                if input_epoch_is_current(&client, epoch)
-                    && client.ready.load(Ordering::Acquire)
-                    && !client.read_only.load(Ordering::Acquire)
-                {
+                if input_epoch_is_current(&client, epoch) && client.ready.load(Ordering::Acquire) {
                     let dispatched_bytes = data.len();
                     let timing = crate::perf_log::input_timing::DesktopInputTiming::begin(
                         &pane_id,

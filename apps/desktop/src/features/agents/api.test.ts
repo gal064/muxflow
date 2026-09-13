@@ -7,11 +7,11 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 const scope = { clientId: "client", hostProfileId: "local", serverIdentity: "server-a", topologyGeneration: 9, connectionEpoch: 4 };
 const wireRecord = {
-  agentId: "agent-1", adapter: "codex", adapterId: "codex", nativeSessionId: "native", displayName: "Review bot",
+  agentId: "agent-1", adapterId: "codex", nativeSessionId: "native", displayName: "Review bot",
   route: { hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", sessionNameFallback: "work", windowId: "@1", windowNameFallback: "agent", paneId: "%1", agentId: "agent-1", attentionGeneration: "4" },
-  lifecycle: "blocked", authority: "hook", stateGeneration: "5", attentionGeneration: "4", attentionKind: "blocked", seenGeneration: "2",
+  lifecycle: "blocked", stateGeneration: "5", attentionGeneration: "4", attentionKind: "blocked", seenGeneration: "2",
   updatedAtUnixMillis: "100", lifecycleChangedAtUnixMillis: "90", attentionSeenAtUnixMillis: "80",
-  hookAuthorityExpiresAtUnixMillis: "200", detectedManually: true,
+  detectedManually: true,
   present: true,
 };
 
@@ -19,20 +19,12 @@ describe("TauriAgentClient", () => {
   beforeEach(() => invokeMock.mockReset());
 
   it("maps the protobuf-derived JSON snapshot into the adapter-neutral record", async () => {
-    invokeMock.mockResolvedValue({ snapshot: { generation: "6", acceptedGeneration: "6", agents: [wireRecord], authoritative: true, notificationWatermark: "4", connectionEpoch: "4", adapters: [{ adapter: "unspecified", id: "future", displayName: "Future", supportsLaunch: true, supportsResume: true, supportsHooks: false, supportsProcessDetection: true, supportsScreenFallback: false, hookConfigPath: "", hookEvents: [] }] } });
+    invokeMock.mockResolvedValue({ snapshot: { generation: "6", acceptedGeneration: "6", agents: [wireRecord], authoritative: true, notificationWatermark: "4", connectionEpoch: "4", adapters: [{ id: "future", displayName: "Future", supportsLaunch: true, supportsResume: true, supportsHooks: false, supportsProcessDetection: true, hookConfigPath: "", hookEvents: [] }] } });
     const snapshot = await new TauriAgentClient().snapshot(scope);
     expect(snapshot).toMatchObject({ revision: "6", acceptedGeneration: "6", notificationWatermark: "4", authoritative: true, adapters: [{ id: "future", displayName: "Future", placements: ["window", "split"], supportsProcessDetection: true }], agents: [{ id: "agent-1", adapterId: "codex", lifecycle: "blocked", attentionGeneration: "4", attentionKind: "blocked", lifecycleChangedAt: 90, attentionSeenAt: 80, paneId: "%1", detectedManually: true }] });
-    // `wireRecord` deliberately still carries `authority` and
-    // `hookAuthorityExpiresAtUnixMillis`, and the adapter still carries
-    // `supportsScreenFallback`. A host older than this desktop keeps sending
-    // them; they must be ignored rather than surfaced or rejected.
-    expect(snapshot.agents[0]).not.toHaveProperty("authority");
     expect(invokeMock).toHaveBeenCalledWith("agent_request", { clientId: "client", command: expect.objectContaining({ operation: "snapshot", expectedServerIdentity: "server-a", expectedTopologyGeneration: "9", connectionEpoch: "4" }) });
   });
 
-  // These mappers used to throw. Nothing catches per record, so one value this
-  // build did not recognise aborted `mapSnapshot` and the user's entire agent
-  // list went blank — from a host merely newer than the desktop.
   it("degrades an unrecognised lifecycle to unknown instead of blanking the list", async () => {
     const strange = { ...wireRecord, agentId: "agent-2", route: { ...wireRecord.route, agentId: "agent-2" }, lifecycle: "deliberating", attentionKind: "pondering" };
     invokeMock.mockResolvedValue({ snapshot: { generation: "6", acceptedGeneration: "6", agents: [wireRecord, strange], authoritative: true, notificationWatermark: "4", connectionEpoch: "4", adapters: [] } });
@@ -84,7 +76,7 @@ describe("TauriAgentClient", () => {
   });
 
   it("requires a host-issued confirmation token before hook install or uninstall", async () => {
-    invokeMock.mockResolvedValueOnce({ hookPlan: { adapter: "claudeCode", adapterId: "claude-code", action: "review", configPath: "/config", backupPath: "/backup", managedVersion: "muxflow/v1", summary: "one managed hook", confirmationToken: "confirm", alreadyCurrent: false, ownershipMarker: "Claude adapter", proposedCommand: "/usr/bin/host hook ingest", proposedEvents: ["Stop"], trustGuidance: "Review trust", beforeHash: "old", afterHash: "new", createsConfig: false, removesConfig: true, beforePreview: "{\n  redacted\n}", afterPreview: "{\n  managed\n}", diffPreview: "--- before\n-redacted\n+++ after\n+managed", previewTruncated: false } }).mockResolvedValueOnce({});
+    invokeMock.mockResolvedValueOnce({ hookPlan: { adapterId: "claude-code", action: "review", configPath: "/config", backupPath: "/backup", managedVersion: "muxflow/v1", summary: "one managed hook", confirmationToken: "confirm", alreadyCurrent: false, ownershipMarker: "Claude adapter", proposedCommand: "/usr/bin/host hook ingest", proposedEvents: ["Stop"], trustGuidance: "Review trust", beforeHash: "old", afterHash: "new", createsConfig: false, removesConfig: true, beforePreview: "{\n  redacted\n}", afterPreview: "{\n  managed\n}", diffPreview: "--- before\n-redacted\n+++ after\n+managed", previewTruncated: false } }).mockResolvedValueOnce({});
     const client = new TauriAgentClient();
     const review = await client.reviewHooks(scope, "claude-code", "uninstall");
     expect(review).toMatchObject({ action: "uninstall", revision: "confirm", trustGuidance: "Review trust", changes: [{ path: "/config", owner: "Claude adapter", command: "/usr/bin/host hook ingest", events: ["Stop"], beforeHash: "old", afterHash: "new", removesConfig: true, diffPreview: expect.stringContaining("--- before") }] });

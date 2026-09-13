@@ -161,7 +161,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const menuRow = menu
     ? props.rows.find((row) => row.key === menu.row.key && sameHostConnection(row.scope, menu.row.scope))
     : undefined;
-  // Read live while the row is there: a connection dropping to read-only
+  // Read live while the row is there: a connection disconnecting
   // with the menu open must take the mutations with it.
   // A row the list no longer holds can be mutated by nobody: the captured
   // row's answer was true for a connection that is gone.
@@ -644,7 +644,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           id: `host-${host.profileId}`,
           // The dot is decorative; a shown host that is not connected says
           // so in words too.
-          label: host.shown && host.phase !== "connected" ? `${host.letter} ${host.label} · ${phaseWord(host.phase)}` : `${host.letter} ${host.label}`,
+          label: host.shown && host.phase !== "connected" ? `${host.letter} ${host.label} · ${host.phase}` : `${host.letter} ${host.label}`,
           checked: host.shown,
           disabled: host.active,
           // Only a shown host has a link to report on.
@@ -784,14 +784,9 @@ function workspaceIndicatorState(row: WorkspaceRowModel): AgentDisplayState | un
   }
 }
 
-/** A phase as a word in a label; only read-only is not already one. */
-function phaseWord(phase: ConnectionPhase): string {
-  return phase === "readOnly" ? "read-only" : phase;
-}
-
 /** Whether the row's host has no live link behind it. Read-only is a live link that refuses writes, not an absence. */
 function rowOffline(row: MergedWorkspaceRow): boolean {
-  return row.phase !== "connected" && row.phase !== "readOnly";
+  return row.phase !== "connected";
 }
 
 /** One agent's line, written the same way for the eye and for the label. */
@@ -811,7 +806,7 @@ function rowLabel(row: MergedWorkspaceRow, hostLabel: string | undefined): strin
   return [
     row.session.name,
     hostLabel && `on ${hostLabel}`,
-    rowOffline(row) ? `host ${phaseWord(row.phase)}` : undefined,
+    rowOffline(row) ? `host ${row.phase}` : undefined,
     row.pinned ? "pinned" : undefined,
     row.agents[0] && agentLine(row.agents[0]),
     total > 1 ? `${total} agents` : undefined,

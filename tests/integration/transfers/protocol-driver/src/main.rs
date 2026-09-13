@@ -9,7 +9,7 @@ use std::{
 };
 
 use protocol_driver_support::{Bridge, Hello, local_bridge_command, ssh_bridge_command};
-use tmux_agent_protocol::{HOST_CAPABILITIES, v1};
+use tmux_agent_protocol::v1;
 use uuid::Uuid;
 
 const CHUNK_BYTES: usize = 1024 * 1024;
@@ -91,8 +91,6 @@ fn connect(
     Bridge::connect(
         &mut bridge_command(mode, bulk),
         Hello {
-            desktop_version: "phase7-deterministic-driver",
-            requested_capabilities: HOST_CAPABILITIES,
             bulk_connection: bulk,
             expected_server_identity: expected_server,
             connection_epoch,

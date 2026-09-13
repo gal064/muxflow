@@ -24,7 +24,6 @@ struct ProbeReport {
     git_version: String,
     installed: bool,
     helper_version: Option<String>,
-    compatible: bool,
     digest: Option<String>,
     remote_path: String,
 }
@@ -38,7 +37,6 @@ struct Options {
     digest: Option<String>,
     allow_upgrade: bool,
     expected_arch: Option<String>,
-    expected_version: Option<String>,
     control_socket: Option<PathBuf>,
     test_fail_after_shutdown: bool,
 }
@@ -81,7 +79,6 @@ fn parse_options(arguments: &[String]) -> anyhow::Result<Options> {
         digest: None,
         allow_upgrade: false,
         expected_arch: None,
-        expected_version: None,
         control_socket: None,
         test_fail_after_shutdown: false,
     };
@@ -89,7 +86,7 @@ fn parse_options(arguments: &[String]) -> anyhow::Result<Options> {
     while index < arguments.len() {
         match arguments[index].as_str() {
             "--config" | "--remote-path" | "--artifact" | "--digest" | "--expected-arch"
-            | "--expected-version" | "--control-socket" => {
+            | "--control-socket" => {
                 let flag = arguments[index].as_str();
                 let value = arguments
                     .get(index + 1)
@@ -101,7 +98,6 @@ fn parse_options(arguments: &[String]) -> anyhow::Result<Options> {
                     "--artifact" => options.artifact = Some(value.into()),
                     "--digest" => options.digest = Some(value),
                     "--expected-arch" => options.expected_arch = Some(value),
-                    "--expected-version" => options.expected_version = Some(value),
                     "--control-socket" => options.control_socket = Some(value.into()),
                     _ => unreachable!(),
                 }
@@ -146,7 +142,6 @@ fn probe(connection: &SshControl, remote_path: &str) -> anyhow::Result<ProbeRepo
     let helper_version = serde_json::from_str::<serde_json::Value>(&version_line)
         .ok()
         .and_then(|value| value.get("helperVersion")?.as_str().map(ToOwned::to_owned));
-    let compatible = helper_version.as_deref() == Some(tmux_agent_protocol::HELPER_VERSION);
     Ok(ProbeReport {
         operating_system,
         architecture,
@@ -154,7 +149,6 @@ fn probe(connection: &SshControl, remote_path: &str) -> anyhow::Result<ProbeRepo
         git_version,
         installed: status == "installed",
         helper_version,
-        compatible,
         digest,
         remote_path: remote_path.into(),
     })
@@ -216,18 +210,6 @@ fn install(connection: &SshControl, options: &Options) -> anyhow::Result<()> {
         println!("helper-current: pass digest={expected_digest}");
         return Ok(());
     }
-    if before.installed
-        && helper_is_newer(
-            before.helper_version.as_deref(),
-            options.expected_version.as_deref(),
-        )
-    {
-        bail!(
-            "remote helper {} is newer than this app expects {}; refusing downgrade",
-            before.helper_version.as_deref().unwrap_or("unknown"),
-            options.expected_version.as_deref().unwrap_or("unknown"),
-        );
-    }
     if before.installed && !options.allow_upgrade {
         bail!("a different helper is installed; explicit --allow-upgrade is required");
     }
@@ -258,24 +240,8 @@ fn install(connection: &SshControl, options: &Options) -> anyhow::Result<()> {
         if value.get("architecture").and_then(|value| value.as_str()) != Some(artifact_arch) {
             bail!("uploaded helper reported unexpected architecture");
         }
-        // Uploads happen outside the critical section: they are private UUID paths
-        // and cannot affect the installed helper. Serialize the fresh direction
-        // check and replacement so two desktops cannot both approve an old helper,
-        // then let the older one overwrite what the newer one just installed.
+        // Serialize publication and rollback while each upload keeps its private path.
         let install_lock = RemoteInstallLock::acquire(connection, &final_path)?;
-        let current = probe(connection, &options.remote_path)?;
-        if current.installed
-            && helper_is_newer(
-                current.helper_version.as_deref(),
-                options.expected_version.as_deref(),
-            )
-        {
-            bail!(
-                "remote helper {} is newer than this app expects {}; refusing downgrade",
-                current.helper_version.as_deref().unwrap_or("unknown"),
-                options.expected_version.as_deref().unwrap_or("unknown"),
-            );
-        }
         let backup = format!("{final_path}.{}.previous", Uuid::new_v4());
         connection.command(&format!(
             "set -eu; chmod 0755 {partial}; if [ -e {final_path} ]; then cp -p {final_path} {backup}; fi; mv -f {partial} {final_path}"
@@ -737,20 +703,6 @@ fn tmux_supported(version: &str) -> bool {
     matches!((major, minor), (Some(major), Some(minor)) if major > 3 || (major == 3 && minor >= 3))
 }
 
-fn release_ordinal(version: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = version.trim().split('.');
-    let mut next = || parts.next()?.parse::<u64>().ok();
-    let ordinal = (next()?, next()?, next()?);
-    parts.next().is_none().then_some(ordinal)
-}
-
-fn helper_is_newer(installed: Option<&str>, expected: Option<&str>) -> bool {
-    installed
-        .and_then(release_ordinal)
-        .zip(expected.and_then(release_ordinal))
-        .is_some_and(|(installed, expected)| installed > expected)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,14 +789,6 @@ mod tests {
             fixed < home,
             "fixed-prefix candidates must precede home candidates"
         );
-    }
-
-    #[test]
-    fn refuses_only_a_parseable_newer_helper_version() {
-        assert!(helper_is_newer(Some("2.1.0"), Some("2.0.9")));
-        assert!(!helper_is_newer(Some("2.0.9"), Some("2.1.0")));
-        assert!(!helper_is_newer(Some("development"), Some("2.1.0")));
-        assert!(!helper_is_newer(Some("2.1.0"), None));
     }
 
     #[test]

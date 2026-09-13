@@ -49,12 +49,10 @@ describe("terminal output credit (§7.7)", () => {
     expect(ledger.acknowledged).toEqual(ledger.charged);
   });
 
-  it("sends nothing when credit was not negotiated (window 0) or after close", () => {
+  it("rejects a missing credit window and sends nothing after close", () => {
     const acks: OutputAck[] = [];
-    const disabled = new OutputCreditLedger({ windowBytes: 0n, send: (ack) => acks.push(ack) });
-    disabled.charge(1000n, 1n);
-    vi.advanceTimersByTime(100);
-    expect(acks).toEqual([]);
+    expect(() => new OutputCreditLedger({ windowBytes: 0n, send: (ack) => acks.push(ack) }))
+      .toThrow("positive window");
     const ledger = new OutputCreditLedger({ windowBytes: WINDOW, send: (ack) => acks.push(ack) });
     ledger.charge(1n, 1n);
     ledger.close();

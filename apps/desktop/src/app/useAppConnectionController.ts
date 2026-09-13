@@ -773,7 +773,7 @@ export function useAppConnectionController({
           }
           // Let helper reconciliation observe the active host's transport
           // transition before publishing it to the shell. React batches both
-          // updates, so a live or read-only helper probe can arbitrate against
+          // updates, so a live helper probe can arbitrate against
           // other one-time host questions on that first settled render without
           // delaying the bridge.
           if (isActive()) connectionStateChangedRef.current?.(linkConnection, event.state);

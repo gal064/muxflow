@@ -22,7 +22,7 @@ export interface ContextMenuItem {
    * A connection phase drawn as a dot before the label — the host menu's way
    * of showing how each shown host is doing without a row for each.
    */
-  dot?: "connected" | "connecting" | "reconnecting" | "resyncing" | "disconnected" | "readOnly";
+  dot?: "connected" | "connecting" | "reconnecting" | "resyncing" | "disconnected";
   run(): void;
 }
 
@@ -120,7 +120,7 @@ export function ContextMenu(props: ContextMenuProps) {
     // Falling back to the menu itself is not a nicety. An open menu suppresses
     // every global shortcut (`openMenus` feeds `modalOpen`), and Escape is
     // handled by a listener on this container — so a menu whose items are all
-    // disabled, which happens on a read-only connection, left focus outside it
+    // disabled, which happens while disconnected, left focus outside it
     // and made ⌘K, ⌘P, ⌘B and ⌘, all dead with no keyboard way out.
     // A menu that *picks* something opens on the option that is already
     // picked, the way every platform's own picker does — so the strip's

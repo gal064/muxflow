@@ -22,7 +22,6 @@ function harness(extra: Partial<TerminalControllerOptions> = {}) {
       transports.push(t);
       return t;
     },
-    appVersion: "t",
     nextConnectionEpoch: () => (epoch += 1),
     store,
     terminals: registry,

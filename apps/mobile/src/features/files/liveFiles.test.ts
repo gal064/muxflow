@@ -67,7 +67,6 @@ describe.skipIf(!availability.available)(`live files (${availability.reason ?? "
     harness = await startHostHarness();
     control = new HostConnection({
       dial: async () => harness.transport,
-      appVersion: "0.1.0-live-files",
       nextConnectionEpoch: () => (epoch += 1),
       store,
     });
@@ -149,7 +148,6 @@ describe.skipIf(!availability.available)(`live files (${availability.reason ?? "
     // The bulk lane: a second bridge bound to the control connection.
     bulk = new HostConnection({
       dial: async () => harness.dial(),
-      appVersion: "0.1.0-live-files",
       nextConnectionEpoch: () => {
         throw new Error("a bulk lane reuses the control connection's epoch");
       },

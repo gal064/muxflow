@@ -15,7 +15,7 @@ export interface OutputAck {
 }
 
 export interface OutputCreditLedgerOptions {
-  /** `serverHello.terminalOutputWindowBytes`; 0 means credit was not negotiated and nothing is acked. */
+  /** Positive `serverHello.terminalOutputWindowBytes` from the control handshake. */
   windowBytes: bigint;
   send: (ack: OutputAck) => void;
   /** Coalescing delay; the doc fixes it at 50 ms. */
@@ -31,7 +31,6 @@ export class OutputCreditLedger {
   private ackedRecords = 0n;
   private timer: unknown;
   private closed = false;
-  private readonly windowBytes: bigint;
   private readonly immediateThreshold: bigint;
   private readonly flushDelayMs: number;
   private readonly send: (ack: OutputAck) => void;
@@ -39,16 +38,12 @@ export class OutputCreditLedger {
   private readonly cancelTimeout: (handle: unknown) => void;
 
   constructor(options: OutputCreditLedgerOptions) {
-    this.windowBytes = options.windowBytes;
+    if (options.windowBytes <= 0n) throw new Error("terminal output credit requires a positive window");
     this.immediateThreshold = options.windowBytes / 4n;
     this.flushDelayMs = options.flushDelayMs ?? 50;
     this.send = options.send;
     this.scheduleTimeout = options.setTimeout ?? ((callback, ms) => setTimeout(callback, ms));
     this.cancelTimeout = options.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
-  }
-
-  get enabled(): boolean {
-    return this.windowBytes > 0n;
   }
 
   get charged(): OutputAck {
@@ -65,7 +60,7 @@ export class OutputCreditLedger {
    * within `flushDelayMs`.
    */
   charge(bytes: bigint, records: bigint): void {
-    if (!this.enabled || this.closed) return;
+    if (this.closed) return;
     this.cumulativeBytes += bytes;
     this.cumulativeRecords += records;
     if (this.cumulativeBytes - this.ackedBytes > this.immediateThreshold) {
@@ -86,7 +81,7 @@ export class OutputCreditLedger {
       this.cancelTimeout(this.timer);
       this.timer = undefined;
     }
-    if (!this.enabled || this.closed) return;
+    if (this.closed) return;
     if (this.cumulativeBytes === this.ackedBytes && this.cumulativeRecords === this.ackedRecords) return;
     this.ackedBytes = this.cumulativeBytes;
     this.ackedRecords = this.cumulativeRecords;

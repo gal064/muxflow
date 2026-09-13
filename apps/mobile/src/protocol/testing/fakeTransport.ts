@@ -14,7 +14,7 @@ import {
   type ServerHello,
   type Snapshot,
 } from "../gen/envelope_pb";
-import { HOST_CAPABILITIES, PROTOCOL_MAJOR, PROTOCOL_MINOR } from "../contract";
+import { PROTOCOL_MAJOR } from "../contract";
 import type { Transport, TransportClose } from "../Transport";
 
 export class FakeTransport implements Transport {
@@ -80,7 +80,6 @@ export function hostEnvelope(
 ): Envelope {
   return create(EnvelopeSchema, {
     protocolMajor: options.protocolMajor ?? PROTOCOL_MAJOR,
-    protocolMinor: PROTOCOL_MINOR,
     requestId: options.requestId ?? 0n,
     sequence: options.sequence ?? 0n,
     streamId: 0n,
@@ -98,9 +97,6 @@ export function serverHello(overrides: MessageInitShape<typeof ServerHelloSchema
     architecture: "x86_64",
     tmuxVersion: "tmux 3.7b",
     serverIdentity: "server-a",
-    capabilities: HOST_CAPABILITIES,
-    readOnly: false,
-    incompatibility: "",
     gitVersion: "git version 2.50.0",
     connectionEpoch: 1n,
     terminalOutputWindowBytes: BigInt(2 * 1024 * 1024),

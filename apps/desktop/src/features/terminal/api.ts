@@ -38,7 +38,7 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "topologyDirty"; name: string }
   | { kind: "error"; message: string }
   | { kind: "exit"; reason: string }
-  | { kind: "connectionState"; state: "connecting" | "connected" | "reconnecting" | "resyncing" | "disconnected" | "readOnly"; detail?: string }
+  | { kind: "connectionState"; state: "connecting" | "connected" | "reconnecting" | "resyncing" | "disconnected"; detail?: string }
   | { kind: "protocolProgress" }
   | {
       kind: "paneResource";
@@ -118,7 +118,7 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
       return { kind: "exit", reason: label, sequence };
     case 6:
       requireLocalSequence(sequence, "connection state");
-      if (!["connecting", "connected", "reconnecting", "resyncing", "disconnected", "readOnly"].includes(label)) {
+      if (!["connecting", "connected", "reconnecting", "resyncing", "disconnected"].includes(label)) {
         throw new Error(`unknown connection state ${label}`);
       }
       try {

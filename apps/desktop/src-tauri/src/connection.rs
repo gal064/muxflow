@@ -15,8 +15,6 @@ use tauri::{
     State,
     ipc::{Channel, InvokeResponseBody},
 };
-#[cfg(test)]
-use tmux_agent_protocol::{HOST_CAPABILITIES, PROTOCOL_MAJOR};
 use tmux_agent_protocol::{
     envelope,
     v1::{self, envelope::Payload},
@@ -175,7 +173,6 @@ pub(crate) struct TerminalClient {
     late_requests_total: AtomicU32,
     stop_signal: StopSignal,
     ready: AtomicBool,
-    read_only: AtomicBool,
     next_request_id: AtomicU64,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<PendingAnswer, String>>>>,
     /// Everything this link's reader has taken off the ssh stream, so a late
@@ -242,7 +239,6 @@ impl TerminalClient {
             late_requests_total: AtomicU32::new(0),
             stop_signal: StopSignal::default(),
             ready: AtomicBool::new(false),
-            read_only: AtomicBool::new(false),
             next_request_id: AtomicU64::new(100),
             pending: Mutex::new(HashMap::new()),
             link_counters: LinkCounters::new(),
@@ -385,13 +381,9 @@ impl TerminalClient {
     /// rejection arrives as a pane-scoped recovery event on the event stream
     /// and a transport failure tears down the bridge visibly.
     fn enqueue_input(&self, pane_id: String, data: Vec<u8>) -> Result<(), String> {
-        if self.stop_signal.is_stopped()
-            || !self.ready.load(Ordering::Acquire)
-            || self.read_only.load(Ordering::Acquire)
-        {
+        if self.stop_signal.is_stopped() || !self.ready.load(Ordering::Acquire) {
             return Err(
-                "terminal bridge is disconnected, reconciling, or read-only; input was not queued"
-                    .into(),
+                "terminal bridge is disconnected or reconciling; input was not queued".into(),
             );
         }
         if data.is_empty() {
@@ -515,10 +507,8 @@ impl TerminalClient {
         &self,
         request: v1::Request,
     ) -> Result<crate::perf_log::input_timing::DispatchedInput, String> {
-        if !self.ready.load(Ordering::Acquire) || self.read_only.load(Ordering::Acquire) {
-            return Err(
-                "host is disconnected, reconciling, or read-only; input was not sent".into(),
-            );
+        if !self.ready.load(Ordering::Acquire) {
+            return Err("host is disconnected or reconciling; input was not sent".into());
         }
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
         let writer = self
@@ -589,9 +579,6 @@ impl TerminalClient {
             return Err(
                 "connection_unavailable: host connection is disconnected or reconciling".into(),
             );
-        }
-        if self.read_only.load(Ordering::Acquire) {
-            return Err("connection_read_only: host helper connection is read-only".into());
         }
         let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
         let (sender, receiver) = mpsc::channel();
@@ -902,10 +889,7 @@ pub fn prewarm_terminal_bulk(
 ) -> Result<(), String> {
     let client = get_client(&clients, &client_id)?;
     let terminal_epoch = client.terminal_epoch.load(Ordering::Acquire);
-    if terminal_epoch == 0
-        || !client.ready.load(Ordering::Acquire)
-        || client.read_only.load(Ordering::Acquire)
-    {
+    if terminal_epoch == 0 || !client.ready.load(Ordering::Acquire) {
         return Ok(());
     }
     let server_identity = client.server_identity.lock().unwrap().clone();
@@ -1365,8 +1349,8 @@ mod bridge;
 use bridge::supervise_bridge;
 #[cfg(test)]
 use bridge::{
-    attach_scope, handshake_admission, reconnect_delay_millis, reconnect_jitter,
-    scoped_terminal_recovery, terminal_scope, validate_event_sequence,
+    attach_scope, reconnect_delay_millis, reconnect_jitter, scoped_terminal_recovery,
+    terminal_scope, validate_event_sequence,
 };
 
 fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {

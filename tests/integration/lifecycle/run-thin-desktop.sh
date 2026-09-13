@@ -25,8 +25,9 @@ cp "$release_target/muxflow" "$stage/muxflow"
 cp "$release_target/muxflow-host" "$stage/muxflow-host"
 chmod 0755 "$stage/muxflow" "$stage/muxflow-host"
 
+protocol_major=$(jq -r '.protocolMajor' apps/mobile/src/protocol/gen/host_contract.json)
 metadata="$($stage/muxflow-host version)"
-jq -e '.helperVersion == "0.2.0" and .protocolMajor == 2' <<<"$metadata" >/dev/null
+jq -e --argjson major "$protocol_major" '.helperVersion == "0.2.0" and .protocolMajor == $major' <<<"$metadata" >/dev/null
 [[ -x "$stage/muxflow" ]]
 [[ -x "$stage/muxflow-host" ]]
 [[ -n "${DISPLAY:-}" ]] || { echo 'phase1 thin desktop smoke requires DISPLAY' >&2; exit 1; }
@@ -49,5 +50,5 @@ for _ in $(seq 1 200); do
 done
 [[ -S "$runtime/host/host.sock" ]]
 "$stage/muxflow-host" protocol-check --socket "$runtime/host/host.sock" \
-  | jq -e '.helperVersion == "0.2.0" and .protocolMajor == 2' >/dev/null
+  | jq -e --argjson major "$protocol_major" '.helperVersion == "0.2.0" and .protocolMajor == $major' >/dev/null
 echo "phase1-thin-desktop: pass ($stage)"

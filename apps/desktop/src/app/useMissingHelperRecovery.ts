@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, type Dispatch } from "react";
 import {
   helperConnectionKey,
   type HelperUpgradeAction,
@@ -12,7 +12,6 @@ interface RemoteHelperRecoveryOptions {
   connection: ConnectionSpec;
   connectionEpoch: number;
   dispatchHelper: Dispatch<HelperUpgradeAction>;
-  setConnectionDetail: Dispatch<SetStateAction<string>>;
 }
 
 /**
@@ -47,7 +46,6 @@ export function useRemoteHelperRecovery(options: RemoteHelperRecoveryOptions) {
     generation: number;
     key: string;
     requestUpgrade: boolean;
-    reportNewerApp: boolean;
     survivesTransportDrop: boolean;
   } | undefined>(undefined);
   const settledConnectionProbeKey = useRef<string | undefined>(undefined);
@@ -96,7 +94,6 @@ export function useRemoteHelperRecovery(options: RemoteHelperRecoveryOptions) {
         // intent so a Settings click cannot turn an automatic reconciliation
         // into an informational-only result while the first probe is pending.
         active.requestUpgrade ||= requestUpgrade;
-        active.reportNewerApp ||= reason !== "manual";
         // A request associated with any live transport is invalid once that
         // transport drops. Manual callers may strengthen intent, never age.
         active.survivesTransportDrop &&= reason !== "connected";
@@ -109,7 +106,6 @@ export function useRemoteHelperRecovery(options: RemoteHelperRecoveryOptions) {
       generation,
       key,
       requestUpgrade,
-      reportNewerApp: reason !== "manual",
       survivesTransportDrop: reason !== "connected",
     };
     activeProbe.current = request;
@@ -127,20 +123,12 @@ export function useRemoteHelperRecovery(options: RemoteHelperRecoveryOptions) {
       activeProbe.current = undefined;
       settledConnectionProbeKey.current = request.survivesTransportDrop ? undefined : key;
       optionsRef.current.dispatchHelper({ type: "probeSucceeded", connectionKey, probe });
-      if (request.requestUpgrade && (!probe.installed || (!probe.compatible && !probe.appOutdated))) {
+      if (request.requestUpgrade && (!probe.installed || !probe.compatible)) {
         // Straight through the same reducer path the Settings button walks, so
         // the confirmation, the install, the rollback and the reconnect after
         // it are one implementation rather than two.
         optionsRef.current.dispatchHelper({ type: "requestUpgrade" });
         return;
-      }
-      if (request.reportNewerApp && !probe.compatible && probe.appOutdated) {
-        // Nothing to offer: installing from here would replace the host's newer
-        // helper with this app's older one. Said in the strip in the same words
-        // Settings uses, because it is the same refusal.
-        optionsRef.current.setConnectionDetail(
-          `This host runs a newer helper (${probe.helperVersion}) than this app expects (${probe.expectedHelperVersion}). Update the app — installing from here would downgrade the host.`,
-        );
       }
     }).catch((error) => {
       if (scopeKeyRef.current !== key || probeGeneration.current !== generation
@@ -159,7 +147,7 @@ export function useRemoteHelperRecovery(options: RemoteHelperRecoveryOptions) {
     state: Extract<TerminalEvent, { kind: "connectionState" }>["state"],
   ) => {
     if (connection.mode !== "ssh") return;
-    if (state === "connected" || state === "readOnly") {
+    if (state === "connected") {
       probe(connection, "connected", true);
       return;
     }

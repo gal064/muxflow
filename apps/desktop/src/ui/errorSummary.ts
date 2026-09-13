@@ -39,7 +39,6 @@ const CODE_SUMMARY: readonly (readonly [RegExp, string])[] = [
   [/^terminal_.*_rejected$/, "The terminal connection refused that request."],
   [/^mutation_rejected$/, "The connection to the host is not accepting changes right now."],
   [/^connection_unavailable$/, "The connection to the host is still reconnecting."],
-  [/^connection_read_only$/, "The host helper connection is read-only."],
   [/^confirmation_required$/, "That change needs an explicit confirmation first."],
   [/^cancelled$/, "That request was cancelled."],
 ];
@@ -85,7 +84,6 @@ const REASON_SUMMARY: readonly (readonly [RegExp, string])[] = [
   [/timed out|timeout/i, "The host did not answer in time. Check the connection and try again."],
   [/disconnected or reconciling/i, "The connection to the host is still reconnecting."],
   [/server is unavailable|connection (closed|lost)|not connected/i, "The connection to the host is down. Reconnect and try again."],
-  [/not writable|read-only/i, "The host helper connection is read-only."],
 ];
 
 /** How much of an unmapped message reads as a summary before it is a wall. */

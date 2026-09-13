@@ -9,8 +9,7 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    CAP_BULK_DOWNLOAD, CAP_TERMINAL_OUTPUT_CREDIT, FrameError, HELPER_VERSION, HOST_CAPABILITIES,
-    PROTOCOL_MAJOR, envelope, read_frame,
+    FrameError, HELPER_VERSION, PROTOCOL_MAJOR, envelope, read_frame,
     v1::{self, envelope::Payload},
     write_frame,
 };
@@ -385,42 +384,43 @@ async fn serve_connection(
     };
 
     let host_protocol_major = advertised_protocol_major();
-    let protocol_compatible = hello.protocol_major == host_protocol_major;
-    let host_helper_version = advertised_helper_version();
-    let helper_compatible = client_hello.expected_helper_version.is_empty()
-        || client_hello.expected_helper_version == host_helper_version;
     let current_server_identity = server_identity();
-    let identity_compatible = !client_hello.bulk_connection
-        || (!client_hello.expected_server_identity.is_empty()
-            && client_hello.expected_server_identity == current_server_identity);
-    let read_only = !protocol_compatible || !helper_compatible || !identity_compatible;
-    let incompatibility = if !protocol_compatible {
-        format!(
-            "protocol major {} is incompatible with host major {host_protocol_major}",
-            hello.protocol_major
-        )
-    } else if !helper_compatible {
-        format!(
-            "helper {} does not match required {}",
-            host_helper_version, client_hello.expected_helper_version
-        )
-    } else if !identity_compatible {
-        format!(
-            "bulk connection expected server identity {:?}, but the active server is {:?}",
-            client_hello.expected_server_identity, current_server_identity
-        )
+    let refusal = if hello.protocol_major != host_protocol_major {
+        Some((
+            "protocol_incompatible",
+            format!(
+                "protocol major {} does not match host major {host_protocol_major}",
+                hello.protocol_major
+            ),
+        ))
+    } else if client_hello.bulk_connection
+        && (client_hello.expected_server_identity.is_empty()
+            || client_hello.expected_server_identity != current_server_identity)
+    {
+        Some((
+            "server_identity_mismatch",
+            format!(
+                "bulk connection expected server identity {:?}, but the active server is {:?}",
+                client_hello.expected_server_identity, current_server_identity
+            ),
+        ))
     } else {
-        String::new()
+        None
     };
-    let negotiated_capabilities = HOST_CAPABILITIES & client_hello.requested_capabilities;
-    let output_credit_enabled =
-        !client_hello.bulk_connection && negotiated_capabilities & CAP_TERMINAL_OUTPUT_CREDIT != 0;
-    let output_credit = Arc::new(OutputCredit::negotiated(output_credit_enabled));
+    if let Some((code, message)) = refusal {
+        let outcome = send_handshake_error(&mut stream, code, &message)
+            .await
+            .and_then(|()| Err(anyhow::anyhow!(message)));
+        activity.mark_host_frame();
+        return (outcome, ended(ConnectionEndReason::HandshakeFailed));
+    }
+    let output_credit_enabled = !client_hello.bulk_connection;
+    let output_credit = Arc::new(OutputCredit::new());
     let mut server_hello = envelope(
         hello.request_id,
         0,
         Payload::ServerHello(v1::ServerHello {
-            helper_version: host_helper_version,
+            helper_version: HELPER_VERSION.into(),
             helper_build_digest: crate::build_identity::digest()
                 .expect("daemon initializes its executable digest before serving")
                 .to_owned(),
@@ -428,9 +428,6 @@ async fn serve_connection(
             architecture: std::env::consts::ARCH.into(),
             tmux_version: daemon_command_version(CommandVersion::Tmux),
             server_identity: current_server_identity,
-            capabilities: negotiated_capabilities,
-            read_only,
-            incompatibility,
             git_version: daemon_command_version(CommandVersion::Git),
             connection_epoch: client_hello.connection_epoch,
             terminal_output_window_bytes: if output_credit_enabled {
@@ -733,8 +730,7 @@ async fn serve_connection(
                 }
                 let policy =
                     requests::operation_policy::OperationPolicy::for_raw(request.operation);
-                if let Some(error) = policy.admission_error(read_only, client_hello.bulk_connection)
-                {
+                if let Some(error) = policy.admission_error(client_hello.bulk_connection) {
                     send_response(
                         &control_tx,
                         frame.request_id,
@@ -817,16 +813,6 @@ async fn serve_connection(
                     files: Arc::clone(&files),
                     git: Arc::clone(&git),
                     bulk_connection: client_hello.bulk_connection,
-                    // Both halves, because the comment on the field
-                    // states a capability fact and `!read_only` alone is a
-                    // proxy for it: a read-only host refuses a bulk
-                    // connection outright, *and* a client that never asked
-                    // for the bulk capability will not open one. Guessing
-                    // from read-only alone hands any other non-read-only
-                    // control client a diff body reference it cannot
-                    // fetch, and an empty diff with it.
-                    bulk_available: !read_only
-                        && client_hello.requested_capabilities & CAP_BULK_DOWNLOAD != 0,
                     connection_epoch: client_hello.connection_epoch,
                     perf_connection_epoch,
                     connection_id,
@@ -1385,16 +1371,6 @@ fn advertised_protocol_major() -> u32 {
         return value;
     }
     PROTOCOL_MAJOR
-}
-
-fn advertised_helper_version() -> String {
-    if testing_enabled()
-        && let Ok(value) = std::env::var("ADE_PHASE1_TEST_HELPER_VERSION")
-        && !value.is_empty()
-    {
-        return value;
-    }
-    HELPER_VERSION.into()
 }
 
 #[cfg(test)]

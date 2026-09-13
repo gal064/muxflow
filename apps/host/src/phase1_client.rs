@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, bail};
 use serde::Serialize;
 use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, PROTOCOL_MINOR, envelope, read_frame_sync,
+    PROTOCOL_MAJOR, envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -18,7 +18,6 @@ struct Report {
     transport: String,
     helper_version: String,
     server_identity: String,
-    read_only: bool,
     sessions: usize,
     windows: usize,
     panes: usize,
@@ -43,19 +42,13 @@ pub fn run(arguments: Vec<String>) -> anyhow::Result<()> {
     let requested_major = value_after(&arguments, "--protocol-major")
         .and_then(|value| value.parse().ok())
         .unwrap_or(PROTOCOL_MAJOR);
-    let expected_helper =
-        value_after(&arguments, "--expected-helper").unwrap_or_else(|| HELPER_VERSION.into());
     let hello_request = v1::Envelope {
         protocol_major: requested_major,
-        protocol_minor: PROTOCOL_MINOR,
         request_id: 1,
         sequence: 0,
         stream_id: 0,
         priority: v1::Priority::Control.into(),
         payload: Some(Payload::ClientHello(v1::ClientHello {
-            desktop_version: "phase1-client".into(),
-            requested_capabilities: HOST_CAPABILITIES,
-            expected_helper_version: expected_helper,
             bulk_connection: false,
             ..Default::default()
         })),
@@ -73,8 +66,6 @@ pub fn run(arguments: Vec<String>) -> anyhow::Result<()> {
                 "protocolMajor": server_protocol_major,
                 "helperVersion": hello.helper_version,
                 "serverIdentity": hello.server_identity,
-                "readOnly": hello.read_only,
-                "incompatibility": hello.incompatibility,
             })
         );
         stop_child(&mut child);
@@ -98,7 +89,6 @@ pub fn run(arguments: Vec<String>) -> anyhow::Result<()> {
         },
         helper_version: hello.helper_version,
         server_identity: hello.server_identity,
-        read_only: hello.read_only,
         sessions: snapshot.sessions.len(),
         windows: snapshot.windows.len(),
         panes: snapshot.panes.len(),
@@ -143,7 +133,7 @@ pub fn run(arguments: Vec<String>) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if requested_major != PROTOCOL_MAJOR || hello.read_only || !testing {
+    if !testing {
         println!("{}", serde_json::to_string_pretty(&report)?);
         stop_child(&mut child);
         return Ok(());

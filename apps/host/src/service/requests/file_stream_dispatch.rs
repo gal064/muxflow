@@ -174,9 +174,7 @@ mod tests {
     use super::*;
     use crate::service::serve_with_shutdown;
     use std::io::Write as _;
-    use tmux_agent_protocol::{
-        HOST_CAPABILITIES, envelope, read_frame, v1::envelope::Payload, write_frame,
-    };
+    use tmux_agent_protocol::{envelope, read_frame, v1::envelope::Payload, write_frame};
     use tokio::{net::UnixStream, time::timeout};
 
     struct BulkPeer {
@@ -194,8 +192,6 @@ mod tests {
                     1,
                     0,
                     Payload::ClientHello(v1::ClientHello {
-                        desktop_version: "file-stream-test".into(),
-                        requested_capabilities: HOST_CAPABILITIES,
                         bulk_connection: true,
                         expected_server_identity: crate::service::snapshot::server_identity(),
                         ..Default::default()
@@ -209,17 +205,9 @@ mod tests {
                 .expect("server hello timed out")
                 .unwrap()
                 .unwrap();
-            let Some(Payload::ServerHello(hello)) = hello.payload else {
+            let Some(Payload::ServerHello(_)) = hello.payload else {
                 panic!("expected a server hello")
             };
-            assert!(!hello.read_only);
-            // The desktop requires every host capability at its control
-            // handshake, so a helper that serves this operation must say so.
-            assert_ne!(
-                hello.capabilities & tmux_agent_protocol::CAP_FILE_STREAM,
-                0,
-                "a host that serves OpenFileStream must advertise it"
-            );
             (
                 Self {
                     stream: client,
