@@ -35,6 +35,26 @@ fn event(id: &str, generation: u64, name: &str) -> v1::AgentHookEvent {
     }
 }
 
+fn event_for_turn(id: &str, name: &str, turn_id: &str) -> v1::AgentHookEvent {
+    let mut value = event(id, 0, name);
+    let mut payload: serde_json::Value = serde_json::from_slice(&value.payload_json).unwrap();
+    payload[adapters::CODEX_APPROVAL_TURN_ID_FIELD] = turn_id.into();
+    value.payload_json = serde_json::to_vec(&payload).unwrap();
+    value
+}
+
+fn root_turn(index: u16) -> String {
+    format!("00000000-{index:04x}-7000-8000-000000000000")
+}
+
+fn child_event_for_turn(id: &str, name: &str, child_id: &str, turn_id: &str) -> v1::AgentHookEvent {
+    let mut value = event_for_turn(id, name, turn_id);
+    let mut payload: serde_json::Value = serde_json::from_slice(&value.payload_json).unwrap();
+    payload[adapters::CODEX_SUBAGENT_ID_FIELD] = child_id.into();
+    value.payload_json = serde_json::to_vec(&payload).unwrap();
+    value
+}
+
 fn topology(command: &str) -> tmux_control::TmuxSnapshot {
     tmux_control::TmuxSnapshot {
         sessions: vec![tmux_control::Session {
@@ -71,6 +91,16 @@ fn topology(command: &str) -> tmux_control::TmuxSnapshot {
             start_command: String::new(),
         }],
     }
+}
+
+fn two_pane_topology() -> tmux_control::TmuxSnapshot {
+    let mut value = topology("codex");
+    let mut second = value.panes[0].clone();
+    second.id = "%8".into();
+    second.index = 1;
+    second.left = 80;
+    value.panes.push(second);
+    value
 }
 
 #[test]
@@ -533,6 +563,65 @@ fn promotion_sink_observes_persisted_identity_before_stop_reply_sink() {
 }
 
 #[test]
+fn topology_outage_promotes_a_manual_owner_before_dispatching_its_first_native_reply() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-outage-manual-promotion-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let promotion_calls = Arc::clone(&calls);
+    let reply_calls = Arc::clone(&calls);
+    let runtime = AgentRuntime::isolated_with_sinks(
+        path,
+        Box::new(move |reply| {
+            reply_calls
+                .lock()
+                .unwrap()
+                .push(format!("reply:{}", reply.agent_id));
+        }),
+        Box::new(move |retired_ids, new_id| {
+            promotion_calls
+                .lock()
+                .unwrap()
+                .push(format!("promotion:{}:{new_id}", retired_ids.join(",")));
+        }),
+    );
+    let topology = topology("codex");
+    runtime.reconcile_topology(&topology, "server-a").unwrap();
+    let manual_id = runtime.snapshot_for("server-a").agents[0].agent_id.clone();
+    let mut stop = event("outage-first-native-stop", 0, "Stop");
+    stop.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "Stop",
+        adapters::LAST_ASSISTANT_MESSAGE_FIELD: "done",
+    }))
+    .unwrap();
+
+    let promoted = runtime
+        .ingest_hook_with_context(&stop, "server-a", None)
+        .unwrap();
+    let native = promoted.agent.unwrap();
+    assert_eq!(
+        promoted.retired_agent_ids.as_slice(),
+        std::slice::from_ref(&manual_id)
+    );
+    assert_ne!(native.agent_id, manual_id);
+    assert_eq!(native.native_session_id, "native-1");
+    assert_eq!(native.route.as_ref().unwrap().pane_id, "%7");
+    assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            format!("promotion:{manual_id}:{}", native.agent_id),
+            format!("reply:{}", native.agent_id),
+        ]
+    );
+}
+
+#[test]
 fn ingest_order_remains_held_through_identity_promotion() {
     let path = std::env::current_dir()
         .unwrap()
@@ -613,6 +702,1348 @@ fn native_to_native_pane_replacement_does_not_transfer_voice_identity() {
 
     assert_eq!(replaced.retired_agent_ids, [old_id]);
     assert!(promotions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn native_session_replacement_resets_displaced_turn_children_and_sidecars() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-session-replacement-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let promotions = Arc::new(Mutex::new(Vec::new()));
+    let promotion_calls = Arc::clone(&promotions);
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let reply_calls = Arc::clone(&replies);
+    let runtime = AgentRuntime::isolated_with_sinks(
+        path,
+        Box::new(move |reply| reply_calls.lock().unwrap().push(reply)),
+        Box::new(move |retired, new_id| {
+            promotion_calls
+                .lock()
+                .unwrap()
+                .push((retired.to_vec(), new_id.to_owned()));
+        }),
+    );
+    let topology = topology("codex");
+    let turn_a = root_turn(1);
+    let child_turn = root_turn(2);
+    let root = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("prompt-a", "UserPromptSubmit", &turn_a),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn("child-a", "SubagentStart", "child", &child_turn),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("stop-a", "Stop", &turn_a),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/13");
+    fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    fs::write(&transcript, b"\n").unwrap();
+    let open_monitor = |turn_id: &str| {
+        crate::hook::codex_transcript::TurnMonitor::open(
+            &serde_json::json!({
+                "turn_id": turn_id,
+                "transcript_path": transcript,
+            }),
+            home.path(),
+        )
+        .unwrap()
+    };
+    let child_key = CodexTurnKey {
+        agent_id: "child".into(),
+        turn_id: child_turn.clone(),
+    };
+    runtime.codex_child_monitors.lock().unwrap().insert(
+        (root.agent_id.clone(), "child".into()),
+        CodexChildMonitor {
+            turn: child_key,
+            monitor: open_monitor(&child_turn),
+            terminal: None,
+        },
+    );
+    let changed_at =
+        runtime.state.lock().unwrap().agents[&root.agent_id].lifecycle_changed_at_unix_millis;
+    let permission_key = CodexTurnKey {
+        agent_id: String::new(),
+        turn_id: turn_a.clone(),
+    };
+    runtime.pending_codex_permissions.lock().unwrap().insert(
+        PendingCodexPermissionKey {
+            record_id: root.agent_id.clone(),
+            turn: permission_key,
+        },
+        PendingCodexPermission {
+            monitor: open_monitor(&turn_a),
+            terminal: None,
+            lifecycle_changed_at_unix_millis: changed_at,
+            observed_at_unix_millis: now_millis(),
+            root_turn_id: turn_a.clone(),
+        },
+    );
+
+    let turn_b = root_turn(3);
+    let mut replacement = event_for_turn("prompt-b", "UserPromptSubmit", &turn_b);
+    replacement.native_session_id = "native-2".into();
+    let replaced = runtime
+        .ingest_hook_with_context(&replacement, "server-a", None)
+        .unwrap();
+    assert_eq!(
+        replaced.retired_agent_ids.as_slice(),
+        std::slice::from_ref(&root.agent_id)
+    );
+    assert!(runtime.pending_codex_permissions.lock().unwrap().is_empty());
+    assert!(runtime.codex_child_monitors.lock().unwrap().is_empty());
+    let unmapped_replacement_id = replaced.agent.unwrap().agent_id;
+    let replacement_generation = runtime.snapshot_for("server-a").generation;
+
+    let mut late_root = event_for_turn("late-stop-a-outage", "Stop", &turn_a);
+    let mut late_payload: serde_json::Value =
+        serde_json::from_slice(&late_root.payload_json).unwrap();
+    late_payload[adapters::LAST_ASSISTANT_MESSAGE_FIELD] = "stale reply".into();
+    late_root.payload_json = serde_json::to_vec(&late_payload).unwrap();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&late_root, "server-a", None),
+        Err(HookIngestFailure::Superseded)
+    ));
+    let replacement_snapshot = runtime.snapshot_for("server-a");
+    assert_eq!(replacement_snapshot.generation, replacement_generation);
+    assert_eq!(replacement_snapshot.agents.len(), 1);
+    assert_eq!(
+        replacement_snapshot.agents[0].agent_id,
+        unmapped_replacement_id
+    );
+    assert_eq!(
+        replacement_snapshot.agents[0].lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    assert!(replies.lock().unwrap().is_empty());
+    assert!(promotions.lock().unwrap().is_empty());
+
+    let mut unmapped_activity = event_for_turn("activity-b-unmapped", "PreToolUse", &turn_b);
+    unmapped_activity.native_session_id = "native-2".into();
+    let continued = runtime
+        .ingest_hook_with_context(&unmapped_activity, "server-a", None)
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(continued.agent_id, unmapped_replacement_id);
+    assert!(continued.route.unwrap().pane_id.is_empty());
+    let migrated_permission_turn = root_turn(99);
+    runtime.pending_codex_permissions.lock().unwrap().insert(
+        PendingCodexPermissionKey {
+            record_id: unmapped_replacement_id.clone(),
+            turn: CodexTurnKey {
+                agent_id: String::new(),
+                turn_id: migrated_permission_turn.clone(),
+            },
+        },
+        PendingCodexPermission {
+            monitor: open_monitor(&migrated_permission_turn),
+            terminal: None,
+            lifecycle_changed_at_unix_millis: changed_at,
+            observed_at_unix_millis: now_millis(),
+            root_turn_id: migrated_permission_turn,
+        },
+    );
+    runtime.codex_child_monitors.lock().unwrap().insert(
+        (unmapped_replacement_id.clone(), "migrated-child".into()),
+        CodexChildMonitor {
+            turn: CodexTurnKey {
+                agent_id: "migrated-child".into(),
+                turn_id: child_turn.clone(),
+            },
+            monitor: open_monitor(&child_turn),
+            terminal: None,
+        },
+    );
+
+    let mut mapped_activity = event_for_turn("activity-b-mapped", "PostToolUse", &turn_b);
+    mapped_activity.native_session_id = "native-2".into();
+    let replacement_id = runtime
+        .ingest_hook_with_context(&mapped_activity, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap()
+        .agent_id;
+    assert_ne!(replacement_id, unmapped_replacement_id);
+    assert!(
+        runtime
+            .pending_codex_permissions
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|key| key.record_id == replacement_id)
+    );
+    assert!(
+        runtime
+            .codex_child_monitors
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|(record_id, _)| record_id == &replacement_id)
+    );
+
+    let mut replacement_stop = event_for_turn("stop-b", "Stop", &turn_b);
+    replacement_stop.native_session_id = "native-2".into();
+    let completed = runtime
+        .ingest_hook_with_context(&replacement_stop, "server-a", Some(&topology))
+        .unwrap();
+    assert!(completed.notify);
+    assert_eq!(
+        completed.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+    let generation = runtime.snapshot_for("server-a").generation;
+
+    let late_child = child_event_for_turn("late-child-a", "SubagentStop", "child", &child_turn);
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&late_child, "server-a", Some(&topology)),
+        Err(HookIngestFailure::Superseded)
+    ));
+    let snapshot = runtime.snapshot_for("server-a");
+    assert_eq!(snapshot.generation, generation);
+    assert_eq!(snapshot.agents.len(), 1);
+    assert_eq!(snapshot.agents[0].agent_id, replacement_id);
+    assert_eq!(
+        snapshot.agents[0].lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+    let state = runtime.state.lock().unwrap();
+    let record = &state.agents[&replacement_id];
+    assert!(record.codex_running_subagents.is_empty());
+    assert_eq!(record.codex_active_root_turn_id, turn_b);
+    assert_eq!(
+        *promotions.lock().unwrap(),
+        [(vec![unmapped_replacement_id], replacement_id)]
+    );
+}
+
+#[test]
+fn a_known_session_move_keeps_its_state_and_retires_the_displaced_session() {
+    let runtime = runtime("known-session-move");
+    let topology = two_pane_topology();
+    let turn_a = root_turn(1);
+    let turn_a_next = root_turn(2);
+    let turn_b = root_turn(10);
+    let child_b = root_turn(11);
+    let sequenced = |id: &str,
+                     name: &str,
+                     turn: &str,
+                     native_session_id: &str,
+                     pane_id: &str,
+                     generation: u64| {
+        let mut hook = event_for_turn(id, name, turn);
+        hook.native_session_id = native_session_id.into();
+        hook.pane_id = pane_id.into();
+        hook.source_sequence_authoritative = true;
+        hook.source_generation = generation;
+        hook
+    };
+    let session_a = runtime
+        .ingest_hook_with_context(
+            &sequenced("prompt-a", "UserPromptSubmit", &turn_a, "native-a", "%7", 5),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let session_b = runtime
+        .ingest_hook_with_context(
+            &sequenced(
+                "prompt-b",
+                "UserPromptSubmit",
+                &turn_b,
+                "native-b",
+                "%8",
+                100,
+            ),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let mut child = child_event_for_turn("child-b", "SubagentStart", "child", &child_b);
+    child.native_session_id = "native-b".into();
+    child.pane_id = "%8".into();
+    runtime
+        .ingest_hook_with_context(&child, "server-a", Some(&topology))
+        .unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/13");
+    fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    fs::write(&transcript, b"\n").unwrap();
+    let open_monitor = |turn_id: &str| {
+        crate::hook::codex_transcript::TurnMonitor::open(
+            &serde_json::json!({"turn_id": turn_id, "transcript_path": transcript}),
+            home.path(),
+        )
+        .unwrap()
+    };
+    runtime.codex_child_monitors.lock().unwrap().insert(
+        (session_b.agent_id.clone(), "child".into()),
+        CodexChildMonitor {
+            turn: CodexTurnKey {
+                agent_id: "child".into(),
+                turn_id: child_b.clone(),
+            },
+            monitor: open_monitor(&child_b),
+            terminal: None,
+        },
+    );
+    let changed_at =
+        runtime.state.lock().unwrap().agents[&session_b.agent_id].lifecycle_changed_at_unix_millis;
+    runtime.pending_codex_permissions.lock().unwrap().insert(
+        PendingCodexPermissionKey {
+            record_id: session_b.agent_id.clone(),
+            turn: CodexTurnKey {
+                agent_id: String::new(),
+                turn_id: turn_b.clone(),
+            },
+        },
+        PendingCodexPermission {
+            monitor: open_monitor(&turn_b),
+            terminal: None,
+            lifecycle_changed_at_unix_millis: changed_at,
+            observed_at_unix_millis: now_millis(),
+            root_turn_id: turn_b,
+        },
+    );
+
+    let moved = runtime
+        .ingest_hook_with_context(
+            &sequenced("move-a", "PreToolUse", &turn_a_next, "native-a", "%8", 6),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(moved.retired_agent_ids.contains(&session_b.agent_id));
+    let moved = moved.agent.unwrap();
+    assert_eq!(moved.agent_id, session_a.agent_id);
+    assert_eq!(moved.route.as_ref().unwrap().pane_id, "%8");
+    assert!(runtime.pending_codex_permissions.lock().unwrap().is_empty());
+    assert!(runtime.codex_child_monitors.lock().unwrap().is_empty());
+    let state = runtime.state.lock().unwrap();
+    assert_eq!(state.agents.len(), 1);
+    let record = &state.agents[&session_a.agent_id];
+    assert_eq!(record.native_session_id, "native-a");
+    assert_eq!(record.codex_active_root_turn_id, turn_a_next);
+    assert_eq!(record.latest_source_generation, 6);
+}
+
+#[test]
+fn superseded_codex_fork_hooks_do_not_reclaim_the_current_pane() {
+    let runtime = runtime("codex-superseded-fork");
+    let topology = topology("codex");
+
+    let root = runtime
+        .ingest_hook_with_context(
+            &event("root-start", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let mut fork_start = event("fork-start", 0, "UserPromptSubmit");
+    fork_start.native_session_id = "native-fork".into();
+    runtime
+        .ingest_hook_with_context(&fork_start, "server-a", Some(&topology))
+        .unwrap();
+    let root_resumed = runtime
+        .ingest_hook_with_context(
+            &event("root-resumed", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(root_resumed.agent_id, root.agent_id);
+    let generation = runtime.snapshot_for("server-a").generation;
+
+    for event_name in ["PreToolUse", "Stop", "Interrupt", "SessionEnd"] {
+        let mut late = event(&format!("fork-late-{event_name}"), 0, event_name);
+        late.native_session_id = "native-fork".into();
+        assert!(matches!(
+            runtime.ingest_hook_with_context(&late, "server-a", Some(&topology)),
+            Err(HookIngestFailure::Superseded)
+        ));
+    }
+
+    let snapshot = runtime.snapshot_for("server-a");
+    assert_eq!(snapshot.generation, generation);
+    assert_eq!(snapshot.agents.len(), 1);
+    assert_eq!(snapshot.agents[0].agent_id, root.agent_id);
+    assert_eq!(
+        snapshot.agents[0].lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+}
+
+#[test]
+fn an_unmapped_codex_fork_does_not_gain_pane_continuity() {
+    let runtime = runtime("codex-unmapped-superseded-fork");
+    let topology = topology("codex");
+    let root = runtime
+        .ingest_hook_with_context(
+            &event("root-start", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+
+    let mut unmapped_fork_stop = event("fork-stop-unmapped", 0, "Stop");
+    unmapped_fork_stop.native_session_id = "native-fork".into();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&unmapped_fork_stop, "server-a", None),
+        Err(HookIngestFailure::Superseded)
+    ));
+
+    let mut mapped_fork_end = event("fork-end-mapped", 0, "SessionEnd");
+    mapped_fork_end.native_session_id = "native-fork".into();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&mapped_fork_end, "server-a", Some(&topology)),
+        Err(HookIngestFailure::Superseded)
+    ));
+
+    let snapshot = runtime.snapshot_for("server-a");
+    let pane_owner = snapshot
+        .agents
+        .iter()
+        .find(|agent| {
+            agent
+                .route
+                .as_ref()
+                .is_some_and(|route| route.pane_id == "%7")
+        })
+        .unwrap();
+    assert_eq!(pane_owner.agent_id, root.agent_id);
+    assert_eq!(
+        pane_owner.lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    assert_eq!(snapshot.agents.len(), 1);
+}
+
+#[test]
+fn topology_outage_preserves_current_native_identity_route_and_voice_reply() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-outage-continuity-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let reply_calls = Arc::clone(&replies);
+    let runtime = AgentRuntime::isolated_with_sink(
+        path,
+        Box::new(move |reply| reply_calls.lock().unwrap().push(reply)),
+    );
+    let topology = topology("codex");
+    let turn_a = root_turn(1);
+    let turn_b = root_turn(2);
+    let root = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("prompt-a", "UserPromptSubmit", &turn_a),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+
+    let continued = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("continue-b", "PreToolUse", &turn_b),
+            "server-a",
+            None,
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(continued.agent_id, root.agent_id);
+    assert_eq!(continued.route.as_ref().unwrap().pane_id, "%7");
+
+    let mut stop = event_for_turn("stop-b", "Stop", &turn_b);
+    let mut payload: serde_json::Value = serde_json::from_slice(&stop.payload_json).unwrap();
+    payload[adapters::LAST_ASSISTANT_MESSAGE_FIELD] = "current reply".into();
+    stop.payload_json = serde_json::to_vec(&payload).unwrap();
+    let completed = runtime
+        .ingest_hook_with_context(&stop, "server-a", None)
+        .unwrap()
+        .agent
+        .unwrap();
+
+    assert_eq!(completed.agent_id, root.agent_id);
+    assert_eq!(completed.route.as_ref().unwrap().pane_id, "%7");
+    let snapshot = runtime.snapshot_for("server-a");
+    assert_eq!(snapshot.agents.len(), 1);
+    assert_eq!(snapshot.agents[0].agent_id, root.agent_id);
+    let replies = replies.lock().unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].agent_id, root.agent_id);
+    assert_eq!(replies[0].text, "current reply");
+}
+
+#[test]
+fn mapped_native_identity_wins_over_an_earlier_sorting_unmapped_alias() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-native-alias-order-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let reply_calls = Arc::clone(&replies);
+    let promotions = Arc::new(Mutex::new(Vec::new()));
+    let promotion_calls = Arc::clone(&promotions);
+    let runtime = AgentRuntime::isolated_with_sinks(
+        path,
+        Box::new(move |reply| reply_calls.lock().unwrap().push(reply)),
+        Box::new(move |retired, current| {
+            promotion_calls
+                .lock()
+                .unwrap()
+                .push((retired.to_vec(), current.to_owned()));
+        }),
+    );
+    let topology = two_pane_topology();
+    let turn_a = root_turn(1);
+    let turn_a_next = root_turn(2);
+
+    let mut start_a = event_for_turn("start-a", "UserPromptSubmit", &turn_a);
+    start_a.native_session_id = "native-2".into();
+    let mapped_a = runtime
+        .ingest_hook_with_context(&start_a, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    let mut start_b = event_for_turn("start-b", "UserPromptSubmit", &root_turn(20));
+    start_b.native_session_id = "native-b".into();
+    start_b.pane_id = "%8".into();
+    let mapped_b = runtime
+        .ingest_hook_with_context(&start_b, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+
+    let mut stale_start = event_for_turn("stale-start", "UserPromptSubmit", &root_turn(0));
+    stale_start.native_session_id = "native-2".into();
+    stale_start.pane_id = "%99".into();
+    runtime
+        .ingest_hook_with_context(&stale_start, "server-a", Some(&topology))
+        .unwrap();
+    let mut stale_stop = event_for_turn("stale-stop", "Stop", &root_turn(0));
+    stale_stop.native_session_id = "native-2".into();
+    stale_stop.pane_id = "%99".into();
+    runtime
+        .ingest_hook_with_context(&stale_stop, "server-a", Some(&topology))
+        .unwrap();
+    let alias_id = runtime
+        .state
+        .lock()
+        .unwrap()
+        .agents
+        .values()
+        .find(|record| record.native_session_id == "native-2" && record.route.pane_id.is_empty())
+        .unwrap()
+        .agent_id
+        .clone();
+    assert!(
+        alias_id < mapped_a.agent_id,
+        "native-2 must exercise the alias-first BTreeMap ordering"
+    );
+    {
+        let mut state = runtime.state.lock().unwrap();
+        let alias = state.agents.get_mut(&alias_id).unwrap();
+        let existing = std::mem::take(&mut alias.source_event_ids);
+        alias.source_event_ids = (0..(ingest::MAX_DEDUPE_IDS - existing.len()))
+            .map(|index| format!("alias-history-{index}"))
+            .chain(existing)
+            .collect();
+        assert_eq!(alias.source_event_ids.len(), ingest::MAX_DEDUPE_IDS);
+    }
+
+    let mut outage_stop = event_for_turn("outage-stop", "Stop", &turn_a);
+    outage_stop.native_session_id = "native-2".into();
+    outage_stop.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "Stop",
+        adapters::CODEX_APPROVAL_TURN_ID_FIELD: turn_a,
+        adapters::LAST_ASSISTANT_MESSAGE_FIELD: "mapped reply",
+    }))
+    .unwrap();
+    let outage = runtime
+        .ingest_hook_with_context(&outage_stop, "server-a", None)
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(outage.agent_id, mapped_a.agent_id);
+    assert_eq!(outage.route.as_ref().unwrap().pane_id, "%7");
+    assert_eq!(replies.lock().unwrap()[0].agent_id, mapped_a.agent_id);
+
+    let mut alias_topology = topology.clone();
+    alias_topology.panes[0].id = "%99".into();
+    let mut stale_child = child_event_for_turn(
+        "stale-alias-child",
+        "SubagentStart",
+        "stale-child",
+        &root_turn(30),
+    );
+    stale_child.native_session_id = "native-2".into();
+    stale_child.pane_id = "%99".into();
+    assert!(
+        !runtime
+            .ingest_hook_with_context(&stale_child, "server-a", Some(&alias_topology))
+            .unwrap()
+            .agent
+            .unwrap()
+            .present,
+        "a child hook cannot let an older alias steal routing"
+    );
+    let superseded = runtime
+        .ingest_hook_with_context(&stale_stop, "server-a", Some(&alias_topology))
+        .unwrap();
+    assert!(superseded.retired_agent_ids.is_empty());
+    let tombstone = superseded.agent.unwrap();
+    assert_eq!(tombstone.agent_id, alias_id);
+    assert!(!tombstone.present);
+    assert_eq!(
+        runtime
+            .snapshot_for("server-a")
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == mapped_a.agent_id)
+            .unwrap()
+            .route
+            .as_ref()
+            .unwrap()
+            .pane_id,
+        "%7",
+        "a stale alias retry may clean up identity but cannot steal routing"
+    );
+    assert_eq!(
+        runtime
+            .snapshot_for("server-a")
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == mapped_a.agent_id)
+            .unwrap()
+            .lifecycle,
+        v1::AgentLifecycleState::Idle as i32,
+        "the older alias replay must not regress canonical state"
+    );
+    assert_eq!(
+        runtime.state.lock().unwrap().agents[&mapped_a.agent_id].codex_active_root_turn_id,
+        turn_a
+    );
+
+    let mut moved = event_for_turn("move-a", "PreToolUse", &turn_a_next);
+    moved.native_session_id = "native-2".into();
+    moved.pane_id = "%8".into();
+    let moved = runtime
+        .ingest_hook_with_context(&moved, "server-a", Some(&topology))
+        .unwrap();
+    assert!(moved.retired_agent_ids.contains(&alias_id));
+    assert!(moved.retired_agent_ids.contains(&mapped_b.agent_id));
+    let moved = moved.agent.unwrap();
+    assert_eq!(moved.agent_id, mapped_a.agent_id);
+    assert_eq!(moved.route.as_ref().unwrap().pane_id, "%8");
+
+    let state = runtime.state.lock().unwrap();
+    assert_eq!(state.agents.len(), 1);
+    let record = &state.agents[&mapped_a.agent_id];
+    assert_eq!(record.codex_active_root_turn_id, turn_a_next);
+    assert!(record.source_event_ids.contains(&"stale-start".into()));
+    assert!(record.source_event_ids.contains(&"stale-stop".into()));
+    assert!(
+        record.source_event_ids.contains(&"start-a".into()),
+        "bounded alias merging must retain canonical dedupe history"
+    );
+    drop(state);
+    assert_eq!(
+        *promotions.lock().unwrap(),
+        [(vec![alias_id], mapped_a.agent_id)]
+    );
+    let mut replay = start_a;
+    replay.pane_id = "%8".into();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&replay, "server-a", Some(&topology)),
+        Err(HookIngestFailure::Duplicate)
+    ));
+}
+
+#[test]
+fn a_third_pane_child_hook_recovers_a_newer_unmapped_turn_into_an_older_canonical_identity() {
+    let runtime = runtime("newer-alias-recovery");
+    let mapped_topology = topology("codex");
+    let turn_a = root_turn(1);
+    let turn_b = root_turn(2);
+    let mapped = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("mapped-start", "UserPromptSubmit", &turn_a),
+            "server-a",
+            Some(&mapped_topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("mapped-stop", "Stop", &turn_a),
+            "server-a",
+            Some(&mapped_topology),
+        )
+        .unwrap();
+
+    let mut alias_start = event_for_turn("newer-alias-start", "UserPromptSubmit", &turn_b);
+    alias_start.pane_id = "%99".into();
+    let alias = runtime
+        .ingest_hook_with_context(&alias_start, "server-a", Some(&mapped_topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_ne!(alias.agent_id, mapped.agent_id);
+    assert_eq!(alias.lifecycle, v1::AgentLifecycleState::Working as i32);
+
+    let mut recovery_topology = mapped_topology;
+    recovery_topology.panes[0].id = "%77".into();
+    let mut recovery =
+        child_event_for_turn("newer-alias-child", "SubagentStart", "child", &root_turn(3));
+    recovery.pane_id = "%77".into();
+    let recovered = runtime
+        .ingest_hook_with_context(&recovery, "server-a", Some(&recovery_topology))
+        .unwrap();
+    assert_eq!(recovered.retired_agent_ids, [alias.agent_id]);
+    let recovered = recovered.agent.unwrap();
+    assert_eq!(recovered.agent_id, mapped.agent_id);
+    assert_eq!(recovered.route.as_ref().unwrap().pane_id, "%77");
+    assert_eq!(recovered.lifecycle, v1::AgentLifecycleState::Working as i32);
+    let state = runtime.state.lock().unwrap();
+    assert_eq!(state.agents.len(), 1);
+    assert_eq!(
+        state.agents[&mapped.agent_id].codex_active_root_turn_id,
+        turn_b
+    );
+    assert_eq!(
+        state.agents[&mapped.agent_id]
+            .codex_running_subagents
+            .get("child"),
+        Some(&root_turn(3))
+    );
+}
+
+#[test]
+fn authoritative_alias_monitor_replaces_a_stale_canonical_collision() {
+    let runtime = runtime("alias-monitor-collision");
+    let mapped_topology = topology("codex");
+    let old_turn = root_turn(1);
+    let new_turn = root_turn(2);
+    let old_child_turn = root_turn(3);
+    let new_child_turn = root_turn(4);
+    let canonical = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("collision-mapped", "UserPromptSubmit", &old_turn),
+            "server-a",
+            Some(&mapped_topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let mut alias_start = event_for_turn("collision-alias", "UserPromptSubmit", &new_turn);
+    alias_start.pane_id = "%99".into();
+    let alias = runtime
+        .ingest_hook_with_context(&alias_start, "server-a", Some(&mapped_topology))
+        .unwrap()
+        .agent
+        .unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/13");
+    fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    fs::write(&transcript, b"\n").unwrap();
+    let open_monitor = |turn_id: &str| {
+        crate::hook::codex_transcript::TurnMonitor::open(
+            &serde_json::json!({"turn_id": turn_id, "transcript_path": transcript}),
+            home.path(),
+        )
+        .unwrap()
+    };
+    let child_monitor = |turn_id: &str| CodexChildMonitor {
+        turn: CodexTurnKey {
+            agent_id: "child".into(),
+            turn_id: turn_id.into(),
+        },
+        monitor: open_monitor(turn_id),
+        terminal: None,
+    };
+    runtime.codex_child_monitors.lock().unwrap().insert(
+        (canonical.agent_id.clone(), "child".into()),
+        child_monitor(&old_child_turn),
+    );
+    runtime.codex_child_monitors.lock().unwrap().insert(
+        (alias.agent_id.clone(), "child".into()),
+        child_monitor(&new_child_turn),
+    );
+
+    let mut recovery_topology = mapped_topology;
+    recovery_topology.panes[0].id = "%99".into();
+    let mut recovery = event_for_turn("collision-recovery", "PostToolUse", &new_turn);
+    recovery.pane_id = "%99".into();
+    runtime
+        .ingest_hook_with_context(&recovery, "server-a", Some(&recovery_topology))
+        .unwrap();
+    let monitors = runtime.codex_child_monitors.lock().unwrap();
+    assert_eq!(monitors.len(), 1);
+    assert_eq!(
+        monitors[&(canonical.agent_id, "child".into())].turn.turn_id,
+        new_child_turn
+    );
+}
+
+#[test]
+fn verified_recovery_uses_the_exact_pane_among_multiple_unmapped_aliases() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-multiple-unmapped-aliases-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let promotions = Arc::new(Mutex::new(Vec::new()));
+    let promotion_calls = Arc::clone(&promotions);
+    let runtime = AgentRuntime::isolated_with_sinks(
+        path,
+        Box::new(|_| {}),
+        Box::new(move |retired, current| {
+            promotion_calls
+                .lock()
+                .unwrap()
+                .push((retired.to_vec(), current.to_owned()));
+        }),
+    );
+    let native = "native-multiple-unmapped";
+    let first_id = identity::unmapped_hook_agent_id("codex", "server-a", "%98", native);
+    let second_id = identity::unmapped_hook_agent_id("codex", "server-a", "%99", native);
+    let (stale_pane, stale_id, exact_pane, exact_id) = if first_id < second_id {
+        ("%98", first_id, "%99", second_id)
+    } else {
+        ("%99", second_id, "%98", first_id)
+    };
+    let missing_topology = topology("codex");
+    let stale_turn = root_turn(1);
+    let exact_turn = root_turn(10);
+
+    let mut stale = event_for_turn("two-alias-stale", "UserPromptSubmit", &stale_turn);
+    stale.native_session_id = native.into();
+    stale.pane_id = stale_pane.into();
+    runtime
+        .ingest_hook_with_context(&stale, "server-a", Some(&missing_topology))
+        .unwrap();
+    let mut exact = event_for_turn("two-alias-exact", "UserPromptSubmit", &exact_turn);
+    exact.native_session_id = native.into();
+    exact.pane_id = exact_pane.into();
+    runtime
+        .ingest_hook_with_context(&exact, "server-a", Some(&missing_topology))
+        .unwrap();
+    assert!(stale_id < exact_id, "the stale alias must sort first");
+    let mut stale_topology = topology("codex");
+    stale_topology.panes[0].id = stale_pane.into();
+    let tombstone = runtime
+        .ingest_hook_with_context(&stale, "server-a", Some(&stale_topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(tombstone.agent_id, stale_id);
+    assert!(!tombstone.present);
+    let mut delayed_stale = event_for_turn("two-alias-delayed-stop", "Stop", &stale_turn);
+    delayed_stale.native_session_id = native.into();
+    delayed_stale.pane_id = stale_pane.into();
+    assert!(
+        !runtime
+            .ingest_hook_with_context(&delayed_stale, "server-a", Some(&stale_topology))
+            .unwrap()
+            .agent
+            .unwrap()
+            .present
+    );
+    let aliases = runtime.snapshot_for("server-a");
+    assert_eq!(aliases.agents.len(), 2);
+    assert_eq!(
+        aliases
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == exact_id)
+            .unwrap()
+            .lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    let sessions = home.path().join(".codex/sessions/2026/09/13");
+    fs::create_dir_all(&sessions).unwrap();
+    let transcript = sessions.join("rollout.jsonl");
+    fs::write(&transcript, b"\n").unwrap();
+    let open_monitor = |turn_id: &str| {
+        crate::hook::codex_transcript::TurnMonitor::open(
+            &serde_json::json!({"turn_id": turn_id, "transcript_path": transcript}),
+            home.path(),
+        )
+        .unwrap()
+    };
+    let changed_at =
+        runtime.state.lock().unwrap().agents[&exact_id].lifecycle_changed_at_unix_millis;
+    runtime.pending_codex_permissions.lock().unwrap().insert(
+        PendingCodexPermissionKey {
+            record_id: exact_id.clone(),
+            turn: CodexTurnKey {
+                agent_id: String::new(),
+                turn_id: root_turn(11),
+            },
+        },
+        PendingCodexPermission {
+            monitor: open_monitor(&root_turn(11)),
+            terminal: None,
+            lifecycle_changed_at_unix_millis: changed_at,
+            observed_at_unix_millis: now_millis(),
+            root_turn_id: exact_turn.clone(),
+        },
+    );
+    runtime.codex_child_monitors.lock().unwrap().insert(
+        (exact_id.clone(), "exact-child".into()),
+        CodexChildMonitor {
+            turn: CodexTurnKey {
+                agent_id: "exact-child".into(),
+                turn_id: root_turn(12),
+            },
+            monitor: open_monitor(&root_turn(12)),
+            terminal: None,
+        },
+    );
+
+    let mut recovery_topology = topology("codex");
+    recovery_topology.panes[0].id = exact_pane.into();
+    let mut recovery = event_for_turn("two-alias-recovery", "PostToolUse", &exact_turn);
+    recovery.native_session_id = native.into();
+    recovery.pane_id = exact_pane.into();
+    let recovered = runtime
+        .ingest_hook_with_context(&recovery, "server-a", Some(&recovery_topology))
+        .unwrap();
+    assert!(recovered.retired_agent_ids.contains(&stale_id));
+    assert!(recovered.retired_agent_ids.contains(&exact_id));
+    let recovered = recovered.agent.unwrap();
+    let canonical_id = recovered.agent_id;
+    assert_eq!(recovered.route.as_ref().unwrap().pane_id, exact_pane);
+    let state = runtime.state.lock().unwrap();
+    assert_eq!(state.agents.len(), 1);
+    assert_eq!(
+        state.agents[&canonical_id].codex_active_root_turn_id,
+        exact_turn
+    );
+    drop(state);
+    assert!(
+        runtime
+            .pending_codex_permissions
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|key| key.record_id == canonical_id)
+    );
+    assert!(
+        runtime
+            .codex_child_monitors
+            .lock()
+            .unwrap()
+            .keys()
+            .all(|(record_id, _)| record_id == &canonical_id)
+    );
+    assert_eq!(
+        *promotions.lock().unwrap(),
+        [
+            (vec![stale_id], exact_id.clone()),
+            (vec![exact_id], canonical_id),
+        ]
+    );
+}
+
+#[test]
+fn equal_turn_aliases_use_ingest_generation_before_exact_pane_routing() {
+    let runtime = runtime("equal-turn-alias-order");
+    let missing_topology = topology("codex");
+    let native = "native-equal-turn-aliases";
+    let turn = root_turn(1);
+    let mut older = event_for_turn("equal-older", "UserPromptSubmit", &turn);
+    older.native_session_id = native.into();
+    older.pane_id = "%98".into();
+    let older_id = runtime
+        .ingest_hook_with_context(&older, "server-a", Some(&missing_topology))
+        .unwrap()
+        .agent
+        .unwrap()
+        .agent_id;
+    let mut newer = event_for_turn("equal-newer", "UserPromptSubmit", &turn);
+    newer.native_session_id = native.into();
+    newer.pane_id = "%99".into();
+    let newer_id = runtime
+        .ingest_hook_with_context(&newer, "server-a", Some(&missing_topology))
+        .unwrap()
+        .agent
+        .unwrap()
+        .agent_id;
+    let mut newer_stop = event_for_turn("equal-newer-stop", "Stop", &turn);
+    newer_stop.native_session_id = native.into();
+    newer_stop.pane_id = "%99".into();
+    runtime
+        .ingest_hook_with_context(&newer_stop, "server-a", Some(&missing_topology))
+        .unwrap();
+    {
+        let mut state = runtime.state.lock().unwrap();
+        state
+            .agents
+            .get_mut(&older_id)
+            .unwrap()
+            .lifecycle_observed_at_unix_millis = 1234;
+        state
+            .agents
+            .get_mut(&newer_id)
+            .unwrap()
+            .lifecycle_observed_at_unix_millis = 1234;
+    }
+
+    let mut recovery_topology = topology("codex");
+    recovery_topology.panes[0].id = "%98".into();
+    let mut delayed_child =
+        child_event_for_turn("equal-older-child", "SubagentStart", "child", &root_turn(2));
+    delayed_child.native_session_id = native.into();
+    delayed_child.pane_id = "%98".into();
+    let tombstone = runtime
+        .ingest_hook_with_context(&delayed_child, "server-a", Some(&recovery_topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(tombstone.agent_id, older_id);
+    assert!(!tombstone.present);
+    let state = runtime.state.lock().unwrap();
+    let current = &state.agents[&newer_id];
+    assert!(current.present);
+    assert_eq!(current.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(current.codex_active_root_turn_id, turn);
+    assert!(current.codex_running_subagents.is_empty());
+    drop(state);
+    for topology in [Some(&recovery_topology), None] {
+        let repeated = runtime
+            .ingest_hook_with_context(&delayed_child, "server-a", topology)
+            .unwrap()
+            .agent
+            .unwrap();
+        assert_eq!(repeated.agent_id, older_id);
+        assert!(!repeated.present, "a tombstone cannot regain authority");
+    }
+    let state = runtime.state.lock().unwrap();
+    assert!(state.agents[&newer_id].present);
+    assert_eq!(
+        state.agents[&newer_id].lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn terminal_root_watermark_beats_a_later_missing_pane_tool_alias() {
+    let runtime = runtime("terminal-root-alias-authority");
+    let mapped_topology = topology("codex");
+    let turn = root_turn(1);
+    let mapped = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("terminal-mapped-start", "UserPromptSubmit", &turn),
+            "server-a",
+            Some(&mapped_topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("terminal-mapped-stop", "Stop", &turn),
+            "server-a",
+            Some(&mapped_topology),
+        )
+        .unwrap();
+
+    let mut delayed = event_for_turn("terminal-delayed-tool", "PreToolUse", &turn);
+    delayed.pane_id = "%99".into();
+    let alias = runtime
+        .ingest_hook_with_context(&delayed, "server-a", Some(&mapped_topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_ne!(alias.agent_id, mapped.agent_id);
+    assert_eq!(alias.lifecycle, v1::AgentLifecycleState::Idle as i32);
+
+    let mut recovery_topology = mapped_topology;
+    recovery_topology.panes[0].id = "%99".into();
+    let tombstone = runtime
+        .ingest_hook_with_context(&delayed, "server-a", Some(&recovery_topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(tombstone.agent_id, alias.agent_id);
+    assert!(!tombstone.present);
+    let state = runtime.state.lock().unwrap();
+    let current = &state.agents[&mapped.agent_id];
+    assert!(current.present);
+    assert_eq!(current.route.pane_id, "%7");
+    assert_eq!(current.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(current.codex_active_root_turn_id, turn);
+    assert!(
+        current
+            .codex_terminal_root_turn_ids
+            .contains(&current.codex_active_root_turn_id)
+    );
+}
+
+#[test]
+fn a_delayed_terminal_cannot_tombstone_an_alias_that_owns_a_newer_turn() {
+    let runtime = runtime("newer-alias-vs-delayed-terminal");
+    let mapped_topology = topology("codex");
+    let old_turn = root_turn(1);
+    let new_turn = root_turn(2);
+    let mapped = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("old-mapped-start", "UserPromptSubmit", &old_turn),
+            "server-a",
+            Some(&mapped_topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("old-mapped-stop", "Stop", &old_turn),
+            "server-a",
+            Some(&mapped_topology),
+        )
+        .unwrap();
+    let mut alias_start = event_for_turn("new-alias-start", "UserPromptSubmit", &new_turn);
+    alias_start.pane_id = "%99".into();
+    let alias = runtime
+        .ingest_hook_with_context(&alias_start, "server-a", Some(&mapped_topology))
+        .unwrap()
+        .agent
+        .unwrap();
+
+    let mut recovery_topology = mapped_topology;
+    recovery_topology.panes[0].id = "%99".into();
+    let mut delayed_stop = event_for_turn("old-delayed-stop", "Stop", &old_turn);
+    delayed_stop.pane_id = "%99".into();
+    let ignored = runtime
+        .ingest_hook_with_context(&delayed_stop, "server-a", Some(&recovery_topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(ignored.agent_id, alias.agent_id);
+    assert!(ignored.present);
+    assert_eq!(ignored.lifecycle, v1::AgentLifecycleState::Working as i32);
+    let state = runtime.state.lock().unwrap();
+    assert_eq!(state.agents.len(), 2);
+    assert_eq!(state.agents[&mapped.agent_id].route.pane_id, "%7");
+    assert_eq!(
+        state.agents[&alias.agent_id].codex_active_root_turn_id,
+        new_turn
+    );
+    assert!(state.agents[&alias.agent_id].present);
+}
+
+#[test]
+fn an_idless_codex_hook_cannot_demote_a_native_pane_owner() {
+    let runtime = runtime("codex-idless-native-demotion");
+    let topology = topology("codex");
+    let root = runtime
+        .ingest_hook_with_context(
+            &event("root-start", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let before = runtime.snapshot_for("server-a");
+
+    let mut idless = event("idless-stop", 0, "Stop");
+    idless.native_session_id.clear();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&idless, "server-a", Some(&topology)),
+        Err(HookIngestFailure::Superseded)
+    ));
+
+    let after = runtime.snapshot_for("server-a");
+    assert_eq!(after, before);
+    assert_eq!(after.agents[0].agent_id, root.agent_id);
+}
+
+#[test]
+fn a_goal_continuation_keeps_session_and_voice_ownership_during_late_fork_teardown() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-continuation-fork-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let reply_calls = Arc::clone(&replies);
+    let promotions = Arc::new(Mutex::new(Vec::new()));
+    let promotion_calls = Arc::clone(&promotions);
+    let runtime = AgentRuntime::isolated_with_sinks(
+        path,
+        Box::new(move |reply| reply_calls.lock().unwrap().push(reply)),
+        Box::new(move |retired, new_id| {
+            promotion_calls
+                .lock()
+                .unwrap()
+                .push((retired.to_vec(), new_id.to_owned()));
+        }),
+    );
+    let topology = topology("codex");
+    let turn_a = root_turn(1);
+    let turn_b = root_turn(2);
+    let root = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("root-prompt-a", "UserPromptSubmit", &turn_a),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("root-stop-a", "Stop", &turn_a),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("root-continues-b", "PreToolUse", &turn_b),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let before = runtime.snapshot_for("server-a");
+
+    for (index, (event_name, topology)) in [("Stop", Some(&topology)), ("SessionEnd", None)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut late = event_for_turn(
+            &format!("fork-late-{index}"),
+            event_name,
+            &root_turn(10 + index as u16),
+        );
+        late.native_session_id = "native-fork".into();
+        let mut payload: serde_json::Value = serde_json::from_slice(&late.payload_json).unwrap();
+        payload[adapters::LAST_ASSISTANT_MESSAGE_FIELD] = "wrong fork reply".into();
+        late.payload_json = serde_json::to_vec(&payload).unwrap();
+        assert!(matches!(
+            runtime.ingest_hook_with_context(&late, "server-a", topology),
+            Err(HookIngestFailure::Superseded)
+        ));
+    }
+
+    let after = runtime.snapshot_for("server-a");
+    assert_eq!(after, before);
+    assert_eq!(after.agents.len(), 1);
+    assert_eq!(after.agents[0].agent_id, root.agent_id);
+    assert_eq!(
+        after.agents[0].lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    let state = runtime.state.lock().unwrap();
+    assert_eq!(
+        state.agents[&root.agent_id].codex_active_root_turn_id,
+        turn_b
+    );
+    drop(state);
+    assert!(replies.lock().unwrap().is_empty());
+    assert!(promotions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn superseded_session_authority_precedes_duplicate_transcript_repair() {
+    let runtime = runtime("superseded-before-duplicate-repair");
+    let topology = topology("codex");
+    let turn_a = root_turn(1);
+    let turn_b = root_turn(2);
+    let child_turn = root_turn(3);
+    for hook in [
+        event_for_turn("prompt-a", "UserPromptSubmit", &turn_a),
+        event_for_turn("activity-a", "PreToolUse", &turn_a),
+        child_event_for_turn("child-a", "SubagentStart", "child", &child_turn),
+        event_for_turn("continue-b", "PreToolUse", &turn_b),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let generation = runtime.snapshot_for("server-a").generation;
+
+    let mut fork = event_for_turn("continue-b", "PostToolUse", &turn_a);
+    fork.native_session_id = "native-fork".into();
+    let mut payload: serde_json::Value = serde_json::from_slice(&fork.payload_json).unwrap();
+    payload[adapters::CODEX_CHILD_TRANSITIONS_FIELD] =
+        serde_json::json!([{"agent_id": "child", "active": false}]);
+    fork.payload_json = serde_json::to_vec(&payload).unwrap();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&fork, "server-a", Some(&topology)),
+        Err(HookIngestFailure::Superseded)
+    ));
+
+    let snapshot = runtime.snapshot_for("server-a");
+    assert_eq!(snapshot.generation, generation);
+    assert_eq!(snapshot.agents.len(), 1);
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.codex_active_root_turn_id, turn_b);
+    assert_eq!(
+        record
+            .codex_running_subagents
+            .get("child")
+            .map(String::as_str),
+        Some(child_turn.as_str())
+    );
 }
 
 #[test]
@@ -740,7 +2171,7 @@ fn blocked_to_idle_never_becomes_a_completed_attention() {
         .unwrap();
     let idle = unseen
         .ingest_hook_with_context(
-            &event("idle", 0, "Stop"),
+            &event_for_turn("idle", "Stop", "turn-blocked"),
             "server-a",
             Some(&topology("codex")),
         )
@@ -765,7 +2196,7 @@ fn blocked_to_idle_never_becomes_a_completed_attention() {
         .unwrap();
     let idle = seen
         .ingest_hook_with_context(
-            &event("idle-seen", 0, "Stop"),
+            &event_for_turn("idle-seen", "Stop", "turn-blocked-seen"),
             "server-a",
             Some(&topology("codex")),
         )
@@ -835,7 +2266,11 @@ fn unsequenced_late_tool_events_cannot_regress_a_completed_phase() {
         ("late-post", "PostToolUse"),
     ] {
         runtime
-            .ingest_hook_with_context(&event(id, 0, name), "server-a", Some(&topology))
+            .ingest_hook_with_context(
+                &event_for_turn(id, name, "turn-a"),
+                "server-a",
+                Some(&topology),
+            )
             .unwrap();
     }
     let completed = &runtime.snapshot_for("server-a").agents[0];
@@ -853,6 +2288,853 @@ fn unsequenced_late_tool_events_cannot_regress_a_completed_phase() {
         runtime.snapshot_for("server-a").agents[0].lifecycle,
         v1::AgentLifecycleState::Working as i32
     );
+}
+
+#[test]
+fn a_codex_goal_continuation_reopens_working_without_another_user_prompt() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-goal-continuation-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let runtime = AgentRuntime::isolated(path.clone());
+    let topology = topology("codex");
+    for (id, name, turn_id) in [
+        ("prompt-a", "UserPromptSubmit", "turn-a"),
+        ("stop-a", "Stop", "turn-a"),
+    ] {
+        runtime
+            .ingest_hook_with_context(
+                &event_for_turn(id, name, turn_id),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+    drop(runtime);
+    let runtime = AgentRuntime::isolated(path);
+
+    // Codex starts automatic goal continuations with a new turn ID but no
+    // UserPromptSubmit. The first tool hook is therefore the start signal.
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("pre-b", "PreToolUse", "turn-b"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let continued = &runtime.snapshot_for("server-a").agents[0];
+    assert_eq!(continued.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert!(
+        !runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .get(&continued.agent_id)
+            .unwrap()
+            .hook_terminal
+    );
+
+    // Events from the completed turn remain stale even after its successor
+    // reopened, including a delayed terminal hook.
+    for (id, name) in [
+        ("late-post-a", "PostToolUse"),
+        ("late-stop-a", "Stop"),
+        ("late-prompt-a", "UserPromptSubmit"),
+    ] {
+        runtime
+            .ingest_hook_with_context(
+                &event_for_turn(id, name, "turn-a"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.snapshot_for("server-a").agents[0].lifecycle,
+            v1::AgentLifecycleState::Working as i32
+        );
+    }
+
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("stop-b", "Stop", "turn-b"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("late-post-b", "PostToolUse", "turn-b"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn a_tool_free_goal_continuation_can_end_on_its_first_observed_hook() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!(
+            "phase6-agent-tool-free-goal-continuation-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .join("agents.json");
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&replies);
+    let runtime = AgentRuntime::isolated_with_sink(
+        path,
+        Box::new(move |reply| sink.lock().unwrap().push(reply)),
+    );
+    let topology = topology("codex");
+    let turn_a = root_turn(1);
+    let turn_b = root_turn(2);
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("prompt-a", "UserPromptSubmit", &turn_a),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("stop-a", "Stop", &turn_a),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let prior_attention = runtime
+        .state
+        .lock()
+        .unwrap()
+        .agents
+        .values()
+        .next()
+        .unwrap()
+        .attention_generation;
+
+    let mut stop = event_for_turn("stop-b", "Stop", &turn_b);
+    let mut payload: serde_json::Value = serde_json::from_slice(&stop.payload_json).unwrap();
+    payload[adapters::LAST_ASSISTANT_MESSAGE_FIELD] = "tool-free reply".into();
+    stop.payload_json = serde_json::to_vec(&payload).unwrap();
+    let completed = runtime
+        .ingest_hook_with_context(&stop, "server-a", Some(&topology))
+        .unwrap();
+    assert!(completed.notify);
+    assert_eq!(replies.lock().unwrap()[0].text, "tool-free reply");
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(record.codex_active_root_turn_id, turn_b);
+    assert_eq!(record.attention_generation, prior_attention + 1);
+    assert!(record.codex_terminal_root_turn_ids.contains(&turn_a));
+    assert!(
+        record
+            .codex_terminal_root_turn_ids
+            .contains(&record.codex_active_root_turn_id)
+    );
+}
+
+#[test]
+fn an_unseen_older_root_stop_cannot_displace_the_active_root() {
+    let runtime = runtime("older-unseen-root-stop");
+    let topology = topology("codex");
+    let newer = root_turn(2);
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("prompt-newer", "UserPromptSubmit", &newer),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("late-stop-older", "Stop", &root_turn(1)),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert_eq!(record.codex_active_root_turn_id, newer);
+    assert!(!record.hook_terminal);
+}
+
+#[test]
+fn bounded_root_history_still_rejects_an_evicted_older_turn() {
+    let runtime = runtime("long-root-history");
+    let topology = topology("codex");
+    for index in 0..70 {
+        let turn = root_turn(index);
+        runtime
+            .ingest_hook_with_context(
+                &event_for_turn(&format!("prompt-{index}"), "UserPromptSubmit", &turn),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        runtime
+            .ingest_hook_with_context(
+                &event_for_turn(&format!("stop-{index}"), "Stop", &turn),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+    }
+
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("late-oldest", "PostToolUse", &root_turn(0)),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(record.codex_active_root_turn_id, root_turn(69));
+    assert_eq!(
+        record.codex_terminal_root_turn_ids.len(),
+        MAX_CODEX_TERMINAL_ROOT_TURNS
+    );
+}
+
+#[test]
+fn a_new_root_owner_retires_the_displaced_turn_before_its_delayed_stop() {
+    let runtime = runtime("goal-continuation-before-old-stop");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("prompt-a", "UserPromptSubmit", "turn-a"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("pre-b", "PreToolUse", "turn-b"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+
+    for (id, name) in [("late-post-a", "PostToolUse"), ("late-stop-a", "Stop")] {
+        runtime
+            .ingest_hook_with_context(
+                &event_for_turn(id, name, "turn-a"),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+    }
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert_eq!(record.codex_active_root_turn_id, "turn-b");
+    assert!(
+        record
+            .codex_terminal_root_turn_ids
+            .iter()
+            .any(|turn| turn == "turn-a")
+    );
+    assert!(!record.hook_terminal);
+}
+
+#[test]
+fn a_new_root_first_seen_at_stop_still_waits_for_its_live_child() {
+    let runtime = runtime("goal-continuation-stop-after-child");
+    let topology = topology("codex");
+    for hook in [
+        event_for_turn("prompt-a", "UserPromptSubmit", "turn-a"),
+        event_for_turn("stop-a", "Stop", "turn-a"),
+        child_event_for_turn("child-b", "SubagentStart", "child", "child-turn-b"),
+        event_for_turn("stop-b", "Stop", "turn-b"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    {
+        let state = runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+        assert_eq!(record.codex_active_root_turn_id, "turn-b");
+        assert!(record.codex_parent_stopped_for_subagents);
+        assert_eq!(
+            record
+                .codex_subagent_root_turn_ids
+                .get("child")
+                .map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            record
+                .codex_latest_subagent_turns
+                .back()
+                .map(|turn| turn.turn_id.as_str()),
+            Some("child-turn-b")
+        );
+    }
+
+    let mut repaired_stop = event_for_turn("stop-b", "Stop", "turn-b");
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&repaired_stop.payload_json).unwrap();
+    payload[adapters::CODEX_CHILD_TRANSITIONS_FIELD] =
+        serde_json::json!([{"agent_id": "child", "active": false}]);
+    repaired_stop.payload_json = serde_json::to_vec(&payload).unwrap();
+    let completed = runtime
+        .ingest_hook_with_context(&repaired_stop, "server-a", Some(&topology))
+        .unwrap();
+    assert!(completed.notify);
+    assert_eq!(
+        completed.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn a_child_resume_before_its_new_root_binds_only_to_that_successor() {
+    let runtime = runtime("goal-continuation-resume-before-root");
+    let topology = topology("codex");
+    for hook in [
+        event_for_turn("prompt-a", "UserPromptSubmit", "turn-a"),
+        child_event_for_turn("child-a", "SubagentStart", "child", "child-turn-a"),
+        child_event_for_turn("child-stop-a", "SubagentStop", "child", "child-turn-a"),
+        event_for_turn("stop-a", "Stop", "turn-a"),
+        child_event_for_turn("child-b", "SubagentStart", "child", "child-turn-b"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    {
+        let state = runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        assert!(record.codex_subagents_awaiting_root.contains("child"));
+    }
+
+    let mut stale_a = event_for_turn("late-stop-a", "Stop", "turn-a");
+    let mut payload: serde_json::Value = serde_json::from_slice(&stale_a.payload_json).unwrap();
+    payload[adapters::CODEX_CHILD_TRANSITIONS_FIELD] =
+        serde_json::json!([{"agent_id": "child", "active": false}]);
+    stale_a.payload_json = serde_json::to_vec(&payload).unwrap();
+    runtime
+        .ingest_hook_with_context(&stale_a, "server-a", Some(&topology))
+        .unwrap();
+    assert_eq!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .codex_running_subagents["child"],
+        "child-turn-b"
+    );
+
+    let stop_b = event_for_turn("stop-b", "Stop", "turn-b");
+    runtime
+        .ingest_hook_with_context(&stop_b, "server-a", Some(&topology))
+        .unwrap();
+    {
+        let state = runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        assert!(!record.codex_subagents_awaiting_root.contains("child"));
+        assert_eq!(record.codex_subagent_root_turn_ids["child"], "turn-b");
+        assert!(record.codex_parent_stopped_for_subagents);
+    }
+
+    let mut repaired_b = stop_b;
+    let mut payload: serde_json::Value = serde_json::from_slice(&repaired_b.payload_json).unwrap();
+    payload[adapters::CODEX_CHILD_TRANSITIONS_FIELD] =
+        serde_json::json!([{"agent_id": "child", "active": false}]);
+    repaired_b.payload_json = serde_json::to_vec(&payload).unwrap();
+    let completed = runtime
+        .ingest_hook_with_context(&repaired_b, "server-a", Some(&topology))
+        .unwrap();
+    assert!(completed.notify);
+    assert_eq!(
+        completed.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn an_unmatched_child_terminal_still_protects_its_later_resume() {
+    let runtime = runtime("unmatched-child-terminal-history");
+    let topology = topology("codex");
+    for hook in [
+        event_for_turn("prompt-a", "UserPromptSubmit", "turn-a"),
+        child_event_for_turn(
+            "missed-start-stop-a",
+            "SubagentStop",
+            "child",
+            "child-turn-a",
+        ),
+        child_event_for_turn("late-activity-a", "PreToolUse", "child", "child-turn-a"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .codex_running_subagents
+            .is_empty()
+    );
+    for hook in [
+        event_for_turn("stop-a", "Stop", "turn-a"),
+        child_event_for_turn("child-b", "SubagentStart", "child", "child-turn-b"),
+        event_for_turn("stop-b", "Stop", "turn-b"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+
+    let mut stale_a = event_for_turn("late-stop-a", "Stop", "turn-a");
+    let mut payload: serde_json::Value = serde_json::from_slice(&stale_a.payload_json).unwrap();
+    payload[adapters::CODEX_CHILD_TRANSITIONS_FIELD] =
+        serde_json::json!([{"agent_id": "child", "active": false}]);
+    stale_a.payload_json = serde_json::to_vec(&payload).unwrap();
+    runtime
+        .ingest_hook_with_context(&stale_a, "server-a", Some(&topology))
+        .unwrap();
+    {
+        let state = runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+        assert_eq!(record.codex_running_subagents["child"], "child-turn-b");
+        assert_eq!(record.codex_subagent_root_turn_ids["child"], "turn-b");
+    }
+
+    let completed = runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn("child-stop-b", "SubagentStop", "child", "child-turn-b"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(completed.notify);
+}
+
+#[test]
+fn a_late_older_child_terminal_tombstones_without_clearing_its_resume() {
+    let runtime = runtime("late-older-child-terminal");
+    let topology = topology("codex");
+    for hook in [
+        event_for_turn("prompt-a", "UserPromptSubmit", "turn-a"),
+        child_event_for_turn("child-a", "SubagentStart", "child", "child-turn-a"),
+        event_for_turn("pre-b", "PreToolUse", "turn-b"),
+        child_event_for_turn("child-b", "SubagentStart", "child", "child-turn-b"),
+        child_event_for_turn("late-stop-a", "SubagentStop", "child", "child-turn-a"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    assert_eq!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .codex_running_subagents["child"],
+        "child-turn-b"
+    );
+    for hook in [
+        event_for_turn("stop-b", "Stop", "turn-b"),
+        child_event_for_turn("child-stop-b", "SubagentStop", "child", "child-turn-b"),
+        child_event_for_turn("late-activity-a", "PreToolUse", "child", "child-turn-a"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert!(record.codex_running_subagents.is_empty());
+}
+
+#[test]
+fn an_evicted_child_tombstone_is_still_rejected_by_the_latest_turn_watermark() {
+    let runtime = runtime("evicted-child-terminal-watermark");
+    let topology = topology("codex");
+    let parent = root_turn(1);
+    for hook in [
+        event_for_turn("prompt", "UserPromptSubmit", &parent),
+        event_for_turn("stop", "Stop", &parent),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+
+    let oldest = root_turn(10);
+    for index in 10..=(10 + MAX_CODEX_CHILD_TURN_HISTORY as u16) {
+        let turn = root_turn(index);
+        runtime
+            .ingest_hook_with_context(
+                &child_event_for_turn(
+                    &format!("child-stop-{index}"),
+                    "SubagentStop",
+                    "child",
+                    &turn,
+                ),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+    }
+    {
+        let state = runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        assert!(
+            !record
+                .codex_terminal_subagent_turns
+                .iter()
+                .any(|turn| { turn.agent_id == "child" && turn.turn_id == oldest })
+        );
+    }
+
+    runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn("late-oldest", "PreToolUse", "child", &oldest),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert!(record.codex_running_subagents.is_empty());
+}
+
+#[test]
+fn an_evicted_child_tombstone_is_rejected_while_a_sibling_keeps_working() {
+    let runtime = runtime("evicted-child-terminal-with-live-sibling");
+    let topology = topology("codex");
+    let completed_child = root_turn(2);
+    for hook in [
+        event_for_turn("prompt", "UserPromptSubmit", &root_turn(1)),
+        child_event_for_turn("sibling-start", "SubagentStart", "sibling", &root_turn(3)),
+        child_event_for_turn(
+            "completed-start",
+            "SubagentStart",
+            "completed",
+            &completed_child,
+        ),
+        child_event_for_turn(
+            "completed-stop",
+            "SubagentStop",
+            "completed",
+            &completed_child,
+        ),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    for index in 10..=(10 + MAX_CODEX_CHILD_TURN_HISTORY as u16) {
+        runtime
+            .ingest_hook_with_context(
+                &child_event_for_turn(
+                    &format!("churn-stop-{index}"),
+                    "SubagentStop",
+                    "churn",
+                    &root_turn(index),
+                ),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+    }
+    runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn(
+                "completed-late",
+                "PreToolUse",
+                "completed",
+                &completed_child,
+            ),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert_eq!(record.codex_running_subagents.len(), 1);
+    assert!(record.codex_running_subagents.contains_key("sibling"));
+}
+
+#[test]
+fn a_session_terminal_tombstones_live_child_turns_before_clearing_them() {
+    let runtime = runtime("session-terminal-child-tombstones");
+    let topology = topology("codex");
+    let parent = root_turn(1);
+    let child = root_turn(2);
+    for hook in [
+        event_for_turn("prompt", "UserPromptSubmit", &parent),
+        child_event_for_turn("child-start", "SubagentStart", "child", &child),
+        event_for_turn("session-end", "SessionEnd", &parent),
+        child_event_for_turn("late-child", "PreToolUse", "child", &child),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert!(record.codex_running_subagents.is_empty());
+    assert!(
+        record
+            .codex_terminal_subagent_turns
+            .iter()
+            .any(|turn| { turn.agent_id == "child" && turn.turn_id == child })
+    );
+}
+
+#[test]
+fn ignored_child_activity_does_not_refresh_a_live_siblings_evidence() {
+    let runtime = runtime("stale-child-evidence-refresh");
+    let topology = topology("codex");
+    for hook in [
+        event_for_turn("prompt", "UserPromptSubmit", "turn-a"),
+        child_event_for_turn("sibling-start", "SubagentStart", "sibling", "sibling-turn"),
+        child_event_for_turn("stale-start", "SubagentStart", "stale", "stale-turn"),
+        child_event_for_turn("stale-stop", "SubagentStop", "stale", "stale-turn"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    {
+        let mut state = runtime.state.lock().unwrap();
+        state
+            .agents
+            .values_mut()
+            .next()
+            .unwrap()
+            .subagent_evidence_observed_at_unix_millis = 123;
+    }
+    runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn("stale-late", "PreToolUse", "stale", "stale-turn"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.subagent_evidence_observed_at_unix_millis, 123);
+    assert_eq!(record.codex_running_subagents["sibling"], "sibling-turn");
+}
+
+#[test]
+fn an_awaiting_child_terminal_does_not_complete_the_previous_root() {
+    let runtime = runtime("awaiting-child-terminal-before-root");
+    let topology = topology("codex");
+    for hook in [
+        event_for_turn("prompt-a", "UserPromptSubmit", "turn-a"),
+        child_event_for_turn("child-a", "SubagentStart", "child", "child-turn-a"),
+        child_event_for_turn("child-stop-a", "SubagentStop", "child", "child-turn-a"),
+        event_for_turn("stop-a", "Stop", "turn-a"),
+        child_event_for_turn("child-b", "SubagentStart", "child", "child-turn-b"),
+        child_event_for_turn("child-stop-b", "SubagentStop", "child", "child-turn-b"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert!(!record.hook_terminal);
+    assert!(!record.codex_parent_stopped_for_subagents);
+}
+
+#[test]
+fn stale_root_transcript_repair_cannot_stop_the_new_parent() {
+    let runtime = runtime("stale-root-child-repair");
+    let topology = topology("codex");
+    for hook in [
+        event_for_turn("prompt-a", "UserPromptSubmit", "turn-a"),
+        child_event_for_turn("child-a", "SubagentStart", "child", "child-turn-a"),
+        event_for_turn("stop-a", "Stop", "turn-a"),
+        event_for_turn("pre-b", "PreToolUse", "turn-b"),
+    ] {
+        runtime
+            .ingest_hook_with_context(&hook, "server-a", Some(&topology))
+            .unwrap();
+    }
+
+    let mut stale = event_for_turn("late-stop-a", "Stop", "turn-a");
+    let mut payload: serde_json::Value = serde_json::from_slice(&stale.payload_json).unwrap();
+    payload[adapters::CODEX_CHILD_TRANSITIONS_FIELD] =
+        serde_json::json!([{"agent_id": "child", "active": false}]);
+    stale.payload_json = serde_json::to_vec(&payload).unwrap();
+    let repaired = runtime
+        .ingest_hook_with_context(&stale, "server-a", Some(&topology))
+        .unwrap();
+    assert!(!repaired.notify);
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert_eq!(record.codex_active_root_turn_id, "turn-b");
+    assert_eq!(record.codex_running_subagents["child"], "child-turn-a");
+    assert!(!record.codex_parent_stopped_for_subagents);
+    assert!(!record.hook_terminal);
+}
+
+#[test]
+fn a_goal_continuation_owns_parent_lifecycle_across_old_child_and_fallback_events() {
+    let runtime = runtime("goal-continuation-child-ownership");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("prompt-a", "UserPromptSubmit", "turn-a"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn("child-a", "SubagentStart", "child", "child-turn-a"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn(
+                "old-child-a",
+                "SubagentStart",
+                "old-child",
+                "old-child-turn-a",
+            ),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("stop-a", "Stop", "turn-a"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .codex_parent_stopped_for_subagents
+    );
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("late-permission-a", "PermissionRequest", "turn-a"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    {
+        let state = runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+        assert!(record.codex_parent_stopped_for_subagents);
+    }
+
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("pre-b", "PreToolUse", "turn-b"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn("child-a-stop", "SubagentStop", "child", "child-turn-a"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+
+    runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn("child-b", "SubagentStart", "child", "child-turn-b"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let mut stale_fallback = event_for_turn("late-stop-a-fallback", "Stop", "turn-a");
+    let mut payload: serde_json::Value =
+        serde_json::from_slice(&stale_fallback.payload_json).unwrap();
+    payload[adapters::CODEX_CHILD_TRANSITIONS_FIELD] = serde_json::json!([
+        {"agent_id": "child", "active": false},
+        {"agent_id": "old-child", "active": false},
+    ]);
+    stale_fallback.payload_json = serde_json::to_vec(&payload).unwrap();
+    let repaired = runtime
+        .ingest_hook_with_context(&stale_fallback, "server-a", Some(&topology))
+        .unwrap();
+    assert!(!repaired.notify);
+
+    let idless_stop = event("idless-stop", 0, "Stop");
+    runtime
+        .ingest_hook_with_context(&idless_stop, "server-a", Some(&topology))
+        .unwrap();
+    let child_scoped_stop = child_event_for_turn("child-stop", "Stop", "child", "child-turn-b");
+    runtime
+        .ingest_hook_with_context(&child_scoped_stop, "server-a", Some(&topology))
+        .unwrap();
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert!(!record.codex_running_subagents.contains_key("child"));
+    assert!(!record.codex_subagent_root_turn_ids.contains_key("child"));
+    assert_eq!(
+        record.codex_running_subagents["old-child"],
+        "old-child-turn-a"
+    );
+    assert_eq!(record.codex_subagent_root_turn_ids["old-child"], "");
+    assert!(!record.codex_parent_stopped_for_subagents);
 }
 
 #[test]

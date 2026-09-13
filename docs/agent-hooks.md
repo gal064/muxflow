@@ -84,6 +84,41 @@ than caching a negative result. A permission request still unclassified after
 that check and `PreToolUse(request_user_input)` are the observed blocked
 signals. Recorded rather than faked.
 
+One Codex TUI may run more than one logical thread while all of their hook
+processes inherit the same `TMUX_PANE`. Pane ownership therefore does not
+follow whichever native session emitted the latest hook. An unknown native
+Codex session may replace the pane's current native owner only with
+`SessionStart` or `UserPromptSubmit`, the two events that explicitly begin a
+session or turn. A known native session may continue reporting after it moves
+panes. A continuation or terminal hook from an unknown, superseded thread is
+discarded, so delayed fork teardown cannot make the interactive root disappear
+and then reappear. When fresh topology is temporarily unavailable, the exact
+same-server pane already stored on the current owner is used only to reject a
+different logical session or retire it for an explicit replacement; it is
+never trusted as a new routing destination. A hook matching the current native
+owner keeps that owner's last verified identity and route through the outage.
+An explicit replacement starts with clean session/turn state, while a verified
+move keeps the moving session's state and retires the other pane owner.
+The initial pane-derived record may still be promoted by any first native hook,
+including `Stop`; that is the separate discovery handoff needed when hooks
+become authoritative late in a turn, and it preserves the last verified route
+even if topology discovery fails during that hook.
+
+If missing-pane hooks create more than one record for the same native session,
+state authority follows the newest root turn, then its terminal watermark, then
+the host's monotonic ingest generation. Verified routing collapses the winning
+record into the canonical identity. A losing alias becomes a non-present
+routing tombstone until a current event can retire it, preventing repeated late
+child or terminal hooks from reclaiming the pane while keeping it out of the UI.
+
+Session and turn handling form one authority hierarchy: pane, native session,
+root turn, then child turn. Session authority is resolved before deduplication,
+transcript repair, lifecycle, attention, identity promotion, or voice reply
+delivery; only an accepted native session can affect its root and child turns.
+A superseded-session discard writes one safe daemon diagnostic containing the
+pane ordinal, hashed agent IDs, and normalized hook event name, never native
+session or turn IDs or hook content.
+
 A `Working` state that receives no further event for fifteen minutes decays to
 `Unknown`. Direct evidence of a running subagent stays authoritative while its
 bounded transcript monitor remains readable. The 24-hour recovery window is a
@@ -138,6 +173,18 @@ agent and turn IDs; the daemon keeps a bounded child-to-turn map so duplicate
 events cannot miscount concurrent children, a resumed turn replaces its prior
 turn, and a late terminal event cannot clear the resumed child. Hooks update
 that map immediately and exact-turn transcript terminals repair missing stops.
+A Codex goal can complete one root turn and automatically start another without
+emitting `UserPromptSubmit`. The daemon therefore also tracks exact root turn
+IDs and their UUIDv7 ordering: activity from a fresh root turn reopens Working,
+while later tool or terminal hooks from an older or recently completed root
+cannot overwrite the newer turn. The exact completion set is bounded because
+UUID ordering still rejects older entries after eviction. The daemon also retains
+a bounded recent history of each child’s latest exact turn. Because child hooks
+do not name their parent root, first-seen child ownership remains explicitly
+unknown; a known child that resumes after its root completes waits for the next
+root hook before binding. Transcript fallback can then finish an unknown or
+matching older child without clearing the same child ID after a known resume
+under a newer root.
 A parent `Stop` remains Working until that map is empty,
 including across daemon restarts, while a real Blocked state remains Blocked
 until its own question or permission resolves. A Claude `Stop` retains only a boolean

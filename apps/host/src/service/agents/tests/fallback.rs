@@ -45,9 +45,11 @@ fn a_turn_that_starts_and_blocks_offline_replays_in_the_order_it_happened() {
         replayed.push(event.source_event_id.clone());
         match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
             Ok(_) => fallback::HookReplayDisposition::Applied,
-            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                fallback::HookReplayDisposition::Discarded
-            }
+            Err(
+                HookIngestFailure::Duplicate
+                | HookIngestFailure::Superseded
+                | HookIngestFailure::Permanent(_),
+            ) => fallback::HookReplayDisposition::Discarded,
             Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
         }
     })
@@ -98,9 +100,11 @@ fn replay_preserves_an_auto_review_permission_as_working() {
     let report = fallback::consume(&dir, |event| {
         match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
             Ok(_) => fallback::HookReplayDisposition::Applied,
-            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                fallback::HookReplayDisposition::Discarded
-            }
+            Err(
+                HookIngestFailure::Duplicate
+                | HookIngestFailure::Superseded
+                | HookIngestFailure::Permanent(_),
+            ) => fallback::HookReplayDisposition::Discarded,
             Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
         }
     })
@@ -135,6 +139,7 @@ fn replayed_sanitized_transcript_edges_repair_a_missing_child_stop() {
     let mut repaired = event("transcript-repair", 0, "PostToolUse");
     repaired.payload_json = serde_json::to_vec(&serde_json::json!({
         "hook_event_name": "PostToolUse",
+        adapters::CODEX_APPROVAL_TURN_ID_FIELD: "turn-root",
         adapters::CODEX_CHILD_TRANSITIONS_FIELD: [
             {"agent_id": "child", "active": false},
         ],
@@ -143,7 +148,7 @@ fn replayed_sanitized_transcript_edges_repair_a_missing_child_stop() {
     for (name, hook) in [
         (
             "hook-fallback-codex-7-00000000000000000001-a.pb",
-            event("prompt", 0, "UserPromptSubmit"),
+            event_for_turn("prompt", "UserPromptSubmit", "turn-root"),
         ),
         (
             "hook-fallback-codex-7-00000000000000000002-b.pb",
@@ -151,7 +156,7 @@ fn replayed_sanitized_transcript_edges_repair_a_missing_child_stop() {
         ),
         (
             "hook-fallback-codex-7-00000000000000000003-c.pb",
-            event("parent-stop", 0, "Stop"),
+            event_for_turn("parent-stop", "Stop", "turn-root"),
         ),
         ("hook-fallback-codex-7-00000000000000000004-d.pb", repaired),
     ] {
@@ -161,9 +166,11 @@ fn replayed_sanitized_transcript_edges_repair_a_missing_child_stop() {
     let report = fallback::consume(&dir, |event| {
         match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
             Ok(_) => fallback::HookReplayDisposition::Applied,
-            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                fallback::HookReplayDisposition::Discarded
-            }
+            Err(
+                HookIngestFailure::Duplicate
+                | HookIngestFailure::Superseded
+                | HookIngestFailure::Permanent(_),
+            ) => fallback::HookReplayDisposition::Discarded,
             Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
         }
     })
@@ -173,10 +180,84 @@ fn replayed_sanitized_transcript_edges_repair_a_missing_child_stop() {
     let record = &runtime.snapshot_for("server-a").agents[0];
     assert_eq!(record.lifecycle, v1::AgentLifecycleState::Idle as i32);
     assert_eq!(record.attention_kind, "completed");
+    runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn("late-child", "PreToolUse", "child", "turn-child"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
     let stored = runtime.state.lock().unwrap();
     let stored = stored.agents.values().next().unwrap();
     assert!(stored.codex_running_subagents.is_empty());
     assert!(stored.hook_terminal);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn replay_discards_late_fork_teardown_after_a_goal_continuation() {
+    let dir = std::env::current_dir().unwrap().join("tmp").join(format!(
+        "phase13-continuation-fork-replay-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let runtime = AgentRuntime::isolated(dir.join("agents.json"));
+    let topology = topology("codex");
+    let turn_a = root_turn(1);
+    let turn_b = root_turn(2);
+    let mut fork_stop = event_for_turn("fork-stop", "Stop", &root_turn(10));
+    fork_stop.native_session_id = "native-fork".into();
+
+    for (name, hook) in [
+        (
+            "hook-fallback-codex-7-00000000000000000001-a.pb",
+            event_for_turn("prompt-a", "UserPromptSubmit", &turn_a),
+        ),
+        (
+            "hook-fallback-codex-7-00000000000000000002-b.pb",
+            event_for_turn("stop-a", "Stop", &turn_a),
+        ),
+        (
+            "hook-fallback-codex-7-00000000000000000003-c.pb",
+            event_for_turn("continue-b", "PreToolUse", &turn_b),
+        ),
+        ("hook-fallback-codex-7-00000000000000000004-d.pb", fork_stop),
+    ] {
+        fs::write(dir.join(name), hook.encode_to_vec()).unwrap();
+    }
+
+    let report = fallback::consume(&dir, |event| {
+        match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
+            Ok(_) => fallback::HookReplayDisposition::Applied,
+            Err(
+                HookIngestFailure::Duplicate
+                | HookIngestFailure::Superseded
+                | HookIngestFailure::Permanent(_),
+            ) => fallback::HookReplayDisposition::Discarded,
+            Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
+        }
+    })
+    .unwrap();
+
+    assert_eq!(report.applied, 3);
+    assert_eq!(report.retained, 0);
+    let snapshot = runtime.snapshot_for("server-a");
+    assert_eq!(snapshot.agents.len(), 1);
+    assert_eq!(
+        snapshot.agents[0].lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert_eq!(record.native_session_id, "native-1");
+    assert_eq!(record.codex_active_root_turn_id, turn_b);
+    drop(state);
+    assert!(fs::read_dir(&dir).unwrap().flatten().all(|entry| {
+        entry
+            .path()
+            .extension()
+            .is_none_or(|extension| extension != "pb")
+    }));
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -306,15 +387,17 @@ fn recovered_mailbox_applies_before_the_next_live_event_without_a_restart() {
 
     fs::remove_file(&state_parent).unwrap();
     fs::create_dir_all(&state_parent).unwrap();
-    let live = event("live-b", 0, "Stop");
+    let live = event_for_turn("live-b", "Stop", "turn-retained-a");
     let live_event = runtime
         .ingest_after_replay_with_context(&live, "server-a", Some(&topology), || {
             let report = fallback::consume(&mailbox, |event| {
                 match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
                     Ok(_) => fallback::HookReplayDisposition::Applied,
-                    Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                        fallback::HookReplayDisposition::Discarded
-                    }
+                    Err(
+                        HookIngestFailure::Duplicate
+                        | HookIngestFailure::Superseded
+                        | HookIngestFailure::Permanent(_),
+                    ) => fallback::HookReplayDisposition::Discarded,
                     Err(HookIngestFailure::Retryable(_)) => {
                         fallback::HookReplayDisposition::Retryable
                     }
@@ -364,9 +447,11 @@ fn incomplete_mailbox_sweep_rejects_live_input_after_partial_progress() {
             fallback::consume_roots(&roots, |event| {
                 match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
                     Ok(_) => fallback::HookReplayDisposition::Applied,
-                    Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                        fallback::HookReplayDisposition::Discarded
-                    }
+                    Err(
+                        HookIngestFailure::Duplicate
+                        | HookIngestFailure::Superseded
+                        | HookIngestFailure::Permanent(_),
+                    ) => fallback::HookReplayDisposition::Discarded,
                     Err(HookIngestFailure::Retryable(_)) => {
                         fallback::HookReplayDisposition::Retryable
                     }
@@ -401,7 +486,7 @@ fn ambiguous_duplicate_replay_still_applies_its_sanitized_child_terminal() {
     let topology = topology("codex");
     runtime
         .ingest_hook_with_context(
-            &event("prompt", 0, "UserPromptSubmit"),
+            &event_for_turn("prompt", "UserPromptSubmit", "turn-root"),
             "server-a",
             Some(&topology),
         )
@@ -416,15 +501,12 @@ fn ambiguous_duplicate_replay_still_applies_its_sanitized_child_terminal() {
     runtime
         .ingest_hook_with_context(&started, "server-a", Some(&topology))
         .unwrap();
+    let parent_stop = event_for_turn("parent-stop", "Stop", "turn-root");
     runtime
-        .ingest_hook_with_context(
-            &event("parent-stop", 0, "Stop"),
-            "server-a",
-            Some(&topology),
-        )
+        .ingest_hook_with_context(&parent_stop, "server-a", Some(&topology))
         .unwrap();
 
-    let mut fallback = started;
+    let mut fallback = parent_stop;
     let mut payload: serde_json::Value = serde_json::from_slice(&fallback.payload_json).unwrap();
     payload[adapters::CODEX_CHILD_TRANSITIONS_FIELD] =
         serde_json::json!([{"agent_id": "child", "active": false}]);
@@ -438,16 +520,26 @@ fn ambiguous_duplicate_replay_still_applies_its_sanitized_child_terminal() {
         repaired.agent.unwrap().lifecycle,
         v1::AgentLifecycleState::Idle as i32
     );
+    let state = runtime.state.lock().unwrap();
+    let record = state.agents.values().next().unwrap();
+    assert!(record.hook_terminal);
     assert!(
-        runtime
-            .state
-            .lock()
-            .unwrap()
-            .agents
-            .values()
-            .next()
-            .unwrap()
-            .hook_terminal
+        record
+            .codex_terminal_root_turn_ids
+            .iter()
+            .any(|turn| turn == "turn-root")
+    );
+    drop(state);
+    runtime
+        .ingest_hook_with_context(
+            &child_event_for_turn("late-child", "PreToolUse", "child", "turn-child"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.snapshot_for("server-a").agents[0].lifecycle,
+        v1::AgentLifecycleState::Idle as i32
     );
     fs::remove_dir_all(dir).unwrap();
 }
@@ -472,9 +564,11 @@ fn lost_ack_replay_discards_duplicate_without_republishing_or_advancing_state() 
     let report = fallback::consume(&root, |event| {
         match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
             Ok(_) => fallback::HookReplayDisposition::Applied,
-            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                fallback::HookReplayDisposition::Discarded
-            }
+            Err(
+                HookIngestFailure::Duplicate
+                | HookIngestFailure::Superseded
+                | HookIngestFailure::Permanent(_),
+            ) => fallback::HookReplayDisposition::Discarded,
             Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
         }
     })

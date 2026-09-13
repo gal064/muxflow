@@ -11,6 +11,7 @@ use tmux_agent_protocol::v1;
 use super::{broadcast_control_event, snapshot::server_identity};
 
 pub(crate) mod adapters;
+mod codex_authority;
 mod fallback;
 mod hooks;
 mod identity;
@@ -50,7 +51,22 @@ const DEPARTURE_MISSES_REQUIRED: u8 = 3;
 const MAX_PENDING_CODEX_PERMISSIONS: usize = 64;
 const PENDING_CODEX_PERMISSION_TTL_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 pub(crate) const MAX_CODEX_CHILDREN: usize = 64;
+pub(crate) const MAX_CODEX_CHILD_TURN_HISTORY: usize = 512;
+pub(crate) const MAX_CODEX_TERMINAL_ROOT_TURNS: usize = 64;
 const MAX_CODEX_TRANSCRIPT_MONITORS: usize = 64;
+
+fn remember_terminal_root_turn(turns: &mut std::collections::BTreeSet<String>, turn_id: &str) {
+    if turn_id.is_empty() {
+        return;
+    }
+    turns.insert(turn_id.to_owned());
+    while turns.len() > MAX_CODEX_TERMINAL_ROOT_TURNS {
+        let Some(oldest) = turns.first().cloned() else {
+            break;
+        };
+        turns.remove(&oldest);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PendingCodexPermissionKey {
@@ -63,6 +79,7 @@ struct PendingCodexPermission {
     terminal: Option<crate::hook::codex_transcript::TurnTerminal>,
     lifecycle_changed_at_unix_millis: i64,
     observed_at_unix_millis: i64,
+    root_turn_id: String,
 }
 
 struct CodexChildMonitor {
@@ -173,15 +190,54 @@ impl AgentRuntime {
         turn: Option<CodexTurnKey>,
         monitor: Option<crate::hook::codex_transcript::TurnMonitor>,
         lifecycle_changed_at_unix_millis: i64,
-        observed_at_unix_millis: i64,
+        root: (&str, Option<&StoredAgent>),
     ) {
+        let (root_turn_id, current_record) = root;
+        let observed_at_unix_millis = now_millis();
+        let current_children = turn
+            .as_ref()
+            .filter(|turn| turn.agent_id.is_empty())
+            .and(current_record)
+            .map(|record| {
+                (
+                    record.codex_running_subagents.clone(),
+                    record.codex_subagent_root_turn_ids.clone(),
+                )
+            })
+            .unwrap_or_default();
         let mut pending = self.pending_codex_permissions.lock().unwrap();
         pending.retain(|_, value| {
             observed_at_unix_millis.saturating_sub(value.observed_at_unix_millis)
                 <= PENDING_CODEX_PERMISSION_TTL_MILLIS
         });
-        if matches!(event_name, "SessionStart" | "UserPromptSubmit") {
+        if matches!(
+            event_name,
+            "SessionStart" | "UserPromptSubmit" | "Interrupt" | "SessionEnd"
+        ) {
             pending.retain(|key, _| key.record_id != record_id);
+        } else if let Some(active_root) = turn.as_ref().filter(|turn| turn.agent_id.is_empty()) {
+            for (key, value) in pending.iter_mut() {
+                if key.record_id == record_id
+                    && !key.turn.agent_id.is_empty()
+                    && value.root_turn_id.is_empty()
+                    && current_children.0.get(&key.turn.agent_id) == Some(&key.turn.turn_id)
+                    && current_children.1.get(&key.turn.agent_id) == Some(&active_root.turn_id)
+                {
+                    value.root_turn_id.clone_from(&active_root.turn_id);
+                }
+            }
+            pending.retain(|key, value| {
+                key.record_id != record_id
+                    || key.turn.agent_id.is_empty()
+                    || !value.root_turn_id.is_empty()
+                    || current_children.0.get(&key.turn.agent_id) == Some(&key.turn.turn_id)
+                        && current_children.1.get(&key.turn.agent_id) == Some(&active_root.turn_id)
+            });
+            pending.retain(|key, _| {
+                key.record_id != record_id
+                    || !key.turn.agent_id.is_empty()
+                    || key.turn.turn_id == active_root.turn_id
+            });
         }
         let Some(turn) = turn else {
             return;
@@ -201,6 +257,7 @@ impl AgentRuntime {
                     terminal: None,
                     lifecycle_changed_at_unix_millis,
                     observed_at_unix_millis,
+                    root_turn_id: root_turn_id.to_owned(),
                 },
             );
         }
@@ -265,6 +322,55 @@ impl AgentRuntime {
         }
     }
 
+    fn retire_codex_runtime_state(&self, record_ids: &[String]) {
+        if record_ids.is_empty() {
+            return;
+        }
+        self.pending_codex_permissions
+            .lock()
+            .unwrap()
+            .retain(|key, _| !record_ids.contains(&key.record_id));
+        self.codex_child_monitors
+            .lock()
+            .unwrap()
+            .retain(|(record_id, _), _| !record_ids.contains(record_id));
+    }
+
+    fn migrate_codex_runtime_state(&self, old_record_id: &str, new_record_id: &str) {
+        if old_record_id == new_record_id {
+            return;
+        }
+        let mut pending = self.pending_codex_permissions.lock().unwrap();
+        let old_keys: Vec<_> = pending
+            .keys()
+            .filter(|key| key.record_id == old_record_id)
+            .cloned()
+            .collect();
+        for old_key in old_keys {
+            let Some(value) = pending.remove(&old_key) else {
+                continue;
+            };
+            let mut new_key = old_key;
+            new_key.record_id = new_record_id.to_owned();
+            pending.insert(new_key, value);
+        }
+        drop(pending);
+
+        let mut monitors = self.codex_child_monitors.lock().unwrap();
+        let old_keys: Vec<_> = monitors
+            .keys()
+            .filter(|(record_id, _)| record_id == old_record_id)
+            .cloned()
+            .collect();
+        for old_key in old_keys {
+            let Some(value) = monitors.remove(&old_key) else {
+                continue;
+            };
+            let new_key = (new_record_id.to_owned(), old_key.1);
+            monitors.insert(new_key, value);
+        }
+    }
+
     /// Reconcile the terminal record for each exact Codex child turn. Codex
     /// writes `turn_aborted` when a child is interrupted but emits no matching
     /// `SubagentStop`; the child transcript is the authoritative repair path.
@@ -305,7 +411,11 @@ impl AgentRuntime {
             }
             let blocked = before.lifecycle == v1::AgentLifecycleState::Blocked as i32;
             let mut children = before.codex_running_subagents.clone();
+            let mut child_roots = before.codex_subagent_root_turn_ids.clone();
+            let mut awaiting_root = before.codex_subagents_awaiting_root.clone();
             children.remove(&turn.agent_id);
+            child_roots.remove(&turn.agent_id);
+            awaiting_root.remove(&turn.agent_id);
             let has_children = !children.is_empty() || before.codex_subagent_capacity_exceeded;
             let completed = !blocked && !has_children && before.codex_parent_stopped_for_subagents;
             let lifecycle = if blocked {
@@ -320,12 +430,25 @@ impl AgentRuntime {
             let generation = state.generation;
             let record = state.agents.get_mut(record_id).unwrap();
             record.codex_running_subagents = children;
+            record.codex_subagent_root_turn_ids = child_roots;
+            record.codex_subagents_awaiting_root = awaiting_root;
+            ingest::remember_codex_terminal_child_turn(
+                &mut record.codex_terminal_subagent_turns,
+                turn,
+            );
             record.codex_parent_stopped_for_subagents = if completed {
                 false
             } else {
                 record.codex_parent_stopped_for_subagents
             };
             record.hook_terminal = completed;
+            if completed && !record.codex_active_root_turn_id.is_empty() {
+                let active_root_turn_id = record.codex_active_root_turn_id.clone();
+                remember_terminal_root_turn(
+                    &mut record.codex_terminal_root_turn_ids,
+                    &active_root_turn_id,
+                );
+            }
             record.lifecycle = lifecycle as i32;
             record.lifecycle_observed_at_unix_millis = now;
             record.updated_at_unix_millis = now;
@@ -375,32 +498,52 @@ impl AgentRuntime {
             return Vec::new();
         }
         let now = now_millis();
-        let current: BTreeMap<String, (i32, i64)> = self
+        let current: BTreeMap<String, StoredAgent> = self
             .state
             .lock()
             .unwrap()
             .agents
             .iter()
-            .map(|(id, record)| {
-                (
-                    id.clone(),
-                    (record.lifecycle, record.lifecycle_changed_at_unix_millis),
-                )
-            })
+            .map(|(id, record)| (id.clone(), record.clone()))
             .collect();
         let mut pending = self.pending_codex_permissions.lock().unwrap();
         pending.retain(|key, value| {
             now.saturating_sub(value.observed_at_unix_millis) <= PENDING_CODEX_PERMISSION_TTL_MILLIS
-                && current
-                    .get(&key.record_id)
-                    .is_some_and(|(lifecycle, changed_at)| {
-                        *lifecycle == v1::AgentLifecycleState::Blocked as i32
-                            && *changed_at == value.lifecycle_changed_at_unix_millis
-                    })
+                && current.get(&key.record_id).is_some_and(|record| {
+                    let exact_child_is_current = key.turn.agent_id.is_empty()
+                        || record.codex_running_subagents.get(&key.turn.agent_id)
+                            == Some(&key.turn.turn_id);
+                    if value.root_turn_id.is_empty()
+                        && exact_child_is_current
+                        && !key.turn.agent_id.is_empty()
+                        && record.codex_subagent_root_turn_ids.get(&key.turn.agent_id)
+                            == Some(&record.codex_active_root_turn_id)
+                    {
+                        value
+                            .root_turn_id
+                            .clone_from(&record.codex_active_root_turn_id);
+                    }
+                    let root_is_current = if value.root_turn_id.is_empty() {
+                        !key.turn.agent_id.is_empty()
+                            && record
+                                .codex_subagents_awaiting_root
+                                .contains(&key.turn.agent_id)
+                    } else {
+                        record.codex_active_root_turn_id == value.root_turn_id
+                    };
+                    record.lifecycle == v1::AgentLifecycleState::Blocked as i32
+                        && record.lifecycle_changed_at_unix_millis
+                            == value.lifecycle_changed_at_unix_millis
+                        && exact_child_is_current
+                        && root_is_current
+                })
         });
         let resolved: Vec<_> = pending
             .iter_mut()
             .filter_map(|(key, value)| {
+                if value.root_turn_id.is_empty() {
+                    return None;
+                }
                 if value.terminal.is_none() {
                     value.terminal = value.monitor.poll_terminal();
                 }
@@ -409,6 +552,7 @@ impl AgentRuntime {
                         key.clone(),
                         terminal,
                         value.lifecycle_changed_at_unix_millis,
+                        value.root_turn_id.clone(),
                     )
                 })
             })
@@ -421,13 +565,17 @@ impl AgentRuntime {
         let mut state = self.state.lock().unwrap();
         let original = state.clone();
         let mut events = Vec::new();
-        let resolved_keys: Vec<_> = resolved.iter().map(|(key, _, _)| key.clone()).collect();
-        for (key, terminal, expected_changed_at) in resolved {
+        let resolved_keys: Vec<_> = resolved.iter().map(|(key, _, _, _)| key.clone()).collect();
+        for (key, terminal, expected_changed_at, expected_root_turn_id) in resolved {
             let Some(current) = state.agents.get(&key.record_id) else {
                 continue;
             };
             if current.lifecycle != v1::AgentLifecycleState::Blocked as i32
                 || current.lifecycle_changed_at_unix_millis != expected_changed_at
+                || current.codex_active_root_turn_id != expected_root_turn_id
+                || !key.turn.agent_id.is_empty()
+                    && current.codex_running_subagents.get(&key.turn.agent_id)
+                        != Some(&key.turn.turn_id)
             {
                 continue;
             }
@@ -438,19 +586,46 @@ impl AgentRuntime {
                 && record.codex_running_subagents.get(&key.turn.agent_id) == Some(&key.turn.turn_id)
             {
                 record.codex_running_subagents.remove(&key.turn.agent_id);
+                record
+                    .codex_subagent_root_turn_ids
+                    .remove(&key.turn.agent_id);
+                record
+                    .codex_subagents_awaiting_root
+                    .remove(&key.turn.agent_id);
             }
-            let idle = key.turn.agent_id.is_empty()
-                || record.codex_parent_stopped_for_subagents
-                    && record.codex_running_subagents.is_empty()
-                    && !record.codex_subagent_capacity_exceeded;
+            if !key.turn.agent_id.is_empty() {
+                ingest::remember_codex_terminal_child_turn(
+                    &mut record.codex_terminal_subagent_turns,
+                    &key.turn,
+                );
+            }
+            let idle = record.codex_running_subagents.is_empty()
+                && !record.codex_subagent_capacity_exceeded
+                && (key.turn.agent_id.is_empty() || record.codex_parent_stopped_for_subagents);
+            if key.turn.agent_id.is_empty() && !idle {
+                record.codex_parent_stopped_for_subagents = true;
+            }
             record.lifecycle = if idle {
                 v1::AgentLifecycleState::Idle as i32
             } else {
                 v1::AgentLifecycleState::Working as i32
             };
             record.hook_terminal = idle;
+            if key.turn.agent_id.is_empty() {
+                remember_terminal_root_turn(
+                    &mut record.codex_terminal_root_turn_ids,
+                    &key.turn.turn_id,
+                );
+            }
             if idle {
                 record.codex_parent_stopped_for_subagents = false;
+                if !key.turn.agent_id.is_empty() && !record.codex_active_root_turn_id.is_empty() {
+                    let active_root_turn_id = record.codex_active_root_turn_id.clone();
+                    remember_terminal_root_turn(
+                        &mut record.codex_terminal_root_turn_ids,
+                        &active_root_turn_id,
+                    );
+                }
             }
             record
                 .codex_turn_reviews
@@ -553,6 +728,8 @@ impl AgentRuntime {
             record.lifecycle = v1::AgentLifecycleState::Unknown as i32;
             record.claude_has_running_subagent = false;
             record.codex_running_subagents.clear();
+            record.codex_subagent_root_turn_ids.clear();
+            record.codex_subagents_awaiting_root.clear();
             record.codex_subagent_capacity_exceeded = false;
             record.codex_parent_stopped_for_subagents = false;
             record.subagent_evidence_observed_at_unix_millis = 0;

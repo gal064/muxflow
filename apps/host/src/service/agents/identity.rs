@@ -36,10 +36,17 @@ pub(super) fn hook_candidates(
         state
             .agents
             .values()
-            .find(|record| {
+            .filter(|record| {
                 record.adapter_id == adapter_id
                     && record.route.server_identity == active_server_identity
                     && record.native_session_id == native_session_id
+            })
+            .min_by_key(|record| {
+                (
+                    record.agent_id != agent_id,
+                    record.route.pane_id.is_empty(),
+                    record.agent_id.as_str(),
+                )
             })
             .map(|record| record.agent_id.clone())
     };
