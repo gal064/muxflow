@@ -84,6 +84,21 @@ than caching a negative result. A permission request still unclassified after
 that check and `PreToolUse(request_user_input)` are the observed blocked
 signals. Recorded rather than faked.
 
+One Codex TUI may run more than one logical thread while all of their hook
+processes inherit the same `TMUX_PANE`. Pane ownership therefore does not
+follow whichever native session emitted the latest hook. An unknown native
+Codex session may replace the pane's current native owner only with
+`SessionStart` or `UserPromptSubmit`, the two events that explicitly begin a
+session or turn. A known native session may continue reporting after it moves
+panes. A continuation or terminal hook from an unknown, superseded thread is
+discarded, so delayed fork teardown cannot make the interactive root disappear
+and then reappear. When fresh topology is temporarily unavailable, the exact
+same-server pane already stored on the current owner is used only to reject a
+different logical session; it is never trusted as a new routing destination.
+The initial pane-derived record may still be promoted by any first native hook,
+including `Stop`; that is the separate discovery handoff needed when hooks
+become authoritative late in a turn.
+
 A `Working` state that receives no further event for fifteen minutes decays to
 `Unknown`. Direct evidence of a running subagent stays authoritative while its
 bounded transcript monitor remains readable. The 24-hour recovery window is a

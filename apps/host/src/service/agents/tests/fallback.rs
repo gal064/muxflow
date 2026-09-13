@@ -45,9 +45,11 @@ fn a_turn_that_starts_and_blocks_offline_replays_in_the_order_it_happened() {
         replayed.push(event.source_event_id.clone());
         match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
             Ok(_) => fallback::HookReplayDisposition::Applied,
-            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                fallback::HookReplayDisposition::Discarded
-            }
+            Err(
+                HookIngestFailure::Duplicate
+                | HookIngestFailure::Superseded
+                | HookIngestFailure::Permanent(_),
+            ) => fallback::HookReplayDisposition::Discarded,
             Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
         }
     })
@@ -98,9 +100,11 @@ fn replay_preserves_an_auto_review_permission_as_working() {
     let report = fallback::consume(&dir, |event| {
         match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
             Ok(_) => fallback::HookReplayDisposition::Applied,
-            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                fallback::HookReplayDisposition::Discarded
-            }
+            Err(
+                HookIngestFailure::Duplicate
+                | HookIngestFailure::Superseded
+                | HookIngestFailure::Permanent(_),
+            ) => fallback::HookReplayDisposition::Discarded,
             Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
         }
     })
@@ -161,9 +165,11 @@ fn replayed_sanitized_transcript_edges_repair_a_missing_child_stop() {
     let report = fallback::consume(&dir, |event| {
         match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
             Ok(_) => fallback::HookReplayDisposition::Applied,
-            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                fallback::HookReplayDisposition::Discarded
-            }
+            Err(
+                HookIngestFailure::Duplicate
+                | HookIngestFailure::Superseded
+                | HookIngestFailure::Permanent(_),
+            ) => fallback::HookReplayDisposition::Discarded,
             Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
         }
     })
@@ -312,9 +318,11 @@ fn recovered_mailbox_applies_before_the_next_live_event_without_a_restart() {
             let report = fallback::consume(&mailbox, |event| {
                 match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
                     Ok(_) => fallback::HookReplayDisposition::Applied,
-                    Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                        fallback::HookReplayDisposition::Discarded
-                    }
+                    Err(
+                        HookIngestFailure::Duplicate
+                        | HookIngestFailure::Superseded
+                        | HookIngestFailure::Permanent(_),
+                    ) => fallback::HookReplayDisposition::Discarded,
                     Err(HookIngestFailure::Retryable(_)) => {
                         fallback::HookReplayDisposition::Retryable
                     }
@@ -364,9 +372,11 @@ fn incomplete_mailbox_sweep_rejects_live_input_after_partial_progress() {
             fallback::consume_roots(&roots, |event| {
                 match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
                     Ok(_) => fallback::HookReplayDisposition::Applied,
-                    Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                        fallback::HookReplayDisposition::Discarded
-                    }
+                    Err(
+                        HookIngestFailure::Duplicate
+                        | HookIngestFailure::Superseded
+                        | HookIngestFailure::Permanent(_),
+                    ) => fallback::HookReplayDisposition::Discarded,
                     Err(HookIngestFailure::Retryable(_)) => {
                         fallback::HookReplayDisposition::Retryable
                     }
@@ -472,9 +482,11 @@ fn lost_ack_replay_discards_duplicate_without_republishing_or_advancing_state() 
     let report = fallback::consume(&root, |event| {
         match runtime.ingest_hook_with_context(&event, "server-a", Some(&topology)) {
             Ok(_) => fallback::HookReplayDisposition::Applied,
-            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                fallback::HookReplayDisposition::Discarded
-            }
+            Err(
+                HookIngestFailure::Duplicate
+                | HookIngestFailure::Superseded
+                | HookIngestFailure::Permanent(_),
+            ) => fallback::HookReplayDisposition::Discarded,
             Err(HookIngestFailure::Retryable(_)) => fallback::HookReplayDisposition::Retryable,
         }
     })

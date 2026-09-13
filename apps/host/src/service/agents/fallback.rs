@@ -31,9 +31,11 @@ pub(crate) fn ingest() -> anyhow::Result<usize> {
         let runtime = AgentRuntime::global();
         match runtime.ingest_and_publish(&event) {
             Ok(_) => v1::HookIngestDisposition::Applied,
-            Err(HookIngestFailure::Duplicate | HookIngestFailure::Permanent(_)) => {
-                v1::HookIngestDisposition::Discarded
-            }
+            Err(
+                HookIngestFailure::Duplicate
+                | HookIngestFailure::Superseded
+                | HookIngestFailure::Permanent(_),
+            ) => v1::HookIngestDisposition::Discarded,
             Err(HookIngestFailure::Retryable(error)) => {
                 // The mailbox records only a safe counter at its caller;
                 // consume the internal cause here without logging paths or

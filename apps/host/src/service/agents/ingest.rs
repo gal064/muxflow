@@ -26,6 +26,10 @@ struct IngestedHook {
 #[derive(Debug)]
 pub(crate) enum HookIngestFailure {
     Duplicate,
+    /// A logical Codex thread that no longer owns its inherited tmux pane
+    /// emitted a late hook. The event is final, but it must not replace the
+    /// pane's current interactive thread.
+    Superseded,
     Permanent(anyhow::Error),
     Retryable(anyhow::Error),
 }
@@ -33,7 +37,9 @@ pub(crate) enum HookIngestFailure {
 impl HookIngestFailure {
     pub(crate) fn disposition(&self) -> v1::HookIngestDisposition {
         match self {
-            Self::Duplicate | Self::Permanent(_) => v1::HookIngestDisposition::Discarded,
+            Self::Duplicate | Self::Superseded | Self::Permanent(_) => {
+                v1::HookIngestDisposition::Discarded
+            }
             Self::Retryable(_) => v1::HookIngestDisposition::Retryable,
         }
     }
@@ -216,6 +222,52 @@ impl AgentRuntime {
                 });
             }
             return Err(HookIngestFailure::Duplicate);
+        }
+        // One Codex TUI can fork logical threads inside the same process. Each
+        // fork inherits TMUX_PANE and emits hooks with its own native session
+        // ID, including a delayed terminal hook when an abandoned fork is
+        // torn down. Only an explicit session/turn start may introduce an
+        // unknown native Codex identity into a pane that already has a native
+        // owner. Continuation and terminal hooks from a known identity remain
+        // valid when that identity moves panes.
+        let known_mapped_native_session = native_record_id
+            .as_ref()
+            .and_then(|native_id| state.agents.get(native_id))
+            .is_some_and(|record| !record.route.pane_id.is_empty());
+        // Topology discovery can fail while the hook still carries the exact
+        // same-server pane inherited from tmux. That pane is not trusted as a
+        // destination, but an existing mapped owner may use it as negative
+        // evidence that a different logical session is a superseded emitter.
+        let stored_pane_owner = origin_matches
+            .then(|| {
+                state.agents.values().find(|record| {
+                    record.adapter_id == adapter.id()
+                        && record.route.server_identity == active_server_identity
+                        && record.route.pane_id == event.pane_id
+                })
+            })
+            .flatten();
+        // Prefer an actual mapped owner over the incoming identity's unmapped
+        // record. During a topology outage, an allowed start hook can create
+        // that record; it must not mask the pane owner on a later terminal
+        // hook from the same fork.
+        let observed_pane_owner = stored_pane_owner.or_else(|| {
+            pane_record_id
+                .as_ref()
+                .and_then(|pane_id| state.agents.get(pane_id))
+        });
+        let superseded_codex_thread = adapter.id() == "codex"
+            && !native_session_id.is_empty()
+            && !known_mapped_native_session
+            && observed_pane_owner.is_some_and(|owner| {
+                !owner.native_session_id.is_empty() && owner.native_session_id != native_session_id
+            })
+            && !matches!(
+                parsed.event_name.as_str(),
+                "SessionStart" | "UserPromptSubmit"
+            );
+        if superseded_codex_thread {
+            return Err(HookIngestFailure::Superseded);
         }
         let latest_sequence = [native_record_id.as_ref(), pane_record_id.as_ref()]
             .into_iter()
