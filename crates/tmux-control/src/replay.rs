@@ -96,6 +96,20 @@ pub struct PaneResource {
     pub recovery_reason: String,
 }
 
+impl PaneResource {
+    /// Projects a store answer onto the visibility response sent to a renderer.
+    /// A hide retains its tail in the store and sends no bytes: only a reveal
+    /// transfers that output back, including after an idempotent repeated hide.
+    pub fn into_visibility_response(mut self, visible: bool) -> Self {
+        if visible {
+            self.state = PaneResourceState::Visible;
+        } else {
+            self.raw_tail.clear();
+        }
+        self
+    }
+}
+
 /// The largest tail a reveal answers with instead of a photograph.
 ///
 /// A screen-only capture of a 200x50 pane is ~10 KB, and that is what the
