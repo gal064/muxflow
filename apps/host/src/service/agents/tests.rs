@@ -616,6 +616,156 @@ fn native_to_native_pane_replacement_does_not_transfer_voice_identity() {
 }
 
 #[test]
+fn superseded_codex_fork_hooks_do_not_reclaim_the_current_pane() {
+    let runtime = runtime("codex-superseded-fork");
+    let topology = topology("codex");
+
+    let root = runtime
+        .ingest_hook_with_context(
+            &event("root-start", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let mut fork_start = event("fork-start", 0, "UserPromptSubmit");
+    fork_start.native_session_id = "native-fork".into();
+    runtime
+        .ingest_hook_with_context(&fork_start, "server-a", Some(&topology))
+        .unwrap();
+    let root_resumed = runtime
+        .ingest_hook_with_context(
+            &event("root-resumed", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(root_resumed.agent_id, root.agent_id);
+    let generation = runtime.snapshot_for("server-a").generation;
+
+    for event_name in ["PreToolUse", "Stop", "Interrupt", "SessionEnd"] {
+        let mut late = event(&format!("fork-late-{event_name}"), 0, event_name);
+        late.native_session_id = "native-fork".into();
+        assert!(matches!(
+            runtime.ingest_hook_with_context(&late, "server-a", Some(&topology)),
+            Err(HookIngestFailure::Superseded)
+        ));
+    }
+
+    let snapshot = runtime.snapshot_for("server-a");
+    assert_eq!(snapshot.generation, generation);
+    assert_eq!(snapshot.agents.len(), 1);
+    assert_eq!(snapshot.agents[0].agent_id, root.agent_id);
+    assert_eq!(
+        snapshot.agents[0].lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+}
+
+#[test]
+fn an_unmapped_codex_fork_does_not_gain_pane_continuity() {
+    let runtime = runtime("codex-unmapped-superseded-fork");
+    let topology = topology("codex");
+    let root = runtime
+        .ingest_hook_with_context(
+            &event("root-start", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+
+    let mut unmapped_fork_stop = event("fork-stop-unmapped", 0, "Stop");
+    unmapped_fork_stop.native_session_id = "native-fork".into();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&unmapped_fork_stop, "server-a", None),
+        Err(HookIngestFailure::Superseded)
+    ));
+
+    let mut mapped_fork_end = event("fork-end-mapped", 0, "SessionEnd");
+    mapped_fork_end.native_session_id = "native-fork".into();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&mapped_fork_end, "server-a", Some(&topology)),
+        Err(HookIngestFailure::Superseded)
+    ));
+
+    let snapshot = runtime.snapshot_for("server-a");
+    let pane_owner = snapshot
+        .agents
+        .iter()
+        .find(|agent| {
+            agent
+                .route
+                .as_ref()
+                .is_some_and(|route| route.pane_id == "%7")
+        })
+        .unwrap();
+    assert_eq!(pane_owner.agent_id, root.agent_id);
+    assert_eq!(
+        pane_owner.lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    assert_eq!(snapshot.agents.len(), 1);
+}
+
+#[test]
+fn an_unmapped_codex_fork_record_does_not_mask_the_mapped_pane_owner() {
+    let runtime = runtime("codex-unmapped-fork-record");
+    let topology = topology("codex");
+    let root = runtime
+        .ingest_hook_with_context(
+            &event("root-start", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+
+    let mut fork_start = event("fork-start-unmapped", 0, "SessionStart");
+    fork_start.native_session_id = "native-fork".into();
+    runtime
+        .ingest_hook_with_context(&fork_start, "server-a", None)
+        .unwrap();
+    let generation = runtime.snapshot_for("server-a").generation;
+
+    let mut fork_stop = event("fork-stop-unmapped", 0, "Stop");
+    fork_stop.native_session_id = "native-fork".into();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&fork_stop, "server-a", None),
+        Err(HookIngestFailure::Superseded)
+    ));
+
+    let snapshot = runtime.snapshot_for("server-a");
+    assert_eq!(snapshot.generation, generation);
+    let pane_owner = snapshot
+        .agents
+        .iter()
+        .find(|agent| {
+            agent
+                .route
+                .as_ref()
+                .is_some_and(|route| route.pane_id == "%7")
+        })
+        .unwrap();
+    assert_eq!(pane_owner.agent_id, root.agent_id);
+    assert_eq!(
+        pane_owner.lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+    assert!(
+        snapshot
+            .agents
+            .iter()
+            .all(|agent| agent.attention_kind.is_empty())
+    );
+}
+
+#[test]
 fn foreign_hook_is_visible_but_never_invents_a_destination() {
     let runtime = runtime("foreign-route");
     let mut foreign = event("foreign", 0, "PermissionRequest");

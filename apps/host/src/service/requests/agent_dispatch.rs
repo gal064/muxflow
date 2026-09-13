@@ -84,6 +84,9 @@ fn handle_inner(
                     let disposition = failure.disposition();
                     let message = match failure {
                         HookIngestFailure::Duplicate => "hook event was already handled",
+                        HookIngestFailure::Superseded => {
+                            "hook event belongs to a superseded pane session"
+                        }
                         HookIngestFailure::Permanent(error) => {
                             drop(error);
                             "hook event was permanently rejected"
