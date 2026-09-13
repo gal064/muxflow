@@ -4,7 +4,7 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    HELPER_VERSION, envelope, read_frame_sync,
+    envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -28,18 +28,14 @@ pub fn ssh_bridge_command(
 }
 
 pub struct Hello<'a> {
-    pub desktop_version: &'a str,
-    pub requested_capabilities: u64,
     pub bulk_connection: bool,
     pub expected_server_identity: &'a str,
     pub connection_epoch: u64,
 }
 
 impl<'a> Hello<'a> {
-    pub fn control(desktop_version: &'a str, requested_capabilities: u64) -> Self {
+    pub fn control() -> Self {
         Self {
-            desktop_version,
-            requested_capabilities,
             bulk_connection: false,
             expected_server_identity: "",
             connection_epoch: 0,
@@ -272,9 +268,6 @@ fn handshake(
             1,
             0,
             Payload::ClientHello(v1::ClientHello {
-                desktop_version: config.desktop_version.into(),
-                requested_capabilities: config.requested_capabilities,
-                expected_helper_version: HELPER_VERSION.into(),
                 bulk_connection: config.bulk_connection,
                 expected_server_identity: config.expected_server_identity.into(),
                 connection_epoch: config.connection_epoch,
@@ -288,14 +281,8 @@ fn handshake(
     let Some(Payload::ServerHello(hello)) = frame.payload else {
         return Err("missing ServerHello".into());
     };
-    if hello.read_only {
-        return Err(format!("helper is read-only: {}", hello.incompatibility));
-    }
-    if config.requested_capabilities != 0
-        && hello.capabilities & config.requested_capabilities != config.requested_capabilities
-    {
-        return Err("bridge omitted required capabilities".into());
-    }
+    tmux_agent_protocol::validate_host_contract(frame.protocol_major)
+        .map_err(|error| error.to_string())?;
     if config.connection_epoch != 0 && hello.connection_epoch != config.connection_epoch {
         return Err("bridge did not echo connection epoch".into());
     }

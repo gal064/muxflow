@@ -103,7 +103,9 @@ fn handle_inner(
             }
         }
         v1::Operation::AgentHookManagement => {
-            let adapter = v1::AgentAdapterKind::try_from(request.adapter).unwrap_or_default();
+            let adapter = super::super::agents::adapters::by_id(&request.adapter_id)
+                .context("supported agent adapter is required")?
+                .legacy_kind();
             let action =
                 v1::HookManagementAction::try_from(request.hook_management).unwrap_or_default();
             let manager = HookManager::system_default()?;
@@ -193,14 +195,8 @@ fn launch_agent(
     if request.expected_topology_generation != current_generation {
         bail!("tmux topology generation changed; refresh before launching an agent");
     }
-    let adapter = if request.adapter_id.is_empty() {
-        super::super::agents::adapters::adapter(
-            v1::AgentAdapterKind::try_from(request.adapter).unwrap_or_default(),
-        )
-    } else {
-        super::super::agents::adapters::by_id(&request.adapter_id)
-    }
-    .context("supported agent adapter is required")?;
+    let adapter = super::super::agents::adapters::by_id(&request.adapter_id)
+        .context("supported agent adapter is required")?;
     let resume = (action == v1::AgentActionKind::Resume)
         .then_some(request.native_session_id.as_str())
         .filter(|id| !id.is_empty());

@@ -97,7 +97,7 @@ fi
 ADE_HOST_RUNTIME_DIR="$local_runtime" ADE_TMUX_SOCKET_NAME="$local_socket_name" ADE_PHASE1_TESTING=1 \
   "$host_binary" phase1-client local >"$runtime/local-smoke.json"
 jq -e '
-  .transport == "local" and .readOnly == false and .sessions == 1 and
+  .transport == "local" and .sessions == 1 and
   .sequenceGapDetected == true and .overflowDetected == true and
   .cancellation == "pass" and .scopedSnapshot == true and .terminalInputRouted == true
 ' "$runtime/local-smoke.json" >/dev/null
@@ -111,12 +111,11 @@ tmux -L "$local_socket_name" split-window -h -t phase1
 wait "$watch_pid"
 jq -e '.panes == 1 and (.eventCounts.TopologySnapshot // 0) >= 1' "$runtime/local-watch.json" >/dev/null
 
-ADE_HOST_RUNTIME_DIR="$local_runtime" ADE_TMUX_SOCKET_NAME="$local_socket_name" \
-  "$host_binary" phase1-client local --protocol-major 99 >"$runtime/protocol-incompatible.json"
-jq -e '.readOnly == true' "$runtime/protocol-incompatible.json" >/dev/null
-ADE_HOST_RUNTIME_DIR="$local_runtime" ADE_TMUX_SOCKET_NAME="$local_socket_name" \
-  "$host_binary" phase1-client local --expected-helper 99.0.0 >"$runtime/helper-incompatible.json"
-jq -e '.readOnly == true' "$runtime/helper-incompatible.json" >/dev/null
+if ADE_HOST_RUNTIME_DIR="$local_runtime" ADE_TMUX_SOCKET_NAME="$local_socket_name" \
+  "$host_binary" phase1-client local --protocol-major 99 >"$runtime/protocol-incompatible.json" 2>&1; then
+  echo "a different protocol contract was admitted" >&2
+  exit 1
+fi
 
 kill "$local_daemon_pid"
 wait "$local_daemon_pid" >/dev/null 2>&1 || true
@@ -291,7 +290,7 @@ ADE_PHASE1_TESTING=1 "$host_binary" phase1-client ssh ade-phase1-docker \
   --config "$ssh_config" --control-socket "$control_socket" >"$runtime/remote-smoke.json"
 wait "$bulk_pid"
 jq -e '
-  .transport == "ssh" and .readOnly == false and .sessions == 1 and
+  .transport == "ssh" and .sessions == 1 and
   .sequenceGapDetected == true and .overflowDetected == true and
   .cancellation == "pass" and .scopedSnapshot == true and .terminalInputRouted == true
 ' "$runtime/remote-smoke.json" >/dev/null

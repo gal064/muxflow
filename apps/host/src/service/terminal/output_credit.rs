@@ -64,7 +64,6 @@ struct OpenState {
 
 #[derive(Debug)]
 enum State {
-    Legacy,
     Open(OpenState),
     Closed,
 }
@@ -76,16 +75,12 @@ pub(crate) struct OutputCredit {
 }
 
 impl OutputCredit {
-    pub(crate) fn negotiated(enabled: bool) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            state: Mutex::new(if enabled {
-                State::Open(OpenState {
-                    reserved: OutputCharge::default(),
-                    acknowledged: OutputCharge::default(),
-                })
-            } else {
-                State::Legacy
-            }),
+            state: Mutex::new(State::Open(OpenState {
+                reserved: OutputCharge::default(),
+                acknowledged: OutputCharge::default(),
+            })),
             released: Condvar::new(),
         }
     }
@@ -116,7 +111,6 @@ impl OutputCredit {
             return Err("terminal delivery attachment is stopped");
         }
         match &mut *state {
-            State::Legacy => Ok(Reservation::legacy(self)),
             State::Closed => Err("terminal delivery credit is closed"),
             State::Open(open) => {
                 open.reserved.bytes = open.reserved.bytes.saturating_add(charge.bytes);
@@ -125,7 +119,6 @@ impl OutputCredit {
                     credit: self,
                     charge,
                     committed: false,
-                    legacy: false,
                 })
             }
         }
@@ -149,7 +142,7 @@ impl OutputCredit {
                 return;
             }
             match &*state {
-                State::Legacy | State::Closed => return,
+                State::Closed => return,
                 State::Open(open) => {
                     let outstanding_bytes =
                         open.reserved.bytes.saturating_sub(open.acknowledged.bytes);
@@ -171,7 +164,6 @@ impl OutputCredit {
     pub(crate) fn acknowledge(&self, cumulative: OutputCharge) -> Result<(), &'static str> {
         let mut state = self.state.lock().unwrap();
         match &mut *state {
-            State::Legacy => Ok(()),
             State::Closed => Err("terminal delivery credit is closed"),
             State::Open(open) => {
                 if cumulative.bytes < open.acknowledged.bytes
@@ -219,19 +211,9 @@ pub(crate) struct Reservation<'a> {
     credit: &'a OutputCredit,
     charge: OutputCharge,
     committed: bool,
-    legacy: bool,
 }
 
 impl Reservation<'_> {
-    fn legacy(credit: &OutputCredit) -> Reservation<'_> {
-        Reservation {
-            credit,
-            charge: OutputCharge::default(),
-            committed: true,
-            legacy: true,
-        }
-    }
-
     pub(crate) fn commit(mut self) {
         self.committed = true;
     }
@@ -239,7 +221,7 @@ impl Reservation<'_> {
 
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
-        if !self.committed && !self.legacy {
+        if !self.committed {
             self.credit.rollback(self.charge);
         }
     }
@@ -266,7 +248,7 @@ mod tests {
 
     #[test]
     fn exact_window_holds_a_reader_until_cumulative_credit_is_released() {
-        let credit = Arc::new(OutputCredit::negotiated(true));
+        let credit = Arc::new(OutputCredit::new());
         fill_window(&credit);
         let waiting = Arc::clone(&credit);
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -290,7 +272,7 @@ mod tests {
     /// `admit` ever waits again this test hangs, since nothing here ever acks.
     #[test]
     fn admission_never_waits_on_a_full_window() {
-        let credit = OutputCredit::negotiated(true);
+        let credit = OutputCredit::new();
         fill_window(&credit);
         for _ in 0..4 {
             credit
@@ -311,7 +293,7 @@ mod tests {
 
     #[test]
     fn rollback_and_close_release_waiters_without_forging_credit() {
-        let credit = OutputCredit::negotiated(true);
+        let credit = OutputCredit::new();
         drop(
             credit
                 .admit(OutputCharge::terminal(128), &running())
@@ -324,7 +306,7 @@ mod tests {
 
     #[test]
     fn an_oversize_record_is_refused_but_a_window_sized_one_is_admitted() {
-        let credit = OutputCredit::negotiated(true);
+        let credit = OutputCredit::new();
         assert!(
             credit
                 .admit(OutputCharge::terminal(MAX_FRAME_BYTES + 1), &running())
@@ -341,7 +323,7 @@ mod tests {
 
     #[test]
     fn tiny_records_release_by_record_credit_without_a_timer() {
-        let credit = Arc::new(OutputCredit::negotiated(true));
+        let credit = Arc::new(OutputCredit::new());
         for _ in 0..OUTPUT_WINDOW_RECORDS {
             credit
                 .admit(OutputCharge::terminal(1), &running())
@@ -366,7 +348,7 @@ mod tests {
 
     #[test]
     fn close_releases_a_reader_waiting_on_a_full_window() {
-        let credit = Arc::new(OutputCredit::negotiated(true));
+        let credit = Arc::new(OutputCredit::new());
         credit
             .admit(
                 OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),
@@ -390,7 +372,7 @@ mod tests {
     /// being torn down, so nothing else ever notifies the condvar.
     #[test]
     fn attachment_stop_releases_its_waiter_without_closing_the_shared_credit() {
-        let credit = Arc::new(OutputCredit::negotiated(true));
+        let credit = Arc::new(OutputCredit::new());
         credit
             .admit(
                 OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),

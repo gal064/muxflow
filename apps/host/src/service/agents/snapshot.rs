@@ -31,7 +31,6 @@ pub(super) fn build(
 pub(super) fn record(value: &StoredAgent) -> v1::AgentRecord {
     v1::AgentRecord {
         agent_id: value.agent_id.clone(),
-        adapter: value.adapter,
         adapter_id: if value.adapter_id.is_empty() {
             adapters::adapter(v1::AgentAdapterKind::try_from(value.adapter).unwrap_or_default())
                 .map(|adapter| adapter.id().to_owned())

@@ -68,7 +68,7 @@ fn client_hello_and_subscribe_are_written_before_the_first_read() {
         1,
         0,
         Payload::ServerHello(v1::ServerHello {
-            capabilities: HOST_CAPABILITIES,
+            connection_epoch: 9,
             server_identity: "server-a".into(),
             ..Default::default()
         }),
@@ -97,58 +97,10 @@ fn client_hello_and_subscribe_are_written_before_the_first_read() {
         checked: false,
     };
 
-    let (_, initial, admission, accepted_sequence) =
-        handshake_and_snapshot(&mut writer, &mut reader, 9).unwrap();
+    let (_, initial) = handshake_and_snapshot(&mut writer, &mut reader, 9).unwrap();
 
     assert!(reader.checked);
-    assert!(admission.is_ok());
-    assert_eq!(accepted_sequence, 4);
-    assert_eq!(initial.unwrap().accepted_sequence, 4);
-}
-
-#[test]
-fn incompatible_handshake_drains_pipelined_subscribe_and_keeps_its_watermark() {
-    let hello = envelope(
-        1,
-        0,
-        Payload::ServerHello(v1::ServerHello {
-            read_only: true,
-            server_identity: "server-old".into(),
-            ..Default::default()
-        }),
-    );
-    let response = envelope(
-        2,
-        0,
-        Payload::Response(v1::Response {
-            ok: true,
-            accepted_sequence: 17,
-            snapshot: Some(v1::Snapshot {
-                server_identity: "server-old".into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }),
-    );
-    let later_event = event(18);
-    let mut bytes = tmux_agent_protocol::encode_frame(&hello).unwrap();
-    bytes.extend(tmux_agent_protocol::encode_frame(&response).unwrap());
-    bytes.extend(tmux_agent_protocol::encode_frame(&later_event).unwrap());
-    let mut reader = Cursor::new(bytes);
-    let mut writer = Vec::new();
-
-    let (_, initial, admission, accepted_sequence) =
-        handshake_and_snapshot(&mut writer, &mut reader, 9).unwrap();
-
-    // The refusal doubles as the reason the read-only path reports, so a
-    // quarantined handshake can never be silent.
-    assert!(
-        !admission.unwrap_err().to_string().is_empty(),
-        "a quarantined handshake must carry its reason"
-    );
-    assert!(initial.is_none());
-    assert_eq!(accepted_sequence, 17);
-    assert_eq!(read_frame_sync(&mut reader).unwrap(), Some(later_event));
+    assert_eq!(initial.accepted_sequence, 4);
 }
 
 #[test]
@@ -215,14 +167,7 @@ impl StreamHarness {
             TerminalEventChannel::new(Uuid::new_v4(), channel, Arc::clone(&client.delivery_window));
         let run_client = Arc::clone(&client);
         let run = thread::spawn(move || {
-            read_protocol_stream(
-                host_read,
-                from_sequence,
-                "server-a",
-                &channel,
-                &run_client,
-                true,
-            )
+            read_protocol_stream(host_read, from_sequence, "server-a", &channel, &run_client)
         });
         Self {
             host: Some(host_write),
@@ -464,4 +409,27 @@ fn a_local_teardown_is_named_on_the_bridge_error_and_only_then() {
         super::name_local_teardown("host bridge closed".into(), None),
         "host bridge closed"
     );
+}
+
+#[test]
+fn handshake_refuses_a_different_contract_or_epoch_without_reading_a_snapshot() {
+    for (major, epoch, expected) in [
+        (tmux_agent_protocol::PROTOCOL_MAJOR - 1, 9, "protocol major"),
+        (tmux_agent_protocol::PROTOCOL_MAJOR, 8, "connection epoch"),
+    ] {
+        let mut hello = envelope(
+            1,
+            0,
+            Payload::ServerHello(v1::ServerHello {
+                connection_epoch: epoch,
+                ..Default::default()
+            }),
+        );
+        hello.protocol_major = major;
+        let mut reader = Cursor::new(tmux_agent_protocol::encode_frame(&hello).unwrap());
+        let error = handshake_and_snapshot(&mut Vec::new(), &mut reader, 9)
+            .err()
+            .unwrap();
+        assert!(error.contains(expected), "{error}");
+    }
 }

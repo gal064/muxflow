@@ -1,20 +1,14 @@
-import { create } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
-import { capabilityNames, validateHostContract } from "./contract";
+import { validateHostContract } from "./contract";
 import { FrameAccumulator, encodeFrame } from "./framing";
-import { EventKind, Operation, ServerHelloSchema, VoiceProvider } from "./gen/envelope_pb";
+import { EventKind, Operation, VoiceProvider } from "./gen/envelope_pb";
 import vectors from "./testing/rust_vectors.json";
 
 describe("Rust-produced admission contract", () => {
-  it.each(vectors.admissions)("major=$major capabilities=$capabilities readOnly=$readOnly", (vector) => {
-    const refusal = validateHostContract(vector.major, create(ServerHelloSchema, {
-      capabilities: BigInt(vector.capabilities), readOnly: vector.readOnly, incompatibility: "test refusal",
-    }));
+  it.each(vectors.admissions)("major=$major", (vector) => {
+    const refusal = validateHostContract(vector.major);
     expect(refusal?.kind ?? null).toBe(vector.refusal?.kind ?? null);
-    if (refusal?.kind === "missingCapabilities") {
-      expect(refusal.missing.toString()).toBe(vector.refusal?.missing);
-      expect(capabilityNames(refusal.missing)).toEqual(vector.refusal?.names);
-    }
+
   });
 });
 

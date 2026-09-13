@@ -302,7 +302,7 @@ export function App() {
   const latency = useHostLatency();
   useEffect(() => dispatchHelper({ type: "reset" }), [connectionEpoch, currentHelperConnectionKey]);
   const remoteHelperRecovery = useRemoteHelperRecovery({
-    connection, connectionEpoch, dispatchHelper, setConnectionDetail,
+    connection, connectionEpoch, dispatchHelper,
   });
   onHandshakeFailure.current = remoteHelperRecovery.onHandshakeFailure;
   onConnectionStateChanged.current = remoteHelperRecovery.onConnectionStateChanged;

@@ -3,26 +3,16 @@
 //! MUXFLOW_UPDATE_CONTRACT=1 cargo test -p tmux-agent-protocol --test mobile_contract
 use serde_json::{Value, json};
 use tmux_agent_protocol::{
-    HOST_CAPABILITIES, HostContractError, MAX_FRAME_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR,
-    capability_names, encode_frame, envelope, v1, validate_host_contract,
+    HostContractError, MAX_FRAME_BYTES, PROTOCOL_MAJOR, encode_frame, envelope, v1,
+    validate_host_contract,
 };
 
-fn admission(major: u32, capabilities: u64, read_only: bool) -> Value {
-    let hello = v1::ServerHello {
-        capabilities,
-        read_only,
-        incompatibility: "test refusal".into(),
-        ..Default::default()
-    };
-    let refusal = match validate_host_contract(major, &hello) {
+fn admission(major: u32) -> Value {
+    let refusal = match validate_host_contract(major) {
         Ok(()) => Value::Null,
         Err(HostContractError::ProtocolMajor { .. }) => json!({"kind": "protocolMajor"}),
-        Err(HostContractError::ReadOnly(_)) => json!({"kind": "readOnly"}),
-        Err(HostContractError::MissingCapabilities(missing)) => {
-            json!({"kind": "missingCapabilities", "missing": missing.to_string(), "names": capability_names(missing)})
-        }
     };
-    json!({"major": major, "capabilities": capabilities.to_string(), "readOnly": read_only, "refusal": refusal})
+    json!({"major": major, "refusal": refusal})
 }
 
 fn frame(payload: v1::envelope::Payload) -> String {
@@ -35,28 +25,15 @@ fn frame(payload: v1::envelope::Payload) -> String {
 
 #[test]
 fn mobile_contract_matches_rust() {
-    let capabilities: Vec<Value> = (0..64)
-        .map(|index| 1_u64 << index)
-        .filter(|bit| HOST_CAPABILITIES & bit != 0)
-        .map(|bit| json!({"bit": bit.to_string(), "name": capability_names(bit)[0]}))
-        .collect();
-    let mut admissions = vec![
-        admission(PROTOCOL_MAJOR, HOST_CAPABILITIES, false),
-        admission(PROTOCOL_MAJOR, u64::MAX, false),
-        admission(PROTOCOL_MAJOR + 1, 0, true),
-        admission(PROTOCOL_MAJOR, 0, true),
-        admission(PROTOCOL_MAJOR, 0, false),
+    let admissions = vec![
+        admission(PROTOCOL_MAJOR),
+        admission(PROTOCOL_MAJOR - 1),
+        admission(PROTOCOL_MAJOR + 1),
+        admission(0),
     ];
-    admissions.extend(
-        (0..64)
-            .map(|index| 1_u64 << index)
-            .filter(|bit| HOST_CAPABILITIES & bit != 0)
-            .map(|bit| admission(PROTOCOL_MAJOR, HOST_CAPABILITIES & !bit, false)),
-    );
     let constants = json!({
-        "protocolMajor": PROTOCOL_MAJOR, "protocolMinor": PROTOCOL_MINOR,
-        "maxFrameBytes": MAX_FRAME_BYTES, "hostCapabilities": HOST_CAPABILITIES.to_string(),
-        "capabilities": capabilities,
+        "protocolMajor": PROTOCOL_MAJOR,
+        "maxFrameBytes": MAX_FRAME_BYTES,
     });
     let vectors = json!({
         "admissions": admissions,

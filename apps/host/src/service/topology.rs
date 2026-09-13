@@ -457,7 +457,7 @@ mod tests {
                 lock: Arc::new(tokio::sync::Mutex::new(())),
                 baseline: Arc::new(Mutex::new(None)),
                 terminal: Arc::new(Mutex::new(TerminalClients::new(
-                    Arc::new(OutputCredit::negotiated(false)),
+                    Arc::new(OutputCredit::new()),
                     TopologyOutputTrigger::default(),
                 ))),
                 sender,
@@ -724,7 +724,7 @@ mod tests {
                 lock: Arc::new(tokio::sync::Mutex::new(())),
                 baseline: Arc::new(Mutex::new(None)),
                 terminal: Arc::new(Mutex::new(TerminalClients::new(
-                    Arc::new(OutputCredit::negotiated(false)),
+                    Arc::new(OutputCredit::new()),
                     TopologyOutputTrigger::default(),
                 ))),
                 sender,
@@ -899,7 +899,7 @@ mod tests {
             lock: Arc::new(tokio::sync::Mutex::new(())),
             baseline: Arc::new(Mutex::new(None)),
             terminal: Arc::new(Mutex::new(TerminalClients::new(
-                Arc::new(OutputCredit::negotiated(false)),
+                Arc::new(OutputCredit::new()),
                 TopologyOutputTrigger::default(),
             ))),
             sender,

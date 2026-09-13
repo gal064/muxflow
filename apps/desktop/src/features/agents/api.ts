@@ -32,7 +32,6 @@ interface WireRoute {
 
 interface WireRecord {
   agentId: string;
-  adapter: string;
   adapterId?: string;
   nativeSessionId: string;
   displayName: string;
@@ -57,7 +56,7 @@ export interface WireAgentSnapshot {
   notificationWatermark?: string | number;
   connectionEpoch: string | number;
   adapters?: Array<{
-    adapter: string; id: string; displayName: string; supportsLaunch?: boolean; supportsResume?: boolean;
+    id: string; displayName: string; supportsLaunch?: boolean; supportsResume?: boolean;
     supportsHooks?: boolean; supportsProcessDetection?: boolean;
     hookConfigPath?: string; hookEvents?: string[];
     hookWiring?: string; hookWiringDetail?: string; hookSetupRecommended?: boolean;
@@ -65,7 +64,6 @@ export interface WireAgentSnapshot {
 }
 
 interface WireHookPlan {
-  adapter: string;
   adapterId?: string;
   action: string;
   configPath: string;
@@ -183,7 +181,7 @@ export class TauriAgentClient implements AgentClient {
     const plan = response.hookPlan;
     if (!plan?.confirmationToken || !plan.configPath) throw new Error("Host omitted the reviewable hook plan.");
     return {
-      adapterId: canonicalAdapterId(plan.adapterId, plan.adapter),
+      adapterId: canonicalAdapterId(plan.adapterId),
       action,
       revision: plan.confirmationToken,
       alreadyInstalled: Boolean(plan.alreadyCurrent),
@@ -329,9 +327,9 @@ function mapRecord(scope: AgentRequestScope, value: WireRecord): AgentRecord {
   const attentionSeenAt = safeNumber(value.attentionSeenAtUnixMillis, "agent attention seen time");
   return {
     id: value.agentId,
-    adapterId: canonicalAdapterId(value.adapterId, value.adapter),
+    adapterId: canonicalAdapterId(value.adapterId),
     nativeSessionId: value.nativeSessionId,
-    displayName: value.displayName || `${value.adapterId || value.adapter || "Agent"} agent`,
+    displayName: value.displayName || `${value.adapterId || "Agent"} agent`,
     hostProfileId: scope.hostProfileId,
     serverIdentity: scope.serverIdentity,
     sessionId: value.route.sessionId,
@@ -353,7 +351,7 @@ function mapRecord(scope: AgentRequestScope, value: WireRecord): AgentRecord {
 }
 
 function mapAdapterDescriptor(value: NonNullable<WireAgentSnapshot["adapters"]>[number]): AgentAdapterDescriptor {
-  const id = canonicalAdapterId(value.id, value.adapter);
+  const id = canonicalAdapterId(value.id);
   return {
     id, displayName: value.displayName || id,
     supportsLaunch: Boolean(value.supportsLaunch), supportsResume: Boolean(value.supportsResume),

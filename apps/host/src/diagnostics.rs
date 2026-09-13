@@ -1955,9 +1955,6 @@ struct HelperReport {
     version: &'static str,
     build_digest: String,
     protocol_major: u32,
-    protocol_minor: u32,
-    capability_bits: u64,
-    capabilities: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2051,11 +2048,6 @@ fn build_report() -> DiagnosticsReport {
                 .unwrap_or("unavailable")
                 .to_owned(),
             protocol_major: tmux_agent_protocol::PROTOCOL_MAJOR,
-            protocol_minor: tmux_agent_protocol::PROTOCOL_MINOR,
-            capability_bits: tmux_agent_protocol::HOST_CAPABILITIES,
-            capabilities: tmux_agent_protocol::capability_names(
-                tmux_agent_protocol::HOST_CAPABILITIES,
-            ),
         },
         dependencies: DependenciesReport {
             tmux: tmux_dependency_version(),
@@ -2086,15 +2078,14 @@ fn build_report() -> DiagnosticsReport {
 
 fn print_human_report(report: &DiagnosticsReport) {
     println!(
-        "muxflow helper {} build {} (protocol {}.{})",
+        "muxflow helper {} build {} (protocol {})",
         report.helper.version,
         report
             .helper
             .build_digest
             .get(..12)
             .unwrap_or("unavailable"),
-        report.helper.protocol_major,
-        report.helper.protocol_minor
+        report.helper.protocol_major
     );
     println!(
         "platform: {}/{}",

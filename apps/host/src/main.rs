@@ -91,7 +91,6 @@ async fn main() -> anyhow::Result<()> {
                     "helperVersion": tmux_agent_protocol::HELPER_VERSION,
                     "helperBuildDigest": build_identity::digest()?,
                     "protocolMajor": tmux_agent_protocol::PROTOCOL_MAJOR,
-                    "protocolMinor": tmux_agent_protocol::PROTOCOL_MINOR,
                     "os": std::env::consts::OS,
                     "architecture": std::env::consts::ARCH,
                 })

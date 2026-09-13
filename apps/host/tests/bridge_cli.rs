@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, PROTOCOL_MAJOR, envelope, read_frame_sync,
+    HELPER_VERSION, PROTOCOL_MAJOR, envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -60,7 +60,6 @@ fn accept_compatible_bridge(listener: &UnixListener) -> UnixStream {
         Payload::ServerHello(v1::ServerHello {
             helper_version: HELPER_VERSION.into(),
             helper_build_digest: version["helperBuildDigest"].as_str().unwrap().into(),
-            capabilities: HOST_CAPABILITIES,
             ..Default::default()
         }),
     );

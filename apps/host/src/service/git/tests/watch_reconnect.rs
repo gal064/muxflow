@@ -390,7 +390,7 @@ async fn a_diff_reads_status_once_on_an_unobserved_repository() {
     request.repository_id = status.repository.unwrap().repository_id;
     request.path = b"file".to_vec();
     request.diff_target = v1::GitDiffTarget::Unstaged.into();
-    let (_diff, landed) = service.diff(&request, true, None).await.unwrap();
+    let (_diff, landed) = service.diff(&request, None).await.unwrap();
     assert!(landed.authoritative);
     // Nothing invalidated the repository during the read, so the status the
     // diff was read against is the status it landed on. Reading it again would
@@ -498,7 +498,7 @@ async fn phase14_warm_diff_and_mutation_process_counts() {
     request.repository_id = repository_id.clone();
     request.path = b"file".to_vec();
     request.diff_target = v1::GitDiffTarget::Unstaged.into();
-    let (diff, carried) = service.diff(&request, true, None).await.unwrap();
+    let (diff, carried) = service.diff(&request, None).await.unwrap();
     assert!(carried.authoritative, "the diff response carries status");
     assert_eq!(diff.new_content, b"changed\n");
     let after_diff = measurements::phase14_git_process_snapshot();

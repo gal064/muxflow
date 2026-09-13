@@ -72,7 +72,7 @@ async fn mutation_generation_is_observed_only_after_topology_lock() {
 }
 
 #[tokio::test]
-async fn bulk_handshake_rejects_stale_server_identity_and_echoes_epoch() {
+async fn bulk_handshake_rejects_stale_server_identity_before_admission() {
     let (mut client, server) = UnixStream::pair().unwrap();
     let task = tokio::spawn(serve_with_shutdown(server, None));
     write_frame(
@@ -81,9 +81,6 @@ async fn bulk_handshake_rejects_stale_server_identity_and_echoes_epoch() {
             1,
             0,
             Payload::ClientHello(v1::ClientHello {
-                desktop_version: "test".into(),
-                requested_capabilities: HOST_CAPABILITIES,
-                expected_helper_version: HELPER_VERSION.into(),
                 bulk_connection: true,
                 expected_server_identity: "definitely-stale".into(),
                 connection_epoch: 9_007_199_254_740_993,
@@ -93,14 +90,13 @@ async fn bulk_handshake_rejects_stale_server_identity_and_echoes_epoch() {
     .await
     .unwrap();
     let frame = read_frame(&mut client).await.unwrap().unwrap();
-    let Some(Payload::ServerHello(hello)) = frame.payload else {
-        panic!("expected hello")
+    let Some(Payload::Error(error)) = frame.payload else {
+        panic!("expected identity refusal")
     };
-    assert!(hello.read_only);
-    assert!(hello.incompatibility.contains("expected server identity"));
-    assert_eq!(hello.connection_epoch, 9_007_199_254_740_993);
-    drop(client);
-    task.await.unwrap().unwrap();
+    assert_eq!(error.code, "server_identity_mismatch");
+    assert!(error.display_message.contains("expected server identity"));
+    assert!(read_frame(&mut client).await.unwrap().is_none());
+    assert!(task.await.unwrap().is_err());
 }
 
 /// Every connection leaves one line behind saying how it ended, and the
@@ -121,9 +117,6 @@ async fn a_desktop_that_closes_its_side_ends_the_connection_as_a_client_eof() {
             1,
             0,
             Payload::ClientHello(v1::ClientHello {
-                desktop_version: "client-eof-test".into(),
-                requested_capabilities: HOST_CAPABILITIES,
-                expected_helper_version: HELPER_VERSION.into(),
                 connection_epoch: 5,
                 ..Default::default()
             }),
@@ -157,9 +150,6 @@ async fn stalled_ordered_operation_does_not_block_the_frame_reader() {
             1,
             0,
             Payload::ClientHello(v1::ClientHello {
-                desktop_version: "ordered-stall-test".into(),
-                requested_capabilities: HOST_CAPABILITIES,
-                expected_helper_version: HELPER_VERSION.into(),
                 connection_epoch: 77,
                 ..Default::default()
             }),
@@ -271,9 +261,6 @@ async fn buffered_cancel_or_eof_before_first_poll_cannot_stage_a_file() {
                 1,
                 0,
                 Payload::ClientHello(v1::ClientHello {
-                    desktop_version: "cancel-race".into(),
-                    requested_capabilities: HOST_CAPABILITIES,
-                    expected_helper_version: HELPER_VERSION.into(),
                     connection_epoch: epoch,
                     ..Default::default()
                 }),
@@ -362,9 +349,6 @@ async fn half_closed_client_with_live_git_watch_completes_teardown() {
             1,
             0,
             Payload::ClientHello(v1::ClientHello {
-                desktop_version: "half-close".into(),
-                requested_capabilities: HOST_CAPABILITIES,
-                expected_helper_version: HELPER_VERSION.into(),
                 ..Default::default()
             }),
         ),
@@ -696,4 +680,34 @@ async fn a_full_queue_defers_a_recovery_event_rather_than_dropping_it() {
         },
         "a recovery event was lost"
     );
+}
+
+#[tokio::test]
+async fn a_different_contract_is_closed_before_pipelined_requests_are_dispatched() {
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(serve_with_shutdown(server, Some(shutdown_tx)));
+    let mut hello = envelope(1, 0, Payload::ClientHello(v1::ClientHello::default()));
+    hello.protocol_major = PROTOCOL_MAJOR - 1;
+    write_frame(&mut client, &hello).await.unwrap();
+    write_frame(
+        &mut client,
+        &envelope(
+            2,
+            0,
+            Payload::Request(v1::Request {
+                operation: v1::Operation::ShutdownDaemon.into(),
+                ..Default::default()
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    let response = read_frame(&mut client).await.unwrap().unwrap();
+    let Some(Payload::Error(error)) = response.payload else {
+        panic!("expected contract refusal");
+    };
+    assert_eq!(error.code, "protocol_incompatible");
+    assert!(task.await.unwrap().is_err());
+    assert!(shutdown_rx.try_recv().is_err());
 }

@@ -1,7 +1,7 @@
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 use protocol_driver_support::{Bridge, Hello, local_bridge_command, ssh_bridge_command};
-use tmux_agent_protocol::{HOST_CAPABILITIES, v1};
+use tmux_agent_protocol::v1;
 use uuid::Uuid;
 
 struct Connection {
@@ -16,8 +16,6 @@ impl Connection {
         let (bridge, hello) = Bridge::connect(
             &mut command,
             Hello {
-                desktop_version: "phase5-driver",
-                requested_capabilities: HOST_CAPABILITIES,
                 bulk_connection: false,
                 expected_server_identity: "",
                 connection_epoch: epoch,

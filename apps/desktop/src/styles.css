@@ -162,7 +162,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .bar-button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--chrome-hover); color: var(--chrome-ink); --icon-knockout: var(--chrome-hover); }
 .bar-button[aria-pressed="true"] { color: var(--chrome-ink-strong); }
-/* A frozen control has to look frozen. While the connection was read-only the
+/* A frozen control has to look frozen. While the connection was disconnected the
    titlebar's new-workspace `+` and the strip's split and `+` were disabled and
    drawn identically to the live ones, so the only feedback from pressing one
    was nothing happening. */
@@ -206,10 +206,6 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 /* The live region wrapping title + detail; it must not change the row's shape. */
 .link-strip-message { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; }
-.link-strip-frozen {
-  background: var(--danger-wash); color: var(--danger-ink);
-  box-shadow: inset 2px 0 var(--danger);
-}
 .link-strip-title { font-weight: 600; flex: 0 0 auto; }
 .link-strip-detail {
   min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -548,7 +544,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .host-latency { margin-left: auto; color: var(--chrome-faint); font-variant-numeric: tabular-nums; }
 .link-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--ok); }
 .link-dot.connecting, .link-dot.reconnecting, .link-dot.resyncing { background: var(--warn); }
-.link-dot.disconnected, .link-dot.readOnly { background: var(--danger); }
+.link-dot.disconnected { background: var(--danger); }
 
 /* ── Workspace column ──────────────────────────────────────────────────── */
 
@@ -1545,9 +1541,6 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   .agent-mark-badge.blocked, .agent-mark-badge.done { background: ButtonText; }
   .agent-mark-badge.unknown { border-style: dashed; }
   .link-strip { border-bottom: 2px solid ButtonText; }
-  /* Read-only and reconnecting are two different situations and the colors
-     that separate them do not survive here, so the words carry it. */
-  .link-strip-frozen .link-strip-title::after { content: " (read-only)"; }
   .context-menu, .palette, .settings-dialog, .confirmation, .shortcut-dialog { border: 1px solid ButtonText; }
 }
 
