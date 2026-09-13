@@ -549,7 +549,7 @@ pub(crate) enum Prewarm {
 ///
 /// **Only ever for a settled writable connection.** `BulkBinding::validate` is
 /// the gate, and it is the whole reason this takes a binding rather than the
-/// parts of one: a connection that is read-only or still settling fails it with
+/// parts of one: a connection that is disconnected or still settling fails it with
 /// "bulk job is not bound to a writable live control connection" — the exact
 /// error that replaced a painted editor in decomposition.md's "Observed once".
 /// A pre-warm has no user behind it, so it must never turn that state into
@@ -803,7 +803,6 @@ mod tests {
                 tmux_agent_protocol::v1::ServerHello {
                     server_identity: "server-a".into(),
                     connection_epoch: 7,
-                    capabilities: tmux_agent_protocol::HOST_CAPABILITIES,
                     ..Default::default()
                 },
             ),
@@ -872,7 +871,6 @@ mod tests {
                 tmux_agent_protocol::v1::ServerHello {
                     server_identity: identity.into(),
                     connection_epoch: epoch,
-                    capabilities: tmux_agent_protocol::HOST_CAPABILITIES,
                     ..Default::default()
                 },
             ),
@@ -955,30 +953,6 @@ mod tests {
             Prewarm::AlreadyWarm,
         );
         close_pooled_bulk_bridges(client.bulk_scope);
-    }
-
-    /// decomposition.md's "Observed once": a connection that is read-only while
-    /// it settles is the state a pre-warm must refuse, not the state it
-    /// hurries into. Captured while writable and flipped afterwards, because
-    /// that is the real race — the binding is taken on the bridge thread and
-    /// validated again on the pre-warm thread.
-    #[test]
-    fn a_connection_that_went_read_only_is_not_prewarmed() {
-        let _guard = super::super::scheduler::engine_test_lock();
-        let client = settled_client("prewarm-c", 13);
-        let binding = BulkBinding::capture(Arc::clone(&client), "prewarm-c".into(), 13).unwrap();
-        client
-            .read_only
-            .store(true, std::sync::atomic::Ordering::Release);
-
-        let error = prewarm_with_spawn(&ConnectionSpec::Local, &binding, |_, _| {
-            panic!("a read-only connection must never reach a spawn")
-        })
-        .expect_err("a read-only connection must not be pre-warmed");
-        assert!(
-            error.contains("writable live control connection"),
-            "{error}"
-        );
     }
 
     /// The same refusal for a connection that has not finished settling.

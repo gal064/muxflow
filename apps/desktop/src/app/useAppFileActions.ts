@@ -49,7 +49,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
 
   const mutateFile = async (mutation: FileMutation) => {
     if (!options.scope || !options.root || !options.canMutate) {
-      throw new Error("File changes are unavailable while the host is read-only.");
+      throw new Error("File changes are unavailable while the host is disconnected.");
     }
     const mutationScope = options.scope;
     const mutationRoot = options.root;

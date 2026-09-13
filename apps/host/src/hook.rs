@@ -1252,9 +1252,6 @@ async fn connect_and_handshake(socket: &Path) -> anyhow::Result<UnixStream> {
             1,
             0,
             v1::envelope::Payload::ClientHello(v1::ClientHello {
-                desktop_version: tmux_agent_protocol::HELPER_VERSION.into(),
-                requested_capabilities: tmux_agent_protocol::CAP_AGENTS,
-                expected_helper_version: tmux_agent_protocol::HELPER_VERSION.into(),
                 bulk_connection: false,
                 ..Default::default()
             }),
@@ -1268,9 +1265,7 @@ async fn connect_and_handshake(socket: &Path) -> anyhow::Result<UnixStream> {
     let Some(v1::envelope::Payload::ServerHello(hello)) = hello.payload else {
         bail!("private daemon returned an invalid handshake");
     };
-    if hello.read_only || hello.capabilities & tmux_agent_protocol::CAP_AGENTS == 0 {
-        bail!("private daemon does not accept this hook protocol version");
-    }
+
     if hello.helper_build_digest != crate::build_identity::digest()? {
         bail!("private daemon is not the same helper build as this hook");
     }
@@ -1491,7 +1486,6 @@ mod tests {
                     1,
                     0,
                     v1::envelope::Payload::ServerHello(v1::ServerHello {
-                        capabilities: tmux_agent_protocol::CAP_AGENTS,
                         helper_build_digest: crate::build_identity::digest().unwrap().into(),
                         ..Default::default()
                     }),
@@ -2299,7 +2293,6 @@ mod tests {
                     v1::envelope::Payload::ServerHello(v1::ServerHello {
                         helper_version: tmux_agent_protocol::HELPER_VERSION.into(),
                         helper_build_digest: "0".repeat(64),
-                        capabilities: tmux_agent_protocol::CAP_AGENTS,
                         ..Default::default()
                     }),
                 ),
@@ -2344,7 +2337,6 @@ mod tests {
                     1,
                     0,
                     v1::envelope::Payload::ServerHello(v1::ServerHello {
-                        capabilities: tmux_agent_protocol::CAP_AGENTS,
                         helper_build_digest: crate::build_identity::digest().unwrap().into(),
                         ..Default::default()
                     }),

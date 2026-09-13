@@ -4,7 +4,7 @@ use std::{
 };
 
 use protocol_driver_support::{Bridge, Hello, ssh_bridge_command};
-use tmux_agent_protocol::{CAP_AGENTS, v1};
+use tmux_agent_protocol::v1;
 
 const REMOTE_ENV: &str = "HOME=$HOME/phase6-home PATH=$HOME/phase6-bin:/usr/local/bin:/usr/bin:/bin ADE_HOST_RUNTIME_DIR=$HOME/phase6-runtime ADE_TMUX_SOCKET_NAME=ade-phase6";
 
@@ -19,8 +19,6 @@ impl Connection {
         let (bridge, _) = Bridge::connect(
             &mut command,
             Hello {
-                desktop_version: "phase6-driver",
-                requested_capabilities: CAP_AGENTS,
                 bulk_connection: false,
                 expected_server_identity: "",
                 connection_epoch: epoch,
@@ -112,14 +110,10 @@ fn main() -> Result<(), String> {
     }
 
     let mut hook_evidence = serde_json::Map::new();
-    for (adapter_id, adapter_kind) in [
-        ("codex", v1::AgentAdapterKind::Codex),
-        ("claude-code", v1::AgentAdapterKind::ClaudeCode),
-    ] {
+    for adapter_id in ["codex", "claude-code"] {
         let review = review_hooks(
             &mut connection,
             adapter_id,
-            adapter_kind,
             v1::HookManagementAction::Install,
         )?;
         if review.confirmation_token.is_empty()
@@ -138,14 +132,12 @@ fn main() -> Result<(), String> {
         apply_hooks(
             &mut connection,
             adapter_id,
-            adapter_kind,
             v1::HookManagementAction::Install,
             &stale_token,
         )?;
         let current = review_hooks(
             &mut connection,
             adapter_id,
-            adapter_kind,
             v1::HookManagementAction::Install,
         )?;
         if !current.already_current {
@@ -154,7 +146,6 @@ fn main() -> Result<(), String> {
         apply_hooks(
             &mut connection,
             adapter_id,
-            adapter_kind,
             v1::HookManagementAction::Install,
             &current.confirmation_token,
         )?;
@@ -163,7 +154,6 @@ fn main() -> Result<(), String> {
         let stale = review_hooks(
             &mut connection,
             adapter_id,
-            adapter_kind,
             v1::HookManagementAction::Uninstall,
         )?;
         let command = if adapter_id == "codex" {
@@ -175,7 +165,6 @@ fn main() -> Result<(), String> {
         let rejected = apply_hooks_expect_error(
             &mut connection,
             adapter_id,
-            adapter_kind,
             v1::HookManagementAction::Uninstall,
             &stale.confirmation_token,
         )?;
@@ -187,20 +176,17 @@ fn main() -> Result<(), String> {
         let uninstall = review_hooks(
             &mut connection,
             adapter_id,
-            adapter_kind,
             v1::HookManagementAction::Uninstall,
         )?;
         apply_hooks(
             &mut connection,
             adapter_id,
-            adapter_kind,
             v1::HookManagementAction::Uninstall,
             &uninstall.confirmation_token,
         )?;
         let removed = review_hooks(
             &mut connection,
             adapter_id,
-            adapter_kind,
             v1::HookManagementAction::Uninstall,
         )?;
         if !removed.already_current {
@@ -466,14 +452,12 @@ fn main() -> Result<(), String> {
 fn review_hooks(
     connection: &mut Connection,
     adapter_id: &str,
-    adapter: v1::AgentAdapterKind,
     target: v1::HookManagementAction,
 ) -> Result<v1::HookManagementPlan, String> {
     connection
         .request(v1::Request {
             operation: v1::Operation::AgentHookManagement.into(),
             agent: Some(v1::AgentRequest {
-                adapter: adapter.into(),
                 adapter_id: adapter_id.into(),
                 hook_management: v1::HookManagementAction::Review.into(),
                 hook_management_target: target.into(),
@@ -489,7 +473,6 @@ fn review_hooks(
 fn apply_hooks(
     connection: &mut Connection,
     adapter_id: &str,
-    adapter: v1::AgentAdapterKind,
     action: v1::HookManagementAction,
     token: &str,
 ) -> Result<v1::HookManagementPlan, String> {
@@ -497,7 +480,6 @@ fn apply_hooks(
         .request(v1::Request {
             operation: v1::Operation::AgentHookManagement.into(),
             agent: Some(v1::AgentRequest {
-                adapter: adapter.into(),
                 adapter_id: adapter_id.into(),
                 hook_management: action.into(),
                 confirmed: true,
@@ -514,14 +496,12 @@ fn apply_hooks(
 fn apply_hooks_expect_error(
     connection: &mut Connection,
     adapter_id: &str,
-    adapter: v1::AgentAdapterKind,
     action: v1::HookManagementAction,
     token: &str,
 ) -> Result<v1::Response, String> {
     connection.request_error(v1::Request {
         operation: v1::Operation::AgentHookManagement.into(),
         agent: Some(v1::AgentRequest {
-            adapter: adapter.into(),
             adapter_id: adapter_id.into(),
             hook_management: action.into(),
             confirmed: true,

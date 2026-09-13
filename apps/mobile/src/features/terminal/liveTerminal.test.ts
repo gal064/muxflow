@@ -43,7 +43,6 @@ describe.skipIf(!availability.available)(`live terminal (${availability.reason ?
     harness = await startHostHarness();
     connection = new HostConnection({
       dial: async () => harness.transport,
-      appVersion: "0.1.0-live-terminal",
       nextConnectionEpoch: () => (epoch += 1),
       store,
       terminals: registry,

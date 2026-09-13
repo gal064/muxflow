@@ -5,8 +5,7 @@ export type ConnectionPhase =
   | "connecting"
   | "reconnecting"
   | "resyncing"
-  | "connected"
-  | "readOnly";
+  | "connected";
 
 export interface NormalizedHostState {
   phase: ConnectionPhase;

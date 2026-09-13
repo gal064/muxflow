@@ -265,7 +265,6 @@ impl HookManager {
         let after_preview = preview(&proposed);
         let diff_preview = diff_preview(&value, &proposed);
         Ok(v1::HookManagementPlan {
-            adapter: adapter.into(),
             adapter_id: adapter_impl.id().into(),
             action: action.into(),
             config_path: path.to_string_lossy().into_owned(),

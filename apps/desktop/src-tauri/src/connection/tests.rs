@@ -18,7 +18,7 @@ fn bulk_prewarm_is_claimed_once_per_nonzero_terminal_epoch() {
 }
 
 #[test]
-fn incompatible_or_disconnected_client_rejects_mutation_without_queueing() {
+fn disconnected_client_rejects_mutation_without_queueing() {
     let client = TerminalClient::new();
     let error = client
         .request(v1::Request {
@@ -33,9 +33,6 @@ fn incompatible_or_disconnected_client_rejects_mutation_without_queueing() {
     assert!(client.pending.lock().unwrap().is_empty());
 
     client.ready.store(true, Ordering::Release);
-    client.read_only.store(true, Ordering::Release);
-    let error = client.request(v1::Request::default()).unwrap_err();
-    assert!(error.starts_with("connection_read_only: "), "{error}");
     assert!(client.pending.lock().unwrap().is_empty());
 }
 
@@ -673,69 +670,6 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
 }
 
 #[test]
-fn incompatible_server_hello_enters_read_only_and_quarantines_its_snapshot() {
-    use tmux_agent_protocol::CAP_TERMINAL_FILE_RESOLUTION;
-
-    let compatible = v1::ServerHello {
-        read_only: false,
-        capabilities: HOST_CAPABILITIES,
-        ..Default::default()
-    };
-    let read_only = v1::ServerHello {
-        read_only: true,
-        ..Default::default()
-    };
-    assert!(handshake_admission(PROTOCOL_MAJOR, &compatible).is_ok());
-    assert!(handshake_admission(PROTOCOL_MAJOR + 1, &compatible).is_err());
-    assert!(handshake_admission(PROTOCOL_MAJOR, &read_only).is_err());
-    let missing_capability = v1::ServerHello {
-        capabilities: 0,
-        ..compatible.clone()
-    };
-    assert!(handshake_admission(PROTOCOL_MAJOR, &missing_capability).is_err());
-    let pre_terminal_file_helper = v1::ServerHello {
-        capabilities: HOST_CAPABILITIES & !CAP_TERMINAL_FILE_RESOLUTION,
-        ..compatible
-    };
-    assert!(handshake_admission(PROTOCOL_MAJOR, &pre_terminal_file_helper).is_err());
-}
-
-/// Every refusal carries the reason the user is shown. The regression: the
-/// boolean consolidated three checks while the message was recomputed from the
-/// capability mask alone, so a helper with every capability that disagreed on
-/// the envelope major was refused *and* explained by nothing — the app entered
-/// read-only in silence.
-#[test]
-fn every_handshake_refusal_names_its_reason() {
-    let full_capabilities = v1::ServerHello {
-        read_only: false,
-        capabilities: HOST_CAPABILITIES,
-        ..Default::default()
-    };
-    let refusals = [
-        handshake_admission(PROTOCOL_MAJOR + 1, &full_capabilities),
-        handshake_admission(
-            PROTOCOL_MAJOR,
-            &v1::ServerHello {
-                read_only: true,
-                ..full_capabilities.clone()
-            },
-        ),
-        handshake_admission(
-            PROTOCOL_MAJOR,
-            &v1::ServerHello {
-                capabilities: 0,
-                ..full_capabilities
-            },
-        ),
-    ];
-    for refusal in refusals {
-        let reason = refusal.expect_err("the hello is refused").to_string();
-        assert!(!reason.is_empty(), "a refusal without a reason is silent");
-    }
-}
-
-#[test]
 fn startup_rollback_releases_both_dispatch_workers() {
     let client = Arc::new(TerminalClient::new());
     client.start_dispatchers("rollback-test").unwrap();
@@ -850,27 +784,6 @@ fn input_flush_reports_bytes_accepted_by_a_replaced_connection() {
 
     sender.send(ClientInputDispatch::Stop).unwrap();
     worker.join().unwrap();
-}
-
-/// A helper that cannot serve a single-request file open is refused at the
-/// handshake, rather than admitted and found wanting one operation at a time.
-#[test]
-fn a_helper_missing_the_file_stream_capability_is_refused_at_the_handshake() {
-    use tmux_agent_protocol::{CAP_FILE_STREAM, HOST_CAPABILITIES, PROTOCOL_MAJOR};
-    let hello = |capabilities: u64| v1::ServerHello {
-        capabilities,
-        read_only: false,
-        ..Default::default()
-    };
-    assert!(super::bridge::handshake_admission(PROTOCOL_MAJOR, &hello(HOST_CAPABILITIES)).is_ok());
-    assert!(
-        super::bridge::handshake_admission(
-            PROTOCOL_MAJOR,
-            &hello(HOST_CAPABILITIES & !CAP_FILE_STREAM)
-        )
-        .is_err(),
-        "an older helper was admitted and would fail every file open"
-    );
 }
 
 /// Cancelling an operation this connection has not dispatched succeeds, and

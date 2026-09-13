@@ -4,7 +4,6 @@ package tmux_agent.protocol.v1;
 
 message Envelope {
   uint32 protocol_major = 1;
-  uint32 protocol_minor = 2;
   uint64 request_id = 3;
   uint64 sequence = 4;
   uint64 stream_id = 5;
@@ -35,9 +34,6 @@ enum Priority {
 }
 
 message ClientHello {
-  string desktop_version = 1;
-  uint64 requested_capabilities = 2;
-  string expected_helper_version = 3;
   bool bulk_connection = 4;
   // Bulk connections are capabilities of one observed control connection,
   // never merely of a profile. The helper rejects a mismatched identity and
@@ -52,9 +48,6 @@ message ServerHello {
   string architecture = 3;
   string tmux_version = 4;
   string server_identity = 5;
-  uint64 capabilities = 6;
-  bool read_only = 7;
-  string incompatibility = 8;
   string git_version = 9;
   uint64 connection_epoch = 10;
   uint64 terminal_output_window_bytes = 11;
@@ -67,7 +60,7 @@ message ServerHello {
 
 // Reverse-direction, one-way credit release. It is deliberately not a
 // Request: acknowledging renderer admission must never wait behind the output
-// whose admission it releases, and is valid on a negotiated read-only stream.
+// whose admission it releases.
 message TerminalOutputAck {
   uint64 connection_epoch = 1;
   uint64 cumulative_bytes = 2;
@@ -91,8 +84,6 @@ enum Operation {
   OPERATION_WATCH_DIRECTORY = 13;
   OPERATION_UNWATCH_DIRECTORY = 14;
   OPERATION_FILE_MUTATION = 15;
-  OPERATION_READ_FILE = 16;
-  OPERATION_WRITE_FILE = 17;
   OPERATION_START_DOWNLOAD = 18;
   OPERATION_READ_DOWNLOAD_CHUNK = 19;
   OPERATION_CANCEL_DOWNLOAD = 20;
@@ -572,7 +563,6 @@ message FileServiceRequest {
   uint32 page_size = 22;
   uint64 total_bytes = 23;
   string blake3 = 24;
-  // Terminal-upload fields are additive so older helpers safely ignore them.
   // destination is the requested basename, never a shell command or path.
   string source_name = 25;
   bool large_upload_confirmed = 26;
@@ -721,8 +711,7 @@ message FileServiceEvent {
   string state = 8;
   string error = 9;
   bool deleted = 10;
-  // Capability and lease identity for authoritative routing. Existing field
-  // numbers remain stable for backwards compatibility.
+  // Capability and lease identity for authoritative routing.
   string root_token = 11;
   string watch_id = 12;
 }
@@ -949,6 +938,7 @@ message GitEvent {
 
 // Agent protocol is adapter-neutral. Vendor-specific hook JSON remains on the
 // private host side and is normalized before it crosses the desktop bridge.
+// Numeric identities are retained for persisted agent records and queued hook events.
 enum AgentAdapterKind {
   AGENT_ADAPTER_KIND_UNSPECIFIED = 0;
   AGENT_ADAPTER_KIND_CODEX = 1;
@@ -1021,7 +1011,6 @@ message AgentRoute {
 }
 
 message AgentAdapterDescriptor {
-  AgentAdapterKind adapter = 1;
   string id = 2;
   string display_name = 3;
   bool supports_launch = 4;
@@ -1044,7 +1033,6 @@ message AgentAdapterDescriptor {
 
 message AgentRecord {
   string agent_id = 1;
-  AgentAdapterKind adapter = 2;
   string native_session_id = 3;
   string display_name = 4;
   AgentRoute route = 5;
@@ -1065,7 +1053,7 @@ message AgentRecord {
   // Presence is topology/process reachability, independent of the retained
   // lifecycle evidence.
   bool present = 14;
-  // Canonical registry identity. The enum remains for protocol compatibility.
+  // Canonical registry identity.
   string adapter_id = 15;
   // Empty, "blocked", or "completed" for the current attention generation.
   string attention_kind = 16;
@@ -1112,7 +1100,6 @@ message AgentHookEvent {
 
 message AgentRequest {
   AgentActionKind action = 1;
-  AgentAdapterKind adapter = 2;
   string agent_id = 3;
   string native_session_id = 4;
   string display_name = 5;
@@ -1134,7 +1121,6 @@ message AgentRequest {
 }
 
 message HookManagementPlan {
-  AgentAdapterKind adapter = 1;
   HookManagementAction action = 2;
   string config_path = 3;
   string backup_path = 4;

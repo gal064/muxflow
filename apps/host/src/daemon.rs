@@ -164,9 +164,6 @@ pub async fn stop(socket_path: PathBuf) -> anyhow::Result<()> {
             1,
             0,
             Payload::ClientHello(v1::ClientHello {
-                desktop_version: tmux_agent_protocol::HELPER_VERSION.into(),
-                requested_capabilities: 0,
-                expected_helper_version: String::new(),
                 bulk_connection: false,
                 ..Default::default()
             }),
@@ -337,9 +334,6 @@ pub async fn check(socket_path: PathBuf) -> anyhow::Result<()> {
             1,
             0,
             Payload::ClientHello(v1::ClientHello {
-                desktop_version: tmux_agent_protocol::HELPER_VERSION.into(),
-                requested_capabilities: tmux_agent_protocol::HOST_CAPABILITIES,
-                expected_helper_version: tmux_agent_protocol::HELPER_VERSION.into(),
                 bulk_connection: false,
                 ..Default::default()
             }),
@@ -353,10 +347,7 @@ pub async fn check(socket_path: PathBuf) -> anyhow::Result<()> {
     let Some(Payload::ServerHello(hello)) = frame.payload else {
         bail!("daemon did not return ServerHello");
     };
-    validate_host_contract(envelope_major, &hello)?;
-    if hello.helper_version != tmux_agent_protocol::HELPER_VERSION {
-        bail!("daemon helper version handshake is incompatible");
-    }
+    validate_host_contract(envelope_major)?;
     if hello.helper_build_digest != crate::build_identity::digest()? {
         bail!("daemon helper build handshake is incompatible");
     }

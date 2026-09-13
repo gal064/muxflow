@@ -5,8 +5,7 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    CAP_TERMINAL_OUTPUT_CREDIT, HELPER_VERSION, HOST_CAPABILITIES, HostContractError, envelope,
-    read_frame_sync,
+    envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     validate_host_contract, write_frame_sync,
 };
@@ -188,9 +187,8 @@ fn run_bridge_once(
     }
     let mut reader = BufReader::new(stdout);
     let terminal_epoch = ((Uuid::new_v4().as_u128() as u64) & ((1_u64 << 53) - 1)).max(1);
-    let (hello, initial, admission, mut sequence) =
-        handshake_and_snapshot(&mut stdin, &mut reader, terminal_epoch)
-            .map_err(|error| with_bridge_diagnostic(error, diagnostic.as_ref()))?;
+    let (hello, initial) = handshake_and_snapshot(&mut stdin, &mut reader, terminal_epoch)
+        .map_err(|error| with_bridge_diagnostic(error, diagnostic.as_ref()))?;
     if client.stop_signal.is_stopped() {
         return Err("terminal bridge stopped during handshake".into());
     }
@@ -202,16 +200,13 @@ fn run_bridge_once(
         "bulk transfer control connection epoch was replaced",
     );
     super::files::bulk_pool::close_pooled_bulk_bridges(client.bulk_scope);
-    let credit_negotiated = hello.capabilities & CAP_TERMINAL_OUTPUT_CREDIT != 0;
-    if credit_negotiated
-        && (hello.terminal_output_window_bytes == 0 || hello.terminal_output_window_records == 0)
-    {
-        return Err("host negotiated terminal output credit without a bounded window".into());
+    if hello.terminal_output_window_bytes == 0 || hello.terminal_output_window_records == 0 {
+        return Err("host terminal output credit requires a bounded window".into());
     }
     if hello.terminal_output_window_bytes > super::delivery_window::NATIVE_DELIVERY_WINDOW_BYTES {
         return Err("host terminal output window exceeds the native 2 MiB delivery bound".into());
     }
-    let next_delivery = credit_negotiated.then(|| super::DeliveryWindow::new(terminal_epoch));
+    let next_delivery = Some(super::DeliveryWindow::new(terminal_epoch));
     let previous = {
         let mut delivery = client.delivery_window.lock().unwrap();
         std::mem::replace(&mut *delivery, next_delivery)
@@ -229,10 +224,9 @@ fn run_bridge_once(
             epoch: terminal_epoch,
         },
     );
-    let mut terminal_scope_value = None;
-    if let Some(initial) = initial {
-        sequence = initial.accepted_sequence;
-        terminal_scope_value = attach_scope(client, &initial.snapshot);
+    let mut sequence = initial.accepted_sequence;
+    let terminal_scope_value = attach_scope(client, &initial.snapshot);
+    {
         send_protocol_event(
             channel,
             sequence,
@@ -271,27 +265,7 @@ fn run_bridge_once(
             }
         }
     }
-    let read_only = admission.is_err();
-    client.read_only.store(read_only, Ordering::Release);
-    // The reason shown here *is* the refusal that put the connection in
-    // read-only, so there is no handshake the contract turns down without the
-    // user being told why. Recomputing the reason from the hello was how an
-    // envelope-major mismatch entered read-only with no error event at all.
-    if let Err(refusal) = admission {
-        send_event(
-            channel,
-            TerminalEvent::Error {
-                message: refusal.to_string(),
-            },
-        );
-        send_event(
-            channel,
-            TerminalEvent::ConnectionState {
-                state: "readOnly".into(),
-                detail: None,
-            },
-        );
-    } else if let Some((attach_session, attach_panes)) = terminal_scope_value
+    if let Some((attach_session, attach_panes)) = terminal_scope_value
         && !attach_session.is_empty()
     {
         let attach_id = 3;
@@ -324,18 +298,16 @@ fn run_bridge_once(
     let published_writer = control_writer.clone();
     let published = client.stop_signal.if_running(|| {
         *client.writer.lock().unwrap() = Some(published_writer);
-        if !read_only {
-            mark_input_reconnected(client);
-            client.lane_ready();
-            client.resize_queue.reconnected();
-            send_event(
-                channel,
-                TerminalEvent::ConnectionState {
-                    state: "connected".into(),
-                    detail: None,
-                },
-            );
-        }
+        mark_input_reconnected(client);
+        client.lane_ready();
+        client.resize_queue.reconnected();
+        send_event(
+            channel,
+            TerminalEvent::ConnectionState {
+                state: "connected".into(),
+                detail: None,
+            },
+        );
     });
     if !published {
         control_writer.close();
@@ -352,34 +324,20 @@ fn run_bridge_once(
         &hello.server_identity,
         channel,
         client,
-        !read_only,
     )
 }
-
-/// The handshake outcome: the hello, the quarantined-or-accepted snapshot, the
-/// host contract's verdict — `Err` carrying the reason the connection may only
-/// be read-only — and the accepted sequence watermark.
-type HandshakeOutcome = (
-    v1::ServerHello,
-    Option<InitialHostState>,
-    Result<(), HostContractError>,
-    u64,
-);
 
 pub(super) fn handshake_and_snapshot(
     stdin: &mut impl Write,
     reader: &mut impl Read,
     connection_epoch: u64,
-) -> Result<HandshakeOutcome, String> {
+) -> Result<(v1::ServerHello, InitialHostState), String> {
     write_frame_sync(
         stdin,
         &envelope(
             1,
             0,
             Payload::ClientHello(v1::ClientHello {
-                desktop_version: env!("CARGO_PKG_VERSION").into(),
-                requested_capabilities: HOST_CAPABILITIES,
-                expected_helper_version: HELPER_VERSION.into(),
                 bulk_connection: false,
                 connection_epoch,
                 ..Default::default()
@@ -389,7 +347,7 @@ pub(super) fn handshake_and_snapshot(
     .map_err(|error| error.to_string())?;
     // Subscribe is valid immediately after ClientHello. Pipeline both writes
     // before waiting for ServerHello so an SSH RTT does not sit between them;
-    // the response remains quarantined until compatibility is validated.
+    // admission is checked before consuming any response payload.
     write_frame_sync(
         stdin,
         &envelope(
@@ -410,14 +368,12 @@ pub(super) fn handshake_and_snapshot(
     let Some(Payload::ServerHello(hello)) = hello_frame.payload else {
         return Err("host did not return ServerHello".into());
     };
+    validate_host_contract(envelope_major).map_err(|error| error.to_string())?;
+    if hello.connection_epoch != connection_epoch {
+        return Err("host returned a different connection epoch".into());
+    }
     let (response, buffered) = read_until_response_with_value(reader, 2)?;
     let accepted_sequence = response.accepted_sequence;
-    if let Err(refusal) = handshake_admission(envelope_major, &hello) {
-        // Subscribe was intentionally pipelined, so its correlated response
-        // must always be consumed. Keep its sequence watermark while
-        // quarantining the incompatible snapshot and every later event.
-        return Ok((hello, None, Err(refusal), accepted_sequence));
-    }
     if !response.ok {
         return Err(format!(
             "{}: {}",
@@ -436,7 +392,7 @@ pub(super) fn handshake_and_snapshot(
     let agent_snapshot = snapshot.agents.clone();
     Ok((
         hello,
-        Some(InitialHostState {
+        InitialHostState {
             snapshot: snapshot_from_proto(snapshot),
             agent_snapshot,
             accepted_sequence,
@@ -450,33 +406,12 @@ pub(super) fn handshake_and_snapshot(
                 .into_iter()
                 .filter(|frame| event_follows_snapshot_barrier(frame, accepted_sequence))
                 .collect(),
-        }),
-        Ok(()),
-        accepted_sequence,
+        },
     ))
 }
 
 fn event_follows_snapshot_barrier(frame: &v1::Envelope, accepted_sequence: u64) -> bool {
     matches!(&frame.payload, Some(Payload::Event(_))) && frame.sequence > accepted_sequence
-}
-
-/// Whether this helper may serve the app at all — and, when it may not, why.
-///
-/// Every capability the desktop needs is required here, including the
-/// single-request file open: a helper that cannot serve one is refused at the
-/// handshake rather than accepted and then found wanting one operation at a
-/// time. The daemon lives on a host the user upgrades separately from the app,
-/// so this is a real state.
-///
-/// The rule is [`validate_host_contract`] and lives in the protocol crate, and
-/// the refusal it returns is the message the read-only path above shows. The
-/// verdict and the explanation are therefore one value: nothing can be refused
-/// here and left unexplained there.
-pub(super) fn handshake_admission(
-    envelope_major: u32,
-    hello: &v1::ServerHello,
-) -> Result<(), HostContractError> {
-    validate_host_contract(envelope_major, hello)
 }
 
 fn read_until_response(
@@ -520,7 +455,6 @@ fn read_protocol_stream(
     server_identity: &str,
     channel: &TerminalEventChannel,
     client: &Arc<TerminalClient>,
-    admit_events: bool,
 ) -> Result<(), String> {
     let mut resync_request_id = None;
     // Terminal payload the host has already reserved credit for and this run
@@ -611,13 +545,6 @@ fn read_protocol_stream(
             // resumes, every gap would shrink the terminal output window until
             // the host stopped sending. Release it as one exact total below.
             quarantined_charge.accumulate(event_delivery_charge(&frame));
-            continue;
-        }
-        if !admit_events {
-            // An incompatible helper remains connected only to surface its
-            // read-only state. Its subscription was already established by
-            // the pipelined request, so drain and quarantine those events
-            // without applying payloads from a protocol we cannot trust.
             continue;
         }
         // Read before the frame is consumed: an event that trips the gap below

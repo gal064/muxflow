@@ -36,7 +36,6 @@ describe.skipIf(!availability.available)(`live sizing (${availability.reason ?? 
     const registry = new TerminalRegistry();
     const connection = new HostConnection({
       dial: async () => transport(),
-      appVersion: `0.1.0-live-sizing-${name}`,
       nextConnectionEpoch: () => (epoch += 1),
       store,
       terminals: registry,

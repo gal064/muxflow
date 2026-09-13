@@ -13,21 +13,11 @@ describe("summarizeSurfaceError", () => {
     expect(long.detail).toContain("os error 63");
   });
 
-  it("answers the refusal a mid-reconcile Git action produces", () => {
-    // Seen on the packaged app as a full-width red banner over the diff,
-    // enumerating three internal states and naming "mutation".
-    const raw = "mutation_rejected: host connection is not writable (disconnected, reconciling, or read-only)";
-    expect(summarizeSurfaceError(raw).summary).toBe("The host helper connection is read-only.");
-    expect(summarizeSurfaceError(raw).detail).toBe(raw);
-  });
 
-  it("distinguishes a settling connection from an incompatible read-only helper", () => {
+  it("explains a settling connection", () => {
     expect(summarizeSurfaceError(
       "connection_unavailable: host connection is disconnected or reconciling",
     ).summary).toBe("The connection to the host is still reconnecting.");
-    expect(summarizeSurfaceError(
-      "connection_read_only: host helper connection is read-only",
-    ).summary).toBe("The host helper connection is read-only.");
   });
 
   it("never loses the diagnostic it summarizes", () => {

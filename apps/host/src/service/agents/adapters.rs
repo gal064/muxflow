@@ -88,7 +88,6 @@ pub(crate) trait AgentAdapter: Send + Sync {
             // The desktop had its own copy of this rule, in TypeScript, and it
             // had already drifted from the helper's.
             hook_setup_recommended: observed.state.invites_setup(),
-            adapter: self.legacy_kind().into(),
             id: self.id().into(),
             display_name: self.display_name().into(),
             supports_launch: true,

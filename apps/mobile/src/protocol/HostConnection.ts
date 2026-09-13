@@ -5,7 +5,7 @@
 
 import { create } from "@bufbuild/protobuf";
 import { OutputCreditLedger } from "./credit";
-import { HOST_CAPABILITIES, PROTOCOL_MAJOR, PROTOCOL_MINOR, validateHostContract } from "./contract";
+import { PROTOCOL_MAJOR, validateHostContract } from "./contract";
 import { FrameAccumulator, encodeFrame } from "./framing";
 import {
   ClientHelloSchema,
@@ -122,7 +122,6 @@ export interface HostConnectionOptions {
    * reach a channel that has not produced a transport yet.
    */
   dial: (signal: AbortSignal) => Promise<Transport>;
-  appVersion: string;
   /** Persisted per saved host, incremented on every attempt; must return >= 1. */
   nextConnectionEpoch: () => number | bigint;
   /**
@@ -387,9 +386,6 @@ export class HostConnection {
     // §7.3: both handshake frames go out without waiting between them.
     const bulk = this.options.bulk;
     const hello = create(ClientHelloSchema, {
-      desktopVersion: this.options.appVersion,
-      requestedCapabilities: HOST_CAPABILITIES,
-      expectedHelperVersion: "",
       bulkConnection: bulk !== undefined,
       expectedServerIdentity: bulk?.expectedServerIdentity ?? "",
       connectionEpoch: attempt.connectionEpoch,
@@ -437,22 +433,28 @@ export class HostConnection {
   }
 
   private onHelloFrame(attempt: Attempt, frame: Envelope): void {
+    const refusal = validateHostContract(frame.protocolMajor);
+    if (refusal) {
+      this.log(`handshake.incompatible ${refusal.kind}`);
+      this.fail(attempt, "incompatible", refusal.message);
+      return;
+    }
+    if (frame.payload.case === "error") {
+      this.fail(attempt, "failed", frame.payload.value.displayMessage);
+      return;
+    }
     if (frame.payload.case !== "serverHello") {
       this.fail(attempt, "failed", "host did not return ServerHello");
       return;
     }
     const hello = frame.payload.value;
     const bulk = this.options.bulk;
-    // Before the contract check: the host answers a mis-bound bulk lane with
-    // `read_only`, which would otherwise read as "update the helper".
     if (bulk && (hello.serverIdentity !== bulk.expectedServerIdentity || hello.connectionEpoch !== bulk.connectionEpoch)) {
       this.fail(attempt, "failed", "bulk connection was bound to a different control connection");
       return;
     }
-    const refusal = validateHostContract(frame.protocolMajor, hello);
-    if (refusal) {
-      this.log(`handshake.incompatible ${refusal.kind}`);
-      this.fail(attempt, "incompatible", refusal.message);
+    if (!bulk && (hello.terminalOutputWindowBytes === 0n || hello.terminalOutputWindowRecords === 0)) {
+      this.fail(attempt, "failed", "host terminal output credit requires a bounded window");
       return;
     }
     attempt.hello = hello;
@@ -816,7 +818,6 @@ export class HostConnection {
 function envelope(requestId: bigint, payload: Envelope["payload"]): Envelope {
   return create(EnvelopeSchema, {
     protocolMajor: PROTOCOL_MAJOR,
-    protocolMinor: PROTOCOL_MINOR,
     requestId,
     sequence: 0n,
     streamId: 0n,

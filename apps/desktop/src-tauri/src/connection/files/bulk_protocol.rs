@@ -6,7 +6,7 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    FrameAccumulator, HELPER_VERSION, HOST_CAPABILITIES, encode_frame, envelope,
+    FrameAccumulator, encode_frame, envelope,
     v1::{self, envelope::Payload},
     validate_host_contract,
 };
@@ -124,9 +124,6 @@ impl<'a> BulkProtocolClient<'a> {
                     1,
                     0,
                     Payload::ClientHello(v1::ClientHello {
-                        desktop_version: env!("CARGO_PKG_VERSION").into(),
-                        requested_capabilities: HOST_CAPABILITIES,
-                        expected_helper_version: HELPER_VERSION.into(),
                         bulk_connection: true,
                         expected_server_identity: binding.expected_server_identity.clone(),
                         connection_epoch: binding.connection_epoch,
@@ -167,7 +164,7 @@ impl<'a> BulkProtocolClient<'a> {
         let Some(Payload::ServerHello(hello)) = frame.payload else {
             return Err("bulk bridge omitted ServerHello".into());
         };
-        validate_host_contract(envelope_major, &hello)
+        validate_host_contract(envelope_major)
             .map_err(|error| format!("bulk bridge handshake is incompatible: {error}"))?;
         if hello.server_identity != binding.expected_server_identity
             || hello.connection_epoch != binding.connection_epoch

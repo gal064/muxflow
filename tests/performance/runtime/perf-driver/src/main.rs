@@ -22,7 +22,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::json;
 use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, envelope, read_frame_sync,
+    envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -290,7 +290,6 @@ struct PerfClient {
     /// Matches `ACTION_RECONCILE_TIMEOUT_MS` in the desktop reconciliation loop.
     reconcile_timeout: Duration,
     connection_epoch: u64,
-    output_credit: bool,
     delivered_terminal_bytes: u64,
     delivered_terminal_records: u64,
     acknowledged_terminal_bytes: u64,
@@ -308,15 +307,11 @@ impl PerfClient {
             &mut stdin,
             &v1::Envelope {
                 protocol_major: tmux_agent_protocol::PROTOCOL_MAJOR,
-                protocol_minor: tmux_agent_protocol::PROTOCOL_MINOR,
                 request_id: 1,
                 sequence: 0,
                 stream_id: 0,
                 priority: v1::Priority::Control.into(),
                 payload: Some(Payload::ClientHello(v1::ClientHello {
-                    desktop_version: "performance-test-driver".into(),
-                    requested_capabilities: HOST_CAPABILITIES,
-                    expected_helper_version: HELPER_VERSION.into(),
                     bulk_connection: false,
                     connection_epoch,
                     ..Default::default()
@@ -328,10 +323,6 @@ impl PerfClient {
         let Some(Payload::ServerHello(hello)) = hello.payload else {
             bail!("host did not return ServerHello");
         };
-        ensure!(
-            !hello.read_only,
-            "Phase 12 perf bridge unexpectedly read-only"
-        );
         let (sender, incoming) = mpsc::channel();
         thread::Builder::new()
             .name("phase12-perf-reader".into())
@@ -367,9 +358,6 @@ impl PerfClient {
             responses: BTreeMap::new(),
             reconcile_timeout,
             connection_epoch,
-            output_credit: hello.capabilities
-                & tmux_agent_protocol::CAP_TERMINAL_OUTPUT_CREDIT
-                != 0,
             delivered_terminal_bytes: 0,
             delivered_terminal_records: 0,
             acknowledged_terminal_bytes: 0,
@@ -419,15 +407,14 @@ impl PerfClient {
                             .delivered_terminal_records
                             .saturating_add(event.terminal_delivery_records);
                     }
-                    if self.output_credit
-                        && (self
-                            .delivered_terminal_bytes
-                            .saturating_sub(self.acknowledged_terminal_bytes)
-                            >= 512 * 1024
-                            || self
-                                .delivered_terminal_records
-                                .saturating_sub(self.acknowledged_terminal_records)
-                                >= self.terminal_record_ack_quantum)
+                    if self
+                        .delivered_terminal_bytes
+                        .saturating_sub(self.acknowledged_terminal_bytes)
+                        >= 512 * 1024
+                        || self
+                            .delivered_terminal_records
+                            .saturating_sub(self.acknowledged_terminal_records)
+                            >= self.terminal_record_ack_quantum
                     {
                         write_frame_sync(
                             &mut self.stdin,
@@ -1140,9 +1127,8 @@ fn probe_flood(
             },
         )?;
         let deadline = keystroke_started + Duration::from_secs(10);
-        let acknowledged = client.pump_until(deadline, |_, responses| {
-            responses.contains_key(&request_id)
-        })?;
+        let acknowledged =
+            client.pump_until(deadline, |_, responses| responses.contains_key(&request_id))?;
         if acknowledged {
             input_acks.push(keystroke_started.elapsed().as_secs_f64() * 1000.0);
         }

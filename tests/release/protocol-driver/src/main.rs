@@ -6,7 +6,7 @@ use std::{
 };
 
 use tmux_agent_protocol::{
-    HELPER_VERSION, HOST_CAPABILITIES, envelope, read_frame_sync,
+    envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
@@ -59,9 +59,6 @@ impl Client {
                 1,
                 0,
                 Payload::ClientHello(v1::ClientHello {
-                    desktop_version: "phase8-scale-driver".into(),
-                    requested_capabilities: HOST_CAPABILITIES,
-                    expected_helper_version: HELPER_VERSION.into(),
                     connection_epoch,
                     ..Default::default()
                 }),
@@ -74,8 +71,8 @@ impl Client {
         let Some(Payload::ServerHello(hello)) = frame.payload else {
             return Err("handshake omitted ServerHello".into());
         };
-        if hello.read_only || hello.connection_epoch != connection_epoch {
-            return Err(format!("handshake rejected: {}", hello.incompatibility));
+        if hello.connection_epoch != connection_epoch {
+            return Err("handshake did not echo the connection epoch".into());
         }
         Ok(Self {
             child,

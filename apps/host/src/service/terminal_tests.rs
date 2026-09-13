@@ -124,7 +124,7 @@ impl Drop for RecordedClient {
 fn clients_with_recorded_client(
     recorded: &RecordedClient,
 ) -> (TerminalClients, mpsc::Receiver<SequencerControl>) {
-    let output_credit = Arc::new(OutputCredit::negotiated(false));
+    let output_credit = Arc::new(OutputCredit::new());
     let mut clients =
         TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
     let (events, receiver) = mpsc::channel(64);
@@ -340,7 +340,7 @@ fn every_attachment_worker_spawn_failure_reaps_the_child_and_allows_retry() {
                     4, 1024, 4096,
                 ))),
                 Arc::new(AtomicU64::new(0)),
-                Arc::new(OutputCredit::negotiated(false)),
+                Arc::new(OutputCredit::new()),
                 Arc::new(Mutex::new(())),
             )
         });
@@ -355,7 +355,7 @@ fn every_attachment_worker_spawn_failure_reaps_the_child_and_allows_retry() {
             4, 1024, 4096,
         ))),
         Arc::new(AtomicU64::new(0)),
-        Arc::new(OutputCredit::negotiated(false)),
+        Arc::new(OutputCredit::new()),
         Arc::new(Mutex::new(())),
     )
     .unwrap();
@@ -368,7 +368,7 @@ fn every_attachment_worker_spawn_failure_reaps_the_child_and_allows_retry() {
 /// service thread.
 #[test]
 fn stopping_one_attachment_unparks_its_credit_waiter_before_the_join() {
-    let output_credit = Arc::new(OutputCredit::negotiated(true));
+    let output_credit = Arc::new(OutputCredit::new());
     output_credit
         .admit(
             OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),
@@ -412,7 +412,7 @@ fn stopping_one_attachment_unparks_its_credit_waiter_before_the_join() {
 /// the recovery event must still precede output that observes visibility.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stalled_reveal_recovery_is_admitted_before_concurrent_visible_output() {
-    let output_credit = Arc::new(OutputCredit::negotiated(true));
+    let output_credit = Arc::new(OutputCredit::new());
     let mut clients =
         TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
     let pane_id = "%1".to_owned();
@@ -595,7 +595,7 @@ fn ordered_event_within(
 /// test hangs exactly the way the daemon did.
 #[test]
 fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
-    let output_credit = Arc::new(OutputCredit::negotiated(true));
+    let output_credit = Arc::new(OutputCredit::new());
     output_credit
         .admit(
             OutputCharge::terminal(OUTPUT_WINDOW_BYTES as usize),
@@ -707,7 +707,7 @@ fn a_full_window_and_a_parked_reader_cannot_wedge_a_visibility_transition() {
 #[test]
 fn failed_visibility_admission_invalidates_the_speculative_transition() {
     for close_credit in [true, false] {
-        let output_credit = Arc::new(OutputCredit::negotiated(close_credit));
+        let output_credit = Arc::new(OutputCredit::new());
         let mut clients =
             TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
         clients.generation.store(1, Ordering::Release);
@@ -811,7 +811,7 @@ fn a_capture_whose_flush_failed_is_not_recorded_as_in_flight() {
 /// that is the point — and only the answer is empty.
 #[test]
 fn a_hide_answers_with_no_bytes_and_the_reveal_carries_the_whole_tail() {
-    let output_credit = Arc::new(OutputCredit::negotiated(true));
+    let output_credit = Arc::new(OutputCredit::new());
     let mut clients =
         TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
     let (events, mut receiver) = mpsc::channel(8);
@@ -904,7 +904,7 @@ fn a_hide_answers_with_no_bytes_and_the_reveal_carries_the_whole_tail() {
 #[test]
 fn fresh_server_has_a_vacuous_input_fence_for_create_session_bootstrap() {
     let mut clients = TerminalClients::new(
-        Arc::new(OutputCredit::negotiated(false)),
+        Arc::new(OutputCredit::new()),
         TopologyOutputTrigger::default(),
     );
     assert!(clients.clients.is_empty());
@@ -1734,7 +1734,7 @@ fn screen_seed_preserves_each_differently_styled_trailing_blank_span() {
 /// instead, and the attachment that replaces the broken one settles it.
 #[test]
 fn a_reveal_whose_seed_request_fails_owes_the_pane_a_seed_and_settles_it_later() {
-    let output_credit = Arc::new(OutputCredit::negotiated(false));
+    let output_credit = Arc::new(OutputCredit::new());
     let mut clients =
         TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
     clients.generation.store(1, Ordering::Release);
@@ -1832,7 +1832,7 @@ fn a_reveal_whose_seed_request_fails_owes_the_pane_a_seed_and_settles_it_later()
 /// request produces no seed however many times it is repeated.
 #[test]
 fn an_explicit_seed_request_makes_a_released_pane_emission_eligible_again() {
-    let output_credit = Arc::new(OutputCredit::negotiated(false));
+    let output_credit = Arc::new(OutputCredit::new());
     let mut clients =
         TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
     clients
@@ -1885,7 +1885,7 @@ fn an_evicted_pane_is_reported_to_the_desktop_as_requiring_a_seed() {
     let generation = AtomicU64::new(1);
     let stopped = AtomicBool::new(false);
     let overflowed = AtomicBool::new(false);
-    let output_credit = OutputCredit::negotiated(false);
+    let output_credit = OutputCredit::new();
     let emission_order = Mutex::new(());
     TestOutputEmission {
         connection_epoch: crate::diagnostics::PerfConnectionEpoch::new(0),

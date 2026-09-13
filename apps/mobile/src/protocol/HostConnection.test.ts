@@ -1,6 +1,5 @@
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HOST_CAPABILITIES } from "./contract";
 import {
   AgentEventSchema,
   AgentLifecycleState,
@@ -54,7 +53,6 @@ function harness(overrides: Partial<HostConnectionOptions> = {}): Harness {
       state.transports.push(transport);
       return transport;
     },
-    appVersion: "0.1.0-test",
     nextConnectionEpoch: () => (state.epoch += 1),
     store,
     host: { id: "h", label: "Dev box", host: "dev.local", port: 22, user: "dev" },
@@ -100,15 +98,11 @@ describe("handshake (§7.3)", () => {
     const transport = h.transports[0]!;
     const [hello, subscribe] = transport.drain();
     expect(hello?.requestId).toBe(1n);
-    expect(hello?.protocolMajor).toBe(2);
-    expect(hello?.protocolMinor).toBe(1);
+    expect(hello?.protocolMajor).toBe(3);
     expect(hello?.payload.case).toBe("clientHello");
     if (hello?.payload.case !== "clientHello") throw new Error("unreachable");
-    expect(hello.payload.value.requestedCapabilities).toBe(HOST_CAPABILITIES);
-    expect(hello.payload.value.expectedHelperVersion).toBe("");
     expect(hello.payload.value.bulkConnection).toBe(false);
     expect(hello.payload.value.connectionEpoch).toBe(1n);
-    expect(hello.payload.value.desktopVersion).toBe("0.1.0-test");
     expect(subscribe?.requestId).toBe(2n);
     if (subscribe?.payload.case !== "request") throw new Error("unreachable");
     expect(subscribe.payload.value.operation).toBe(Operation.SUBSCRIBE);
@@ -133,40 +127,23 @@ describe("handshake (§7.3)", () => {
     const h = harness();
     h.connection.connect();
     await settle();
-    h.transports[0]!.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n, protocolMajor: 3 }));
+    h.transports[0]!.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n, protocolMajor: 4 }));
     expect(h.store.getState().connection).toMatchObject({
       state: "incompatible",
-      message: "This host's Muxflow helper speaks protocol v3; this app needs v2. Update the helper from the Muxflow desktop app.",
+      message: "This host's Muxflow helper speaks protocol v4; this app needs v3. Update the app or the helper from Muxflow desktop.",
     });
     expect(h.transports[0]!.closed).toBe(true);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(h.dials).toBe(1);
   });
 
-  it("refuses a read-only helper, quoting its incompatibility", async () => {
+  it("refuses control admission without terminal output flow control", async () => {
     const h = harness();
     h.connection.connect();
     await settle();
-    h.transports[0]!.feed(hostEnvelope(
-      { case: "serverHello", value: serverHello({ readOnly: true, incompatibility: "helper 0.0.9 does not match required 0.1.0" }) },
-      { requestId: 1n },
-    ));
-    expect(h.store.getState().connection).toMatchObject({
-      state: "incompatible",
-      message: "The Muxflow helper on this host is read-only: helper 0.0.9 does not match required 0.1.0. Update it from the Muxflow desktop app.",
-    });
-  });
-
-  it("refuses a helper missing a required capability, naming it", async () => {
-    const h = harness();
-    h.connection.connect();
-    await settle();
-    const withoutFileStream = HOST_CAPABILITIES & ~(1n << 15n) & ~(1n << 16n);
-    h.transports[0]!.feed(hostEnvelope({ case: "serverHello", value: serverHello({ capabilities: withoutFileStream }) }, { requestId: 1n }));
-    expect(h.store.getState().connection).toMatchObject({
-      state: "incompatible",
-      message: "The Muxflow helper on this host is missing: fileStream, terminalFileResolution. Update it from the Muxflow desktop app.",
-    });
+    h.transports[0]!.feed(hostEnvelope({ case: "serverHello", value: serverHello({ terminalOutputWindowBytes: 0n }) }, { requestId: 1n }));
+    expect(h.store.getState().connection.state).toBe("failed");
+    expect(h.transports[0]!.closed).toBe(true);
   });
 
   it("fails without retry when the first frame is not a ServerHello", async () => {
@@ -547,7 +524,6 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
         h.transports.push(transport);
         return transport;
       },
-      appVersion: "0.1.0-test",
       nextConnectionEpoch: () => (h.epoch += 1),
       store,
       host: { id: "h", label: "Dev box", host: "dev.local", port: 22, user: "dev" },
@@ -628,7 +604,6 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
           signal = s;
           s.addEventListener("abort", () => reject(new Error("aborted")));
         }),
-      appVersion: "0.1.0-test",
       nextConnectionEpoch: () => (h.epoch += 1),
       store,
       host: { id: "h", label: "Dev box", host: "dev.local", port: 22, user: "dev" },

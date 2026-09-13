@@ -12,8 +12,6 @@ use super::{TerminalClients, get_client};
 pub struct AgentCommand {
     pub operation: String,
     #[serde(default)]
-    pub adapter: String,
-    #[serde(default)]
     pub adapter_id: String,
     #[serde(default)]
     pub agent_id: String,
@@ -65,18 +63,11 @@ pub async fn agent_request(
         return Err("agent request belongs to a replaced connection epoch".into());
     }
     let host_profile_id = client.host_profile_id.lock().unwrap().clone();
-    let requested_adapter = if command.adapter_id.is_empty() {
-        command.adapter.as_str()
-    } else {
-        command.adapter_id.as_str()
-    };
-    let adapter_kind = legacy_adapter_kind(requested_adapter);
-    let adapter_id = canonical_adapter_id(requested_adapter);
+    let adapter_id = command.adapter_id;
     let request = v1::Request {
         operation: operation.into(),
         agent: Some(v1::AgentRequest {
             action: action.into(),
-            adapter: adapter_kind.into(),
             adapter_id,
             agent_id: command.agent_id,
             native_session_id: command.native_session_id,
@@ -167,23 +158,6 @@ fn operation_from_name(
     }
 }
 
-/// The protobuf enum is compatibility metadata only. Canonical registry IDs
-/// remain opaque so a newer host adapter can flow through an older desktop.
-fn legacy_adapter_kind(value: &str) -> v1::AgentAdapterKind {
-    match value {
-        "codex" => v1::AgentAdapterKind::Codex,
-        "claude" | "claudeCode" | "claude-code" => v1::AgentAdapterKind::ClaudeCode,
-        _ => v1::AgentAdapterKind::Unspecified,
-    }
-}
-
-fn canonical_adapter_id(value: &str) -> String {
-    match value {
-        "claude" | "claudeCode" => "claude-code".into(),
-        _ => value.into(),
-    }
-}
-
 fn hook_action_from_name(value: &str) -> Result<v1::HookManagementAction, String> {
     match value {
         "" | "install" => Ok(v1::HookManagementAction::Install),
@@ -261,8 +235,7 @@ fn record_json(value: &v1::AgentRecord, host_profile_id: &str) -> Value {
     let route = value.route.as_ref();
     json!({
         "agentId": value.agent_id,
-        "adapter": adapter_name(value.adapter),
-        "adapterId": if value.adapter_id.is_empty() { adapter_name(value.adapter) } else { &value.adapter_id },
+        "adapterId": value.adapter_id,
         "nativeSessionId": value.native_session_id,
         "displayName": value.display_name,
         "route": route.map(|route| json!({
@@ -291,8 +264,8 @@ fn record_json(value: &v1::AgentRecord, host_profile_id: &str) -> Value {
 }
 
 fn hook_plan_json(value: &v1::HookManagementPlan) -> Value {
-    json!({ "adapter": adapter_name(value.adapter), "action": hook_action_name(value.action),
-        "adapterId": if value.adapter_id.is_empty() { adapter_name(value.adapter) } else { &value.adapter_id },
+    json!({ "action": hook_action_name(value.action),
+        "adapterId": value.adapter_id,
         "configPath": value.config_path, "backupPath": value.backup_path,
         "managedVersion": value.managed_version, "summary": value.summary,
         "confirmationToken": value.confirmation_token, "alreadyCurrent": value.already_current,
@@ -305,7 +278,7 @@ fn hook_plan_json(value: &v1::HookManagementPlan) -> Value {
 }
 
 fn adapter_descriptor_json(value: &v1::AgentAdapterDescriptor) -> Value {
-    json!({ "adapter": adapter_name(value.adapter), "id": value.id,
+    json!({ "id": value.id,
         "displayName": value.display_name, "supportsLaunch": value.supports_launch,
         "supportsResume": value.supports_resume, "supportsHooks": value.supports_hooks,
         "supportsProcessDetection": value.supports_process_detection,
@@ -319,14 +292,6 @@ fn hook_wiring_name(value: i32) -> &'static str {
     v1::AgentHookWiring::try_from(value)
         .unwrap_or_default()
         .label()
-}
-
-fn adapter_name(value: i32) -> &'static str {
-    match v1::AgentAdapterKind::try_from(value).unwrap_or_default() {
-        v1::AgentAdapterKind::Codex => "codex",
-        v1::AgentAdapterKind::ClaudeCode => "claudeCode",
-        _ => "unspecified",
-    }
 }
 
 fn lifecycle_name(value: i32) -> &'static str {
@@ -387,7 +352,6 @@ mod tests {
     #[test]
     fn every_adapter_descriptor_field_crosses_the_bridge() {
         let value = v1::AgentAdapterDescriptor {
-            adapter: v1::AgentAdapterKind::ClaudeCode.into(),
             id: "claude-code".into(),
             display_name: "Claude Code".into(),
             supports_launch: true,
@@ -411,7 +375,6 @@ mod tests {
         assert_eq!(
             carried,
             [
-                "adapter",
                 "displayName",
                 "hookConfigPath",
                 "hookEvents",
@@ -427,19 +390,5 @@ mod tests {
         );
         assert_eq!(json["hookWiring"], "partial");
         assert_eq!(json["hookSetupRecommended"], true);
-    }
-
-    #[test]
-    fn canonical_adapter_ids_are_opaque_and_legacy_enum_mapping_is_optional() {
-        assert_eq!(canonical_adapter_id("future-agent"), "future-agent");
-        assert_eq!(
-            legacy_adapter_kind("future-agent"),
-            v1::AgentAdapterKind::Unspecified
-        );
-        assert_eq!(canonical_adapter_id("claudeCode"), "claude-code");
-        assert_eq!(
-            legacy_adapter_kind("claudeCode"),
-            v1::AgentAdapterKind::ClaudeCode
-        );
     }
 }
