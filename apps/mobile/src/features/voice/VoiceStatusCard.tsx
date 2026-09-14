@@ -19,7 +19,7 @@ import type { VoiceHostStatus } from "./voiceStore";
 export function VoiceStatusCard({ controller, connected }: { controller: VoiceController; connected: boolean }) {
   const status = useVoice((s) => s.hostStatus);
   const [consent, setConsent] = useState(false);
-  const size = status.modelDownloadBytes > 0 ? formatBytes(status.modelDownloadBytes) : "~640 MB";
+  const size = status.modelDownloadBytes > 0 ? formatBytes(status.modelDownloadBytes) : "~697 MB";
   return (
     <>
       <ReadinessCard connected={connected} controller={controller} onSetUp={() => setConsent(true)} size={size} status={status} />

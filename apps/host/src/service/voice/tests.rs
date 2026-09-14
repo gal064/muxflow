@@ -18,8 +18,8 @@ fn uv_absent() -> Result<PathBuf, tmux_control::ExecutableError> {
     })
 }
 
-/// A service whose sidecar is the `#!/bin/sh` echo script and whose model is
-/// four one-byte files, so every path but the real recognizer runs.
+/// A service whose sidecar is the `#!/bin/sh` echo script and whose sparse
+/// model file looks complete, so every path but the real recognizer runs.
 fn service(dir: &Path, idle_after: Duration, script: &str) -> Arc<VoiceService> {
     let script = fake_sidecar(dir, "fake-sidecar.sh", script);
     let service = VoiceService::with_runtime(
@@ -85,7 +85,7 @@ async fn transcribe_decodes_the_fixture_loads_once_and_single_lines_the_text() {
     let dir = tempfile::tempdir().unwrap();
     let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
     let transcript = service
-        .transcribe(FIXTURE.to_vec(), "audio/mp4", "en-US", &not_cancelled())
+        .transcribe(FIXTURE.to_vec(), "audio/mp4", &not_cancelled())
         .await
         .unwrap();
     assert_eq!(transcript.text, "hello world");
@@ -96,7 +96,7 @@ async fn transcribe_decodes_the_fixture_loads_once_and_single_lines_the_text() {
     // per process, so the id advancing proves no respawn happened.
     let pid = service.sidecar_pid().await;
     service
-        .transcribe(FIXTURE.to_vec(), "audio/mp4", "", &not_cancelled())
+        .transcribe(FIXTURE.to_vec(), "audio/mp4", &not_cancelled())
         .await
         .unwrap();
     assert_eq!(service.sidecar_pid().await, pid);
@@ -108,31 +108,19 @@ async fn transcribe_decodes_the_fixture_loads_once_and_single_lines_the_text() {
 async fn transcribe_validates_before_touching_the_sidecar() {
     let dir = tempfile::tempdir().unwrap();
     let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
-    let cases: Vec<(Vec<u8>, &str, &str, &str)> = vec![
-        (Vec::new(), "audio/mp4", "", "voice_invalid_request"),
+    let cases: Vec<(Vec<u8>, &str, &str)> = vec![
+        (Vec::new(), "audio/mp4", "voice_invalid_request"),
         (
             vec![0; audio::MAX_AUDIO_BYTES + 1],
             "audio/mp4",
-            "",
             "voice_audio_too_large",
         ),
-        (FIXTURE.to_vec(), "audio/wav", "", "voice_audio_bad_mime"),
-        (
-            FIXTURE.to_vec(),
-            "audio/mp4",
-            "not a tag!",
-            "voice_invalid_request",
-        ),
-        (
-            b"garbage".to_vec(),
-            "audio/mp4",
-            "",
-            "voice_audio_undecodable",
-        ),
+        (FIXTURE.to_vec(), "audio/wav", "voice_audio_bad_mime"),
+        (b"garbage".to_vec(), "audio/mp4", "voice_audio_undecodable"),
     ];
-    for (audio, mime, hint, code) in cases {
+    for (audio, mime, code) in cases {
         let error = service
-            .transcribe(audio, mime, hint, &not_cancelled())
+            .transcribe(audio, mime, &not_cancelled())
             .await
             .unwrap_err();
         assert_eq!(error.code, code);
@@ -143,7 +131,7 @@ async fn transcribe_validates_before_touching_the_sidecar() {
         "validation spawned the sidecar"
     );
     let cancelled = service
-        .transcribe(FIXTURE.to_vec(), "audio/mp4", "", &AtomicBool::new(true))
+        .transcribe(FIXTURE.to_vec(), "audio/mp4", &AtomicBool::new(true))
         .await
         .unwrap_err();
     assert_eq!(cancelled.code, "cancelled");
@@ -662,7 +650,7 @@ async fn provision_needs_consent_runs_the_sidecar_and_verifies_by_loading() {
 
 /// Verification deletes the download only when the sidecar itself rejected
 /// the files; a sidecar that crashed or was cancelled mid-load says nothing
-/// about the bytes, and 487 MB must not be thrown away on its account.
+/// about the bytes, and a verified model must not be thrown away on its account.
 #[tokio::test]
 async fn verification_keeps_the_model_unless_the_sidecar_rejects_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -696,7 +684,7 @@ async fn verification_keeps_the_model_unless_the_sidecar_rejects_it() {
         .replace("progress) printf", "provision) printf")
         .replace(
             "load) printf '{\"id\":%s,\"ok\":true,\"load_millis\":7}\\n' \"$id\" ;;",
-            "load) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"bad onnx\"}\\n' \"$id\" ;;",
+            "load) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"bad gguf\"}\\n' \"$id\" ;;",
         );
     let strict = super::tests::service(dir.path(), DEFAULT_IDLE_AFTER, &rejecting);
     strict.model().remove();
@@ -710,7 +698,7 @@ async fn verification_keeps_the_model_unless_the_sidecar_rejects_it() {
         .await
         .unwrap_err();
     assert_eq!(error.code, "voice_provision_failed");
-    assert!(error.message.contains("bad onnx"));
+    assert!(error.message.contains("bad gguf"));
     assert!(!strict.model().complete(), "a rejected model survived");
 }
 
@@ -748,7 +736,7 @@ async fn a_cancel_during_a_cold_load_keeps_the_loaded_sidecar() {
     let slow_load = ECHO_SIDECAR.replace("load) printf", "load) sleep 1; printf");
     let service = service(dir.path(), DEFAULT_IDLE_AFTER, &slow_load);
     let cancel = AtomicBool::new(false);
-    let transcribe = service.transcribe(FIXTURE.to_vec(), "audio/mp4", "", &cancel);
+    let transcribe = service.transcribe(FIXTURE.to_vec(), "audio/mp4", &cancel);
     let flag = async {
         tokio::time::sleep(Duration::from_millis(300)).await;
         cancel.store(true, Ordering::Release);
@@ -761,22 +749,22 @@ async fn a_cancel_during_a_cold_load_keeps_the_loaded_sidecar() {
         .expect("the load was allowed to finish");
     assert!(service.status().sidecar_running);
     service
-        .transcribe(FIXTURE.to_vec(), "audio/mp4", "", &not_cancelled())
+        .transcribe(FIXTURE.to_vec(), "audio/mp4", &not_cancelled())
         .await
         .unwrap();
     assert_eq!(service.sidecar_pid().await, Some(pid));
 }
 
-/// An archive the sidecar could not extract is a failed download (§4.6),
-/// retryable, not a broken sidecar.
+/// A model whose digest does not match is a failed download (§4.6), retryable,
+/// not a broken sidecar.
 #[tokio::test]
-async fn a_refused_extraction_is_a_retryable_provision_failure() {
+async fn a_refused_verification_is_a_retryable_provision_failure() {
     let dir = tempfile::tempdir().unwrap();
     let script = ECHO_SIDECAR.replace(
         "refuse) printf '{\"id\":%s,\"ok\":false,\"class\":\"network\",\"error\":\"offline\"}\\n' \"$id\" ;;",
-        "provision) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"archive lacks tokens.txt\"}\\n' \"$id\" ;;",
+        "provision) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"download checksum mismatch\"}\\n' \"$id\" ;;",
     );
-    assert!(script.contains("archive lacks"), "fixture edit missed");
+    assert!(script.contains("checksum mismatch"), "fixture edit missed");
     let service = service(dir.path(), DEFAULT_IDLE_AFTER, &script);
     service.model().remove();
     let error = service
@@ -785,7 +773,7 @@ async fn a_refused_extraction_is_a_retryable_provision_failure() {
         .unwrap_err();
     assert_eq!(error.code, "voice_provision_failed");
     assert!(error.retryable);
-    assert!(error.message.contains("archive lacks tokens.txt"));
+    assert!(error.message.contains("download checksum mismatch"));
     // The sidecar was not at fault: it is still there for the retry.
     assert!(service.sidecar_pid().await.is_some());
 }
@@ -797,9 +785,9 @@ async fn provision_reverifies_a_complete_model_and_drops_a_rejected_one() {
     let dir = tempfile::tempdir().unwrap();
     let rejecting = ECHO_SIDECAR.replace(
         "load) printf '{\"id\":%s,\"ok\":true,\"load_millis\":7}\\n' \"$id\" ;;",
-        "load) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"bad onnx\"}\\n' \"$id\" ;;",
+        "load) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"bad gguf\"}\\n' \"$id\" ;;",
     );
-    assert!(rejecting.contains("bad onnx"), "fixture edit missed");
+    assert!(rejecting.contains("bad gguf"), "fixture edit missed");
     let service = service(dir.path(), DEFAULT_IDLE_AFTER, &rejecting);
     assert!(service.model().complete());
     let error = service
@@ -869,7 +857,7 @@ async fn a_dropped_connection_does_not_cancel_a_provision() {
     assert!(!service.model().complete());
 }
 
-/// A sidecar the phone cancelled while it was mid-extraction cannot answer in
+/// A sidecar the phone cancelled while it was mid-download cannot answer in
 /// time; killing it is the cancel's outcome, not a crash to hold against it.
 #[tokio::test]
 async fn an_unacknowledged_cancel_is_a_cancel_not_a_crash() {
@@ -903,19 +891,19 @@ async fn a_rejected_model_is_reported_missing_until_a_load_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let rejecting = ECHO_SIDECAR.replace(
         "load) printf '{\"id\":%s,\"ok\":true,\"load_millis\":7}\\n' \"$id\" ;;",
-        "load) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"bad onnx\"}\\n' \"$id\" ;;",
+        "load) printf '{\"id\":%s,\"ok\":false,\"class\":\"model\",\"error\":\"bad gguf\"}\\n' \"$id\" ;;",
     );
     let service = service(dir.path(), DEFAULT_IDLE_AFTER, &rejecting);
     assert_eq!(service.status().readiness, v1::VoiceReadiness::Ready as i32);
     let error = service
-        .transcribe(FIXTURE.to_vec(), "audio/mp4", "", &not_cancelled())
+        .transcribe(FIXTURE.to_vec(), "audio/mp4", &not_cancelled())
         .await
         .unwrap_err();
     assert_eq!(error.code, "voice_sidecar_failed");
     assert!(!error.retryable);
     let status = service.status();
     assert_eq!(status.readiness, v1::VoiceReadiness::ModelMissing as i32);
-    assert!(status.detail.contains("bad onnx"));
+    assert!(status.detail.contains("bad gguf"));
 }
 
 /// The teardown-raised token is ignored at every check a provision passes
@@ -977,13 +965,7 @@ async fn provision_treats_teardown_and_explicit_cancel_differently_while_startin
 }
 
 #[test]
-fn language_tags_and_voice_ids_are_validated_by_shape() {
-    for tag in ["en", "en-US", "pt-BR", "zh-Hans-CN", "ast-ES"] {
-        assert!(valid_language_tag(tag), "{tag}");
-    }
-    for tag in ["", "e", "en_US", "en-", "english-language", "en US"] {
-        assert!(!valid_language_tag(tag), "{tag}");
-    }
+fn voice_ids_are_validated_by_shape() {
     for voice in [
         "en-US-AvaNeural",
         "en-US-AvaMultilingualNeural",

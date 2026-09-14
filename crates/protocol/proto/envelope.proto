@@ -155,7 +155,7 @@ enum Operation {
   // caller today.
   // Readiness probe; never spawns anything. `warm` may pre-load the sidecar.
   OPERATION_VOICE_STATUS = 49;
-  // Consent-gated ~640 MB model download; progress arrives by VOICE_PROVISION
+  // Consent-gated 697 MiB model download; progress arrives by VOICE_PROVISION
   // events, and the response is the READY status.
   OPERATION_VOICE_PROVISION = 50;
   // Audio bytes -> one-line transcript. The phone types it into the pane.
@@ -1194,8 +1194,7 @@ message VoiceRequest {
   bytes audio = 2;
   // TRANSCRIBE: audio/mp4 (expo-audio); also audio/x-m4a, audio/aac.
   string audio_mime = 3;
-  // TRANSCRIBE: BCP-47, validated and passed through (parakeet v3 auto-detects).
-  string language_hint = 4;
+  reserved 4;
   // SPEAK: text to synthesize (replay, or arbitrary text).
   string text = 5;
   // SESSION: agent whose replies this connection wants spoken; "" clears.
@@ -1214,7 +1213,7 @@ message VoiceRequest {
 
 message VoiceProvisionProgress {
   string operation_id = 1;
-  // installing_runtime | downloading | extracting | verifying | ready | failed
+  // installing_runtime | downloading | verifying | ready | failed
   string phase = 2;
   uint64 transferred_bytes = 3;
   // 0 while unknown (uv's own install has no byte count).
@@ -1226,7 +1225,7 @@ message VoiceStatus {
   VoiceReadiness readiness = 1;
   string uv_path = 2;
   string model_dir = 3;
-  // For the consent copy (~640 MB).
+  // For the consent copy (697 MiB).
   uint64 model_download_bytes = 4;
   // Install hint when UV_MISSING; the last sidecar error otherwise.
   string detail = 5;
