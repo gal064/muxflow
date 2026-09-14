@@ -8,7 +8,7 @@ export function formatClock(ms: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
-/** `640 MB`-style sizes for the consent copy and the progress line. */
+/** `697 MB`-style sizes for the consent copy and the progress line. */
 export function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
   if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`;
@@ -19,7 +19,6 @@ export function formatBytes(bytes: number): string {
 const PHASE_LABELS: Record<string, string> = {
   installing_runtime: "Installing the speech runtime…",
   downloading: "Downloading the speech model…",
-  extracting: "Unpacking the model…",
   verifying: "Verifying the model…",
   ready: "Ready",
   failed: "Setup failed",

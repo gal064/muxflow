@@ -15,7 +15,7 @@ import type { Agent } from "../../store/sessionStore";
 export type VoiceReadinessState = "unknown" | "uvMissing" | "modelMissing" | "provisioning" | "ready";
 
 export interface ProvisionProgress {
-  /** installing_runtime | downloading | extracting | verifying | ready | failed */
+  /** installing_runtime | downloading | verifying | ready | failed */
   phase: string;
   transferredBytes: number;
   /** 0 while unknown. */

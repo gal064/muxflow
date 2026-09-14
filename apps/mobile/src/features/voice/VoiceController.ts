@@ -70,7 +70,7 @@ export const TAIL_HOLD_MS = 350;
 /** A warm host answers in ~1 s; a cold sidecar may take up to 120 s to load (§4.3). */
 export const TRANSCRIBE_TIMEOUT_MS = 70_000;
 export const SPEAK_TIMEOUT_MS = 60_000;
-/** The ~640 MB download answers only when done; progress arrives as events. */
+/** The 697 MiB download answers only when done; progress arrives as events. */
 export const PROVISION_TIMEOUT_MS = 60 * 60_000;
 
 /** Refusals that are really a readiness report (§4.6): the card shows them, no toast. */

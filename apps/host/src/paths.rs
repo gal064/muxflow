@@ -148,7 +148,7 @@ pub fn state_dir() -> PathBuf {
         .unwrap_or_else(|| default_state_dir().expect("resolve effective account state directory"))
 }
 
-/// Where voice mode keeps the sidecar script, its log and the ~487 MB speech
+/// Where voice mode keeps the sidecar script, its log and the 697 MiB speech
 /// model (docs/mobile/voice-mode-plan.md §4.1): `MUXFLOW_VOICE_CACHE_DIR`, else
 /// `$XDG_CACHE_HOME/muxflow/voice`, else `~/.cache/muxflow/voice` (macOS
 /// `~/Library/Caches/dev.muxflow.desktop/voice`). Nothing here is created until
