@@ -134,12 +134,7 @@ async fn dispatch(
         }
         v1::Operation::VoiceTranscribe => {
             let transcript = service
-                .transcribe(
-                    request.audio,
-                    &request.audio_mime,
-                    &request.language_hint,
-                    cancellation,
-                )
+                .transcribe(request.audio, &request.audio_mime, cancellation)
                 .await?;
             Ok(v1::VoiceResponse {
                 transcript: Some(transcript),

@@ -89,7 +89,7 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             let mime = flag("--mime").unwrap_or_else(|| "audio/mp4".into());
             let audio = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
             let transcript = service
-                .transcribe(audio, &mime, "", &cancel)
+                .transcribe(audio, &mime, &cancel)
                 .await
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             println!(

@@ -222,7 +222,7 @@ export function voiceStatus(operationId: string, warm = false): Request {
 }
 
 /**
- * VOICE_PROVISION: the ~640 MB model download. `confirmed` is the user's
+ * VOICE_PROVISION: the 697 MiB model download. `confirmed` is the user's
  * consent and the host refuses without it (`voice_consent_required`), so the
  * builder sets it: the consent dialog is what calls this. Progress arrives as
  * EVENT_KIND_VOICE_PROVISION events; the response is the READY status.
@@ -237,8 +237,7 @@ export function voiceProvision(operationId: string): Request {
 /**
  * VOICE_TRANSCRIBE: one recorded utterance -> one-line transcript. `audio` is
  * the whole file (expo-audio's `.m4a`, so `audioMime` is "audio/mp4"); the host
- * caps it and rejects an unknown mime. No `languageHint`: parakeet v3 detects
- * the language itself.
+ * caps it and rejects an unknown mime. The selected model is English-only.
  */
 export function voiceTranscribe(operationId: string, audio: Uint8Array, audioMime: string): Request {
   return create(RequestSchema, {

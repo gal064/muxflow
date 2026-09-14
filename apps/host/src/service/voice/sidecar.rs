@@ -23,7 +23,7 @@ use tokio::{
 };
 
 pub(crate) const PYTHON_PIN: &str = "3.12";
-pub(crate) const SHERPA_ONNX_PIN: &str = "1.13.7";
+pub(crate) const TRANSCRIBE_CPP_PIN: &str = "0.2.3";
 pub(crate) const EDGE_TTS_PIN: &str = "7.2.8";
 /// The largest body the sidecar may answer with: the reply MP3 cap (§2b).
 pub(crate) const MAX_REPLY_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -114,7 +114,7 @@ impl SidecarChild {
             .arg("run")
             .args(["--python", PYTHON_PIN, "--no-project", "--no-config"])
             .arg("--with")
-            .arg(format!("sherpa-onnx=={SHERPA_ONNX_PIN}"))
+            .arg(format!("transcribe-cpp=={TRANSCRIBE_CPP_PIN}"))
             .arg("--with")
             .arg(format!("edge-tts=={EDGE_TTS_PIN}"))
             .arg(script)
