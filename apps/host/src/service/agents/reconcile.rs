@@ -7,6 +7,7 @@ use super::{StoredAgent, StoredRoute, StoredState, identity};
 #[derive(Debug, Default)]
 pub(super) struct ReconcileResult {
     pub changed: bool,
+    pub retired_codex_agent_ids: Vec<String>,
 }
 
 /// Every `(pane_id, adapter_id)` this tmux server is currently running an agent
@@ -48,6 +49,7 @@ pub(super) fn topology(
     let detected = detect_all(snapshot);
 
     let mut retired = Vec::new();
+    let mut retired_codex_agent_ids = Vec::new();
     state.agents.retain(|agent_id, record| {
         let same_server = record.route.server_identity == server_identity;
         let live = if record.route.pane_id.is_empty() {
@@ -69,10 +71,16 @@ pub(super) fn topology(
         let retain = same_server && (live || (pane_still_exists && !replaced));
         if !retain {
             retired.push(agent_id.clone());
+            if record.adapter_id == "codex" {
+                retired_codex_agent_ids.push(agent_id.clone());
+            }
         }
         retain
     });
     state.unbind_agents(&retired);
+    for agent_id in &retired {
+        retired_codex_agent_ids.extend(state.drain_codex_predecessors(agent_id));
+    }
 
     let mut changed = !retired.is_empty();
     for ((pane_id, adapter_id), (_pane, adapter)) in detected {
@@ -102,10 +110,15 @@ pub(super) fn topology(
             if !same_route_for_reconciliation(&state.agents[&existing_id].route, &fresh_route) {
                 state.generation = state.generation.saturating_add(1);
                 let generation = state.generation;
-                let record = state.agents.get_mut(&existing_id).unwrap();
-                record.route = fresh_route;
-                record.state_generation = generation;
-                record.updated_at_unix_millis = now;
+                {
+                    let record = state.agents.get_mut(&existing_id).unwrap();
+                    record.route = fresh_route.clone();
+                    record.state_generation = generation;
+                    record.updated_at_unix_millis = now;
+                }
+                if adapter.id() == "codex" {
+                    state.move_codex_predecessor_routes(&existing_id, &fresh_route);
+                }
                 changed = true;
             }
             changed |= state.bind_pane(adapter.id(), server_identity, &pane_id, &existing_id);
@@ -165,7 +178,10 @@ pub(super) fn topology(
     if changed && !retired.is_empty() {
         state.generation = state.generation.saturating_add(1);
     }
-    ReconcileResult { changed }
+    ReconcileResult {
+        changed,
+        retired_codex_agent_ids,
+    }
 }
 
 /// Agent route fallbacks follow the same title semantics as topology

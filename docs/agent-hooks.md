@@ -86,19 +86,25 @@ signals. Recorded rather than faked.
 
 One Codex TUI may run more than one logical thread while all of their hook
 processes inherit the same `TMUX_PANE`. Pane ownership therefore does not
-follow whichever native session emitted the latest hook. An unknown native
-Codex session may replace the pane's current native owner only with
-`SessionStart` or `UserPromptSubmit`, the two events that explicitly begin a
-session or turn. A known native session may continue reporting after it moves
-panes. A continuation or terminal hook from an unknown, superseded thread is
-discarded, so delayed fork teardown cannot make the interactive root disappear
-and then reappear. Pane ownership is stored separately from the verified
-navigation route. When fresh topology is temporarily unavailable, that binding
-can reject a different logical session or transfer ownership for an explicit
-replacement without inventing a routing destination. A hook matching the
-current native owner keeps that owner's last verified route through the outage.
-An explicit replacement starts with clean session/turn state, while a verified
-move keeps the moving session's state and retires the other pane owner.
+follow whichever native session emitted the latest hook. The pane retains one
+foreground session and a bounded chain of the sessions it displaced. An
+unknown native Codex session may enter the foreground only with `SessionStart`
+or `UserPromptSubmit`, the two events that explicitly begin a session or turn.
+Its `Stop` remains foreground because that session can accept another prompt.
+`SessionEnd` restores its immediate predecessor; the predecessor's first root
+hook may also restore it once every newer session is terminal. Returning to an
+older predecessor permanently unwinds the newer sessions, so their delayed
+tool, child, or teardown hooks cannot reclaim the pane. Suspended sessions keep
+their own lifecycle and turn state and never seed the foreground session's
+state. The chain is limited to sixteen predecessors.
+
+Pane ownership is stored separately from the verified navigation route. When
+fresh topology is temporarily unavailable, that binding can reject a different
+logical session, transfer ownership for an explicit replacement, or restore a
+recorded same-pane predecessor without inventing a routing destination. A hook
+matching the current native owner keeps that owner's last verified route
+through the outage. A verified move keeps the moving session's state and
+retires the other pane owner.
 The initial pane-derived record may still be promoted by any first native hook,
 including `Stop`; that is the separate discovery handoff needed when hooks
 become authoritative late in a turn, and it preserves the last verified route

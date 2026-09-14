@@ -53,6 +53,7 @@ const PENDING_CODEX_PERMISSION_TTL_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 pub(crate) const MAX_CODEX_CHILDREN: usize = 64;
 pub(crate) const MAX_CODEX_CHILD_TURN_HISTORY: usize = 512;
 pub(crate) const MAX_CODEX_TERMINAL_ROOT_TURNS: usize = 64;
+pub(crate) const MAX_CODEX_PANE_SESSION_DEPTH: usize = 16;
 const MAX_CODEX_TRANSCRIPT_MONITORS: usize = 64;
 
 fn remember_terminal_root_turn(turns: &mut std::collections::BTreeSet<String>, turn_id: &str) {
@@ -365,10 +366,15 @@ impl AgentRuntime {
         let mut state = self.state.lock().unwrap();
         let original = state.clone();
         let mut events = Vec::new();
+        let mut resolved_keys = Vec::new();
         for ((record_id, _), turn, terminal) in &resolved {
             let Some(before) = state.agents.get(record_id).cloned() else {
+                if state.codex_predecessor_record(record_id).is_none() {
+                    resolved_keys.push((record_id.clone(), turn.agent_id.clone()));
+                }
                 continue;
             };
+            resolved_keys.push((record_id.clone(), turn.agent_id.clone()));
             if before.adapter_id != "codex"
                 || before.codex_running_subagents.get(&turn.agent_id) != Some(&turn.turn_id)
             {
@@ -445,7 +451,7 @@ impl AgentRuntime {
         }
         drop(state);
         let mut monitors = self.codex_child_monitors.lock().unwrap();
-        for (key, _, _) in resolved {
+        for key in resolved_keys {
             monitors.remove(&key);
         }
         events
@@ -463,14 +469,20 @@ impl AgentRuntime {
             return Vec::new();
         }
         let now = now_millis();
-        let current: BTreeMap<String, StoredAgent> = self
-            .state
-            .lock()
-            .unwrap()
-            .agents
-            .iter()
-            .map(|(id, record)| (id.clone(), record.clone()))
-            .collect();
+        let current: BTreeMap<String, StoredAgent> = {
+            let state = self.state.lock().unwrap();
+            state
+                .agents
+                .iter()
+                .map(|(id, record)| (id.clone(), record.clone()))
+                .chain(
+                    state
+                        .codex_predecessors
+                        .values()
+                        .map(|record| (record.agent_id.clone(), record.clone())),
+                )
+                .collect()
+        };
         let mut pending = self.pending_codex_permissions.lock().unwrap();
         pending.retain(|key, value| {
             now.saturating_sub(value.observed_at_unix_millis) <= PENDING_CODEX_PERMISSION_TTL_MILLIS
@@ -530,11 +542,15 @@ impl AgentRuntime {
         let mut state = self.state.lock().unwrap();
         let original = state.clone();
         let mut events = Vec::new();
-        let resolved_keys: Vec<_> = resolved.iter().map(|(key, _, _, _)| key.clone()).collect();
+        let mut resolved_keys = Vec::new();
         for (key, terminal, expected_changed_at, expected_root_turn_id) in resolved {
             let Some(current) = state.agents.get(&key.record_id) else {
+                if state.codex_predecessor_record(&key.record_id).is_none() {
+                    resolved_keys.push(key);
+                }
                 continue;
             };
+            resolved_keys.push(key.clone());
             if current.lifecycle != v1::AgentLifecycleState::Blocked as i32
                 || current.lifecycle_changed_at_unix_millis != expected_changed_at
                 || current.codex_active_root_turn_id != expected_root_turn_id
@@ -801,8 +817,10 @@ impl AgentRuntime {
             return Vec::new();
         }
         let original = state.clone();
+        let mut runtime_departed = departed.clone();
         for agent_id in &departed {
             state.agents.remove(agent_id);
+            runtime_departed.extend(state.drain_codex_predecessors(agent_id));
         }
         state.unbind_agents(&departed);
         state.generation = state.generation.saturating_add(1);
@@ -814,6 +832,9 @@ impl AgentRuntime {
         for agent_id in &departed {
             misses.remove(agent_id);
         }
+        drop(misses);
+        drop(state);
+        self.retire_codex_runtime_state(&runtime_departed);
         vec![v1::AgentEvent {
             agent: None,
             generation,
@@ -903,6 +924,9 @@ impl AgentRuntime {
                 .unwrap()
                 .retain(|agent_id, _| !observed.contains(agent_id));
         }
+        let retired_codex_agent_ids = result.retired_codex_agent_ids.clone();
+        drop(state);
+        self.retire_codex_runtime_state(&retired_codex_agent_ids);
         Ok(result.changed)
     }
 

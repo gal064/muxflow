@@ -262,7 +262,7 @@ impl AgentRuntime {
                     .map(str::to_owned)
             })
             .flatten();
-        let observed_pane_owner = stored_pane_owner_id
+        let observed_pane_owner_record = stored_pane_owner_id
             .as_ref()
             .and_then(|owner_id| state.agents.get(owner_id))
             .or_else(|| {
@@ -273,19 +273,49 @@ impl AgentRuntime {
                             .and_then(|pane_id| state.agents.get(pane_id))
                     })
                     .flatten()
-            });
-        let observed_pane_owner_id = observed_pane_owner.map(|owner| owner.agent_id.clone());
-        let observed_pane_owner_record = observed_pane_owner.cloned();
-        let known_mapped_native_session = native_record_id.as_ref().is_some_and(|record_id| {
+            })
+            .cloned();
+        let observed_pane_owner_id = observed_pane_owner_record
+            .as_ref()
+            .map(|owner| owner.agent_id.clone());
+        let predecessor_position = if adapter.id() == "codex" && origin_matches {
+            stored_pane_owner_id
+                .as_ref()
+                .and_then(|owner_id| state.codex_predecessor_position(owner_id, &agent_id))
+        } else {
+            None
+        };
+        let codex_session_child_event = adapter.id() == "codex"
+            && payload
+                .get(adapters::CODEX_SUBAGENT_ID_FIELD)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.is_empty());
+        let session_position = if observed_pane_owner_record
+            .as_ref()
+            .is_some_and(|owner| owner.native_session_id == native_session_id)
+        {
+            super::codex_authority::SessionPosition::Current
+        } else if let Some(all_newer_terminal) = predecessor_position {
+            super::codex_authority::SessionPosition::Predecessor { all_newer_terminal }
+        } else if native_record_id.as_ref().is_some_and(|record_id| {
             state.agents[record_id].present && state.agent_is_bound(record_id)
-        });
+        }) {
+            super::codex_authority::SessionPosition::BoundElsewhere
+        } else if native_record_id.is_some() {
+            super::codex_authority::SessionPosition::KnownUnbound
+        } else {
+            super::codex_authority::SessionPosition::Unknown
+        };
         let session_authority = if adapter.id() == "codex" {
             super::codex_authority::session(
                 &native_session_id,
-                known_mapped_native_session,
-                observed_pane_owner.map(|owner| owner.native_session_id.as_str()),
+                session_position,
+                observed_pane_owner_record
+                    .as_ref()
+                    .map(|owner| owner.native_session_id.as_str()),
                 route_verified,
                 &parsed.event_name,
+                codex_session_child_event,
             )
         } else {
             super::codex_authority::SessionAuthority::Current
@@ -293,11 +323,104 @@ impl AgentRuntime {
         if session_authority == super::codex_authority::SessionAuthority::Superseded {
             crate::diagnostics::write_codex_hook_superseded_log(
                 &event.pane_id,
-                observed_pane_owner.map(|owner| owner.agent_id.as_str()),
+                observed_pane_owner_record
+                    .as_ref()
+                    .map(|owner| owner.agent_id.as_str()),
                 &agent_id,
                 &parsed.event_name,
             );
             return Err(HookIngestFailure::Superseded);
+        }
+        if session_authority == super::codex_authority::SessionAuthority::Dismissed {
+            let owner_id = observed_pane_owner_id
+                .as_deref()
+                .expect("a suspended Codex session has a foreground owner");
+            let dismissed_id = state
+                .dismiss_codex_predecessor(owner_id, &agent_id)
+                .expect("authority resolved an existing Codex predecessor");
+            state.generation = state.generation.saturating_add(1);
+            let generation = state.generation;
+            let owner = state
+                .agents
+                .get_mut(owner_id)
+                .expect("foreground Codex owner remains present");
+            owner.state_generation = generation;
+            let owner = owner.clone();
+            if let Err(error) = self.persist_locked(&state) {
+                *state = original;
+                return Err(HookIngestFailure::Retryable(error));
+            }
+            drop(state);
+            self.retire_codex_runtime_state(std::slice::from_ref(&dismissed_id));
+            return Ok(IngestedHook {
+                event: v1::AgentEvent {
+                    agent: Some(snapshot::record(&owner)),
+                    generation,
+                    notify: false,
+                    reason: "state_changed".into(),
+                    retired_agent_ids: vec![dismissed_id],
+                },
+                reply: None,
+            });
+        }
+        if adapter.id() == "codex"
+            && parsed.event_name == "SessionEnd"
+            && session_authority == super::codex_authority::SessionAuthority::Current
+            && let Some(owner_id) = observed_pane_owner_id.as_ref()
+            && let Some(mut predecessor) = state.pop_codex_predecessor(owner_id)
+        {
+            state.agents.remove(owner_id);
+            state.generation = state.generation.saturating_add(1);
+            let generation = state.generation;
+            predecessor.state_generation = generation;
+            predecessor.present = true;
+            let predecessor_id = predecessor.agent_id.clone();
+            state
+                .agents
+                .insert(predecessor_id.clone(), predecessor.clone());
+            state.bind_pane(
+                adapter.id(),
+                active_server_identity,
+                &event.pane_id,
+                &predecessor_id,
+            );
+            if let Err(error) = self.persist_locked(&state) {
+                *state = original;
+                return Err(HookIngestFailure::Retryable(error));
+            }
+            drop(state);
+            self.retire_codex_runtime_state(std::slice::from_ref(owner_id));
+            return Ok(IngestedHook {
+                event: v1::AgentEvent {
+                    agent: Some(snapshot::record(&predecessor)),
+                    generation,
+                    notify: false,
+                    reason: "state_changed".into(),
+                    retired_agent_ids: vec![owner_id.clone()],
+                },
+                reply: None,
+            });
+        }
+        let mut ownership_retired_agent_ids = Vec::new();
+        if session_authority == super::codex_authority::SessionAuthority::Resume {
+            let owner_id = observed_pane_owner_id
+                .as_deref()
+                .expect("a resumed Codex predecessor has a foreground owner");
+            let Some((predecessor, retired)) = state.resume_codex_predecessor(owner_id, &agent_id)
+            else {
+                return Err(HookIngestFailure::Superseded);
+            };
+            state.agents.remove(owner_id);
+            if !route_verified {
+                route = predecessor.route.clone();
+                restored_route_authority = true;
+            }
+            native_record_id = Some(predecessor.agent_id.clone());
+            pane_record_id = None;
+            state
+                .agents
+                .insert(predecessor.agent_id.clone(), predecessor);
+            ownership_retired_agent_ids = retired;
         }
         // Keep the current session's last verified identity and route through
         // topology loss. TMUX_PANE is evidence that the hook still belongs to
@@ -306,7 +429,7 @@ impl AgentRuntime {
             && session_authority == super::codex_authority::SessionAuthority::Current
             && !route_verified
         {
-            let exact_pane_owner = observed_pane_owner;
+            let exact_pane_owner = observed_pane_owner_record.as_ref();
             let continuity_id = exact_pane_owner
                 .filter(|owner| owner.native_session_id == native_session_id)
                 .map(|owner| owner.agent_id.clone())
@@ -339,6 +462,7 @@ impl AgentRuntime {
             session_authority,
             super::codex_authority::SessionAuthority::Current
                 | super::codex_authority::SessionAuthority::Move
+                | super::codex_authority::SessionAuthority::Resume
         ) {
             for record_id in [native_record_id.as_ref(), pane_record_id.as_ref()]
                 .into_iter()
@@ -405,7 +529,7 @@ impl AgentRuntime {
             .cloned();
         let metadata_previous =
             if session_authority == super::codex_authority::SessionAuthority::Replacement {
-                observed_pane_owner_record
+                observed_pane_owner_record.clone()
             } else {
                 session_record_ids
                     .first()
@@ -458,16 +582,42 @@ impl AgentRuntime {
                 }
             }
         }
-        let mut retired_agent_ids = Vec::new();
+        let suspended_predecessor = (adapter.id() == "codex"
+            && session_authority == super::codex_authority::SessionAuthority::Replacement)
+            .then(|| observed_pane_owner_record.clone())
+            .flatten()
+            .filter(|record| !record.native_session_id.is_empty() && record.agent_id != agent_id);
+        let suspended_predecessor_id = suspended_predecessor
+            .as_ref()
+            .map(|record| record.agent_id.clone());
+        let mut retired_agent_ids = ownership_retired_agent_ids.clone();
+        let mut runtime_retired_agent_ids = ownership_retired_agent_ids;
         for old_id in retirement_candidates {
             if old_id != agent_id
                 && !retired_agent_ids.contains(&old_id)
                 && state.agents.remove(&old_id).is_some()
             {
-                retired_agent_ids.push(old_id);
+                retired_agent_ids.push(old_id.clone());
+                if suspended_predecessor_id.as_ref() != Some(&old_id) {
+                    if !runtime_retired_agent_ids.contains(&old_id) {
+                        runtime_retired_agent_ids.push(old_id.clone());
+                    }
+                    for hidden_id in state.drain_codex_predecessors(&old_id) {
+                        if !runtime_retired_agent_ids.contains(&hidden_id) {
+                            runtime_retired_agent_ids.push(hidden_id);
+                        }
+                    }
+                }
             }
         }
         state.unbind_agents(&retired_agent_ids);
+        if let Some(predecessor) = suspended_predecessor {
+            for dropped_id in state.push_codex_predecessor(&agent_id, predecessor) {
+                if !runtime_retired_agent_ids.contains(&dropped_id) {
+                    runtime_retired_agent_ids.push(dropped_id);
+                }
+            }
+        }
         state.generation = state.generation.saturating_add(1);
         let generation = state.generation;
         let previous_lifecycle = previous
@@ -1173,6 +1323,11 @@ impl AgentRuntime {
             lifecycle_changed_at_unix_millis: lifecycle_changed_at,
         };
         state.agents.insert(agent_id.clone(), record.clone());
+        if adapter.id() == "codex"
+            && session_authority == super::codex_authority::SessionAuthority::Move
+        {
+            state.move_codex_predecessor_routes(&agent_id, &record.route);
+        }
         let explicit_session_claim = adapter.id() == "codex"
             && matches!(
                 parsed.event_name.as_str(),
@@ -1192,7 +1347,7 @@ impl AgentRuntime {
         }
         drop(state);
         if adapter.id() == "codex" {
-            self.retire_codex_runtime_state(&retired_agent_ids);
+            self.retire_codex_runtime_state(&runtime_retired_agent_ids);
         }
         if adapter.id() == "codex" {
             if !codex_ignored_lifecycle_event {
