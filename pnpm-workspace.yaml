@@ -1,6 +1,7 @@
 packages:
   - apps/desktop
   - apps/mobile
+  - packages/*
 
 allowBuilds:
   '@bufbuild/buf': true

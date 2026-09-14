@@ -11,7 +11,7 @@ import { sessionStore } from "../../store/sessionStore";
 import { resolveRoot, rooted, type ResolvedRoot } from "./activeRoot";
 import { displayMessageFor } from "./errors";
 import { readFile } from "./fileStream";
-import { filesStore } from "./filesStore";
+import { filesStore, terminalFileKey } from "./filesStore";
 import { filePresentation, FILE_VIEWER_COPY, type FilePresentation } from "./presentation";
 
 export type FileView =
@@ -39,10 +39,12 @@ export function useFileBody(paneId: string, path: string, name: string): FileBod
     }
     const identity = connection.serverIdentity;
     try {
-      const known = filesStore.getState().roots[paneId];
-      const root = await resolveRoot(connection.request.bind(connection), paneId, identity, known);
+      const state = filesStore.getState();
+      const exact = state.terminalFileRoots[terminalFileKey(paneId, path)];
+      const known = state.roots[paneId];
+      const root = exact ?? await resolveRoot(connection.request.bind(connection), paneId, identity, known);
       if (token !== attempt.current) return;
-      filesStore.getState().setRoot(root);
+      if (!exact) filesStore.getState().setRoot(root);
       const bulk = await openBulkConnection();
       if (token !== attempt.current) return;
       const body = await readFile(bulk.request.bind(bulk), rooted(root, path), identity);

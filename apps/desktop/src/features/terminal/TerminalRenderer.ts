@@ -22,11 +22,14 @@ import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
 import { settleWithin } from "./timeBound";
 import { recordPerfCounter } from "../../perf/probe";
 import { recordIncident } from "../../diagnostics/incidents";
-import { isTerminalFileLinkActivation } from "./terminalFilePaths";
+import {
+  captureTerminalSelection,
+  terminalLinksForBufferLine,
+  type TerminalSelectionSnapshot,
+} from "@muxflow/terminal-interactions";
 import type { Platform } from "../../commands/registry";
 import { installOsc52ClipboardWrite } from "./osc52Clipboard";
-import { captureTerminalSelection, type TerminalSelectionSnapshot } from "./terminalSelection";
-import { terminalLinksForBufferLine } from "./terminalLinks";
+import { isTerminalLinkActivation } from "./terminalLinkActivation";
 import {
   captureTerminalViewport,
   resizeTerminalPreservingViewport,
@@ -370,7 +373,7 @@ export function activatedTerminalUrl(
   platform: Platform,
   value: string,
 ): string | undefined {
-  if (!isTerminalFileLinkActivation(event, platform)) return undefined;
+  if (!isTerminalLinkActivation(event, platform)) return undefined;
   try {
     const url = new URL(value);
     if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
@@ -1369,7 +1372,7 @@ export class XtermRenderer implements TerminalRenderer {
         text: link.text,
         range: link.range,
         activate: (event) => {
-          if (isTerminalFileLinkActivation(event, this.#options.platform ?? "linux")) {
+          if (isTerminalLinkActivation(event, this.#options.platform ?? "linux")) {
             this.#options.onOpenFilePath?.(link.text);
           }
         },

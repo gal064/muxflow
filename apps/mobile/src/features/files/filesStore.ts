@@ -12,6 +12,8 @@ import type { ResolvedRoot } from "./activeRoot";
 export interface FilesState {
   /** paneId → the root capability last resolved for it. */
   roots: Record<string, ResolvedRoot>;
+  /** Exact terminal-resolved file path → its possibly narrow, non-listable read capability. */
+  terminalFileRoots: Record<string, ResolvedRoot>;
   /**
    * Directory path → a counter bumped whenever the host says that directory
    * changed. A mounted listing watches its own entry and re-lists silently
@@ -22,6 +24,7 @@ export interface FilesState {
 
 export interface FilesActions {
   setRoot(root: ResolvedRoot): void;
+  setTerminalFileRoot(path: string, root: ResolvedRoot): void;
   clearRoot(paneId: string): void;
   bumpDirectory(path: string): void;
   /** ACTIVE_ROOT / DIRECTORY_SNAPSHOT / FILE_CHANGED, forwarded by the connection (§7.4). */
@@ -35,10 +38,15 @@ export type FilesStore = StoreApi<FilesState & FilesActions>;
 export function createFilesStore(): FilesStore {
   return createStore<FilesState & FilesActions>((set, get) => ({
     roots: {},
+    terminalFileRoots: {},
     directoryRevisions: {},
 
     setRoot(root) {
       set({ roots: { ...get().roots, [root.paneId]: root } });
+    },
+
+    setTerminalFileRoot(path, root) {
+      set({ terminalFileRoots: { ...get().terminalFileRoots, [terminalFileKey(root.paneId, path)]: root } });
     },
 
     clearRoot(paneId) {
@@ -85,10 +93,14 @@ export function createFilesStore(): FilesStore {
     },
 
     clearAll() {
-      set({ roots: {}, directoryRevisions: {} });
+      set({ roots: {}, terminalFileRoots: {}, directoryRevisions: {} });
     },
   }));
 }
 
 /** The app-wide instance. Tests create their own with `createFilesStore()`. */
 export const filesStore: FilesStore = createFilesStore();
+
+export function terminalFileKey(paneId: string, path: string): string {
+  return `${paneId}\0${path}`;
+}

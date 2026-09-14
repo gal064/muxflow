@@ -19,6 +19,7 @@
     "webview:check": "pnpm run webview:build && git diff --exit-code -- src/webview src/features/terminal/terminalHtml.ts assets/webview && test -z \"$(git ls-files --others --exclude-standard -- src/webview src/features/terminal/terminalHtml.ts assets/webview)\""
   },
   "dependencies": {
+    "@muxflow/terminal-interactions": "workspace:*",
     "@bufbuild/protobuf": "2.14.0",
     "expo": "57.0.16",
     "expo-audio": "57.0.4",

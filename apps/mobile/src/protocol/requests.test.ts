@@ -1,6 +1,28 @@
 import { describe, expect, it } from "vitest";
 import { Operation, VoiceProvider } from "./gen/envelope_pb";
-import { voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "./requests";
+import { resolveTerminalFile, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "./requests";
+
+describe("terminal file request builder", () => {
+  it("binds the candidate to the exact pane route and host generation", () => {
+    const request = resolveTerminalFile("op-file", "%7", "../README.md", "server-a", 42n, {
+      sessionId: "$2",
+      windowId: "@5",
+      cwd: "/home/user/project/src",
+    });
+
+    expect(request.operation).toBe(Operation.RESOLVE_TERMINAL_FILE);
+    expect(request.file).toMatchObject({
+      operationId: "op-file",
+      paneId: "%7",
+      path: "../README.md",
+      expectedServerIdentity: "server-a",
+      expectedTopologyGeneration: 42n,
+      expectedSessionId: "$2",
+      expectedWindowId: "@5",
+      expectedCwd: "/home/user/project/src",
+    });
+  });
+});
 
 // Field usage of the voice builders against docs/mobile/voice-mode-plan.md §3:
 // everything rides in `Request.voice`, nothing in `scope` or `data`.
