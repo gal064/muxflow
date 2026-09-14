@@ -7,6 +7,7 @@ describe("voice copy helpers", () => {
   it("formats clocks and sizes", () => {
     expect(formatClock(0)).toBe("0:00");
     expect(formatClock(61_400)).toBe("1:01");
+    expect(formatBytes(731_357_568)).toBe("697 MB");
     expect(formatBytes(671_088_640)).toBe("640 MB");
     expect(formatBytes(1536)).toBe("2 KB");
     expect(provisionFraction(5, 0)).toBeUndefined();

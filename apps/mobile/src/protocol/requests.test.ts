@@ -54,7 +54,6 @@ describe("voice request builders", () => {
     expect(request.voice?.operationId).toBe("op-4");
     expect(request.voice?.audio).toBe(audio);
     expect(request.voice?.audioMime).toBe("audio/mp4");
-    expect(request.voice?.languageHint).toBe("");
     expect(request.data.length).toBe(0);
   });
 

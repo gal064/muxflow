@@ -9,20 +9,20 @@ the daemon.
 
 import asyncio
 import ctypes
+import fcntl
+import hashlib
 import json
 import os
 import queue
 import shutil
 import signal
 import sys
-import tarfile
 import threading
 import time
 import urllib.error
 import urllib.request
 
 PROGRESS_INTERVAL = 0.25
-MODEL_FILES = ("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt")
 
 
 class Refusal(Exception):
@@ -68,37 +68,51 @@ def read_frame(stream):
 
 class Recognizer:
     def __init__(self):
-        self.recognizer = None
+        self.model = None
+        self.session = None
         self.key = None
 
     def load(self, request):
-        import sherpa_onnx
+        import transcribe_cpp
 
-        key = (request["encoder"], request["decoder"], request["joiner"], request["tokens"])
-        for path in key:
-            if not os.path.isfile(path) or os.path.getsize(path) == 0:
-                raise Refusal("model", f"model file missing or empty: {os.path.basename(path)}")
-        if self.recognizer is not None and self.key == key:
+        key = request["model"]
+        if not os.path.isfile(key) or os.path.getsize(key) == 0:
+            raise Refusal("model", f"model file missing or empty: {os.path.basename(key)}")
+        if self.session is not None and self.key == key:
             return 0
+        self.close()
         started = time.monotonic()
+        model = None
+        session = None
         try:
-            self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-                encoder=key[0],
-                decoder=key[1],
-                joiner=key[2],
-                tokens=key[3],
-                num_threads=min(4, os.cpu_count() or 1),
-                model_type="nemo_transducer",
-            )
+            model = transcribe_cpp.Model(key, backend="auto")
+            capabilities = model.capabilities
+            if capabilities.native_sample_rate != 16_000 or "en" not in capabilities.languages:
+                raise Refusal("model", "model is not the expected 16 kHz English recognizer")
+            session = model.session(n_threads=min(4, os.cpu_count() or 1))
         except Exception as error:  # noqa: BLE001 - reported to the host
-            self.recognizer = None
-            raise Refusal("model", f"model failed to load: {error}") from error
+            if session is not None:
+                session.close()
+            if model is not None:
+                model.close()
+            if isinstance(error, Refusal):
+                raise
+            if isinstance(
+                error,
+                (transcribe_cpp.ModelFileNotFound, transcribe_cpp.ModelLoadError),
+            ):
+                raise Refusal("model", f"model failed to load: {error}") from error
+            raise Refusal("internal", f"speech runtime failed to load: {error}") from error
+        self.model = model
+        self.session = session
         self.key = key
         return int((time.monotonic() - started) * 1000)
 
     def transcribe(self, sample_rate, body):
-        if self.recognizer is None:
+        if self.session is None:
             raise Refusal("model", "model is not loaded")
+        if sample_rate != 16_000:
+            raise Refusal("input", f"pcm sample rate must be 16000 Hz, got {sample_rate}")
         if len(body) % 4 or not body:
             raise Refusal("input", "pcm body must be non-empty f32 little-endian")
         import array
@@ -108,11 +122,20 @@ class Recognizer:
         if sys.byteorder != "little":
             samples.byteswap()
         started = time.monotonic()
-        stream = self.recognizer.create_stream()
-        stream.accept_waveform(sample_rate, samples.tolist())
-        self.recognizer.decode_stream(stream)
-        text = stream.result.text.strip()
+        try:
+            text = self.session.run(samples, language="en", timestamps="none").text.strip()
+        except Exception as error:  # noqa: BLE001 - reported to the host
+            raise Refusal("internal", f"transcription failed: {error}") from error
         return text, int((time.monotonic() - started) * 1000)
+
+    def close(self):
+        if self.session is not None:
+            self.session.close()
+        if self.model is not None:
+            self.model.close()
+        self.session = None
+        self.model = None
+        self.key = None
 
 
 def speak(text, voice):
@@ -148,21 +171,55 @@ class Provisioner:
         self.cancel.clear()
         model_dir = request["model_dir"]
         url = request["url"]
+        filename = request["filename"]
+        expected_size = int(request["size"])
+        expected_sha256 = request["sha256"]
+        marker_contents = request["marker"]
         parent = os.path.dirname(model_dir)
         os.makedirs(parent, exist_ok=True)
-        partial = os.path.join(parent, f".partial-{os.getpid()}.tar.bz2")
-        extract = os.path.join(parent, f".extract-{os.getpid()}")
+        partial = os.path.join(parent, f".partial-{os.getpid()}.gguf")
+        marker_tmp = os.path.join(model_dir, f".complete.{os.getpid()}")
+        lock = self.acquire_lock(parent)
         try:
-            self.download(url, partial, request_id)
-            self.extract(partial, extract, model_dir, request_id)
+            self.sweep_partials(parent)
+            self.download(url, partial, request_id, expected_size, expected_sha256)
+            os.makedirs(model_dir, exist_ok=True)
+            final_path = os.path.join(model_dir, filename)
+            os.replace(partial, final_path)
+
+            with open(marker_tmp, "w", encoding="utf-8") as marker:
+                marker.write(marker_contents)
+                marker.flush()
+                os.fsync(marker.fileno())
+            os.replace(marker_tmp, os.path.join(model_dir, ".complete"))
+            fsync_dir(model_dir)
+            fsync_dir(parent)
         finally:
             if os.path.exists(partial):
                 os.remove(partial)
-            for directory in (extract, extract + ".model"):
-                if os.path.isdir(directory):
-                    shutil.rmtree(directory, ignore_errors=True)
-        with open(os.path.join(model_dir, ".complete"), "w", encoding="utf-8") as marker:
-            marker.write(url)
+            if os.path.exists(marker_tmp):
+                os.remove(marker_tmp)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            lock.close()
+
+    def acquire_lock(self, parent):
+        lock = open(os.path.join(parent, ".provision.lock"), "a+b")
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            lock.close()
+            raise Refusal("busy", "another host process is provisioning voice") from error
+        return lock
+
+    def sweep_partials(self, parent):
+        for name in os.listdir(parent):
+            if not name.startswith((".partial-", ".extract-")):
+                continue
+            path = os.path.join(parent, name)
+            if os.path.isfile(path) or os.path.islink(path):
+                os.remove(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
 
     def progress(self, request_id, phase, transferred, total):
         write_frame(
@@ -175,15 +232,22 @@ class Provisioner:
             }
         )
 
-    def download(self, url, partial, request_id):
+    def download(self, url, partial, request_id, expected_size, expected_sha256):
         try:
             response = urllib.request.urlopen(url, timeout=60)
         except (urllib.error.URLError, OSError) as error:
             raise Refusal("network", f"download failed: {error}") from error
-        total = int(response.headers.get("Content-Length") or 0)
+        announced_size = int(response.headers.get("Content-Length") or 0)
+        if announced_size and announced_size != expected_size:
+            response.close()
+            raise Refusal(
+                "model",
+                f"download size changed: expected {expected_size}, server announced {announced_size}",
+            )
         transferred = 0
+        digest = hashlib.sha256()
         last = 0.0
-        self.progress(request_id, "downloading", 0, total)
+        self.progress(request_id, "downloading", 0, expected_size)
         with response, open(partial, "wb") as out:
             while True:
                 if self.cancel.is_set():
@@ -195,48 +259,37 @@ class Provisioner:
                 if not chunk:
                     break
                 out.write(chunk)
+                digest.update(chunk)
                 transferred += len(chunk)
                 now = time.monotonic()
                 if now - last >= PROGRESS_INTERVAL:
                     last = now
-                    self.progress(request_id, "downloading", transferred, total)
-        if total and transferred != total:
-            raise Refusal("network", f"download incomplete: {transferred} of {total} bytes")
-        self.progress(request_id, "downloading", transferred, total)
+                    self.progress(request_id, "downloading", transferred, expected_size)
+            out.flush()
+            os.fsync(out.fileno())
 
-    def extract(self, partial, extract, model_dir, request_id):
-        self.progress(request_id, "extracting", 0, 0)
-        if os.path.isdir(extract):
-            shutil.rmtree(extract, ignore_errors=True)
-        os.makedirs(extract)
-        try:
-            with tarfile.open(partial, "r:bz2") as archive:
-                for member in archive:
-                    if self.cancel.is_set():
-                        raise Refusal("cancelled", "provision cancelled")
-                    archive.extract(member, extract, filter="data")
-        except (tarfile.TarError, OSError, ValueError) as error:
-            raise Refusal("model", f"archive could not be extracted: {error}") from error
-        found = {}
-        for root, _dirs, files in os.walk(extract):
-            for name in files:
-                for wanted in MODEL_FILES:
-                    if name == wanted or (
-                        wanted.endswith(".onnx") and name.startswith(wanted.split(".")[0]) and name.endswith("int8.onnx")
-                    ):
-                        found.setdefault(wanted, os.path.join(root, name))
-        missing = [name for name in MODEL_FILES if name not in found]
-        if missing:
-            raise Refusal("model", f"archive lacks {', '.join(missing)}")
-        staged = extract + ".model"
-        if os.path.isdir(staged):
-            shutil.rmtree(staged, ignore_errors=True)
-        os.makedirs(staged)
-        for wanted, path in found.items():
-            shutil.move(path, os.path.join(staged, wanted))
-        if os.path.isdir(model_dir):
-            shutil.rmtree(model_dir, ignore_errors=True)
-        os.rename(staged, model_dir)
+        self.progress(request_id, "downloading", transferred, expected_size)
+        self.progress(request_id, "verifying", transferred, expected_size)
+        if transferred != expected_size:
+            raise Refusal(
+                "model", f"download incomplete: {transferred} of {expected_size} bytes"
+            )
+        actual_sha256 = digest.hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise Refusal(
+                "model",
+                f"download checksum mismatch: expected {expected_sha256}, got {actual_sha256}",
+            )
+
+
+def fsync_dir(path):
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def read_requests(stdin, requests, provisioner):

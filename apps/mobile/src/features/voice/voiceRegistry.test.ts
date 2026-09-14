@@ -54,8 +54,8 @@ describe("VoiceRegistry", () => {
       voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "a", displayMarkdown: "_silent_", speechText: "silent" }), status: create(VoiceStatusSchema, { detail: "tts down" }) }),
     }));
     expect(h.store.getState().sessions["a"]?.messages.at(-1)).toMatchObject({ displayText: "_silent_", speechText: "silent", audioError: "tts down" });
-    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_PROVISION, voice: create(VoiceEventSchema, { provision: create(VoiceProvisionProgressSchema, { phase: "extracting", totalBytes: 4n, transferredBytes: 4n }) }) }));
-    expect(h.store.getState().hostStatus).toMatchObject({ readiness: "provisioning", provision: { phase: "extracting" } });
+    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_PROVISION, voice: create(VoiceEventSchema, { provision: create(VoiceProvisionProgressSchema, { phase: "verifying", totalBytes: 4n, transferredBytes: 4n }) }) }));
+    expect(h.store.getState().hostStatus).toMatchObject({ readiness: "provisioning", provision: { phase: "verifying" } });
   });
 
   it("onConnected re-registers live sessions; end clears on the host; disposeAll is local only", async () => {

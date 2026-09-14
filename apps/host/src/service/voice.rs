@@ -475,15 +475,15 @@ impl VoiceService {
             // has rejected — corrupted on disk, or outgrown by a pin bump —
             // back into a fresh download on the next attempt.
             return match self.ensure_loaded(cancel, connection_closed).await {
-                Ok(()) => Ok(self.status()),
-                Err(error) if error.model_fault => {
-                    model.remove();
-                    Err(VoiceError::new(
-                        "voice_provision_failed",
-                        error.message,
-                        true,
-                    ))
+                Ok(()) => {
+                    model.remove_obsolete_model();
+                    Ok(self.status())
                 }
+                Err(error) if error.model_fault => Err(VoiceError::new(
+                    "voice_provision_failed",
+                    error.message,
+                    true,
+                )),
                 Err(error) => Err(error),
             };
         }
@@ -493,15 +493,6 @@ impl VoiceService {
         let final_progress = match &outcome {
             Ok(()) => provision::progress(operation_id, provision::PHASE_READY, 0, 0, ""),
             Err(error) => {
-                // The sidecar removes its own partials when it gets to; a
-                // sidecar the host killed did not, so sweep here as well. Not
-                // for the refusals answered before anything was attempted.
-                if !matches!(
-                    error.code,
-                    "voice_busy" | "voice_uv_missing" | "voice_provisioning"
-                ) {
-                    model.sweep_partials();
-                }
                 provision::progress(operation_id, provision::PHASE_FAILED, 0, 0, &error.message)
             }
         };
@@ -523,7 +514,7 @@ impl VoiceService {
         self.emit_progress(&installing, on_progress);
         let mut forward = |event: &serde_json::Value| {
             let phase = match event.get("phase").and_then(serde_json::Value::as_str) {
-                Some("extracting") => provision::PHASE_EXTRACTING,
+                Some("verifying") => provision::PHASE_VERIFYING,
                 _ => provision::PHASE_DOWNLOADING,
             };
             let progress = provision::progress(
@@ -554,8 +545,8 @@ impl VoiceService {
             .map_err(|error| match error.code {
                 // Not about the download: the phone should show these as they are.
                 "cancelled" | "voice_busy" | "voice_uv_missing" | "voice_sidecar_timeout" => error,
-                // A refused, crashed or otherwise failed download or extraction
-                // (§4.6): retryable — a bad archive is fetched again — unless
+                // A refused, crashed or otherwise failed download or verification
+                // (§4.6): retryable — bad bytes are fetched again — unless
                 // the sidecar itself has crashed out of its retry window.
                 _ => VoiceError::new(
                     "voice_provision_failed",
@@ -564,9 +555,7 @@ impl VoiceService {
                 ),
             })?;
         if !model.complete() {
-            // The sidecar said it finished, yet the layout is not there: the
-            // archive did not contain what it should have.
-            model.remove();
+            // The sidecar said it finished, yet the verified layout is absent.
             return Err(VoiceError::new(
                 "voice_provision_failed",
                 "the download did not produce a complete model",
@@ -580,7 +569,6 @@ impl VoiceService {
                 // The sidecar read the files and rejected them: a corrupt
                 // download, and the next provision must start from nothing
                 // rather than verify the same bytes.
-                model.remove();
                 return Err(VoiceError::new(
                     "voice_provision_failed",
                     error.message,
@@ -589,9 +577,10 @@ impl VoiceService {
             }
             // Cancelled, crashed or timed out while loading: the bytes are fine
             // as far as anyone knows. The next STATUS finds a complete model
-            // and the next request verifies it, without another 487 MB.
+            // and the next request verifies it, without another download.
             return Err(error);
         }
+        model.remove_obsolete_model();
         Ok(())
     }
 
@@ -621,7 +610,6 @@ impl VoiceService {
         self: &Arc<Self>,
         audio: Vec<u8>,
         mime: &str,
-        language_hint: &str,
         cancel: &AtomicBool,
     ) -> Result<v1::VoiceTranscript, VoiceError> {
         if audio.is_empty() {
@@ -640,9 +628,6 @@ impl VoiceService {
                 "audio_mime must be audio/mp4, audio/x-m4a or audio/aac",
                 false,
             ));
-        }
-        if !language_hint.is_empty() && !valid_language_tag(language_hint) {
-            return Err(VoiceError::invalid("language_hint must be a BCP-47 tag"));
         }
         self.readiness_gate()?;
         let decode_started = Instant::now();
@@ -682,9 +667,6 @@ impl VoiceService {
         let mut header = serde_json::Map::new();
         header.insert("op".into(), "transcribe".into());
         header.insert("sample_rate".into(), pcm.sample_rate.into());
-        if !language_hint.is_empty() {
-            header.insert("language".into(), language_hint.into());
-        }
         let body: Vec<u8> = pcm.samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         let request = SidecarRequest {
             header,
@@ -934,6 +916,43 @@ impl VoiceService {
                     false,
                 ));
             }
+            let verify_model = model.clone();
+            let locked = tokio::task::spawn_blocking(move || verify_model.lock_and_verify())
+                .await
+                .map_err(|error| {
+                    VoiceError::new(
+                        "voice_sidecar_failed",
+                        format!("model verification task failed: {error}"),
+                        true,
+                    )
+                })?
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        VoiceError::new(
+                            "voice_busy",
+                            "another host process is provisioning voice",
+                            true,
+                        )
+                    } else {
+                        VoiceError::new(
+                            "voice_sidecar_failed",
+                            format!("could not lock the speech model: {error}"),
+                            true,
+                        )
+                    }
+                })?;
+            let (model_lock, verified) = locked;
+            if !verified {
+                model.remove_locked(&model_lock);
+                let message = "the speech model failed integrity verification";
+                let mut books = self.books.lock().unwrap();
+                books.model_rejected = true;
+                books.last_error = message.into();
+                return Err(VoiceError {
+                    model_fault: true,
+                    ..VoiceError::new("voice_sidecar_failed", message, false)
+                });
+            }
             let child = slot.child.as_mut().expect("spawned above");
             // Never cancellable: the sidecar cannot interrupt a load, and
             // giving up on it would only throw away the model it is loading.
@@ -946,7 +965,13 @@ impl VoiceService {
                     self.hot.store(true, Ordering::Release);
                     self.books.lock().unwrap().model_rejected = false;
                 }
-                Err(failure) => return Err(self.handle_failure(&mut slot, failure).await),
+                Err(failure) => {
+                    let error = self.handle_failure(&mut slot, failure).await;
+                    if error.model_fault {
+                        model.remove_locked(&model_lock);
+                    }
+                    return Err(error);
+                }
             }
             self.touch();
         }
@@ -1037,9 +1062,10 @@ impl VoiceService {
         match failure {
             SidecarFailure::Cancelled => VoiceError::cancelled(),
             SidecarFailure::CancelUnacknowledged => {
-                // Stuck in work it cannot interrupt (bz2 extraction, a stalled
+                // Stuck in work it cannot interrupt (hash verification, a stalled
                 // read): killed at the cancel's request, not counted against it.
                 self.drop_child(slot).await;
+                self.cleanup_model_partials().await;
                 VoiceError::cancelled()
             }
             SidecarFailure::Refused { class, error } => {
@@ -1047,6 +1073,7 @@ impl VoiceService {
                 self.books.lock().unwrap().last_error = error.clone();
                 match class.as_str() {
                     "network" => VoiceError::new("voice_network_unavailable", error, true),
+                    "busy" => VoiceError::new("voice_busy", error, true),
                     "input" => VoiceError::invalid(error),
                     "model" => {
                         // STATUS now reports MODEL_MISSING with this reason, so
@@ -1062,6 +1089,7 @@ impl VoiceService {
             }
             SidecarFailure::Timeout => {
                 self.drop_child(slot).await;
+                self.cleanup_model_partials().await;
                 // A sidecar that keeps hanging is as broken as one that keeps
                 // dying: it counts toward the same backoff.
                 self.record_crash("sidecar timed out".into());
@@ -1076,6 +1104,7 @@ impl VoiceService {
             }
             SidecarFailure::Crashed(detail) => {
                 self.drop_child(slot).await;
+                self.cleanup_model_partials().await;
                 self.record_crash(bounded_detail(&detail));
                 self.sidecar_failed()
             }
@@ -1089,6 +1118,11 @@ impl VoiceService {
         if let Some(child) = slot.child.take() {
             child.kill().await;
         }
+    }
+
+    async fn cleanup_model_partials(&self) {
+        let model = self.model();
+        let _ = tokio::task::spawn_blocking(move || model.cleanup_partials()).await;
     }
 
     fn record_crash(&self, detail: String) {
@@ -1258,18 +1292,6 @@ fn prune_sessions(sessions: &mut HashMap<String, Session>) {
     sessions.retain(|_, session| {
         session.since.elapsed() < SESSION_TTL && control_sink_alive(session.connection_id)
     });
-}
-
-/// BCP-47 shape: 2–3 letter language, then `-` separated 1–8 alphanumeric
-/// subtags.
-fn valid_language_tag(tag: &str) -> bool {
-    let mut parts = tag.split('-');
-    let language = parts.next().unwrap_or_default();
-    (2..=3).contains(&language.len())
-        && language.chars().all(|c| c.is_ascii_alphabetic())
-        && parts.all(|part| {
-            (1..=8).contains(&part.len()) && part.chars().all(|c| c.is_ascii_alphanumeric())
-        })
 }
 
 /// Edge voice identifiers look like `en-US-AvaNeural` or
