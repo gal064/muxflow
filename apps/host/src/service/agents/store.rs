@@ -204,6 +204,13 @@ pub(super) struct StoredState {
     /// never become a navigation destination.
     #[serde(default)]
     pub pane_bindings: BTreeSet<StoredPaneBinding>,
+    /// Immediate Codex predecessor for each foreground or suspended logical
+    /// session. One TUI can temporarily focus another thread in the same tmux
+    /// pane; keeping that chain separate from `agents` leaves the public
+    /// snapshot at one row per pane without destroying the displaced thread's
+    /// lifecycle and turn state. The key is the newer session's agent ID.
+    #[serde(default)]
+    pub codex_predecessors: BTreeMap<String, StoredAgent>,
 }
 
 impl Default for StoredState {
@@ -213,6 +220,7 @@ impl Default for StoredState {
             generation: 0,
             agents: BTreeMap::new(),
             pane_bindings: BTreeSet::new(),
+            codex_predecessors: BTreeMap::new(),
         }
     }
 }
@@ -274,6 +282,165 @@ impl StoredState {
     pub(super) fn unbind_agents(&mut self, agent_ids: &[String]) {
         self.pane_bindings
             .retain(|binding| !agent_ids.contains(&binding.agent_id));
+    }
+
+    pub(super) fn codex_predecessor_position(
+        &self,
+        foreground_agent_id: &str,
+        candidate_agent_id: &str,
+    ) -> Option<bool> {
+        let mut owner_id = foreground_agent_id;
+        let mut all_newer_terminal = self
+            .agents
+            .get(foreground_agent_id)
+            .is_some_and(|record| record.hook_terminal);
+        let mut visited = BTreeSet::new();
+        while visited.insert(owner_id.to_owned()) {
+            let predecessor = self.codex_predecessors.get(owner_id)?;
+            if predecessor.agent_id == candidate_agent_id {
+                return Some(all_newer_terminal);
+            }
+            all_newer_terminal &= predecessor.hook_terminal;
+            owner_id = &predecessor.agent_id;
+        }
+        None
+    }
+
+    pub(super) fn codex_predecessor_record(&self, agent_id: &str) -> Option<&StoredAgent> {
+        self.codex_predecessors
+            .values()
+            .find(|record| record.agent_id == agent_id)
+    }
+
+    /// Push a displaced foreground session and return any oldest records
+    /// dropped to keep adversarial or corrupt hook streams bounded.
+    pub(super) fn push_codex_predecessor(
+        &mut self,
+        foreground_agent_id: &str,
+        predecessor: StoredAgent,
+    ) -> Vec<String> {
+        self.codex_predecessors
+            .insert(foreground_agent_id.to_owned(), predecessor);
+        let mut cursor = foreground_agent_id.to_owned();
+        for _ in 0..super::MAX_CODEX_PANE_SESSION_DEPTH {
+            let Some(next) = self.codex_predecessors.get(&cursor) else {
+                return Vec::new();
+            };
+            cursor = next.agent_id.clone();
+        }
+        self.drain_codex_predecessors(&cursor)
+    }
+
+    /// Restore `candidate_agent_id` and permanently unwind every newer
+    /// logical session. The returned IDs were visible or suspended sessions
+    /// that can no longer reclaim this pane.
+    pub(super) fn resume_codex_predecessor(
+        &mut self,
+        foreground_agent_id: &str,
+        candidate_agent_id: &str,
+    ) -> Option<(StoredAgent, Vec<String>)> {
+        let mut owner_id = foreground_agent_id.to_owned();
+        let mut retired = vec![owner_id.clone()];
+        loop {
+            let predecessor = self.codex_predecessors.remove(&owner_id)?;
+            if predecessor.agent_id == candidate_agent_id {
+                return Some((predecessor, retired));
+            }
+            owner_id = predecessor.agent_id.clone();
+            retired.push(owner_id.clone());
+        }
+    }
+
+    pub(super) fn pop_codex_predecessor(
+        &mut self,
+        foreground_agent_id: &str,
+    ) -> Option<StoredAgent> {
+        self.codex_predecessors.remove(foreground_agent_id)
+    }
+
+    /// Remove a suspended session while preserving the chain around it.
+    pub(super) fn dismiss_codex_predecessor(
+        &mut self,
+        foreground_agent_id: &str,
+        candidate_agent_id: &str,
+    ) -> Option<String> {
+        let mut owner_id = foreground_agent_id.to_owned();
+        let mut visited = BTreeSet::new();
+        while visited.insert(owner_id.clone()) {
+            let predecessor = self.codex_predecessors.get(&owner_id)?;
+            if predecessor.agent_id != candidate_agent_id {
+                owner_id = predecessor.agent_id.clone();
+                continue;
+            }
+            let removed = self.codex_predecessors.remove(&owner_id)?;
+            if let Some(older) = self.codex_predecessors.remove(candidate_agent_id) {
+                self.codex_predecessors.insert(owner_id, older);
+            }
+            return Some(removed.agent_id);
+        }
+        None
+    }
+
+    /// Remove every suspended predecessor reachable from this owner.
+    pub(super) fn drain_codex_predecessors(&mut self, owner_agent_id: &str) -> Vec<String> {
+        let mut drained = Vec::new();
+        let mut owner_id = owner_agent_id.to_owned();
+        let mut visited = BTreeSet::new();
+        while visited.insert(owner_id.clone()) {
+            let Some(predecessor) = self.codex_predecessors.remove(&owner_id) else {
+                break;
+            };
+            owner_id = predecessor.agent_id.clone();
+            drained.push(owner_id.clone());
+        }
+        drained
+    }
+
+    pub(super) fn move_codex_predecessor_routes(
+        &mut self,
+        owner_agent_id: &str,
+        route: &StoredRoute,
+    ) {
+        let mut owner_id = owner_agent_id.to_owned();
+        let mut visited = BTreeSet::new();
+        while visited.insert(owner_id.clone()) {
+            let Some(predecessor) = self.codex_predecessors.get_mut(&owner_id) else {
+                break;
+            };
+            predecessor.route = route.clone();
+            owner_id = predecessor.agent_id.clone();
+        }
+    }
+
+    fn normalize_codex_predecessors(&mut self) {
+        let mut stored = std::mem::take(&mut self.codex_predecessors);
+        let mut normalized = BTreeMap::new();
+        let mut claimed = BTreeSet::new();
+        let roots: Vec<String> = self
+            .agents
+            .values()
+            .filter(|record| record.adapter_id == "codex")
+            .map(|record| record.agent_id.clone())
+            .collect();
+        for root in roots {
+            let mut owner_id = root;
+            for _ in 0..super::MAX_CODEX_PANE_SESSION_DEPTH {
+                let Some(predecessor) = stored.remove(&owner_id) else {
+                    break;
+                };
+                if predecessor.adapter_id != "codex"
+                    || predecessor.native_session_id.is_empty()
+                    || self.agents.contains_key(&predecessor.agent_id)
+                    || !claimed.insert(predecessor.agent_id.clone())
+                {
+                    break;
+                }
+                let next_owner = predecessor.agent_id.clone();
+                normalized.insert(owner_id, predecessor);
+                owner_id = next_owner;
+            }
+        }
+        self.codex_predecessors = normalized;
     }
 
     fn normalize_pane_bindings(&mut self) {
@@ -408,6 +575,7 @@ pub(super) fn load(path: &Path) -> StoredState {
             }
         }
     }
+    state.normalize_codex_predecessors();
     state.normalize_pane_bindings();
     state
 }

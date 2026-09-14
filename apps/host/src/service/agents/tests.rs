@@ -702,7 +702,7 @@ fn native_to_native_pane_replacement_does_not_transfer_voice_identity() {
 }
 
 #[test]
-fn native_session_replacement_resets_displaced_turn_children_and_sidecars() {
+fn native_session_replacement_suspends_displaced_turn_children_and_sidecars() {
     let path = std::env::current_dir()
         .unwrap()
         .join("tmp")
@@ -809,9 +809,36 @@ fn native_session_replacement_resets_displaced_turn_children_and_sidecars() {
         replaced.retired_agent_ids.as_slice(),
         std::slice::from_ref(&root.agent_id)
     );
-    assert!(runtime.pending_codex_permissions.lock().unwrap().is_empty());
-    assert!(runtime.codex_child_monitors.lock().unwrap().is_empty());
     let replacement_id = replaced.agent.unwrap().agent_id;
+    {
+        let state = runtime.state.lock().unwrap();
+        let suspended = state
+            .codex_predecessors
+            .get(&replacement_id)
+            .expect("the displaced session is retained behind its replacement");
+        assert_eq!(suspended.agent_id, root.agent_id);
+        assert_eq!(suspended.codex_active_root_turn_id, turn_a);
+        assert_eq!(
+            suspended.codex_running_subagents.get("child"),
+            Some(&child_turn)
+        );
+    }
+    assert!(
+        runtime
+            .pending_codex_permissions
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|key| key.record_id == root.agent_id)
+    );
+    assert!(
+        runtime
+            .codex_child_monitors
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|(record_id, _)| record_id == &root.agent_id)
+    );
     let replacement_generation = runtime.snapshot_for("server-a").generation;
 
     let mut late_root = event_for_turn("late-stop-a-outage", "Stop", &turn_a);
@@ -887,7 +914,7 @@ fn native_session_replacement_resets_displaced_turn_children_and_sidecars() {
             .lock()
             .unwrap()
             .keys()
-            .all(|key| key.record_id == replacement_id)
+            .any(|key| key.record_id == root.agent_id)
     );
     assert!(
         runtime
@@ -895,7 +922,7 @@ fn native_session_replacement_resets_displaced_turn_children_and_sidecars() {
             .lock()
             .unwrap()
             .keys()
-            .all(|(record_id, _)| record_id == &replacement_id)
+            .any(|(record_id, _)| record_id == &root.agent_id)
     );
 
     let mut replacement_stop = event_for_turn("stop-b", "Stop", &turn_b);
@@ -1094,6 +1121,66 @@ fn a_known_session_move_keeps_its_state_and_retires_the_displaced_session() {
 }
 
 #[test]
+fn a_verified_session_move_carries_its_predecessor_chain_to_the_new_pane() {
+    let runtime = runtime("codex-session-chain-move");
+    let topology = two_pane_topology();
+    let parent_turn = root_turn(1);
+    let mut parent_prompt = event_for_turn("parent-prompt", "UserPromptSubmit", &parent_turn);
+    parent_prompt.pane_id = "%7".into();
+    let parent = runtime
+        .ingest_hook_with_context(&parent_prompt, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    let side_turn = root_turn(2);
+    let mut side_prompt = event_for_turn("side-prompt", "UserPromptSubmit", &side_turn);
+    side_prompt.native_session_id = "native-side".into();
+    side_prompt.pane_id = "%7".into();
+    runtime
+        .ingest_hook_with_context(&side_prompt, "server-a", Some(&topology))
+        .unwrap();
+    let mut occupant = event_for_turn("occupant-prompt", "UserPromptSubmit", &root_turn(3));
+    occupant.native_session_id = "native-occupant".into();
+    occupant.pane_id = "%8".into();
+    let occupant_id = runtime
+        .ingest_hook_with_context(&occupant, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap()
+        .agent_id;
+
+    let mut moved = event_for_turn("side-moved", "PreToolUse", &side_turn);
+    moved.native_session_id = "native-side".into();
+    moved.pane_id = "%8".into();
+    let moved = runtime
+        .ingest_hook_with_context(&moved, "server-a", Some(&topology))
+        .unwrap();
+    assert!(moved.retired_agent_ids.contains(&occupant_id));
+    let moved = moved.agent.unwrap();
+    assert_eq!(moved.route.unwrap().pane_id, "%8");
+    let predecessor_route = runtime.state.lock().unwrap().codex_predecessors[&moved.agent_id]
+        .route
+        .clone();
+    assert_eq!(predecessor_route.pane_id, "%8");
+
+    let mut side_stop = event_for_turn("side-stop", "Stop", &side_turn);
+    side_stop.native_session_id = "native-side".into();
+    side_stop.pane_id = "%8".into();
+    runtime
+        .ingest_hook_with_context(&side_stop, "server-a", Some(&topology))
+        .unwrap();
+    let mut parent_returned = event_for_turn("parent-returned", "PostToolUse", &parent_turn);
+    parent_returned.pane_id = "%8".into();
+    let parent_returned = runtime
+        .ingest_hook_with_context(&parent_returned, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(parent_returned.agent_id, parent.agent_id);
+    assert_eq!(parent_returned.route.unwrap().pane_id, "%8");
+}
+
+#[test]
 fn superseded_codex_fork_hooks_do_not_reclaim_the_current_pane() {
     let runtime = runtime("codex-superseded-fork");
     let topology = topology("codex");
@@ -1141,6 +1228,448 @@ fn superseded_codex_fork_hooks_do_not_reclaim_the_current_pane() {
         snapshot.agents[0].lifecycle,
         v1::AgentLifecycleState::Working as i32
     );
+}
+
+#[test]
+fn codex_btw_completion_returns_ownership_to_its_running_parent() {
+    let runtime = runtime("codex-btw-parent-resume");
+    let topology = topology("codex");
+    let parent_turn = root_turn(1);
+    let side_turn = root_turn(2);
+    let parent = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("parent-prompt", "UserPromptSubmit", &parent_turn),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+
+    let mut side_prompt = event_for_turn("side-prompt", "UserPromptSubmit", &side_turn);
+    side_prompt.native_session_id = "native-side".into();
+    let side = runtime
+        .ingest_hook_with_context(&side_prompt, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    let mut side_stop = event_for_turn("side-stop", "Stop", &side_turn);
+    side_stop.native_session_id = "native-side".into();
+    let side_done = runtime
+        .ingest_hook_with_context(&side_stop, "server-a", Some(&topology))
+        .unwrap();
+    assert!(side_done.notify);
+    assert_eq!(
+        side_done.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+
+    let resumed = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("parent-tool-returned", "PostToolUse", &parent_turn),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(resumed.retired_agent_ids.contains(&side.agent_id));
+    let resumed = resumed.agent.unwrap();
+    assert_eq!(resumed.agent_id, parent.agent_id);
+    assert_eq!(resumed.lifecycle, v1::AgentLifecycleState::Working as i32);
+
+    let done = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("parent-stop", "Stop", &parent_turn),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(done.notify);
+    assert_eq!(done.agent.unwrap().agent_id, parent.agent_id);
+    let snapshot = runtime.snapshot_for("server-a");
+    assert_eq!(snapshot.agents.len(), 1);
+    assert_eq!(snapshot.agents[0].agent_id, parent.agent_id);
+    assert_eq!(
+        snapshot.agents[0].lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn a_still_open_btw_turn_remains_foreground_and_blocks_parent_reclaim() {
+    let runtime = runtime("codex-btw-still-open");
+    let topology = topology("codex");
+    let parent_turn = root_turn(1);
+    let side_turn = root_turn(2);
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("parent-prompt", "UserPromptSubmit", &parent_turn),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let mut side_prompt = event_for_turn("side-prompt", "UserPromptSubmit", &side_turn);
+    side_prompt.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&side_prompt, "server-a", Some(&topology))
+        .unwrap();
+    let mut side_stop = event_for_turn("side-stop", "Stop", &side_turn);
+    side_stop.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&side_stop, "server-a", Some(&topology))
+        .unwrap();
+    let next_side_turn = root_turn(3);
+    let mut next_side = event_for_turn("side-next", "UserPromptSubmit", &next_side_turn);
+    next_side.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&next_side, "server-a", Some(&topology))
+        .unwrap();
+
+    assert!(matches!(
+        runtime.ingest_hook_with_context(
+            &event_for_turn("parent-background", "PostToolUse", &parent_turn),
+            "server-a",
+            Some(&topology),
+        ),
+        Err(HookIngestFailure::Superseded)
+    ));
+}
+
+#[test]
+fn child_scoped_explicit_hooks_cannot_restore_a_suspended_parent() {
+    for event_name in ["SessionStart", "UserPromptSubmit"] {
+        let runtime = runtime(&format!("child-explicit-cannot-resume-{event_name}"));
+        let topology = topology("codex");
+        runtime
+            .ingest_hook_with_context(
+                &event_for_turn("parent-prompt", "UserPromptSubmit", &root_turn(1)),
+                "server-a",
+                Some(&topology),
+            )
+            .unwrap();
+        let mut side = event_for_turn("side-prompt", "UserPromptSubmit", &root_turn(2));
+        side.native_session_id = "native-side".into();
+        let side_id = runtime
+            .ingest_hook_with_context(&side, "server-a", Some(&topology))
+            .unwrap()
+            .agent
+            .unwrap()
+            .agent_id;
+        let child = child_event_for_turn("parent-child", event_name, "child", &root_turn(3));
+        assert!(matches!(
+            runtime.ingest_hook_with_context(&child, "server-a", Some(&topology)),
+            Err(HookIngestFailure::Superseded)
+        ));
+        assert_eq!(runtime.snapshot_for("server-a").agents[0].agent_id, side_id);
+    }
+}
+
+#[test]
+fn codex_session_end_restores_the_immediate_predecessor() {
+    let runtime = runtime("codex-btw-session-end");
+    let topology = topology("codex");
+    let parent = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("parent-prompt", "UserPromptSubmit", &root_turn(1)),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let mut side = event_for_turn("side-prompt", "UserPromptSubmit", &root_turn(2));
+    side.native_session_id = "native-side".into();
+    let side_id = runtime
+        .ingest_hook_with_context(&side, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap()
+        .agent_id;
+    let mut side_end = event("side-end", 0, "SessionEnd");
+    side_end.native_session_id = "native-side".into();
+    let restored = runtime
+        .ingest_hook_with_context(&side_end, "server-a", Some(&topology))
+        .unwrap();
+    assert!(!restored.notify);
+    assert_eq!(restored.retired_agent_ids, [side_id]);
+    let restored = restored.agent.unwrap();
+    assert_eq!(restored.agent_id, parent.agent_id);
+    assert_eq!(restored.lifecycle, v1::AgentLifecycleState::Working as i32);
+}
+
+#[test]
+fn topology_move_refreshes_suspended_routes_before_session_end_restores_them() {
+    let runtime = runtime("codex-suspended-topology-move");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("parent-prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let mut side = event("side-prompt", 0, "UserPromptSubmit");
+    side.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&side, "server-a", Some(&topology))
+        .unwrap();
+
+    let mut moved = topology;
+    moved.sessions[0].id = "$9".into();
+    moved.sessions[0].name = "moved-session".into();
+    moved.windows[0].id = "@9".into();
+    moved.windows[0].session_id = "$9".into();
+    moved.windows[0].name = "moved-window".into();
+    moved.panes[0].session_id = "$9".into();
+    moved.panes[0].window_id = "@9".into();
+    assert!(runtime.reconcile_topology(&moved, "server-a").unwrap());
+
+    let mut side_end = event("side-end", 0, "SessionEnd");
+    side_end.native_session_id = "native-side".into();
+    let restored = runtime
+        .ingest_hook_with_context(&side_end, "server-a", Some(&moved))
+        .unwrap()
+        .agent
+        .unwrap();
+    let route = restored.route.unwrap();
+    assert_eq!(route.session_id, "$9");
+    assert_eq!(route.window_id, "@9");
+    assert_eq!(route.session_name_fallback, "moved-session");
+    assert_eq!(route.window_name_fallback, "moved-window");
+}
+
+#[test]
+fn a_parent_stop_can_return_directly_after_btw_completes() {
+    let runtime = runtime("codex-btw-direct-parent-stop");
+    let topology = topology("codex");
+    let parent_turn = root_turn(1);
+    let parent = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("parent-prompt", "UserPromptSubmit", &parent_turn),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let side_turn = root_turn(2);
+    let mut side_prompt = event_for_turn("side-prompt", "UserPromptSubmit", &side_turn);
+    side_prompt.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&side_prompt, "server-a", Some(&topology))
+        .unwrap();
+    let mut side_stop = event_for_turn("side-stop", "Stop", &side_turn);
+    side_stop.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&side_stop, "server-a", Some(&topology))
+        .unwrap();
+
+    let completed = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("parent-stop", "Stop", &parent_turn),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    assert!(completed.notify);
+    let completed = completed.agent.unwrap();
+    assert_eq!(completed.agent_id, parent.agent_id);
+    assert_eq!(completed.lifecycle, v1::AgentLifecycleState::Idle as i32);
+}
+
+#[test]
+fn nested_codex_sessions_unwind_in_lifo_order() {
+    let runtime = runtime("nested-codex-pane-sessions");
+    let topology = topology("codex");
+    let root_turn_id = root_turn(1);
+    let root = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("root-prompt", "UserPromptSubmit", &root_turn_id),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let first_turn = root_turn(2);
+    let mut first_prompt = event_for_turn("first-prompt", "UserPromptSubmit", &first_turn);
+    first_prompt.native_session_id = "native-first".into();
+    let first = runtime
+        .ingest_hook_with_context(&first_prompt, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    let second_turn = root_turn(3);
+    let mut second_prompt = event_for_turn("second-prompt", "UserPromptSubmit", &second_turn);
+    second_prompt.native_session_id = "native-second".into();
+    runtime
+        .ingest_hook_with_context(&second_prompt, "server-a", Some(&topology))
+        .unwrap();
+    let mut second_stop = event_for_turn("second-stop", "Stop", &second_turn);
+    second_stop.native_session_id = "native-second".into();
+    runtime
+        .ingest_hook_with_context(&second_stop, "server-a", Some(&topology))
+        .unwrap();
+    let mut first_stop = event_for_turn("first-stop", "Stop", &first_turn);
+    first_stop.native_session_id = "native-first".into();
+    let first_done = runtime
+        .ingest_hook_with_context(&first_stop, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(first_done.agent_id, first.agent_id);
+    assert_eq!(first_done.lifecycle, v1::AgentLifecycleState::Idle as i32);
+
+    let root_resumed = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("root-returned", "PostToolUse", &root_turn_id),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(root_resumed.agent_id, root.agent_id);
+    assert_eq!(runtime.state.lock().unwrap().codex_predecessors.len(), 0);
+}
+
+#[test]
+fn btw_parent_resume_survives_restart_and_topology_loss() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("btw-resume-reload-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let topology = topology("codex");
+    let parent_turn = root_turn(1);
+    let runtime = AgentRuntime::isolated(path.clone());
+    let parent = runtime
+        .ingest_hook_with_context(
+            &event_for_turn("parent-prompt", "UserPromptSubmit", &parent_turn),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let side_turn = root_turn(2);
+    let mut side_prompt = event_for_turn("side-prompt", "UserPromptSubmit", &side_turn);
+    side_prompt.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&side_prompt, "server-a", Some(&topology))
+        .unwrap();
+    let mut side_stop = event_for_turn("side-stop", "Stop", &side_turn);
+    side_stop.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&side_stop, "server-a", Some(&topology))
+        .unwrap();
+    drop(runtime);
+
+    let reloaded = AgentRuntime::isolated(path);
+    let restored = reloaded
+        .ingest_hook_with_context(
+            &event_for_turn("parent-returned", "PostToolUse", &parent_turn),
+            "server-a",
+            None,
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(restored.agent_id, parent.agent_id);
+    assert_eq!(restored.route.unwrap().pane_id, "%7");
+    assert_eq!(restored.lifecycle, v1::AgentLifecycleState::Working as i32);
+}
+
+#[test]
+fn codex_pane_predecessor_history_is_bounded() {
+    let runtime = runtime("bounded-codex-pane-history");
+    let topology = topology("codex");
+    for index in 0..=MAX_CODEX_PANE_SESSION_DEPTH + 2 {
+        let mut prompt = event_for_turn(
+            &format!("prompt-{index}"),
+            "UserPromptSubmit",
+            &root_turn(index as u16 + 1),
+        );
+        prompt.native_session_id = format!("native-{index}");
+        runtime
+            .ingest_hook_with_context(&prompt, "server-a", Some(&topology))
+            .unwrap();
+    }
+    let state = runtime.state.lock().unwrap();
+    assert_eq!(state.codex_predecessors.len(), MAX_CODEX_PANE_SESSION_DEPTH);
+}
+
+#[test]
+fn a_departed_codex_pane_discards_its_suspended_session_chain() {
+    let runtime = runtime("departed-codex-pane-chain");
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("parent-prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let mut side = event("side-prompt", 0, "UserPromptSubmit");
+    side.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&side, "server-a", Some(&topology))
+        .unwrap();
+    assert_eq!(runtime.state.lock().unwrap().codex_predecessors.len(), 1);
+
+    assert!(
+        runtime
+            .reconcile_topology(&tmux_control::TmuxSnapshot::default(), "server-a")
+            .unwrap()
+    );
+    let state = runtime.state.lock().unwrap();
+    assert!(state.agents.is_empty());
+    assert!(state.codex_predecessors.is_empty());
+}
+
+#[test]
+fn ending_a_suspended_session_removes_it_without_changing_foreground_ownership() {
+    let runtime = runtime("dismiss-suspended-codex-session");
+    let topology = topology("codex");
+    let parent = runtime
+        .ingest_hook_with_context(
+            &event("parent-prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap()
+        .agent
+        .unwrap();
+    let mut side = event("side-prompt", 0, "UserPromptSubmit");
+    side.native_session_id = "native-side".into();
+    let side_id = runtime
+        .ingest_hook_with_context(&side, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap()
+        .agent_id;
+    let parent_end = event("parent-end", 0, "SessionEnd");
+    let unchanged = runtime
+        .ingest_hook_with_context(&parent_end, "server-a", Some(&topology))
+        .unwrap()
+        .agent
+        .unwrap();
+    assert_eq!(unchanged.agent_id, side_id);
+    assert_eq!(runtime.state.lock().unwrap().codex_predecessors.len(), 0);
+
+    let mut side_stop = event("side-stop", 0, "Stop");
+    side_stop.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&side_stop, "server-a", Some(&topology))
+        .unwrap();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(
+            &event("parent-late", 0, "PostToolUse"),
+            "server-a",
+            Some(&topology),
+        ),
+        Err(HookIngestFailure::Superseded)
+    ));
+    assert_ne!(side_id, parent.agent_id);
 }
 
 #[test]

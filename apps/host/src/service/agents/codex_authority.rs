@@ -5,15 +5,27 @@ pub(super) enum SessionAuthority {
     Current,
     Replacement,
     Move,
+    Resume,
+    Dismissed,
     Superseded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SessionPosition {
+    Current,
+    Predecessor { all_newer_terminal: bool },
+    BoundElsewhere,
+    KnownUnbound,
+    Unknown,
 }
 
 pub(super) fn session(
     native_session_id: &str,
-    known_bound_session: bool,
+    position: SessionPosition,
     pane_owner_native_session_id: Option<&str>,
     route_verified: bool,
     event_name: &str,
+    child_event: bool,
 ) -> SessionAuthority {
     let explicit_claim = matches!(event_name, "SessionStart" | "UserPromptSubmit");
     if native_session_id.is_empty()
@@ -23,10 +35,24 @@ pub(super) fn session(
     }
     match pane_owner_native_session_id {
         Some(owner) if owner == native_session_id || owner.is_empty() => SessionAuthority::Current,
-        Some(_) if known_bound_session && route_verified => SessionAuthority::Move,
-        Some(_) if explicit_claim => SessionAuthority::Replacement,
-        Some(_) => SessionAuthority::Superseded,
-        None if known_bound_session && !route_verified => SessionAuthority::Superseded,
+        Some(_) => match position {
+            SessionPosition::Predecessor { .. } if event_name == "SessionEnd" => {
+                SessionAuthority::Dismissed
+            }
+            SessionPosition::Predecessor { all_newer_terminal }
+                if !child_event && (explicit_claim || all_newer_terminal) =>
+            {
+                SessionAuthority::Resume
+            }
+            SessionPosition::Predecessor { .. } => SessionAuthority::Superseded,
+            SessionPosition::BoundElsewhere if route_verified => SessionAuthority::Move,
+            _ if explicit_claim => SessionAuthority::Replacement,
+            _ => SessionAuthority::Superseded,
+        },
+        None if position == SessionPosition::BoundElsewhere && route_verified => {
+            SessionAuthority::Move
+        }
+        None if matches!(position, SessionPosition::BoundElsewhere) => SessionAuthority::Superseded,
         None => SessionAuthority::Current,
     }
 }
@@ -118,27 +144,153 @@ mod tests {
     #[test]
     fn a_foreign_session_needs_an_explicit_start_to_replace_the_pane_owner() {
         assert_eq!(
-            session("fork", false, Some("root"), true, "Stop"),
+            session(
+                "fork",
+                SessionPosition::Unknown,
+                Some("root"),
+                true,
+                "Stop",
+                false,
+            ),
             SessionAuthority::Superseded
         );
         assert_eq!(
-            session("fork", false, Some("root"), true, "UserPromptSubmit",),
+            session(
+                "fork",
+                SessionPosition::Unknown,
+                Some("root"),
+                true,
+                "UserPromptSubmit",
+                false,
+            ),
             SessionAuthority::Replacement
         );
         assert_eq!(
-            session("root", true, Some("fork"), true, "PreToolUse"),
+            session(
+                "root",
+                SessionPosition::BoundElsewhere,
+                Some("fork"),
+                true,
+                "PreToolUse",
+                false,
+            ),
             SessionAuthority::Move
         );
         assert_eq!(
-            session("root", true, Some("fork"), false, "PreToolUse"),
+            session(
+                "root",
+                SessionPosition::BoundElsewhere,
+                Some("fork"),
+                false,
+                "PreToolUse",
+                false,
+            ),
             SessionAuthority::Superseded
         );
         assert_eq!(
-            session("", false, Some("root"), true, "Stop"),
+            session(
+                "",
+                SessionPosition::Unknown,
+                Some("root"),
+                true,
+                "Stop",
+                false,
+            ),
             SessionAuthority::Superseded
         );
         assert_eq!(
-            session("root", true, None, false, "PreToolUse"),
+            session(
+                "root",
+                SessionPosition::BoundElsewhere,
+                None,
+                false,
+                "PreToolUse",
+                false,
+            ),
+            SessionAuthority::Superseded
+        );
+        for event_name in ["SessionStart", "UserPromptSubmit"] {
+            assert_eq!(
+                session(
+                    "root",
+                    SessionPosition::Predecessor {
+                        all_newer_terminal: true,
+                    },
+                    Some("side"),
+                    true,
+                    event_name,
+                    true,
+                ),
+                SessionAuthority::Superseded
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_terminal_foreground_allows_implicit_predecessor_resume() {
+        assert_eq!(
+            session(
+                "root",
+                SessionPosition::Predecessor {
+                    all_newer_terminal: false,
+                },
+                Some("side"),
+                true,
+                "PostToolUse",
+                false,
+            ),
+            SessionAuthority::Superseded
+        );
+        assert_eq!(
+            session(
+                "root",
+                SessionPosition::Predecessor {
+                    all_newer_terminal: true,
+                },
+                Some("side"),
+                false,
+                "PostToolUse",
+                false,
+            ),
+            SessionAuthority::Resume
+        );
+        assert_eq!(
+            session(
+                "root",
+                SessionPosition::Predecessor {
+                    all_newer_terminal: false,
+                },
+                Some("side"),
+                false,
+                "UserPromptSubmit",
+                false,
+            ),
+            SessionAuthority::Resume
+        );
+        assert_eq!(
+            session(
+                "root",
+                SessionPosition::Predecessor {
+                    all_newer_terminal: false,
+                },
+                Some("side"),
+                true,
+                "SessionEnd",
+                false,
+            ),
+            SessionAuthority::Dismissed
+        );
+        assert_eq!(
+            session(
+                "root",
+                SessionPosition::Predecessor {
+                    all_newer_terminal: true,
+                },
+                Some("side"),
+                true,
+                "SubagentStop",
+                true,
+            ),
             SessionAuthority::Superseded
         );
     }
