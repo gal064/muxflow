@@ -32,6 +32,10 @@ export type FromPageMessage =
   | { t: "atTop"; above: number }
   /** One content-free summary after a touch gesture; never emitted per move/frame. */
   | { t: "scroll"; mode: "normal" | "alternate"; rows: number; durationMs: number; cancelled: boolean }
+  /** Explicit user actions only; terminal content is never sent for observation or logging. */
+  | { t: "copy"; text: string }
+  | { t: "openLink"; href: string }
+  | { t: "openFile"; path: string }
   | { t: "log"; line: string };
 
 /** Name of the page-global the app calls through `injectJavaScript`. */
@@ -73,6 +77,18 @@ export function parseFromPageMessage(raw: string): FromPageMessage | undefined {
         durationMs: Math.max(0, Math.round(message.durationMs)),
         cancelled: message.cancelled === true,
       };
+    case "copy":
+      return typeof message.text === "string" && message.text.length > 0
+        ? { t: "copy", text: message.text }
+        : undefined;
+    case "openLink":
+      return typeof message.href === "string" && message.href.length > 0
+        ? { t: "openLink", href: message.href }
+        : undefined;
+    case "openFile":
+      return typeof message.path === "string" && message.path.length > 0
+        ? { t: "openFile", path: message.path }
+        : undefined;
     case "log":
       return { t: "log", line: typeof message.line === "string" ? message.line : "" };
     default:

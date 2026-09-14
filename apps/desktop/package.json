@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@muxflow/terminal-interactions": "workspace:*",
     "@monaco-editor/react": "4.7.0",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.2",

@@ -10,6 +10,43 @@
   /* A 6 px inset so column 0 does not touch the bezel; the fit addon measures the inner box. */
   #terminal { position: absolute; inset: 0 0 0 6px; }
   .xterm .xterm-viewport { overflow-y: auto; }
+  .muxflow-selection-control { display: none; position: absolute; z-index: 20; }
+  .muxflow-selection-control.visible { display: block; }
+  .muxflow-selection-handle {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    height: 44px;
+    margin: 0;
+    padding: 0;
+    touch-action: none;
+    width: 44px;
+  }
+  .muxflow-selection-handle::before {
+    background: #7aa6da;
+    border: 2px solid #282c34;
+    border-radius: 50%;
+    box-sizing: border-box;
+    content: "";
+    height: 18px;
+    left: 13px;
+    position: absolute;
+    top: 13px;
+    width: 18px;
+  }
+  .muxflow-copy-button {
+    appearance: none;
+    background: #2c313a;
+    border: 1px solid #3e4451;
+    border-radius: 8px;
+    color: #fff;
+    font: 600 14px Roboto, system-ui, sans-serif;
+    min-height: 44px;
+    min-width: 60px;
+    padding: 7px 12px;
+    touch-action: manipulation;
+  }
+  .muxflow-copy-button:active { background: #353b45; }
   /*__XTERM_CSS__*/
 </style>
 </head>
