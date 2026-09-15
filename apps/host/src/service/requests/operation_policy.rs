@@ -149,7 +149,9 @@ impl OperationPolicy {
             | v1::Operation::GitMutation
             | v1::Operation::GitCommit
             | v1::Operation::GitPush => (Lane::Control, Scheduling::Detached, Handler::Git),
-            v1::Operation::AgentSnapshot => (Lane::Control, Scheduling::Inline, Handler::Agent),
+            v1::Operation::AgentSnapshot | v1::Operation::AgentDiagnostics => {
+                (Lane::Control, Scheduling::Inline, Handler::Agent)
+            }
             v1::Operation::AgentAction
             | v1::Operation::AgentMarkSeen
             | v1::Operation::AgentHookIngest
@@ -277,6 +279,7 @@ mod tests {
             (GitCommit, C, Dd, GH),
             (GitPush, C, Dd, GH),
             (AgentSnapshot, C, I, AH),
+            (AgentDiagnostics, C, I, AH),
             (AgentAction, C, I, AH),
             (AgentMarkSeen, C, I, AH),
             (AgentHookIngest, C, I, AH),

@@ -329,6 +329,57 @@ impl AgentRuntime {
                 &agent_id,
                 &parsed.event_name,
             );
+            let lifecycle = observed_pane_owner_record
+                .as_ref()
+                .map_or("absent", |record| lifecycle_name(record.lifecycle));
+            crate::diagnostics::record_lifecycle_decision(crate::diagnostics::LifecycleDecision {
+                input_origin: "unknown",
+                pane_id: &event.pane_id,
+                agent_id: observed_pane_owner_id.as_deref().unwrap_or(&agent_id),
+                event: diagnostic_event_name(&parsed.event_name),
+                child: codex_session_child_event,
+                has_session_id: !native_session_id.is_empty(),
+                has_turn_id: payload
+                    .get(adapters::CODEX_APPROVAL_TURN_ID_FIELD)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| !id.is_empty()),
+                session_relation: session_relation(session_authority),
+                turn_relation: "unknown",
+                authority: "superseded",
+                lifecycle_before: lifecycle,
+                lifecycle_after: lifecycle,
+                reason: "session_authority_rejected",
+                active_children: observed_pane_owner_record.as_ref().map_or(0, |record| {
+                    record.codex_running_subagents.len()
+                        + usize::from(record.claude_has_running_subagent)
+                }),
+            });
+            // Voice follows the pane, not the lifecycle reducer's foreground
+            // session. A late predecessor root reply is still a pane reply;
+            // its status mutation remains rejected as superseded.
+            let reply = (parsed.event_name == "Stop" && !codex_session_child_event)
+                .then(|| {
+                    payload
+                        .get(adapters::LAST_ASSISTANT_MESSAGE_FIELD)
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| !text.trim().is_empty())
+                        .map(|text| crate::service::voice::AgentReply {
+                            server_identity: event.origin_server_identity.clone(),
+                            pane_id: event.pane_id.clone(),
+                            text: text.to_owned(),
+                            truncated: payload
+                                .get(adapters::LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD)
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true),
+                            // The rejected event has no committed state
+                            // generation; zero tells mobile not to dedupe on it.
+                            state_generation: 0,
+                            occurred_at_unix_millis: occurred_at,
+                        })
+                })
+                .flatten();
+            drop(state);
+            self.dispatch_reply(reply);
             return Err(HookIngestFailure::Superseded);
         }
         if session_authority == super::codex_authority::SessionAuthority::Dismissed {
@@ -388,6 +439,24 @@ impl AgentRuntime {
                 *state = original;
                 return Err(HookIngestFailure::Retryable(error));
             }
+            crate::diagnostics::record_lifecycle_decision(crate::diagnostics::LifecycleDecision {
+                input_origin: "unknown",
+                pane_id: &event.pane_id,
+                agent_id: &predecessor_id,
+                event: "SessionEnd",
+                child: false,
+                has_session_id: !predecessor.native_session_id.is_empty(),
+                has_turn_id: false,
+                session_relation: "predecessor",
+                turn_relation: "missing",
+                authority: "accepted",
+                lifecycle_before: observed_pane_owner_record
+                    .as_ref()
+                    .map_or("unknown", |record| lifecycle_name(record.lifecycle)),
+                lifecycle_after: lifecycle_name(predecessor.lifecycle),
+                reason: "pane_owner_restored",
+                active_children: predecessor.codex_running_subagents.len(),
+            });
             drop(state);
             self.retire_codex_runtime_state(std::slice::from_ref(owner_id));
             return Ok(IngestedHook {
@@ -499,6 +568,31 @@ impl AgentRuntime {
                     *state = original;
                     return Err(HookIngestFailure::Retryable(error));
                 }
+                if let Some(record) = state.agents.get(&duplicate_id) {
+                    let after = lifecycle_name(record.lifecycle);
+                    crate::diagnostics::record_lifecycle_decision(
+                        crate::diagnostics::LifecycleDecision {
+                            input_origin: "unknown",
+                            pane_id: &record.route.pane_id,
+                            agent_id: &record.agent_id,
+                            event: "TranscriptChildTerminal",
+                            child: true,
+                            has_session_id: !record.native_session_id.is_empty(),
+                            has_turn_id: true,
+                            session_relation: "current",
+                            turn_relation: "current",
+                            authority: "accepted",
+                            lifecycle_before: if reconciled.reason == "completed" {
+                                "working"
+                            } else {
+                                after
+                            },
+                            lifecycle_after: after,
+                            reason: &reconciled.reason,
+                            active_children: record.codex_running_subagents.len(),
+                        },
+                    );
+                }
                 return Ok(IngestedHook {
                     event: reconciled,
                     reply: None,
@@ -564,23 +658,6 @@ impl AgentRuntime {
             && !retirement_candidates.contains(&owner_id)
         {
             retirement_candidates.push(owner_id);
-        }
-        let mut voice_preferred_retired_agent_ids = Vec::new();
-        if !native_session_id.is_empty() {
-            for old_id in &retirement_candidates {
-                if old_id == &agent_id {
-                    continue;
-                }
-                let Some(record) = state.agents.get(old_id) else {
-                    continue;
-                };
-                if !record.present {
-                    continue;
-                }
-                if record.native_session_id.is_empty() {
-                    voice_preferred_retired_agent_ids.push(old_id.clone());
-                }
-            }
         }
         let suspended_predecessor = (adapter.id() == "codex"
             && session_authority == super::codex_authority::SessionAuthority::Replacement)
@@ -1383,17 +1460,13 @@ impl AgentRuntime {
                 parsed.event_name == "SessionStart" || record.hook_terminal,
             );
         }
-        if !voice_preferred_retired_agent_ids.is_empty() {
-            (self.identity_promotion_sink)(&voice_preferred_retired_agent_ids, &agent_id);
-        }
         // Voice mode (docs/mobile/voice-mode-plan.md §4.5): Claude produces a
         // final aggregate Stop after its background children, so its
         // intermediate Stop is skipped. Codex does not produce another parent
         // Stop when an unwaited child finishes; speaking its one parent reply
         // here preserves the existing voice behavior without storing content.
         let reply = if parsed.event_name == "Stop"
-            && !codex_ignored_root_event
-            && !codex_child_event
+            && !codex_session_child_event
             && (lifecycle == v1::AgentLifecycleState::Idle || adapter.id() == "codex")
             && let Some(text) = payload
                 .get(adapters::LAST_ASSISTANT_MESSAGE_FIELD)
@@ -1401,7 +1474,11 @@ impl AgentRuntime {
                 .filter(|text| !text.trim().is_empty())
         {
             Some(crate::service::voice::AgentReply {
-                agent_id: agent_id.clone(),
+                // A hook's pane belongs to its origin tmux server. Using a
+                // reconciled record route here could relabel a delayed old-
+                // server reply as belonging to a reused pane on the new one.
+                server_identity: event.origin_server_identity.clone(),
+                pane_id: event.pane_id.clone(),
                 text: text.to_owned(),
                 truncated: payload
                     .get(adapters::LAST_ASSISTANT_MESSAGE_TRUNCATED_FIELD)
@@ -1422,6 +1499,45 @@ impl AgentRuntime {
         } else {
             "state_changed"
         };
+        let diagnostic_child_event = codex_session_child_event
+            || adapter.id() == "claude-code"
+                && matches!(parsed.event_name.as_str(), "SubagentStart" | "SubagentStop");
+        if diagnostic_hook_boundary(
+            &parsed.event_name,
+            diagnostic_child_event,
+            session_authority,
+            previous_lifecycle,
+            lifecycle,
+        ) {
+            let authority = if root_authority == super::codex_authority::RootTurnAuthority::Stale {
+                "stale"
+            } else if codex_unscoped_root_terminal {
+                "unscoped"
+            } else {
+                "accepted"
+            };
+            crate::diagnostics::record_lifecycle_decision(crate::diagnostics::LifecycleDecision {
+                input_origin: "unknown",
+                pane_id: &record.route.pane_id,
+                agent_id: &agent_id,
+                event: diagnostic_event_name(&parsed.event_name),
+                child: diagnostic_child_event,
+                has_session_id: !record.native_session_id.is_empty(),
+                has_turn_id: !approval_turn_id.is_empty(),
+                session_relation: session_relation(session_authority),
+                turn_relation: turn_relation(root_authority, !approval_turn_id.is_empty()),
+                authority,
+                lifecycle_before: lifecycle_enum_name(previous_lifecycle),
+                lifecycle_after: lifecycle_enum_name(lifecycle),
+                reason: if codex_ignored_root_event {
+                    "root_authority_ignored"
+                } else {
+                    reason
+                },
+                active_children: record.codex_running_subagents.len()
+                    + usize::from(record.claude_has_running_subagent),
+            });
+        }
         Ok(IngestedHook {
             event: v1::AgentEvent {
                 agent: Some(snapshot::record(&record)),
@@ -1438,6 +1554,76 @@ impl AgentRuntime {
         if let Some(reply) = reply {
             (self.reply_sink)(reply);
         }
+    }
+}
+
+fn lifecycle_name(value: i32) -> &'static str {
+    lifecycle_enum_name(v1::AgentLifecycleState::try_from(value).unwrap_or_default())
+}
+
+fn lifecycle_enum_name(value: v1::AgentLifecycleState) -> &'static str {
+    match value {
+        v1::AgentLifecycleState::Working => "working",
+        v1::AgentLifecycleState::Blocked => "blocked",
+        v1::AgentLifecycleState::Idle => "idle",
+        v1::AgentLifecycleState::Unknown | v1::AgentLifecycleState::Unspecified => "unknown",
+    }
+}
+
+fn session_relation(authority: super::codex_authority::SessionAuthority) -> &'static str {
+    use super::codex_authority::SessionAuthority;
+    match authority {
+        SessionAuthority::Current | SessionAuthority::Move => "current",
+        SessionAuthority::Replacement => "replacement",
+        SessionAuthority::Resume | SessionAuthority::Dismissed => "predecessor",
+        SessionAuthority::Superseded => "unknown",
+    }
+}
+
+fn turn_relation(
+    authority: super::codex_authority::RootTurnAuthority,
+    has_turn_id: bool,
+) -> &'static str {
+    use super::codex_authority::RootTurnAuthority;
+    match authority {
+        RootTurnAuthority::Current | RootTurnAuthority::SessionTerminal => "current",
+        RootTurnAuthority::Successor => "newer",
+        RootTurnAuthority::Stale => "older",
+        RootTurnAuthority::Unscoped if !has_turn_id => "missing",
+        RootTurnAuthority::Unscoped => "unknown",
+    }
+}
+
+fn diagnostic_hook_boundary(
+    event_name: &str,
+    child: bool,
+    session_authority: super::codex_authority::SessionAuthority,
+    before: v1::AgentLifecycleState,
+    after: v1::AgentLifecycleState,
+) -> bool {
+    before != after
+        || session_authority != super::codex_authority::SessionAuthority::Current
+        || matches!(
+            event_name,
+            "SessionStart" | "UserPromptSubmit" | "Stop" | "Interrupt" | "SessionEnd"
+        )
+        || child && matches!(event_name, "SubagentStart" | "SubagentStop")
+}
+
+fn diagnostic_event_name(event_name: &str) -> &'static str {
+    match event_name {
+        "SessionStart" => "SessionStart",
+        "UserPromptSubmit" => "UserPromptSubmit",
+        "Stop" => "Stop",
+        "Interrupt" => "Interrupt",
+        "SessionEnd" => "SessionEnd",
+        "SubagentStart" => "SubagentStart",
+        "SubagentStop" => "SubagentStop",
+        "PermissionRequest" => "PermissionRequest",
+        "Notification" => "Notification",
+        "PreToolUse" => "PreToolUse",
+        "PostToolUse" => "PostToolUse",
+        _ => "Unknown",
     }
 }
 
@@ -1702,5 +1888,11 @@ mod permission_review_tests {
             classify_permission_review(None, None, || None),
             PermissionReview::Unknown
         );
+    }
+
+    #[test]
+    fn diagnostic_event_names_are_fixed_labels() {
+        assert_eq!(diagnostic_event_name("Stop"), "Stop");
+        assert_eq!(diagnostic_event_name("secret\ninjected=line"), "Unknown");
     }
 }

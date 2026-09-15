@@ -142,18 +142,19 @@ export async function connectHost(host: SavedHost): Promise<void> {
       // A new control epoch invalidates the bulk binding (§11.1).
       dropBulk();
       terminalRegistry.onConnected();
-      voiceRegistry.onConnected();
+      voiceRegistry.onConnected(connection.serverIdentity);
     },
     onAgentTransition: (transition) => {
       for (const listener of listeners) listener(transition);
     },
     onAgentIdentityPromotion: (promotion) => {
-      const accepted = voiceRegistry.promoteAgent(promotion.retiredAgentIds, promotion.agent);
-      if (accepted) {
-        notificationAttention.promoteAgent(accepted.oldAgentId, promotion.agent.id);
-        log(`voice identity.promoted old=${accepted.oldAgentId} new=${promotion.agent.id} adapter=${promotion.agent.adapterId} pane=${promotion.agent.route.paneId}`);
+      for (const oldAgentId of promotion.retiredAgentIds) {
+        notificationAttention.promoteAgent(oldAgentId, promotion.agent.id);
       }
     },
+    // A tmux server can be replaced without dropping the SSH lane. Pane IDs
+    // may then be reused, so no Voice controller may survive that boundary.
+    onServerIdentityChanged: (serverIdentity) => voiceRegistry.onServerChanged(serverIdentity),
     // §7.4 routes ACTIVE_ROOT / directory / file-stream events to the files feature.
     onFileEvent: (event) => filesStore.getState().applyFileEvent(event),
     // VOICE_PROVISION / VOICE_REPLY (voice-mode-plan.md §3) go to whichever voice session they name.

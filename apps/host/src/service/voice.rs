@@ -94,7 +94,8 @@ impl std::fmt::Display for VoiceError {
 /// (docs/mobile/voice-mode-plan.md §4.5). Consumed, never stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentReply {
-    pub(crate) agent_id: String,
+    pub(crate) server_identity: String,
+    pub(crate) pane_id: String,
     pub(crate) text: String,
     pub(crate) truncated: bool,
     pub(crate) state_generation: u64,
@@ -109,6 +110,12 @@ struct Slot {
 struct Session {
     connection_id: u64,
     since: Instant,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct PaneKey {
+    server_identity: String,
+    pane_id: String,
 }
 
 #[derive(Default)]
@@ -147,7 +154,7 @@ pub(crate) struct VoiceService {
     child_pid: std::sync::atomic::AtomicI32,
     waiters: AtomicUsize,
     books: Mutex<Bookkeeping>,
-    sessions: Mutex<HashMap<String, Session>>,
+    sessions: Mutex<HashMap<PaneKey, Session>>,
 }
 
 static GLOBAL: OnceLock<Arc<VoiceService>> = OnceLock::new();
@@ -272,19 +279,18 @@ impl VoiceService {
     pub(crate) fn register_session(
         &self,
         connection_id: u64,
-        agent_id: &str,
+        server_identity: &str,
+        pane_id: &str,
     ) -> Result<(), VoiceError> {
-        if agent_id.is_empty()
-            || agent_id.chars().count() > 256
-            || agent_id.chars().any(char::is_control)
-        {
-            return Err(VoiceError::invalid(
-                "agent_id must be 1-256 printable characters",
-            ));
-        }
+        super::terminal::validate_tmux_id(pane_id, '%')
+            .map_err(|_| VoiceError::invalid("pane_id must be a tmux pane id"))?;
+        let key = PaneKey {
+            server_identity: server_identity.to_owned(),
+            pane_id: pane_id.to_owned(),
+        };
         let mut sessions = self.sessions.lock().unwrap();
         prune_sessions(&mut sessions);
-        if !sessions.contains_key(agent_id) && sessions.len() >= MAX_SESSIONS {
+        if !sessions.contains_key(&key) && sessions.len() >= MAX_SESSIONS {
             return Err(VoiceError::new(
                 "voice_too_many_sessions",
                 format!("at most {MAX_SESSIONS} voice sessions can be registered at once"),
@@ -292,7 +298,7 @@ impl VoiceService {
             ));
         }
         sessions.insert(
-            agent_id.to_owned(),
+            key,
             Session {
                 connection_id,
                 since: Instant::now(),
@@ -301,7 +307,7 @@ impl VoiceService {
         Ok(())
     }
 
-    /// `agent_id = ""`: every session this connection registered ends.
+    /// `pane_id = ""`: every session this connection registered ends.
     pub(crate) fn clear_sessions(&self, connection_id: u64) {
         self.sessions
             .lock()
@@ -309,49 +315,28 @@ impl VoiceService {
             .retain(|_, session| session.connection_id != connection_id);
     }
 
-    /// Move registrations from pane-derived identities to the authoritative
-    /// hook identity without creating the service or touching the sidecar.
-    /// An explicit registration for the authoritative identity always wins.
-    pub(crate) fn promote_sessions(&self, retired_ids: &[String], new_id: &str) {
-        let mut sessions = self.sessions.lock().unwrap();
-        prune_sessions(&mut sessions);
-        let mut newest_retired: Option<Session> = None;
-        for retired_id in retired_ids {
-            let Some(retired) = sessions.remove(retired_id) else {
-                continue;
-            };
-            if newest_retired
-                .as_ref()
-                .is_none_or(|current| retired.since > current.since)
-            {
-                newest_retired = Some(retired);
-            }
-        }
-        if !sessions.contains_key(new_id)
-            && let Some(retired) = newest_retired
-        {
-            sessions.insert(new_id.to_owned(), retired);
-        }
-    }
-
     #[cfg(test)]
     fn session_count(&self) -> usize {
         self.sessions.lock().unwrap().len()
     }
 
-    fn session_connection(&self, agent_id: &str) -> Option<u64> {
+    fn session_connection(&self, key: &PaneKey) -> Option<u64> {
         let mut sessions = self.sessions.lock().unwrap();
         prune_sessions(&mut sessions);
-        sessions.get(agent_id).map(|session| session.connection_id)
+        sessions.get(key).map(|session| session.connection_id)
     }
 
     // --- pushed replies -------------------------------------------------
 
     /// Synthesizes the reply on a detached task and pushes it to the one
-    /// connection holding a session for the agent. Nothing is retained: an
-    /// agent without a session costs a map lookup.
+    /// connection holding a session for the pane. Nothing is retained: a
+    /// pane without a session costs a map lookup.
     pub(crate) fn push_reply(self: &Arc<Self>, reply: AgentReply) {
-        if self.session_connection(&reply.agent_id).is_none() {
+        let key = PaneKey {
+            server_identity: reply.server_identity.clone(),
+            pane_id: reply.pane_id.clone(),
+        };
+        if self.session_connection(&key).is_none() {
             return;
         }
         let service = Arc::clone(self);
@@ -373,12 +358,12 @@ impl VoiceService {
                     }),
                 ),
             };
-            let Some(connection_id) = service.session_connection(&reply.agent_id) else {
+            let Some(connection_id) = service.session_connection(&key) else {
                 return;
             };
             let event = v1::HostEvent {
                 kind: v1::EventKind::VoiceReply.into(),
-                scope: reply.agent_id.clone(),
+                scope: reply.pane_id.clone(),
                 voice: Some(v1::VoiceEvent {
                     status,
                     reply: Some(v1::VoiceSpeech {
@@ -393,9 +378,10 @@ impl VoiceService {
                         truncated: spoken.truncated || reply.truncated,
                         voice: DEFAULT_VOICE.into(),
                         provider: v1::VoiceProvider::EdgeTts.into(),
-                        agent_id: reply.agent_id.clone(),
+                        pane_id: reply.pane_id.clone(),
                         state_generation: reply.state_generation,
                         reply_at_unix_millis: reply.occurred_at_unix_millis,
+                        server_identity: reply.server_identity.clone(),
                     }),
                     ..Default::default()
                 }),
@@ -1288,7 +1274,7 @@ fn bounded_detail(detail: &str) -> String {
     cut
 }
 
-fn prune_sessions(sessions: &mut HashMap<String, Session>) {
+fn prune_sessions(sessions: &mut HashMap<PaneKey, Session>) {
     sessions.retain(|_, session| {
         session.since.elapsed() < SESSION_TTL && control_sink_alive(session.connection_id)
     });
@@ -1313,14 +1299,6 @@ fn valid_voice_id(voice: &str) -> bool {
 pub(crate) fn on_agent_reply(reply: AgentReply) {
     if let Some(service) = VoiceService::existing() {
         service.push_reply(reply);
-    }
-}
-
-/// Ingest's identity-promotion entry point. A host that has never handled a
-/// Voice request stays completely uninitialized.
-pub(crate) fn on_agent_identity_promoted(retired_ids: &[String], new_id: &str) {
-    if let Some(service) = VoiceService::existing() {
-        service.promote_sessions(retired_ids, new_id);
     }
 }
 

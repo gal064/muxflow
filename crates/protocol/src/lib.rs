@@ -50,7 +50,7 @@ pub mod v1 {
 
 // Mobile is independently released. A differing contract is rejected at admission;
 // desktop and host are shipped together and have no version-skew mode.
-pub const PROTOCOL_MAJOR: u32 = 3;
+pub const PROTOCOL_MAJOR: u32 = 4;
 pub const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 

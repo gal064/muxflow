@@ -99,7 +99,7 @@ describe("New agent create-then-send", () => {
     const created = await pending;
     const [inputFrame] = transport.drain();
     if (inputFrame?.payload.case !== "request") throw new Error("expected terminal input request");
-    expect(inputFrame.payload.value).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%9", terminalInputAgentId: "" });
+    expect(inputFrame.payload.value).toMatchObject({ operation: Operation.TERMINAL_INPUT, scope: "%9", terminalInputVoice: false });
     expect(new TextDecoder().decode(inputFrame.payload.value.data)).toBe("  cx --profile dev  \n");
     expect(transport.drain()).toHaveLength(0);
 

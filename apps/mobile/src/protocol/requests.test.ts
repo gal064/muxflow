@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Operation, VoiceProvider } from "./gen/envelope_pb";
-import { resolveTerminalFile, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "./requests";
+import { agentDiagnostics, resolveTerminalFile, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "./requests";
 
 describe("terminal file request builder", () => {
   it("binds the candidate to the exact pane route and host generation", () => {
@@ -27,6 +27,12 @@ describe("terminal file request builder", () => {
 // Field usage of the voice builders against docs/mobile/voice-mode-plan.md §3:
 // everything rides in `Request.voice`, nothing in `scope` or `data`.
 describe("voice request builders", () => {
+  it("requests host lifecycle diagnostics without a normal-operation payload", () => {
+    const request = agentDiagnostics();
+    expect(request.operation).toBe(Operation.AGENT_DIAGNOSTICS);
+    expect(request.agent).toBeDefined();
+  });
+
   it("voiceStatus probes readiness and only warms when asked", () => {
     const cold = voiceStatus("op-1");
     expect(cold.operation).toBe(Operation.VOICE_STATUS);
@@ -68,12 +74,13 @@ describe("voice request builders", () => {
     expect(voiceSpeak("op-6", "Hi", "en-GB-SoniaNeural").voice?.voice).toBe("en-GB-SoniaNeural");
   });
 
-  it("voiceSession registers an agent id and clears it with the empty string", () => {
-    const register = voiceSession("codex:native-7");
+  it("voiceSession registers a pane id and clears it with the empty string", () => {
+    const register = voiceSession("%7", "server-a");
     expect(register.operation).toBe(Operation.VOICE_SESSION);
-    expect(register.voice?.agentId).toBe("codex:native-7");
+    expect(register.voice?.paneId).toBe("%7");
+    expect(register.voice?.expectedServerIdentity).toBe("server-a");
     expect(register.voice?.operationId).toBe("");
 
-    expect(voiceSession("").voice?.agentId).toBe("");
+    expect(voiceSession("").voice?.paneId).toBe("");
   });
 });

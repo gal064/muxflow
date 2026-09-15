@@ -56,7 +56,11 @@ fn handle_inner(
     let request = request?;
     let runtime = AgentRuntime::global();
     let mut response = v1::AgentResponse::default();
+    let mut diagnostic_lines = Vec::new();
     match operation {
+        v1::Operation::AgentDiagnostics => {
+            diagnostic_lines = crate::diagnostics::lifecycle_diagnostic_lines();
+        }
         v1::Operation::AgentSnapshot => {
             // No sweep here any more. The daemon's own maintenance pass runs
             // every two seconds whether or not anything is connected, so a
@@ -163,6 +167,7 @@ fn handle_inner(
     Ok(v1::Response {
         ok: true,
         agent: Some(response),
+        diagnostic_lines,
         hook_ingest_disposition: if operation == v1::Operation::AgentHookIngest {
             v1::HookIngestDisposition::Applied.into()
         } else {

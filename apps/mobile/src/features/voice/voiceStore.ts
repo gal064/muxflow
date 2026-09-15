@@ -1,7 +1,5 @@
 // Voice-mode state that outlives one screen (docs/mobile/voice-mode-plan.md
-// §5.2, design.md §9.11). Sessions are keyed by an immutable local session key
-// (initially the agent id), while `VoiceSession.agentId` follows an
-// authoritative identity promotion. Each lives in memory until `endSession`,
+// §5.2, design.md §9.11). Sessions are keyed by pane. Each lives in memory until `endSession`,
 // which is the only thing that forgets it. Nothing is persisted across restarts.
 //
 // One player app-wide: `playback` describes whichever message is loaded in it.
@@ -10,7 +8,6 @@
 
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { VoiceReadiness, type VoiceProvisionProgress, type VoiceStatus } from "../../protocol/gen/envelope_pb";
-import type { Agent } from "../../store/sessionStore";
 
 export type VoiceReadinessState = "unknown" | "uvMissing" | "modelMissing" | "provisioning" | "ready";
 
@@ -55,7 +52,6 @@ export interface VoiceMessage {
 }
 
 export interface VoiceSession {
-  agentId: string;
   paneId: string;
   sessionId: string;
   startedAt: number;
@@ -89,9 +85,7 @@ export interface VoiceActions {
   /** One EVENT_KIND_VOICE_PROVISION line; `ready` / `failed` also move `readiness`. */
   applyProvisionProgress(progress: ProvisionProgress): void;
   /** Creates the session when absent; an existing one keeps its history. */
-  ensureSession(sessionKey: string, paneId: string, sessionId: string, now: number, agentId?: string): void;
-  /** Retargets only the remote identity and route; all local session state stays put. */
-  promoteSession(sessionKey: string, agent: Agent): void;
+  ensureSession(sessionKey: string, paneId: string, sessionId: string, now: number): void;
   setPhase(sessionKey: string, phase: VoicePhase): void;
   appendMessage(sessionKey: string, message: VoiceMessage): void;
   /**
@@ -169,22 +163,14 @@ export function createVoiceStore(): VoiceStore {
         set({ hostStatus: { ...current, readiness, provision: provision.phase === "ready" ? undefined : provision } });
       },
 
-      ensureSession(sessionKey, paneId, sessionId, now, agentId = sessionKey) {
+      ensureSession(sessionKey, paneId, sessionId, now) {
         const existing = get().sessions[sessionKey];
         if (existing) {
           if (existing.paneId === paneId && existing.sessionId === sessionId) return;
           set({ sessions: { ...get().sessions, [sessionKey]: { ...existing, paneId, sessionId } } });
           return;
         }
-        set({ sessions: { ...get().sessions, [sessionKey]: { agentId, paneId, sessionId, startedAt: now, messages: [], phase: "idle" } } });
-      },
-
-      promoteSession(sessionKey, agent) {
-        updateSession(sessionKey, (session) => {
-          const { paneId, sessionId } = agent.route;
-          if (session.agentId === agent.id && session.paneId === paneId && session.sessionId === sessionId) return session;
-          return { ...session, agentId: agent.id, paneId, sessionId };
-        });
+        set({ sessions: { ...get().sessions, [sessionKey]: { paneId, sessionId, startedAt: now, messages: [], phase: "idle" } } });
       },
 
       setPhase(agentId, phase) {
@@ -290,13 +276,4 @@ export function latestReply(session: VoiceSession | undefined): VoiceMessage | u
     if (message?.kind === "agent") return message;
   }
   return undefined;
-}
-
-/**
- * An utterance has been typed into the pane and no reply has come back yet:
- * the last turn is the user's. With the agent's lifecycle `working` this is
- * when the conversation shows the working indicator (design.md §9.11).
- */
-export function awaitingReply(session: VoiceSession | undefined): boolean {
-  return session?.messages.at(-1)?.kind === "you";
 }

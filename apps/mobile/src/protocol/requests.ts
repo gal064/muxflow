@@ -86,13 +86,14 @@ export function requestTerminalHistory(paneId: string, lines: number, skip: numb
  * iff the pane's application asked for bracketed paste, and is never
  * coalesced with the input around it; the default is keystrokes.
  */
-export function terminalInput(paneId: string, data: Uint8Array, options: { paste?: boolean; agentId?: string } = {}): Request {
+export function terminalInput(paneId: string, data: Uint8Array, options: { paste?: boolean; voice?: boolean; expectedServerIdentity?: string } = {}): Request {
   return create(RequestSchema, {
     operation: Operation.TERMINAL_INPUT,
     scope: paneId,
     data,
     terminalInputPaste: options.paste === true,
-    terminalInputAgentId: options.agentId ?? "",
+    terminalInputVoice: options.voice === true,
+    terminalInputExpectedServerIdentity: options.expectedServerIdentity ?? "",
   });
 }
 
@@ -100,6 +101,14 @@ export function agentSnapshot(expectedServerIdentity: string): Request {
   return create(RequestSchema, {
     operation: Operation.AGENT_SNAPSHOT,
     agent: create(AgentRequestSchema, { expectedServerIdentity }),
+  });
+}
+
+/** Privacy-safe host lifecycle ring, fetched only when Copy Diagnostics is tapped. */
+export function agentDiagnostics(): Request {
+  return create(RequestSchema, {
+    operation: Operation.AGENT_DIAGNOSTICS,
+    agent: create(AgentRequestSchema),
   });
 }
 
@@ -260,15 +269,15 @@ export function voiceSpeak(operationId: string, text: string, voice = ""): Reque
 }
 
 /**
- * VOICE_SESSION: register `agentId` as the agent whose replies this connection
+ * VOICE_SESSION: register `paneId` as the pane whose root replies this connection
  * wants pushed as EVENT_KIND_VOICE_REPLY; "" clears it. Per connection, so it
  * is re-sent after every reconnect and refreshed periodically (the host holds
  * a 10-minute TTL). No operation id: the answer is a bare ok/error.
  */
-export function voiceSession(agentId: string): Request {
+export function voiceSession(paneId: string, expectedServerIdentity = ""): Request {
   return create(RequestSchema, {
     operation: Operation.VOICE_SESSION,
-    voice: create(VoiceRequestSchema, { agentId }),
+    voice: create(VoiceRequestSchema, { paneId, expectedServerIdentity }),
   });
 }
 

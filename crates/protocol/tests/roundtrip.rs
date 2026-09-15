@@ -6,7 +6,7 @@ use tmux_agent_protocol::{PROTOCOL_MAJOR, encode_frame, read_frame_sync, v1};
 #[test]
 fn assigned_operation_and_enum_numbers_do_not_move() {
     use v1::Operation::*;
-    assert_eq!(PROTOCOL_MAJOR, 3);
+    assert_eq!(PROTOCOL_MAJOR, 4);
     for (operation, number) in [
         (ReconcileTerminalUpload, 41),
         (SelectTerminalSession, 43),
@@ -20,6 +20,7 @@ fn assigned_operation_and_enum_numbers_do_not_move() {
         (VoiceTranscribe, 51),
         (VoiceSpeak, 52),
         (VoiceSession, 53),
+        (AgentDiagnostics, 54),
         (TestDelay, 100),
     ] {
         assert_eq!(operation as i32, number);
@@ -43,14 +44,15 @@ fn field_numbers_and_wire_types_do_not_move() {
         terminal_history_lines: 2000,
         terminal_history_skip_lines: 40,
         terminal_input_paste: true,
-        terminal_input_agent_id: "a".into(),
+        terminal_input_voice: true,
+        terminal_input_expected_server_identity: "server-a".into(),
         ..Default::default()
     };
     assert_eq!(
         request.encode_to_vec(),
         [
-            0x58, 7, 0x60, 42, 0x80, 1, 1, 0x88, 1, 0xd0, 0x0f, 0x90, 1, 40, 0x98, 1, 1, 0xaa, 1,
-            1, b'a',
+            0x58, 7, 0x60, 42, 0x80, 1, 1, 0x88, 1, 0xd0, 0x0f, 0x90, 1, 40, 0x98, 1, 1, 0xb0, 1,
+            1, 0xba, 1, 8, b's', b'e', b'r', b'v', b'e', b'r', b'-', b'a',
         ]
     );
     assert_eq!(
@@ -195,8 +197,9 @@ fn an_unknown_terminal_history_event_is_inert_rather_than_a_seed() {
     );
 
     // And the same in the other direction: an operation number a host predating
-    // 53 cannot resolve is refused at admission rather than run as its
+    // 54 cannot resolve is refused at admission rather than run as its
     // neighbour.
     assert!(v1::Operation::try_from(53).is_ok());
-    assert!(v1::Operation::try_from(54).is_err());
+    assert!(v1::Operation::try_from(54).is_ok());
+    assert!(v1::Operation::try_from(55).is_err());
 }

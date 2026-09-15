@@ -22,6 +22,7 @@ pub(super) async fn handle(
     request: v1::Request,
     control_tx: &tokio::sync::mpsc::Sender<SequencerControl>,
     connection_id: u64,
+    active_server_identity: &str,
     cancellation: &AtomicBool,
     connection_closed: &AtomicBool,
 ) {
@@ -37,6 +38,7 @@ pub(super) async fn handle(
                 operation,
                 voice,
                 connection_id,
+                active_server_identity,
                 cancellation,
                 connection_closed,
             )
@@ -50,6 +52,7 @@ async fn handle_inner(
     operation: v1::Operation,
     request: v1::VoiceRequest,
     connection_id: u64,
+    active_server_identity: &str,
     cancellation: &AtomicBool,
     connection_closed: &AtomicBool,
 ) -> v1::Response {
@@ -66,6 +69,7 @@ async fn handle_inner(
         operation,
         request,
         connection_id,
+        active_server_identity,
         cancellation,
         connection_closed,
     )
@@ -94,6 +98,7 @@ async fn dispatch(
     operation: v1::Operation,
     request: v1::VoiceRequest,
     connection_id: u64,
+    active_server_identity: &str,
     cancellation: &AtomicBool,
     connection_closed: &AtomicBool,
 ) -> Result<v1::VoiceResponse, VoiceError> {
@@ -110,10 +115,19 @@ async fn dispatch(
             })
         }
         v1::Operation::VoiceSession => {
-            if request.agent_id.is_empty() {
+            if request.pane_id.is_empty() {
                 service.clear_sessions(connection_id);
             } else {
-                service.register_session(connection_id, &request.agent_id)?;
+                if request.expected_server_identity != active_server_identity {
+                    return Err(VoiceError::invalid(
+                        "tmux server identity changed; reopen Voice",
+                    ));
+                }
+                service.register_session(
+                    connection_id,
+                    active_server_identity,
+                    &request.pane_id,
+                )?;
             }
             Ok(v1::VoiceResponse::default())
         }
@@ -181,6 +195,7 @@ mod tests {
             v1::Request::default(),
             &control_tx,
             1,
+            "server-a",
             &AtomicBool::new(false),
             &AtomicBool::new(false),
         )
@@ -209,6 +224,7 @@ mod tests {
                 ..Default::default()
             },
             1,
+            "server-a",
             &AtomicBool::new(true),
             &AtomicBool::new(false),
         )
@@ -217,6 +233,31 @@ mod tests {
         let voice = response.voice.unwrap();
         assert_eq!(voice.operation_id, "op-7");
         assert!(!voice.retryable);
+    }
+
+    #[tokio::test]
+    async fn a_voice_session_cannot_register_across_a_tmux_server_replacement() {
+        let response = handle_inner(
+            v1::Operation::VoiceSession,
+            v1::VoiceRequest {
+                pane_id: "%7".into(),
+                expected_server_identity: "server-old".into(),
+                ..Default::default()
+            },
+            91,
+            "server-new",
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        )
+        .await;
+
+        assert!(!response.ok);
+        assert_eq!(response.error_code, "voice_invalid_request");
+        assert!(
+            response
+                .display_message
+                .contains("tmux server identity changed")
+        );
     }
 
     #[test]

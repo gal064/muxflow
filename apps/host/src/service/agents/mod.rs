@@ -110,13 +110,9 @@ pub(crate) struct AgentRuntime {
     /// Where a `Stop` hands the agent's final message. Voice mode in
     /// production; a recorder in tests, so no test needs the voice service.
     reply_sink: ReplySink,
-    /// Moves Voice registration before a promoted identity can dispatch its
-    /// Stop reply. Production uses Voice; tests can observe exact ordering.
-    identity_promotion_sink: IdentityPromotionSink,
 }
 
 type ReplySink = Box<dyn Fn(super::voice::AgentReply) + Send + Sync>;
-type IdentityPromotionSink = Box<dyn Fn(&[String], &str) + Send + Sync>;
 
 static GLOBAL: OnceLock<Arc<AgentRuntime>> = OnceLock::new();
 
@@ -130,23 +126,10 @@ impl AgentRuntime {
     }
 
     fn load(state_path: PathBuf) -> Self {
-        Self::load_with_sinks(
-            state_path,
-            Box::new(super::voice::on_agent_reply),
-            Box::new(super::voice::on_agent_identity_promoted),
-        )
+        Self::load_with_sink(state_path, Box::new(super::voice::on_agent_reply))
     }
 
-    #[cfg(test)]
     fn load_with_sink(state_path: PathBuf, reply_sink: ReplySink) -> Self {
-        Self::load_with_sinks(state_path, reply_sink, Box::new(|_, _| {}))
-    }
-
-    fn load_with_sinks(
-        state_path: PathBuf,
-        reply_sink: ReplySink,
-        identity_promotion_sink: IdentityPromotionSink,
-    ) -> Self {
         let state = store::load(&state_path);
         Self {
             state_path,
@@ -157,7 +140,6 @@ impl AgentRuntime {
             pending_codex_permissions: Mutex::new(BTreeMap::new()),
             codex_child_monitors: Mutex::new(BTreeMap::new()),
             reply_sink,
-            identity_promotion_sink,
         }
     }
 
@@ -169,15 +151,6 @@ impl AgentRuntime {
     #[cfg(test)]
     fn isolated_with_sink(state_path: PathBuf, reply_sink: ReplySink) -> Self {
         Self::load_with_sink(state_path, reply_sink)
-    }
-
-    #[cfg(test)]
-    fn isolated_with_sinks(
-        state_path: PathBuf,
-        reply_sink: ReplySink,
-        identity_promotion_sink: IdentityPromotionSink,
-    ) -> Self {
-        Self::load_with_sinks(state_path, reply_sink, identity_promotion_sink)
     }
 
     pub(super) fn snapshot(&self) -> v1::AgentSnapshot {
@@ -366,6 +339,7 @@ impl AgentRuntime {
         let mut state = self.state.lock().unwrap();
         let original = state.clone();
         let mut events = Vec::new();
+        let mut decisions = Vec::new();
         let mut resolved_keys = Vec::new();
         for ((record_id, _), turn, terminal) in &resolved {
             let Some(before) = state.agents.get(record_id).cloned() else {
@@ -431,23 +405,50 @@ impl AgentRuntime {
                 record.attention_kind = "completed".into();
                 record.attention_seen_at_unix_millis = 0;
             }
+            let reason = match terminal {
+                crate::hook::codex_transcript::TurnTerminal::Completed => "child_turn_completed",
+                crate::hook::codex_transcript::TurnTerminal::Aborted => "child_turn_aborted",
+            };
+            decisions.push((
+                record.agent_id.clone(),
+                record.route.pane_id.clone(),
+                !record.native_session_id.is_empty(),
+                lifecycle_label(before.lifecycle),
+                lifecycle_label(record.lifecycle),
+                reason,
+                record.codex_running_subagents.len(),
+            ));
             events.push(v1::AgentEvent {
                 agent: Some(snapshot::record(record)),
                 generation,
                 notify: completed,
-                reason: match terminal {
-                    crate::hook::codex_transcript::TurnTerminal::Completed => {
-                        "child_turn_completed"
-                    }
-                    crate::hook::codex_transcript::TurnTerminal::Aborted => "child_turn_aborted",
-                }
-                .into(),
+                reason: reason.into(),
                 retired_agent_ids: Vec::new(),
             });
         }
         if !events.is_empty() && self.persist_locked(&state).is_err() {
             *state = original;
             return Vec::new();
+        }
+        for (agent_id, pane_id, has_session_id, before, after, reason, active_children) in
+            &decisions
+        {
+            crate::diagnostics::record_lifecycle_decision(crate::diagnostics::LifecycleDecision {
+                input_origin: "unknown",
+                pane_id,
+                agent_id,
+                event: "TranscriptChildTerminal",
+                child: true,
+                has_session_id: *has_session_id,
+                has_turn_id: true,
+                session_relation: "current",
+                turn_relation: "current",
+                authority: "accepted",
+                lifecycle_before: before,
+                lifecycle_after: after,
+                reason,
+                active_children: *active_children,
+            });
         }
         drop(state);
         let mut monitors = self.codex_child_monitors.lock().unwrap();
@@ -542,6 +543,7 @@ impl AgentRuntime {
         let mut state = self.state.lock().unwrap();
         let original = state.clone();
         let mut events = Vec::new();
+        let mut diagnostic_scopes = Vec::new();
         let mut resolved_keys = Vec::new();
         for (key, terminal, expected_changed_at, expected_root_turn_id) in resolved {
             let Some(current) = state.agents.get(&key.record_id) else {
@@ -615,6 +617,10 @@ impl AgentRuntime {
             record.lifecycle_changed_at_unix_millis = now;
             record.updated_at_unix_millis = now;
             record.state_generation = generation;
+            diagnostic_scopes.push((
+                !key.turn.agent_id.is_empty(),
+                record.codex_running_subagents.len(),
+            ));
             events.push(v1::AgentEvent {
                 agent: Some(snapshot::record(record)),
                 generation,
@@ -641,6 +647,30 @@ impl AgentRuntime {
         if self.persist_locked(&state).is_err() {
             *state = original;
             return Vec::new();
+        }
+        for (event, (child, active_children)) in events.iter().zip(diagnostic_scopes) {
+            let Some(record) = event.agent.as_ref() else {
+                continue;
+            };
+            let Some(route) = record.route.as_ref() else {
+                continue;
+            };
+            crate::diagnostics::record_lifecycle_decision(crate::diagnostics::LifecycleDecision {
+                input_origin: "unknown",
+                pane_id: &route.pane_id,
+                agent_id: &record.agent_id,
+                event: "TranscriptTerminal",
+                child,
+                has_session_id: !record.native_session_id.is_empty(),
+                has_turn_id: true,
+                session_relation: "current",
+                turn_relation: "current",
+                authority: "accepted",
+                lifecycle_before: "blocked",
+                lifecycle_after: lifecycle_label(record.lifecycle),
+                reason: &event.reason,
+                active_children,
+            });
         }
         let mut pending = self.pending_codex_permissions.lock().unwrap();
         for key in resolved_keys {
@@ -727,6 +757,30 @@ impl AgentRuntime {
         if self.persist_locked(&state).is_err() {
             *state = original;
             return Vec::new();
+        }
+        for event in &events {
+            let Some(record) = event.agent.as_ref() else {
+                continue;
+            };
+            let Some(route) = record.route.as_ref() else {
+                continue;
+            };
+            crate::diagnostics::record_lifecycle_decision(crate::diagnostics::LifecycleDecision {
+                input_origin: "unknown",
+                pane_id: &route.pane_id,
+                agent_id: &record.agent_id,
+                event: "WorkingDecay",
+                child: false,
+                has_session_id: !record.native_session_id.is_empty(),
+                has_turn_id: false,
+                session_relation: "current",
+                turn_relation: "missing",
+                authority: "accepted",
+                lifecycle_before: "working",
+                lifecycle_after: "unknown",
+                reason: "stale_working_decay",
+                active_children: 0,
+            });
         }
         events
     }
@@ -855,25 +909,40 @@ impl AgentRuntime {
             .any(|record| !record.route.pane_id.is_empty() && !record.adapter_id.is_empty())
     }
 
-    /// Voice-origin terminal input is accepted only while the host still has
-    /// this exact agent on this exact pane. The caller holds this lock through
-    /// its terminal-input fence, closing both the phone-event and queued-input
-    /// delivery races.
-    pub(super) fn with_valid_input_target<T>(
+    /// Voice-origin terminal input is accepted while any supported root agent
+    /// is still present on this pane. The caller holds this lock through the
+    /// terminal-input fence so a confirmed departure cannot race submission.
+    pub(super) fn with_valid_input_pane<T>(
         &self,
-        agent_id: &str,
+        server_identity: &str,
+        pane_id: &str,
+        process_present: bool,
+        record_submission: bool,
+        action: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let state = self.state.lock().unwrap();
+        if !process_present {
+            bail!("pane no longer contains a supported agent");
+        }
+        let result = action();
+        if result.is_ok() && record_submission {
+            record_input_diagnostic_locked(&state, server_identity, pane_id, "voice");
+        }
+        result
+    }
+
+    pub(super) fn with_input_diagnostic<T>(
+        &self,
+        server_identity: &str,
         pane_id: &str,
         action: impl FnOnce() -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         let state = self.state.lock().unwrap();
-        let record = state
-            .agents
-            .get(agent_id)
-            .context("agent no longer exists")?;
-        if !record.present || record.route.pane_id != pane_id {
-            bail!("agent no longer owns this pane");
+        let result = action();
+        if result.is_ok() {
+            record_input_diagnostic_locked(&state, server_identity, pane_id, "terminal");
         }
-        action()
+        result
     }
 
     pub(super) fn snapshot_for(&self, server_identity: &str) -> v1::AgentSnapshot {
@@ -1004,6 +1073,46 @@ impl AgentRuntime {
     }
 }
 
+pub(super) fn pane_has_supported_process(pane: &tmux_control::Pane) -> bool {
+    process::detect_live(pane).is_some()
+}
+
+fn record_input_diagnostic_locked(
+    state: &StoredState,
+    server_identity: &str,
+    pane_id: &str,
+    origin: &str,
+) {
+    let Some(record) = state.agents.values().find(|record| {
+        record.present
+            && record.route.server_identity == server_identity
+            && record.route.pane_id == pane_id
+    }) else {
+        return;
+    };
+    let lifecycle = lifecycle_label(record.lifecycle);
+    crate::diagnostics::record_lifecycle_decision(crate::diagnostics::LifecycleDecision {
+        input_origin: origin,
+        pane_id,
+        agent_id: &record.agent_id,
+        event: "InputSubmit",
+        child: false,
+        has_session_id: !record.native_session_id.is_empty(),
+        has_turn_id: !record.codex_active_root_turn_id.is_empty(),
+        session_relation: "current",
+        turn_relation: if record.codex_active_root_turn_id.is_empty() {
+            "missing"
+        } else {
+            "current"
+        },
+        authority: "accepted",
+        lifecycle_before: lifecycle,
+        lifecycle_after: lifecycle,
+        reason: "input_accepted",
+        active_children: record.codex_running_subagents.len(),
+    });
+}
+
 pub(crate) fn publish(event: v1::AgentEvent) {
     broadcast_control_event(v1::HostEvent {
         kind: v1::EventKind::AgentState.into(),
@@ -1054,6 +1163,15 @@ pub(crate) fn maintain() {
     }
     for event in runtime.sweep_stale() {
         publish(event);
+    }
+}
+
+fn lifecycle_label(value: i32) -> &'static str {
+    match v1::AgentLifecycleState::try_from(value).unwrap_or_default() {
+        v1::AgentLifecycleState::Working => "working",
+        v1::AgentLifecycleState::Blocked => "blocked",
+        v1::AgentLifecycleState::Idle => "idle",
+        v1::AgentLifecycleState::Unknown | v1::AgentLifecycleState::Unspecified => "unknown",
     }
 }
 
