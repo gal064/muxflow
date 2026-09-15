@@ -5,6 +5,8 @@ import { Button } from "../../ui/components/Button";
 import { colors, fonts, typeScale } from "../../ui/tokens";
 import { diagnosticHeader } from "../../session/diagnosticSnapshot";
 import { logText } from "../../session/log";
+import { getConnection } from "../../session/connectionManager";
+import { agentDiagnostics } from "../../protocol/requests";
 import { useLog } from "./hooks";
 
 export interface LogViewerProps {
@@ -28,6 +30,20 @@ export function LogViewer({ visible, onDismiss }: LogViewerProps) {
 function LogContents({ onDismiss }: { onDismiss: () => void }) {
   const lines = useLog((state) => state.lines);
   const clear = useLog((state) => state.clear);
+  const copy = async () => {
+    let hostLines: string[] = [];
+    const connection = getConnection();
+    if (connection?.state === "connected") {
+      try {
+        hostLines = (await connection.request(agentDiagnostics())).diagnosticLines;
+      } catch {
+        hostLines = ["host.lifecycle unavailable=request-failed"];
+      }
+    } else {
+      hostLines = ["host.lifecycle unavailable=not-connected"];
+    }
+    await Clipboard.setStringAsync(logText(undefined, [...diagnosticHeader(), ...hostLines]));
+  };
 
   return (
     <View style={styles.root}>
@@ -50,7 +66,7 @@ function LogContents({ onDismiss }: { onDismiss: () => void }) {
       </ScrollView>
       <View style={styles.actions}>
         <Button label="Clear" variant="text" onPress={clear} />
-        <Button label="Copy" onPress={() => void Clipboard.setStringAsync(logText(undefined, diagnosticHeader()))} />
+        <Button label="Copy" onPress={() => void copy()} />
       </View>
     </View>
   );

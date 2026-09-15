@@ -2,7 +2,6 @@ import { create } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HostError } from "../../protocol/HostConnection";
 import { Operation, ResponseSchema, VoiceReadiness, VoiceResponseSchema, VoiceSpeechSchema, type VoiceSpeech } from "../../protocol/gen/envelope_pb";
-import type { Agent } from "../../store/sessionStore";
 import type { VoiceHaptics } from "./haptics";
 import type { VoiceTones } from "./tones";
 import { VoiceRecorderCoordinator } from "./recorderCoordinator";
@@ -45,9 +44,10 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHold
   const toasts: string[] = [];
   const logs: string[] = [];
   const controller = new VoiceController({
+    serverIdentity: "server-a",
     tailHoldMs,
     submitDelayMs,
-    agentId,
+    sessionKey: agentId,
     paneId,
     sessionId: "$1",
     store,
@@ -83,27 +83,8 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHold
   };
 }
 
-function reply(agentId: string, displayMarkdown: string, audio: Uint8Array = MP3, generation = 0n, speechText = displayMarkdown): VoiceSpeech {
-  return create(VoiceSpeechSchema, { agentId, displayMarkdown, speechText, audio, audioMime: "audio/mpeg", stateGeneration: generation, replyAtUnixMillis: 1_700_000_000_000n });
-}
-
-function promotedAgent(id = "agent-native"): Agent {
-  return {
-    id,
-    adapterId: "codex",
-    nativeSessionId: "native-session",
-    displayName: "Codex",
-    lifecycle: "working",
-    attentionKind: "",
-    stateGeneration: 2n,
-    attentionGeneration: 0n,
-    seenGeneration: 0n,
-    updatedAtMs: 2,
-    lifecycleChangedAtMs: 2,
-    attentionSeenAtMs: 0,
-    present: true,
-    route: { sessionId: "$1", sessionNameFallback: "", windowId: "@1", windowNameFallback: "", paneId: "%3", paneIndexFallback: 0 },
-  };
+function reply(paneId: string, displayMarkdown: string, audio: Uint8Array = MP3, generation = 0n, speechText = displayMarkdown): VoiceSpeech {
+  return create(VoiceSpeechSchema, { paneId, displayMarkdown, speechText, audio, audioMime: "audio/mpeg", stateGeneration: generation, replyAtUnixMillis: 1_700_000_000_000n });
 }
 
 describe("VoiceController", () => {
@@ -119,7 +100,7 @@ describe("VoiceController", () => {
     expect(status).toHaveLength(1);
     expect(status[0]!.voice?.warm).toBe(true);
     expect(h.store.getState().hostStatus.readiness).toBe("ready");
-    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.agentId)).toEqual(["agent-a"]);
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%3"]);
     expect(h.recorder.prepared).toBe(1);
 
     // Hold / release → transcript → TERMINAL_INPUT of utf8(text) as a paste, then a CR keystroke.
@@ -137,7 +118,8 @@ describe("VoiceController", () => {
     expect(input.map((r) => r.scope)).toEqual(["%3", "%3"]);
     expect(new TextDecoder().decode(input[0]!.data)).toBe("list the files in this directory");
     expect(input[0]!.terminalInputPaste).toBe(true);
-    expect(input.map((request) => request.terminalInputAgentId)).toEqual(["agent-a", "agent-a"]);
+    expect(input.map((request) => request.terminalInputVoice)).toEqual([true, true]);
+    expect(input.map((request) => request.terminalInputExpectedServerIdentity)).toEqual(["server-a", "server-a"]);
     expect(Array.from(input[1]!.data)).toEqual([0x0d]);
     expect(input[1]!.terminalInputPaste).toBe(false);
     const session = h.store.getState().sessions["agent-a"]!;
@@ -157,7 +139,7 @@ describe("VoiceController", () => {
     expect(h.player.calls.filter((c) => c === "play")).toHaveLength(1);
     expect(h.store.getState().playback).toMatchObject({ messageId: latest.id, state: "playing" });
     const diagnostics = h.logs.join("\n");
-    expect(diagnostics).toContain("voice agent=agent-a pane=%3 session=$1 recorder.started actual=recording");
+    expect(diagnostics).toContain("voice pane=%3 session=$1 recorder.started actual=recording");
     expect(diagnostics).toContain("submission.ack message=agent-a:");
     expect(diagnostics).toContain("reply message=agent-a:");
     expect(diagnostics).not.toContain("list the files in this directory");
@@ -186,101 +168,10 @@ describe("VoiceController", () => {
 
     // End session: host registration cleared with "", file deleted, session forgotten.
     await h.controller.endSession();
-    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.agentId)).toEqual(["agent-a", ""]);
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%3", ""]);
     expect(h.files.deleted).toContain("file:///cache/voice/agent-a.mp3");
     expect(h.store.getState().sessions["agent-a"]).toBeUndefined();
     expect(h.store.getState().playback).toBeUndefined();
-  });
-
-  it("coalesces an in-flight old-id registration into one promoted-id refresh", async () => {
-    const h = harness();
-    let finishOld!: () => void;
-    let registration = 0;
-    h.connection.answer(Operation.VOICE_SESSION, () => {
-      registration += 1;
-      if (registration > 1) return create(ResponseSchema, { ok: true });
-      return new Promise((resolve) => { finishOld = () => resolve(create(ResponseSchema, { ok: true })); });
-    });
-    h.controller.focus();
-    await settle();
-    expect(h.connection.of(Operation.VOICE_SESSION).map((request) => request.voice?.agentId)).toEqual(["agent-a"]);
-
-    h.controller.promoteAgent(promotedAgent());
-    h.controller.reregister();
-    expect(h.controller.sessionKey).toBe("agent-a");
-    expect(h.controller.agentId).toBe("agent-native");
-    expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(1);
-    finishOld();
-    await settle();
-
-    expect(h.connection.of(Operation.VOICE_SESSION).map((request) => request.voice?.agentId)).toEqual(["agent-a", "agent-native"]);
-    expect(h.store.getState().sessions["agent-a"]).toMatchObject({ agentId: "agent-native", paneId: "%3" });
-    expect(h.store.getState().sessions["agent-native"]).toBeUndefined();
-  });
-
-  it("keeps recording and autoplay suppression intact across promotion", async () => {
-    const h = harness();
-    h.controller.focus();
-    await settle();
-    h.controller.beginUtterance();
-    await settle();
-    h.controller.onVoiceReply(reply("agent-a", "arrived while listening"));
-    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recording");
-    expect(h.player.calls).not.toContain("play");
-
-    h.controller.promoteAgent(promotedAgent());
-    expect(h.recorder.recording).toBe(true);
-    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("recording");
-    await h.controller.cancelUtterance();
-    h.controller.blur();
-    h.controller.focus();
-    await settle();
-
-    expect(h.player.calls).not.toContain("play");
-    expect(latestReply(h.store.getState().sessions["agent-a"])?.played).toBe(false);
-  });
-
-  it("preserves lifecycle baselining so working is acknowledged once after promotion", () => {
-    const h = harness();
-    h.store.getState().appendMessage(h.controller.sessionKey, {
-      id: "turn-1", kind: "you", displayText: "hello", speechText: "hello", at: 1,
-      truncated: false, fileUri: undefined, audioError: undefined, played: true,
-    });
-    h.controller.onAgentLifecycle("idle");
-    h.controller.promoteAgent(promotedAgent());
-    h.controller.onAgentLifecycle("working");
-    h.controller.onAgentLifecycle("working");
-
-    expect(h.haptics.calls).toEqual(["working"]);
-    expect(h.tones.calls).toEqual(["working"]);
-    expect(h.logs.filter((line) => line.includes("working.ack"))).toHaveLength(1);
-  });
-
-  it("does not replay acknowledged input and uses the promoted id for the next turn", async () => {
-    const h = harness();
-    h.controller.focus();
-    await settle();
-    h.controller.beginUtterance();
-    await settle();
-    await h.controller.endUtterance();
-    await settle();
-    expect(h.connection.of(Operation.TERMINAL_INPUT).map((request) => request.terminalInputAgentId)).toEqual(["agent-a", "agent-a"]);
-
-    h.controller.promoteAgent(promotedAgent());
-    await settle();
-    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(2);
-    h.files.files.set("file:///cache/rec-1.m4a", new TextEncoder().encode("second-aac"));
-    h.controller.beginUtterance();
-    await settle();
-    await settle();
-    expect(h.recorder.recording).toBe(true);
-    await h.controller.endUtterance();
-    await settle();
-
-    expect(h.connection.of(Operation.TERMINAL_INPUT).map((request) => request.terminalInputAgentId)).toEqual([
-      "agent-a", "agent-a", "agent-native", "agent-native",
-    ]);
-    expect(h.store.getState().sessions["agent-a"]?.messages.filter((message) => message.kind === "you")).toHaveLength(2);
   });
 
   it("does not submit a transcript after the agent is confirmed gone", async () => {
@@ -537,9 +428,10 @@ describe("VoiceController", () => {
   it("two sessions receive their own replies and share the one player", async () => {
     const a = harness("agent-a", "%3");
     const b = new VoiceController({
+      serverIdentity: "server-a",
     tailHoldMs: 0,
     submitDelayMs: 0,
-      agentId: "agent-b",
+      sessionKey: "agent-b",
       paneId: "%4",
       sessionId: "$1",
       store: a.store,
@@ -581,11 +473,11 @@ describe("VoiceController", () => {
     h.controller.onConnected();
     await settle();
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(3);
-    expect(h.connection.of(Operation.VOICE_SESSION).every((r) => r.voice?.agentId === "agent-a")).toBe(true);
+    expect(h.connection.of(Operation.VOICE_SESSION).every((r) => r.voice?.paneId === "%3")).toBe(true);
     await vi.advanceTimersByTimeAsync(SESSION_REFRESH_MS);
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(4);
     await h.controller.endSession();
-    expect(h.connection.of(Operation.VOICE_SESSION).at(-1)?.voice?.agentId).toBe("");
+    expect(h.connection.of(Operation.VOICE_SESSION).at(-1)?.voice?.paneId).toBe("");
     await vi.advanceTimersByTimeAsync(SESSION_REFRESH_MS * 2);
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(5);
   });
@@ -714,7 +606,7 @@ describe("VoiceController against a host that is not set up (review round 1)", (
     expect(h.logs.join("\n")).not.toContain("install uv: curl");
     // End on a never-registered session sends no clear.
     await h.controller.endSession();
-    expect(h.connection.of(Operation.VOICE_SESSION).every((r) => r.voice?.agentId === "agent-a")).toBe(true);
+    expect(h.connection.of(Operation.VOICE_SESSION).every((r) => r.voice?.paneId === "%3")).toBe(true);
   });
 
   it("registers as soon as a later STATUS reports ready, then keeps the refresh loop", async () => {
@@ -765,9 +657,10 @@ describe("VoiceController against a host that is not set up (review round 1)", (
   it("talking stops another session's playback; ending a session leaves another's playback alone", async () => {
     const a = harness("agent-a", "%3");
     const b = new VoiceController({
+      serverIdentity: "server-a",
     tailHoldMs: 0,
     submitDelayMs: 0,
-      agentId: "agent-b",
+      sessionKey: "agent-b",
       paneId: "%4",
       sessionId: "$1",
       store: a.store,
@@ -805,9 +698,10 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
   function pair() {
     const a = harness("agent-a", "%3");
     const b = new VoiceController({
+      serverIdentity: "server-a",
     tailHoldMs: 0,
     submitDelayMs: 0,
-      agentId: "agent-b",
+      sessionKey: "agent-b",
       paneId: "%4",
       sessionId: "$1",
       store: a.store,
@@ -875,7 +769,7 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
     h.controller.focus();
     await settle();
     await h.controller.endSession();
-    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.agentId)).toEqual(["agent-a", ""]);
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%3", ""]);
 
     const g = harness();
     g.controller.focus();
@@ -1044,9 +938,10 @@ describe("VoiceController recorder release races (QA fix review)", () => {
     expect(h.recorder.recording).toBe(false);
     expect(h.recorder.released).toBe(1);
     const b = new VoiceController({
+      serverIdentity: "server-a",
       tailHoldMs: 0,
       submitDelayMs: 0,
-      agentId: "agent-b",
+      sessionKey: "agent-b",
       paneId: "%4",
       sessionId: "$1",
       store: h.store,

@@ -138,6 +138,8 @@ export interface HostConnectionOptions {
   onAgentTransition?: (transition: AgentTransition) => void;
   /** One atomic pane-derived → native agent identity handoff. */
   onAgentIdentityPromotion?: (promotion: AgentIdentityPromotion) => void;
+  /** A live topology snapshot replaced the tmux server behind this connection. */
+  onServerIdentityChanged?: (serverIdentity: string) => void;
   /** ACTIVE_ROOT, DIRECTORY_SNAPSHOT, FILE_CHANGED (§11). */
   onFileEvent?: (event: HostEvent) => void;
   /** VOICE_PROVISION, VOICE_REPLY (docs/mobile/voice-mode-plan.md); payload in `event.voice`. */
@@ -696,8 +698,12 @@ export class HostConnection {
 
   private applySnapshotWithAgents(snapshot: NonNullable<HostEvent["snapshot"]>): void {
     const store = this.options.store;
+    const previousServerIdentity = store.getState().serverIdentity;
     const previousAgents = store.getState().agents;
     store.getState().applySnapshot(snapshot);
+    if (previousServerIdentity && previousServerIdentity !== snapshot.serverIdentity) {
+      this.options.onServerIdentityChanged?.(snapshot.serverIdentity);
+    }
     logAgentTransitions(previousAgents, store.getState().agents, "snapshot", snapshot.generation, (line) => this.log(line));
     if (snapshot.agents?.authoritative && this.options.onAgentTransition) {
       for (const agent of Object.values(store.getState().agents)) {

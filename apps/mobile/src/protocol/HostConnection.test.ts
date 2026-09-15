@@ -98,7 +98,7 @@ describe("handshake (§7.3)", () => {
     const transport = h.transports[0]!;
     const [hello, subscribe] = transport.drain();
     expect(hello?.requestId).toBe(1n);
-    expect(hello?.protocolMajor).toBe(3);
+    expect(hello?.protocolMajor).toBe(4);
     expect(hello?.payload.case).toBe("clientHello");
     if (hello?.payload.case !== "clientHello") throw new Error("unreachable");
     expect(hello.payload.value.bulkConnection).toBe(false);
@@ -127,10 +127,10 @@ describe("handshake (§7.3)", () => {
     const h = harness();
     h.connection.connect();
     await settle();
-    h.transports[0]!.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n, protocolMajor: 4 }));
+    h.transports[0]!.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n, protocolMajor: 5 }));
     expect(h.store.getState().connection).toMatchObject({
       state: "incompatible",
-      message: "This host's Muxflow helper speaks protocol v4; this app needs v3. Update the app or the helper from Muxflow desktop.",
+      message: "This host's Muxflow helper speaks protocol v5; this app needs v4. Update the app or the helper from Muxflow desktop.",
     });
     expect(h.transports[0]!.closed).toBe(true);
     await vi.advanceTimersByTimeAsync(60_000);
@@ -254,6 +254,19 @@ describe("ordered events (§7.4)", () => {
     expect(h.store.getState().connection.state).toBe("reconnecting");
   });
 
+  it("reports a tmux server replacement delivered on the live topology stream", async () => {
+    const replacements: string[] = [];
+    const h = harness({ onServerIdentityChanged: (identity) => replacements.push(identity) });
+    const transport = await connectHappily(h);
+
+    transport.feed(event(EventKind.TOPOLOGY_SNAPSHOT, 1n, {
+      snapshot: topologySnapshot({ serverIdentity: "server-b", generation: 9n }),
+    }));
+
+    expect(h.store.getState().serverIdentity).toBe("server-b");
+    expect(replacements).toEqual(["server-b"]);
+  });
+
   it("delivers a same-event identity promotion before the replacement lifecycle transition", async () => {
     const calls: string[] = [];
     const attention = createNotificationAttention();
@@ -334,13 +347,13 @@ describe("ordered events (§7.4)", () => {
     }));
     transport.feed(event(EventKind.VOICE_REPLY, 2n, {
       voice: create(VoiceEventSchema, {
-        reply: create(VoiceSpeechSchema, { agentId: "a1", displayMarkdown: "**Done.**", speechText: "Done.", audio: new Uint8Array([0xff, 0xfb]), audioMime: "audio/mpeg", stateGeneration: 4n }),
+        reply: create(VoiceSpeechSchema, { serverIdentity: "server-a", paneId: "%1", displayMarkdown: "**Done.**", speechText: "Done.", audio: new Uint8Array([0xff, 0xfb]), audioMime: "audio/mpeg", stateGeneration: 4n }),
       }),
     }));
     expect(received.map((e) => e.kind)).toEqual([EventKind.VOICE_PROVISION, EventKind.VOICE_REPLY]);
     expect(received[0]?.voice?.provision?.phase).toBe("downloading");
     expect(received[0]?.voice?.provision?.totalBytes).toBe(671088640n);
-    expect(received[1]?.voice?.reply?.agentId).toBe("a1");
+    expect(received[1]?.voice?.reply?.paneId).toBe("%1");
     expect(received[1]?.voice?.reply?.audio).toEqual(new Uint8Array([0xff, 0xfb]));
     // Neither is a file or agent event, and neither is logged as ignored.
     expect(h.log.some((line) => line.startsWith("event.ignored"))).toBe(false);

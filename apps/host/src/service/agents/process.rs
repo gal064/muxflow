@@ -34,6 +34,27 @@ pub(super) fn detect(pane: &tmux_control::Pane) -> Option<&'static dyn adapters:
         })
 }
 
+/// Re-checks the process tree without trusting tmux's cached command fields.
+/// Voice uses this immediately before delivery so an exited agent cannot turn
+/// a pending utterance into input for the surviving shell.
+pub(super) fn detect_live(
+    pane: &tmux_control::Pane,
+) -> Option<&'static dyn adapters::AgentAdapter> {
+    #[cfg(target_os = "linux")]
+    {
+        detect_proc_tree(Path::new("/proc"), pane.pane_pid)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        detect_darwin_tree(pane.pane_pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pane;
+        None
+    }
+}
+
 #[cfg(any(test, target_os = "linux"))]
 fn detect_proc_tree(
     proc_root: &Path,

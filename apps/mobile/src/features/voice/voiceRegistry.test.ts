@@ -1,7 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import { EventKind, HostEventSchema, Operation, VoiceEventSchema, VoiceProvisionProgressSchema, VoiceSpeechSchema, VoiceStatusSchema } from "../../protocol/gen/envelope_pb";
-import type { Agent } from "../../store/sessionStore";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, transcriptResponse } from "./testing";
 import { VoiceRegistry } from "./voiceRegistry";
 import { createVoiceStore, latestReply } from "./voiceStore";
@@ -16,156 +15,76 @@ function harness() {
   const logs: string[] = [];
   let foreground = true;
   const registry = new VoiceRegistry(store, (line) => logs.push(line));
-  const deps = { tailHoldMs: 0, getConnection: () => connection.asHostConnection(), recorder: new FakeRecorder(), player: new FakePlayer(), files: new FakeFiles(), appInForeground: () => foreground };
+  const deps = { serverIdentity: "server-a", tailHoldMs: 0, getConnection: () => connection.asHostConnection(), recorder: new FakeRecorder(), player: new FakePlayer(), files: new FakeFiles(), appInForeground: () => foreground };
   return { store, connection, registry, deps, logs, setForeground: (active: boolean) => { foreground = active; } };
 }
 
-function agent(id: string, paneId = "%1", sessionId = "$1"): Agent {
-  return {
-    id,
-    adapterId: "codex",
-    nativeSessionId: "native-session",
-    displayName: "Codex",
-    lifecycle: "working",
-    attentionKind: "",
-    stateGeneration: 2n,
-    attentionGeneration: 0n,
-    seenGeneration: 0n,
-    updatedAtMs: 2,
-    lifecycleChangedAtMs: 2,
-    attentionSeenAtMs: 0,
-    present: true,
-    route: { sessionId, sessionNameFallback: "", windowId: "@1", windowNameFallback: "", paneId, paneIndexFallback: 0 },
-  };
-}
-
 describe("VoiceRegistry", () => {
-  it("routes VOICE_REPLY to the named session, drops it for an unknown agent, and applies VOICE_PROVISION to the host status", () => {
+  it("routes VOICE_REPLY by pane, drops it for an unknown pane, and applies VOICE_PROVISION", () => {
     const h = harness();
-    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
-    expect(h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps })).toBe(a);
-    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_REPLY, voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "a", displayMarkdown: "**hi**", speechText: "hi", audio: new Uint8Array([1]) }) }) }));
-    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_REPLY, voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "ghost", displayMarkdown: "no", speechText: "no", audio: new Uint8Array([1]) }) }) }));
-    expect(h.store.getState().sessions["a"]?.messages.map((m) => m.displayText)).toEqual(["**hi**"]);
-    expect(h.store.getState().sessions["ghost"]).toBeUndefined();
+    const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    expect(h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps })).toBe(a);
+    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_REPLY, voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { serverIdentity: "server-a", paneId: "%1", displayMarkdown: "**hi**", speechText: "hi", audio: new Uint8Array([1]) }) }) }));
+    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_REPLY, voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { serverIdentity: "server-a", paneId: "%9", displayMarkdown: "no", speechText: "no", audio: new Uint8Array([1]) }) }) }));
+    expect(h.store.getState().sessions["%1"]?.messages.map((m) => m.displayText)).toEqual(["**hi**"]);
+    expect(h.store.getState().sessions["%9"]).toBeUndefined();
     // A failed synthesis carries the error in the event's status detail.
     h.registry.onVoiceEvent(create(HostEventSchema, {
       kind: EventKind.VOICE_REPLY,
-      voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "a", displayMarkdown: "_silent_", speechText: "silent" }), status: create(VoiceStatusSchema, { detail: "tts down" }) }),
+      voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { serverIdentity: "server-a", paneId: "%1", displayMarkdown: "_silent_", speechText: "silent" }), status: create(VoiceStatusSchema, { detail: "tts down" }) }),
     }));
-    expect(h.store.getState().sessions["a"]?.messages.at(-1)).toMatchObject({ displayText: "_silent_", speechText: "silent", audioError: "tts down" });
+    expect(h.store.getState().sessions["%1"]?.messages.at(-1)).toMatchObject({ displayText: "_silent_", speechText: "silent", audioError: "tts down" });
     h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_PROVISION, voice: create(VoiceEventSchema, { provision: create(VoiceProvisionProgressSchema, { phase: "verifying", totalBytes: 4n, transferredBytes: 4n }) }) }));
     expect(h.store.getState().hostStatus).toMatchObject({ readiness: "provisioning", provision: { phase: "verifying" } });
   });
 
   it("onConnected re-registers live sessions; end clears on the host; disposeAll is local only", async () => {
     const h = harness();
-    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
-    h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    h.registry.open({ paneId: "%2", sessionId: "$1", ...h.deps });
     a.focus();
     await Promise.resolve();
-    h.registry.onConnected();
+    h.registry.onConnected("server-a");
     await Promise.resolve();
     // Only the focused-at-least-once session is registered; b never opened a screen.
-    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.agentId)).toEqual(["a", "a"]);
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%1", "%1"]);
     // b opens its screen too, so both are registered; End on a clears the whole
     // connection's registrations, so b registers again right after.
-    h.registry.get("b")!.focus();
+    h.registry.get("%2")!.focus();
     await Promise.resolve();
-    await h.registry.end("a");
+    await h.registry.end("%1");
     await Promise.resolve();
-    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.agentId)).toEqual(["a", "a", "b", "", "b"]);
-    expect(h.registry.get("a")).toBeUndefined();
+    expect(h.connection.of(Operation.VOICE_SESSION).map((r) => r.voice?.paneId)).toEqual(["%1", "%1", "%2", "", "%2"]);
+    expect(h.registry.get("%1")).toBeUndefined();
     h.registry.disposeAll();
-    expect(h.registry.get("b")).toBeUndefined();
+    expect(h.registry.get("%2")).toBeUndefined();
     expect(h.store.getState().sessions).toEqual({});
     expect(h.connection.of(Operation.VOICE_SESSION)).toHaveLength(5);
   });
 
-  it("keeps one controller and local session while routing the promoted id's registration and reply", async () => {
+  it("does not carry a pane conversation across a tmux server replacement", () => {
     const h = harness();
-    const controller = h.registry.open({ agentId: "manual", paneId: "%1", sessionId: "$1", ...h.deps });
-    controller.focus();
-    await settle();
-    h.store.getState().appendMessage(controller.sessionKey, {
-      id: "turn-1", kind: "you", displayText: "hello", speechText: "hello", at: 1,
-      truncated: false, fileUri: undefined, audioError: undefined, played: true,
-    });
+    h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    expect(h.store.getState().sessions["%1"]).toBeDefined();
 
-    expect(h.registry.promoteAgent(["manual"], agent("native"))).toEqual({ oldAgentId: "manual" });
-    await settle();
+    h.registry.onServerChanged("server-b");
+    expect(h.registry.get("%1")).toBeUndefined();
+    expect(h.store.getState().sessions).toEqual({});
 
-    expect(h.registry.get("manual")).toBeUndefined();
-    expect(h.registry.get("native")).toBe(controller);
-    expect(h.registry.open({ agentId: "native", paneId: "%1", sessionId: "$1", ...h.deps })).toBe(controller);
-    expect(h.store.getState().sessions.manual).toMatchObject({ agentId: "native" });
-    expect(h.store.getState().sessions.native).toBeUndefined();
-    expect(h.connection.of(Operation.VOICE_SESSION).map((request) => request.voice?.agentId)).toEqual(["manual"]);
-
-    h.registry.onConnected();
-    await settle();
-    expect(h.connection.of(Operation.VOICE_SESSION).map((request) => request.voice?.agentId)).toEqual(["manual", "native"]);
-
+    h.registry.open({ ...h.deps, serverIdentity: "server-b", paneId: "%1", sessionId: "$2" });
     h.registry.onVoiceEvent(create(HostEventSchema, {
       kind: EventKind.VOICE_REPLY,
-      voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "native", displayMarkdown: "done", speechText: "done", audio: new Uint8Array([1]), stateGeneration: 2n }) }),
+      voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, {
+        serverIdentity: "server-a", paneId: "%1", displayMarkdown: "stale", speechText: "stale",
+      }) }),
     }));
-    expect(h.store.getState().sessions.manual?.messages.map((message) => message.displayText)).toEqual(["hello", "done"]);
-
-    await h.registry.end(controller.sessionKey);
-    expect(h.registry.get("native")).toBeUndefined();
-    expect(h.store.getState().sessions).toEqual({});
-  });
-
-  it("rejects a promotion that would merge multiple live sessions", () => {
-    const h = harness();
-    const a = h.registry.open({ agentId: "manual-a", paneId: "%1", sessionId: "$1", ...h.deps });
-    const b = h.registry.open({ agentId: "manual-b", paneId: "%1", sessionId: "$1", ...h.deps });
-
-    expect(h.registry.promoteAgent(["manual-b", "manual-a"], agent("native"))).toBeUndefined();
-    expect(h.registry.get("manual-a")).toBe(a);
-    expect(h.registry.get("manual-b")).toBe(b);
-    expect(h.registry.get("native")).toBeUndefined();
-    expect(h.logs).toContain("[muxflow] voice identity.promotion.rejected reason=multiple-sessions new=native count=2");
-  });
-
-  it("allocates a distinct local key when a retired deterministic id is reused", async () => {
-    const h = harness();
-    const original = h.registry.open({ agentId: "manual", paneId: "%1", sessionId: "$1", ...h.deps });
-    h.registry.promoteAgent(["manual"], agent("native"));
-
-    const replacement = h.registry.open({ agentId: "manual", paneId: "%1", sessionId: "$1", ...h.deps });
-
-    expect(replacement).not.toBe(original);
-    expect(original.sessionKey).toBe("manual");
-    expect(replacement.sessionKey).toBe("manual:2");
-    expect(h.registry.get("native")).toBe(original);
-    expect(h.registry.get("manual")).toBe(replacement);
-    expect(h.store.getState().sessions.manual).toMatchObject({ agentId: "native" });
-    expect(h.store.getState().sessions["manual:2"]).toMatchObject({ agentId: "manual", messages: [] });
-
-    await h.registry.end(original.sessionKey);
-    expect(h.registry.get("native")).toBeUndefined();
-    expect(h.registry.get("manual")).toBe(replacement);
-    expect(h.store.getState().sessions.manual).toBeUndefined();
-    expect(h.store.getState().sessions["manual:2"]).toBeDefined();
-    h.registry.disposeAll();
-    expect(h.store.getState().sessions).toEqual({});
-  });
-
-  it.each(["recording", "recordingLocked", "transcribing", "sending"] as const)("preserves %s phase across promotion", (phase) => {
-    const h = harness();
-    const controller = h.registry.open({ agentId: "manual", paneId: "%1", sessionId: "$1", ...h.deps });
-    h.store.getState().setPhase(controller.sessionKey, phase);
-    h.registry.promoteAgent(["manual"], agent("native"));
-    expect(h.store.getState().sessions[controller.sessionKey]?.phase).toBe(phase);
-    expect(h.registry.get("native")).toBe(controller);
+    expect(h.store.getState().sessions["%1"]?.messages).toEqual([]);
   });
 
   it("keeps B's reply manual-only when it arrives while A owns the listening microphone", async () => {
     const h = harness();
-    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
-    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ paneId: "%2", sessionId: "$1", ...h.deps });
     a.focus();
     await settle();
     a.beginUtterance();
@@ -173,9 +92,9 @@ describe("VoiceRegistry", () => {
 
     h.registry.onVoiceEvent(create(HostEventSchema, {
       kind: EventKind.VOICE_REPLY,
-      voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { agentId: "b", displayMarkdown: "For B", speechText: "For B", audio: new Uint8Array([1]) }) }),
+      voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { serverIdentity: "server-a", paneId: "%2", displayMarkdown: "For B", speechText: "For B", audio: new Uint8Array([1]) }) }),
     }));
-    const message = latestReply(h.store.getState().sessions.b)!;
+    const message = latestReply(h.store.getState().sessions["%2"])!;
     expect(message.played).toBe(false);
 
     await a.cancelUtterance();
@@ -202,8 +121,8 @@ describe("VoiceRegistry", () => {
       events.push("read.end");
       return nativeRead(uri);
     };
-    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
-    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ paneId: "%2", sessionId: "$1", ...h.deps });
     a.focus();
     await settle();
     a.beginUtterance();
@@ -223,15 +142,15 @@ describe("VoiceRegistry", () => {
     await settle();
     expect(events).toEqual(["read.begin", "read.end", "prepare", "record"]);
     expect(h.deps.recorder.recording).toBe(true);
-    expect(h.store.getState().sessions.b?.phase).toBe("recording");
+    expect(h.store.getState().sessions["%2"]?.phase).toBe("recording");
     h.registry.disposeAll();
     await settle();
   });
 
   it("keeps B's recorder claim pending when its focus arrives before A's blur", async () => {
     const h = harness();
-    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
-    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ paneId: "%2", sessionId: "$1", ...h.deps });
     a.focus();
     await settle();
     expect(h.deps.recorder.prepared).toBe(1);
@@ -247,15 +166,15 @@ describe("VoiceRegistry", () => {
     b.beginUtterance();
     await settle();
     expect(h.deps.recorder.recording).toBe(true);
-    expect(h.store.getState().sessions.b?.phase).toBe("recording");
+    expect(h.store.getState().sessions["%2"]?.phase).toBe("recording");
     h.registry.disposeAll();
     await settle();
   });
 
   it("releases an abandoned recording before the next session transcribes", async () => {
     const h = harness();
-    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
-    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ paneId: "%2", sessionId: "$1", ...h.deps });
     a.focus();
     await settle();
     a.beginUtterance();
@@ -266,7 +185,7 @@ describe("VoiceRegistry", () => {
     a.blur();
     b.focus();
     await settle();
-    expect(h.store.getState().sessions.a?.phase).toBe("idle");
+    expect(h.store.getState().sessions["%1"]?.phase).toBe("idle");
 
     h.deps.recorder.nextUri = "file:///cache/rec-2.m4a";
     h.deps.files.files.set("file:///cache/rec-2.m4a", new TextEncoder().encode("second-aac"));
@@ -276,21 +195,21 @@ describe("VoiceRegistry", () => {
     await b.endUtterance();
 
     expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
-    expect(h.store.getState().sessions.b?.phase).toBe("idle");
+    expect(h.store.getState().sessions["%2"]?.phase).toBe("idle");
     h.registry.disposeAll();
     await settle();
   });
 
   it("does not grant a canceled recorder claim after the app enters the background", async () => {
     const h = harness();
-    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
-    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ paneId: "%2", sessionId: "$1", ...h.deps });
     a.focus();
     await settle();
     b.focus();
     b.beginUtterance();
     await settle();
-    expect(h.store.getState().sessions.b?.phase).toBe("recording");
+    expect(h.store.getState().sessions["%2"]?.phase).toBe("recording");
     expect(h.deps.recorder.recording).toBe(false); // B is waiting behind A's prepared recorder.
 
     h.setForeground(false);
@@ -298,7 +217,7 @@ describe("VoiceRegistry", () => {
     a.blur();
     await settle();
 
-    expect(h.store.getState().sessions.b?.phase).toBe("idle");
+    expect(h.store.getState().sessions["%2"]?.phase).toBe("idle");
     expect(h.deps.recorder.prepared).toBe(0);
     expect(h.deps.recorder.recording).toBe(false);
 
@@ -319,15 +238,15 @@ describe("VoiceRegistry", () => {
       if (transcriptions === 1) return new Promise((resolve) => { answerA = resolve; });
       return transcriptResponse("from B");
     });
-    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
-    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ paneId: "%2", sessionId: "$1", ...h.deps });
     a.focus();
     await settle();
     a.beginUtterance();
     await settle();
     const endingA = a.endUtterance();
     await settle();
-    expect(h.store.getState().sessions.a?.phase).toBe("transcribing");
+    expect(h.store.getState().sessions["%1"]?.phase).toBe("transcribing");
 
     a.blur();
     b.focus();
@@ -340,10 +259,10 @@ describe("VoiceRegistry", () => {
     await b.endUtterance();
 
     expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(2);
-    expect(h.store.getState().sessions.b?.phase).toBe("idle");
+    expect(h.store.getState().sessions["%2"]?.phase).toBe("idle");
     answerA!(transcriptResponse("from A"));
     await endingA;
-    expect(h.store.getState().sessions.a?.phase).toBe("idle");
+    expect(h.store.getState().sessions["%1"]?.phase).toBe("idle");
     h.registry.disposeAll();
     await settle();
   });
@@ -365,8 +284,8 @@ describe("VoiceRegistry", () => {
       return nativeStop();
     };
     h.deps.recorder.release = () => { events.push("release"); nativeRelease(); };
-    const a = h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
-    const b = h.registry.open({ agentId: "b", paneId: "%2", sessionId: "$1", ...h.deps });
+    const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    const b = h.registry.open({ paneId: "%2", sessionId: "$1", ...h.deps });
     a.focus();
     await settle();
     a.beginUtterance();
@@ -388,7 +307,7 @@ describe("VoiceRegistry", () => {
     expect(events).toEqual(["stop.begin", "stop.end", "release", "prepare", "record"]);
     expect(h.deps.recorder.recording).toBe(true);
     expect(h.deps.recorder.released).toBe(1);
-    expect(h.store.getState().sessions.b?.phase).toBe("recording");
+    expect(h.store.getState().sessions["%2"]?.phase).toBe("recording");
     h.deps.recorder.stop = nativeStop;
     h.registry.disposeAll();
     await settle();
@@ -396,12 +315,12 @@ describe("VoiceRegistry", () => {
 });
 
 describe("VoiceRegistry host-global state (review round 2)", () => {
-  it("open() re-points an existing session at the agent's current pane; disposeAll forgets the host status", () => {
+  it("open() keeps one controller per pane and refreshes its session route", () => {
     const h = harness();
-    h.registry.open({ agentId: "a", paneId: "%1", sessionId: "$1", ...h.deps });
-    const same = h.registry.open({ agentId: "a", paneId: "%7", sessionId: "$1", ...h.deps });
-    expect(same.target).toEqual({ paneId: "%7", sessionId: "$1" });
-    expect(h.store.getState().sessions["a"]?.paneId).toBe("%7");
+    h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
+    const same = h.registry.open({ paneId: "%1", sessionId: "$7", ...h.deps });
+    expect(same.target).toEqual({ paneId: "%1", sessionId: "$7" });
+    expect(h.store.getState().sessions["%1"]?.sessionId).toBe("$7");
     h.store.getState().setReadiness("ready", "");
     h.registry.disposeAll();
     expect(h.store.getState().hostStatus.readiness).toBe("unknown");

@@ -1,30 +1,10 @@
 import { create } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import { VoiceProvisionProgressSchema, VoiceReadiness, VoiceStatusSchema } from "../../protocol/gen/envelope_pb";
-import type { Agent } from "../../store/sessionStore";
-import { awaitingReply, createVoiceStore, hostStatusFromProto, latestReply, provisionFromProto, type VoiceMessage } from "./voiceStore";
+import { createVoiceStore, hostStatusFromProto, latestReply, provisionFromProto, type VoiceMessage } from "./voiceStore";
 
 function message(id: string, kind: VoiceMessage["kind"], fileUri?: string): VoiceMessage {
   return { id, kind, displayText: id, speechText: id, at: 1, truncated: false, fileUri, audioError: undefined, played: kind === "you" };
-}
-
-function promotedAgent(): Agent {
-  return {
-    id: "native",
-    adapterId: "codex",
-    nativeSessionId: "native-session",
-    displayName: "Codex",
-    lifecycle: "working",
-    attentionKind: "",
-    stateGeneration: 2n,
-    attentionGeneration: 0n,
-    seenGeneration: 0n,
-    updatedAtMs: 2,
-    lifecycleChangedAtMs: 2,
-    attentionSeenAtMs: 0,
-    present: true,
-    route: { sessionId: "$2", sessionNameFallback: "", windowId: "@2", windowNameFallback: "", paneId: "%7", paneIndexFallback: 0 },
-  };
 }
 
 describe("voiceStore", () => {
@@ -81,25 +61,6 @@ describe("voiceStore", () => {
     expect(latestReply(undefined)).toBeUndefined();
   });
 
-  it("promotes the remote identity without moving or replacing local session state", () => {
-    const store = createVoiceStore();
-    store.getState().ensureSession("manual", "%7", "$1", 10);
-    store.getState().appendMessage("manual", message("m1", "you", "file:///recording"));
-    store.getState().setPhase("manual", "recordingLocked");
-    store.getState().setPlayback({ messageId: "m1", state: "paused", positionMs: 120, durationMs: 500 });
-    const before = store.getState().sessions.manual!;
-    const messages = before.messages;
-    const playback = store.getState().playback;
-
-    store.getState().promoteSession("manual", promotedAgent());
-
-    const after = store.getState().sessions.manual!;
-    expect(store.getState().sessions.native).toBeUndefined();
-    expect(after).toMatchObject({ agentId: "native", paneId: "%7", sessionId: "$2", startedAt: 10, phase: "recordingLocked" });
-    expect(after.messages).toBe(messages);
-    expect(store.getState().playback).toBe(playback);
-  });
-
   it("markPlayed and setMessageAudio touch only their message and are no-ops for unknown ids", () => {
     const store = createVoiceStore();
     store.getState().ensureSession("a", "%1", "$1", 0);
@@ -114,20 +75,5 @@ describe("voiceStore", () => {
     store.getState().setPhase("a", "recording");
     expect(store.getState().sessions["a"]!.phase).toBe("recording");
     store.getState().setPhase("zzz", "recording");
-  });
-});
-
-describe("awaitingReply", () => {
-  it("is true only while the last turn is the user's", () => {
-    const store = createVoiceStore();
-    expect(awaitingReply(undefined)).toBe(false);
-    store.getState().ensureSession("a", "%1", "$1", 0);
-    expect(awaitingReply(store.getState().sessions["a"])).toBe(false);
-    store.getState().appendMessage("a", message("m1", "you"));
-    expect(awaitingReply(store.getState().sessions["a"])).toBe(true);
-    store.getState().appendReply("a", message("r1", "agent", "file:///r1"));
-    expect(awaitingReply(store.getState().sessions["a"])).toBe(false);
-    store.getState().appendMessage("a", message("m2", "you"));
-    expect(awaitingReply(store.getState().sessions["a"])).toBe(true);
   });
 });

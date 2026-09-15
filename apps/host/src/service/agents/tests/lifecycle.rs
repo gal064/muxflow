@@ -1198,14 +1198,19 @@ fn a_departed_process_retires_a_working_agent_and_publishes_the_retirement() {
         .unwrap();
     let working = runtime.snapshot_for("server-a").agents[0].clone();
     assert_eq!(working.lifecycle, v1::AgentLifecycleState::Working as i32);
+    assert!(process::detect(&topology.panes[0]).is_some());
+    assert!(
+        !pane_has_supported_process(&topology.panes[0]),
+        "the Voice guard ignores cached command text on this synthetic pane"
+    );
     assert!(
         runtime
-            .with_valid_input_target(&working.agent_id, "%7", || Ok(()))
+            .with_valid_input_pane("server-a", "%7", true, false, || Ok(()))
             .is_ok()
     );
     assert!(
         runtime
-            .with_valid_input_target(&working.agent_id, "%8", || Ok(()))
+            .with_valid_input_pane("server-a", "%8", false, false, || Ok(()))
             .is_err()
     );
     assert!(
@@ -1220,6 +1225,7 @@ fn a_departed_process_retires_a_working_agent_and_publishes_the_retirement() {
     let mut departed = topology.clone();
     departed.panes[0].current_command = "zsh".into();
     departed.panes[0].start_command = "zsh".into();
+    assert!(!pane_has_supported_process(&departed.panes[0]));
     assert!(
         runtime
             .retire_departed_from(&departed, "server-a")
@@ -1239,7 +1245,7 @@ fn a_departed_process_retires_a_working_agent_and_publishes_the_retirement() {
     assert!(runtime.snapshot_for("server-a").agents.is_empty());
     assert!(
         runtime
-            .with_valid_input_target(&working.agent_id, "%7", || Ok(()))
+            .with_valid_input_pane("server-a", "%7", false, false, || Ok(()))
             .is_err()
     );
 }

@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     ffi::OsStr,
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -20,6 +21,7 @@ use crate::paths;
 const DIAGNOSTICS_SCHEMA_VERSION: u32 = 1;
 const MAX_STATE_BYTES: u64 = 128 * 1024;
 const MAX_RECENT_ERRORS: usize = 16;
+const MAX_LIFECYCLE_DECISIONS: usize = 48;
 const STATE_FILE: &str = "diagnostics.json";
 const DEPENDENCY_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 const DEPENDENCY_OUTPUT_LIMIT: usize = 512;
@@ -102,6 +104,51 @@ struct RuntimeState {
     schema_version: u32,
     counters: FlowCounters,
     recent_errors: Vec<RecentSafeError>,
+    #[serde(default)]
+    lifecycle_decisions: VecDeque<StoredLifecycleDecision>,
+    #[serde(default)]
+    lifecycle_decisions_overwritten: u64,
+    #[serde(default)]
+    lifecycle_decision_sequence: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredLifecycleDecision {
+    sequence: u64,
+    at_unix_millis: i64,
+    input_origin: String,
+    pane_id: String,
+    agent_id: String,
+    event: String,
+    child: bool,
+    has_session_id: bool,
+    has_turn_id: bool,
+    session_relation: String,
+    turn_relation: String,
+    authority: String,
+    lifecycle_before: String,
+    lifecycle_after: String,
+    reason: String,
+    active_children: usize,
+}
+
+/// One compact, content-free decision at a lifecycle boundary.
+pub struct LifecycleDecision<'a> {
+    pub input_origin: &'a str,
+    pub pane_id: &'a str,
+    pub agent_id: &'a str,
+    pub event: &'a str,
+    pub child: bool,
+    pub has_session_id: bool,
+    pub has_turn_id: bool,
+    pub session_relation: &'a str,
+    pub turn_relation: &'a str,
+    pub authority: &'a str,
+    pub lifecycle_before: &'a str,
+    pub lifecycle_after: &'a str,
+    pub reason: &'a str,
+    pub active_children: usize,
 }
 
 impl Default for RuntimeState {
@@ -110,6 +157,9 @@ impl Default for RuntimeState {
             schema_version: DIAGNOSTICS_SCHEMA_VERSION,
             counters: FlowCounters::default(),
             recent_errors: Vec::new(),
+            lifecycle_decisions: VecDeque::with_capacity(MAX_LIFECYCLE_DECISIONS),
+            lifecycle_decisions_overwritten: 0,
+            lifecycle_decision_sequence: 0,
         }
     }
 }
@@ -142,6 +192,9 @@ impl RuntimeDiagnostics {
         // Active connections cannot survive a daemon restart. Never report a
         // stale gauge from a killed process.
         state.counters.connections_active = 0;
+        let mut decisions = VecDeque::with_capacity(MAX_LIFECYCLE_DECISIONS);
+        decisions.extend(state.lifecycle_decisions.drain(..));
+        state.lifecycle_decisions = decisions;
         if invalid {
             record_safe_error(&mut state, SafeErrorClass::DiagnosticsStateInvalid);
         }
@@ -290,6 +343,104 @@ pub fn record_terminal_input_backpressure() {
             .terminal_input_backpressure_rejections
             .saturating_add(1);
     });
+}
+
+/// Appends to the fixed host lifecycle ring. Strings are fixed labels or
+/// already-sanitized pane/agent hashes; free-form hook content never enters.
+pub fn record_lifecycle_decision(decision: LifecycleDecision<'_>) {
+    let diagnostics = ACTIVE_RUNTIME
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap()
+        .clone();
+    let Some(diagnostics) = diagnostics else {
+        return;
+    };
+    diagnostics.update(|state| {
+        append_lifecycle_decision(state, decision, now_epoch_millis());
+    });
+}
+
+fn append_lifecycle_decision(
+    state: &mut RuntimeState,
+    decision: LifecycleDecision<'_>,
+    at_unix_millis: i64,
+) {
+    let at_unix_millis = state
+        .lifecycle_decisions
+        .back()
+        .map_or(at_unix_millis, |previous| {
+            at_unix_millis.max(previous.at_unix_millis)
+        });
+    state.lifecycle_decision_sequence = state.lifecycle_decision_sequence.saturating_add(1);
+    if state.lifecycle_decisions.len() == MAX_LIFECYCLE_DECISIONS {
+        state.lifecycle_decisions.pop_front();
+        state.lifecycle_decisions_overwritten =
+            state.lifecycle_decisions_overwritten.saturating_add(1);
+    }
+    state
+        .lifecycle_decisions
+        .push_back(StoredLifecycleDecision {
+            sequence: state.lifecycle_decision_sequence,
+            at_unix_millis,
+            input_origin: bounded_decision_label(decision.input_origin),
+            pane_id: bounded_decision_label(decision.pane_id),
+            agent_id: bounded_decision_label(decision.agent_id),
+            event: bounded_decision_label(decision.event),
+            child: decision.child,
+            has_session_id: decision.has_session_id,
+            has_turn_id: decision.has_turn_id,
+            session_relation: bounded_decision_label(decision.session_relation),
+            turn_relation: bounded_decision_label(decision.turn_relation),
+            authority: bounded_decision_label(decision.authority),
+            lifecycle_before: bounded_decision_label(decision.lifecycle_before),
+            lifecycle_after: bounded_decision_label(decision.lifecycle_after),
+            reason: bounded_decision_label(decision.reason),
+            active_children: decision.active_children,
+        });
+}
+
+/// Returned only for the explicit Copy Diagnostics request.
+pub fn lifecycle_diagnostic_lines() -> Vec<String> {
+    let diagnostics = ACTIVE_RUNTIME
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap()
+        .clone();
+    let Some(diagnostics) = diagnostics else {
+        return Vec::new();
+    };
+    let state = diagnostics.state.lock().unwrap();
+    let mut lines = Vec::with_capacity(state.lifecycle_decisions.len() + 1);
+    lines.push(format!(
+        "host.lifecycle records={} overwritten={}",
+        state.lifecycle_decisions.len(),
+        state.lifecycle_decisions_overwritten
+    ));
+    lines.extend(state.lifecycle_decisions.iter().map(|record| format!(
+        "host.lifecycle seq={} at={} origin={} pane={} agent={} event={} child={} sessionId={} turnId={} session={} turn={} authority={} lifecycle={}->{} reason={} children={}",
+        record.sequence,
+        record.at_unix_millis,
+        record.input_origin,
+        record.pane_id,
+        record.agent_id,
+        record.event,
+        record.child,
+        record.has_session_id,
+        record.has_turn_id,
+        record.session_relation,
+        record.turn_relation,
+        record.authority,
+        record.lifecycle_before,
+        record.lifecycle_after,
+        record.reason,
+        record.active_children,
+    )));
+    lines
+}
+
+fn bounded_decision_label(value: &str) -> String {
+    value.chars().take(96).collect()
 }
 
 /// Counts one pane whose recovery material the pane-resource store discarded on
@@ -2364,6 +2515,9 @@ fn read_runtime_state(path: &Path) -> anyhow::Result<Option<RuntimeState>> {
     if state.recent_errors.len() > MAX_RECENT_ERRORS {
         bail!("diagnostics state has too many recent errors");
     }
+    if state.lifecycle_decisions.len() > MAX_LIFECYCLE_DECISIONS {
+        bail!("diagnostics state has too many lifecycle decisions");
+    }
     Ok(Some(state))
 }
 
@@ -2529,6 +2683,68 @@ mod tests {
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    #[test]
+    fn lifecycle_decision_ring_is_bounded_in_count_and_serialized_size() {
+        let mut state = RuntimeState::default();
+        let label = "x".repeat(200);
+        for index in 0..=MAX_LIFECYCLE_DECISIONS {
+            append_lifecycle_decision(
+                &mut state,
+                LifecycleDecision {
+                    input_origin: &label,
+                    pane_id: &label,
+                    agent_id: &label,
+                    event: &label,
+                    child: false,
+                    has_session_id: true,
+                    has_turn_id: true,
+                    session_relation: &label,
+                    turn_relation: &label,
+                    authority: &label,
+                    lifecycle_before: &label,
+                    lifecycle_after: &label,
+                    reason: &label,
+                    active_children: index,
+                },
+                index as i64,
+            );
+        }
+        assert_eq!(state.lifecycle_decisions.len(), MAX_LIFECYCLE_DECISIONS);
+        assert_eq!(state.lifecycle_decisions_overwritten, 1);
+        assert_eq!(state.lifecycle_decisions.front().unwrap().sequence, 2);
+        assert!(serde_json::to_vec(&state).unwrap().len() <= 64 * 1024);
+    }
+
+    #[test]
+    fn lifecycle_decision_timestamps_never_move_backwards() {
+        let mut state = RuntimeState::default();
+        let decision = || LifecycleDecision {
+            input_origin: "unknown",
+            pane_id: "%1",
+            agent_id: "agent",
+            event: "Stop",
+            child: false,
+            has_session_id: true,
+            has_turn_id: true,
+            session_relation: "current",
+            turn_relation: "current",
+            authority: "accepted",
+            lifecycle_before: "working",
+            lifecycle_after: "idle",
+            reason: "completed",
+            active_children: 0,
+        };
+        append_lifecycle_decision(&mut state, decision(), 10);
+        append_lifecycle_decision(&mut state, decision(), 5);
+
+        let timestamps = state
+            .lifecycle_decisions
+            .iter()
+            .map(|record| record.at_unix_millis)
+            .collect::<Vec<_>>();
+        assert_eq!(timestamps, vec![10, 10]);
     }
 
     #[test]

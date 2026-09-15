@@ -121,12 +121,19 @@ pub(crate) async fn handle_request(
         }
 
         (Handler::Voice, Some(operation)) => {
+            let active_server_identity = topology_baseline
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|(_, identity)| identity.clone())
+                .unwrap_or_default();
             super::voice_dispatch::handle(
                 request_id,
                 operation,
                 request,
                 control_tx,
                 connection_id,
+                &active_server_identity,
                 &cancellation,
                 &closed,
             )
@@ -299,11 +306,51 @@ pub(crate) async fn handle_request(
                 &request.scope,
                 request.data.len(),
             );
-            let guarded = !request.terminal_input_agent_id.is_empty();
-            let result = if guarded {
-                super::super::agents::AgentRuntime::global().with_valid_input_target(
-                    &request.terminal_input_agent_id,
+            let guarded = request.terminal_input_voice;
+            let submission = matches!(request.data.as_slice(), b"\r" | b"\n");
+            let (input_server_identity, target_pane) = if guarded || submission {
+                topology_baseline
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|(snapshot, identity)| {
+                        (
+                            identity.clone(),
+                            snapshot
+                                .panes
+                                .iter()
+                                .find(|pane| pane.id == request.scope)
+                                .cloned(),
+                        )
+                    })
+                    .unwrap_or_default()
+            } else {
+                Default::default()
+            };
+            let result = if guarded
+                && request.terminal_input_expected_server_identity != input_server_identity
+            {
+                Err(anyhow::anyhow!(
+                    "voice session belongs to a different tmux server"
+                ))
+            } else if guarded {
+                // A current process-tree observation is the only reliable way
+                // to distinguish the agent from its surviving shell. Keep its
+                // filesystem/process queries off the async service thread.
+                let process_present = if let Some(pane) = target_pane {
+                    tokio::task::spawn_blocking(move || {
+                        super::super::agents::pane_has_supported_process(&pane)
+                    })
+                    .await
+                    .unwrap_or(false)
+                } else {
+                    false
+                };
+                super::super::agents::AgentRuntime::global().with_valid_input_pane(
+                    &input_server_identity,
                     &request.scope,
+                    process_present,
+                    submission,
                     || {
                         let mut terminal = terminal.lock().unwrap();
                         terminal.send_input(&request.scope, &request.data, delivery, timing)?;
@@ -312,6 +359,19 @@ pub(crate) async fn handle_request(
                         // the agent record is locked, so retirement cannot be
                         // confirmed between validation and the tmux commit.
                         terminal.flush_input()
+                    },
+                )
+            } else if submission {
+                super::super::agents::AgentRuntime::global().with_input_diagnostic(
+                    &input_server_identity,
+                    &request.scope,
+                    || {
+                        terminal.lock().unwrap().send_input(
+                            &request.scope,
+                            &request.data,
+                            delivery,
+                            timing,
+                        )
                     },
                 )
             } else {

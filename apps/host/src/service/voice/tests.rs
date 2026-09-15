@@ -283,136 +283,41 @@ async fn sessions_are_bounded_cleared_by_connection_and_pruned_when_the_connecti
     let connection = registration.id;
     for index in 0..MAX_SESSIONS {
         service
-            .register_session(connection, &format!("agent-{index}"))
+            .register_session(connection, "server-a", &format!("%{index}"))
             .unwrap();
     }
     let error = service
-        .register_session(connection, "one-too-many")
+        .register_session(connection, "server-a", "%999")
         .unwrap_err();
     assert_eq!(error.code, "voice_too_many_sessions");
-    // Re-registering an existing agent refreshes rather than counts.
-    service.register_session(connection, "agent-0").unwrap();
+    // Re-registering an existing pane refreshes rather than counts.
+    service
+        .register_session(connection, "server-a", "%0")
+        .unwrap();
     assert_eq!(
-        service.register_session(connection, "").unwrap_err().code,
+        service
+            .register_session(connection, "server-a", "")
+            .unwrap_err()
+            .code,
         "voice_invalid_request"
     );
     assert_eq!(service.session_count(), MAX_SESSIONS);
     service.clear_sessions(connection);
     assert_eq!(service.session_count(), 0);
 
-    service.register_session(connection, "agent-x").unwrap();
+    service
+        .register_session(connection, "server-a", "%77")
+        .unwrap();
     drop(registration);
     assert_eq!(
-        service.session_connection("agent-x"),
+        service.session_connection(&PaneKey {
+            server_identity: "server-a".into(),
+            pane_id: "%77".into()
+        }),
         None,
         "a closed connection keeps no session"
     );
 }
-
-#[test]
-fn identity_promotion_moves_the_newest_retired_registration_without_refreshing_its_ttl() {
-    let dir = tempfile::tempdir().unwrap();
-    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
-    let (old_tx, _old_rx) = mpsc::channel::<SequencerControl>(1);
-    let (new_tx, _new_rx) = mpsc::channel::<SequencerControl>(1);
-    let old_connection = register_control_event_sink(old_tx);
-    let newer_connection = register_control_event_sink(new_tx);
-    service
-        .register_session(old_connection.id, "manual-old")
-        .unwrap();
-    service
-        .register_session(newer_connection.id, "manual-newer")
-        .unwrap();
-    let original_since = {
-        let mut sessions = service.sessions.lock().unwrap();
-        sessions.get_mut("manual-old").unwrap().since -= Duration::from_secs(2);
-        sessions.get("manual-newer").unwrap().since
-    };
-
-    service.promote_sessions(&["manual-old".into(), "manual-newer".into()], "native");
-
-    let sessions = service.sessions.lock().unwrap();
-    assert!(!sessions.contains_key("manual-old"));
-    assert!(!sessions.contains_key("manual-newer"));
-    assert_eq!(sessions.len(), 1);
-    let promoted = sessions.get("native").unwrap();
-    assert_eq!(promoted.connection_id, newer_connection.id);
-    assert_eq!(promoted.since, original_since);
-}
-
-#[test]
-fn identity_promotion_preserves_an_existing_native_registration_and_removes_retired_entries() {
-    let dir = tempfile::tempdir().unwrap();
-    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
-    let (manual_tx, _manual_rx) = mpsc::channel::<SequencerControl>(1);
-    let (native_tx, _native_rx) = mpsc::channel::<SequencerControl>(1);
-    let manual_connection = register_control_event_sink(manual_tx);
-    let native_connection = register_control_event_sink(native_tx);
-    service
-        .register_session(manual_connection.id, "manual")
-        .unwrap();
-    service
-        .register_session(native_connection.id, "native")
-        .unwrap();
-    let native_since = service.sessions.lock().unwrap()["native"].since;
-
-    service.promote_sessions(&["manual".into()], "native");
-
-    let sessions = service.sessions.lock().unwrap();
-    assert_eq!(sessions.len(), 1);
-    assert!(!sessions.contains_key("manual"));
-    assert_eq!(sessions["native"].connection_id, native_connection.id);
-    assert_eq!(sessions["native"].since, native_since);
-}
-
-#[test]
-fn identity_promotion_prunes_a_dead_native_registration_before_selecting_the_live_retired_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
-    let (manual_tx, _manual_rx) = mpsc::channel::<SequencerControl>(1);
-    let (native_tx, _native_rx) = mpsc::channel::<SequencerControl>(1);
-    let manual_connection = register_control_event_sink(manual_tx);
-    let native_connection = register_control_event_sink(native_tx);
-    service
-        .register_session(manual_connection.id, "manual")
-        .unwrap();
-    service
-        .register_session(native_connection.id, "native")
-        .unwrap();
-    drop(native_connection);
-
-    service.promote_sessions(&["manual".into()], "native");
-
-    let sessions = service.sessions.lock().unwrap();
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions["native"].connection_id, manual_connection.id);
-}
-
-#[tokio::test]
-async fn promoted_reply_reaches_the_connection_that_registered_the_retired_id() {
-    let dir = tempfile::tempdir().unwrap();
-    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
-    let (sender, mut receiver) = mpsc::channel::<SequencerControl>(4);
-    let registration = register_control_event_sink(sender);
-    service.register_session(registration.id, "manual").unwrap();
-    service.promote_sessions(&["manual".into()], "native");
-
-    service.push_reply(AgentReply {
-        agent_id: "native".into(),
-        text: "promoted reply".into(),
-        truncated: false,
-        state_generation: 9,
-        occurred_at_unix_millis: 10,
-    });
-
-    let event = tokio::time::timeout(Duration::from_secs(5), next_reply(&mut receiver))
-        .await
-        .expect("the promoted reply never reached the original connection");
-    let reply = event.voice.unwrap().reply.unwrap();
-    assert_eq!(reply.agent_id, "native");
-    assert_eq!(reply.display_markdown, "promoted reply");
-}
-
 #[tokio::test]
 async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection() {
     let dir = tempfile::tempdir().unwrap();
@@ -422,19 +327,29 @@ async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection()
     let voice_registration = register_control_event_sink(voice_tx);
     let _other_registration = register_control_event_sink(other_tx);
     service
-        .register_session(voice_registration.id, "agent-7")
+        .register_session(voice_registration.id, "server-a", "%7")
         .unwrap();
 
     // No session for this agent: nothing is spoken, nothing is sent.
     service.push_reply(AgentReply {
-        agent_id: "agent-other".into(),
+        server_identity: "server-a".into(),
+        pane_id: "%8".into(),
         text: "ignored".into(),
         truncated: false,
         state_generation: 1,
         occurred_at_unix_millis: 1,
     });
     service.push_reply(AgentReply {
-        agent_id: "agent-7".into(),
+        server_identity: "server-b".into(),
+        pane_id: "%7".into(),
+        text: "wrong server".into(),
+        truncated: false,
+        state_generation: 2,
+        occurred_at_unix_millis: 2,
+    });
+    service.push_reply(AgentReply {
+        server_identity: "server-a".into(),
+        pane_id: "%7".into(),
         text: "## Done\n\nAll **tests** pass.".into(),
         truncated: true,
         state_generation: 42,
@@ -446,13 +361,14 @@ async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection()
     let event = tokio::time::timeout(Duration::from_secs(5), next_reply(&mut voice_rx))
         .await
         .expect("the reply never reached the session connection");
-    assert_eq!(event.scope, "agent-7");
+    assert_eq!(event.scope, "%7");
     let reply = event.voice.unwrap().reply.unwrap();
     assert_eq!(reply.audio, b"MP3!!");
     assert_eq!(reply.display_markdown, "## Done\n\nAll **tests** pass.");
     assert_eq!(reply.speech_text, "Done. All tests pass.");
     assert!(reply.truncated);
-    assert_eq!(reply.agent_id, "agent-7");
+    assert_eq!(reply.pane_id, "%7");
+    assert_eq!(reply.server_identity, "server-a");
     assert_eq!(reply.state_generation, 42);
     assert_eq!(reply.reply_at_unix_millis, 1_700_000_000_000);
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -504,10 +420,11 @@ async fn a_full_queue_drops_the_reply_but_keeps_the_session() {
         .try_send(SequencerControl::OrderedEvent(v1::HostEvent::default()))
         .unwrap();
     service
-        .register_session(registration.id, "agent-full")
+        .register_session(registration.id, "server-a", "%9")
         .unwrap();
     service.push_reply(AgentReply {
-        agent_id: "agent-full".into(),
+        server_identity: "server-a".into(),
+        pane_id: "%9".into(),
         text: "Done.".into(),
         truncated: false,
         state_generation: 1,
@@ -524,7 +441,10 @@ async fn a_full_queue_drops_the_reply_but_keeps_the_session() {
         .await
         .unwrap();
     assert_eq!(
-        service.session_connection("agent-full"),
+        service.session_connection(&PaneKey {
+            server_identity: "server-a".into(),
+            pane_id: "%9".into()
+        }),
         Some(registration.id)
     );
     // The filler the test queued is the only OrderedEvent that may be there;
@@ -548,10 +468,11 @@ async fn a_failed_synthesis_still_pushes_the_text_with_the_error_in_status() {
     let (voice_tx, mut voice_rx) = mpsc::channel::<SequencerControl>(8);
     let registration = register_control_event_sink(voice_tx);
     service
-        .register_session(registration.id, "agent-1")
+        .register_session(registration.id, "server-a", "%1")
         .unwrap();
     service.push_reply(AgentReply {
-        agent_id: "agent-1".into(),
+        server_identity: "server-a".into(),
+        pane_id: "%1".into(),
         text: "Finished.".into(),
         truncated: false,
         state_generation: 3,

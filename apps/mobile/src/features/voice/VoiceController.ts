@@ -1,4 +1,4 @@
-// One voice session with one agent (docs/mobile/voice-mode-plan.md §5.2,
+// One voice session with one pane (docs/mobile/voice-mode-plan.md §5.2,
 // design.md §9.11), without React: the host readiness probe, the session
 // registration the host needs to push replies here, hold-to-talk →
 // transcribe → TERMINAL_INPUT, pushed replies → the one player, and End
@@ -11,7 +11,7 @@ import { newOperationId, terminalInput, voiceProvision, voiceSession, voiceSpeak
 import { utf8Encode } from "../terminal/bytes";
 import { CR } from "../terminal/chips";
 import { SUBMIT_DELAY_MS } from "../terminal/TerminalController";
-import type { Agent, AgentLifecycle } from "../../store/sessionStore";
+import type { AgentLifecycle } from "../../store/sessionStore";
 import { RECORDING_MIME, type PlayerStatus, type VoiceFiles, type VoicePlayer, type VoiceRecorder } from "./audioPorts";
 import type { VoiceHaptics } from "./haptics";
 import type { VoiceRecorderCoordinator } from "./recorderCoordinator";
@@ -20,8 +20,8 @@ import { describeVoiceError, STATUS_CHANGING_CODES } from "./voiceErrors";
 import { latestReply, type VoiceMessage, type VoiceReadinessState, type VoiceStore } from "./voiceStore";
 
 export interface VoiceControllerOptions {
-  agentId: string;
-  /** Registry-assigned immutable local identity; defaults to the initial agent id in direct tests. */
+  serverIdentity: string;
+  /** Registry-assigned immutable local identity; defaults to the pane id in direct tests. */
   sessionKey?: string;
   paneId: string;
   sessionId: string;
@@ -51,8 +51,8 @@ export interface VoiceControllerOptions {
   tailHoldMs?: number;
   /** Gap between the transcript paste and the CR that submits it (`SUBMIT_DELAY_MS`); tests pass 0. */
   submitDelayMs?: number;
-  /** Rechecked after transcription and before Enter so a departed agent's shell never receives a submission. */
-  canSubmit?: (agentId: string) => boolean;
+  /** Rechecked after transcription and before Enter so an ordinary shell never receives a submission. */
+  canSubmit?: (paneId: string) => boolean;
 }
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
@@ -83,7 +83,6 @@ const READINESS_CODES: Record<string, VoiceReadinessState> = {
 export class VoiceController {
   /** Immutable key for local messages, audio ownership, and controller state. */
   readonly sessionKey: string;
-  private currentAgentId: string;
   private paneId: string;
   private sessionId: string;
   private focused = false;
@@ -122,8 +121,7 @@ export class VoiceController {
   private workingAckedFor: string | undefined;
 
   constructor(private readonly options: VoiceControllerOptions) {
-    this.sessionKey = options.sessionKey ?? options.agentId;
-    this.currentAgentId = options.agentId;
+    this.sessionKey = options.sessionKey ?? `${options.serverIdentity}:${options.paneId}`;
     this.paneId = options.paneId;
     this.sessionId = options.sessionId;
     this.now = options.now ?? Date.now;
@@ -132,17 +130,12 @@ export class VoiceController {
     this.submitDelayMs = options.submitDelayMs ?? SUBMIT_DELAY_MS;
     this.playbackRate = options.playbackRate ?? 1;
     this.autoPlay = options.autoPlay ?? true;
-    options.store.getState().ensureSession(this.sessionKey, options.paneId, options.sessionId, this.now(), options.agentId);
+    options.store.getState().ensureSession(this.sessionKey, options.paneId, options.sessionId, this.now());
     this.unsubscribePlayer = options.player.onStatus((status) => this.onPlayerStatus(status));
   }
 
   get isDisposed(): boolean {
     return this.disposed;
-  }
-
-  /** Current authoritative host identity used by every remote operation. */
-  get agentId(): string {
-    return this.currentAgentId;
   }
 
   get target(): { paneId: string; sessionId: string } {
@@ -155,18 +148,6 @@ export class VoiceController {
     this.paneId = paneId;
     this.sessionId = sessionId;
     this.options.store.getState().ensureSession(this.sessionKey, paneId, sessionId, this.now());
-  }
-
-  /** Follow one authoritative same-pane identity promotion in place. */
-  promoteAgent(agent: Agent): void {
-    if (this.disposed) return;
-    this.currentAgentId = agent.id;
-    this.paneId = agent.route.paneId;
-    this.sessionId = agent.route.sessionId;
-    this.options.store.getState().promoteSession(this.sessionKey, agent);
-    // The host transferred a settled registration atomically. Only an old-ID
-    // request still in flight needs one coalesced new-ID follow-up when it settles.
-    if (this.registering) this.registerAgain = true;
   }
 
   // ---- lifecycle ------------------------------------------------------------
@@ -469,8 +450,8 @@ export class VoiceController {
       this.setPhaseIfAlive("idle");
       return;
     }
-    if (this.options.canSubmit?.(this.agentId) === false) {
-      this.log("utterance.discarded agent-departed");
+    if (this.options.canSubmit?.(this.paneId) === false) {
+      this.log("utterance.discarded pane-agent-departed");
       this.setPhaseIfAlive("idle");
       return;
     }
@@ -487,14 +468,21 @@ export class VoiceController {
       // a gap. Claude Code and Codex both read an Enter inside a fast burst as a
       // pasted newline; on its own it submits. A refused paste sends no CR.
       const body = utf8Encode(text);
-      await connection.request(terminalInput(this.paneId, body, { paste: true, agentId: this.agentId }));
+      await connection.request(terminalInput(this.paneId, body, {
+        paste: true,
+        voice: true,
+        expectedServerIdentity: this.options.serverIdentity,
+      }));
       if (this.submitDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, this.submitDelayMs));
-      if (this.disposed || this.options.canSubmit?.(this.agentId) === false) {
-        this.log("input.submit.skipped agent-departed");
+      if (this.disposed || this.options.canSubmit?.(this.paneId) === false) {
+        this.log("input.submit.skipped pane-agent-departed");
         this.setPhaseIfAlive("idle");
         return;
       }
-      await connection.request(terminalInput(this.paneId, CR, { agentId: this.agentId }));
+      await connection.request(terminalInput(this.paneId, CR, {
+        voice: true,
+        expectedServerIdentity: this.options.serverIdentity,
+      }));
       this.log(`submission.ack message=${outgoing.id} bytes=${body.byteLength} elapsedMs=${this.now() - startedAt}`);
       this.options.haptics?.sent();
       this.options.tones?.sent();
@@ -560,7 +548,7 @@ export class VoiceController {
     this.autoPlaySuppressedMessageId = this.options.recorderCoordinator.isListening ? message.id : undefined;
     if (speech.audio.byteLength > 0) {
       try {
-        message.fileUri = this.options.files.writeReply(this.agentId, speech.audio);
+        message.fileUri = this.options.files.writeReply(this.sessionKey, speech.audio);
       } catch (error) {
         message.audioError = describe(error);
       }
@@ -586,7 +574,7 @@ export class VoiceController {
       if (this.disposed) return;
       const speech = response.voice?.speech;
       if (!speech || speech.audio.byteLength === 0) throw new Error("The host returned no audio.");
-      const uri = this.options.files.writeReply(this.agentId, speech.audio);
+      const uri = this.options.files.writeReply(this.sessionKey, speech.audio);
       this.options.store.getState().setMessageAudio(this.sessionKey, messageId, uri);
       this.log(`speak.retry ${speech.audio.byteLength} bytes`);
       this.play(messageId);
@@ -776,17 +764,11 @@ export class VoiceController {
       return;
     }
     this.registering = true;
-    const registeredAgentId = this.agentId;
     try {
-      await connection.request(voiceSession(registeredAgentId));
+      await connection.request(voiceSession(this.paneId, this.options.serverIdentity));
       if (this.disposed) return;
       this.everRegistered = true;
-      if (registeredAgentId !== this.agentId) {
-        this.registerAgain = true;
-        this.log(`session.registration.superseded registered=${registeredAgentId}`);
-      } else {
-        this.log("session.registered");
-      }
+      this.log("session.registered");
       this.refreshTimer ??= setInterval(() => void this.registerSession(), this.sessionRefreshMs);
       // The host just answered on this lane, so a status probe that never
       // settled (or was skipped) is not the host's fault: ask once more rather
@@ -884,7 +866,7 @@ export class VoiceController {
   }
 
   private log(line: string): void {
-    this.options.log?.(`[muxflow] voice agent=${this.agentId} pane=${this.paneId} session=${this.sessionId} ${line}`);
+    this.options.log?.(`[muxflow] voice pane=${this.paneId} session=${this.sessionId} ${line}`);
   }
 }
 

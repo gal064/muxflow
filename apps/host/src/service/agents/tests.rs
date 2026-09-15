@@ -1,5 +1,4 @@
 use super::*;
-use crate::service::{SequencerControl, register_control_event_sink};
 use prost::Message;
 use std::fs;
 
@@ -292,7 +291,6 @@ fn persist_failure_rolls_back_runtime_mutations() {
         pending_codex_permissions: Mutex::new(BTreeMap::new()),
         codex_child_monitors: Mutex::new(BTreeMap::new()),
         reply_sink: Box::new(|_| {}),
-        identity_promotion_sink: Box::new(|_, _| {}),
     };
     let agent_id = baseline_state.agents.keys().next().unwrap().clone();
 
@@ -479,229 +477,6 @@ fn hook_atomically_promotes_manual_pane_identity_without_duplicates() {
 }
 
 #[test]
-fn promotion_sink_observes_persisted_identity_before_stop_reply_sink() {
-    let path = std::env::current_dir()
-        .unwrap()
-        .join("tmp")
-        .join(format!(
-            "phase6-agent-promotion-order-{}",
-            uuid::Uuid::new_v4()
-        ))
-        .join("agents.json");
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<SequencerControl>(64);
-    let _event_registration = register_control_event_sink(event_tx);
-    let event_rx = Arc::new(Mutex::new(event_rx));
-    let promotion_calls = Arc::clone(&calls);
-    let promotion_path = path.clone();
-    let reply_calls = Arc::clone(&calls);
-    let reply_events = Arc::clone(&event_rx);
-    let runtime = AgentRuntime::isolated_with_sinks(
-        path,
-        Box::new(move |reply| {
-            let published_first = loop {
-                match reply_events.lock().unwrap().try_recv() {
-                    Ok(SequencerControl::OrderedEvent(event))
-                        if event.kind == v1::EventKind::AgentState as i32
-                            && event.scope == reply.agent_id =>
-                    {
-                        break true;
-                    }
-                    Ok(_) => continue,
-                    Err(_) => break false,
-                }
-            };
-            assert!(
-                published_first,
-                "Agent State must be queued before its Voice reply"
-            );
-            reply_calls
-                .lock()
-                .unwrap()
-                .push(format!("reply:{}", reply.agent_id));
-        }),
-        Box::new(move |retired_ids, new_id| {
-            let persisted = fs::read_to_string(&promotion_path).unwrap();
-            assert!(persisted.contains(new_id));
-            assert!(
-                retired_ids
-                    .iter()
-                    .all(|retired| !persisted.contains(retired))
-            );
-            promotion_calls
-                .lock()
-                .unwrap()
-                .push(format!("promotion:{new_id}"));
-        }),
-    );
-    let topology = topology("codex");
-    runtime.reconcile_topology(&topology, "server-a").unwrap();
-    let manual_id = runtime.snapshot_for("server-a").agents[0].agent_id.clone();
-    let mut stop = event("promotion-stop", 0, "Stop");
-    stop.payload_json = serde_json::to_vec(&serde_json::json!({
-        "hook_event_name": "Stop",
-        adapters::LAST_ASSISTANT_MESSAGE_FIELD: "done",
-    }))
-    .unwrap();
-
-    let promoted = runtime
-        .ingest_and_publish_with_context(&stop, "server-a", Some(&topology))
-        .unwrap();
-    let native_id = promoted.agent.as_ref().unwrap().agent_id.clone();
-
-    assert_eq!(promoted.retired_agent_ids, [manual_id]);
-    assert_eq!(
-        *calls.lock().unwrap(),
-        [
-            format!("promotion:{native_id}"),
-            format!("reply:{native_id}")
-        ]
-    );
-}
-
-#[test]
-fn topology_outage_promotes_a_manual_owner_before_dispatching_its_first_native_reply() {
-    let path = std::env::current_dir()
-        .unwrap()
-        .join("tmp")
-        .join(format!(
-            "phase6-agent-outage-manual-promotion-{}",
-            uuid::Uuid::new_v4()
-        ))
-        .join("agents.json");
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let promotion_calls = Arc::clone(&calls);
-    let reply_calls = Arc::clone(&calls);
-    let runtime = AgentRuntime::isolated_with_sinks(
-        path,
-        Box::new(move |reply| {
-            reply_calls
-                .lock()
-                .unwrap()
-                .push(format!("reply:{}", reply.agent_id));
-        }),
-        Box::new(move |retired_ids, new_id| {
-            promotion_calls
-                .lock()
-                .unwrap()
-                .push(format!("promotion:{}:{new_id}", retired_ids.join(",")));
-        }),
-    );
-    let topology = topology("codex");
-    runtime.reconcile_topology(&topology, "server-a").unwrap();
-    let manual_id = runtime.snapshot_for("server-a").agents[0].agent_id.clone();
-    let mut stop = event("outage-first-native-stop", 0, "Stop");
-    stop.payload_json = serde_json::to_vec(&serde_json::json!({
-        "hook_event_name": "Stop",
-        adapters::LAST_ASSISTANT_MESSAGE_FIELD: "done",
-    }))
-    .unwrap();
-
-    let promoted = runtime
-        .ingest_hook_with_context(&stop, "server-a", None)
-        .unwrap();
-    let native = promoted.agent.unwrap();
-    assert_eq!(
-        promoted.retired_agent_ids.as_slice(),
-        std::slice::from_ref(&manual_id)
-    );
-    assert_ne!(native.agent_id, manual_id);
-    assert_eq!(native.native_session_id, "native-1");
-    assert_eq!(native.route.as_ref().unwrap().pane_id, "%7");
-    assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
-    assert_eq!(
-        *calls.lock().unwrap(),
-        [
-            format!("promotion:{manual_id}:{}", native.agent_id),
-            format!("reply:{}", native.agent_id),
-        ]
-    );
-}
-
-#[test]
-fn ingest_order_remains_held_through_identity_promotion() {
-    let path = std::env::current_dir()
-        .unwrap()
-        .join("tmp")
-        .join(format!(
-            "phase6-agent-promotion-lock-{}",
-            uuid::Uuid::new_v4()
-        ))
-        .join("agents.json");
-    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let release_rx = Mutex::new(release_rx);
-    let runtime = Arc::new(AgentRuntime::isolated_with_sinks(
-        path,
-        Box::new(|_| {}),
-        Box::new(move |_, _| {
-            entered_tx.send(()).unwrap();
-            release_rx.lock().unwrap().recv().unwrap();
-        }),
-    ));
-    let topology = topology("codex");
-    runtime.reconcile_topology(&topology, "server-a").unwrap();
-    let runtime_for_ingest = Arc::clone(&runtime);
-    let ingest = std::thread::spawn(move || {
-        runtime_for_ingest
-            .ingest_and_publish_with_context(
-                &event("promotion-lock", 0, "Stop"),
-                "server-a",
-                Some(&topology),
-            )
-            .unwrap();
-    });
-
-    entered_rx.recv().unwrap();
-    let promotion_is_ordered = runtime.ingest_order.try_lock().is_err();
-    release_tx.send(()).unwrap();
-    ingest.join().unwrap();
-    assert!(promotion_is_ordered);
-}
-
-#[test]
-fn native_to_native_pane_replacement_does_not_transfer_voice_identity() {
-    let path = std::env::current_dir()
-        .unwrap()
-        .join("tmp")
-        .join(format!(
-            "phase6-agent-native-replace-{}",
-            uuid::Uuid::new_v4()
-        ))
-        .join("agents.json");
-    let promotions = Arc::new(Mutex::new(Vec::new()));
-    let promotion_calls = Arc::clone(&promotions);
-    let runtime = AgentRuntime::isolated_with_sinks(
-        path,
-        Box::new(|_| {}),
-        Box::new(move |retired, new_id| {
-            promotion_calls
-                .lock()
-                .unwrap()
-                .push((retired.to_vec(), new_id.to_owned()));
-        }),
-    );
-    let topology = topology("codex");
-    let first = runtime
-        .ingest_hook_with_context(
-            &event("native-a", 0, "UserPromptSubmit"),
-            "server-a",
-            Some(&topology),
-        )
-        .unwrap();
-    let old_id = first.agent.unwrap().agent_id;
-    let mut replacement = event("native-b", 0, "UserPromptSubmit");
-    replacement.native_session_id = "native-2".into();
-
-    let replaced = runtime
-        .ingest_hook_with_context(&replacement, "server-a", Some(&topology))
-        .unwrap();
-
-    assert_eq!(replaced.retired_agent_ids, [old_id]);
-    assert!(promotions.lock().unwrap().is_empty());
-}
-
-#[test]
 fn native_session_replacement_suspends_displaced_turn_children_and_sidecars() {
     let path = std::env::current_dir()
         .unwrap()
@@ -711,19 +486,11 @@ fn native_session_replacement_suspends_displaced_turn_children_and_sidecars() {
             uuid::Uuid::new_v4()
         ))
         .join("agents.json");
-    let promotions = Arc::new(Mutex::new(Vec::new()));
-    let promotion_calls = Arc::clone(&promotions);
     let replies = Arc::new(Mutex::new(Vec::new()));
     let reply_calls = Arc::clone(&replies);
-    let runtime = AgentRuntime::isolated_with_sinks(
+    let runtime = AgentRuntime::isolated_with_sink(
         path,
         Box::new(move |reply| reply_calls.lock().unwrap().push(reply)),
-        Box::new(move |retired, new_id| {
-            promotion_calls
-                .lock()
-                .unwrap()
-                .push((retired.to_vec(), new_id.to_owned()));
-        }),
     );
     let topology = topology("codex");
     let turn_a = root_turn(1);
@@ -858,8 +625,7 @@ fn native_session_replacement_suspends_displaced_turn_children_and_sidecars() {
         replacement_snapshot.agents[0].lifecycle,
         v1::AgentLifecycleState::Working as i32
     );
-    assert!(replies.lock().unwrap().is_empty());
-    assert!(promotions.lock().unwrap().is_empty());
+    assert_eq!(replies.lock().unwrap()[0].text, "stale reply");
 
     let mut unmapped_activity = event_for_turn("activity-b-unmapped", "PreToolUse", &turn_b);
     unmapped_activity.native_session_id = "native-2".into();
@@ -954,7 +720,7 @@ fn native_session_replacement_suspends_displaced_turn_children_and_sidecars() {
     let record = &state.agents[&replacement_id];
     assert!(record.codex_running_subagents.is_empty());
     assert_eq!(record.codex_active_root_turn_id, turn_b);
-    assert!(promotions.lock().unwrap().is_empty());
+    assert_eq!(replies.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -1777,7 +1543,8 @@ fn topology_outage_preserves_current_native_identity_route_and_voice_reply() {
     assert_eq!(snapshot.agents[0].agent_id, root.agent_id);
     let replies = replies.lock().unwrap();
     assert_eq!(replies.len(), 1);
-    assert_eq!(replies[0].agent_id, root.agent_id);
+    assert_eq!(replies[0].server_identity, "server-a");
+    assert_eq!(replies[0].pane_id, "%7");
     assert_eq!(replies[0].text, "current reply");
 }
 
@@ -1881,7 +1648,7 @@ fn an_idless_codex_hook_cannot_demote_a_native_pane_owner() {
 }
 
 #[test]
-fn a_goal_continuation_keeps_session_and_voice_ownership_during_late_fork_teardown() {
+fn a_goal_continuation_keeps_session_ownership_during_late_fork_teardown() {
     let path = std::env::current_dir()
         .unwrap()
         .join("tmp")
@@ -1892,17 +1659,9 @@ fn a_goal_continuation_keeps_session_and_voice_ownership_during_late_fork_teardo
         .join("agents.json");
     let replies = Arc::new(Mutex::new(Vec::new()));
     let reply_calls = Arc::clone(&replies);
-    let promotions = Arc::new(Mutex::new(Vec::new()));
-    let promotion_calls = Arc::clone(&promotions);
-    let runtime = AgentRuntime::isolated_with_sinks(
+    let runtime = AgentRuntime::isolated_with_sink(
         path,
         Box::new(move |reply| reply_calls.lock().unwrap().push(reply)),
-        Box::new(move |retired, new_id| {
-            promotion_calls
-                .lock()
-                .unwrap()
-                .push((retired.to_vec(), new_id.to_owned()));
-        }),
     );
     let topology = topology("codex");
     let turn_a = root_turn(1);
@@ -1965,8 +1724,9 @@ fn a_goal_continuation_keeps_session_and_voice_ownership_during_late_fork_teardo
         turn_b
     );
     drop(state);
-    assert!(replies.lock().unwrap().is_empty());
-    assert!(promotions.lock().unwrap().is_empty());
+    let replies = replies.lock().unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].text, "wrong fork reply");
 }
 
 #[test]
@@ -3158,7 +2918,7 @@ fn a_stop_landing_in_idle_hands_the_reply_on_once_and_stores_none_of_it() {
     assert_eq!(handed.len(), 1);
     assert_eq!(handed[0].text, secret);
     assert!(handed[0].truncated);
-    assert_eq!(handed[0].agent_id, done.agent.as_ref().unwrap().agent_id);
+    assert_eq!(handed[0].pane_id, "%7");
     assert_eq!(handed[0].state_generation, done.generation);
     assert_eq!(
         handed[0].occurred_at_unix_millis,
@@ -3197,6 +2957,111 @@ fn a_stop_landing_in_idle_hands_the_reply_on_once_and_stores_none_of_it() {
             .is_err()
     );
     assert_eq!(replies.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn pane_voice_receives_a_superseded_root_reply_but_not_a_child_reply() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("pane-voice-superseded-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&replies);
+    let runtime = AgentRuntime::isolated_with_sink(
+        path,
+        Box::new(move |reply| sink.lock().unwrap().push(reply)),
+    );
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event_for_turn("parent-prompt", "UserPromptSubmit", &root_turn(1)),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let mut side = event_for_turn("side-prompt", "UserPromptSubmit", &root_turn(2));
+    side.native_session_id = "native-side".into();
+    runtime
+        .ingest_hook_with_context(&side, "server-a", Some(&topology))
+        .unwrap();
+
+    let mut idless_child = event("idless-child", 0, "Stop");
+    idless_child.native_session_id = "native-side".into();
+    idless_child.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "Stop",
+        adapters::CODEX_SUBAGENT_ID_FIELD: "child-without-turn",
+        adapters::LAST_ASSISTANT_MESSAGE_FIELD: "must not be spoken",
+    }))
+    .unwrap();
+    runtime
+        .ingest_hook_with_context(&idless_child, "server-a", Some(&topology))
+        .unwrap();
+    assert!(replies.lock().unwrap().is_empty());
+
+    let mut late_root = event_for_turn("late-root", "Stop", &root_turn(1));
+    let mut root_payload: serde_json::Value =
+        serde_json::from_slice(&late_root.payload_json).unwrap();
+    root_payload[adapters::LAST_ASSISTANT_MESSAGE_FIELD] = "parent answer".into();
+    late_root.payload_json = serde_json::to_vec(&root_payload).unwrap();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&late_root, "server-a", Some(&topology)),
+        Err(HookIngestFailure::Superseded)
+    ));
+
+    let mut late_child = child_event_for_turn("late-child", "Stop", "child", &root_turn(3));
+    let mut child_payload: serde_json::Value =
+        serde_json::from_slice(&late_child.payload_json).unwrap();
+    child_payload[adapters::LAST_ASSISTANT_MESSAGE_FIELD] = "child answer".into();
+    late_child.payload_json = serde_json::to_vec(&child_payload).unwrap();
+    assert!(matches!(
+        runtime.ingest_hook_with_context(&late_child, "server-a", Some(&topology)),
+        Err(HookIngestFailure::Superseded)
+    ));
+
+    let replies = replies.lock().unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].pane_id, "%7");
+    assert_eq!(replies[0].text, "parent answer");
+}
+
+#[test]
+fn delayed_old_server_reply_keeps_its_origin_after_reconciliation() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("pane-voice-old-server-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&replies);
+    let runtime = AgentRuntime::isolated_with_sink(
+        path,
+        Box::new(move |reply| sink.lock().unwrap().push(reply)),
+    );
+    let topology = topology("codex");
+    runtime
+        .ingest_hook_with_context(
+            &event("old-prompt", 0, "UserPromptSubmit"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime.reconcile_topology(&topology, "server-b").unwrap();
+
+    let mut late = event("old-stop", 0, "Stop");
+    late.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "Stop",
+        adapters::LAST_ASSISTANT_MESSAGE_FIELD: "old answer",
+    }))
+    .unwrap();
+    runtime
+        .ingest_hook_with_context(&late, "server-b", Some(&topology))
+        .unwrap();
+
+    let replies = replies.lock().unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].server_identity, "server-a");
+    assert_eq!(replies[0].pane_id, "%7");
 }
 
 #[test]

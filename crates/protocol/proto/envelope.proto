@@ -162,9 +162,12 @@ enum Operation {
   OPERATION_VOICE_TRANSCRIBE = 51;
   // Text -> mp3 bytes (replay, or arbitrary text).
   OPERATION_VOICE_SPEAK = 52;
-  // Register or clear the agent whose replies this connection wants pushed as
+  // Register or clear the pane whose root replies this connection wants pushed as
   // VOICE_REPLY events.
   OPERATION_VOICE_SESSION = 53;
+  // Fetches the bounded, privacy-safe host lifecycle decision trace. The
+  // mobile app requests it only when the user copies diagnostics.
+  OPERATION_AGENT_DIAGNOSTICS = 54;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -215,11 +218,16 @@ message Request {
   bool terminal_input_paste = 19;
   // Every OPERATION_VOICE_* payload.
   VoiceRequest voice = 20;
-  // TERMINAL_INPUT only: when non-empty, the host accepts the input only
-  // while this exact agent still owns `scope`. Voice uses this to prevent a
-  // departed agent's surviving shell from receiving dictated commands.
-  string terminal_input_agent_id = 21;
-  // NEXT FREE FIELD = 22.
+  reserved 21;
+  reserved "terminal_input_agent_id";
+  // TERMINAL_INPUT only: require a supported root agent to remain attached to
+  // the target pane. Voice does not care which root identity owns it.
+  bool terminal_input_voice = 22;
+  // TERMINAL_INPUT from Voice only: the tmux server that owned the pane when
+  // this Voice controller was opened. Prevents an in-flight utterance from
+  // reaching a reused pane ID after a live tmux-server replacement.
+  string terminal_input_expected_server_identity = 23;
+  // NEXT FREE FIELD = 24.
 }
 
 message Response {
@@ -238,6 +246,8 @@ message Response {
   // Set on every OPERATION_VOICE_* answer, error responses included: Response
   // has no retryable flag, so VoiceResponse carries one.
   VoiceResponse voice = 13;
+  // OPERATION_AGENT_DIAGNOSTICS only. Already sanitized and bounded by host.
+  repeated string diagnostic_lines = 14;
 }
 
 enum HookIngestDisposition {
@@ -1197,8 +1207,8 @@ message VoiceRequest {
   reserved 4;
   // SPEAK: text to synthesize (replay, or arbitrary text).
   string text = 5;
-  // SESSION: agent whose replies this connection wants spoken; "" clears.
-  string agent_id = 6;
+  // SESSION: tmux pane whose root replies this connection wants spoken; "" clears.
+  string pane_id = 6;
   reserved 7;
   // SPEAK: unspecified means EDGE_TTS.
   VoiceProvider provider = 8;
@@ -1209,6 +1219,8 @@ message VoiceRequest {
   bool confirmed = 10;
   // STATUS: if READY, spawn and load the sidecar in a detached task.
   bool warm = 11;
+  // SESSION: exact tmux server the pane belongs to.
+  string expected_server_identity = 12;
 }
 
 message VoiceProvisionProgress {
@@ -1252,13 +1264,15 @@ message VoiceSpeech {
   bool truncated = 4;
   string voice = 5;
   VoiceProvider provider = 6;
-  // VOICE_REPLY: the agent whose turn ended; empty for a SPEAK answer.
-  string agent_id = 7;
+  // VOICE_REPLY: the pane whose root turn ended; empty for a SPEAK answer.
+  string pane_id = 7;
   // VOICE_REPLY: the AgentRecord.state_generation the reply belongs to.
   uint64 state_generation = 8;
   int64 reply_at_unix_millis = 9;
   // Exactly what was synthesized (after Markdown flattening and cap).
   string speech_text = 10;
+  // VOICE_REPLY: exact tmux server instance the pane belongs to.
+  string server_identity = 11;
 }
 
 message VoiceResponse {

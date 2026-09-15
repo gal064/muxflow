@@ -5,7 +5,7 @@ import { AppState, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions,
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useStore } from "zustand";
 
-import { agentStateLabel, agentTitle } from "../agents/agentViews";
+import { agentForPane, agentStateLabel, agentTitle } from "../agents/agentViews";
 import { markState } from "../agents/agentListModel";
 import { AgentMark } from "../agents/ui/AgentMark";
 import { notificationAttention } from "../notifications/attention";
@@ -56,25 +56,26 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const animateAgentState = useAnimationsAllowed();
+  const serverIdentity = useSession((s) => s.serverIdentity);
   const { height: windowHeight } = useWindowDimensions();
   const open = useCallback((): VoiceController => voiceRegistry.open({
-    agentId,
+    serverIdentity,
     paneId,
     sessionId,
     getConnection,
     ...sharedAudio(),
     appInForeground: () => AppState.currentState === "active",
-    canSubmit: (currentAgentId) => sessionStore.getState().agents[currentAgentId]?.present === true,
+    canSubmit: (targetPaneId) => agentForPane(sessionStore.getState(), targetPaneId)?.present === true,
     playbackRate: prefsStore.getState().voicePlaybackRate,
     autoPlay: prefsStore.getState().voiceAutoPlay,
     toast,
     log,
-  }), [agentId, paneId, sessionId]);
+  }), [paneId, serverIdentity, sessionId]);
   const [controller, setController] = useState(open);
   const sessionKey = controller.sessionKey;
   const session = useVoice((s) => s.sessions[sessionKey]);
-  const effectiveAgentId = session?.agentId ?? controller.agentId;
-  const agent = useSession((s) => s.agents[effectiveAgentId]);
+  const agent = useSession((s) => agentForPane(s, paneId));
+  const effectiveAgentId = agent?.id ?? agentId;
   const lifecycle = agent?.lifecycle;
   const windows = useSession((s) => s.windows);
   const adapters = useSession((s) => s.adapters);
@@ -132,6 +133,8 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
   const messages = session?.messages ?? [];
   const phase = session?.phase ?? "idle";
   const newest = latestReply(session);
+  const agentDisplayState = agent ? markState(agent) : "idle";
+  const paneWorking = agentDisplayState === "working";
 
   const title = agent ? agentTitle({ windows, adapters }, agent) : "Agent";
   // The pane may survive an exited agent as an ordinary shell. Never submit
@@ -172,7 +175,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         <Pressable accessibilityLabel="Back" accessibilityRole="button" onPress={() => router.back()} style={styles.iconButton}>
           <BackIcon color={colors.chromeInkStrong} />
         </Pressable>
-        {agent ? <AgentMark adapterId={agent.adapterId} animate={animateAgentState} ring={colors.chromeRaised} state={markState(agent)} surface={colors.chromeBg} /> : null}
+        {agent ? <AgentMark adapterId={agent.adapterId} animate={animateAgentState} ring={colors.chromeRaised} state={agentDisplayState} surface={colors.chromeBg} /> : null}
         <Text {...fixedChromeText} accessibilityLabel={agent ? `${title}, ${agentStateLabel(agent)}` : title} accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
         <Pressable accessibilityLabel="End session" accessibilityRole="button" onPress={() => setConfirmEnd(true)} style={styles.endButton}>
           <Text {...fixedChromeText} numberOfLines={1} style={styles.endLabel}>End</Text>
@@ -187,7 +190,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         {messages.map((message) => (
           <MessageBubble controller={message.id === newest?.id ? controller : undefined} key={message.id} message={message} />
         ))}
-        <WorkingIndicator agentId={effectiveAgentId} />
+        <WorkingIndicator working={paneWorking} />
       </ScrollView>
 
       <VoiceStatusCard connected={connected} controller={controller} />

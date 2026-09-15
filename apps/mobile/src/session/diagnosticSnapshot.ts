@@ -45,7 +45,7 @@ export function diagnosticHeader(now = Date.now()): string[] {
   const appName = Constants.expoConfig?.name ?? "Muxflow";
   const version = Constants.expoConfig?.version ?? "unknown";
   return [
-    `diagnostics copied=${new Date(now).toISOString()} storage=memory-only events=${recorder.lines.length} bytes=${recorder.bytes}`,
+    `diagnostics copied=${new Date(now).toISOString()} storage=mobile-memory+host-bounded events=${recorder.lines.length} bytes=${recorder.bytes}`,
     `app name=${appName} version=${version} build=${build()} platform=${Platform.OS} os=${String(Platform.Version)} device=${device()}`,
     `state lifecycle=${AppState.currentState} connection=${state.connection.state} attempt=${state.connection.attempt} topology=${state.topologyGeneration} focusedPane=${state.focusedPaneId ?? "none"} hostGrid=${hostGrid ? `${hostGrid.cols}x${hostGrid.rows}` : "unknown"} agents=${Object.keys(state.agents).length} working=${working} voice=${phaseSummary} window=${Math.round(window.width)}x${Math.round(window.height)} screen=${Math.round(screen.width)}x${Math.round(screen.height)} keyboard=${keyboardSummary}`,
   ];
