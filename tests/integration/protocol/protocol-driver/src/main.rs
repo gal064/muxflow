@@ -991,11 +991,8 @@ fn run_matrix(transport: Transport, primary_name: &str, ordinary_client: &str) -
         .last()
         .context("buffered resource event missing")?;
     ensure!(
-        buffered
-            .raw_tail
-            .windows(b"PHASE2_HIDDEN_OUTPUT".len())
-            .any(|part| part == b"PHASE2_HIDDEN_OUTPUT"),
-        "hidden output was not retained in the bounded raw tail"
+        buffered.raw_tail.is_empty(),
+        "a repeated hide published recovery bytes before reveal"
     );
     ensure!(
         buffered.snapshot_generation == hide_cutoff
@@ -1013,63 +1010,29 @@ fn run_matrix(transport: Transport, primary_name: &str, ordinary_client: &str) -
         v1::Request {
             scope: original_pane.id.clone(),
             visible: true,
+            terminal_renderer_holds_snapshot: true,
+            terminal_epoch: visibility_epoch,
+            terminal_generation_cutoff: hide_cutoff,
             ..Default::default()
         },
     )?;
     ensure!(response.ok, "show pane before second handoff failed");
-    let resource_count = client.observations.resources.len();
-    let oversized_cutoff = client
-        .observations
-        .pane_generations
-        .get(&original_pane.id)
-        .copied()
-        .unwrap_or_default();
-    let response = client.request(
-        v1::Operation::SetTerminalVisibility,
-        v1::Request {
-            scope: original_pane.id.clone(),
-            visible: false,
-            data: vec![b'x'; 4 * 1024 * 1024 + 1],
-            terminal_epoch: visibility_epoch,
-            terminal_generation_cutoff: oversized_cutoff,
-            ..Default::default()
-        },
-    )?;
-    ensure!(response.ok, "oversized hidden snapshot request failed");
     client
         .pump_until(|observations| observations.resources.len() > resource_count)
-        .context("wait for released pane resource event")?;
-    let released = client
+        .context("wait for buffered-tail reveal event")?;
+    let resumed = client
         .observations
         .resources
         .last()
-        .context("released resource event missing")?;
+        .context("buffered-tail reveal event missing")?;
     ensure!(
-        v1::PaneResourceState::try_from(released.state).unwrap_or_default()
-            == v1::PaneResourceState::Released,
-        "oversized hidden resource was not released"
+        resumed.resume_from_renderer
+            && resumed
+                .raw_tail
+                .windows(b"PHASE2_HIDDEN_OUTPUT".len())
+                .any(|part| part == b"PHASE2_HIDDEN_OUTPUT"),
+        "reveal did not return the retained hidden output exactly once"
     );
-    ensure!(
-        released.requires_seed
-            && released.recovery_reason == "renderer handoff exceeded the hidden-pane budget",
-        "released pane omitted deterministic seed-recovery metadata"
-    );
-    let seeds_before = client.observations.event_count(v1::EventKind::TerminalSeed);
-    let response = client.request(
-        v1::Operation::SetTerminalVisibility,
-        v1::Request {
-            scope: original_pane.id.clone(),
-            visible: true,
-            ..Default::default()
-        },
-    )?;
-    ensure!(response.ok, "show pane failed");
-    client
-        .pump_until(|observations| {
-            observations.event_count(v1::EventKind::TerminalSeed) > seeds_before
-        })
-        .context("wait for visible reattach seed")?;
-
     // Saturate terminal/event output while the consumer pauses, then require an
     // explicit overflow signal, authoritative resync, and fresh screen seed.
     let flood =
@@ -1169,7 +1132,7 @@ fn run_matrix(transport: Transport, primary_name: &str, ordinary_client: &str) -
             "pipelinedInputLatencyMs": input_latency.as_millis(),
             "controlLatencyMs": control_latency.as_millis(),
             "exactOnceMembershipOutput": true,
-            "hiddenReleaseReattach": true,
+            "hiddenTailResume": true,
             "backpressureResnapshot": true,
             "seedModeDiagnostics": true,
             "eventCounts": client.observations.event_counts,

@@ -129,7 +129,7 @@ jq -e '
   .destructiveConfirmation and .ordinaryClient and .sessionSidecarOrder and
   .layoutConvergence and .exactOuterTopology and
   .exactOnceMembershipOutput and (.pipelinedInputLatencyMs < 2000) and
-  (.controlLatencyMs < 2000) and .hiddenReleaseReattach and
+  (.controlLatencyMs < 2000) and .hiddenTailResume and
   .backpressureResnapshot and .overflowSignalObserved and .seedModeDiagnostics
 ' "$runtime/local-matrix.json" >/dev/null
 
@@ -251,7 +251,7 @@ jq -e '
   .destructiveConfirmation and .ordinaryClient and .sessionSidecarOrder and
   .layoutConvergence and .exactOuterTopology and
   .exactOnceMembershipOutput and (.pipelinedInputLatencyMs < 2000) and
-  (.controlLatencyMs < 2000) and .hiddenReleaseReattach and
+  (.controlLatencyMs < 2000) and .hiddenTailResume and
   .backpressureResnapshot and .overflowSignalObserved and .seedModeDiagnostics
 ' "$runtime/remote-matrix.json" >/dev/null
 
