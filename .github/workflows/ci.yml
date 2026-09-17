@@ -32,6 +32,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check:privacy
       - run: cargo fmt --all -- --check
+      - run: pnpm build
       - run: cargo clippy --workspace --all-targets -- -D warnings
         env:
           TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
@@ -55,7 +56,6 @@ jobs:
         run: cargo run --manifest-path tests/integration/fuzz-smoke/Cargo.toml -- 1000
       - run: pnpm check
       - run: pnpm test
-      - run: pnpm build
       - name: Check mobile skeleton
         if: runner.os == 'Linux'
         run: |
