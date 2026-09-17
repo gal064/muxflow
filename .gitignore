@@ -37,6 +37,10 @@ pnpm-debug.log*
 .env.*
 !.env.example
 
+# Private planning
+/todo.md
+/todos/
+
 # Temporary files and directories (at any depth)
 **/tmp/
 tests/**/evidence/

@@ -4,6 +4,12 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd -P)
 cd "$repo"
 
+if [[ -f "$repo/.env" ]]; then
+  set -a
+  source "$repo/.env"
+  set +a
+fi
+
 [[ $(uname -s) == Darwin ]] || { echo "macOS packaging requires Darwin" >&2; exit 69; }
 [[ $(uname -m) == arm64 ]] || { echo "this internal package is Apple Silicon only" >&2; exit 69; }
 

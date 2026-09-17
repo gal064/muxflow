@@ -5,12 +5,12 @@ import { terminalLinksForBufferLine } from "./terminalLinks";
 describe("terminal links across rendered rows", () => {
   it("joins a parenthesized relative path whose first hard row is not a path by itself", async () => {
     const lines = [
-      "PowerPoint (sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/output/Muxflow-Partnerco-2026-09-10.pptx) · PDF (sampleco-projectx-strategic-",
-      "  mapping/slides/partnerco-september-2026/tmp/Muxflow-Partnerco-2026-09-10.pdf)",
+      "PowerPoint (sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/output/Sampleco-Partnerco-2026-09-10.pptx) · PDF (sampleco-projectx-strategic-",
+      "  mapping/slides/partnerco-september-2026/tmp/Sampleco-Partnerco-2026-09-10.pdf)",
     ];
     const terminal = await terminalWith(lines.join("\r\n"), 200);
-    const powerpoint = "sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/output/Muxflow-Partnerco-2026-09-10.pptx";
-    const pdf = "sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/tmp/Muxflow-Partnerco-2026-09-10.pdf";
+    const powerpoint = "sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/output/Sampleco-Partnerco-2026-09-10.pptx";
+    const pdf = "sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/tmp/Sampleco-Partnerco-2026-09-10.pdf";
     const expectedPdf = {
       kind: "file",
       text: pdf,
@@ -63,11 +63,11 @@ describe("terminal links across rendered rows", () => {
   });
 
   it.each([
-    ["ordinary prose", "Stored at /home/user/report-", "  final.ts:11.", "/home/user/report-final.ts", "/home"],
+    ["ordinary prose", "Stored at /home/dev/report-", "  final.ts:11.", "/home/dev/report-final.ts", "/home"],
     ["a bullet", "• Stored ~/reports/report-", "  final.ts:11.", "~/reports/report-final.ts", "~/"],
     ["an indented list item", "    - Stored src/report-", "      final.ts:11.", "src/report-final.ts", "src/"],
-    ["a numbered item", "  1. Stored /home/user/report-", "     final.ts:11.", "/home/user/report-final.ts", "/home"],
-    ["a standalone target", "  /home/user/report-", "  final.ts:11.", "/home/user/report-final.ts", "/home"],
+    ["a numbered item", "  1. Stored /home/dev/report-", "     final.ts:11.", "/home/dev/report-final.ts", "/home"],
+    ["a standalone target", "  /home/dev/report-", "  final.ts:11.", "/home/dev/report-final.ts", "/home"],
   ])(
     "joins a recognized path across hard rows in %s",
     async (_context, origin, continuation, path, firstFragment) => {
@@ -89,10 +89,10 @@ describe("terminal links across rendered rows", () => {
   it("joins the reported migration path embedded in a hard-wrapped paragraph", async () => {
     const lines = [
       "  The new attempt table stores requested/accepted/running/completed/failed/unavailable state, result stage, candidate identity, verification, inferred-",
-      "  unavailable state and recovery deadlines at /home/user/dev/muxflow-pr4807-integration-v2/packages/core-services/src/migrations/1803020000000-",
+      "  unavailable state and recovery deadlines at /home/dev/dev/sampleco-demo-repo-pr4807-integration-v2/packages/core-services/src/migrations/1803020000000-",
       "  CreateTestRunHealingAttempts.ts:11.",
     ];
-    const path = "/home/user/dev/muxflow-pr4807-integration-v2/packages/core-services/src/migrations/1803020000000-CreateTestRunHealingAttempts.ts";
+    const path = "/home/dev/dev/sampleco-demo-repo-pr4807-integration-v2/packages/core-services/src/migrations/1803020000000-CreateTestRunHealingAttempts.ts";
     const terminal = await terminalWith(lines.join("\r\n"), 200);
     const expected = {
       kind: "file",
@@ -108,21 +108,21 @@ describe("terminal links across rendered rows", () => {
   });
 
   it("does not append indented prose to a standalone directory", async () => {
-    const terminal = await terminalWith("  /home/user/reports/\r\n  Read the summary next.", 80);
+    const terminal = await terminalWith("  /home/dev/reports/\r\n  Read the summary next.", 80);
 
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 1)[0]?.text)
-      .toBe("/home/user/reports/");
+      .toBe("/home/dev/reports/");
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 2)).toEqual([]);
   });
 
   it("returns both links when one hard-wrapped target ends where another begins", async () => {
     const lines = [
-      "• PowerPoint (sampleco-projectx-strategic-mapping/slides/acquirer-update/output/2026-08-11/Muxflow-Strategic-Acquirer-Update-",
-      "  2026-08-11.pptx) · PDF (sampleco-projectx-strategic-mapping/slides/acquirer-update/output/2026-08-11/Muxflow-Strategic-",
-      "  Acquirer-Update-2026-08-11.pdf)",
+      "• PowerPoint (sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-Projectx-Update-",
+      "  2026-08-11.pptx) · PDF (sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-",
+      "  Projectx-Update-2026-08-11.pdf)",
     ];
-    const powerpoint = "sampleco-projectx-strategic-mapping/slides/acquirer-update/output/2026-08-11/Muxflow-Strategic-Acquirer-Update-2026-08-11.pptx";
-    const pdf = "sampleco-projectx-strategic-mapping/slides/acquirer-update/output/2026-08-11/Muxflow-Strategic-Acquirer-Update-2026-08-11.pdf";
+    const powerpoint = "sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-Projectx-Update-2026-08-11.pptx";
+    const pdf = "sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-Projectx-Update-2026-08-11.pdf";
     const terminal = await terminalWith(lines.join("\r\n"), 160);
 
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 2).map((link) => link.text)).toEqual([
@@ -134,7 +134,7 @@ describe("terminal links across rendered rows", () => {
 
   it("joins the exact three hard rows painted by Codex in an 85-column pane", async () => {
     const lines = [
-      "• Or manually transfer and install /home/user/dev/muxflow-mobile-layout-scroll-",
+      "• Or manually transfer and install /home/dev/dev/dev-app-mobile-layout-scroll-",
       "  diagnostics/apps/mobile/android/app/build/outputs/apk/release/app-",
       "  release.apk.",
     ];
@@ -142,7 +142,7 @@ describe("terminal links across rendered rows", () => {
     const terminal = await terminalWith(lines.join("\r\n"), 85);
     const expected = {
       kind: "file",
-      text: "/home/user/dev/muxflow-mobile-layout-scroll-diagnostics/apps/mobile/android/app/build/outputs/apk/release/app-release.apk",
+      text: "/home/dev/dev/dev-app-mobile-layout-scroll-diagnostics/apps/mobile/android/app/build/outputs/apk/release/app-release.apk",
       range: {
         start: { x: 36, y: 1 },
         end: { x: 13, y: 3 },
@@ -226,8 +226,8 @@ describe("terminal links across rendered rows", () => {
   );
 
   it("joins a file path across a proven soft wrap and links both rows", async () => {
-    const terminal = await terminalWith("  /home/user/dev/muxflow/apps/mobile/android/app-release.apk", 32);
-    const expectedText = "/home/user/dev/muxflow/apps/mobile/android/app-release.apk";
+    const terminal = await terminalWith("  /home/dev/dev/dev-app/apps/mobile/android/app-release.apk", 32);
+    const expectedText = "/home/dev/dev/dev-app/apps/mobile/android/app-release.apk";
 
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 1)).toEqual([{
       kind: "file",
@@ -254,10 +254,10 @@ describe("terminal links across rendered rows", () => {
   });
 
   it("does not join tokens separated by a real newline", async () => {
-    const terminal = await terminalWith("/home/user/dev/muxflow/apps/mobile/android/app-re\r\nlease.apk", 80);
+    const terminal = await terminalWith("/home/dev/dev/dev-app/apps/mobile/android/app-re\r\nlease.apk", 80);
 
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 1)[0]?.text)
-      .toBe("/home/user/dev/muxflow/apps/mobile/android/app-re");
+      .toBe("/home/dev/dev/dev-app/apps/mobile/android/app-re");
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 2)).toEqual([]);
   });
 
@@ -399,10 +399,10 @@ describe("terminal links across rendered rows", () => {
 
   it("joins an indented dash list item that wraps after a slash", async () => {
     const lines = [
-      "    - /home/user/dev/ai-projects/sampleco-projectx-strategic-mapping/meetings/2026-09-10-partnerco/",
+      "    - /home/dev/dev/ai-projects/sampleco-projectx-strategic-mapping/meetings/2026-09-10-partnerco/",
       "      RUNBOOK.md is the concise operator checklist.",
     ];
-    const path = "/home/user/dev/ai-projects/sampleco-projectx-strategic-mapping/meetings/2026-09-10-partnerco/RUNBOOK.md";
+    const path = "/home/dev/dev/ai-projects/sampleco-projectx-strategic-mapping/meetings/2026-09-10-partnerco/RUNBOOK.md";
     const terminal = await terminalWith(lines.join("\r\n"), 200);
 
     for (const row of [1, 2]) {
@@ -411,13 +411,13 @@ describe("terminal links across rendered rows", () => {
   });
 
   it("does not splice a sibling list item into the item above it", async () => {
-    const lines = ["  - /home/user/dev/one/", "  - /home/user/dev/two/"];
+    const lines = ["  - /home/dev/dev/one/", "  - /home/dev/dev/two/"];
     const terminal = await terminalWith(lines.join("\r\n"), 80);
 
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 1).map((link) => link.text))
-      .toEqual(["/home/user/dev/one/"]);
+      .toEqual(["/home/dev/dev/one/"]);
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 2).map((link) => link.text))
-      .toEqual(["/home/user/dev/two/"]);
+      .toEqual(["/home/dev/dev/two/"]);
   });
 
   it("does not splice a sibling list item into a relative path above it", async () => {
@@ -438,34 +438,34 @@ describe("terminal links across rendered rows", () => {
   });
 
   it("keeps joining across hops whose fragments carry no separator or extension", async () => {
-    const terminal = await terminalWith("● /home/user/a-\r\n  b-\r\n  c.md", 80);
+    const terminal = await terminalWith("● /home/dev/a-\r\n  b-\r\n  c.md", 80);
 
     for (const row of [1, 2, 3]) {
       expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, row)[0]?.text)
-        .toBe("/home/user/a-b-c.md");
+        .toBe("/home/dev/a-b-c.md");
     }
   });
 
   it("joins an extensionless tail when the row broke inside the token", async () => {
-    const terminal = await terminalWith("● Saved /home/user/dev/my-\r\n  project", 80);
+    const terminal = await terminalWith("● Saved /home/dev/dev/my-\r\n  project", 80);
 
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 1)[0]?.text)
-      .toBe("/home/user/dev/my-project");
+      .toBe("/home/dev/dev/my-project");
   });
 
   it("does not splice a sibling item marked with a plus", async () => {
-    const lines = ["  + /home/user/dev/one/", "  + /home/user/dev/two/"];
+    const lines = ["  + /home/dev/dev/one/", "  + /home/dev/dev/two/"];
     const terminal = await terminalWith(lines.join("\r\n"), 80);
 
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 1).map((link) => link.text))
-      .toEqual(["/home/user/dev/one/"]);
+      .toEqual(["/home/dev/dev/one/"]);
   });
 
   it("joins a multi-level numbered item that wraps", async () => {
-    const terminal = await terminalWith("  1.1. Open /home/user/dev/notes-\r\n       archive/today.md.", 80);
+    const terminal = await terminalWith("  1.1. Open /home/dev/dev/notes-\r\n       archive/today.md.", 80);
 
     expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 1)[0]?.text)
-      .toBe("/home/user/dev/notes-archive/today.md");
+      .toBe("/home/dev/dev/notes-archive/today.md");
   });
 
   it("maps UTF-16 text offsets to cells across wrapped rows", async () => {

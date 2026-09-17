@@ -25,8 +25,8 @@ const phase = (state: "connected" | "disconnected" | "reconnecting"): TerminalEv
 const failure = (message: string): TerminalEvent => ({ kind: "error", message, sequence: 0 });
 
 /** What the supervisor actually says, once per failed reconnect attempt. */
-const unreachable = "OpenSSH control master failed: ssh: connect to host omarchy port 22: Undefined error: 0";
-const refused = "OpenSSH control master failed: ssh: connect to host omarchy port 22: Connection refused";
+const unreachable = "OpenSSH control master failed: ssh: connect to host devhost port 22: Undefined error: 0";
+const refused = "OpenSSH control master failed: ssh: connect to host devhost port 22: Connection refused";
 
 /** The controller alone, with every status it asked the shell to show. */
 async function connected() {

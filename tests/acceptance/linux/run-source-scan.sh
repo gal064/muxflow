@@ -23,9 +23,8 @@ rg -n '"nested_provenance": 2' apps/host/src/service/agents/store.rs >/dev/null
 
 test ! -e docs/nested-tmux.md
 ! rg -n 'WindowFallback|SessionFallback|windowFallback|sessionFallback|closest surviving destination' \
-  apps crates README.md docs docs/history/plan/product-requirements.md docs/history/plan/technical-plan.md
-rg -n 'Nested tmux is unsupported' README.md docs/history/plan/product-requirements.md >/dev/null
-rg -n 'Nested tmux is outside V1 support' docs/history/plan/technical-plan.md >/dev/null
+  apps crates README.md docs
+rg -n 'Nested tmux is unsupported' README.md >/dev/null
 protocol_major=$(jq -r '.protocolMajor' apps/mobile/src/protocol/gen/host_contract.json)
 rg -n "pub const PROTOCOL_MAJOR: u32 = $protocol_major;" crates/protocol/src/lib.rs >/dev/null
 rg -n '^version = "0.2.0"$' crates/protocol/Cargo.toml >/dev/null
