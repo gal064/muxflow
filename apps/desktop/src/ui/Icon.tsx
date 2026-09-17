@@ -1,0 +1,221 @@
+import type { ReactElement } from "react";
+
+/**
+ * The app's only icon set.
+ *
+ * Phase 11 deletes text-glyph icons (`•••`, `✎`, `▱`, `E`, `G`, `M`, `＋`):
+ * they inherit the text font, so they changed shape per platform, sat on the
+ * text baseline instead of the control's optical center, and could not be
+ * given a consistent stroke weight. These are 16x16 stroke paths at
+ * SF-Symbols weight, drawn in `currentColor`, so a control's color rule is the
+ * only thing that decides how its icon looks.
+ *
+ * Icons are decorative by construction: every one renders `aria-hidden`, and
+ * the control around it carries the accessible name.
+ */
+
+export type IconName =
+  | "sidebarLeft"
+  | "panelRight"
+  | "bell"
+  | "plus"
+  // Source Control's row and header actions. `minus` is `plus` with one stroke
+  // taken away, so stage and unstage read as one pair; `discard` is the return
+  // arrow VS Code uses for it, and `refresh` the circular one.
+  | "minus"
+  | "discard"
+  | "refresh"
+  | "splitRight"
+  | "close"
+  // The tab strip's bulk closes, which are buttons now rather than menu items
+  // only. Both have to say *which* tabs go without a label: `closeOthers` keeps
+  // one tab and crosses out its neighbours, `closeNonAgent` crosses out a tab
+  // and keeps the dot that marks an agent.
+  | "closeOthers"
+  | "closeNonAgent"
+  | "check"
+  | "more"
+  | "arrowLeft"
+  | "arrowRight"
+  | "chevronRight"
+  | "chevronDown"
+  | "file"
+  | "markdown"
+  | "diff"
+  | "zoom"
+  // Pinned tabs and workspaces. A push pin seen head-on, so it reads as a pin
+  // rather than a bookmark at the 11px the tab strip draws it at.
+  | "pin"
+  | "search"
+  | "branch"
+  // The Explorer's file-type set. VS Code's Seti look is mostly *color*, so
+  // these are a handful of shape archetypes that a per-extension table tints
+  // (`features/files/fileIcons.ts`) rather than one drawing per language.
+  | "folder"
+  | "folderOpen"
+  | "fileCode"
+  | "fileText"
+  | "fileConfig"
+  | "fileImage"
+  | "fileLock"
+  | "fileShell"
+  | "fileData";
+
+const paths: Record<IconName, ReactElement> = {
+  sidebarLeft: <>
+    <rect height="11" rx="2" width="13" x="1.5" y="2.5" />
+    <path d="M6 2.5v11" />
+    <path d="M3.4 5.6h1.2M3.4 8h1.2" />
+  </>,
+  panelRight: <>
+    <rect height="11" rx="2" width="13" x="1.5" y="2.5" />
+    <path d="M10 2.5v11" />
+    <path d="M11.4 5.6h1.2M11.4 8h1.2" />
+  </>,
+  bell: <>
+    <path d="M4 6.75a4 4 0 0 1 8 0c0 3 .9 4 1.4 4.5H2.6C3.1 10.75 4 9.75 4 6.75Z" />
+    <path d="M6.6 13.2a1.6 1.6 0 0 0 2.8 0" />
+  </>,
+  plus: <path d="M8 3.75v8.5M3.75 8h8.5" />,
+  minus: <path d="M3.75 8h8.5" />,
+  discard: <>
+    <path d="M5.6 3.35 2.6 6.35l3 3" />
+    <path d="M2.6 6.35h6.15a3.6 3.6 0 1 1 0 7.2H6.2" />
+  </>,
+  refresh: <>
+    <path d="M12.6 5.9A5 5 0 1 0 13 8" />
+    <path d="M9.7 5.9h2.9V3" />
+  </>,
+  splitRight: <>
+    <rect height="11" rx="2" width="13" x="1.5" y="2.5" />
+    <path d="M8 2.5v11" />
+  </>,
+  close: <path d="m4.25 4.25 7.5 7.5M11.75 4.25l-7.5 7.5" />,
+  // Lucide (ISC) `copy-x`, transcribed on the 24 grid and scaled to this set's
+  // 16 one; the stroke is widened to keep SF-Symbols weight after the scale.
+  closeOthers: <>
+    <g strokeWidth={2.1} transform="scale(.6667)">
+      <line x1="12" x2="18" y1="12" y2="18" />
+      <line x1="12" x2="18" y1="18" y2="12" />
+      <rect height="14" rx="2" ry="2" width="14" x="8" y="8" />
+      <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+    </g>
+  </>,
+  // Lucide (ISC) `bot`, scaled and offset up-left to leave room for an ×
+  // badge knocked out of its bottom-right corner. The knockout follows the
+  // surface under the icon: `.bar-button:hover` sets `--icon-knockout` to its
+  // hover colour so the disc does not draw a ring on hover.
+  closeNonAgent: <>
+    <g strokeWidth={2.3} transform="translate(-1 -1) scale(.6)">
+      <path d="M12 8V4H8" />
+      <rect height="12" rx="2" width="16" x="4" y="8" />
+      <path d="M2 14h2" />
+      <path d="M20 14h2" />
+      <path d="M15 13v2" />
+      <path d="M9 13v2" />
+    </g>
+    <circle cx="12.4" cy="12.4" fill="var(--icon-knockout, var(--chrome-bg))" r="3.6" stroke="none" />
+    <path d="m10.7 10.7 3.4 3.4M14.1 10.7l-3.4 3.4" strokeWidth={1.5} />
+  </>,
+  check: <path d="m3.5 8.4 3 3 6-6.8" />,
+  more: <>
+    <circle cx="3.6" cy="8" r=".9" />
+    <circle cx="8" cy="8" r=".9" />
+    <circle cx="12.4" cy="8" r=".9" />
+  </>,
+  arrowLeft: <path d="M12.25 8h-8.5M7.5 4.25 3.75 8l3.75 3.75" />,
+  arrowRight: <path d="M3.75 8h8.5M8.5 4.25 12.25 8 8.5 11.75" />,
+  chevronRight: <path d="M6.25 3.75 10.5 8l-4.25 4.25" />,
+  chevronDown: <path d="M3.75 6.25 8 10.5l4.25-4.25" />,
+  file: <>
+    <path d="M4 2.5h4.5L12 6v7.5H4Z" />
+    <path d="M8.25 2.6V6H11.9" />
+  </>,
+  markdown: <>
+    <rect height="9.5" rx="1.5" width="13" x="1.5" y="3.25" />
+    <path d="M4 10.25v-4l1.75 2 1.75-2v4" />
+    <path d="M10.5 6.25v4m0 0-1.25-1.4m1.25 1.4 1.25-1.4" />
+  </>,
+  diff: <>
+    <path d="M4.5 3v6.5M2.5 5h4" />
+    <path d="M9.5 11h4" />
+  </>,
+  zoom: <>
+    <path d="M2.75 6V2.75H6M10 2.75h3.25V6M13.25 10v3.25H10M6 13.25H2.75V10" />
+  </>,
+  // Bootstrap Icons (MIT) `pin`, whose filled silhouette is redrawn here as a
+  // 1.4 stroke so it matches the rest of the set.
+  pin: <>
+    <path d="M4.75 1.25h6.5c0 .95-.55 1.5-1.25 1.9V6.9c1.2.7 2.25 1.6 2.25 2.85h-8.5c0-1.25 1.05-2.15 2.25-2.85V3.15c-.7-.4-1.25-.95-1.25-1.9Z" />
+    <path d="M8 9.75v4.75" />
+  </>,
+  // 11.1.3 names both of these. `search` marks the palette's input the way the
+  // mock's `⌕` does; `branch` marks the titlebar's branch name, which was a
+  // bare string with no way to tell it apart from the workspace name beside it.
+  search: <>
+    <circle cx="7" cy="7" r="4.25" />
+    <path d="m10.2 10.2 3 3" />
+  </>,
+  branch: <>
+    <circle cx="4.75" cy="3.75" r="1.75" />
+    <circle cx="4.75" cy="12.25" r="1.75" />
+    <circle cx="11.25" cy="3.75" r="1.75" />
+    <path d="M4.75 5.5v5M11.25 5.5v1.25a2.5 2.5 0 0 1-2.5 2.5H6.5" />
+  </>,
+  folder: <path d="M1.75 12.25v-8A1.25 1.25 0 0 1 3 3h2.6l1.4 1.75h6A1.25 1.25 0 0 1 14.25 6v6.25a1.25 1.25 0 0 1-1.25 1.25H3a1.25 1.25 0 0 1-1.25-1.25Z" />,
+  // The open state is the same folder with its front panel swung forward, so a
+  // directory does not change silhouette when it expands — only its lid moves.
+  folderOpen: <>
+    <path d="M1.75 12.25v-8A1.25 1.25 0 0 1 3 3h2.6l1.4 1.75h6A1.25 1.25 0 0 1 14.25 6v1.5" />
+    <path d="M1.9 12.9 3.7 7.75h10.5l-1.8 5.15a1.25 1.25 0 0 1-1.18.85H3a1.25 1.25 0 0 1-1.1-.85Z" />
+  </>,
+  fileCode: <path d="m6 4.75-3.25 3.3L6 11.25M10 4.75l3.25 3.3L10 11.25" />,
+  fileText: <>
+    <path d="M4 2.5h4.5L12 6v7.5H4Z" />
+    <path d="M8.25 2.6V6H11.9" />
+    <path d="M5.9 8.6h4.2M5.9 10.8h3" />
+  </>,
+  // Six teeth on a visible hub, not eight rays: at 14px an eight-spoke gear
+  // collapses into an asterisk. Checked on the QA render at 14px and 48px.
+  fileConfig: <>
+    <circle cx="8" cy="8" r="2.4" />
+    <path d="M11.5 8h1.9M4.5 8H2.6M9.75 11.03l.95 1.65M6.25 11.03l-.95 1.65M6.25 4.97l-.95-1.65M9.75 4.97l.95-1.65" />
+  </>,
+  fileImage: <>
+    <rect height="9.5" rx="1.5" width="11" x="2.5" y="3.25" />
+    <circle cx="6" cy="6.6" r="1" />
+    <path d="m2.9 11.9 3.35-3.3 2.2 2.15 2.3-2.25 2.7 2.65" />
+  </>,
+  fileLock: <>
+    <rect height="6.25" rx="1.4" width="9" x="3.5" y="7" />
+    <path d="M5.75 7V5.4a2.25 2.25 0 0 1 4.5 0V7" />
+  </>,
+  fileShell: <path d="m3.25 4.9 3.1 3.1-3.1 3.1M8.4 11.6h4.35" />,
+  fileData: <>
+    <path d="M6.9 2.9c-1.3 0-1.9.6-1.9 1.9v1.3c0 1.1-.55 1.9-1.5 1.9.95 0 1.5.8 1.5 1.9v1.3c0 1.3.6 1.9 1.9 1.9" />
+    <path d="M9.1 2.9c1.3 0 1.9.6 1.9 1.9v1.3c0 1.1.55 1.9 1.5 1.9-.95 0-1.5.8-1.5 1.9v1.3c0 1.3-.6 1.9-1.9 1.9" />
+  </>,
+};
+
+interface IconProps {
+  name: IconName;
+  /** Optical size in CSS pixels; the stroke scales with it. */
+  size?: number;
+  className?: string;
+}
+
+export function Icon({ name, size = 14, className }: IconProps) {
+  return <svg
+    aria-hidden="true"
+    className={className ? `icon ${className}` : "icon"}
+    fill="none"
+    focusable="false"
+    height={size}
+    stroke="currentColor"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    strokeWidth={1.4}
+    viewBox="0 0 16 16"
+    width={size}
+  >{paths[name]}</svg>;
+}

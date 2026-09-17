@@ -1,0 +1,1554 @@
+/*
+ * The application stylesheet.
+ *
+ * Every color comes from `tokens.css`: there is not one hex literal below this
+ * comment, and that is the point — the build this replaces carried ~150 of them
+ * across one file, with a second palette inside the terminal renderer. The only
+ * literal colors left are `rgb(0 0 0 / α)` shadows and the modal backdrop,
+ * which are opacities over whatever is behind them rather than palette entries.
+ *
+ * Metrics are tokenized where the token table names them (bar heights, sidebar
+ * and panel widths, rings, palette and menu rows, the type scale). One-off
+ * paddings, small radii and the handful of sizes the mock fixes per component
+ * are written inline on purpose; promoting each of those to a variable would
+ * make the token file a dictionary of single-use names.
+ *
+ * Layout follows the approved mock: a 28px titlebar, a 240px sidebar, a 28px
+ * tab strip, and everything else is terminal.
+ */
+
+/* ── Base ──────────────────────────────────────────────────────────────── */
+
+:root {
+  font-family: var(--font-sans);
+  font-size: var(--type-row);
+  color: var(--chrome-ink);
+  background: var(--chrome-bg);
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+button, input, select, textarea { color: inherit; font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .42; }
+code, kbd { font-family: var(--font-mono); }
+hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline); }
+
+:where(button, input, select, textarea, summary, [role="separator"], [tabindex]):focus-visible {
+  outline: var(--focus-ring) solid var(--accent);
+  outline-offset: 1px;
+}
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; overflow: hidden;
+}
+
+/* One quiet line, wherever a surface has nothing to show. */
+.quiet-empty {
+  margin: 0; padding: 10px 12px;
+  color: var(--chrome-faint); font-size: var(--type-secondary);
+}
+/* A loading line that costs nothing to be wrong about: present from the first
+   frame, but invisible until the load has lasted long enough to be worth
+   saying. `forwards` is what keeps it up once it has appeared, and is also why
+   the global reduced-motion override below — which shortens durations but
+   leaves delays alone — still reveals it, just without the fade. */
+.loading-delayed {
+  opacity: 0;
+  animation: loading-delayed-appear 200ms linear 150ms forwards;
+}
+@keyframes loading-delayed-appear { to { opacity: 1; } }
+.inline-action {
+  padding: 0; border: 0; background: none;
+  color: var(--accent); font-size: inherit; text-decoration: underline;
+}
+.surface-error {
+  padding: 5px 12px; color: var(--danger-ink); background: var(--danger-wash);
+  font-size: var(--type-secondary); overflow-wrap: anywhere;
+  display: grid; gap: 6px; justify-items: start;
+}
+/* Filed here, with the component that renders it, and not beside the one
+   surface that first passed `onDismiss` — the prop is on the shared
+   `SurfaceError`, so the layout it needs has to come from the shared rule or
+   the second caller gets an unaligned word. */
+.surface-error-dismiss {
+  justify-self: end; padding: 2px 8px;
+  border: 1px solid currentcolor; border-radius: var(--radius-control);
+  background: transparent; color: inherit; font-size: var(--type-meta);
+}
+.surface-error-dismiss:hover { background: var(--danger); color: var(--accent-ink); }
+/* A rejection reads as a sentence; the host's own diagnostic is one disclosure
+   away and still selectable, per 11.4.4 / M10-E059. */
+.surface-error-summary { display: block; }
+.surface-error-details { margin-top: 4px; }
+.surface-error-details > summary {
+  color: var(--chrome-dim); font-size: var(--type-label);
+  letter-spacing: var(--tracking-label); text-transform: uppercase;
+}
+.surface-error-details > summary:focus-visible {
+  outline: var(--focus-ring) solid var(--accent); outline-offset: 1px;
+}
+.surface-error-details > pre {
+  margin: 4px 0 0; max-height: 132px; overflow: auto;
+  color: var(--chrome-ink); font-family: var(--font-mono); font-size: var(--type-meta);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.surface-note {
+  padding: 5px 12px; color: var(--chrome-dim);
+  font-size: var(--type-secondary); overflow-wrap: anywhere;
+}
+.section-label {
+  font-size: var(--type-label); font-weight: 600; letter-spacing: var(--tracking-label);
+  text-transform: uppercase; color: var(--chrome-faint);
+}
+.icon { display: block; flex: 0 0 auto; }
+
+/* ── Shell ─────────────────────────────────────────────────────────────── */
+
+/* A column, not a grid with named rows. Chrome here comes and goes — the
+   disconnected strip used to be one such child — and under grid auto-placement
+   an absent row let the body land in the `auto` track, where it sized to its
+   own content and left 136px of empty window below it. A flex column has no
+   positional dependency on how many children happen to exist. */
+.shell {
+  display: flex; flex-direction: column;
+  width: 100%; height: 100%; min-width: 0;
+  background: var(--chrome-bg);
+}
+/* Positioned: it is the containing block for the disconnected strip, which
+   overlays the top of the body instead of taking a row above it. */
+.shell-body { position: relative; flex: 1 1 auto; display: flex; min-width: 0; min-height: 0; }
+
+/* ── Titlebar ──────────────────────────────────────────────────────────── */
+
+/* The height is pinned, and `overflow: hidden` pins it again: this bar is one
+   child of a flex column whose default `min-height: auto` lets a child's own
+   content stretch it, which is how a label that appeared a beat after the first
+   paint made the whole bar jump. */
+.titlebar {
+  display: flex; align-items: center; gap: 2px;
+  height: var(--titlebar-height, var(--bar-height)); flex: 0 0 auto; overflow: hidden;
+  padding: 0 6px;
+  background: var(--chrome-bg); border-bottom: 1px solid var(--chrome-hairline);
+}
+/* macOS draws its traffic lights over this bar, because the window is
+   configured `titleBarStyle: "Overlay"` with `hiddenTitle` in
+   src-tauri/tauri.conf.json. If that config is ever changed, this reservation
+   becomes 78px of dead space beside a native title bar — the two belong
+   together. */
+/* Taller than every other bar, and only here: the traffic lights are drawn by
+   the OS at their own size and a 28px bar clips them. `--bar-height` itself is
+   shared with the tabstrip, the panel tabs and the editor toolbars, so the
+   override is local to this bar. */
+.titlebar-overlay { --titlebar-height: 38px; padding-left: 78px; }
+.titlebar-title {
+  display: flex; align-items: center; gap: 7px; min-width: 0;
+  margin-left: 6px;
+}
+.titlebar-workspace {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--chrome-ink); font-size: var(--type-row); font-weight: 550;
+}
+.titlebar-spacer { flex: 1; min-width: 8px; align-self: stretch; }
+
+.bar-button {
+  display: inline-flex; align-items: center; justify-content: center; position: relative;
+  width: 22px; height: 20px; padding: 0;
+  border: 0; border-radius: var(--radius-control);
+  background: transparent; color: var(--chrome-dim);
+}
+.bar-button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--chrome-hover); color: var(--chrome-ink); --icon-knockout: var(--chrome-hover); }
+.bar-button[aria-pressed="true"] { color: var(--chrome-ink-strong); }
+/* A frozen control has to look frozen. While the connection was disconnected the
+   titlebar's new-workspace `+` and the strip's split and `+` were disabled and
+   drawn identically to the live ones, so the only feedback from pressing one
+   was nothing happening. */
+/* `aria-disabled` gets the same treatment: a control that keeps its tooltip
+   and its place in the tab order — the bell, whose whole job when it has
+   nowhere to go is to say so — still has to read as frozen. */
+.bar-button:disabled, .bar-button[aria-disabled="true"] { color: var(--chrome-faint); cursor: default; }
+
+.badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; padding: 0 4px;
+  border-radius: 8px; background: var(--accent); color: var(--accent-ink);
+  font-size: 9px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.badge-corner { position: absolute; top: -1px; right: -3px; }
+.badge-row { position: absolute; top: 7px; right: 7px; pointer-events: none; }
+/* A compact workspace row is a single line of flex children, so the count can
+   simply be the last one. Floating it would have made it overlap the agent
+   cluster it sits next to, which is the reason `.badge-row` is absolute at
+   all: on a tall row there is nothing on that line to collide with. */
+.badge-inline { flex: 0 0 auto; }
+
+/* ── Disconnected strip ────────────────────────────────────────────────── */
+
+/* Fixed height on purpose: this sits above the terminal surface the tmux client
+   size is measured from, so a line that wrapped would resize the user's real
+   tmux windows. */
+/* An overlay, not a row. In flow this 22px band moved the terminal surface the
+   tmux client size is measured from, so every appearance and every recovery
+   resized the user's real windows — for a banner that is frequently gone in
+   under a second. Above the compact sidebar/panel drawers (z-index 25) and
+   below the menus and modals, which must still cover it. */
+.link-strip {
+  position: absolute; z-index: 30; top: 0; left: 0; right: 0;
+  display: flex; align-items: center; gap: 10px;
+  height: 22px; padding: 0 10px;
+  background: color-mix(in srgb, var(--warn) 14%, var(--chrome-bg));
+  border-bottom: 1px solid var(--chrome-hairline);
+  color: var(--warn); font-size: var(--type-secondary);
+  box-shadow: inset 2px 0 var(--warn);
+}
+/* The live region wrapping title + detail; it must not change the row's shape. */
+.link-strip-message { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; }
+.link-strip-title { font-weight: 600; flex: 0 0 auto; }
+.link-strip-detail {
+  min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--chrome-dim);
+}
+.link-strip-action {
+  flex: 0 0 auto; padding: 0 6px; height: 16px;
+  border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-raised); color: var(--chrome-ink); font-size: var(--type-meta);
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────────────── */
+
+.sidebar {
+  position: relative;
+  display: flex; flex-direction: column;
+  width: var(--sidebar-width); flex: 0 0 var(--sidebar-width);
+  min-height: 0; padding: 6px 6px 0;
+  background: var(--chrome-bg); border-right: 1px solid var(--chrome-hairline);
+}
+.sidebar-resize {
+  position: absolute; z-index: 8; top: 0; bottom: 0; right: -3px; width: 7px;
+  cursor: col-resize; touch-action: none;
+}
+.sidebar-section { display: flex; flex-direction: column; min-height: 0; }
+.sidebar-workspaces { flex: 1 1 auto; }
+.sidebar-agents { flex-grow: 0; flex-shrink: 0; }
+.section-head { display: flex; align-items: baseline; gap: 8px; padding: 4px 8px 6px; }
+.sidebar-scroll { min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+
+.sort-toggle {
+  margin-left: auto; padding: 0 2px; border: 0; border-radius: 3px;
+  background: transparent; color: var(--accent);
+  font-size: var(--type-label); letter-spacing: .04em;
+}
+.sort-toggle:hover { background: var(--chrome-hover); }
+
+.section-divider {
+  position: relative; flex: 0 0 auto; height: 9px; margin: 2px 0;
+  border-top: 1px solid var(--chrome-hairline); cursor: row-resize; touch-action: none;
+}
+.section-divider::after {
+  content: ""; position: absolute; top: 2px; left: 50%; width: 28px; height: 3px;
+  margin-left: -14px; border-radius: 2px; background: var(--chrome-border);
+}
+
+/* Pinned above Others, in both halves of the sidebar. A label and a hairline
+   rather than a glyph per row: one line says what a mark repeated down every
+   pinned row said, and it says it without taking a pixel from any name. The
+   hairline is a pseudo-element so the label keeps its intrinsic width and the
+   rule fills whatever is left. */
+.list-divider {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0; padding: 6px 8px 4px;
+  font-size: var(--type-label); font-weight: 600; letter-spacing: var(--tracking-label);
+  text-transform: uppercase; color: var(--chrome-faint);
+}
+.list-divider::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--chrome-hairline); }
+/* The first divider sits directly under the section header, which already
+   supplies the space above it. */
+.list-block:first-child > .list-divider { padding-top: 0; }
+.workspace-row, .agent-row { position: relative; }
+.workspace-button {
+  display: flex; flex-direction: column; gap: 3px;
+  width: 100%; padding: 7px 9px 8px; margin-bottom: 2px;
+  border: 0; border-radius: var(--radius-row);
+  background: transparent; color: inherit; text-align: left;
+}
+.workspace-button:hover:not(.active) { background: var(--chrome-hover); }
+.workspace-button.active { background: var(--accent); }
+/* The host behind the row is not connected: still listed, still selectable, not live. */
+.workspace-button.offline:not(.active) { opacity: 0.55; }
+/* Compact rows are one line, so the row is a line: name on the left, the
+   agent cluster and any unread count pushed to the right edge. ~24px is the
+   Explorer's row budget, which is what makes a long workspace list scannable
+   at all — the column layout above would have made every row 32px. */
+.workspace-button.compact {
+  flex-direction: row; align-items: center; gap: 6px;
+  min-height: 24px; padding: 3px 8px; margin-bottom: 1px;
+}
+.workspace-title {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: var(--type-row); font-weight: var(--weight-row); color: var(--chrome-ink);
+}
+.workspace-button.compact .workspace-title { flex: 1 1 auto; }
+.workspace-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 7px, not 5: each mark's badge overhangs its own box by 3.5px, so a tighter
+   gap has one agent's state sitting on the next agent's icon. */
+.workspace-agents { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; margin-left: auto; }
+.workspace-agents-more {
+  font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
+  font-variant-numeric: tabular-nums;
+}
+/* Up to four single-line entries — three agents and the overflow count — not
+   one wrapped paragraph. A clamped box would have let the second agent eat the
+   third's line, which is the opposite of what listing three is for. */
+.workspace-activity {
+  /* The gap is one wider than it was: the badge overhangs the mark's box by
+     3.5px, and at the old 5px it very nearly touched the name beside it. */
+  --activity-icon: 12px; --activity-gap: 6px;
+  display: flex; flex-direction: column; gap: 1px; min-width: 0;
+  font-size: var(--type-secondary); line-height: 1.35; color: var(--chrome-dim);
+}
+.workspace-activity-line { display: flex; align-items: center; gap: var(--activity-gap); min-width: 0; }
+.workspace-activity-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Indented to where the agent names above it start, since it stands in for
+   more of them and has no mark of its own to take up the gap. Derived from the
+   mark and the gap so it stays aligned if either changes; the state now rides
+   on the mark rather than sitting beside it, so the mark is the whole indent. */
+.workspace-activity-more {
+  padding-inline-start: calc(var(--activity-icon) + var(--activity-gap));
+  color: var(--chrome-faint);
+}
+.workspace-meta {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
+}
+.workspace-button.active .workspace-title,
+.workspace-button.active .workspace-activity { color: var(--accent-ink); }
+.workspace-button.active .workspace-meta,
+.workspace-button.active .workspace-agents-more,
+.workspace-button.active .workspace-activity-more { color: color-mix(in srgb, var(--accent-ink) 72%, transparent); }
+/* The active row is an accent block, so everything on it flips to the knockout
+   ink — including the two things that are not text. The shortcut number and
+   the adapter marks were reading at --chrome-faint and --chrome-dim against a
+   light accent, which is the one combination the palette has no contrast for. */
+.workspace-button.active .workspace-shortcut-index,
+.workspace-button.active .agent-icon { color: var(--accent-ink); }
+.workspace-shortcut-index {
+  width: 12px; flex: 0 0 auto;
+  font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
+  font-variant-numeric: tabular-nums; text-align: center;
+}
+/* The host mark, on workspace rows, agent rows and ⌘P rows alike: the same
+   fixed mono slot as the shortcut index, one step darker than it so a letter
+   reads as an address and not as a second digit. Drawn only when two or more
+   hosts are shown, so a single-host list is exactly what it was. */
+.host-letter {
+  width: 12px; flex: 0 0 auto;
+  font-family: var(--font-mono); font-size: var(--type-meta); font-weight: 600; color: var(--chrome-dim);
+  text-align: center; text-transform: uppercase;
+}
+.workspace-button.active .host-letter { color: var(--accent-ink); }
+/* The compact row's workspace-level state, beside the name. It takes the plain
+   8px `.state-dot`, and the rule below brings the spinner to the same 8px, so
+   the indicator is one size in both modes and a size larger than the 6px
+   per-agent badges out at the right edge — the difference in size is what says
+   one is about the workspace and the others are about single agents.
+   Done is a notification here, the same way it is on a badge and on a tab, so
+   it takes the bright green rather than the muted teal `.state-dot.done` paints
+   for the static state palette. Three classes, so it wins wherever it sits
+   relative to that rule. */
+.state-dot.workspace-state.done { background: var(--ok); }
+/* Both fills land within 1.5:1 of the accent block the active row is painted
+   with — the one row the eye is already on is the one where a red and a green
+   dot would dissolve. The knockout ink the shortcut index and the adapter icons
+   already flip to, drawn as a ring rather than a fill, keeps the dot a distinct
+   object without touching the colour that says which state it is. */
+.workspace-button.active .state-dot.workspace-state { box-shadow: 0 0 0 1.5px var(--accent-ink); }
+/* The working branch of that same indicator, sized to the dot it stands in for
+   rather than to the plain 9px spinner: they are one indicator a state apart,
+   so an agent finishing must not nudge the workspace name by a pixel. */
+.workspace-title .spinner { width: 8px; height: 8px; }
+
+.spinner {
+  width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-top-color: currentColor;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .spinner { animation: sidebar-spin .9s linear infinite; }
+  @keyframes sidebar-spin { to { transform: rotate(360deg); } }
+}
+
+.agent-button {
+  display: block;
+  width: 100%; padding: 3px 7px;
+  border: 0; border-radius: var(--radius-control);
+  background: transparent; color: inherit; text-align: left;
+}
+/* Groups are made of whitespace and nothing else. The rule under every heading
+   plus 5px of margin above it drew a boxed table of one- and two-row sections,
+   which spent more pixels on the borders than on the agents; 10px between
+   groups and 1px inside one says the same thing by proximity alone, and it says
+   it without adding a line to a sidebar that already has three. */
+.agent-workspace-group { margin: 0 5px 10px; }
+.agent-workspace-heading {
+  display: flex; align-items: baseline; gap: 6px; min-width: 0;
+  margin: 0 4px; padding: 2px 0 1px;
+  font-size: var(--type-label); font-weight: 600; color: var(--chrome-dim);
+}
+.agent-workspace-heading > span:not(.agent-group-count),
+.agent-session-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Where the host label used to be. One connection is live at a time here, so
+   the host was the same word on every heading; the count is the thing that
+   differs, and it is what tells you a collapsed-looking group has six agents
+   in it. The host survives in the heading's `title`. */
+.agent-group-count {
+  margin-left: auto; flex: 0 0 auto;
+  font-family: var(--font-mono); font-size: var(--type-meta); font-weight: 400; color: var(--chrome-faint);
+  font-variant-numeric: tabular-nums;
+}
+/* The priority headings' state mark. Smaller than a row's dot on purpose: it
+   labels a group rather than reporting on one agent, and Working spins for the
+   same reason every other working indicator does. */
+/* Two classes, not one: `.state-dot` below is a single class too and comes
+   later in the file, so a bare `.agent-group-dot` lost the size it asks for and
+   every non-Working heading drew an 8px dot beside the Working heading's 7px
+   spinner. One size for every group-heading indicator. */
+.state-dot.agent-group-dot, .spinner.agent-group-dot { width: 7px; height: 7px; align-self: center; }
+.spinner.agent-group-dot { color: var(--chrome-dim); }
+.agent-button.selected { background: var(--chrome-selected); }
+.agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
+/* Reachable by keyboard, still clearly not actionable — see the note at the
+   call site for why this is not `disabled`. */
+.agent-button[data-unavailable] { opacity: .5; cursor: not-allowed; }
+.agent-line {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 11.5px; font-weight: var(--weight-row); color: var(--chrome-ink);
+}
+.agent-icon { width: 12px; height: 12px; flex: 0 0 auto; color: var(--chrome-dim); }
+.agent-icon.codex { fill: currentColor; }
+.agent-icon.claude, .agent-icon.generic { fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.35; }
+/* Four strokes at 2, against Codex's solid mass. The eight-spoke asterisk at
+   1.35 was more ink than the blossom and less shape, and at 12px the spokes
+   merged into a blot; two weights that look equal is the point, not two
+   numbers that are equal. */
+.agent-icon.claude { stroke-width: 2; }
+.agent-icon.generic circle:nth-of-type(n+2) { fill: currentColor; stroke: none; }
+
+/* The adapter mark with its state docked to it — one object per agent instead
+   of a dot, a gap and an icon. The ring is the row's own background punched
+   out around the badge so it reads as a separate layer rather than a bite out
+   of the mark; it is a variable because "the row's background" is four
+   different tokens depending on which row and whether it is hovered. */
+.agent-mark { --badge-ring: var(--chrome-bg); position: relative; display: inline-flex; flex: 0 0 auto; }
+/* The glyph option's shape of the same wrapper: a full-size dot beside the icon
+   rather than a badge on it, held together by a gap of its own. The cluster
+   around it keeps one uniform gap, and that gap now separates agents rather
+   than alternating between "this agent's state" and "the next agent's icon". */
+.agent-mark-glyphs { align-items: center; gap: 3px; }
+.agent-button.selected .agent-mark { --badge-ring: var(--chrome-selected); }
+.agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) .agent-mark,
+.workspace-button:hover:not(.active) .agent-mark { --badge-ring: var(--chrome-hover); }
+.workspace-button.active .agent-mark { --badge-ring: var(--accent); }
+.agent-mark-badge {
+  position: absolute; right: -2px; bottom: -2px;
+  width: 6px; height: 6px; border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--badge-ring);
+}
+.agent-mark-badge.blocked { background: var(--state-blocked); }
+/* A done badge is a notification — it must catch the eye, so it takes the
+   bright connection-green the tab strip's done dot already uses, not the
+   muted teal of the static state palette. */
+.agent-mark-badge.done { background: var(--ok); }
+/* Idle renders no badge at all — quiet is the resting state. Unknown keeps the
+   dashed outline the dots use for nothing-has-told-us. */
+.agent-mark-badge.unknown { background: var(--badge-ring); border: 1.5px dashed var(--state-unknown); }
+/* The outline badge is the only part of a mark whose colour is carried by a
+   border, and on the active row that border is drawn against the accent block,
+   where --state-unknown lands near 2.4:1 and vanishes on the one row the eye
+   is already on. Same knockout flip the shortcut index and the adapter icons
+   make two rules up. */
+.workspace-button.active .agent-mark-badge.unknown { border-color: color-mix(in srgb, var(--accent-ink) 65%, transparent); }
+/* `.spinner` supplies the ring and the animation; this only sizes and colours
+   it, and fills the middle so the mark does not show through the badge. Every
+   spinner in the app is the same neutral ink — motion alone says "working",
+   and the state colours stay reserved for the static dots. */
+.agent-mark-badge.working { width: 7px; height: 7px; background: var(--badge-ring); color: var(--chrome-ink); }
+.workspace-button.active .agent-mark-badge.working { color: var(--accent-ink); }
+/* The name and its pin are one cell, so the pin sits against the end of the
+   text rather than out at the row's edge; the label alone still shrinks and
+   ellipsises, which is why it is `0 1 auto` inside a cell that grows. */
+.agent-name-cell { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 auto; }
+.agent-session-label { min-width: 0; flex: 0 1 auto; }
+.agent-location { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-tab { font-family: var(--font-mono); font-size: var(--type-label); font-weight: 400; color: var(--chrome-faint); }
+.agent-detail {
+  min-width: 0; max-width: 45%; flex: 0 1 auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: var(--type-secondary); color: var(--chrome-dim);
+}
+
+.state-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%;
+  font-size: 6px; font-weight: 700; line-height: 1; color: var(--chrome-bg);
+}
+/* The glyph is always in the markup and hidden here, so `forced-colors` can
+   turn it on by itself: there every dot's background collapses to one system
+   color and the shape is the only thing left that separates the four states. */
+.state-dot, .tab-dot { overflow: hidden; }
+.state-dot:not(.glyphs), .tab-dot:not(.glyphs) { color: transparent; }
+.state-dot.working { background: var(--state-working); }
+.state-dot.blocked { background: var(--state-blocked); }
+.state-dot.done { background: var(--state-done); }
+/* Unknown is "this agent exists and nothing has told us what it is doing" —
+   the state a bare process detection produces, and the state a hook-sourced
+   Working decays to when its events stop. It was a filled dot, which reads as
+   a state at a glance and put two idle agents on the field machine in the same
+   visual class as a working one. Hollow and dashed: present, unfilled, and
+   distinct from the solid ring idle draws for "we know it is idle". */
+/* No `color` here. `.state-dot:not(.glyphs)` is what hides the glyph when the
+   accessibility option is off, and it has the same specificity, so setting a
+   color on this line — later in the file — wins and paints a literal "?"
+   inside an 8px circle on every unknown row by default. `.idle` gets away with
+   it only because its glyph is the empty string. The border already carries
+   the color. */
+.state-dot.unknown { background: transparent; border: 1.5px dashed var(--state-unknown); }
+.state-dot.unknown.glyphs { color: var(--state-unknown); }
+/* Idle draws nothing at all — quiet is the resting state, the same rule the
+   mark badge follows — but the box survives being hidden, so the slot is still
+   there when the state turns into a spinner or a dot and no title beside it
+   ever moves. `visibility`, never `display: none`, for exactly that reason. */
+.state-dot.idle, .state-dot.none, .tab-dot.idle { visibility: hidden; }
+
+/* The agents section's one honest line, when this host cannot report status at
+   all. Quiet, because it is a fact and not an alarm — and text rather than a
+   control, because the shell's resting-control budget is eight and spent; the
+   action is on the section's context menu and in Settings. */
+.agents-notice {
+  flex: 0 0 auto; padding: 5px 8px; margin: 0;
+  font-size: var(--type-secondary); line-height: 1.35; color: var(--chrome-dim);
+}
+
+.host-row {
+  display: flex; align-items: center; gap: 7px;
+  flex: 0 0 auto; padding: 8px 8px 7px; margin-top: auto;
+  border: 0; border-top: 1px solid var(--chrome-hairline);
+  background: transparent;
+  font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-dim);
+}
+.host-row:hover { color: var(--chrome-ink); }
+.host-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-transport { color: var(--chrome-faint); }
+.host-latency { margin-left: auto; color: var(--chrome-faint); font-variant-numeric: tabular-nums; }
+.link-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--ok); }
+.link-dot.connecting, .link-dot.reconnecting, .link-dot.resyncing { background: var(--warn); }
+.link-dot.disconnected { background: var(--danger); }
+
+/* ── Workspace column ──────────────────────────────────────────────────── */
+
+/*
+ * `grid-template-columns` is not optional here.
+ *
+ * Without it the grid has one implicit `auto` column, and an `auto` track is
+ * floored by its content's min-content size. The tab strip's content is a row
+ * of `flex: 0 0 auto` tabs, so that floor is "every tab at its natural width" —
+ * and the column, and everything laid out in it, grew past the column's own
+ * box. Measured on the packaged app at 1280x800 with the right panel open and
+ * four long tab names: the tiled terminal surface ran to x=1129 while the panel
+ * began at x=1097, so the panel's Files/Git tabs and its file rows were painted
+ * over by the tab strip and the terminal.
+ *
+ * `minmax(0, 1fr)` gives the track no min-content floor, which is what makes
+ * `.tabstrip-tabs`'s `overflow-x: auto` reachable: the strip scrolls instead of
+ * pushing.
+ *
+ * This matters beyond the smear. The tmux client size is measured from the
+ * tiled surface's pixel box (Stage 12.10), so an overflowing surface asks the
+ * user's tmux server for a wider grid than the window actually shows.
+ */
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--bar-height) minmax(0, 1fr);
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  background: var(--term-bg);
+}
+.workspace-content { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.workspace-content:focus-visible { outline-offset: -2px; }
+/* The terminal layer stays in the tree under a file or diff tab, which draws
+   over it. `inset: 0` reproduces exactly what `.terminal-window` already had:
+   it is `position: absolute; inset: 4px` against the nearest positioned
+   ancestor, and this layer is that ancestor now instead of `.workspace-content`
+   — same box, same 4px. */
+.terminal-layer { position: absolute; inset: 0; }
+/* `visibility`, never `display: none`. The layer must keep its box: xterm's fit
+   is computed from it, the ResizeObserver in `useClientResize` measures it to
+   size the tmux client, and each pane reports its own cell metrics from it. A
+   layer collapsed to zero would report a zero-sized terminal to tmux and make
+   every pane re-fit on the way back — the flicker this removes. */
+.terminal-layer-covered { visibility: hidden; }
+/* One layer per recently used document tab, over the terminal layer and each
+   other. `inset: 0` reproduces the box the surfaces already had: every one of
+   them is `position: absolute; inset: 0` against the nearest positioned
+   ancestor, which is this layer now instead of `.workspace-content`. They come
+   after the terminal layer in the DOM and are positioned siblings in the same
+   stacking context, so paint order alone puts them on top — no `z-index`. */
+.app-tab-layer { position: absolute; inset: 0; }
+/* `visibility`, never `display: none`, for the same reason as the terminal
+   layer: the box has to survive being hidden. Monaco is laid out from the host
+   box's measured size (`editorLayout.ts`, plus its own `automaticLayout`), and
+   a layer collapsed to zero would hand it a zero box — which that module's
+   zero-box guard exists to refuse, and which would cost a full re-layout on the
+   way back. `visibility: hidden` keeps the box, keeps the ResizeObserver quiet,
+   and takes the covered tab out of the accessibility tree; `inert` takes it out
+   of the tab order and out of reach of the pointer.
+   `opacity: 0` as well, because `visibility` is inherited and Monaco sets
+   `visibility: visible` on a couple of hundred of its own descendants — the
+   margin, view zones, overlays — so a hidden layer still painted the editor
+   over the terminal. Opacity cannot be overridden from inside. */
+.app-tab-layer-covered { visibility: hidden; opacity: 0; }
+
+/* ── Tab strip ─────────────────────────────────────────────────────────── */
+
+.tabstrip {
+  display: flex; align-items: stretch;
+  /* `min-width: 0` for the same reason as the grid track above: the strip must
+     never be the thing that decides how wide the workspace column is. */
+  height: var(--bar-height); min-width: 0; padding: 0 4px; gap: 1px;
+  background: var(--chrome-bg); border-bottom: 1px solid var(--chrome-hairline);
+}
+.tabstrip-tabs { display: flex; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.tabstrip-tabs::-webkit-scrollbar { display: none; }
+.tab { position: relative; display: flex; align-items: stretch; flex: 0 0 auto; max-width: 220px; }
+.tab-select {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 0 12px; border: 0; background: transparent;
+  color: var(--chrome-dim); font-size: 11.5px;
+}
+.tab.active .tab-select { color: var(--chrome-ink-strong); }
+.tab.active::after {
+  content: ""; position: absolute; left: 8px; right: 8px; bottom: 0;
+  height: 2px; border-radius: 1px 1px 0 0; background: var(--accent);
+}
+.tab-index {
+  font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
+  font-variant-numeric: tabular-nums;
+}
+/* The pin marks: at the leading edge of a tab, and immediately after an agent
+   row's name. Both are `inline-flex` so the 11px glyph sits on the control's
+   optical centre rather than the text baseline, and both are absent — not
+   hidden — when the thing is not pinned, so nothing reserves a slot the way the
+   state indicators do. */
+.tab-pin, .agent-pin, .agent-group-pin { display: inline-flex; flex: 0 0 auto; color: var(--chrome-dim); }
+/* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
+   inline color, so there is no rule here per document kind. */
+.tab-glyph { display: inline-flex; }
+/* The terminal tab's adapter mark, in the slot a document tab spends on its
+   file glyph. 12px is the global size and already matches the file glyph, so
+   only the ink is scoped: the sidebar's flat `--chrome-dim` would leave the
+   mark dimmer than its own title on the active tab, which is the one tab whose
+   ink is raised. `inherit` makes it follow the tab, both states at once. */
+.tab-select .agent-icon { color: inherit; }
+.tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A preview tab is the one the next single click will replace. Italic is how
+   VS Code says so, and the strip is on the sans stack, so it just works. */
+.tab-title-preview { font-style: italic; }
+/* A tab whose window the host has not created yet. Dimmed rather than
+   skeleton-shaped: the strip is one row of short labels, so a shimmering block
+   would be more motion than the thing it stands in for is worth. The pulse is
+   the only thing saying "still waiting", so it is what carries the state. */
+.tab-pending .tab-select { color: var(--chrome-faint); cursor: default; }
+.tab-pending .tab-title { font-style: italic; }
+.tab-pending-dot {
+  width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%;
+  background: var(--chrome-faint); animation: tab-pending-pulse 1.2s ease-in-out infinite;
+}
+@keyframes tab-pending-pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+/* Reduced motion still needs the tab to read as pending, so the dot stays and
+   only its animation goes. */
+@media (prefers-reduced-motion: reduce) {
+  .tab-pending-dot { animation: none; opacity: 0.6; }
+}
+.tab-zoom { display: inline-flex; color: var(--chrome-faint); }
+/* Sized to `.tab-agent-spinner` below rather than to itself: the dot and the
+   spinner are the same agent's indicator one state apart, so a working tab
+   that finishes must not shift its own title by the difference. */
+.tab-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%;
+  background: var(--accent);
+  font-size: 6px; font-weight: 700; line-height: 1; color: var(--chrome-bg);
+}
+.tab-dot.blocked { background: var(--state-blocked); }
+.tab-dot.done { background: var(--ok); }
+.tab-agent-spinner { width: 8px; height: 8px; color: var(--chrome-ink); }
+/* Same rule as the sidebar dot, glyph suppression included: a tab whose agent
+   state is unknown must not look like a tab whose agent is doing something. */
+.tab-dot.unknown { background: transparent; border: 1px dashed var(--state-unknown); }
+.tab-dot.unknown.glyphs { color: var(--state-unknown); }
+.tab-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; padding: 0; margin-right: 4px;
+  border: 0; border-radius: 3px; background: transparent; color: var(--chrome-faint);
+}
+.tab-close:hover { background: var(--chrome-hover); color: var(--chrome-ink); }
+.tabstrip-tools { display: flex; align-items: center; gap: 2px; margin-left: auto; padding-left: 6px; }
+
+/* ── Panes ─────────────────────────────────────────────────────────────── */
+
+/* The tiled surface is what the tmux client size is measured from, so the
+   breathing room around it is an inset on this element (outside the measured
+   box) rather than padding inside the panes: per-pane padding does not shrink
+   with the pane, so it costs a split pane its bottom row. */
+/* Terminal-colored, not chrome-colored. tmux hands out whole rows and columns,
+   so a pane's pixel box is almost never an exact multiple of the cell size and
+   a few pixels are always left over at its edges. Painting the surface behind
+   the panes in chrome black turned that leftover into visible black bands
+   between splits; painting it in the terminal's own background makes it
+   disappear, and the dividers below are drawn deliberately instead. */
+.terminal-window { position: absolute; inset: 4px; min-height: 0; background: var(--term-bg); }
+/* Divider handles below draw the frame's right and bottom edges without
+   spending layout pixels. Keeping that line out of this shadow matters: the
+   active state replaces the frame shadow with its focus ring, but must not
+   make the split itself disappear. */
+.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); }
+.pane-frame.active { box-shadow: inset 0 0 0 var(--focus-ring) var(--accent); }
+.pane-frame.attention::after {
+  content: ""; position: absolute; inset: var(--attention-inset);
+  border: var(--attention-ring) solid var(--accent);
+  border-radius: var(--attention-radius);
+  pointer-events: none; opacity: .9;
+}
+.terminal-transfer-surface { position: absolute; inset: 0; min-width: 0; min-height: 0; }
+/* xterm.css paints the viewport and scroll area pure black by default, which
+   showed as a band wherever a pane box was not an exact multiple of the cell
+   height. Everything a pane can expose is the terminal background. */
+.terminal-pane { width: 100%; height: 100%; background: var(--term-bg); }
+.terminal-pane .xterm { height: 100%; background: var(--term-bg); }
+/* xterm parses what it is handed on a later task and draws it on a later frame,
+   so the frame right after `open` is an empty grid with a block cursor at
+   (0,0) — every remount (a window or tab switch remounts every pane) flashed
+   that before the content arrived. Only the `.xterm` child is hidden: the pane
+   and its frame already paint `--term-bg`, so what shows in the gap is the
+   terminal background with no cursor in it, at exactly the same layout.
+   `opacity`, never `visibility: hidden`: xterm's keyboard target is a hidden
+   textarea inside this element, and a `visibility: hidden` ancestor makes it
+   unfocusable — the pane focuses itself on mount, so that would drop whatever
+   the user typed into the gap. */
+.terminal-pane[data-painted="false"] .xterm { opacity: 0; }
+.terminal-pane .xterm .xterm-viewport,
+.terminal-pane .xterm .xterm-screen { background-color: var(--term-bg); }
+.terminal-pane[data-local-selection-active="true"] { box-shadow: inset 0 0 0 1px var(--chrome-dim); }
+.terminal-pane .xterm-viewport { scrollbar-width: thin; scrollbar-color: var(--chrome-faint) transparent; }
+/* The line stays one pixel wide while its transparent hit target reaches 12px
+   into the pane. Keeping the target inside the clipped frame makes its owner
+   unambiguous at a split and avoids relying on overflow for pointer events. */
+.divider-handle { position: absolute; z-index: 7; padding: 0; border: 0; background: transparent; touch-action: none; }
+.divider-handle::after { content: ""; position: absolute; background: var(--chrome-hairline); pointer-events: none; }
+.divider-handle.horizontal { top: 0; right: 0; width: 12px; height: 100%; cursor: col-resize; }
+.divider-handle.horizontal::after { top: 0; right: 0; width: 1px; height: 100%; }
+.divider-handle.vertical { bottom: 0; left: 0; width: 100%; height: 12px; cursor: row-resize; }
+.divider-handle.vertical::after { bottom: 0; left: 0; width: 100%; height: 1px; }
+.divider-handle:hover::after, .divider-handle:focus-visible::after { background: var(--accent); }
+
+.terminal-search {
+  position: absolute; z-index: 6; top: 6px; right: 6px;
+  display: flex; align-items: center; gap: 3px; padding: 4px;
+  border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
+  background: var(--chrome-raised); box-shadow: 0 5px 18px rgb(0 0 0 / .5);
+}
+.terminal-search input {
+  width: 190px; padding: 4px 7px;
+  border: 1px solid var(--chrome-border); border-radius: 3px; background: var(--chrome-bg);
+}
+.terminal-search button { width: 24px; height: 24px; border: 0; border-radius: 3px; background: var(--chrome-hover); }
+.search-miss {
+  position: absolute; top: 34px; right: 0; padding: 3px 7px; border-radius: 3px;
+  color: var(--danger-ink); background: var(--danger-wash);
+}
+.new-output {
+  position: absolute; z-index: 5; right: 12px; bottom: 10px; padding: 4px 9px;
+  border: 1px solid var(--accent); border-radius: 12px;
+  background: var(--chrome-raised); color: var(--chrome-ink); font-size: var(--type-secondary);
+}
+.renderer-diagnostic {
+  position: absolute; z-index: 4; left: 8px; top: 6px; max-width: 320px;
+  padding: 2px 6px; border-radius: 3px;
+  color: var(--state-working); background: var(--chrome-raised);
+  font-size: var(--type-meta); pointer-events: none;
+}
+.terminal-drop-hint {
+  position: absolute; z-index: 9; inset: 8px; display: grid; place-items: center;
+  border: 2px dashed var(--accent); border-radius: 8px;
+  color: var(--chrome-ink-strong); background: var(--accent-wash); font-size: var(--type-menu);
+  pointer-events: none;
+}
+.terminal-upload-progress {
+  position: absolute; z-index: 8; right: 10px; bottom: 10px;
+  display: grid; gap: 5px; width: min(360px, calc(100% - 20px));
+  max-height: min(260px, calc(100% - 20px)); padding: 8px; overflow: auto;
+  border: 1px solid var(--chrome-border); border-radius: 6px;
+  background: var(--chrome-raised); box-shadow: 0 8px 26px rgb(0 0 0 / .55);
+}
+.terminal-upload-progress h3 { margin: 0; color: var(--chrome-dim); font-size: var(--type-meta); letter-spacing: .06em; text-transform: uppercase; }
+.terminal-upload { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; font-size: var(--type-meta); }
+.terminal-upload > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-upload > small:first-of-type { color: var(--chrome-dim); text-transform: capitalize; }
+.terminal-upload progress { grid-column: 1 / -1; width: 100%; height: 5px; }
+.terminal-upload button { justify-self: end; }
+.terminal-upload em { grid-column: 1 / -1; color: var(--danger-ink); font-style: normal; overflow-wrap: anywhere; }
+.terminal-upload .transfer-finalizing { grid-column: 1 / -1; color: var(--state-working); }
+.terminal-upload .transfer-origin { grid-column: 1 / -1; color: var(--chrome-faint); overflow-wrap: anywhere; }
+.terminal-transfer-error {
+  position: absolute; z-index: 9; right: 10px; bottom: 10px;
+  max-width: min(360px, calc(100% - 20px)); padding: 6px;
+  border: 1px solid var(--danger); border-radius: 4px;
+  color: var(--danger-ink); background: var(--chrome-raised);
+  box-shadow: 0 8px 26px rgb(0 0 0 / .55); font-size: var(--type-meta); overflow-wrap: anywhere;
+}
+.terminal-upload-review { display: grid; gap: 10px; width: min(620px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 24px)); overflow: auto; }
+.terminal-upload-review ul { max-height: 190px; margin: 0; padding-left: 22px; overflow: auto; color: var(--chrome-dim); font-size: 11px; }
+.terminal-upload-review li + li { margin-top: 4px; }
+.terminal-upload-review label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11px; }
+.terminal-upload-review select { width: 100%; padding: 8px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control); background: var(--chrome-bg); }
+
+/* ── Right panel ───────────────────────────────────────────────────────── */
+
+.right-panel {
+  position: relative;
+  display: flex; flex-direction: column;
+  width: var(--panel-width); flex: 0 0 var(--panel-width); min-height: 0;
+  background: var(--chrome-bg); border-left: 1px solid var(--chrome-hairline);
+}
+/* The sidebar's handle, on the other edge. */
+.panel-resize {
+  position: absolute; z-index: 8; top: 0; bottom: 0; left: -3px; width: 7px;
+  cursor: col-resize; touch-action: none;
+}
+.panel-tabs {
+  display: flex; align-items: stretch; flex: 0 0 var(--bar-height); height: var(--bar-height);
+  padding: 0 6px; border-bottom: 1px solid var(--chrome-hairline);
+}
+.panel-tab {
+  position: relative; display: inline-flex; align-items: center; padding: 0 10px;
+  border: 0; background: transparent; color: var(--chrome-dim); font-size: 11px;
+}
+.panel-tab.active { color: var(--chrome-ink-strong); }
+.panel-tab.active::after {
+  content: ""; position: absolute; left: 6px; right: 6px; bottom: 0;
+  height: 2px; border-radius: 1px 1px 0 0; background: var(--accent);
+}
+.panel-body { flex: 1; min-height: 0; overflow: hidden; display: grid; }
+.panel-body:focus-visible { outline-offset: -2px; }
+
+/* ── Explorer ──────────────────────────────────────────────────────────── */
+
+.explorer-tree { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; overflow: hidden; }
+.explorer-root {
+  display: flex; align-items: baseline; gap: 7px;
+  padding: 7px 12px; border-bottom: 1px solid var(--chrome-hairline);
+}
+/* Sits in the header, never in the scrolling tree: an indicator inside the tree
+   changes its content height, which is what made the Explorer flicker. */
+.explorer-refreshing { margin-left: auto; color: var(--state-working); }
+.explorer-root > span {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--chrome-ink); font-family: var(--font-sans); font-size: var(--type-row); font-weight: 600;
+}
+.explorer-root > small { color: var(--chrome-faint); font-size: var(--type-label); }
+/* Every row is exactly `--explorer-row-height` tall, and nothing sits above the
+   first one. Both are load-bearing rather than cosmetic: above 200 rows the
+   tree reserves the rows it does not mount as spacer height and places the
+   focused row at `index * rowHeight`, so a 4px top padding offset every row by
+   4px, and a "Load more" button of some other height offset every row below any
+   expanded incomplete directory. The bottom padding is safe — it grows the
+   scrollable area after the last row and shifts nothing. */
+.file-tree { --explorer-row-height: 22px; min-height: 0; padding: 0 0 12px; overflow: auto; outline: 0; }
+/* Measured by `useTreeViewport`; see `ROW_METRIC_CLASS`. Out of flow and
+   zero-width, so it costs no layout and is measurable with no rows at all. */
+.file-row-metric {
+  position: absolute; width: 0; height: var(--explorer-row-height);
+  visibility: hidden; pointer-events: none;
+}
+.file-row {
+  position: relative; display: flex; align-items: center;
+  min-width: max-content; width: 100%; height: var(--explorer-row-height); padding-right: 5px;
+}
+.file-row:hover, .file-row:focus-within { background: var(--chrome-hover); }
+.file-row[aria-selected="true"] { background: var(--chrome-selected); }
+/* The tree is UI text, not code: it was 11px monospace, which is the one place
+   in the app where a proportional stack reads better — VS Code's explorer is
+   the UI font at the row size, on the same 22px rows. Nothing depends on
+   monospace alignment any more; the letter glyphs that did are icons now. */
+.file-main {
+  display: grid; grid-template-columns: 12px 16px minmax(90px, 1fr);
+  align-items: center; gap: 4px; flex: 1; min-width: 0; height: 100%;
+  padding: 0; border: 0; background: transparent;
+  color: var(--chrome-ink); font-family: var(--font-sans); font-size: var(--type-row); text-align: left;
+}
+.file-main span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-twisty { display: inline-flex; color: var(--chrome-faint); }
+/* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
+   inline color, so there is no rule here per language. */
+.file-icon { display: inline-flex; align-items: center; justify-content: center; }
+/* One row tall, like every other row: the tree's spacer model places rows at
+   `index * rowHeight`, and a taller "Load more" pushed every row below an
+   expanded incomplete directory out of position. */
+.load-more-files {
+  display: flex; align-items: center; box-sizing: border-box;
+  height: var(--explorer-row-height); margin: 0; padding: 0 8px;
+  border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-raised); color: var(--chrome-dim); font-size: var(--type-meta);
+}
+/* Busy, not removed: the row keeps its place in the tree and its focus, and
+   only says it cannot be pressed again. `disabled` would take it out of the
+   tab order at the exact moment somebody is standing on it. */
+.load-more-files[aria-disabled="true"] { opacity: .6; cursor: default; }
+.transfers { max-height: 180px; padding: 7px; border-top: 1px solid var(--chrome-hairline); overflow: auto; }
+.transfers-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
+.transfers h3 { margin: 0; color: var(--chrome-dim); font-size: var(--type-label); letter-spacing: .07em; text-transform: uppercase; }
+.transfers-header button {
+  padding: 0; border: 0; background: transparent;
+  color: var(--chrome-dim); font-size: var(--type-meta);
+}
+.transfers-header button:hover { color: var(--chrome-ink); }
+.transfer {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 7px;
+  padding: 5px; border-radius: 4px; background: var(--chrome-raised); font-size: var(--type-meta);
+}
+.transfer + .transfer { margin-top: 4px; }
+.transfer span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transfer small { color: var(--chrome-dim); }
+.transfer progress { grid-column: 1 / -1; width: 100%; height: 4px; }
+.transfer button { justify-self: end; }
+.transfer-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 6px; }
+.transfer-actions button { justify-self: auto; }
+.transfer em { grid-column: 1 / -1; color: var(--danger-ink); font-style: normal; }
+.transfer .transfer-detail { grid-column: 1 / -1; }
+.transfer .transfer-finalizing { color: var(--state-working); }
+.transfer.verifying, .terminal-upload.verifying { border-left: 2px solid var(--state-working); }
+.transfer.failed, .terminal-upload.failed { border-left: 2px solid var(--danger); }
+
+/* ── Git ───────────────────────────────────────────────────────────────── */
+
+.git-sidebar { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.git-sidebar-header {
+  display: flex; align-items: center; gap: 6px; padding: 7px 12px;
+  border-bottom: 1px solid var(--chrome-hairline);
+}
+.git-sidebar-identity { display: grid; gap: 1px; flex: 1; min-width: 0; }
+.git-sidebar-header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.git-sidebar-header small {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
+}
+.git-status-groups { min-height: 0; flex: 1; overflow: auto; }
+.git-group > .section-label { display: block; padding: 8px 12px 3px; }
+.git-group ul { margin: 0; padding: 0; list-style: none; }
+.git-group li { position: relative; }
+.git-group li.conflicted { box-shadow: inset 2px 0 var(--danger); }
+.git-file {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 3px 12px; border: 0; background: transparent;
+  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px; text-align: left;
+}
+/* The row, not the button: the hover actions sit outside the button but inside
+   the row, so pointing at one must not make the row look un-hovered. */
+.git-group li:hover .git-file, .git-group li:focus-within .git-file { background: var(--chrome-hover); }
+/* The per-type tint is data (`features/files/fileIcons.ts`) and arrives as an
+   inline color, so there is no rule here per language. */
+.git-file-icon { flex: 0 0 auto; display: inline-flex; }
+/* The basename gets the space it needs; the directory beside it is the part
+   allowed to be truncated. */
+.git-file-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-file-dir {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--chrome-faint); font-size: var(--type-meta);
+}
+.git-state { margin-left: auto; width: 10px; flex: 0 0 auto; text-align: center; font-weight: 600; color: var(--chrome-faint); }
+.git-state.modified { color: var(--state-working); }
+.git-state.added, .git-state.copied { color: var(--term-2); }
+.git-state.deleted { color: var(--danger); }
+.git-state.untracked { color: var(--term-4); }
+.git-state.renamed, .git-state.typeChanged { color: var(--term-5); }
+/* Stage and discard take the status letter's place on hover, the way VS Code's
+   Source Control rows do. The letter is hidden rather than removed, so the row
+   below does not shift when the pointer crosses it. */
+.git-row-actions {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  display: none; gap: 2px; padding: 0 2px;
+  border-radius: var(--radius-control); background: var(--chrome-hover);
+}
+.git-group li:hover .git-row-actions, .git-group li:focus-within .git-row-actions { display: inline-flex; }
+.git-group li:hover .git-state, .git-group li:focus-within .git-state { visibility: hidden; }
+.git-row-actions button {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0;
+  border: 0; border-radius: var(--radius-control);
+  background: transparent; color: var(--chrome-dim);
+}
+.git-row-actions button:hover { background: var(--chrome-selected); color: var(--chrome-ink); }
+.git-entry-note { display: block; padding: 0 12px 3px 30px; color: var(--chrome-faint); font-size: var(--type-meta); }
+.git-show-more { padding: 4px 12px; }
+.git-show-more button {
+  width: 100%; padding: 4px; border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-raised); color: var(--chrome-dim); font-size: var(--type-meta);
+}
+.git-commit { display: grid; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--chrome-hairline); }
+.git-commit textarea {
+  min-height: 46px; resize: vertical; padding: 6px;
+  border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-size: 11px;
+}
+/* Commit, its one extra action, and Push on one row. The split button is a
+   single control visually — one border, one hairline between the halves — so
+   the caret reads as belonging to Commit rather than as a third button. */
+.git-commit-actions { display: flex; gap: 6px; align-items: stretch; }
+.git-commit-actions .split-button { display: flex; flex: 1 1 auto; min-width: 0; }
+.git-commit-actions .split-button > button:first-child {
+  flex: 1 1 auto; min-width: 0; border-top-right-radius: 0; border-bottom-right-radius: 0;
+}
+.git-commit-actions .split-button-more {
+  flex: 0 0 auto; padding-inline: 7px;
+  border-top-left-radius: 0; border-bottom-left-radius: 0;
+  box-shadow: inset 1px 0 0 rgb(0 0 0 / .22);
+}
+.git-output {
+  max-height: 96px; margin: 0; overflow: auto; padding: 6px; border-radius: 3px;
+  background: var(--chrome-bg); color: var(--term-2); font-size: var(--type-meta); white-space: pre-wrap;
+}
+.git-output.error { color: var(--danger-ink); }
+
+/* ── Document surfaces ─────────────────────────────────────────────────── */
+
+/* Every document surface paints its own background. They are drawn over a
+   terminal layer that is still in the tree, and a translucent one would let a
+   hidden pane's chrome read through on any future theme where the two
+   backgrounds differ. */
+.app-tab-surface {
+  position: absolute; inset: 0; display: grid; align-content: center; justify-items: center;
+  gap: 8px; padding: 32px; background: var(--chrome-bg); color: var(--chrome-dim); text-align: center;
+}
+.app-tab-surface h1 { margin: 0; color: var(--chrome-ink); font-size: 16px; }
+.app-tab-surface code {
+  max-width: min(680px, 90%); padding: 5px 8px; overflow: hidden;
+  border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-raised); color: var(--chrome-dim);
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.app-tab-surface p { font-size: 11.5px; }
+.app-tab-icon {
+  display: grid; place-items: center; width: 40px; height: 40px;
+  border: 1px solid var(--chrome-border); border-radius: 10px;
+  background: var(--chrome-raised); color: var(--chrome-dim); font: 16px var(--font-mono);
+}
+.file-tab-surface {
+  position: absolute; inset: 0; display: grid; grid-template-rows: var(--bar-height) minmax(0, 1fr);
+  min-width: 0; min-height: 0; background: var(--chrome-bg);
+}
+.git-diff-surface {
+  position: absolute; inset: 0; display: grid; grid-template-rows: var(--bar-height) auto minmax(0, 1fr) auto;
+  min-width: 0; min-height: 0; background: var(--chrome-bg);
+}
+.editor-toolbar {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  height: var(--bar-height); padding: 0 8px;
+  border-bottom: 1px solid var(--chrome-hairline); background: var(--chrome-bg);
+}
+.editor-toolbar > code {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--chrome-dim); font-size: var(--type-meta);
+}
+.editor-toolbar > button, .markdown-modes button, .git-hunk-actions button {
+  padding: 3px 8px; border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-raised); color: var(--chrome-dim); font-size: var(--type-meta);
+}
+.markdown-modes { display: flex; }
+.markdown-modes button { border-radius: 0; }
+.markdown-modes button:first-child { border-radius: 4px 0 0 4px; }
+.markdown-modes button:last-child { border-radius: 0 4px 4px 0; }
+.markdown-modes button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-wash); color: var(--chrome-ink-strong); }
+/* The chip keeps its footprint whether or not it is saying anything: 72px is
+   the widest label ("Save failed") plus its padding and a little slack, so a
+   status appearing or leaving never shifts the buttons beside it. It fades
+   rather than blinks. */
+.save-state {
+  flex: 0 0 auto; min-width: 72px; padding: 2px 6px; border-radius: 9px;
+  color: var(--chrome-faint); font-size: var(--type-label); text-align: right;
+  opacity: 0; transition: opacity 160ms ease;
+}
+.save-state.saving, .save-state.dirty { color: var(--state-working); background: var(--chrome-raised); opacity: 1; }
+.save-state.error { color: var(--danger-ink); background: var(--danger-wash); opacity: 1; }
+.git-diff-toolbar { min-width: 0; }
+.git-diff-toolbar code { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-target {
+  padding: 2px 5px; border-radius: 3px; background: var(--chrome-raised);
+  color: var(--chrome-dim); font-size: var(--type-label); text-transform: uppercase;
+}
+.git-target.staged { color: var(--term-2); }
+.git-hunk-actions .danger { color: var(--danger-ink); }
+.git-diff-error { padding: 5px 8px; border-bottom: 1px solid var(--danger); background: var(--danger-wash); color: var(--danger-ink); font-size: 11px; }
+/* The editor's own rejection banner. It had no rule at all before — it
+   inherited whatever the tab header left behind — and now that it carries a
+   disclosure it needs the same treatment as every other one. */
+.editor-error { padding: 5px 10px; background: var(--danger-wash); color: var(--danger-ink); font-size: 11px; overflow-wrap: anywhere; }
+.git-diff-content { min-width: 0; min-height: 0; }
+.git-diff-empty { min-height: 0; display: grid; align-content: center; justify-items: center; padding: 30px; background: var(--chrome-bg); color: var(--chrome-dim); text-align: center; }
+.git-diff-empty h1 { margin: 10px 0 3px; color: var(--chrome-ink); font-size: 15px; }
+.git-hunk-actions {
+  display: flex; gap: 6px; overflow-x: auto; padding: 5px 8px;
+  border-top: 1px solid var(--chrome-hairline); background: var(--chrome-bg);
+}
+.git-hunk-actions > div { display: flex; align-items: center; gap: 4px; flex: none; padding-left: 6px; border-left: 1px solid var(--chrome-hairline); }
+.git-hunk-actions span { color: var(--chrome-dim); font-size: var(--type-meta); }
+.file-tab-surface[data-view-mode="split"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.file-tab-surface[data-view-mode="split"] .editor-toolbar { grid-column: 1 / -1; }
+.monaco-host { min-width: 0; min-height: 0; overflow: hidden; }
+.markdown-preview {
+  min-width: 0; min-height: 0; margin: 0; padding: 24px clamp(18px, 5vw, 56px); overflow: auto;
+  border-left: 1px solid var(--chrome-hairline);
+  color: var(--chrome-ink); background: var(--chrome-bg); font-size: var(--type-menu); line-height: 1.62;
+  /* Rendered Markdown is document text: it selects, it says so under the
+     pointer, and it keeps saying so if the chrome around it ever stops being
+     selectable. */
+  user-select: text; cursor: text;
+}
+.markdown-preview :first-child { margin-top: 0; }
+.markdown-preview h1, .markdown-preview h2, .markdown-preview h3 { color: var(--chrome-ink-strong); }
+.markdown-preview h1, .markdown-preview h2 { padding-bottom: .3em; border-bottom: 1px solid var(--chrome-hairline); }
+.markdown-preview a { color: var(--accent); cursor: pointer; }
+.markdown-preview code { padding: 2px 4px; border-radius: 3px; background: var(--chrome-raised); }
+.markdown-preview pre { padding: 12px; overflow: auto; border: 1px solid var(--chrome-hairline); border-radius: 6px; background: var(--chrome-raised); }
+.markdown-preview pre code { padding: 0; background: transparent; }
+.markdown-preview img { max-width: 100%; cursor: default; }
+.markdown-preview blockquote { margin-left: 0; padding-left: 14px; border-left: 3px solid var(--chrome-border); color: var(--chrome-dim); }
+.binary-surface {
+  position: absolute; inset: 0; display: grid; align-content: center; justify-items: center;
+  gap: 10px; padding: 28px; overflow: auto; background: var(--chrome-bg); color: var(--chrome-dim); text-align: center;
+}
+.binary-surface img { max-width: min(900px, 90%); max-height: min(650px, 65vh); border: 1px solid var(--chrome-border); object-fit: contain; }
+.binary-surface h1 { margin: 0; color: var(--chrome-ink); }
+.binary-surface dl { display: grid; grid-template-columns: auto auto; gap: 4px 14px; text-align: left; }
+.binary-surface dt { color: var(--chrome-faint); }
+.binary-surface dd { margin: 0; }
+.binary-icon {
+  display: grid; place-items: center; width: 56px; height: 56px;
+  border: 1px solid var(--chrome-border); border-radius: 12px;
+  background: var(--chrome-raised); font: 16px var(--font-mono);
+}
+
+/* ── Context menus ─────────────────────────────────────────────────────── */
+
+.context-menu {
+  position: fixed; z-index: 60; display: grid; min-width: 180px; padding: 4px;
+  max-height: calc(100vh - 16px); overflow-y: auto;
+  border: 1px solid var(--chrome-border); border-radius: 7px;
+  background: var(--chrome-raised); box-shadow: 0 10px 28px rgb(0 0 0 / .6);
+  font-size: var(--type-menu);
+}
+.context-menu-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  height: var(--menu-row-height); padding: 0 8px;
+  border: 0; border-radius: 4px; background: transparent;
+  color: var(--chrome-ink); text-align: left; white-space: nowrap;
+}
+.context-menu-item:hover:not(:disabled) { background: var(--accent); color: var(--accent-ink); }
+/* Keeps the outline. Under forced-colors the accent fill flattens to a system
+   color and a menu item with `outline: none` would have no focus affordance at
+   all — on the surface that now carries every row action in the app. */
+.context-menu-item:focus-visible { background: var(--accent); color: var(--accent-ink); outline-offset: -2px; }
+/* A picking menu's rows: the check column is reserved on every row, so the
+   labels sit on one left edge whichever row is checked. */
+.menu-item-label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.menu-item-check { display: inline-flex; flex: none; width: 11px; justify-content: center; }
+.context-menu-item.destructive { color: var(--danger-ink); }
+.context-menu-item.destructive:hover:not(:disabled), .context-menu-item.destructive:focus-visible { background: var(--danger); color: var(--accent-ink); }
+
+/* ── Palette and dialogs ───────────────────────────────────────────────── */
+
+.modal-backdrop {
+  position: fixed; z-index: 100; inset: 0;
+  display: grid; place-items: start center; padding-top: 12vh;
+  background: rgb(0 0 0 / .35); backdrop-filter: blur(1px);
+}
+.palette {
+  width: var(--palette-width); max-width: calc(100vw - 32px);
+  border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
+  background: var(--chrome-raised); box-shadow: 0 24px 60px rgb(0 0 0 / .6);
+  overflow: hidden;
+}
+.palette-input {
+  display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+  border-bottom: 1px solid var(--chrome-hairline);
+}
+.palette-input input {
+  flex: 1; min-width: 0; padding: 0; border: 0; background: transparent;
+  color: var(--chrome-ink-strong); font-size: var(--type-menu);
+}
+/* Inset, not removed: the input is the only focusable thing in the palette,
+   and under forced-colors an unringed one is invisible. The color is stated
+   rather than inherited — the platform ring is the system accent, which is the
+   one place the app's single accent would otherwise vary by machine. */
+.palette-input input:focus-visible {
+  outline: var(--focus-ring) solid var(--accent); outline-offset: -1px;
+}
+.palette-hint { flex: 0 0 auto; color: var(--chrome-faint); font-size: var(--type-meta); }
+/* A whole number of rows, plus the padding. 420px was not one, so the list
+   ended by slicing its last row through the middle — the mock's palette ends on
+   a row boundary. */
+.palette-list {
+  max-height: min(calc(var(--palette-row-height) * 14 + 12px), 60vh);
+  padding: 4px 0 8px; overflow-y: auto;
+}
+.palette-search { flex: 0 0 auto; color: var(--chrome-faint); }
+.palette-group { padding: 8px 14px 2px; }
+.palette-group { font-size: var(--type-label); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--chrome-faint); }
+.palette-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  height: var(--palette-row-height); padding: 0 14px;
+  border: 0; background: transparent; color: var(--chrome-ink);
+  font-size: var(--type-row); text-align: left;
+}
+.palette-row[data-unavailable] { opacity: .42; cursor: not-allowed; }
+.palette-row.selected:not([data-unavailable]) { background: var(--accent); color: var(--accent-ink); }
+.palette-row.selected:not([data-unavailable]) kbd,
+.palette-row.selected:not([data-unavailable]) .palette-meta { color: color-mix(in srgb, var(--accent-ink) 80%, transparent); }
+/* The host letter flips with the row, as it does on the active workspace row. */
+.palette-row.selected:not([data-unavailable]) .host-letter { color: var(--accent-ink); }
+.palette-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-meta {
+  margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
+}
+.palette-row kbd, .context-menu kbd {
+  margin-left: auto; padding: 0; border: 0; background: none;
+  color: var(--chrome-dim); font-family: var(--font-sans); font-size: 11px; letter-spacing: .06em;
+}
+
+.confirmation, .shortcut-dialog, .settings-dialog {
+  width: min(620px, calc(100vw - 32px));
+  border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
+  background: var(--chrome-raised); box-shadow: 0 24px 60px rgb(0 0 0 / .6);
+}
+.confirmation { padding: 20px; }
+.confirmation h2 { margin: 0 0 10px; font-size: 16px; }
+.confirmation p { color: var(--chrome-dim); line-height: 1.5; }
+.text-input-dialog form, .text-input-dialog label,
+.new-workspace-dialog form, .new-workspace-dialog label { display: grid; gap: 8px; }
+.text-input-dialog input, .file-dialog input:not([type="checkbox"]) {
+  width: 100%; padding: 7px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
+  background: var(--chrome-bg); color: var(--chrome-ink);
+}
+.new-workspace-dialog input {
+  width: 100%; padding: 7px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
+  background: var(--chrome-bg); color: var(--chrome-ink);
+}
+.new-workspace-dialog form { gap: 12px; }
+.new-workspace-host-picker {
+  display: flex; align-items: center; gap: 7px; width: 100%; min-height: 30px; padding: 6px !important;
+  border: 1px solid var(--chrome-border) !important; border-radius: var(--radius-control);
+  background: var(--chrome-bg) !important; color: var(--chrome-ink) !important; text-align: left;
+}
+.new-workspace-host-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.new-workspace-host-phase { margin-left: auto; color: var(--chrome-faint); font-size: var(--type-secondary); }
+.new-workspace-host-caret {
+  width: 0; height: 0; margin: 0 5px 0 auto;
+  border: 4px solid transparent; border-top-color: var(--chrome-dim); transform: translateY(2px);
+}
+.new-workspace-host-phase + .new-workspace-host-caret { margin-left: 1px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+/* Every button inside a dialog, rather than an allow-list of the surfaces that
+   happened to have one when this rule was written. The list version silently
+   left the saved-host Delete with no border, no padding and no background —
+   dim text that did not read as a control in either state — and would have
+   done the same to the next button added to any dialog. Opt out with
+   `.bar-button` / `.inline-action`, which bring their own chrome. */
+:where(.modal-backdrop) button:not(.bar-button):not(.inline-action):not(.segment) {
+  padding: 6px 12px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
+  background: var(--chrome-bg); color: var(--chrome-ink);
+}
+/* A destructive action that is not the confirmation itself: the danger ink of
+   `.context-menu-item.destructive`, which is the language this app already
+   uses for "this removes something", without the filled weight of `.danger`. */
+.danger-quiet { color: var(--danger-ink) !important; }
+.danger-quiet:hover:not(:disabled), .danger-quiet:focus-visible {
+  border-color: var(--danger) !important; background: var(--danger) !important; color: var(--accent-ink) !important;
+}
+.primary { border-color: var(--accent) !important; background: var(--accent) !important; color: var(--accent-ink) !important; }
+.primary:disabled { opacity: .5; }
+.danger { border-color: var(--danger) !important; background: var(--danger) !important; color: var(--accent-ink) !important; }
+.dialog-error { color: var(--danger-ink) !important; }
+.file-dialog { display: grid; gap: 11px; padding: 20px; }
+.file-dialog label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11px; }
+.file-dialog .overwrite { grid-template-columns: auto 1fr; align-items: center; }
+/* Named for the download dialog it was written for; that dialog is gone and
+   the terminal upload confirmation is the surviving user. */
+.download-warning {
+  padding: 8px; border: 1px solid var(--state-working); border-radius: 4px;
+  color: var(--state-working); background: var(--chrome-bg); font-size: var(--type-meta);
+}
+
+.settings-dialog { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; max-height: min(640px, 78vh); }
+.settings-dialog > header { display: grid; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--chrome-hairline); }
+.settings-dialog > header h2 { margin: 0; font-size: 16px; }
+.settings-dialog > footer { display: flex; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--chrome-hairline); }
+.segmented { display: flex; gap: 2px; }
+.segment {
+  padding: 4px 10px; border: 0; border-radius: var(--radius-control);
+  background: transparent; color: var(--chrome-dim); font-size: 11.5px;
+}
+.segment.active { background: var(--chrome-hover); color: var(--chrome-ink-strong); }
+.settings-body { display: grid; align-content: start; gap: 12px; padding: 16px; overflow-y: auto; }
+.settings-body label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11.5px; }
+/* The controls take the row type size explicitly rather than inheriting the
+   caption size their `label` sets — `font: inherit` in the reset means a field
+   otherwise renders at 11.5px, which is a size for the words *above* a control,
+   not the words *in* one. `min-height` states the field height once instead of
+   letting each control derive its own from its padding and its type size; the
+   rule below is what actually recovers the picker's, and this is what keeps
+   every field on the same one afterwards. */
+.settings-body input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), .settings-body select {
+  width: 100%; min-height: 30px; padding: 6px; border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-size: var(--type-row);
+}
+/* Drawn rather than native. WKWebView renders `appearance: menulist` at the
+   platform control's intrinsic height and discards most of the padding around
+   it, so the saved-host picker sat visibly shorter than the text inputs beside
+   it however it was styled. Taking the appearance off makes it an ordinary box
+   that honours the rule above; the cost is the disclosure caret, drawn back
+   here from two gradients so it stays a token colour — this file holds no
+   colour literals, and a caret baked into an SVG data URI would be one. */
+.settings-body select {
+  appearance: none; -webkit-appearance: none; padding-right: 28px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--chrome-dim) 50%),
+    linear-gradient(135deg, var(--chrome-dim) 50%, transparent 50%);
+  /* Offset by exactly one box width, so the two halves meet at the apex
+     instead of overlapping into a blunt tip. */
+  background-position: right 14px center, right 9px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.settings-check { display: flex !important; align-items: center; gap: 8px; color: var(--chrome-ink) !important; }
+.settings-hint { margin: -6px 0 4px 22px; color: var(--chrome-faint); font-size: var(--type-secondary); line-height: 1.5; }
+/* The picker and "+ Add host" on one row: choosing a saved host and starting a
+   new one are the same decision, and separating them made the button read as an
+   action on whatever the picker was showing. Aligned to the end of the row so
+   the button meets the field, not the caption above it. */
+.settings-host-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.settings-host-picker label { min-width: 0; }
+/* Its own row under the picker, so the panel keeps one full-width column and a
+   destructive control is not a misclick away from the control above it. */
+.settings-host-actions { display: grid; gap: 4px; justify-items: start; }
+.settings-host-actions .settings-hint { margin: 0; }
+/* The panel's two ways of naming a group of controls, kept identical on
+   purpose: a fieldset's legend, and a heading over a block that is not one. */
+.settings-modes legend, .settings-fieldset legend, .settings-body .settings-heading {
+  padding: 0 0 4px; color: var(--chrome-faint); font-size: var(--type-label);
+  letter-spacing: var(--tracking-label); text-transform: uppercase;
+}
+.settings-body .settings-heading { margin: 4px 0 0; font-weight: inherit; }
+.settings-modes { display: flex; gap: 16px; padding: 0; border: 0; }
+.settings-modes label { display: flex !important; align-items: center; gap: 5px; }
+/* The other kind of group: full-width fields stacked, not a row of radios.
+   `.settings-modes` lays its children out in a line and forces its labels
+   inline, which is right for two radio buttons and wrong for a labelled text
+   field with a hint under it. */
+.settings-fieldset { display: grid; align-content: start; gap: 12px; padding: 0; border: 0; }
+.settings-fieldset .settings-hint { margin-left: 0; }
+.settings-helper { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.settings-helper p { flex-basis: 100%; margin: 0; color: var(--chrome-dim); font-size: 11px; }
+.helper-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; flex-basis: 100%; margin: 0; font-size: var(--type-meta); }
+.helper-details dt { color: var(--chrome-faint); }
+.helper-details dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.shortcut-dialog { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; max-height: min(720px, 78vh); }
+.shortcut-dialog > header, .shortcut-dialog > footer {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 16px; border-bottom: 1px solid var(--chrome-hairline);
+}
+.shortcut-dialog > header h2 { margin: 0; font-size: 16px; }
+.shortcut-dialog > header p { margin: 3px 0 0; color: var(--chrome-dim); font-size: 11px; }
+.shortcut-dialog > header button { width: 26px; height: 26px; border: 0; border-radius: var(--radius-control); background: transparent; }
+.shortcut-dialog > footer { justify-content: flex-end; border-top: 1px solid var(--chrome-hairline); border-bottom: 0; }
+.shortcut-dialog > footer button { padding: 6px 10px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control); background: var(--chrome-bg); }
+.shortcut-warning {
+  margin: 10px 16px 0; padding: 6px 8px; border: 1px solid var(--danger); border-radius: 4px;
+  color: var(--danger-ink); background: var(--danger-wash); font-size: 11px;
+}
+.shortcut-list { min-height: 0; padding: 8px 16px; overflow-y: auto; }
+.shortcut-list label { display: grid; grid-template-columns: minmax(0, 1fr) 200px; align-items: center; gap: 12px; padding: 6px 0; }
+.shortcut-list label > span:first-child { display: grid; }
+.shortcut-list small { color: var(--chrome-faint); }
+.shortcut-field { display: flex; align-items: center; gap: 8px; }
+.shortcut-field input {
+  min-width: 0; flex: 1; padding: 5px 8px;
+  border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-size: 11px;
+}
+.shortcut-field kbd { color: var(--chrome-dim); font-family: var(--font-sans); font-size: 11px; }
+.shortcut-editor { display: grid; gap: 8px; margin: 8px 0 14px; padding: 8px; border: 1px solid var(--chrome-border); }
+
+.modal-backdrop.hook-review-backdrop { place-items: center; padding: 12px; }
+.hook-review {
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 24px); padding: 20px; overflow: hidden;
+  border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
+  background: var(--chrome-raised); box-shadow: 0 18px 60px rgb(0 0 0 / .6);
+}
+.hook-review-scroll { min-height: 0; padding-right: 4px; overflow-y: auto; scrollbar-width: thin; }
+.hook-review h2 { margin: 2px 0 0; font-size: 16px; }
+.hook-review header small, .hook-review p, .hook-review li span { color: var(--chrome-dim); }
+.hook-review li { display: grid; gap: 3px; margin-bottom: 8px; }
+.hook-review footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--chrome-hairline); }
+.hook-review footer button { padding: 6px 11px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control); background: var(--chrome-bg); }
+.hook-backup { overflow-wrap: anywhere; }
+.hook-review dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 9px; margin: 6px 0; font-size: var(--type-meta); }
+.hook-review dt { color: var(--chrome-faint); }
+.hook-review dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.hook-trust { padding: 8px; border: 1px solid var(--state-working); border-radius: var(--radius-control); background: var(--chrome-bg); color: var(--state-working) !important; }
+.hook-review pre {
+  max-height: 220px; margin: 4px 0 8px; padding: 8px; overflow: auto;
+  border: 1px solid var(--chrome-hairline); border-radius: 4px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-size: var(--type-meta); white-space: pre;
+}
+.hook-preview-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.hook-review h3 { margin: 6px 0 2px; font-size: 11px; }
+
+/* The one-time "set up this host" prompt.
+   Its own card, for the same reason the hook review has one: there is no
+   `.modal` rule in this stylesheet — each dialog names its own class — so a
+   dialog that only claimed `.modal` rendered as unstyled full-bleed text
+   across the whole window, with its buttons in the top-left corner and the
+   sidebar showing through. Caught on a real screenshot, not in a test. */
+.modal-backdrop.host-setup-backdrop { place-items: center; padding: 12px; }
+.host-setup {
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 24px); padding: 20px; overflow: hidden;
+  border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
+  background: var(--chrome-raised); box-shadow: 0 18px 60px rgb(0 0 0 / .6);
+}
+.host-setup h2 { margin: 2px 0 0; font-size: 16px; }
+.host-setup header small { color: var(--chrome-faint); }
+.host-setup-body { display: grid; gap: 10px; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+.host-setup-body p { margin: 0; color: var(--chrome-dim); line-height: 1.45; }
+.host-setup-body .quiet-note { color: var(--chrome-faint); font-size: var(--type-secondary); }
+.host-setup-paths { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.host-setup-paths li {
+  display: grid; gap: 2px; padding: 8px 10px;
+  border: 1px solid var(--chrome-hairline); border-radius: var(--radius-control);
+  background: var(--chrome-bg);
+}
+.host-setup-paths code { font-size: var(--type-meta); color: var(--chrome-dim); overflow-wrap: anywhere; }
+.host-setup footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--chrome-hairline); }
+.host-setup footer button { padding: 6px 11px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control); background: var(--chrome-bg); }
+
+/* ── Toasts ────────────────────────────────────────────────────────────── */
+
+/* Scoped to the shell, dismissed with the state that raised them, and never
+   overlapping the terminal surface's measured box. */
+.toast {
+  position: fixed; z-index: 90; right: 14px; bottom: 14px;
+  display: grid; gap: 5px; max-width: 420px; padding: 12px;
+  border: 1px solid var(--chrome-border); border-radius: 8px;
+  background: var(--chrome-raised); box-shadow: 0 12px 32px rgb(0 0 0 / .7);
+  font-size: 11px;
+}
+.toast[role="alert"], .toast-problem { border-color: var(--danger); }
+.toast-problem > span { color: var(--danger-ink); }
+.toast span { color: var(--chrome-dim); overflow-wrap: anywhere; }
+/* The problem toast carries a SurfaceError rather than a bare line, so the
+   summary is what is read and the raw rejection is one disclosure down. No
+   padding or wash of its own — the toast already is the container. */
+.toast-body { padding: 0; background: none; font-size: inherit; }
+.toast-body > .surface-error-summary { color: var(--danger-ink); }
+.toast > div { display: flex; gap: 6px; }
+.toast button {
+  justify-self: start; padding: 5px 9px;
+  border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-bg); color: var(--chrome-ink);
+}
+
+/* ── Narrow windows ────────────────────────────────────────────────────── */
+
+/* Below 880px the sidebar and the panel overlay the terminal rather than
+   taking width from it, so the product stays visible at any window size. */
+@media (max-width: 880px) {
+  /* Positioned inside `.shell-body` (which is `position: relative` for the
+     disconnected strip already), not against the viewport: the drawers belong
+     to the body, and the strip stays above them. */
+  .shell.compact .sidebar {
+    position: absolute; z-index: 25; top: 0; bottom: 0; left: 0;
+    width: min(var(--sidebar-width), 80vw);
+    box-shadow: 12px 0 30px rgb(0 0 0 / .7);
+  }
+  .shell.compact .right-panel {
+    position: absolute; z-index: 25; top: 0; bottom: 0; right: 0;
+    width: min(var(--panel-width), 80vw);
+    box-shadow: -12px 0 30px rgb(0 0 0 / .7);
+  }
+  .tab { max-width: 150px; }
+  .file-tab-surface[data-view-mode="split"] { grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--bar-height) minmax(180px, 1fr) minmax(180px, 1fr); }
+  .file-tab-surface[data-view-mode="split"] .editor-toolbar { grid-column: 1; }
+  .markdown-preview { border-left: 0; border-top: 1px solid var(--chrome-hairline); }
+  .terminal-upload-progress { right: 6px; bottom: 6px; width: calc(100% - 12px); max-height: 44%; }
+}
+
+@media (max-width: 600px) {
+  .palette, .confirmation, .shortcut-dialog, .settings-dialog, .hook-review {
+    width: calc(100vw - 16px); max-height: calc(100vh - 16px); border-radius: 6px;
+  }
+  .modal-backdrop { padding: 8px; place-items: center; }
+  .shortcut-list label { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .hook-preview-pair { grid-template-columns: minmax(0, 1fr); }
+  .toast { right: 8px; bottom: 8px; left: 8px; max-width: none; }
+}
+
+/* ── Accessibility modes ───────────────────────────────────────────────── */
+
+@media (forced-colors: active) {
+  /* Colors are replaced by the system palette here, so anything that carried
+     meaning purely as a color has to carry it as a border or an outline. */
+  .workspace-button.active, .tab.active, .pane-frame.active, .palette-row.selected, .agent-button.selected,
+  .panel-tab.active, .segment.active, .file-row[aria-selected="true"],
+  .bar-button[aria-pressed="true"] {
+    outline: 2px solid Highlight; outline-offset: -2px;
+  }
+  .pane-frame.attention::after { border-color: Highlight; }
+  .state-dot, .tab-dot, .link-dot, .badge { border: 1px solid ButtonText; }
+  .bar-button:disabled, .bar-button[aria-disabled="true"] { color: GrayText; }
+  /* Four state colors become one system color here, so the shape carries the
+     encoding whether or not the user turned the glyph option on. The dots grow
+     to fit a legible glyph — and the tab's spinner grows with them, because a
+     dot and a spinner are one indicator a state apart and neither a tab title
+     nor a workspace name may move when an agent starts working. */
+  .state-dot, .tab-dot {
+    width: 11px; height: 11px; overflow: visible;
+    background: Canvas; color: ButtonText; font-size: 9px;
+  }
+  .tab-agent-spinner { width: 11px; height: 11px; }
+  .workspace-title .spinner { width: 11px; height: 11px; }
+  .state-dot:not(.glyphs), .tab-dot:not(.glyphs) { color: ButtonText; }
+  /* The mark badge is 6px and cannot hold a glyph, so here it keeps what a
+     shape can carry at that size: filled for the two states that want a human,
+     dashed-outlined for the one nothing has reported. Idle draws no badge at
+     all, and working is already a spinner and needs no help. The ring loses its
+     meaning when every background is Canvas, so it goes. */
+  .agent-mark-badge { box-shadow: none; background: Canvas; }
+  .agent-mark-badge:not(.working) { border: 1px solid ButtonText; }
+  .agent-mark-badge.blocked, .agent-mark-badge.done { background: ButtonText; }
+  .agent-mark-badge.unknown { border-style: dashed; }
+  .link-strip { border-bottom: 2px solid ButtonText; }
+  .context-menu, .palette, .settings-dialog, .confirmation, .shortcut-dialog { border: 1px solid ButtonText; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .001ms !important;
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

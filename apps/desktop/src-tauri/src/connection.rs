@@ -1,0 +1,1490 @@
+use std::{
+    collections::HashMap,
+    process::Child,
+    sync::{
+        Arc, LazyLock, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        mpsc,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+use serde::{Deserialize, Serialize};
+use tauri::{
+    State,
+    ipc::{Channel, InvokeResponseBody},
+};
+use tmux_agent_protocol::{
+    envelope,
+    v1::{self, envelope::Payload},
+};
+use uuid::Uuid;
+
+use tmux_control::MAX_INPUT_REQUEST_BYTES;
+
+mod event_frame;
+use event_frame::{TerminalEvent, encode_event};
+mod delivery_window;
+use delivery_window::{DeliveryWindow, HostCharge};
+pub(crate) mod delivery_ack;
+use delivery_ack::{flush_delivery_ack, forfeit_delivery_charge};
+mod dispatch;
+mod operations;
+use dispatch::{
+    ClientInputDispatch, ClientInputQueue, INPUT_BYTE_BUDGET, INPUT_LATENCY_BUCKETS,
+    INPUT_MESSAGE_BUDGET, ResizeQueue, StopSignal, TerminalSize, input_latency_bucket,
+    run_client_input_dispatch, run_client_resize_dispatch,
+};
+use operations::{Bound, OperationClaim, OperationLane, OperationRegistry};
+mod writer;
+use writer::ControlWriterHandle;
+pub(crate) mod agent;
+pub(crate) mod files;
+pub(crate) mod git;
+pub(crate) mod git_content;
+use git_content::GitContentReads;
+pub(crate) mod tmux_action;
+// Switch-timeline instrumentation. Compiled out of a plain release build with
+// the rest of `perf_log`; see `perf_log/switch_timing.rs` for what each stamp
+// means and why the counters are relaxed.
+use crate::perf_log::switch_timing::{AnswerMark, CountingReader, LinkCounters, RequestTiming};
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a written request may wait for its answer. The host answers a
+/// request *after* the ordered events it caused, and a workspace switch causes
+/// every pane's seed — two thousand lines of scrollback each — so on a 2 Mbit/s
+/// link the answer sits behind ~2 MB of screens for eight seconds or more. Five
+/// seconds turned every switch on such a link into a refusal, a retry, and
+/// eventually a teardown (2026-08-29). The write keeps its short deadline: a
+/// pipe that will not take five seconds' worth of bytes is a different fault.
+const HOST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Timeouts in a row before the lane is judged stalled rather than slow —
+/// and, because parallel requests time out together, only once the host has
+/// answered nothing for `STALLED_LANE_SILENCE` either. Together they catch
+/// the stalled-lane incident within a minute of serial requests (three
+/// `HOST_RESPONSE_TIMEOUT`s) and never punish a slow link for a burst.
+const STALLED_LANE_UNANSWERED_REQUESTS: u32 = 3;
+const STALLED_LANE_SILENCE: Duration = Duration::from_secs(15);
+const GIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum ConnectionSpec {
+    Local,
+    Ssh {
+        #[serde(default, rename = "profileId")]
+        profile_id: String,
+        target: String,
+        #[serde(default, rename = "configPath")]
+        config_path: Option<String>,
+    },
+}
+
+impl ConnectionSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Self::Ssh {
+            target,
+            config_path,
+            profile_id,
+        } = self
+        {
+            validate_profile_id(profile_id)?;
+            validate_ssh_target(target)?;
+            if config_path
+                .as_ref()
+                .is_some_and(|path| path.is_empty() || path.bytes().any(|byte| byte == 0))
+            {
+                return Err("invalid SSH config path".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) mod profiles;
+pub use profiles::ProfileStore;
+pub(crate) mod helper;
+mod transport;
+use transport::{
+    SshLease, acquire_control_master, acquire_control_master_for_socket, host_helper_path,
+    ssh_profile_control_socket,
+};
+pub(crate) use transport::{close_all_control_masters, spawn_orphan_reaper};
+
+/// One answer, as the reader delivers it to the thread that is waiting.
+///
+/// The mark travels with the response rather than through a side map because a
+/// waiter that has already given up must not leave a stamp behind: dropping the
+/// answer drops it.
+pub(crate) struct PendingAnswer {
+    response: v1::Response,
+    /// D4 and the reader's counters ahead of this answer. `None` outside a
+    /// measurement build, and for any answer read before the marks existed.
+    mark: Option<AnswerMark>,
+}
+
+/// The session the renderer is showing on this host, as the bridge attaches
+/// it on every connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalSelection {
+    pub(crate) session_id: String,
+    pub(crate) pane_ids: Vec<String>,
+}
+
+pub(crate) struct TerminalClient {
+    bulk_scope: Uuid,
+    /// The immutable route this native client was opened through. Bulk
+    /// prewarming is requested later, when the renderer makes this the active
+    /// host, so that request must recover the exact connection without trusting
+    /// a second copy sent across IPC.
+    connection: OnceLock<ConnectionSpec>,
+    /// The terminal epoch for which an active-host bulk prewarm was last
+    /// started. Repeated renders and session selections are harmless, while a
+    /// reconnect's fresh epoch earns one fresh warm connection.
+    bulk_prewarm_epoch: AtomicU64,
+    writer: Mutex<Option<ControlWriterHandle>>,
+    child: Mutex<Option<Child>>,
+    /// `None` until the renderer names a session: the bridge then relays
+    /// topology and agent state but attaches no terminal and seeds no pane.
+    /// `select_terminal_session` fills it, and every later reconnect
+    /// attaches what it names.
+    terminal_selection: Mutex<Option<TerminalSelection>>,
+    /// Why this side last tore its own transport down, for the bridge
+    /// supervisor to append to the error the dying bridge reports. Without it
+    /// every local teardown reaches the journal as the *reader's* symptom
+    /// ("host bridge closed", "frame I/O failed") and the six places that can
+    /// order one are indistinguishable — which is what left the 2026-08-28
+    /// throttled-link reconnect storm without a cause.
+    teardown_reason: Mutex<Option<&'static str>>,
+    /// Requests that timed out since the host last answered one. One late
+    /// answer is a slow link; a run of them with nothing answered in between
+    /// is a stalled ordered lane. Git requests share the count on their own,
+    /// sixty-times-longer deadline: a five-minute silence is a strike too.
+    unanswered_requests: AtomicU32,
+    /// Monotonic millis of the host's last answer to a request — or of this
+    /// lane's start, so a fresh lane is owed the full silence before it is
+    /// judged stalled. Zero means never, which only a test sets.
+    last_answer_at: AtomicU64,
+    /// Requests the host answered late enough to give up on, for the link
+    /// stats the shell polls. Not an event: the event channel's delivery
+    /// ledger commits in order and is owned by the bridge thread, and a send
+    /// from a request thread would race it.
+    late_requests_total: AtomicU32,
+    stop_signal: StopSignal,
+    ready: AtomicBool,
+    next_request_id: AtomicU64,
+    pending: Mutex<HashMap<u64, mpsc::Sender<Result<PendingAnswer, String>>>>,
+    /// Everything this link's reader has taken off the ssh stream, so a late
+    /// answer can be attributed to the bytes that were ahead of it.
+    link_counters: LinkCounters,
+    operations: Arc<OperationRegistry>,
+    /// Deferred Git diff-body reads this connection owns, so replacing the
+    /// connection cancels them rather than leaving them streaming.
+    git_content_reads: Arc<GitContentReads>,
+    input_queue: Mutex<ClientInputQueue>,
+    resize_queue: ResizeQueue,
+    input_epoch: AtomicU64,
+    terminal_epoch: AtomicU64,
+    server_identity: Mutex<String>,
+    host_profile_id: Mutex<String>,
+    delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
+    delivery_ack_serialization: Mutex<()>,
+    pending_delivery_ack: Mutex<Option<(u64, HostCharge)>>,
+    /// Milliseconds since `MONOTONIC_ORIGIN` at the last host frame, or 0 for
+    /// a connection that has never read one. Journal-only, and written once per
+    /// frame with a relaxed store so the read loop stays lock-free.
+    last_host_frame_at: AtomicU64,
+    /// How long accepted input waited between `enqueue_input` and its bytes
+    /// reaching the bridge's stdin, bucketed by `INPUT_LATENCY_BUCKET_BOUNDS_MS`.
+    ///
+    /// Journal-only and lock-free: the input pump records one relaxed increment
+    /// per keystroke, and `input_latency_stats` drains the whole window by
+    /// swapping every counter to zero. The frontend owns the other three
+    /// segments of the same measurement — see `inputLatencyStats.ts`.
+    input_latency_buckets: [AtomicU64; INPUT_LATENCY_BUCKETS],
+    /// The largest queue time observed in the current window, in microseconds;
+    /// no bucket can recover it, and it is reported in whole milliseconds.
+    input_latency_max_micros: AtomicU64,
+}
+
+/// A process-wide monotonic base, so "when did the last frame arrive" fits in
+/// one atomic instead of a lock around an `Instant`.
+static MONOTONIC_ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+fn monotonic_millis() -> u64 {
+    MONOTONIC_ORIGIN.elapsed().as_millis() as u64
+}
+
+struct InitialHostState {
+    snapshot: tmux_control::TmuxSnapshot,
+    agent_snapshot: Option<v1::AgentSnapshot>,
+    accepted_sequence: u64,
+    generation: u64,
+    buffered_events: Vec<v1::Envelope>,
+}
+
+impl TerminalClient {
+    fn new() -> Self {
+        Self {
+            bulk_scope: Uuid::new_v4(),
+            connection: OnceLock::new(),
+            bulk_prewarm_epoch: AtomicU64::new(0),
+            writer: Mutex::new(None),
+            child: Mutex::new(None),
+            terminal_selection: Mutex::new(None),
+            teardown_reason: Mutex::new(None),
+            unanswered_requests: AtomicU32::new(0),
+            last_answer_at: AtomicU64::new(monotonic_millis()),
+            late_requests_total: AtomicU32::new(0),
+            stop_signal: StopSignal::default(),
+            ready: AtomicBool::new(false),
+            next_request_id: AtomicU64::new(100),
+            pending: Mutex::new(HashMap::new()),
+            link_counters: LinkCounters::new(),
+            operations: Arc::new(OperationRegistry::default()),
+            git_content_reads: Arc::new(GitContentReads::default()),
+            input_queue: Mutex::new(ClientInputQueue::default()),
+            resize_queue: ResizeQueue::default(),
+            input_epoch: AtomicU64::new(0),
+            terminal_epoch: AtomicU64::new(0),
+            server_identity: Mutex::new(String::new()),
+            host_profile_id: Mutex::new(String::new()),
+            delivery_window: Arc::new(Mutex::new(None)),
+            delivery_ack_serialization: Mutex::new(()),
+            pending_delivery_ack: Mutex::new(None),
+            last_host_frame_at: AtomicU64::new(0),
+            input_latency_buckets: [const { AtomicU64::new(0) }; INPUT_LATENCY_BUCKETS],
+            input_latency_max_micros: AtomicU64::new(0),
+        }
+    }
+
+    /// The lane can carry requests again. The stall clock starts here: a
+    /// fresh lane is owed the full silence before it can be judged stalled,
+    /// however long its own setup took.
+    pub(super) fn lane_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+        self.unanswered_requests.store(0, Ordering::Release);
+        self.last_answer_at
+            .store(monotonic_millis(), Ordering::Release);
+    }
+
+    pub(super) fn note_host_frame(&self) {
+        self.last_host_frame_at
+            .store(monotonic_millis(), Ordering::Relaxed);
+    }
+
+    /// One keystroke's queue time, from the input pump. Never blocks.
+    fn record_input_latency(&self, waited: Duration) {
+        let micros = waited.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.input_latency_buckets[input_latency_bucket(micros)].fetch_add(1, Ordering::Relaxed);
+        self.input_latency_max_micros
+            .fetch_max(micros, Ordering::Relaxed);
+    }
+
+    /// Reads the current window and starts a new one.
+    ///
+    /// Draining is the point: the frontend folds each window into one journal
+    /// record, so counts left behind would be reported again in the next one.
+    fn drain_input_latency(&self) -> InputLatencyStats {
+        InputLatencyStats {
+            bucket_counts: self
+                .input_latency_buckets
+                .iter()
+                .map(|bucket| bucket.swap(0, Ordering::AcqRel))
+                .collect(),
+            // Rounded up, so a window whose slowest keystroke queued for 300 µs
+            // reports 1 ms rather than a zero that reads as "no samples".
+            max_ms: self
+                .input_latency_max_micros
+                .swap(0, Ordering::AcqRel)
+                .div_ceil(1_000),
+        }
+    }
+
+    fn start_dispatchers(self: &Arc<Self>, client_id: &str) -> Result<(), String> {
+        let (sender, receiver) = mpsc::sync_channel(INPUT_MESSAGE_BUDGET);
+        self.input_queue.lock().unwrap().sender = Some(sender);
+        let client = Arc::clone(self);
+        thread::Builder::new()
+            .name(format!("host-input-dispatch-{client_id}"))
+            .spawn(move || run_client_input_dispatch(client, receiver))
+            .map_err(|error| format!("failed to start input dispatcher: {error}"))?;
+        let client = Arc::clone(self);
+        thread::Builder::new()
+            .name(format!("host-resize-dispatch-{client_id}"))
+            .spawn(move || run_client_resize_dispatch(client))
+            .map(|_| ())
+            .map_err(|error| {
+                self.shutdown_transport("host connection startup failed");
+                format!("failed to start resize dispatcher: {error}")
+            })
+    }
+
+    fn shutdown_transport(&self, pending_message: &str) {
+        self.stop_signal.stop();
+        files::invalidate_bulk_scope(self.bulk_scope, pending_message);
+        self.ready.store(false, Ordering::Release);
+        self.resize_queue.stop();
+        if let Some(window) = self.delivery_window.lock().unwrap().take() {
+            window.close();
+        }
+        self.pending_delivery_ack.lock().unwrap().take();
+        if let Some(writer) = self.writer.lock().unwrap().take() {
+            writer.close();
+        }
+        if let Some(sender) = self.input_queue.lock().unwrap().sender.take() {
+            let _ = sender.try_send(ClientInputDispatch::Stop);
+        }
+        self.fail_pending(pending_message);
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn reconnect_transport(&self, reason: &'static str) {
+        // The reason is recorded only when there is a live transport to tear
+        // down. A caller that fails *after* the supervisor has already reaped
+        // a dead bridge — a write parked on the closed writer, a request
+        // outliving the link that carried it — orders nothing, and a reason
+        // left behind then would be pinned on the next bridge's death.
+        let child = self.child.lock().unwrap().take();
+        if child.is_some() {
+            *self.teardown_reason.lock().unwrap() = Some(reason);
+        }
+        files::invalidate_bulk_scope(
+            self.bulk_scope,
+            "bulk transfer control connection is reconnecting",
+        );
+        self.ready.store(false, Ordering::Release);
+        if let Some(window) = self.delivery_window.lock().unwrap().take() {
+            window.close();
+        }
+        self.pending_delivery_ack.lock().unwrap().take();
+        if let Some(writer) = self.writer.lock().unwrap().take() {
+            writer.close();
+        }
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// Queues a keystroke and returns.
+    ///
+    /// Waiting for the host's ack put a full round trip — an entire RTT over
+    /// SSH — on the main thread of every keypress, and the ack carried no
+    /// information the caller could act on. Delivery failures now surface where
+    /// they belong: backpressure is still refused synchronously here, because
+    /// the queue is local and its answer is immediate, while a host-side
+    /// rejection arrives as a pane-scoped recovery event on the event stream
+    /// and a transport failure tears down the bridge visibly.
+    fn enqueue_input(&self, pane_id: String, data: Vec<u8>) -> Result<(), String> {
+        if self.stop_signal.is_stopped() || !self.ready.load(Ordering::Acquire) {
+            return Err(
+                "terminal bridge is disconnected or reconciling; input was not queued".into(),
+            );
+        }
+        if data.is_empty() {
+            return Ok(());
+        }
+        if data.len() > MAX_INPUT_REQUEST_BYTES {
+            return Err("terminal input batch exceeds 1 MiB; retry with a smaller batch".into());
+        }
+        let data_len = data.len();
+        let mut queue = self.input_queue.lock().unwrap();
+        if queue.messages >= INPUT_MESSAGE_BUDGET
+            || queue.bytes.saturating_add(data_len) > INPUT_BYTE_BUDGET
+        {
+            return Err("terminal input queue budget is full; retry without dropping bytes".into());
+        }
+        queue.messages += 1;
+        queue.bytes += data_len;
+        let result = queue
+            .sender
+            .as_ref()
+            .ok_or_else(|| "terminal input dispatcher is unavailable".to_owned())
+            .and_then(|sender| {
+                sender
+                    .try_send(ClientInputDispatch::Bytes {
+                        pane_id,
+                        data,
+                        epoch: self.input_epoch.load(Ordering::Acquire),
+                        // The accepted path only: refused bytes never queued,
+                        // so they have no queue time to measure.
+                        enqueued_at: Instant::now(),
+                    })
+                    .map_err(|error| match error {
+                        mpsc::TrySendError::Full(_) => {
+                            "terminal input queue is full; retry without dropping bytes".to_owned()
+                        }
+                        mpsc::TrySendError::Disconnected(_) => {
+                            "terminal input dispatcher is disconnected".to_owned()
+                        }
+                    })
+            });
+        if result.is_err() {
+            queue.messages -= 1;
+            queue.bytes -= data_len;
+        }
+        result
+    }
+
+    fn release_input_budget(&self, messages: usize, bytes: usize) {
+        let mut queue = self.input_queue.lock().unwrap();
+        queue.messages = queue.messages.saturating_sub(messages);
+        queue.bytes = queue.bytes.saturating_sub(bytes);
+    }
+
+    fn flush_input(&self) -> Result<(), String> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let dispatcher = self
+            .input_queue
+            .lock()
+            .unwrap()
+            .sender
+            .clone()
+            .ok_or_else(|| "terminal input dispatcher is unavailable".to_owned())?;
+        dispatcher
+            .send(ClientInputDispatch::Barrier(sender))
+            .map_err(|_| "terminal input dispatcher is disconnected".to_owned())?;
+        receiver
+            .recv_timeout(REQUEST_TIMEOUT)
+            .map_err(|_| "terminal input flush timed out".to_owned())?
+    }
+
+    fn enqueue_resize(
+        &self,
+        columns: u16,
+        rows: u16,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<(), String>>, String> {
+        if self.stop_signal.is_stopped() {
+            return Err("terminal bridge is stopped; resize was not queued".into());
+        }
+        self.resize_queue.replace(TerminalSize { columns, rows })
+    }
+
+    fn wait_for_reconnect(&self, delay: Duration) -> bool {
+        self.stop_signal.wait_timeout(delay)
+    }
+
+    fn request(&self, request: v1::Request) -> Result<v1::Response, String> {
+        self.request_with_timeout(
+            request,
+            REQUEST_TIMEOUT,
+            HOST_RESPONSE_TIMEOUT,
+            None,
+            &mut RequestTiming::inert(),
+        )
+    }
+
+    /// `request`, with the native half of the switch timeline filled in.
+    ///
+    /// Only the tmux action path asks for this: it is the round trip the slow
+    /// link made unusable, and `timing` is what says whether its seconds were
+    /// spent on the wire or after the answer arrived.
+    pub(crate) fn request_timed(
+        &self,
+        request: v1::Request,
+        timing: &mut RequestTiming,
+    ) -> Result<v1::Response, String> {
+        self.request_with_timeout(
+            request,
+            REQUEST_TIMEOUT,
+            HOST_RESPONSE_TIMEOUT,
+            None,
+            timing,
+        )
+    }
+
+    /// Writes a request without registering a waiter for its response.
+    ///
+    /// Used by the keystroke path, whose acks carry nothing actionable. The
+    /// reader drops responses with no waiter, so the host stays free to answer
+    /// without either side having to change shape.
+    fn dispatch_request(
+        &self,
+        request: v1::Request,
+    ) -> Result<crate::perf_log::input_timing::DispatchedInput, String> {
+        if !self.ready.load(Ordering::Acquire) {
+            return Err("host is disconnected or reconciling; input was not sent".into());
+        }
+        let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
+        let writer = self
+            .writer
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "host bridge is disconnected".to_owned())?;
+        let timing = writer
+            .write_timed(
+                envelope(request_id, 0, Payload::Request(request)),
+                Instant::now() + REQUEST_TIMEOUT,
+            )
+            .inspect_err(|_| {
+                self.reconnect_transport(
+                    "an input request could not be written before its deadline",
+                )
+            })?;
+        Ok(writer.dispatched_input(request_id, timing))
+    }
+
+    fn request_git(
+        self: &Arc<Self>,
+        request: v1::Request,
+        operation_id: &str,
+    ) -> Result<v1::Response, String> {
+        let claim = self.operations.claim(OperationLane::Git, operation_id)?;
+        self.request_with_timeout(
+            request,
+            GIT_REQUEST_TIMEOUT,
+            GIT_REQUEST_TIMEOUT,
+            Some(claim),
+            &mut RequestTiming::inert(),
+        )
+    }
+
+    /// A control-lane file request the renderer can cancel by operation id.
+    ///
+    /// Explorer listings are the one control-lane file operation worth
+    /// cancelling: a collapsed folder, a replaced root, or a superseded
+    /// preview leaves a bounded remote enumeration running that nothing will
+    /// ever read, and on the remote link that is the whole cost of the action.
+    fn request_file(
+        &self,
+        request: v1::Request,
+        claim: Option<OperationClaim>,
+    ) -> Result<v1::Response, String> {
+        self.request_with_timeout(
+            request,
+            REQUEST_TIMEOUT,
+            HOST_RESPONSE_TIMEOUT,
+            claim,
+            &mut RequestTiming::inert(),
+        )
+    }
+
+    fn request_with_timeout(
+        &self,
+        request: v1::Request,
+        write_timeout: Duration,
+        response_timeout: Duration,
+        operation: Option<OperationClaim>,
+        timing: &mut RequestTiming,
+    ) -> Result<v1::Response, String> {
+        let deadline = Instant::now() + write_timeout;
+        let response_deadline = Instant::now() + response_timeout;
+        if !self.ready.load(Ordering::Acquire) {
+            return Err(
+                "connection_unavailable: host connection is disconnected or reconciling".into(),
+            );
+        }
+        let request_id = self.next_request_id.fetch_add(1, Ordering::AcqRel);
+        let (sender, receiver) = mpsc::channel();
+        self.pending.lock().unwrap().insert(request_id, sender);
+        if let Some(claim) = &operation
+            && matches!(self.operations.bind(claim, request_id), Bound::Cancelled)
+        {
+            self.pending.lock().unwrap().remove(&request_id);
+            return Err("cancelled: request was cancelled before dispatch".into());
+        }
+        let write_result = self
+            .writer
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "host bridge is disconnected".to_owned())
+            .and_then(|writer| {
+                writer.write(envelope(request_id, 0, Payload::Request(request)), deadline)
+            });
+        if let Err(error) = write_result {
+            self.pending.lock().unwrap().remove(&request_id);
+            if let Some(claim) = &operation {
+                self.operations.unbind(claim);
+            }
+            // A control write that missed its deadline or poisoned its pipe is
+            // not a request-scoped failure. Keeping that bridge installed lets
+            // every later keystroke and mutation queue behind a transport that
+            // has already proved it cannot make bounded progress. The bridge
+            // supervisor owns reconnect policy; removing this one transport is
+            // the smallest recovery that reaches it.
+            self.reconnect_transport("a control request could not be written before its deadline");
+            return Err(error);
+        }
+        // D3: the frame's last byte has been accepted by the ssh child's stdin.
+        // The delivery window's outstanding bytes are read at the same instant
+        // because they are the size of the queue this answer now sits behind.
+        timing.mark_written(request_id, &self.link_counters, || {
+            let window = self.delivery_window.lock().unwrap().clone();
+            window
+                .and_then(|window| window.totals())
+                .map(|(reserved, acked)| reserved.bytes.saturating_sub(acked.bytes))
+        });
+        // A cancel raised between the bind above and the write that has just
+        // finished reached the host *before* the request it names, and the host
+        // discards a cancel for a request it has never seen — so the request
+        // would have run with nothing able to stop it. Rather than serialize
+        // dispatch behind one lock, which would put every Explorer cancellation
+        // in the queue behind any five-minute Git request, the cancellation is
+        // simply re-sent now that the request is provably on the wire. A
+        // duplicate cancel is harmless; a lost one is the whole guarantee.
+        if let Some(claim) = &operation
+            && self.operations.cancelled(claim)
+        {
+            self.cancel_request(request_id);
+        }
+        let received =
+            receiver.recv_timeout(response_deadline.saturating_duration_since(Instant::now()));
+        // Any answer at all proves the lane still answers.
+        if received.is_ok() {
+            self.unanswered_requests.store(0, Ordering::Release);
+            self.last_answer_at
+                .store(monotonic_millis(), Ordering::Release);
+        }
+        let result = match received {
+            Ok(Ok(answer)) => {
+                // D4, as the reader stamped it: kept for a refusal too, since a
+                // refusal that arrived late is the same wire question.
+                timing.mark_answer(answer.mark);
+                let response = answer.response;
+                if response.ok {
+                    Ok(response)
+                } else {
+                    Err(format!(
+                        "{}: {}",
+                        response.error_code, response.display_message
+                    ))
+                }
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                self.cancel_request(request_id);
+                self.pending.lock().unwrap().remove(&request_id);
+                // The host may still complete a mutation after our deadline,
+                // so it is not safe to replay the request. Whether the lane is
+                // safe to keep is a separate question. Production once showed
+                // one timed-out selection leaving later selections and terminal
+                // input several minutes behind it while fresh connections to
+                // the same daemon stayed healthy — a stalled lane, and tearing
+                // the bridge down is the right answer to it. But a link that is
+                // merely slow answers late too, and tearing it down for that
+                // starts a loop: every reconnect re-sends every pane's screen,
+                // which is exactly the traffic that made the reply late
+                // (2026-08-28, shaped to 150 ms / 2 Mbit/s: six drops in two
+                // minutes, every one ordered here). So one late answer keeps
+                // the lane, and only a run of them with nothing answered in
+                // between is torn down for the supervisor to rebuild from an
+                // authoritative snapshot. Pane output is deliberately not
+                // consulted: an idle workspace produces none, and the rule has
+                // to hold the same there.
+                let unanswered = self.unanswered_requests.fetch_add(1, Ordering::AcqRel) + 1;
+                let silence = match self.last_answer_at.load(Ordering::Acquire) {
+                    0 => Duration::MAX,
+                    at => Duration::from_millis(monotonic_millis().saturating_sub(at)),
+                };
+                if unanswered < STALLED_LANE_UNANSWERED_REQUESTS || silence < STALLED_LANE_SILENCE {
+                    // A five-minute Git deadline missed says nothing about the
+                    // link; only the ordinary request class counts as late.
+                    if write_timeout != GIT_REQUEST_TIMEOUT {
+                        self.late_requests_total.fetch_add(1, Ordering::AcqRel);
+                    }
+                    Err(
+                        "host request timed out; the link was kept, but commit outcome is unknown and the request will not be replayed"
+                            .into(),
+                    )
+                } else {
+                    self.reconnect_transport("a request went unanswered past its deadline");
+                    Err(
+                        "host request timed out; reconnecting because commit outcome is unknown and the request will not be replayed"
+                            .into(),
+                    )
+                }
+            }
+        };
+        if let Some(claim) = &operation {
+            self.operations.unbind(claim);
+        }
+        result
+    }
+
+    pub(crate) fn git_content_reads(&self) -> Arc<GitContentReads> {
+        Arc::clone(&self.git_content_reads)
+    }
+
+    /// A renderer that aborts immediately can reach here before the request it
+    /// is cancelling has been written. The registry's tombstone makes that
+    /// abort take effect when the request binds, instead of letting the host
+    /// run a Git pipeline nobody is waiting for.
+    fn cancel_git(&self, operation_id: &str) -> Result<(), String> {
+        self.cancel_operation(OperationLane::Git, operation_id)
+    }
+
+    fn cancel_file(&self, operation_id: &str) -> Result<(), String> {
+        self.cancel_operation(OperationLane::File, operation_id)
+    }
+
+    pub(crate) fn claim_file_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<OperationClaim, String> {
+        self.operations.claim(OperationLane::File, operation_id)
+    }
+
+    fn cancel_operation(&self, lane: OperationLane, operation_id: &str) -> Result<(), String> {
+        let Some(request_id) = self.operations.cancel(lane, operation_id) else {
+            // Claimed but not yet dispatched. The registry's tombstone refuses
+            // the request rather than sending it to a host that would never be
+            // told to stop — and if the request is being written right now, its
+            // own dispatcher re-sends this cancellation once the request is
+            // provably on the wire.
+            return Ok(());
+        };
+        let writer = self
+            .writer
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("host bridge is disconnected")?;
+        writer
+            .write(
+                envelope(
+                    self.next_request_id.fetch_add(1, Ordering::AcqRel),
+                    0,
+                    Payload::Cancel(v1::Cancel {
+                        target_request_id: request_id,
+                    }),
+                ),
+                Instant::now() + REQUEST_TIMEOUT,
+            )
+            .inspect_err(|_| {
+                self.reconnect_transport("a cancel could not be written before its deadline")
+            })
+    }
+
+    /// Best-effort `Cancel` for a request already on the wire.
+    fn cancel_request(&self, request_id: u64) {
+        if let Some(writer) = self.writer.lock().unwrap().clone() {
+            let _ = writer.try_write(
+                envelope(
+                    self.next_request_id.fetch_add(1, Ordering::AcqRel),
+                    0,
+                    Payload::Cancel(v1::Cancel {
+                        target_request_id: request_id,
+                    }),
+                ),
+                Instant::now() + REQUEST_TIMEOUT,
+            );
+        }
+    }
+
+    fn fail_pending(&self, message: &str) {
+        self.operations.clear();
+        self.git_content_reads.cancel_all();
+        for (_, sender) in self.pending.lock().unwrap().drain() {
+            let _ = sender.send(Err(message.into()));
+        }
+    }
+}
+
+fn mark_input_reconnected(client: &TerminalClient) {
+    client.input_epoch.fetch_add(1, Ordering::AcqRel);
+}
+
+fn input_epoch_is_current(client: &TerminalClient, epoch: u64) -> bool {
+    epoch == client.input_epoch.load(Ordering::Acquire)
+}
+
+#[derive(Default)]
+pub struct TerminalClients(Mutex<HashMap<String, Arc<TerminalClient>>>);
+
+#[tauri::command]
+pub fn start_terminal(
+    session_id: String,
+    pane_ids: Vec<String>,
+    connection: ConnectionSpec,
+    attach: bool,
+    measurement_id: String,
+    on_event: Channel<InvokeResponseBody>,
+    clients: State<'_, TerminalClients>,
+) -> Result<String, String> {
+    connection.validate()?;
+    if !session_id.is_empty() {
+        validate_tmux_id(&session_id, '$')?;
+    }
+    for pane_id in &pane_ids {
+        validate_tmux_id(pane_id, '%')?;
+    }
+    let measurement_id =
+        Uuid::parse_str(&measurement_id).map_err(|_| "invalid terminal measurement ID")?;
+    let client_id = Uuid::new_v4().to_string();
+    let client = Arc::new(TerminalClient::new());
+    client
+        .connection
+        .set(connection.clone())
+        .map_err(|_| "terminal client connection was already initialized".to_owned())?;
+    *client.host_profile_id.lock().unwrap() = match &connection {
+        ConnectionSpec::Local => "local".into(),
+        ConnectionSpec::Ssh { profile_id, .. } => profile_id.clone(),
+    };
+    if attach {
+        *client.terminal_selection.lock().unwrap() = Some(TerminalSelection {
+            session_id,
+            pane_ids,
+        });
+    }
+    client.start_dispatchers(&client_id)?;
+    let event_channel = TerminalEventChannel::new(
+        measurement_id,
+        on_event,
+        Arc::clone(&client.delivery_window),
+    );
+    // Publish local progress before the supervisor can perform DNS, ProxyJump,
+    // authentication, or any other network work.
+    let _ = event_channel.send(encode_event(TerminalEvent::ConnectionState {
+        state: "connecting".into(),
+        detail: None,
+    }));
+    let worker_id = client_id.clone();
+    let worker_client = Arc::clone(&client);
+    let worker_channel = event_channel.clone();
+    thread::Builder::new()
+        .name(format!("host-bridge-{client_id}"))
+        .spawn(move || supervise_bridge(worker_id, connection, worker_channel, worker_client))
+        .map_err(|error| {
+            client.shutdown_transport("host bridge supervisor failed to start");
+            let _ = event_channel.send(encode_event(TerminalEvent::ConnectionState {
+                state: "disconnected".into(),
+                detail: None,
+            }));
+            format!("failed to start host bridge supervisor: {error}")
+        })?;
+    clients.0.lock().unwrap().insert(client_id.clone(), client);
+    Ok(client_id)
+}
+
+#[tauri::command]
+pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> Result<(), String> {
+    if let Some(client) = clients.0.lock().unwrap().remove(&client_id) {
+        client.shutdown_transport("host connection stopped");
+        // Pooled bulk bridges are owned by this exact control-client token, so
+        // once the connection is gone none of *its* bridges can be handed to
+        // anything: closing them here frees their ssh
+        // channels and remote helper processes now rather than at the idle
+        // timeout. Only this connection's, though — another window can be
+        // connected to another host at the same time, and its warm bridges are
+        // still reachable.
+        files::bulk_pool::close_pooled_bulk_bridges(client.bulk_scope);
+    }
+    Ok(())
+}
+
+/// Warms the active host's bulk file lane without making every shown peer pay
+/// for an idle SSH/helper process. The renderer calls this only for its active,
+/// writable link; the epoch gate makes repeated committed renders free.
+#[tauri::command]
+pub fn prewarm_terminal_bulk(
+    client_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    let client = get_client(&clients, &client_id)?;
+    let terminal_epoch = client.terminal_epoch.load(Ordering::Acquire);
+    if terminal_epoch == 0 || !client.ready.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let server_identity = client.server_identity.lock().unwrap().clone();
+    let Ok(binding) = files::scheduler::BulkBinding::capture(
+        Arc::clone(&client),
+        server_identity,
+        terminal_epoch,
+    ) else {
+        // Prewarming has no user waiting on it. A connection racing a teardown
+        // or readiness transition simply leaves the first real operation to
+        // acquire its own bridge, exactly as a failed prewarm did before.
+        return Ok(());
+    };
+    if !claim_bulk_prewarm_epoch(
+        &client.terminal_epoch,
+        &client.bulk_prewarm_epoch,
+        terminal_epoch,
+    ) {
+        return Ok(());
+    }
+    let connection = client
+        .connection
+        .get()
+        .ok_or("terminal client connection is unavailable")?
+        .clone();
+    files::bulk_pool::prewarm_bulk_bridge(connection, binding);
+    Ok(())
+}
+
+fn claim_bulk_prewarm_epoch(
+    live_epoch: &AtomicU64,
+    last_started: &AtomicU64,
+    captured_epoch: u64,
+) -> bool {
+    if captured_epoch == 0 {
+        return false;
+    }
+    let mut previous = last_started.load(Ordering::Acquire);
+    loop {
+        if previous == captured_epoch || live_epoch.load(Ordering::Acquire) != captured_epoch {
+            return false;
+        }
+        match last_started.compare_exchange_weak(
+            previous,
+            captured_epoch,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => previous = actual,
+        }
+    }
+}
+
+#[tauri::command]
+pub fn send_terminal_input(
+    client_id: String,
+    pane_id: String,
+    data: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    validate_tmux_id(&pane_id, '%')?;
+    if data.len() > MAX_INPUT_REQUEST_BYTES {
+        return Err("terminal input batch exceeds 1 MiB; retry with a smaller batch".into());
+    }
+    let client = get_client(&clients, &client_id)?;
+    client.enqueue_input(pane_id, data.into_bytes())
+}
+
+/// Binary terminal input, carried as a raw IPC body.
+///
+/// A `Vec<u8>` argument in a JSON command becomes a JSON array of numbers —
+/// roughly four characters of text per byte, stringified and re-parsed on the
+/// main thread. The payload is framed the same way the downlink event frames
+/// are, so the bytes cross the boundary once, as bytes.
+#[tauri::command]
+pub fn send_terminal_input_bytes(
+    request: tauri::ipc::Request<'_>,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err("terminal input IPC body must be raw binary".into());
+    };
+    let (client_id, pane_id, data) = decode_terminal_input_frame(body)?;
+    validate_tmux_id(pane_id, '%')?;
+    if data.len() > MAX_INPUT_REQUEST_BYTES {
+        return Err("terminal input batch exceeds 1 MiB".into());
+    }
+    let client = get_client(&clients, client_id)?;
+    client.enqueue_input(pane_id.to_owned(), data.to_vec())
+}
+
+/// `u16` client-id length, client id, `u16` pane-id length, pane id, payload.
+fn decode_terminal_input_frame(body: &[u8]) -> Result<(&str, &str, &[u8]), String> {
+    let mut offset = 0;
+    let client_id = take_length_prefixed(body, &mut offset)?;
+    let pane_id = take_length_prefixed(body, &mut offset)?;
+    Ok((client_id, pane_id, &body[offset..]))
+}
+
+/// Tells the host which session the desktop is showing, so tmux sizes from
+/// that one's control client. `useVisibleTerminalSession.ts` owns why this
+/// exists and when it is sent.
+///
+/// Async and spawn_blocking for the same reason `set_terminal_visibility` is:
+/// this runs on a workspace switch, and holding the WebView's main thread for
+/// an SSH round trip is a visibly frozen switch.
+#[tauri::command]
+pub async fn select_terminal_session(
+    client_id: String,
+    session_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    validate_tmux_id(&session_id, '$')?;
+    let client = get_client(&clients, &client_id)?;
+    // Recorded before the host answers: the next reconnect attaches this
+    // session whether or not the host had a control client for it yet, and the
+    // shell retries the request itself until it does.
+    *client.terminal_selection.lock().unwrap() = Some(TerminalSelection {
+        session_id: session_id.clone(),
+        pane_ids: Vec::new(),
+    });
+    let request = v1::Request {
+        operation: v1::Operation::SelectTerminalSession.into(),
+        session_id,
+        ..Default::default()
+    };
+    tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("terminal session selection task failed: {error}"))??;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn resize_terminal_client(
+    client_id: String,
+    columns: u16,
+    rows: u16,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    let client = get_client(&clients, &client_id)?;
+    let receiver = client.enqueue_resize(columns, rows)?;
+    tokio::time::timeout(
+        REQUEST_TIMEOUT + REQUEST_TIMEOUT + Duration::from_secs(1),
+        receiver,
+    )
+    .await
+    .map_err(|_| "terminal resize acknowledgement timed out".to_owned())?
+    .map_err(|_| "terminal resize acknowledgement channel closed".to_owned())?
+}
+
+/// Async: a tab switch reveals and hides panes, and doing that on the WebView's
+/// main thread meant the new tab could not paint until the host had answered
+/// for the old one — a whole RTT of frozen UI per switch over SSH.
+///
+/// The payload is a raw IPC body rather than a JSON argument object. A hide
+/// carries the renderer's serialized screen, up to 4 MiB, and as a JSON array
+/// of numbers that is roughly 15 MB of text to stringify and re-parse on the
+/// main thread — measured at one to two seconds per switch.
+#[tauri::command]
+pub async fn set_terminal_visibility(
+    request: tauri::ipc::Request<'_>,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err("terminal visibility IPC body must be raw binary".into());
+    };
+    let visibility = decode_terminal_visibility_frame(body)?;
+    let client = get_client(&clients, visibility.client_id)?;
+    let request = terminal_visibility_request(
+        visibility.pane_id.to_owned(),
+        visibility.visible,
+        visibility.renderer_holds_snapshot,
+        visibility.terminal_epoch,
+        visibility.output_generation,
+        client.terminal_epoch.load(Ordering::Acquire),
+    )?;
+    tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("terminal visibility task failed: {error}"))??;
+    Ok(())
+}
+
+struct TerminalVisibilityFrame<'a> {
+    client_id: &'a str,
+    pane_id: &'a str,
+    visible: bool,
+    renderer_holds_snapshot: bool,
+    terminal_epoch: u64,
+    output_generation: u64,
+}
+
+/// `u16` client-id length, client id, `u16` pane-id length, pane id, one
+/// visibility byte, one flags byte, two big-endian `u64`s.
+///
+/// The frame used to end with the renderer's serialized screen, up to 4 MiB of
+/// it. It carries no screen at all now — the renderer keeps its own, and this
+/// frame's flags byte is how it says so — but the body stays raw, because the
+/// visibility call is on the switch path and JSON would put a stringify and a
+/// parse on the thread that is painting the tab the user just switched to.
+fn decode_terminal_visibility_frame(body: &[u8]) -> Result<TerminalVisibilityFrame<'_>, String> {
+    const SCALARS: usize = 1 + 1 + 8 + 8;
+    let mut offset = 0;
+    let client_id = take_length_prefixed(body, &mut offset)?;
+    let pane_id = take_length_prefixed(body, &mut offset)?;
+    let scalars_end = offset
+        .checked_add(SCALARS)
+        .filter(|end| *end <= body.len())
+        .ok_or("terminal visibility frame is truncated")?;
+    if scalars_end != body.len() {
+        return Err("terminal visibility frame carries an unexpected payload".into());
+    }
+    let visible = match body[offset] {
+        0 => false,
+        1 => true,
+        _ => return Err("terminal visibility flag must be 0 or 1".into()),
+    };
+    let flags = body[offset + 1];
+    if flags & !1 != 0 {
+        return Err("terminal visibility frame has unknown flags".into());
+    }
+    let terminal_epoch = u64::from_be_bytes(
+        body[offset + 2..offset + 10]
+            .try_into()
+            .map_err(|_| "terminal visibility epoch is truncated")?,
+    );
+    let output_generation = u64::from_be_bytes(
+        body[offset + 10..scalars_end]
+            .try_into()
+            .map_err(|_| "terminal visibility cutoff is truncated")?,
+    );
+    Ok(TerminalVisibilityFrame {
+        client_id,
+        pane_id,
+        visible,
+        renderer_holds_snapshot: flags & 1 == 1,
+        terminal_epoch,
+        output_generation,
+    })
+}
+
+fn take_length_prefixed<'a>(body: &'a [u8], offset: &mut usize) -> Result<&'a str, String> {
+    let header_end = offset
+        .checked_add(2)
+        .filter(|end| *end <= body.len())
+        .ok_or("raw IPC frame is truncated")?;
+    let length = usize::from(u16::from_be_bytes([body[*offset], body[*offset + 1]]));
+    let end = header_end
+        .checked_add(length)
+        .filter(|end| *end <= body.len())
+        .ok_or("raw IPC frame is truncated")?;
+    *offset = end;
+    std::str::from_utf8(&body[header_end..end])
+        .map_err(|_| "raw IPC frame label is not valid UTF-8".to_owned())
+}
+
+/// The structured discriminator for "this checkpoint names an epoch the host
+/// has already replaced".
+///
+/// It is a code rather than a bare sentence because the desktop has to branch
+/// on it: a reveal refused here can never be satisfied by resending the same
+/// request — the epoch is stamped by whoever built the checkpoint, and only a
+/// newer `GenerationEpoch` frame can change it — so `revealRetry.ts` routes it
+/// to the checkpoint-free seed path instead of the retry series. Renaming this
+/// constant without renaming `STALE_REVEAL_EPOCH_CODE` there turns that
+/// one-round-trip recovery back into ~2s of futile retries.
+const STALE_VISIBILITY_EPOCH_CODE: &str = "terminal_visibility_epoch_rejected";
+
+fn terminal_visibility_request(
+    pane_id: String,
+    visible: bool,
+    renderer_holds_snapshot: bool,
+    terminal_epoch: u64,
+    output_generation: u64,
+    current_epoch: u64,
+) -> Result<v1::Request, String> {
+    validate_tmux_id(&pane_id, '%')?;
+    if terminal_epoch == 0 || terminal_epoch != current_epoch {
+        return Err(format!(
+            "{STALE_VISIBILITY_EPOCH_CODE}: terminal visibility checkpoint belongs to a stale connection epoch"
+        ));
+    }
+    Ok(v1::Request {
+        operation: v1::Operation::SetTerminalVisibility.into(),
+        scope: pane_id,
+        visible,
+        terminal_epoch,
+        terminal_generation_cutoff: output_generation,
+        terminal_renderer_holds_snapshot: renderer_holds_snapshot,
+        ..Default::default()
+    })
+}
+
+#[tauri::command]
+pub async fn request_terminal_seed(
+    client_id: String,
+    pane_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    let request = terminal_seed_request(pane_id)?;
+    let client = get_client(&clients, &client_id)?;
+    tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("terminal seed task failed: {error}"))??;
+    Ok(())
+}
+
+/// Asks the host for the scrollback above one pane's screen.
+///
+/// Kept separate from `request_terminal_seed` rather than folded into it with a
+/// flag: a seed request is also a claim that the pane is visible and settles the
+/// pane's seed debt, and neither is true of a photograph of the scrollback.
+///
+/// `skip_lines` is the scrollback the renderer is already holding. tmux
+/// measures its capture from the pane's current display, so a pane that has
+/// printed since it was seeded would otherwise be handed the rows that scrolled
+/// off in the meantime a second time.
+#[tauri::command]
+pub async fn request_terminal_history(
+    client_id: String,
+    pane_id: String,
+    lines: u32,
+    skip_lines: u32,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    let request = terminal_history_request(pane_id, lines, skip_lines)?;
+    let client = get_client(&clients, &client_id)?;
+    tauri::async_runtime::spawn_blocking(move || client.request(request))
+        .await
+        .map_err(|error| format!("terminal history task failed: {error}"))??;
+    Ok(())
+}
+
+fn terminal_history_request(
+    pane_id: String,
+    lines: u32,
+    skip_lines: u32,
+) -> Result<v1::Request, String> {
+    validate_tmux_id(&pane_id, '%')?;
+    if lines == 0 {
+        return Err("terminal history request must ask for at least one line".into());
+    }
+    Ok(v1::Request {
+        operation: v1::Operation::RequestTerminalHistory.into(),
+        scope: pane_id,
+        terminal_history_lines: lines,
+        terminal_history_skip_lines: skip_lines,
+        ..Default::default()
+    })
+}
+
+fn terminal_seed_request(pane_id: String) -> Result<v1::Request, String> {
+    validate_tmux_id(&pane_id, '%')?;
+    Ok(v1::Request {
+        operation: v1::Operation::RequestTerminalSeed.into(),
+        scope: pane_id,
+        ..Default::default()
+    })
+}
+
+/// What the delivery link looked like at one instant, for the journal.
+///
+/// `reserved` minus `acked` is the terminal credit the host is still holding
+/// for this connection; `msSinceLastHostEvent` says whether the link is moving
+/// at all. Together they are what turns "typing echoed three seconds late" into
+/// a cause. Nothing here mutates the ledger it reads.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalLinkStats {
+    reserved_bytes: u64,
+    acked_bytes: u64,
+    reserved_records: u64,
+    acked_records: u64,
+    ms_since_last_host_event: u64,
+    /// Requests given up on after the response deadline, since this client started.
+    late_requests_total: u32,
+    /// Bytes and frames this link's reader has taken off the ssh stream since
+    /// the connection started. Null unless the process is running a measured
+    /// build with `ADE_PERF_LOG` set. The renderer's echo probe samples these
+    /// at the keystroke and again at its echo: the difference is how much other
+    /// traffic the echo waited behind, the same head-of-line number
+    /// `perf.timeline` reports for a tmux action.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_read_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frames_read_total: Option<u64>,
+}
+
+#[tauri::command]
+pub fn terminal_link_stats(
+    client_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<TerminalLinkStats, String> {
+    let client = get_client(&clients, &client_id)?;
+    let last_frame_at = client.last_host_frame_at.load(Ordering::Relaxed);
+    if last_frame_at == 0 {
+        return Err("this terminal connection has not read a host frame yet".into());
+    }
+    let window = client.delivery_window.lock().unwrap().clone();
+    let (reserved, acked) = window
+        .and_then(|window| window.totals())
+        .ok_or("terminal delivery window is unavailable")?;
+    let read_totals = client.link_counters.totals();
+    Ok(TerminalLinkStats {
+        reserved_bytes: reserved.bytes,
+        acked_bytes: acked.bytes,
+        reserved_records: reserved.records,
+        acked_records: acked.records,
+        ms_since_last_host_event: monotonic_millis().saturating_sub(last_frame_at),
+        late_requests_total: client.late_requests_total.load(Ordering::Acquire),
+        bytes_read_total: read_totals.map(|(bytes, _)| bytes),
+        frames_read_total: read_totals.map(|(_, frames)| frames),
+    })
+}
+
+/// One window of native input-queue latency, for the journal.
+///
+/// `bucket_counts` is one count per `INPUT_LATENCY_BUCKET_BOUNDS_MS` entry, in
+/// that order; the frontend reads them with the same bounds and turns the pair
+/// into the `rustQueue` segment of a single `input.latency` record. Reading
+/// drains, so each count is reported exactly once.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputLatencyStats {
+    bucket_counts: Vec<u64>,
+    max_ms: u64,
+}
+
+/// Reads *and resets* this connection's input-queue histogram.
+///
+/// Never fails: this is diagnostics polled on a timer while the app may already
+/// be reconnecting, and a client that has gone away is simply a window with
+/// nothing in it. `None` (null in the webview) means "no stats", exactly as
+/// `fetchLinkStats` treats its own failure.
+#[tauri::command]
+pub fn input_latency_stats(
+    client_id: String,
+    clients: State<'_, TerminalClients>,
+) -> Option<InputLatencyStats> {
+    Some(get_client(&clients, &client_id).ok()?.drain_input_latency())
+}
+
+fn get_client(
+    clients: &State<'_, TerminalClients>,
+    client_id: &str,
+) -> Result<Arc<TerminalClient>, String> {
+    clients
+        .0
+        .lock()
+        .unwrap()
+        .get(client_id)
+        .cloned()
+        .ok_or_else(|| "terminal client is no longer attached".into())
+}
+
+mod bridge;
+use bridge::supervise_bridge;
+#[cfg(test)]
+use bridge::{
+    attach_scope, reconnect_delay_millis, reconnect_jitter, scoped_terminal_recovery,
+    terminal_scope, validate_event_sequence,
+};
+
+fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
+    tmux_control::TmuxSnapshot {
+        sessions: value
+            .sessions
+            .into_iter()
+            .map(|item| tmux_control::Session {
+                id: item.id,
+                name: item.name,
+                window_count: item.window_count,
+                attached_clients: item.attached_clients,
+                order: item.order,
+                pinned: item.pinned,
+            })
+            .collect(),
+        windows: value
+            .windows
+            .into_iter()
+            .map(|item| tmux_control::Window {
+                id: item.id,
+                session_id: item.session_id,
+                index: item.index,
+                name: item.name,
+                active: item.active,
+                layout: item.layout,
+                zoomed: item.zoomed,
+                pinned: item.pinned,
+            })
+            .collect(),
+        panes: value
+            .panes
+            .into_iter()
+            .map(|item| tmux_control::Pane {
+                id: item.id,
+                session_id: item.session_id,
+                window_id: item.window_id,
+                index: item.index,
+                active: item.active,
+                width: item.width.try_into().unwrap_or(u16::MAX),
+                height: item.height.try_into().unwrap_or(u16::MAX),
+                left: item.left.try_into().unwrap_or(u16::MAX),
+                top: item.top.try_into().unwrap_or(u16::MAX),
+                current_path: item.current_path,
+                current_command: item.current_command,
+                pane_pid: 0,
+                start_command: String::new(),
+            })
+            .collect(),
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct TerminalEventChannel {
+    measurement: Arc<TerminalMeasurement>,
+    channel: Channel<InvokeResponseBody>,
+    delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
+}
+
+impl TerminalEventChannel {
+    fn new(
+        measurement_id: Uuid,
+        channel: Channel<InvokeResponseBody>,
+        delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
+    ) -> Self {
+        Self {
+            measurement: Arc::new(TerminalMeasurement(measurement_id)),
+            channel,
+            delivery_window,
+        }
+    }
+
+    fn send(&self, frame: Vec<u8>) -> Result<(), String> {
+        self.send_charged(frame, HostCharge::default())
+    }
+
+    fn send_charged(&self, frame: Vec<u8>, host: HostCharge) -> Result<(), String> {
+        let window = self.delivery_window.lock().unwrap().clone();
+        let reservation = window
+            .as_ref()
+            .map(|window| window.reserve(frame.len(), host))
+            .transpose()?;
+        crate::perf_log::send_bridge_frame(self.measurement.0, &self.channel, frame)
+            .and_then(|()| reservation.map_or(Ok(()), |reservation| reservation.commit()))
+    }
+}
+
+struct TerminalMeasurement(Uuid);
+
+impl Drop for TerminalMeasurement {
+    fn drop(&mut self) {
+        crate::perf_log::quiesce_bridge_measurement(self.0);
+    }
+}
+
+fn send_event(channel: &TerminalEventChannel, event: TerminalEvent) {
+    let _ = channel.send(encode_event(event));
+}
+
+fn validate_tmux_id(value: &str, prefix: char) -> Result<(), String> {
+    if value.strip_prefix(prefix).is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    }) {
+        Ok(())
+    } else {
+        Err(format!("invalid tmux identifier: {value}"))
+    }
+}
+
+fn validate_ssh_target(target: &str) -> Result<(), String> {
+    if target.is_empty()
+        || target.starts_with('-')
+        || target.chars().any(char::is_whitespace)
+        || target.bytes().any(|byte| byte == 0)
+    {
+        Err("invalid SSH target".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_profile_id(value: &str) -> Result<(), String> {
+    if !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        Ok(())
+    } else {
+        Err("profile/client identifier contains unsafe characters".into())
+    }
+}
+
+#[cfg(test)]
+#[path = "connection/tests.rs"]
+mod tests;

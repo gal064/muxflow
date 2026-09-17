@@ -1,0 +1,12 @@
+%begin 1710000000 1 1
+__ADE_CAPTURE__:%9
+%end 1710000000 1 1
+%begin 1710000000 2 1
+primary logical line joined across a soft wrap
+%end 1710000000 2 1
+%begin 1710000000 3 1
+alternate screen
+%end 1710000000 3 1
+%begin 1710000000 4 1
+__ADE_META__:%9:0:0:1::0:0:0:0:0:1:0:0:1:80:
+%end 1710000000 4 1

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Muxflow
+Comment=Graphical IDE for local and remote tmux sessions
+Exec=@EXEC@
+Icon=@ICON@
+Terminal=false
+Categories=Development;IDE;
+StartupNotify=true

@@ -1,0 +1,38 @@
+packages:
+  - apps/desktop
+  - apps/mobile
+  - packages/*
+
+allowBuilds:
+  '@bufbuild/buf': true
+  esbuild: true
+
+# Upstream bug in @xterm/addon-webgl 0.19.0 only: one texture atlas is shared by
+# every terminal with the same font config (`CharAtlasCache.acquireTextureAtlas`
+# keys the cache on that config and hands the same atlas to each), and merging
+# four atlas pages into one rewrites `texturePage`, `texturePositionClipSpace`
+# and `sizeClipSpace` on every glyph already rasterised into them. Each renderer
+# baked the old values into its own vertex buffer when it last touched a cell, so
+# every renderer's model needs rebuilding after a merge — but upstream tracks
+# that as a single `_requestClearModel` boolean on the shared atlas, which can
+# only be answered once. Left set forever it made `WebglRenderer.renderRows`
+# rebuild the whole viewport every frame for the rest of the session (stutter);
+# consumed by the first renderer to ask, its sibling panes keep sampling the
+# pre-merge coordinates and paint smeared, column-shifted rows until an unrelated
+# redraw touches those lines. The patch counts invalidations on the atlas
+# (a merge, the first oversized glyph, and `clearTexture()`) and has each
+# `GlyphRenderer` remember the count it last acted on, so every renderer sharing
+# the atlas rebuilds exactly once per event and no renderer rebuilds twice.
+# Drop it if a later addon release fixes this upstream.
+#
+# Upstream in @xterm/xterm 6.0.0: the wheel path that feeds full-screen TUIs
+# multiplies every sub-50px delta by 0.3 and then emits at most one report per
+# DOM wheel event, whatever the delta was worth — a TUI scrolls at a fraction of
+# the speed of the shell in the pane beside it, which reads as a wrong scroll
+# speed setting rather than as lag. The patch drops the 0.3, honours the whole-row
+# count (bounded to 5 rows per DOM event), and repeats the encoded report inside
+# the single existing data event so N rows still cost one input round trip.
+# Drop it if a later xterm release fixes this upstream.
+patchedDependencies:
+  '@xterm/addon-webgl@0.19.0': patches/@xterm__addon-webgl@0.19.0.patch
+  '@xterm/xterm@6.0.0': patches/@xterm__xterm@6.0.0.patch

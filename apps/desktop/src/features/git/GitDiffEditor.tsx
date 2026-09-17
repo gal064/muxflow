@@ -1,0 +1,58 @@
+import { DiffEditor } from "@monaco-editor/react";
+import { languageForPath } from "../files/editorLanguage";
+import { useEditorLayout } from "../files/editorLayout";
+import { ADE_MONACO_THEME } from "../files/monaco";
+
+export interface GitDiffEditorProps {
+  /** The displayed path, which decides the language. */
+  path: string;
+  original: string;
+  modified: string;
+  originalModelPath: string;
+  modifiedModelPath: string;
+  /** The editor exists and is about to paint. */
+  onReady(): void;
+}
+
+/**
+ * The Monaco diff editor, and the only Git-side module that imports it.
+ *
+ * Split out for the same reason as the file editor: a binary diff, an oversized
+ * diff and a diff that never arrives all render without it, and the diff
+ * request itself must not queue behind the editor bundle being evaluated.
+ */
+export function GitDiffEditor(props: GitDiffEditorProps) {
+  const attachLayout = useEditorLayout();
+  return <DiffEditor
+    keepCurrentModifiedModel
+    keepCurrentOriginalModel
+    language={languageForPath(props.path)}
+    modified={props.modified}
+    modifiedModelPath={props.modifiedModelPath}
+    onMount={(editor) => {
+      props.onReady();
+      attachLayout(editor);
+    }}
+    options={{
+      // Left on for the reason stated in `FileEditor`: disabling it is gated on
+      // resize/restore coverage that needs the packaged macOS lane.
+      automaticLayout: true,
+      enableSplitViewResizing: true,
+      minimap: { enabled: false },
+      originalEditable: false,
+      readOnly: true,
+      renderSideBySide: true,
+      scrollBeyondLastLine: false,
+      // A minified bundle or a long prose line used to run off the right edge
+      // of a 320px-wide panel with no way to read it. `diffWordWrap: "inherit"`
+      // — Monaco's default, stated here because it is the setting that makes
+      // both sides follow `wordWrap` rather than only the modified one — keeps
+      // the two columns wrapping identically, and so aligned.
+      wordWrap: "on",
+      diffWordWrap: "inherit",
+    }}
+    original={props.original}
+    originalModelPath={props.originalModelPath}
+    theme={ADE_MONACO_THEME}
+  />;
+}

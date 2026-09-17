@@ -1,0 +1,815 @@
+use super::*;
+
+#[test]
+fn bulk_prewarm_is_claimed_once_per_nonzero_terminal_epoch() {
+    let live = AtomicU64::new(7);
+    let claimed = AtomicU64::new(0);
+    assert!(!claim_bulk_prewarm_epoch(&live, &claimed, 0));
+    assert!(claim_bulk_prewarm_epoch(&live, &claimed, 7));
+    assert!(!claim_bulk_prewarm_epoch(&live, &claimed, 7));
+
+    live.store(9, Ordering::Release);
+    // A delayed command that captured the old epoch cannot move the gate
+    // backwards after the reconnect has published a new live epoch.
+    assert!(!claim_bulk_prewarm_epoch(&live, &claimed, 7));
+    assert_eq!(claimed.load(Ordering::Acquire), 7);
+    assert!(claim_bulk_prewarm_epoch(&live, &claimed, 9));
+    assert!(!claim_bulk_prewarm_epoch(&live, &claimed, 9));
+}
+
+#[test]
+fn disconnected_client_rejects_mutation_without_queueing() {
+    let client = TerminalClient::new();
+    let error = client
+        .request(v1::Request {
+            operation: v1::Operation::TerminalInput.into(),
+            ..Default::default()
+        })
+        .unwrap_err();
+    // Coded, so the frontend leads with a sentence and keeps the internal
+    // state list behind a disclosure rather than printing it as a banner.
+    assert!(error.starts_with("connection_unavailable: "), "{error}");
+    assert!(error.contains("reconciling"));
+    assert!(client.pending.lock().unwrap().is_empty());
+
+    client.ready.store(true, Ordering::Release);
+    assert!(client.pending.lock().unwrap().is_empty());
+}
+
+/// The shaped-link storm: a reply that is late because the lane is busy is
+/// not a lane that has stopped answering. The bridge stays up through two
+/// late answers; the third in a row, with nothing answered between them, is
+/// the stalled lane and is still torn down.
+#[test]
+fn a_late_answer_keeps_the_bridge_and_a_run_of_them_does_not() {
+    use std::{fs::File, os::fd::FromRawFd};
+
+    let mut fds = [0; 2];
+    // SAFETY: pipe initializes both descriptors on success, and each is moved
+    // into exactly one File below.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let read_end = unsafe { File::from_raw_fd(fds[0]) };
+    let write_end = unsafe { File::from_raw_fd(fds[1]) };
+
+    let client = TerminalClient::new();
+    client.ready.store(true, Ordering::Release);
+    *client.writer.lock().unwrap() =
+        Some(ControlWriterHandle::start_with(write_end, "late-answer-keeps-bridge").unwrap());
+    let late = || {
+        client
+            .request_with_timeout(
+                v1::Request {
+                    operation: v1::Operation::SelectTerminalSession.into(),
+                    session_id: "$1".into(),
+                    ..Default::default()
+                },
+                Duration::from_millis(25),
+                Duration::from_millis(25),
+                None,
+                &mut RequestTiming::inert(),
+            )
+            .unwrap_err()
+    };
+
+    for _ in 0..(STALLED_LANE_UNANSWERED_REQUESTS - 1) {
+        let error = late();
+        assert!(error.contains("host request timed out"), "{error}");
+        assert!(error.contains("was kept"), "{error}");
+        assert!(client.ready.load(Ordering::Acquire));
+        assert!(client.writer.lock().unwrap().is_some());
+        assert!(client.pending.lock().unwrap().is_empty());
+    }
+
+    // A third miss inside the silence window is still a burst, not a stall:
+    // parallel requests time out together.
+    let error = late();
+    assert!(error.contains("was kept"), "{error}");
+    assert!(client.ready.load(Ordering::Acquire));
+    client
+        .unanswered_requests
+        .store(STALLED_LANE_UNANSWERED_REQUESTS, Ordering::Release);
+    client.last_answer_at.store(0, Ordering::Release);
+    let error = late();
+    assert!(error.contains("reconnecting"), "{error}");
+    assert!(!client.ready.load(Ordering::Acquire));
+    assert!(client.writer.lock().unwrap().is_none());
+    assert!(client.pending.lock().unwrap().is_empty());
+    // The late requests it kept were counted for the link stats.
+    assert_eq!(client.late_requests_total.load(Ordering::Acquire), 3);
+    // A lane becoming ready owes the full silence from that moment.
+    client.last_answer_at.store(0, Ordering::Release);
+    client.lane_ready();
+    assert_ne!(client.last_answer_at.load(Ordering::Acquire), 0);
+    drop(read_end);
+}
+
+#[test]
+fn a_failed_fire_and_forget_input_write_reconnects_the_transport() {
+    use std::{fs::File, os::fd::FromRawFd};
+
+    let mut fds = [0; 2];
+    // SAFETY: pipe initializes both descriptors on success, and each is moved
+    // into exactly one File below.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let read_end = unsafe { File::from_raw_fd(fds[0]) };
+    let write_end = unsafe { File::from_raw_fd(fds[1]) };
+
+    let client = TerminalClient::new();
+    client.ready.store(true, Ordering::Release);
+    let writer = ControlWriterHandle::start_with(write_end, "input-write-reconnect").unwrap();
+    writer.close();
+    *client.writer.lock().unwrap() = Some(writer);
+
+    let error = client
+        .dispatch_request(v1::Request {
+            operation: v1::Operation::TerminalInput.into(),
+            scope: "%1".into(),
+            data: b"x".to_vec(),
+            ..Default::default()
+        })
+        .unwrap_err();
+
+    assert!(error.contains("writer is closed"), "{error}");
+    assert!(!client.ready.load(Ordering::Acquire));
+    assert!(client.writer.lock().unwrap().is_none());
+    drop(read_end);
+}
+
+#[test]
+fn sequence_gap_is_detected_before_event_application() {
+    assert!(validate_event_sequence(2, 3).is_ok());
+    let error = validate_event_sequence(2, 4).unwrap_err();
+    assert_eq!(error, "sequence gap: expected 3, received 4");
+}
+
+#[test]
+fn reconnect_jitter_is_bounded_and_changes_by_attempt() {
+    let first = reconnect_jitter("client-a", 1);
+    let second = reconnect_jitter("client-a", 2);
+    assert!(first <= 150);
+    assert!(second <= 150);
+    assert_ne!(first, second);
+}
+
+#[test]
+fn reconnect_backoff_stays_quick_for_a_blip_and_tops_out_at_a_minute() {
+    // A blip must not be punished: the first retries are sub-second.
+    assert!(reconnect_delay_millis("client-a", 1) < 600);
+    assert!(reconnect_delay_millis("client-a", 2) < 1_000);
+    // A machine that is away all afternoon must not retry ten times a
+    // minute forever, and the ceiling must hold for every later attempt
+    // rather than overflowing back to something short.
+    for attempt in 9..64 {
+        let delay = reconnect_delay_millis("client-a", attempt);
+        assert!(
+            (60_000..=60_150).contains(&delay),
+            "attempt {attempt} slept {delay} ms"
+        );
+    }
+}
+
+#[test]
+fn invalid_same_epoch_delivery_ack_fails_closed_instead_of_retrying_the_ledger() {
+    let client = TerminalClient::new();
+    client.ready.store(true, Ordering::Release);
+    let window = DeliveryWindow::new(17);
+    window
+        .reserve(100, HostCharge::terminal(80))
+        .unwrap()
+        .commit()
+        .unwrap();
+    *client.pending_delivery_ack.lock().unwrap() = Some((16, HostCharge::terminal(20)));
+    *client.delivery_window.lock().unwrap() = Some(Arc::clone(&window));
+    assert!(client.acknowledge_delivery(17, 1, 99).is_err());
+    assert!(!client.ready.load(Ordering::Acquire));
+    assert!(client.delivery_window.lock().unwrap().is_none());
+    assert!(client.pending_delivery_ack.lock().unwrap().is_none());
+    assert!(window.reserve(1, HostCharge::default()).is_err());
+}
+
+#[test]
+fn disconnected_input_is_rejected_and_reconnect_starts_a_fresh_epoch() {
+    let client = Arc::new(TerminalClient::new());
+    let (sender, receiver) = mpsc::sync_channel(1);
+    client.input_queue.lock().unwrap().sender = Some(sender);
+
+    assert!(
+        client
+            .enqueue_input("%1".into(), b"offline".to_vec())
+            .is_err()
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "offline input must not be queued"
+    );
+
+    mark_input_reconnected(&client);
+    client.ready.store(true, Ordering::Release);
+    assert_eq!(client.input_epoch.load(Ordering::Acquire), 1);
+    // Queueing is the whole of the caller's obligation now: the keystroke
+    // path never waits for the host, so this must return before anything
+    // drains the queue.
+    assert_eq!(
+        client.enqueue_input("%1".into(), b"connected".to_vec()),
+        Ok(())
+    );
+    let ClientInputDispatch::Bytes { epoch, data, .. } = receiver.recv().unwrap() else {
+        panic!("expected terminal bytes");
+    };
+    assert_eq!(epoch, 1);
+    assert_eq!(data, b"connected");
+
+    mark_input_reconnected(&client);
+    assert!(!input_epoch_is_current(&client, epoch));
+}
+
+#[test]
+fn raw_visibility_frame_carries_its_scalars_without_a_json_number_array() {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(6_u16).to_be_bytes());
+    frame.extend_from_slice(b"client");
+    frame.extend_from_slice(&(2_u16).to_be_bytes());
+    frame.extend_from_slice(b"%3");
+    frame.push(0);
+    frame.push(1);
+    frame.extend_from_slice(&7_u64.to_be_bytes());
+    frame.extend_from_slice(&42_u64.to_be_bytes());
+    let decoded = decode_terminal_visibility_frame(&frame).unwrap();
+    assert_eq!(decoded.client_id, "client");
+    assert_eq!(decoded.pane_id, "%3");
+    assert!(!decoded.visible);
+    assert!(decoded.renderer_holds_snapshot);
+    assert_eq!(decoded.terminal_epoch, 7);
+    assert_eq!(decoded.output_generation, 42);
+
+    // A truncated or malformed frame is refused rather than read past, and so
+    // is a screen: this frame carries none any more, and a trailing payload
+    // means an encoder this decoder does not agree with.
+    assert!(decode_terminal_visibility_frame(&frame[..frame.len() - 4]).is_err());
+    let mut with_a_screen = frame.clone();
+    with_a_screen.extend_from_slice(b"screen");
+    assert!(decode_terminal_visibility_frame(&with_a_screen).is_err());
+    let mut invalid_flag = frame.clone();
+    invalid_flag[12] = 2;
+    assert!(decode_terminal_visibility_frame(&invalid_flag).is_err());
+    let mut unknown_flags = frame.clone();
+    unknown_flags[13] = 2;
+    assert!(decode_terminal_visibility_frame(&unknown_flags).is_err());
+}
+
+#[test]
+fn raw_terminal_input_frame_round_trips_without_a_json_number_array() {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(6_u16).to_be_bytes());
+    frame.extend_from_slice(b"client");
+    frame.extend_from_slice(&(2_u16).to_be_bytes());
+    frame.extend_from_slice(b"%7");
+    frame.extend_from_slice(&[0x00, 0x1b, 0xff]);
+    assert_eq!(
+        decode_terminal_input_frame(&frame).unwrap(),
+        ("client", "%7", [0x00, 0x1b, 0xff].as_slice())
+    );
+    assert!(decode_terminal_input_frame(&frame[..5]).is_err());
+    assert!(decode_terminal_input_frame(&[]).is_err());
+}
+
+#[test]
+fn queue_backpressure_is_still_refused_synchronously_without_dropping_bytes() {
+    let client = Arc::new(TerminalClient::new());
+    let (sender, receiver) = mpsc::sync_channel(1);
+    client.input_queue.lock().unwrap().sender = Some(sender);
+    mark_input_reconnected(&client);
+    client.ready.store(true, Ordering::Release);
+
+    assert_eq!(client.enqueue_input("%1".into(), b"first".to_vec()), Ok(()));
+    let error = client
+        .enqueue_input("%1".into(), b"second".to_vec())
+        .unwrap_err();
+    assert!(error.contains("retry without dropping bytes"));
+    let ClientInputDispatch::Bytes { data, .. } = receiver.recv().unwrap() else {
+        panic!("expected terminal bytes");
+    };
+    assert_eq!(
+        data, b"first",
+        "the refused request must not displace the queued one"
+    );
+}
+
+#[test]
+fn terminal_binary_frames_prefix_big_endian_generation() {
+    for (event, expected_kind) in [
+        (
+            TerminalEvent::Seed {
+                pane_id: "%12".into(),
+                generation: 0x0102_0304_0506_0708,
+                data: vec![0, 0xff, b'x'],
+            },
+            1,
+        ),
+        (
+            TerminalEvent::Output {
+                pane_id: "%12".into(),
+                generation: 0x0102_0304_0506_0708,
+                data: vec![0, 0xff, b'x'],
+            },
+            2,
+        ),
+    ] {
+        let frame = event_frame::encode_event_with_sequence(event, 42);
+        assert_eq!(frame[0], expected_kind);
+        assert_eq!(&frame[1..3], &3_u16.to_be_bytes());
+        assert_eq!(&frame[3..6], b"%12");
+        assert_eq!(&frame[6..14], &42_u64.to_be_bytes());
+        assert_eq!(&frame[14..22], &0x0102_0304_0506_0708_u64.to_be_bytes());
+        assert_eq!(&frame[22..], &[0, 0xff, b'x']);
+    }
+}
+
+#[test]
+fn terminal_epoch_frame_resets_same_server_generation_watermarks() {
+    let frame = encode_event(TerminalEvent::GenerationEpoch {
+        epoch: 0x0102_0304_0506_0708,
+    });
+    assert_eq!(frame[0], 10);
+    assert_eq!(&frame[1..3], &8_u16.to_be_bytes());
+    assert_eq!(&frame[3..11], b"terminal");
+    assert_eq!(&frame[11..19], &0_u64.to_be_bytes());
+    assert_eq!(&frame[19..], &0x0102_0304_0506_0708_u64.to_be_bytes());
+}
+
+#[test]
+fn pane_resource_frame_is_compact_and_sequence_atomic() {
+    let frame = event_frame::encode_event_with_sequence(
+        TerminalEvent::PaneResource {
+            pane_id: "%1".into(),
+            state: "hiddenBuffered".into(),
+            requires_seed: true,
+            resume_from_renderer: false,
+            recovery_reason: "overflow".into(),
+            generation: 9,
+            snapshot_generation: 7,
+            tail_through_generation: 9,
+            raw_tail: vec![3, 4, 5],
+        },
+        77,
+    );
+    assert_eq!(frame[0], 9);
+    assert_eq!(&frame[3..5], b"%1");
+    assert_eq!(&frame[5..13], &77_u64.to_be_bytes());
+    assert_eq!(frame[13], 2);
+    assert_eq!(frame[14], 1);
+    assert_eq!(&frame[23..31], &7_u64.to_be_bytes());
+    assert_eq!(&frame[31..39], &9_u64.to_be_bytes());
+    assert!(
+        frame.len() < 96,
+        "binary resource framing regressed to JSON arrays"
+    );
+}
+
+#[test]
+fn oversized_pane_resource_crosses_native_delivery_and_releases_exact_credit() {
+    let epoch = 73;
+    let window = DeliveryWindow::new(epoch);
+    let shared_window = Arc::new(Mutex::new(Some(Arc::clone(&window))));
+    let (sender, receiver) = mpsc::channel();
+    let channel = Channel::new(move |body| {
+        if let InvokeResponseBody::Raw(frame) = body {
+            sender.send(frame).unwrap();
+        }
+        Ok(())
+    });
+    let channel = TerminalEventChannel::new(Uuid::new_v4(), channel, shared_window);
+    let tail_bytes = delivery_window::NATIVE_DELIVERY_WINDOW_BYTES as usize + 1_024;
+    let event = TerminalEvent::PaneResource {
+        pane_id: "%1".into(),
+        state: "hiddenBuffered".into(),
+        requires_seed: true,
+        resume_from_renderer: false,
+        recovery_reason: "oversized-recovery".into(),
+        generation: 9,
+        snapshot_generation: 8,
+        tail_through_generation: 9,
+        raw_tail: vec![0xa5; tail_bytes],
+    };
+    let frame = event_frame::encode_event_with_sequence(event, 41);
+    assert!(frame.len() as u64 > delivery_window::NATIVE_DELIVERY_WINDOW_BYTES);
+    let host = HostCharge {
+        bytes: tail_bytes as u64,
+        records: 1,
+    };
+    channel.send_charged(frame.clone(), host).unwrap();
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+        frame
+    );
+    assert_eq!(
+        window.acknowledge(epoch, 1, frame.len() as u64).unwrap(),
+        Some(host)
+    );
+}
+
+fn assert_snapshot_frame_sequence(frame: &[u8], expected: u64) {
+    assert_eq!(frame[0], 7);
+    let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    assert_eq!(&frame[3..3 + label_len], b"snapshot");
+    let sequence_offset = 3 + label_len;
+    assert_eq!(
+        &frame[sequence_offset..sequence_offset + 8],
+        &expected.to_be_bytes()
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&frame[sequence_offset + 8..]).unwrap();
+    assert_eq!(payload["sequence"].as_u64(), Some(expected));
+}
+
+/// The reconciliation acknowledgement rides the same frame as a described
+/// snapshot — it is the same event kind, and the perf timeline counts it as
+/// one — but carries no tree at all, so its whole cost is the header and a few
+/// dozen bytes of JSON rather than the 7–39 KB the server used to cost.
+#[test]
+fn a_reconciliation_acknowledgement_frame_carries_no_tree() {
+    let frame = encode_event(TerminalEvent::Snapshot {
+        snapshot: None,
+        sequence: 12,
+        generation: 5,
+        server_identity: "local:test".into(),
+        authoritative: false,
+    });
+    assert_snapshot_frame_sequence(&frame, 12);
+    let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    let payload: serde_json::Value = serde_json::from_slice(&frame[3 + label_len + 8..]).unwrap();
+    assert!(payload["snapshot"].is_null());
+    assert_eq!(payload["generation"].as_u64(), Some(5));
+    assert!(
+        frame.len() < 128,
+        "an acknowledgement cost {} bytes",
+        frame.len()
+    );
+}
+
+#[test]
+fn fresh_reconnect_snapshot_frame_uses_accepted_sequence_atomically() {
+    let frame = encode_event(TerminalEvent::Snapshot {
+        snapshot: Some(tmux_control::TmuxSnapshot::default()),
+        sequence: 41,
+        generation: 3,
+        server_identity: "local:test".into(),
+        authoritative: true,
+    });
+    assert_snapshot_frame_sequence(&frame, 41);
+}
+
+#[test]
+fn resync_snapshot_frame_cannot_diverge_from_payload_sequence() {
+    let frame = event_frame::encode_event_with_sequence(
+        TerminalEvent::Snapshot {
+            snapshot: Some(tmux_control::TmuxSnapshot::default()),
+            sequence: 97,
+            generation: 8,
+            server_identity: "ssh:test".into(),
+            authoritative: true,
+        },
+        0,
+    );
+    assert_snapshot_frame_sequence(&frame, 97);
+}
+
+#[test]
+fn pane_scoped_recovery_does_not_disconnect_sibling_sessions() {
+    let client = TerminalClient::new();
+    client.ready.store(true, Ordering::Release);
+    assert_eq!(scoped_terminal_recovery("%12").as_deref(), Some("%12"));
+    assert!(scoped_terminal_recovery("terminal").is_none());
+    assert!(client.ready.load(Ordering::Acquire));
+}
+
+#[test]
+fn terminal_seed_command_builds_a_scoped_validated_request() {
+    let request = terminal_seed_request("%12".into()).unwrap();
+    assert_eq!(
+        v1::Operation::try_from(request.operation).unwrap(),
+        v1::Operation::RequestTerminalSeed
+    );
+    assert_eq!(request.scope, "%12");
+    assert!(terminal_seed_request("%12; kill-server".into()).is_err());
+}
+
+#[test]
+fn terminal_history_command_builds_a_scoped_request_with_a_real_line_count() {
+    let request = terminal_history_request("%12".into(), 2000, 37).unwrap();
+    assert_eq!(
+        v1::Operation::try_from(request.operation).unwrap(),
+        v1::Operation::RequestTerminalHistory
+    );
+    assert_eq!(request.scope, "%12");
+    assert_eq!(request.terminal_history_lines, 2000);
+    // What this renderer already holds, so the host's capture starts above it
+    // instead of handing back rows that scrolled off since the seed.
+    assert_eq!(request.terminal_history_skip_lines, 37);
+    // It photographs and nothing else: no visibility claim rides along with it.
+    assert!(!request.visible);
+    assert_eq!(request.terminal_epoch, 0);
+    assert!(terminal_history_request("%12; kill-server".into(), 2000, 0).is_err());
+    // Zero lines would ask tmux for a range it reads as the whole history.
+    assert!(terminal_history_request("%12".into(), 0, 0).is_err());
+}
+
+/// A history frame is its own kind, so nothing downstream can read the
+/// scrollback as the pane's screen — and it carries the one number the
+/// scrollback itself cannot express: how much of it tmux is holding.
+#[test]
+fn a_history_frame_is_labelled_by_its_pane_and_carries_the_scrollback_and_its_size() {
+    let frame = event_frame::encode_event_with_sequence(
+        TerminalEvent::History {
+            pane_id: "%3".into(),
+            data: b"older\r\nnewer".to_vec(),
+            history_size: Some(1_200),
+        },
+        41,
+    );
+    assert_eq!(frame[0], 18);
+    let label_length = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    assert_eq!(&frame[3..3 + label_length], b"%3");
+    let payload_offset = 11 + label_length;
+    // No generation prefix, unlike a seed or an output frame: the history
+    // claims no place in the output ordering. One presence byte and a u32
+    // instead, which is what the renderer stops paging on.
+    assert_eq!(frame[payload_offset], 1);
+    assert_eq!(
+        u32::from_be_bytes(
+            frame[payload_offset + 1..payload_offset + 5]
+                .try_into()
+                .unwrap()
+        ),
+        1_200
+    );
+    assert_eq!(&frame[payload_offset + 5..], b"older\r\nnewer");
+}
+
+/// A size the host could not read is absent rather than zero: the renderer
+/// asks again, where a real zero would mean there is nothing above the screen.
+#[test]
+fn a_history_frame_whose_size_probe_went_unanswered_says_so() {
+    let frame = event_frame::encode_event_with_sequence(
+        TerminalEvent::History {
+            pane_id: "%3".into(),
+            data: b"older".to_vec(),
+            history_size: None,
+        },
+        41,
+    );
+    let label_length = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+    let payload_offset = 11 + label_length;
+    assert_eq!(frame[payload_offset], 0);
+    assert_eq!(
+        u32::from_be_bytes(
+            frame[payload_offset + 1..payload_offset + 5]
+                .try_into()
+                .unwrap()
+        ),
+        0
+    );
+    assert_eq!(&frame[payload_offset + 5..], b"older");
+}
+
+#[test]
+fn visibility_handoff_rejects_stale_epoch_and_preserves_cutoff() {
+    let stale = terminal_visibility_request("%1".into(), false, true, 6, 10, 7).unwrap_err();
+    // The desktop branches on this prefix to skip a retry series that cannot
+    // ever succeed, so the code — not just the sentence — is the contract.
+    assert!(
+        stale.starts_with("terminal_visibility_epoch_rejected: "),
+        "{stale}"
+    );
+    assert!(
+        terminal_visibility_request("%1".into(), false, true, 0, 10, 0)
+            .unwrap_err()
+            .starts_with("terminal_visibility_epoch_rejected: "),
+    );
+    let request = terminal_visibility_request("%1".into(), false, true, 7, 42, 7).unwrap();
+    assert_eq!(request.terminal_epoch, 7);
+    assert_eq!(request.terminal_generation_cutoff, 42);
+    // The renderer keeps its screen; the request says so and carries none.
+    assert!(request.terminal_renderer_holds_snapshot);
+    assert!(request.data.is_empty());
+}
+
+#[test]
+fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
+    let snapshot = tmux_control::TmuxSnapshot {
+        sessions: vec![tmux_control::Session {
+            id: "$1".into(),
+            name: "work".into(),
+            window_count: 1,
+            attached_clients: 0,
+            order: 0,
+            pinned: false,
+        }],
+        windows: vec![
+            tmux_control::Window {
+                id: "@1".into(),
+                session_id: "$1".into(),
+                index: 0,
+                name: "active".into(),
+                active: true,
+                layout: String::new(),
+                zoomed: false,
+                pinned: false,
+            },
+            tmux_control::Window {
+                id: "@2".into(),
+                session_id: "$1".into(),
+                index: 1,
+                name: "hidden".into(),
+                active: false,
+                layout: String::new(),
+                zoomed: false,
+                pinned: false,
+            },
+        ],
+        panes: [("%2", "@1"), ("%3", "@2")]
+            .into_iter()
+            .map(|(id, window_id)| tmux_control::Pane {
+                id: id.into(),
+                session_id: "$1".into(),
+                window_id: window_id.into(),
+                index: 0,
+                active: true,
+                width: 80,
+                height: 24,
+                left: 0,
+                top: 0,
+                current_path: "/tmp".into(),
+                current_command: "bash".into(),
+                pane_pid: 0,
+                start_command: String::new(),
+            })
+            .collect(),
+    };
+    assert_eq!(
+        terminal_scope(&snapshot, "", &[]),
+        ("$1".into(), vec!["%2".into()])
+    );
+    assert_eq!(
+        terminal_scope(&snapshot, "$99", &["%99".into()]),
+        ("$1".into(), Vec::<String>::new())
+    );
+
+    // A bridge started without `attach` names no session, so a connect
+    // attaches nothing rather than falling back to the first session; once a
+    // selection is recorded, every connect attaches what it names.
+    let client = TerminalClient::new();
+    assert_eq!(attach_scope(&client, &snapshot), None);
+    *client.terminal_selection.lock().unwrap() = Some(TerminalSelection {
+        session_id: "$1".into(),
+        pane_ids: Vec::new(),
+    });
+    assert_eq!(
+        attach_scope(&client, &snapshot),
+        Some(("$1".into(), vec!["%2".into()]))
+    );
+}
+
+#[test]
+fn startup_rollback_releases_both_dispatch_workers() {
+    let client = Arc::new(TerminalClient::new());
+    client.start_dispatchers("rollback-test").unwrap();
+    let weak = Arc::downgrade(&client);
+
+    client.shutdown_transport("startup rolled back");
+    drop(client);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while weak.upgrade().is_some() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        weak.upgrade().is_none(),
+        "dispatcher workers retained client"
+    );
+}
+
+#[test]
+fn full_input_channel_does_not_block_shutdown_while_resize_flush_waits() {
+    let client = Arc::new(TerminalClient::new());
+    let (dispatcher, receiver) = mpsc::sync_channel(1);
+    dispatcher
+        .send(ClientInputDispatch::Bytes {
+            pane_id: "%1".into(),
+            data: vec![1],
+            epoch: 0,
+            enqueued_at: std::time::Instant::now(),
+        })
+        .unwrap();
+    client.input_queue.lock().unwrap().sender = Some(dispatcher);
+    let _resize = client.enqueue_resize(100, 30).unwrap();
+    let flush_client = Arc::clone(&client);
+    let flush = thread::spawn(move || flush_client.flush_input());
+    thread::sleep(Duration::from_millis(20));
+
+    let started = std::time::Instant::now();
+    client.shutdown_transport("shutdown during resize flush");
+    assert!(started.elapsed() < Duration::from_millis(200));
+
+    drop(receiver);
+    assert!(flush.join().unwrap().is_err());
+}
+
+#[test]
+fn input_flush_reports_the_first_failed_write() {
+    let client = Arc::new(TerminalClient::new());
+    let (sender, receiver) = mpsc::sync_channel(8);
+    client.input_queue.lock().unwrap().sender = Some(sender.clone());
+    mark_input_reconnected(&client);
+    client.ready.store(true, Ordering::Release);
+    let worker_client = Arc::clone(&client);
+    let worker = thread::spawn(move || run_client_input_dispatch(worker_client, receiver));
+
+    client
+        .enqueue_input("%1".into(), b"accepted".to_vec())
+        .unwrap();
+    let error = client.flush_input().unwrap_err();
+    assert!(error.contains("host bridge is disconnected"), "{error}");
+
+    sender.send(ClientInputDispatch::Stop).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn abandoned_input_barrier_cannot_consume_a_failed_write() {
+    let client = Arc::new(TerminalClient::new());
+    let (sender, receiver) = mpsc::sync_channel(8);
+    let worker_client = Arc::clone(&client);
+    let worker = thread::spawn(move || run_client_input_dispatch(worker_client, receiver));
+    sender
+        .send(ClientInputDispatch::Bytes {
+            pane_id: "%1".into(),
+            data: b"accepted".to_vec(),
+            epoch: 0,
+            enqueued_at: std::time::Instant::now(),
+        })
+        .unwrap();
+    let (abandoned_tx, abandoned_rx) = mpsc::sync_channel(1);
+    drop(abandoned_rx);
+    sender
+        .send(ClientInputDispatch::Barrier(abandoned_tx))
+        .unwrap();
+    let (live_tx, live_rx) = mpsc::sync_channel(1);
+    sender.send(ClientInputDispatch::Barrier(live_tx)).unwrap();
+    let error = live_rx.recv().unwrap().unwrap_err();
+    assert!(error.contains("disconnected connection"), "{error}");
+
+    let (clean_tx, clean_rx) = mpsc::sync_channel(1);
+    sender.send(ClientInputDispatch::Barrier(clean_tx)).unwrap();
+    assert_eq!(clean_rx.recv().unwrap(), Ok(()));
+    sender.send(ClientInputDispatch::Stop).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn input_flush_reports_bytes_accepted_by_a_replaced_connection() {
+    let client = Arc::new(TerminalClient::new());
+    let (sender, receiver) = mpsc::sync_channel(8);
+    client.input_queue.lock().unwrap().sender = Some(sender.clone());
+    client.ready.store(true, Ordering::Release);
+
+    client
+        .enqueue_input("%1".into(), b"accepted-before-reconnect".to_vec())
+        .unwrap();
+    mark_input_reconnected(&client);
+    let worker_client = Arc::clone(&client);
+    let worker = thread::spawn(move || run_client_input_dispatch(worker_client, receiver));
+
+    let error = client.flush_input().unwrap_err();
+    assert!(error.contains("replaced connection"), "{error}");
+
+    sender.send(ClientInputDispatch::Stop).unwrap();
+    worker.join().unwrap();
+}
+
+/// Cancelling an operation this connection has not dispatched succeeds, and
+/// leaves a refusal behind rather than an error.
+///
+/// A behaviour change worth pinning: `cancel_git` used to answer "unknown or
+/// completed Git operation ID" with an `Err`, because the only place a request
+/// ID could live was a map written *after* dispatch. Every renderer that
+/// abandoned a request faster than the worker thread could register it got an
+/// error for having been quick, and the request then ran with nothing able to
+/// stop it. The registry records the refusal instead, and the claim that
+/// arrives afterwards finds it.
+#[test]
+fn cancelling_an_operation_before_it_is_dispatched_refuses_it_rather_than_failing() {
+    use super::operations::{Bound, OperationLane};
+    for lane in [OperationLane::Git, OperationLane::File] {
+        let client = TerminalClient::new();
+        assert_eq!(
+            client.cancel_operation(lane, "raced"),
+            Ok(()),
+            "a cancellation that arrived first was reported as a failure"
+        );
+        let claim = client.operations.claim(lane, "raced").unwrap();
+        assert!(
+            matches!(client.operations.bind(&claim, 7), Bound::Cancelled),
+            "a request the renderer had already abandoned was dispatched anyway"
+        );
+    }
+}

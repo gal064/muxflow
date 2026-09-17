@@ -1,0 +1,140 @@
+import { describe, expect, it } from "vitest";
+import { TerminalStateCache, terminalCacheKey } from "./TerminalStateCache";
+
+const viewport = { atBottom: true, viewportLine: 0, grid: { columns: 80, rows: 24 } } as const;
+const options = (
+  checkpoint?: { terminalEpoch: number; outputGeneration: number },
+  history?: { screenSeeded: boolean; historyExhausted: boolean; historyNextPageLines: number },
+) => ({ checkpoint, history, viewport });
+
+describe("TerminalStateCache", () => {
+  it("keeps only bounded, recently used hidden pane snapshots", () => {
+    const cache = new TerminalStateCache(2, 10);
+    cache.set("%1", "one", options()); cache.set("%2", "two", options());
+    expect(cache.get("%1")?.serialized).toBe("one");
+    cache.set("%3", "three", options());
+    expect(cache.get("%2")).toBeUndefined();
+    expect(cache.size).toBe(2);
+  });
+
+  it("rejects oversized serialization rather than retaining unbounded memory", () => {
+    const cache = new TerminalStateCache(2, 3);
+    cache.set("%1", "long", options());
+    expect(cache.size).toBe(0);
+  });
+
+  it("enforces a UTF-8 aggregate LRU budget across many pane snapshots", () => {
+    const cache = new TerminalStateCache(100, 12, 20);
+    for (let pane = 1; pane <= 50; pane += 1) cache.set(`%${pane}`, "λλ", options());
+    expect(cache.size).toBe(5);
+    expect(cache.retainedByteLength).toBe(20);
+    expect(cache.get("%1")).toBeUndefined();
+    expect(cache.get("%50")?.serialized).toBe("λλ");
+  });
+
+  it("measures the screen in UTF-8 bytes rather than characters", () => {
+    const cache = new TerminalStateCache(2, 10, 10);
+    cache.set("%1", "λλ", options({ terminalEpoch: 7, outputGeneration: 9 }));
+    expect(cache.get("%1")).toMatchObject({
+      byteLength: 4, terminalEpoch: 7, outputGeneration: 9, viewport,
+    });
+    expect(cache.retainedByteLength).toBe(4);
+  });
+
+  // An eviction is not free: this cache is what a hidden pane's reveal resumes
+  // from, so a pane evicted while the user is still working in it pays a full
+  // host seed on its next reveal. Twenty was under the number of panes a real
+  // session has open, which made ordinary switching evict panes that were about
+  // to come back.
+  it("holds a real session's worth of panes, inside a hard byte bound", () => {
+    const cache = new TerminalStateCache();
+    expect(cache.capacity).toBe(64);
+    for (let pane = 1; pane <= 64; pane += 1) cache.set(`%${pane}`, `screen-${pane}`, options());
+    expect(cache.size).toBe(64);
+    expect(cache.get("%1")?.serialized).toBe("screen-1");
+
+    // The count is not the only bound: the bytes are checked on every insert,
+    // so a larger capacity cannot become a larger footprint.
+    const bounded = new TerminalStateCache(64, 1_000, 40);
+    for (let pane = 1; pane <= 64; pane += 1) bounded.set(`%${pane}`, "0123456789", options());
+    expect(bounded.size).toBe(4);
+    expect(bounded.retainedByteLength).toBe(40);
+  });
+
+  // A screen carries how far up its own history it has been paged, because the
+  // pages are part of the bytes: a restore that forgot would fetch them again.
+  // The size of the *next* page rides along for the same reason — the ladder
+  // that grows it is sizing the cost of rewriting these bytes, and a restore
+  // that forgot it would climb from the bottom again.
+  it("carries a screen's paging state, defaulting to a screen nobody paged", () => {
+    const cache = new TerminalStateCache();
+    cache.set("%1", "plain", options());
+    expect(cache.get("%1")).toMatchObject({
+      screenSeeded: false, historyExhausted: false, historyNextPageLines: 0,
+    });
+    cache.set("%2", "paged", options(undefined, {
+      screenSeeded: true, historyExhausted: true, historyNextPageLines: 2_400,
+    }));
+    expect(cache.get("%2")).toMatchObject({
+      screenSeeded: true, historyExhausted: true, historyNextPageLines: 2_400,
+    });
+  });
+
+  // The invariant the docstring claims: a read is a use. `Map` iterates in
+  // insertion order and eviction takes the front of it, so a `get` that did not
+  // reorder would make this a FIFO — and a FIFO evicts the pane the user keeps
+  // returning to, which costs that pane a full host seed on its next reveal.
+  it("counts a read as a use, so the pane a reveal keeps returning to survives", () => {
+    const cache = new TerminalStateCache(2, 100, 100);
+    cache.set("%1", "one", options());
+    cache.set("%2", "two", options());
+    // %1 is the oldest by insertion and the newest by use.
+    expect(cache.get("%1")?.serialized).toBe("one");
+    cache.set("%3", "three", options());
+    expect(cache.get("%1")?.serialized, "the least *recently used* screen was evicted").toBe("one");
+    expect(cache.get("%2")).toBeUndefined();
+  });
+
+  // This cache is now the only copy of a hidden pane's screen, so declining one
+  // has to drop what it was holding rather than keep a stale screen beside a
+  // newer one it refused. The pane's next reveal is answered with a seed.
+  it("forgets the screen it was holding when a newer one is refused", () => {
+    const cache = new TerminalStateCache(2, 10, 10);
+    cache.set("%1", "old", options());
+    cache.set("%1", "a screen past the budget", options());
+    expect(cache.get("%1")).toBeUndefined();
+    expect(cache.retainedByteLength).toBe(0);
+  });
+
+  // Pane ids repeat across tmux servers, so the same `%0` on two hosts must be
+  // two entries, and a host whose bridge restarted must forget only its own.
+  it("keys the same pane on two hosts apart and clears one host at a time", () => {
+    const cache = new TerminalStateCache();
+    const local = terminalCacheKey("local", "%0");
+    const remote = terminalCacheKey("remote", "%0");
+    expect(local).not.toBe(remote);
+    cache.set(local, "local-screen", options());
+    cache.set(remote, "remote-screen", options());
+    cache.set(terminalCacheKey("remote", "%1"), "remote-other", options());
+    expect(cache.get(local)?.serialized).toBe("local-screen");
+    expect(cache.get(remote)?.serialized).toBe("remote-screen");
+
+    cache.clearScope("remote");
+    expect(cache.get(remote)).toBeUndefined();
+    expect(cache.get(terminalCacheKey("remote", "%1"))).toBeUndefined();
+    expect(cache.get(local)?.serialized).toBe("local-screen");
+    expect(cache.size).toBe(1);
+    expect(cache.retainedByteLength).toBe("local-screen".length);
+  });
+
+  // The prefix is the whole scope plus its separator: "remote" must not match
+  // "remote-2", and a scope that is a prefix of another must not clear both.
+  it("clears by exact scope, not by scope prefix", () => {
+    const cache = new TerminalStateCache();
+    cache.set(terminalCacheKey("host", "%0"), "one", options());
+    cache.set(terminalCacheKey("host-2", "%0"), "two", options());
+    cache.clearScope("host");
+    expect(cache.get(terminalCacheKey("host", "%0"))).toBeUndefined();
+    expect(cache.get(terminalCacheKey("host-2", "%0"))?.serialized).toBe("two");
+  });
+});

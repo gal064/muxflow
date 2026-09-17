@@ -1,0 +1,572 @@
+use std::{
+    sync::{Arc, Condvar, Mutex, atomic::Ordering, mpsc},
+    time::{Duration, Instant},
+};
+
+use tmux_agent_protocol::v1;
+use tmux_control::{DESKTOP_INPUT_COALESCE_BYTES, MAX_INPUT_REQUEST_BYTES};
+use tokio::sync::oneshot;
+
+use super::{TerminalClient, input_epoch_is_current};
+
+pub(super) const INPUT_MESSAGE_BUDGET: usize = 512;
+pub(super) const INPUT_BYTE_BUDGET: usize = 4 * MAX_INPUT_REQUEST_BYTES;
+
+pub(super) const INPUT_LATENCY_BUCKETS: usize = 20;
+
+/// Upper bounds, in milliseconds, of every input-latency bucket.
+///
+/// SHARED WITH THE FRONTEND: `INPUT_LATENCY_BUCKET_BOUNDS_MS` in
+/// `src/features/terminal/inputLatencyStats.ts` is the same list in the same
+/// order, so the reporter can read these counts as if it had recorded them
+/// itself. The last bucket is unbounded — `Infinity` there, `u64::MAX` here —
+/// and changing either list without the other silently mislabels every native
+/// bucket in the journal.
+pub(super) const INPUT_LATENCY_BUCKET_BOUNDS_MS: [u64; INPUT_LATENCY_BUCKETS] = [
+    1,
+    2,
+    4,
+    8,
+    16,
+    24,
+    32,
+    48,
+    64,
+    96,
+    128,
+    192,
+    256,
+    384,
+    512,
+    768,
+    1024,
+    2048,
+    4096,
+    u64::MAX,
+];
+
+/// The first bucket whose upper bound the measured queue time does not exceed.
+///
+/// Takes microseconds because the span being measured is routinely under a
+/// millisecond, and truncating it to whole milliseconds first would put every
+/// healthy keystroke in bucket zero.
+pub(super) fn input_latency_bucket(micros: u64) -> usize {
+    for (index, bound_ms) in INPUT_LATENCY_BUCKET_BOUNDS_MS.iter().enumerate() {
+        if *bound_ms == u64::MAX || micros <= bound_ms.saturating_mul(1_000) {
+            return index;
+        }
+    }
+    INPUT_LATENCY_BUCKETS - 1
+}
+
+#[derive(Default)]
+pub(super) struct StopSignal {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl StopSignal {
+    pub(super) fn is_stopped(&self) -> bool {
+        *self.stopped.lock().unwrap()
+    }
+
+    pub(super) fn stop(&self) {
+        *self.stopped.lock().unwrap() = true;
+        self.wake.notify_all();
+    }
+
+    pub(super) fn if_running(&self, action: impl FnOnce()) -> bool {
+        let stopped = self.stopped.lock().unwrap();
+        if *stopped {
+            return false;
+        }
+        action();
+        true
+    }
+
+    pub(super) fn wait_timeout(&self, delay: Duration) -> bool {
+        let stopped = self.stopped.lock().unwrap();
+        let (stopped, _) = self
+            .wake
+            .wait_timeout_while(stopped, delay, |stopped| !*stopped)
+            .unwrap();
+        !*stopped
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ClientInputQueue {
+    pub(super) sender: Option<mpsc::SyncSender<ClientInputDispatch>>,
+    pub(super) messages: usize,
+    pub(super) bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TerminalSize {
+    pub(super) columns: u16,
+    pub(super) rows: u16,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct VersionedTerminalSize {
+    pub(super) version: u64,
+    pub(super) size: TerminalSize,
+}
+
+#[derive(Default)]
+pub(super) struct ResizeQueue {
+    state: Mutex<ResizeState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct ResizeState {
+    desired: Option<VersionedTerminalSize>,
+    next_version: u64,
+    connection_epoch: u64,
+    stopped: bool,
+    waiter: Option<(u64, oneshot::Sender<Result<(), String>>)>,
+}
+
+impl ResizeQueue {
+    pub(super) fn replace(
+        &self,
+        size: TerminalSize,
+    ) -> Result<oneshot::Receiver<Result<(), String>>, String> {
+        let (sender, receiver) = oneshot::channel();
+        let mut state = self.state.lock().unwrap();
+        if state.stopped {
+            return Err("terminal bridge is stopped; resize was not queued".into());
+        }
+        state.next_version = state.next_version.saturating_add(1);
+        let version = state.next_version;
+        state.desired = Some(VersionedTerminalSize { version, size });
+        // Only the final dimensions matter. Resolve the superseded caller
+        // promptly instead of retaining one sender (and one async waiter) per
+        // resize event until a slow remote request completes.
+        if let Some((_, superseded)) = state.waiter.replace((version, sender)) {
+            let _ = superseded.send(Ok(()));
+        }
+        drop(state);
+        self.wake.notify_one();
+        Ok(receiver)
+    }
+
+    pub(super) fn wait_for_attempt(
+        &self,
+        previous: Option<(u64, u64)>,
+    ) -> Option<(VersionedTerminalSize, u64)> {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if state.stopped {
+                return None;
+            }
+            if let Some(desired) = state.desired {
+                let key = (desired.version, state.connection_epoch);
+                if Some(key) != previous {
+                    return Some((desired, state.connection_epoch));
+                }
+            }
+            state = self.wake.wait(state).unwrap();
+        }
+    }
+
+    pub(super) fn complete(&self, version: u64, connection_epoch: u64, result: Result<(), String>) {
+        let mut state = self.state.lock().unwrap();
+        let result = if state.connection_epoch == connection_epoch {
+            result
+        } else {
+            Err("terminal connection changed before resize acknowledgement".into())
+        };
+        if state
+            .waiter
+            .as_ref()
+            .is_some_and(|(waiter_version, _)| *waiter_version <= version)
+            && let Some((_, sender)) = state.waiter.take()
+        {
+            let _ = sender.send(result);
+        }
+    }
+
+    pub(super) fn reconnected(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.connection_epoch = state.connection_epoch.saturating_add(1);
+        drop(state);
+        self.wake.notify_one();
+    }
+
+    pub(super) fn stop(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.stopped = true;
+        if let Some((_, sender)) = state.waiter.take() {
+            let _ = sender.send(Err("terminal bridge stopped before resize landed".into()));
+        }
+        drop(state);
+        self.wake.notify_all();
+    }
+}
+
+pub(super) enum ClientInputDispatch {
+    Bytes {
+        pane_id: String,
+        data: Vec<u8>,
+        epoch: u64,
+        /// When `enqueue_input` accepted these bytes, so the pump can journal
+        /// how long they waited for the writer. Journal-only.
+        enqueued_at: Instant,
+    },
+    Barrier(mpsc::SyncSender<Result<(), String>>),
+    Stop,
+}
+
+pub(super) fn run_client_input_dispatch(
+    client: Arc<TerminalClient>,
+    receiver: mpsc::Receiver<ClientInputDispatch>,
+) {
+    let mut deferred = None;
+    let mut pending_error = None;
+    loop {
+        let message = match deferred.take() {
+            Some(message) => message,
+            None => match receiver.recv() {
+                Ok(message) => message,
+                Err(_) => break,
+            },
+        };
+        match message {
+            ClientInputDispatch::Bytes {
+                pane_id,
+                mut data,
+                epoch,
+                enqueued_at,
+            } => {
+                let mut message_count = 1;
+                // Every keystroke folded into this write waited its own time,
+                // and the histogram is about keystrokes, not writes. Empty for
+                // the common uncoalesced batch, so it costs no allocation.
+                let mut coalesced_at: Vec<Instant> = Vec::new();
+                while data.len() < DESKTOP_INPUT_COALESCE_BYTES {
+                    match receiver.try_recv() {
+                        Ok(ClientInputDispatch::Bytes {
+                            pane_id: next_pane,
+                            data: next_data,
+                            epoch: next_epoch,
+                            enqueued_at: next_enqueued_at,
+                        }) if next_pane == pane_id
+                            && next_epoch == epoch
+                            && data.len().saturating_add(next_data.len())
+                                <= DESKTOP_INPUT_COALESCE_BYTES =>
+                        {
+                            data.extend_from_slice(&next_data);
+                            coalesced_at.push(next_enqueued_at);
+                            message_count += 1;
+                        }
+                        Ok(message) => {
+                            deferred = Some(message);
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
+                // Input accepted by an older connection must not poison the
+                // replacement connection's ordered stream.
+                if input_epoch_is_current(&client, epoch) && client.ready.load(Ordering::Acquire) {
+                    let dispatched_bytes = data.len();
+                    let timing = crate::perf_log::input_timing::DesktopInputTiming::begin(
+                        &pane_id,
+                        dispatched_bytes,
+                        message_count,
+                        enqueued_at,
+                        &coalesced_at,
+                    );
+                    let result = client.dispatch_request(v1::Request {
+                        operation: v1::Operation::TerminalInput.into(),
+                        scope: pane_id,
+                        data,
+                        ..Default::default()
+                    });
+                    match result {
+                        // The bytes are on the bridge's stdin by the time the
+                        // write returns, so this is the whole native queue
+                        // segment: accepted here, physically written there. A
+                        // failed write measures nothing — those bytes never
+                        // left, and timing the failure would read as a fast
+                        // keystroke.
+                        Ok(dispatched) => {
+                            client.record_input_latency(enqueued_at.elapsed());
+                            for queued_at in &coalesced_at {
+                                client.record_input_latency(queued_at.elapsed());
+                            }
+                            timing.finish(dispatched);
+                        }
+                        Err(error) => {
+                            if pending_error.is_none() {
+                                pending_error = Some(error);
+                            }
+                        }
+                    }
+                    client.release_input_budget(message_count, dispatched_bytes);
+                } else {
+                    if pending_error.is_none() {
+                        let error = if !input_epoch_is_current(&client, epoch) {
+                            "accepted terminal input belongs to a replaced connection"
+                        } else if !client.ready.load(Ordering::Acquire) {
+                            "accepted terminal input reached a disconnected connection"
+                        } else {
+                            "accepted terminal input reached a read-only connection"
+                        };
+                        pending_error = Some(error.into());
+                    }
+                    client.release_input_budget(message_count, data.len());
+                }
+            }
+            ClientInputDispatch::Barrier(sender) => {
+                let result = pending_error.clone().map_or(Ok(()), Err);
+                if sender.send(result).is_ok() {
+                    pending_error = None;
+                }
+            }
+            ClientInputDispatch::Stop => break,
+        }
+    }
+}
+
+pub(super) fn run_client_resize_dispatch(client: Arc<TerminalClient>) {
+    let mut previous = None;
+    while let Some((desired, connection_epoch)) = client.resize_queue.wait_for_attempt(previous) {
+        previous = Some((desired.version, connection_epoch));
+        let result = client.flush_input().and_then(|_| {
+            if client.stop_signal.is_stopped() {
+                return Err("terminal bridge stopped before resize landed".into());
+            }
+            client.request(v1::Request {
+                operation: v1::Operation::ResizeTerminal.into(),
+                columns: desired.size.columns.into(),
+                rows: desired.size.rows.into(),
+                ..Default::default()
+            })?;
+            Ok(())
+        });
+        client
+            .resize_queue
+            .complete(desired.version, connection_epoch, result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::mark_input_reconnected;
+    use std::{thread, time::Instant};
+
+    #[test]
+    fn input_byte_budget_refuses_retryably_without_displacing_accepted_order() {
+        let client = Arc::new(TerminalClient::new());
+        let (sender, receiver) = mpsc::sync_channel(INPUT_MESSAGE_BUDGET);
+        client.input_queue.lock().unwrap().sender = Some(sender);
+        mark_input_reconnected(&client);
+        client.lane_ready();
+
+        for marker in 0..4_u8 {
+            assert_eq!(
+                client.enqueue_input("%1".into(), vec![marker; MAX_INPUT_REQUEST_BYTES]),
+                Ok(())
+            );
+        }
+        let error = client
+            .enqueue_input("%1".into(), vec![9])
+            .expect_err("the byte budget must refuse excess synchronously");
+        assert!(error.contains("retry without dropping bytes"), "{error}");
+        for marker in 0..4_u8 {
+            let ClientInputDispatch::Bytes { data, .. } = receiver.recv().unwrap() else {
+                panic!("expected accepted input bytes");
+            };
+            assert_eq!(data[0], marker, "refusal must preserve accepted order");
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn input_message_budget_refuses_the_513th_message_without_displacement() {
+        let client = Arc::new(TerminalClient::new());
+        let (sender, receiver) = mpsc::sync_channel(INPUT_MESSAGE_BUDGET);
+        client.input_queue.lock().unwrap().sender = Some(sender);
+        mark_input_reconnected(&client);
+        client.lane_ready();
+
+        for marker in 0..INPUT_MESSAGE_BUDGET {
+            assert_eq!(
+                client.enqueue_input("%1".into(), marker.to_be_bytes().to_vec()),
+                Ok(())
+            );
+        }
+        let error = client
+            .enqueue_input("%1".into(), b"refused".to_vec())
+            .expect_err("the message budget must be explicit");
+        assert!(error.contains("retry without dropping bytes"), "{error}");
+        for marker in 0..INPUT_MESSAGE_BUDGET {
+            let ClientInputDispatch::Bytes { data, .. } = receiver.recv().unwrap() else {
+                panic!("expected accepted input bytes");
+            };
+            assert_eq!(data, marker.to_be_bytes());
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn legacy_and_binary_input_share_the_atomic_per_message_limit() {
+        let client = TerminalClient::new();
+        client.lane_ready();
+        let oversized = vec![b'x'; MAX_INPUT_REQUEST_BYTES + 1];
+        let error = client
+            .enqueue_input("%1".into(), oversized)
+            .expect_err("all callers must share the same atomic limit");
+        assert!(error.contains("retry with a smaller batch"), "{error}");
+    }
+
+    #[test]
+    fn resize_queue_replaces_intermediate_sizes_so_the_final_size_wins() {
+        let queue = ResizeQueue::default();
+        let first = queue
+            .replace(TerminalSize {
+                columns: 80,
+                rows: 24,
+            })
+            .unwrap();
+        let second = queue
+            .replace(TerminalSize {
+                columns: 120,
+                rows: 40,
+            })
+            .unwrap();
+        let final_receiver = queue
+            .replace(TerminalSize {
+                columns: 160,
+                rows: 50,
+            })
+            .unwrap();
+        let (desired, epoch) = queue.wait_for_attempt(None).unwrap();
+        assert_eq!(
+            desired.size,
+            TerminalSize {
+                columns: 160,
+                rows: 50,
+            }
+        );
+        queue.complete(desired.version, epoch, Ok(()));
+        assert_eq!(first.blocking_recv().unwrap(), Ok(()));
+        assert_eq!(second.blocking_recv().unwrap(), Ok(()));
+        assert_eq!(final_receiver.blocking_recv().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn failed_resize_is_retained_and_retried_after_reconnect() {
+        let queue = ResizeQueue::default();
+        let receiver = queue
+            .replace(TerminalSize {
+                columns: 132,
+                rows: 43,
+            })
+            .unwrap();
+        let (desired, epoch) = queue.wait_for_attempt(None).unwrap();
+        let attempt = Some((desired.version, epoch));
+        queue.complete(desired.version, epoch, Err("link lost".into()));
+        assert_eq!(receiver.blocking_recv().unwrap(), Err("link lost".into()));
+        queue.reconnected();
+        let (retried, reconnect_epoch) = queue.wait_for_attempt(attempt).unwrap();
+        assert_eq!(retried.version, desired.version);
+        assert_eq!(retried.size, desired.size);
+        assert_ne!(reconnect_epoch, epoch);
+    }
+
+    #[test]
+    fn resize_ack_from_a_replaced_connection_is_not_reported_as_landed() {
+        let queue = ResizeQueue::default();
+        let receiver = queue
+            .replace(TerminalSize {
+                columns: 101,
+                rows: 31,
+            })
+            .unwrap();
+        let (desired, stale_epoch) = queue.wait_for_attempt(None).unwrap();
+        queue.reconnected();
+        queue.complete(desired.version, stale_epoch, Ok(()));
+        let error = receiver.blocking_recv().unwrap().unwrap_err();
+        assert!(error.contains("connection changed"), "{error}");
+    }
+
+    #[test]
+    fn input_latency_buckets_hold_their_bounds_and_drain_to_zero() {
+        assert_eq!(input_latency_bucket(0), 0);
+        assert_eq!(input_latency_bucket(1_000), 0);
+        assert_eq!(input_latency_bucket(1_001), 1);
+        assert_eq!(input_latency_bucket(2_000), 1);
+        assert_eq!(input_latency_bucket(4_096_000), INPUT_LATENCY_BUCKETS - 2);
+        assert_eq!(input_latency_bucket(4_096_001), INPUT_LATENCY_BUCKETS - 1);
+
+        let client = TerminalClient::new();
+        client.record_input_latency(Duration::from_micros(300));
+        client.record_input_latency(Duration::from_millis(3));
+        client.record_input_latency(Duration::from_millis(3));
+        client.record_input_latency(Duration::from_millis(700));
+        let stats = client.drain_input_latency();
+        assert_eq!(stats.bucket_counts.len(), INPUT_LATENCY_BUCKETS);
+        assert_eq!(
+            stats.bucket_counts[0], 1,
+            "300 µs belongs in the 1 ms bucket"
+        );
+        assert_eq!(stats.bucket_counts[2], 2, "3 ms belongs in the 4 ms bucket");
+        assert_eq!(
+            stats.bucket_counts[15], 1,
+            "700 ms belongs in the 768 ms bucket"
+        );
+        assert_eq!(stats.bucket_counts.iter().sum::<u64>(), 4);
+        assert_eq!(stats.max_ms, 700);
+
+        // Reading is draining: the next window starts empty, so nothing is
+        // journalled twice.
+        let drained = client.drain_input_latency();
+        assert_eq!(drained.bucket_counts.iter().sum::<u64>(), 0);
+        assert_eq!(drained.max_ms, 0);
+    }
+
+    #[test]
+    fn a_failed_write_records_no_input_latency() {
+        let client = Arc::new(TerminalClient::new());
+        let (sender, receiver) = mpsc::sync_channel(8);
+        client.input_queue.lock().unwrap().sender = Some(sender.clone());
+        mark_input_reconnected(&client);
+        client.lane_ready();
+        let worker = thread::spawn({
+            let client = Arc::clone(&client);
+            move || run_client_input_dispatch(client, receiver)
+        });
+
+        // No writer is attached, so the dispatch fails: those bytes never
+        // reached the bridge and have no queue time to report.
+        client
+            .enqueue_input("%1".into(), b"typed".to_vec())
+            .unwrap();
+        assert!(client.flush_input().is_err());
+        let stats = client.drain_input_latency();
+        assert_eq!(stats.bucket_counts.iter().sum::<u64>(), 0);
+
+        sender.send(ClientInputDispatch::Stop).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn reconnect_backoff_is_cancelled_promptly_by_stop() {
+        let client = Arc::new(TerminalClient::new());
+        let waiter = Arc::clone(&client);
+        let started = Instant::now();
+        let thread = thread::spawn(move || waiter.wait_for_reconnect(Duration::from_secs(60)));
+        client.stop_signal.stop();
+        assert!(!thread.join().unwrap());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stop must not wait for reconnect backoff"
+        );
+    }
+}

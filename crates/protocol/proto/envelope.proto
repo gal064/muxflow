@@ -1,0 +1,1303 @@
+syntax = "proto3";
+
+package tmux_agent.protocol.v1;
+
+message Envelope {
+  uint32 protocol_major = 1;
+  uint64 request_id = 3;
+  uint64 sequence = 4;
+  uint64 stream_id = 5;
+  Priority priority = 6;
+
+  oneof payload {
+    ClientHello client_hello = 10;
+    ServerHello server_hello = 11;
+    Request request = 12;
+    Response response = 13;
+    HostEvent event = 14;
+    Cancel cancel = 15;
+    Error error = 16;
+    TerminalBytes terminal_bytes = 17;
+    TransferChunk transfer_chunk = 18;
+    TerminalOutputAck terminal_output_ack = 19;
+    // One frame of an OpenFileStream body. Carried on the request's own id so
+    // the bulk client can bind header, chunks, and terminal response to the
+    // exact request without a second control exchange.
+    FileStreamFrame file_stream = 20;
+  }
+}
+
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_CONTROL = 1;
+  PRIORITY_BULK = 2;
+}
+
+message ClientHello {
+  bool bulk_connection = 4;
+  // Bulk connections are capabilities of one observed control connection,
+  // never merely of a profile. The helper rejects a mismatched identity and
+  // echoes the caller's opaque connection epoch.
+  string expected_server_identity = 5;
+  uint64 connection_epoch = 6;
+}
+
+message ServerHello {
+  string helper_version = 1;
+  string operating_system = 2;
+  string architecture = 3;
+  string tmux_version = 4;
+  string server_identity = 5;
+  string git_version = 9;
+  uint64 connection_epoch = 10;
+  uint64 terminal_output_window_bytes = 11;
+  uint32 terminal_output_window_records = 12;
+  // Exact SHA-256 of the running helper executable. The stdio bridge compares
+  // this with its own executable so a same-version daemon from an older build
+  // is retired instead of silently reused.
+  string helper_build_digest = 13;
+}
+
+// Reverse-direction, one-way credit release. It is deliberately not a
+// Request: acknowledging renderer admission must never wait behind the output
+// whose admission it releases.
+message TerminalOutputAck {
+  uint64 connection_epoch = 1;
+  uint64 cumulative_bytes = 2;
+  uint64 cumulative_records = 3;
+}
+
+enum Operation {
+  OPERATION_UNSPECIFIED = 0;
+  OPERATION_FULL_SNAPSHOT = 1;
+  OPERATION_SUBSCRIBE = 2;
+  OPERATION_ATTACH_TERMINAL = 3;
+  OPERATION_TERMINAL_INPUT = 4;
+  OPERATION_RESIZE_TERMINAL = 5;
+  OPERATION_RESYNC = 6;
+  OPERATION_SHUTDOWN_DAEMON = 7;
+  OPERATION_TMUX_ACTION = 8;
+  OPERATION_SET_TERMINAL_VISIBILITY = 9;
+  OPERATION_REQUEST_TERMINAL_SEED = 10;
+  OPERATION_RESOLVE_ACTIVE_ROOT = 11;
+  OPERATION_LIST_DIRECTORY = 12;
+  OPERATION_WATCH_DIRECTORY = 13;
+  OPERATION_UNWATCH_DIRECTORY = 14;
+  OPERATION_FILE_MUTATION = 15;
+  OPERATION_START_DOWNLOAD = 18;
+  OPERATION_READ_DOWNLOAD_CHUNK = 19;
+  OPERATION_CANCEL_DOWNLOAD = 20;
+  OPERATION_BEGIN_FILE_WRITE = 21;
+  OPERATION_WRITE_FILE_CHUNK = 22;
+  OPERATION_COMMIT_FILE_WRITE = 23;
+  OPERATION_CANCEL_FILE_WRITE = 24;
+  OPERATION_GIT_STATUS = 25;
+  OPERATION_WATCH_GIT = 26;
+  OPERATION_UNWATCH_GIT = 27;
+  OPERATION_GIT_DIFF = 28;
+  OPERATION_PREPARE_GIT_DISCARD = 29;
+  OPERATION_GIT_MUTATION = 30;
+  OPERATION_GIT_COMMIT = 31;
+  OPERATION_AGENT_SNAPSHOT = 32;
+  OPERATION_AGENT_ACTION = 33;
+  OPERATION_AGENT_MARK_SEEN = 34;
+  OPERATION_AGENT_HOOK_INGEST = 35;
+  OPERATION_AGENT_HOOK_MANAGEMENT = 36;
+  OPERATION_PREPARE_TERMINAL_UPLOAD = 37;
+  OPERATION_WRITE_TERMINAL_UPLOAD_CHUNK = 38;
+  OPERATION_COMMIT_TERMINAL_UPLOAD = 39;
+  OPERATION_CANCEL_TERMINAL_UPLOAD = 40;
+  OPERATION_RECONCILE_TERMINAL_UPLOAD = 41;
+  // Applies the recommended tmux window naming this app's "tabs are tmux
+  // windows" contract depends on. Consent-gated by the same one-time host
+  // prompt as hook installation, and re-asserted on every connect because it
+  // lives in the tmux server's memory rather than in a config file.
+  OPERATION_AGENT_HOST_NAMING = 42;
+  // Names the session the desktop is *showing*, which is the one tmux must
+  // size from. Distinct from ATTACH_TERMINAL, which also sets the control
+  // client's pane membership and reseeds it: a workspace switch changes which
+  // client participates in sizing and nothing else, and paying an attach for
+  // that reseeds every pane of the session on every switch.
+  OPERATION_SELECT_TERMINAL_SESSION = 43;
+  // One descriptor-bound editor open. The host classifies once from the
+  // descriptor it will stream from, emits exactly one FileStreamFrame header,
+  // then streams bounded body frames until its terminal response. It replaces
+  // the ReadFile + StartDownload + per-chunk ReadDownloadChunk staircase, so a
+  // warm open costs one round trip plus transfer time.
+  OPERATION_OPEN_FILE_STREAM = 44;
+  // Re-reads one side of an already classified Git diff over the independent
+  // bulk connection. The control lane withholds large diff bodies so a
+  // multi-megabyte file cannot head-of-line block terminal traffic; this
+  // streams the same bytes back under an exact size + digest binding.
+  //
+  // 45, not the 44 this operation carried on its own branch: P3's
+  // OPEN_FILE_STREAM claimed 44 independently, and two wire numbers cannot be
+  // the same. Neither had been released, so the Git lane takes the next free
+  // number. Nothing outside this repository speaks either one.
+  OPERATION_GIT_DIFF_CONTENT = 45;
+  // Resolves one deliberately explicit terminal-output path against the
+  // authoritative cwd of the pane that displayed it. The response carries a
+  // parent-directory capability and canonical regular-file path for the editor.
+  OPERATION_RESOLVE_TERMINAL_FILE = 46;
+  // Publishes the current branch to its already configured upstream. Kept
+  // distinct from GIT_COMMIT because it is the only Git operation whose
+  // authority is a remote: it can be refused by that remote, it can need
+  // credentials this host deliberately cannot supply interactively, and its
+  // outcome is therefore never inferable from the local repository alone.
+  OPERATION_GIT_PUSH = 47;
+  // Photographs the scrollback above a pane's screen, which a screen-only seed
+  // deliberately does not carry. It answers a question the user asked by
+  // scrolling to the top of a pane, so it is not part of the output stream:
+  // the answer is one TERMINAL_HISTORY event and it moves no generation.
+  OPERATION_REQUEST_TERMINAL_HISTORY = 48;
+  // Voice mode (docs/mobile/voice-mode-plan.md). All five ride the control
+  // lane with `Request.voice` / `Response.voice`; the mobile app is the only
+  // caller today.
+  // Readiness probe; never spawns anything. `warm` may pre-load the sidecar.
+  OPERATION_VOICE_STATUS = 49;
+  // Consent-gated 697 MiB model download; progress arrives by VOICE_PROVISION
+  // events, and the response is the READY status.
+  OPERATION_VOICE_PROVISION = 50;
+  // Audio bytes -> one-line transcript. The phone types it into the pane.
+  OPERATION_VOICE_TRANSCRIBE = 51;
+  // Text -> mp3 bytes (replay, or arbitrary text).
+  OPERATION_VOICE_SPEAK = 52;
+  // Register or clear the pane whose root replies this connection wants pushed as
+  // VOICE_REPLY events.
+  OPERATION_VOICE_SESSION = 53;
+  // Fetches the bounded, privacy-safe host lifecycle decision trace. The
+  // mobile app requests it only when the user copies diagnostics.
+  OPERATION_AGENT_DIAGNOSTICS = 54;
+  OPERATION_TEST_DELAY = 100;
+  OPERATION_TEST_INJECT_GAP = 101;
+  OPERATION_TEST_OVERFLOW = 102;
+}
+
+message Request {
+  Operation operation = 1;
+  string scope = 2;
+  string session_id = 3;
+  repeated string pane_ids = 4;
+  // The operation's payload — terminal input, a file body, and so on.
+  // SET_TERMINAL_VISIBILITY carries none: the renderer owns its screen.
+  bytes data = 5;
+  uint32 columns = 6;
+  uint32 rows = 7;
+  uint64 delay_millis = 8;
+  TmuxAction tmux_action = 9;
+  bool visible = 10;
+  uint64 terminal_epoch = 11;
+  uint64 terminal_generation_cutoff = 12;
+  FileServiceRequest file = 13;
+  GitRequest git = 14;
+  AgentRequest agent = 15;
+  // The renderer keeps its own copy of the screen it hands off, so the host
+  // stores no bytes for a hidden pane at all. Set on both halves of the
+  // handoff, and read on the reveal: it says the copy is still held, and a
+  // verified tail may be written on top of it. A peer that does not set it is
+  // answered with a seed, which is what makes the flag — not the payload — the
+  // thing the resume path turns on.
+  bool terminal_renderer_holds_snapshot = 16;
+  // How many lines above the screen REQUEST_TERMINAL_HISTORY asks for. Read by
+  // no other operation, and clamped by the host: the number decides the size of
+  // a capture the user is waiting on.
+  uint32 terminal_history_lines = 17;
+  // How many lines above the screen the renderer is already holding, so
+  // REQUEST_TERMINAL_HISTORY answers with the lines above *those*. tmux
+  // captures everything above the current display, which after a screen-only
+  // seed includes every row that has scrolled off since — rows the renderer
+  // has, and would be given a second copy of. Read by no other operation.
+  uint32 terminal_history_skip_lines = 18;
+  // TERMINAL_INPUT only: deliver `data` through tmux's paste path
+  // (`load-buffer` + `paste-buffer -p`) instead of as keys. tmux wraps the
+  // bytes in bracketed-paste markers iff the pane's application asked for
+  // them, so a composer that tells pasted text from typed text sees a paste,
+  // and a plain shell sees the bytes. A paste is never coalesced with the
+  // input queued around it: a CR sent as keys after it arrives as its own
+  // keystroke, which is what makes it submit rather than insert a newline.
+  bool terminal_input_paste = 19;
+  // Every OPERATION_VOICE_* payload.
+  VoiceRequest voice = 20;
+  reserved 21;
+  reserved "terminal_input_agent_id";
+  // TERMINAL_INPUT only: require a supported root agent to remain attached to
+  // the target pane. Voice does not care which root identity owns it.
+  bool terminal_input_voice = 22;
+  // TERMINAL_INPUT from Voice only: the tmux server that owned the pane when
+  // this Voice controller was opened. Prevents an in-flight utterance from
+  // reaching a reused pane ID after a live tmux-server replacement.
+  string terminal_input_expected_server_identity = 23;
+  // NEXT FREE FIELD = 24.
+}
+
+message Response {
+  bool ok = 1;
+  string error_code = 2;
+  string display_message = 3;
+  Snapshot snapshot = 4;
+  uint64 accepted_sequence = 5;
+  TmuxActionResult tmux_action_result = 6;
+  FileServiceResponse file = 7;
+  GitResponse git = 8;
+  AgentResponse agent = 9;
+  PublicationOutcome publication_outcome = 10;
+  bool cleanup_failed = 11;
+  HookIngestDisposition hook_ingest_disposition = 12;
+  // Set on every OPERATION_VOICE_* answer, error responses included: Response
+  // has no retryable flag, so VoiceResponse carries one.
+  VoiceResponse voice = 13;
+  // OPERATION_AGENT_DIAGNOSTICS only. Already sanitized and bounded by host.
+  repeated string diagnostic_lines = 14;
+}
+
+enum HookIngestDisposition {
+  HOOK_INGEST_DISPOSITION_UNSPECIFIED = 0;
+  HOOK_INGEST_DISPOSITION_APPLIED = 1;
+  HOOK_INGEST_DISPOSITION_DISCARDED = 2;
+  HOOK_INGEST_DISPOSITION_RETRYABLE = 3;
+}
+
+enum PublicationOutcome {
+  PUBLICATION_OUTCOME_UNSPECIFIED = 0;
+  PUBLICATION_OUTCOME_NOT_PUBLISHED = 1;
+  PUBLICATION_OUTCOME_PUBLISHED = 2;
+  PUBLICATION_OUTCOME_UNKNOWN = 3;
+}
+
+enum CleanupStatus {
+  CLEANUP_STATUS_UNSPECIFIED = 0;
+  CLEANUP_STATUS_NOT_NEEDED = 1;
+  CLEANUP_STATUS_REMOVED = 2;
+  CLEANUP_STATUS_RETAINED = 3;
+  CLEANUP_STATUS_FAILED = 4;
+  CLEANUP_STATUS_CONNECTION_CLOSED = 5;
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_TOPOLOGY_SNAPSHOT = 1;
+  EVENT_KIND_TOPOLOGY_DIRTY = 2;
+  EVENT_KIND_RESYNC_REQUIRED = 3;
+  EVENT_KIND_TERMINAL_SEED = 4;
+  EVENT_KIND_TERMINAL_OUTPUT = 5;
+  EVENT_KIND_TERMINAL_EXIT = 6;
+  EVENT_KIND_TERMINAL_FLOW_PAUSED = 7;
+  EVENT_KIND_TERMINAL_RESNAPSHOT_REQUIRED = 8;
+  EVENT_KIND_PANE_RESOURCE = 9;
+  EVENT_KIND_TERMINAL_SEED_DIAGNOSTIC = 10;
+  EVENT_KIND_ACTIVE_ROOT = 11;
+  EVENT_KIND_DIRECTORY_SNAPSHOT = 12;
+  EVENT_KIND_FILE_CHANGED = 13;
+  EVENT_KIND_TRANSFER_PROGRESS = 14;
+  EVENT_KIND_GIT_STATUS = 15;
+  EVENT_KIND_AGENT_STATE = 16;
+  // A pane tmux paused that the host could not get resumed. Distinct from
+  // TERMINAL_FLOW_PAUSED, which is the ordinary start of a flow-control
+  // episode the host recovers from by itself: this one says the recovery ran
+  // out of attempts and the pane is delivering nothing until something reseeds
+  // it.
+  EVENT_KIND_TERMINAL_FLOW_STALLED = 17;
+  // A bounded, write-only clipboard update originating from tmux's automatic
+  // paste buffer. The desktop may write `detail` to the system clipboard and
+  // must never answer with clipboard contents.
+  EVENT_KIND_TERMINAL_CLIPBOARD_WRITE = 18;
+  // The scrollback above a pane's screen, in `terminal.data`, answering one
+  // REQUEST_TERMINAL_HISTORY. Deliberately not a seed: it carries no
+  // generation, replaces no screen, and repairs no seed debt — the renderer
+  // splices it above what it is already showing, or discards it.
+  EVENT_KIND_TERMINAL_HISTORY = 19;
+  // One progress tick of an OPERATION_VOICE_PROVISION download, in
+  // `voice.provision`, scoped "voice", to every subscribed connection.
+  EVENT_KIND_VOICE_PROVISION = 20;
+  // A spoken agent reply, in `voice.reply`, pushed only to the connection that
+  // registered a VOICE_SESSION for that agent. Nothing is kept on the host.
+  EVENT_KIND_VOICE_REPLY = 21;
+}
+
+message HostEvent {
+  EventKind kind = 1;
+  string scope = 2;
+  Snapshot snapshot = 3;
+  TerminalBytes terminal = 4;
+  string detail = 5;
+  PaneResource pane_resource = 6;
+  FileServiceEvent file = 7;
+  GitEvent git = 8;
+  AgentEvent agent = 9;
+  uint64 terminal_delivery_bytes = 10;
+  uint64 terminal_delivery_records = 11;
+  // The topology generation a TOPOLOGY_SNAPSHOT that carries no `snapshot`
+  // acknowledges. A notified reconciliation pass that found the world
+  // unchanged says so with the generation alone rather than with the whole
+  // server; the desktop closes its reconciliation state and keeps the
+  // entities it already holds. Zero on every other event.
+  uint64 topology_generation = 12;
+  // VOICE_PROVISION and VOICE_REPLY payloads; unset on every other event.
+  VoiceEvent voice = 13;
+}
+
+message Cancel {
+  uint64 target_request_id = 1;
+}
+
+message Snapshot {
+  string server_identity = 1;
+  uint64 generation = 2;
+  repeated Session sessions = 3;
+  repeated Window windows = 4;
+  repeated Pane panes = 5;
+  AgentSnapshot agents = 6;
+}
+
+message Session {
+  string id = 1;
+  string name = 2;
+  uint32 window_count = 3;
+  uint32 attached_clients = 4;
+  uint32 order = 5;
+  // Host-owned presentation flag, overlaid from the private pins sidecar.
+  // tmux knows nothing about it.
+  bool pinned = 6;
+}
+
+message Window {
+  string id = 1;
+  string session_id = 2;
+  uint32 index = 3;
+  string name = 4;
+  bool active = 5;
+  string layout = 6;
+  bool zoomed = 7;
+  uint64 layout_generation = 8;
+  // Host-owned, like Session.pinned.
+  bool pinned = 9;
+}
+
+message Pane {
+  string id = 1;
+  string session_id = 2;
+  string window_id = 3;
+  uint32 index = 4;
+  bool active = 5;
+  uint32 width = 6;
+  uint32 height = 7;
+  uint32 left = 8;
+  uint32 top = 9;
+  string current_path = 10;
+  string current_command = 11;
+  reserved 12, 13, 14;
+  reserved "nested_tmux", "outer_pane_id", "nested_provenance";
+}
+
+message TerminalBytes {
+  string pane_id = 1;
+  bytes data = 2;
+  uint64 generation = 3;
+  // EVENT_KIND_TERMINAL_HISTORY only: how many lines of scrollback tmux is
+  // holding for this pane (`#{history_size}`), read by a targeted
+  // display-message that runs after the capture. It is what tells the renderer
+  // whether the page it just received reached the top of the history: the rows
+  // it asked for are the `skip` it already held plus the page, and anything at
+  // or past this number is the end.
+  //
+  // `history_size_known` because "tmux did not answer" is a different claim
+  // from "this pane has no scrollback". The probe is targeted, so a pane that
+  // went away between the capture and it fails, and the renderer must read that
+  // as a page to ask for again rather than as the end of the history. Zero and
+  // false on every other event.
+  uint32 history_size = 4;
+  bool history_size_known = 5;
+}
+
+enum TmuxActionKind {
+  TMUX_ACTION_KIND_UNSPECIFIED = 0;
+  TMUX_ACTION_KIND_CREATE_SESSION = 1;
+  TMUX_ACTION_KIND_RENAME_SESSION = 2;
+  TMUX_ACTION_KIND_REORDER_SESSION = 3;
+  TMUX_ACTION_KIND_SELECT_SESSION = 4;
+  TMUX_ACTION_KIND_CLOSE_SESSION = 5;
+  TMUX_ACTION_KIND_CREATE_WINDOW = 6;
+  TMUX_ACTION_KIND_RENAME_WINDOW = 7;
+  TMUX_ACTION_KIND_REORDER_WINDOW = 8;
+  TMUX_ACTION_KIND_SELECT_WINDOW = 9;
+  TMUX_ACTION_KIND_CLOSE_WINDOW = 10;
+  TMUX_ACTION_KIND_SPLIT_PANE_RIGHT = 11;
+  TMUX_ACTION_KIND_SPLIT_PANE_DOWN = 12;
+  TMUX_ACTION_KIND_FOCUS_PANE = 13;
+  TMUX_ACTION_KIND_RESIZE_PANE_LEFT = 14;
+  TMUX_ACTION_KIND_RESIZE_PANE_RIGHT = 15;
+  TMUX_ACTION_KIND_RESIZE_PANE_UP = 16;
+  TMUX_ACTION_KIND_RESIZE_PANE_DOWN = 17;
+  TMUX_ACTION_KIND_ZOOM_PANE = 18;
+  TMUX_ACTION_KIND_CLOSE_PANE = 19;
+  TMUX_ACTION_KIND_SET_PINNED = 20;
+}
+
+message TmuxAction {
+  reserved 17;
+  reserved "command";
+  TmuxActionKind kind = 1;
+  string session_id = 2;
+  string window_id = 3;
+  string pane_id = 4;
+  string name = 5;
+  uint32 index = 6;
+  uint32 split_size = 7;
+  uint32 resize_cells = 8;
+  bool zoomed = 9;
+  string expected_server_identity = 10;
+  uint64 expected_generation = 11;
+  bool confirmed = 12;
+  string target_window_id = 13;
+  WindowRelativePosition relative_position = 14;
+  // Where a created session's first pane starts. Empty leaves tmux's own
+  // choice alone.
+  string directory = 15;
+  // The pin state SET_PINNED writes for session_id, or for window_id inside it
+  // when that is set.
+  bool pinned = 16;
+  // NEXT FREE FIELD = 18.
+}
+
+enum WindowRelativePosition {
+  WINDOW_RELATIVE_POSITION_UNSPECIFIED = 0;
+  WINDOW_RELATIVE_POSITION_BEFORE = 1;
+  WINDOW_RELATIVE_POSITION_AFTER = 2;
+}
+
+message TmuxActionResult {
+  string session_id = 1;
+  string window_id = 2;
+  string pane_id = 3;
+  uint64 topology_generation = 4;
+}
+
+enum PaneResourceState {
+  PANE_RESOURCE_STATE_UNSPECIFIED = 0;
+  PANE_RESOURCE_STATE_VISIBLE = 1;
+  PANE_RESOURCE_STATE_HIDDEN_BUFFERED = 2;
+  PANE_RESOURCE_STATE_RELEASED = 3;
+}
+
+message PaneResource {
+  string pane_id = 1;
+  PaneResourceState state = 2;
+  // The renderer owns its screen: this host answers a reveal with a verified
+  // tail or with a seed, and never with a stored copy of that screen.
+  reserved 3;
+  reserved "serialized_snapshot";
+  bytes raw_tail = 4;
+  uint64 generation = 5;
+  bool requires_seed = 6;
+  string recovery_reason = 7;
+  // Renderer snapshot includes pane output through this generation.
+  uint64 snapshot_generation = 8;
+  // raw_tail includes every pane-output chunk after snapshot_generation and
+  // through this generation, in order. A renderer may discard deferred output
+  // at or below this boundary after applying snapshot + raw_tail.
+  uint64 tail_through_generation = 9;
+  // The host verified this pane's recorded handoff checkpoint against the
+  // reveal's, and raw_tail is the complete output since it. The renderer
+  // restores from its own cache and writes raw_tail on top; an empty raw_tail
+  // is the ordinary answer for an idle pane and still says "you may draw".
+  // Never set together with requires_seed.
+  bool resume_from_renderer = 10;
+}
+
+message TransferChunk {
+  string transfer_id = 3;
+  uint64 offset = 1;
+  bytes data = 2;
+  bool eof = 4;
+  uint64 total_bytes = 5;
+  string blake3 = 6;
+  // Folder archives are streamed while tar is producing them, so their exact
+  // size becomes known only at EOF. File transfers always set this true.
+  bool total_known = 7;
+}
+
+enum FileMutationKind {
+  FILE_MUTATION_KIND_UNSPECIFIED = 0;
+  FILE_MUTATION_KIND_CREATE = 1;
+  FILE_MUTATION_KIND_RENAME = 2;
+  FILE_MUTATION_KIND_MOVE = 3;
+  FILE_MUTATION_KIND_DUPLICATE = 4;
+  FILE_MUTATION_KIND_DELETE = 5;
+}
+
+enum FileKind {
+  FILE_KIND_UNSPECIFIED = 0;
+  FILE_KIND_FILE = 1;
+  FILE_KIND_DIRECTORY = 2;
+  FILE_KIND_SYMLINK = 3;
+  FILE_KIND_OTHER = 4;
+}
+
+enum FileContentKind {
+  FILE_CONTENT_KIND_UNSPECIFIED = 0;
+  FILE_CONTENT_KIND_TEXT = 1;
+  FILE_CONTENT_KIND_BINARY = 2;
+  FILE_CONTENT_KIND_IMAGE = 3;
+  FILE_CONTENT_KIND_TOO_LARGE = 4;
+}
+
+enum CollisionPolicy {
+  COLLISION_POLICY_UNSPECIFIED = 0;
+  COLLISION_POLICY_FAIL = 1;
+  COLLISION_POLICY_OVERWRITE_CONFIRMED = 2;
+  COLLISION_POLICY_RENAME = 3;
+}
+
+message FileServiceRequest {
+  string operation_id = 1;
+  string root = 2;
+  string path = 3;
+  string destination = 4;
+  string pane_id = 5;
+  string expected_server_identity = 6;
+  uint64 expected_topology_generation = 7;
+  FileMutationKind mutation = 8;
+  bool create_directory = 9;
+  bool overwrite_confirmed = 10;
+  bool non_empty_confirmed = 11;
+  uint64 file_generation = 12;
+  bytes content = 13;
+  string watch_id = 14;
+  string transfer_id = 15;
+  uint64 offset = 16;
+  uint32 chunk_bytes = 17;
+  bool folder = 18;
+  CollisionPolicy collision_policy = 19;
+  string root_token = 20;
+  string page_token = 21;
+  uint32 page_size = 22;
+  uint64 total_bytes = 23;
+  string blake3 = 24;
+  // destination is the requested basename, never a shell command or path.
+  string source_name = 25;
+  bool large_upload_confirmed = 26;
+  bool image_png = 27;
+  // The root capability the caller already holds. ResolveActiveRoot answers an
+  // unchanged root without a second authoritative discovery, without minting a
+  // new root generation, and without broadcasting a duplicate ActiveRoot event.
+  string known_root_token = 28;
+  // ResolveTerminalFile binds its authoritative lookup to the exact pane route
+  // and cwd the renderer showed when the user activated the path.
+  string expected_session_id = 29;
+  string expected_window_id = 30;
+  string expected_cwd = 31;
+}
+
+// One frame of an OpenFileStream body.
+//
+// Exactly one header frame precedes any body frame, and the request's terminal
+// Response follows the last body frame. Splitting the header out keeps the
+// renderer able to classify, size, and paint its shell while bytes are still
+// arriving, without a second request.
+message FileStreamFrame {
+  string operation_id = 1;
+  FileStreamHeader header = 2;
+  // Byte position of `data` within the streamed content.
+  uint64 offset = 3;
+  bytes data = 4;
+  bool eof = 5;
+  // BLAKE3 of the complete streamed content; set only on the eof frame.
+  string blake3 = 6;
+}
+
+message FileStreamHeader {
+  FileMetadata metadata = 1;
+  FileContentKind content_kind = 2;
+  // Generation of the exact descriptor the body is streamed from.
+  uint64 generation = 3;
+  uint64 total_bytes = 4;
+  // False when policy answers with classification only: binary, over the text
+  // limit, or an image beyond the preview limit. No body frame follows.
+  bool content_streaming = 5;
+}
+
+message FileMetadata {
+  string path = 1;
+  string name = 2;
+  FileKind kind = 3;
+  uint64 size = 4;
+  int64 modified_unix_millis = 5;
+  uint32 mode = 6;
+  bool symlink = 7;
+  string symlink_target = 8;
+  bool expandable = 9;
+  uint64 generation = 10;
+  string mime = 11;
+  bool image_preview_eligible = 12;
+  // For a symlink, describes its safely-resolved target without making the
+  // symlink expandable. Unspecified means broken, escaping, or unsupported.
+  FileKind symlink_target_kind = 13;
+}
+
+message ActiveRoot {
+  string pane_id = 1;
+  string root = 2;
+  bool git_worktree = 3;
+  string server_identity = 4;
+  uint64 topology_generation = 5;
+  uint64 root_generation = 6;
+  string root_token = 7;
+}
+
+message DirectorySnapshot {
+  string watch_id = 1;
+  string root = 2;
+  string path = 3;
+  uint64 generation = 4;
+  repeated FileMetadata entries = 5;
+  // More entries follow this page. Says nothing about lost events.
+  bool overflowed = 6;
+  bool authoritative = 7;
+  string next_page_token = 8;
+  bool complete = 9;
+  // The watcher lost events and rebuilt this listing from the filesystem, so
+  // anything cached *below* this directory may have missed changes too. A
+  // separate field from `overflowed` because they answer different questions
+  // and drive different client decisions.
+  bool recovered_from_overflow = 10;
+}
+
+message FileContent {
+  FileMetadata metadata = 1;
+  FileContentKind kind = 2;
+  bytes content = 3;
+  uint64 generation = 4;
+}
+
+message DownloadDescriptor {
+  string transfer_id = 1;
+  string suggested_name = 2;
+  uint64 total_bytes = 3;
+  bool folder_archive = 4;
+  uint32 mode = 5;
+  uint64 file_generation = 6;
+  bool total_known = 7;
+}
+
+message UploadDescriptor {
+  string transfer_id = 1;
+  string destination_name = 2;
+  uint64 total_bytes = 3;
+  bool collision_renamed = 4;
+  uint64 available_bytes = 5;
+  // Set only by a successful verified commit. Preflight never exposes a path
+  // that could be mistaken for a complete upload.
+  string final_path = 6;
+  bool verified = 7;
+  string blake3 = 8;
+  string cleanup_error = 9;
+  CleanupStatus cleanup_status = 10;
+}
+
+message FileServiceResponse {
+  string operation_id = 1;
+  ActiveRoot active_root = 2;
+  DirectorySnapshot directory = 3;
+  FileContent content = 4;
+  FileMetadata metadata = 5;
+  TransferChunk transfer_chunk = 6;
+  DownloadDescriptor download = 7;
+  bool deleted = 8;
+  UploadDescriptor upload = 9;
+  // True when ResolveActiveRoot proved the caller's known_root_token still
+  // describes the active pane's root. The active_root payload repeats the
+  // caller's own identity and no ActiveRoot event was broadcast.
+  bool root_unchanged = 10;
+}
+
+message FileServiceEvent {
+  string operation_id = 1;
+  ActiveRoot active_root = 2;
+  DirectorySnapshot directory = 3;
+  FileMetadata metadata = 4;
+  string transfer_id = 5;
+  uint64 transferred_bytes = 6;
+  uint64 total_bytes = 7;
+  string state = 8;
+  string error = 9;
+  bool deleted = 10;
+  // Capability and lease identity for authoritative routing.
+  string root_token = 11;
+  string watch_id = 12;
+}
+
+// Git paths are opaque host byte strings. A lossy display string, where one
+// is carried (GitDiff.display_path) or derived, is presentation only and must
+// never be sent back as an operation target.
+enum GitChangeKind {
+  GIT_CHANGE_KIND_UNSPECIFIED = 0;
+  GIT_CHANGE_KIND_MODIFIED = 1;
+  GIT_CHANGE_KIND_ADDED = 2;
+  GIT_CHANGE_KIND_DELETED = 3;
+  GIT_CHANGE_KIND_RENAMED = 4;
+  GIT_CHANGE_KIND_COPIED = 5;
+  GIT_CHANGE_KIND_TYPE_CHANGED = 6;
+  GIT_CHANGE_KIND_UNMERGED = 7;
+  GIT_CHANGE_KIND_UNTRACKED = 8;
+  GIT_CHANGE_KIND_IGNORED = 9;
+}
+
+enum GitDiffTarget {
+  GIT_DIFF_TARGET_UNSPECIFIED = 0;
+  GIT_DIFF_TARGET_UNSTAGED = 1;
+  GIT_DIFF_TARGET_STAGED = 2;
+}
+
+enum GitMutationKind {
+  GIT_MUTATION_KIND_UNSPECIFIED = 0;
+  GIT_MUTATION_KIND_STAGE_FILE = 1;
+  GIT_MUTATION_KIND_UNSTAGE_FILE = 2;
+  GIT_MUTATION_KIND_DISCARD_FILE = 3;
+  GIT_MUTATION_KIND_STAGE_HUNK = 4;
+  GIT_MUTATION_KIND_UNSTAGE_HUNK = 5;
+  GIT_MUTATION_KIND_DISCARD_HUNK = 6;
+}
+
+message GitRepository {
+  string repository_id = 1;
+  string worktree_root = 2;
+  bytes git_dir = 3;
+  bytes common_dir = 4;
+  bool initial = 5;
+  bool detached_head = 6;
+  string head_name = 7;
+  string head_oid = 8;
+}
+
+message GitStatusEntry {
+  bytes path = 1;
+  bytes original_path = 3;
+  GitChangeKind index_kind = 5;
+  GitChangeKind worktree_kind = 6;
+  string index_status = 7;
+  string worktree_status = 8;
+  uint32 head_mode = 9;
+  uint32 index_mode = 10;
+  uint32 worktree_mode = 11;
+  bool untracked = 14;
+  bool ignored = 15;
+  bool conflicted = 16;
+  string conflict_code = 17;
+  bool submodule = 18;
+  string submodule_state = 19;
+  bool symlink = 20;
+  bool binary = 21;
+  string rename_score = 22;
+  // The absolute path is deliberately absent. It is `worktree_root` — already
+  // in this very message's repository — joined to `path`, and repeating it per
+  // entry inflated the encoded snapshot against a bound that clears *every*
+  // entry once exceeded. The client joins the two.
+  reserved 23;
+  reserved "absolute_path";
+  // Display paths are rendered by the desktop from `path`; the per-entry oids
+  // were never read on either side.
+  reserved 2, 4, 12, 13;
+  reserved "display_path", "display_original_path", "head_oid", "index_oid";
+}
+
+message GitStatusSnapshot {
+  GitRepository repository = 1;
+  uint64 generation = 2;
+  string source_generation = 3;
+  repeated GitStatusEntry entries = 4;
+  bool authoritative = 5;
+  // A bounded placeholder is returned instead of attempting to write an
+  // oversized control-lane frame. Entries are omitted when this is true.
+  bool oversized = 6;
+  uint64 total_entry_count = 7;
+  string error = 8;
+  // True when bounded policy skipped exhaustive copy classification. The
+  // remaining status data is authoritative, but Added entries may be copies.
+  bool copy_detection_incomplete = 9;
+}
+
+message GitDiff {
+  GitRepository repository = 1;
+  GitDiffTarget target = 2;
+  bytes path = 3;
+  bytes original_path = 4;
+  string display_path = 5;
+  bytes old_content = 6;
+  bytes new_content = 7;
+  bytes patch = 8;
+  string source_generation = 9;
+  bool binary = 10;
+  bool too_large = 11;
+  bool old_missing = 12;
+  bool new_missing = 13;
+  uint32 hunk_count = 14;
+  // Set instead of `old_content`/`new_content` when the body is large enough
+  // that inlining it would stall the shared control lane. The desktop fetches
+  // the exact same bytes with OPERATION_GIT_DIFF_CONTENT over the bulk lane.
+  GitDiffContentRef old_content_ref = 15;
+  GitDiffContentRef new_content_ref = 16;
+}
+
+enum GitDiffContentSide {
+  GIT_DIFF_CONTENT_SIDE_UNSPECIFIED = 0;
+  GIT_DIFF_CONTENT_SIDE_OLD = 1;
+  GIT_DIFF_CONTENT_SIDE_NEW = 2;
+}
+
+// A diff body deliberately withheld from the control response. `size` and
+// `content_digest` bind the deferred bulk read to the exact bytes the diff was
+// classified from; a mismatch is reported rather than silently substituted.
+message GitDiffContentRef {
+  GitDiffContentSide side = 1;
+  uint64 size = 2;
+  string content_digest = 3;
+}
+
+message GitDiffContentRequest {
+  GitDiffContentSide side = 1;
+  string expected_content_digest = 2;
+  uint64 expected_size = 3;
+  uint64 offset = 4;
+  uint32 length = 5;
+}
+
+message GitDiffContentChunk {
+  uint64 offset = 1;
+  bytes data = 2;
+  bool last = 3;
+  uint64 total_size = 4;
+}
+
+message GitConfirmation {
+  string token = 1;
+  uint64 expires_unix_millis = 2;
+}
+
+enum GitCommandOutcome {
+  GIT_COMMAND_OUTCOME_UNSPECIFIED = 0;
+  GIT_COMMAND_OUTCOME_NOT_APPLIED = 1;
+  GIT_COMMAND_OUTCOME_APPLIED = 2;
+  GIT_COMMAND_OUTCOME_PARTIAL_OR_UNKNOWN = 3;
+}
+
+message GitCommandResult {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  GitStatusSnapshot status = 4;
+  // True only when the Git command itself exited successfully. A subsequent
+  // refresh failure never erases this completed command outcome.
+  bool applied = 5;
+  bool refresh_failed = 6;
+  string refresh_error = 7;
+  GitCommandOutcome outcome = 8;
+  bool stdout_truncated = 9;
+  bool stderr_truncated = 10;
+  string error = 11;
+  string pre_head_oid = 12;
+  string post_head_oid = 13;
+  string pre_index_generation = 14;
+  string post_index_generation = 15;
+  bool post_state_authoritative = 16;
+  uint64 pre_status_generation = 17;
+  uint64 post_status_generation = 18;
+  bool status_omitted = 19;
+  // What a push published to, exactly as `@{upstream}` names it (`origin/main`).
+  // Empty for every command that is not a push.
+  string push_target = 20;
+}
+
+message GitRequest {
+  string operation_id = 1;
+  string root = 2;
+  string root_token = 3;
+  string repository_id = 4;
+  uint64 expected_status_generation = 5;
+  string expected_source_generation = 6;
+  uint64 connection_epoch = 7;
+  bytes path = 8;
+  bytes original_path = 9;
+  GitDiffTarget diff_target = 10;
+  GitMutationKind mutation = 11;
+  uint32 hunk_index = 12;
+  string confirmation_token = 13;
+  string commit_message = 14;
+  string watch_id = 15;
+  string expected_server_identity = 16;
+  GitDiffContentRequest content = 17;
+}
+
+message GitResponse {
+  string operation_id = 1;
+  // Every authoritative Git response carries the status it was validated
+  // against, so a diff never needs a prerequisite status round trip and a
+  // mutation never needs a follow-up one.
+  GitStatusSnapshot status = 2;
+  GitDiff diff = 3;
+  GitConfirmation confirmation = 4;
+  GitCommandResult command = 5;
+  GitDiffContentChunk content_chunk = 6;
+}
+
+message GitEvent {
+  string watch_id = 1;
+  string root_token = 2;
+  GitStatusSnapshot status = 3;
+  string error = 4;
+}
+
+// Agent protocol is adapter-neutral. Vendor-specific hook JSON remains on the
+// private host side and is normalized before it crosses the desktop bridge.
+// Numeric identities are retained for persisted agent records and queued hook events.
+enum AgentAdapterKind {
+  AGENT_ADAPTER_KIND_UNSPECIFIED = 0;
+  AGENT_ADAPTER_KIND_CODEX = 1;
+  AGENT_ADAPTER_KIND_CLAUDE_CODE = 2;
+}
+
+enum AgentLifecycleState {
+  AGENT_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  AGENT_LIFECYCLE_STATE_WORKING = 1;
+  AGENT_LIFECYCLE_STATE_BLOCKED = 2;
+  AGENT_LIFECYCLE_STATE_IDLE = 3;
+  AGENT_LIFECYCLE_STATE_UNKNOWN = 4;
+}
+
+enum AgentActionKind {
+  AGENT_ACTION_KIND_UNSPECIFIED = 0;
+  AGENT_ACTION_KIND_LAUNCH_WINDOW = 1;
+  AGENT_ACTION_KIND_LAUNCH_SPLIT = 2;
+  AGENT_ACTION_KIND_RESUME = 3;
+  AGENT_ACTION_KIND_RENAME = 4;
+}
+
+enum AgentPlacementKind {
+  AGENT_PLACEMENT_KIND_UNSPECIFIED = 0;
+  AGENT_PLACEMENT_KIND_WINDOW = 1;
+  AGENT_PLACEMENT_KIND_SPLIT = 2;
+}
+
+enum HookManagementAction {
+  HOOK_MANAGEMENT_ACTION_UNSPECIFIED = 0;
+  HOOK_MANAGEMENT_ACTION_REVIEW = 1;
+  HOOK_MANAGEMENT_ACTION_INSTALL = 2;
+  HOOK_MANAGEMENT_ACTION_UNINSTALL = 3;
+}
+
+// Whether this host's agent configuration actually routes lifecycle events to
+// this application. Without it the desktop cannot tell "no agent is doing
+// anything" from "nothing here can ever report what an agent is doing".
+enum AgentHookWiring {
+  AGENT_HOOK_WIRING_UNSPECIFIED = 0;
+  // Every lifecycle event this adapter needs invokes the managed hook at the
+  // current owned version.
+  AGENT_HOOK_WIRING_WIRED = 1;
+  // Owned entries exist but do not cover every event at the current version,
+  // so some transitions can never arrive.
+  AGENT_HOOK_WIRING_PARTIAL = 2;
+  AGENT_HOOK_WIRING_NOT_WIRED = 3;
+  // The configuration could not be inspected; the wiring is unknown rather
+  // than absent, and the desktop must not offer to overwrite it blindly.
+  AGENT_HOOK_WIRING_UNAVAILABLE = 4;
+  // The agent itself is not on this host: no configuration and no executable.
+  // There is nothing to wire, and offering to create configuration for a tool
+  // the user does not have is worse than saying nothing.
+  AGENT_HOOK_WIRING_ABSENT = 5;
+}
+
+message AgentRoute {
+  string host_profile_id = 1;
+  string server_identity = 2;
+  string session_id = 3;
+  string session_name_fallback = 4;
+  string window_id = 5;
+  string window_name_fallback = 6;
+  string pane_id = 7;
+  uint32 pane_index_fallback = 8;
+  string agent_id = 9;
+  uint64 attention_generation = 10;
+  reserved 11, 12;
+  reserved "nested_provenance", "reported_pane_id";
+}
+
+message AgentAdapterDescriptor {
+  string id = 2;
+  string display_name = 3;
+  bool supports_launch = 4;
+  bool supports_resume = 5;
+  bool supports_hooks = 6;
+  bool supports_process_detection = 7;
+  reserved 8;
+  reserved "supports_screen_fallback";
+  string hook_config_path = 9;
+  repeated string hook_events = 10;
+  // Observed on the host at snapshot time, not a capability claim.
+  AgentHookWiring hook_wiring = 11;
+  // Why the wiring could not be inspected; empty in every other state.
+  string hook_wiring_detail = 12;
+  // Whether an install would act on this adapter. Decided by the host, which
+  // is what observed the wiring; the desktop had a second copy of the rule,
+  // in another language, and the two had already diverged.
+  bool hook_setup_recommended = 13;
+}
+
+message AgentRecord {
+  string agent_id = 1;
+  string native_session_id = 3;
+  string display_name = 4;
+  AgentRoute route = 5;
+  AgentLifecycleState lifecycle = 6;
+  // Structured lifecycle evidence needs no desktop-facing source field.
+  // Screen scraping — the only reason the field existed — was removed because
+  // it could only see visible panes and matched vendor TUI output that changes
+  // without notice. Hooks are primary; Codex transcript records may reconcile
+  // child transitions that have no hook.
+  reserved 7;
+  reserved "authority";
+  uint64 state_generation = 8;
+  uint64 attention_generation = 9;
+  uint64 seen_generation = 10;
+  int64 updated_at_unix_millis = 11;
+  int64 hook_authority_expires_at_unix_millis = 12;
+  bool detected_manually = 13;
+  // Presence is topology/process reachability, independent of the retained
+  // lifecycle evidence.
+  bool present = 14;
+  // Canonical registry identity.
+  string adapter_id = 15;
+  // Empty, "blocked", or "completed" for the current attention generation.
+  string attention_kind = 16;
+  // Host-observed time when `lifecycle` last changed. Unlike `updated_at`,
+  // repeated hooks that report the same lifecycle and pure route changes do
+  // not move this clock.
+  int64 lifecycle_changed_at_unix_millis = 17;
+  // Host-observed time when the current attention generation was first seen.
+  // Zero while that generation is still unread or when there is no attention.
+  int64 attention_seen_at_unix_millis = 18;
+}
+
+message AgentSnapshot {
+  uint64 generation = 1;
+  repeated AgentRecord agents = 2;
+  reserved 3, 4, 5;
+  bool authoritative = 6;
+  // Desktop notification reducers must advance this boundary without
+  // replaying native notifications for records at or below it.
+  uint64 notification_watermark = 7;
+  repeated AgentAdapterDescriptor adapters = 8;
+  // All live events at or below this daemon generation are included.
+  uint64 accepted_generation = 9;
+}
+
+message AgentHookEvent {
+  AgentAdapterKind adapter = 1;
+  string source_event_id = 2;
+  uint64 source_generation = 3;
+  string native_session_id = 4;
+  string pane_id = 5;
+  bytes payload_json = 6;
+  int64 occurred_at_unix_millis = 7;
+  reserved 8, 9;
+  reserved "outer_pane_id", "nested_provenance";
+  // Only true when source_generation is an adapter-defined, stable vendor
+  // sequence. Unsequenced hooks use zero and exact source-event ID dedupe.
+  bool source_sequence_authoritative = 10;
+  string adapter_id = 11;
+  // Exact identity of the tmux server inherited by the hook process. Pane IDs
+  // are server-local, so an absent or different identity must remain unmapped.
+  string origin_server_identity = 12;
+}
+
+message AgentRequest {
+  AgentActionKind action = 1;
+  string agent_id = 3;
+  string native_session_id = 4;
+  string display_name = 5;
+  string session_id = 6;
+  string window_id = 7;
+  string pane_id = 8;
+  string active_root = 9;
+  string root_token = 10;
+  string expected_server_identity = 11;
+  uint64 expected_topology_generation = 12;
+  uint64 attention_generation = 13;
+  AgentHookEvent hook_event = 14;
+  HookManagementAction hook_management = 15;
+  bool confirmed = 16;
+  string confirmation_token = 17;
+  HookManagementAction hook_management_target = 18;
+  AgentPlacementKind placement = 19;
+  string adapter_id = 20;
+}
+
+message HookManagementPlan {
+  HookManagementAction action = 2;
+  string config_path = 3;
+  string backup_path = 4;
+  string managed_version = 5;
+  string summary = 6;
+  string confirmation_token = 7;
+  bool already_current = 8;
+  repeated string proposed_events = 9;
+  string proposed_command = 10;
+  string ownership_marker = 11;
+  string trust_guidance = 12;
+  string before_hash = 13;
+  string after_hash = 14;
+  bool creates_config = 15;
+  bool removes_config = 16;
+  string before_preview = 17;
+  string after_preview = 18;
+  string diff_preview = 19;
+  bool preview_truncated = 20;
+  string adapter_id = 21;
+}
+
+message AgentResponse {
+  AgentSnapshot snapshot = 1;
+  AgentRecord agent = 2;
+  HookManagementPlan hook_plan = 3;
+  string session_id = 4;
+  string window_id = 5;
+  string pane_id = 6;
+  uint64 accepted_generation = 7;
+  // "applied", "alreadyCurrent" or "userConfigured"; empty for every other
+  // operation. A tmux server that refused the command fails the request
+  // outright rather than returning a fourth value nobody branches on.
+  string host_naming = 8;
+}
+
+message AgentEvent {
+  AgentRecord agent = 1;
+  uint64 generation = 2;
+  bool notify = 3;
+  string reason = 4;
+  repeated string retired_agent_ids = 5;
+}
+
+// Voice mode: speech-to-text and text-to-speech run on the host (a Python
+// sidecar the host spawns with uv); the phone only records and plays. Audio
+// crosses the wire as one payload, never chunked. See
+// docs/mobile/voice-mode-plan.md.
+enum VoiceProvider {
+  VOICE_PROVIDER_UNSPECIFIED = 0;
+  // Microsoft Edge TTS, the only provider in v1. The field exists so a keyed
+  // provider (ElevenLabs) can be added later without protocol churn.
+  VOICE_PROVIDER_EDGE_TTS = 1;
+}
+
+enum VoiceReadiness {
+  VOICE_READINESS_UNSPECIFIED = 0;
+  // uv is not on the host; VoiceStatus.detail carries the install hint.
+  VOICE_READINESS_UV_MISSING = 1;
+  // uv found; the model must be provisioned before anything else works.
+  VOICE_READINESS_MODEL_MISSING = 2;
+  // A provision is running; VoiceStatus.provision carries its progress.
+  VOICE_READINESS_PROVISIONING = 3;
+  VOICE_READINESS_READY = 4;
+}
+
+message VoiceRequest {
+  // Client correlation, echoed back in VoiceResponse.operation_id.
+  string operation_id = 1;
+  // TRANSCRIBE: the recorded utterance.
+  bytes audio = 2;
+  // TRANSCRIBE: audio/mp4 (expo-audio); also audio/x-m4a, audio/aac.
+  string audio_mime = 3;
+  reserved 4;
+  // SPEAK: text to synthesize (replay, or arbitrary text).
+  string text = 5;
+  // SESSION: tmux pane whose root replies this connection wants spoken; "" clears.
+  string pane_id = 6;
+  reserved 7;
+  // SPEAK: unspecified means EDGE_TTS.
+  VoiceProvider provider = 8;
+  // SPEAK: validated voice identifier; "" means the host default
+  // ("en-US-AvaNeural").
+  string voice = 9;
+  // PROVISION: consent to the download; refused without it.
+  bool confirmed = 10;
+  // STATUS: if READY, spawn and load the sidecar in a detached task.
+  bool warm = 11;
+  // SESSION: exact tmux server the pane belongs to.
+  string expected_server_identity = 12;
+}
+
+message VoiceProvisionProgress {
+  string operation_id = 1;
+  // installing_runtime | downloading | verifying | ready | failed
+  string phase = 2;
+  uint64 transferred_bytes = 3;
+  // 0 while unknown (uv's own install has no byte count).
+  uint64 total_bytes = 4;
+  string error = 5;
+}
+
+message VoiceStatus {
+  VoiceReadiness readiness = 1;
+  string uv_path = 2;
+  string model_dir = 3;
+  // For the consent copy (697 MiB).
+  uint64 model_download_bytes = 4;
+  // Install hint when UV_MISSING; the last sidecar error otherwise.
+  string detail = 5;
+  // The model is currently hot.
+  bool sidecar_running = 6;
+  // Set while PROVISIONING so a reconnecting phone resumes the progress bar.
+  VoiceProvisionProgress provision = 7;
+}
+
+message VoiceTranscript {
+  // One line: every control character mapped to a space, runs collapsed.
+  // Empty when nothing was recognized; that is not an error.
+  string text = 1;
+  uint32 audio_millis = 2;
+  uint32 decode_millis = 3;
+}
+
+message VoiceSpeech {
+  // audio/mpeg; empty when synthesis failed and only the two text forms could be pushed.
+  bytes audio = 1;
+  string audio_mime = 2;
+  // Original Markdown shown by the phone. For SPEAK, this is the request text.
+  string display_markdown = 3;
+  bool truncated = 4;
+  string voice = 5;
+  VoiceProvider provider = 6;
+  // VOICE_REPLY: the pane whose root turn ended; empty for a SPEAK answer.
+  string pane_id = 7;
+  // VOICE_REPLY: the AgentRecord.state_generation the reply belongs to.
+  uint64 state_generation = 8;
+  int64 reply_at_unix_millis = 9;
+  // Exactly what was synthesized (after Markdown flattening and cap).
+  string speech_text = 10;
+  // VOICE_REPLY: exact tmux server instance the pane belongs to.
+  string server_identity = 11;
+}
+
+message VoiceResponse {
+  string operation_id = 1;
+  // STATUS / PROVISION.
+  VoiceStatus status = 2;
+  // TRANSCRIBE.
+  VoiceTranscript transcript = 3;
+  // SPEAK.
+  VoiceSpeech speech = 4;
+  // Set on error responses; Response itself has no retryable flag.
+  bool retryable = 5;
+}
+
+message VoiceEvent {
+  // EVENT_KIND_VOICE_PROVISION.
+  VoiceProvisionProgress provision = 1;
+  // Readiness at the time of the event, when the host has it to hand.
+  VoiceStatus status = 2;
+  // EVENT_KIND_VOICE_REPLY.
+  VoiceSpeech reply = 3;
+}
+
+message Error {
+  string code = 1;
+  string display_message = 2;
+  bool retryable = 3;
+}

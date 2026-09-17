@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+stage="$repo_root/tmp/phase1-thin-app/bin"
+runtime="$repo_root/tmp/phase1-thin-app/runtime"
+tmux_socket="ade-phase1-thin-$$"
+desktop_pid=""
+
+cleanup() {
+  if [[ -n "$desktop_pid" ]]; then
+    kill "$desktop_pid" >/dev/null 2>&1 || true
+    wait "$desktop_pid" >/dev/null 2>&1 || true
+  fi
+  tmux -L "$tmux_socket" kill-server >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+cd "$repo_root"
+cargo build --release --bin muxflow-host
+pnpm tauri build --no-bundle
+mkdir -p "$stage"
+release_target="${CARGO_TARGET_DIR:-$repo_root/target}/release"
+cp "$release_target/muxflow" "$stage/muxflow"
+cp "$release_target/muxflow-host" "$stage/muxflow-host"
+chmod 0755 "$stage/muxflow" "$stage/muxflow-host"
+
+protocol_major=$(jq -r '.protocolMajor' apps/mobile/src/protocol/gen/host_contract.json)
+metadata="$($stage/muxflow-host version)"
+jq -e --argjson major "$protocol_major" '.helperVersion == "0.2.0" and .protocolMajor == $major' <<<"$metadata" >/dev/null
+[[ -x "$stage/muxflow" ]]
+[[ -x "$stage/muxflow-host" ]]
+[[ -n "${DISPLAY:-}" ]] || { echo 'phase1 thin desktop smoke requires DISPLAY' >&2; exit 1; }
+rm -rf "$runtime"
+mkdir -p "$runtime/config" "$runtime/data" "$runtime/cache" "$runtime/host"
+tmux -L "$tmux_socket" new-session -d -s thin 'bash'
+env \
+  GDK_BACKEND=x11 \
+  XDG_CONFIG_HOME="$runtime/config" \
+  XDG_DATA_HOME="$runtime/data" \
+  XDG_CACHE_HOME="$runtime/cache" \
+  ADE_HOST_RUNTIME_DIR="$runtime/host" \
+  ADE_TMUX_SOCKET_NAME="$tmux_socket" \
+  "$stage/muxflow" >"$runtime/desktop.log" 2>&1 &
+desktop_pid=$!
+for _ in $(seq 1 200); do
+  [[ -S "$runtime/host/host.sock" ]] && break
+  kill -0 "$desktop_pid" 2>/dev/null || { cat "$runtime/desktop.log" >&2; exit 1; }
+  sleep 0.05
+done
+[[ -S "$runtime/host/host.sock" ]]
+"$stage/muxflow-host" protocol-check --socket "$runtime/host/host.sock" \
+  | jq -e --argjson major "$protocol_major" '.helperVersion == "0.2.0" and .protocolMajor == $major' >/dev/null
+echo "phase1-thin-desktop: pass ($stage)"

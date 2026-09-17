@@ -1,0 +1,44 @@
+{
+  "name": "@muxflow/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b && vite build",
+    "check": "tsc -b --pretty false",
+    "dev": "vite",
+    "stage-host-helper": "bash scripts/stage-host-helper.sh",
+    "tauri": "tauri",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@muxflow/terminal-interactions": "workspace:*",
+    "@monaco-editor/react": "4.7.0",
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-dialog": "2.7.2",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/addon-serialize": "0.14.0",
+    "@xterm/addon-webgl": "0.19.0",
+    "@xterm/xterm": "6.0.0",
+    "dompurify": "3.4.13",
+    "marked": "18.0.9",
+    "monaco-editor": "0.56.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "26.3.0",
+    "@tauri-apps/cli": "2.11.4",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@types/react-test-renderer": "19.1.0",
+    "@vitejs/plugin-react": "5.1.4",
+    "@xterm/headless": "6.0.0",
+    "jsdom": "30.0.1",
+    "react-test-renderer": "19.2.8",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "4.0.18"
+  }
+}

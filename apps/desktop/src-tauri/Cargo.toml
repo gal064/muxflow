@@ -1,0 +1,50 @@
+[package]
+name = "muxflow"
+version = "0.1.0"
+description = "A graphical IDE on top of tmux"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "muxflow_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+# Compiles the perf_log measurement implementation into release builds for an
+# A/B measurement campaign (`cargo build --release --features perf-log`).
+# Debug builds always include it via debug_assertions; see src/perf_log.rs.
+perf-log = []
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+phase0-core = { path = "../../../crates/phase0-core" }
+base64 = "0.22"
+blake3.workspace = true
+clipboard-rs = "0.3.5"
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2.7.2"
+tmux-agent-protocol = { path = "../../../crates/protocol" }
+tmux-control = { path = "../../../crates/tmux-control" }
+tokio = { version = "1", features = ["sync", "time"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5.19.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSBitmapImageRep", "NSImageRep", "NSPasteboard", "NSPasteboardItem", "NSResponder", "NSWindow", "NSWorkspace"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL", "block2"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }

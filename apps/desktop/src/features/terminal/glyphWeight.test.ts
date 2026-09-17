@@ -1,0 +1,231 @@
+// @vitest-environment jsdom
+import { beforeAll, describe, expect, it } from "vitest";
+import { Terminal } from "@xterm/xterm";
+// The addon's own bundle, as text. The hook below recognises the glyph atlas by
+// the shape of one call inside it, and that call belongs to a dependency — so
+// the assertion that it still looks like this has to read the dependency, the
+// way `theme.test.ts` reads `tokens.css` for the same reason.
+import addonBundle from "@xterm/addon-webgl/lib/addon-webgl.mjs?raw";
+import xtermBundle from "@xterm/xterm/lib/xterm.mjs?raw";
+import { installAtlasFontSmoothing } from "./atlasFontSmoothing";
+import { deviceSafeCellSpacing } from "./cellMetrics";
+import { GHOSTTY_TEXT_OPTIONS } from "./theme";
+
+/**
+ * The two halves of "the terminal's glyphs weigh what the font says they
+ * weigh": where they are rasterised, and which faces they are rasterised from.
+ */
+
+type ContextRequest = { canvas: HTMLCanvasElement; contextId: string; options: unknown };
+
+const requests: ContextRequest[] = [];
+const context = { marker: "context" };
+
+beforeAll(() => {
+  // Stands in for the real `getContext`, which jsdom does not implement. The
+  // hook wraps whatever is on the prototype when it installs, so this has to be
+  // in place first — and it lets the tests below assert that the call still
+  // arrives, unaltered, at the implementation underneath.
+  HTMLCanvasElement.prototype.getContext = function stub(
+    this: HTMLCanvasElement,
+    contextId: string,
+    options?: unknown,
+  ) {
+    requests.push({ canvas: this, contextId, options });
+    return context;
+  } as unknown as HTMLCanvasElement["getContext"];
+  installAtlasFontSmoothing();
+  // Installing twice must not wrap twice: every pane calls this before it
+  // builds its addon, and a stack of wrappers would move a canvas once per
+  // terminal ever opened.
+  installAtlasFontSmoothing();
+});
+
+function atlasContext(canvas: HTMLCanvasElement): unknown {
+  return canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+}
+
+describe("the glyph atlas canvas", () => {
+  it("is in the document before the context that draws into it exists", () => {
+    const canvas = document.createElement("canvas");
+    expect(canvas.isConnected).toBe(false);
+    expect(atlasContext(canvas)).toBe(context);
+    expect(canvas.isConnected).toBe(true);
+    const holder = canvas.parentElement!;
+    const declared = new Map((holder.getAttribute("style") ?? "")
+      .split(";")
+      .map((part) => part.split(/:(.*)/s).map((half) => half.trim()))
+      .filter((pair) => pair[0])
+      .map(([property, value]) => [property, value] as const));
+    // The declaration the whole module exists to apply, and the off-screening
+    // that has to stay positional: an element that is not *rendered* is the one
+    // configuration this was measured not to work in.
+    expect(declared.get("-webkit-font-smoothing")).toBe("antialiased");
+    expect(declared.get("left")).toBe("-9999px");
+    expect(declared.has("display")).toBe(false);
+    expect(declared.has("visibility")).toBe(false);
+    expect(declared.has("content-visibility")).toBe(false);
+    // The call reaches the real implementation with what the caller passed.
+    expect(requests.at(-1)).toMatchObject({ canvas, contextId: "2d", options: { willReadFrequently: true } });
+  });
+
+  it("shares one holder with every other atlas, and joins it once", () => {
+    const first = document.createElement("canvas");
+    const second = document.createElement("canvas");
+    atlasContext(first);
+    atlasContext(second);
+    const holder = first.parentElement!;
+    expect(second.parentElement).toBe(holder);
+    // Asking again for a canvas that is already placed leaves it where it is,
+    // rather than moving it to the end or adding a second copy.
+    const before = holder.querySelectorAll("canvas").length;
+    atlasContext(first);
+    expect(first.parentElement).toBe(holder);
+    expect(holder.querySelectorAll("canvas")).toHaveLength(before);
+    expect(holder.lastElementChild).toBe(second);
+  });
+
+  it("leaves every canvas that is not a glyph atlas where it was", () => {
+    const cases: Array<[string, unknown]> = [
+      // The addon's atlas *pages*: they only ever receive blits.
+      ["2d", { alpha: true }],
+      ["2d", undefined],
+      // An ordinary offscreen measuring canvas — the same `willReadFrequently`
+      // idiom without the addon's `alpha`. Nothing ever removes a canvas from
+      // the holder, so claiming a stranger's would pin it in the document for
+      // the life of the app.
+      ["2d", { willReadFrequently: true }],
+      ["webgl2", { antialias: false }],
+    ];
+    for (const [contextId, options] of cases) {
+      const canvas = document.createElement("canvas");
+      canvas.getContext(contextId as "2d", options as CanvasRenderingContext2DSettings);
+      expect(canvas.isConnected, `${contextId} ${JSON.stringify(options)}`).toBe(false);
+    }
+    // A canvas the app has already put on screen is not relocated under it.
+    const onScreen = document.createElement("canvas");
+    document.body.appendChild(onScreen);
+    atlasContext(onScreen);
+    expect(onScreen.parentElement).toBe(document.body);
+  });
+
+  it("is still asking for its context the way the hook recognises", () => {
+    // The hook fails open: an addon that stops passing these two options
+    // together stops being recognised, and the only symptom is glyphs that go
+    // quietly back to being heavier than the rest of the app. This is the
+    // tripwire for that — it reads the dependency rather than trusting the
+    // signature re-typed in `atlasContext` above, which would keep passing.
+    expect(addonBundle, "the glyph atlas no longer asks for alpha + willReadFrequently")
+      .toMatch(/getContext\(\s*["']2d["']\s*,\s*\{[^}]*\balpha\s*:[^}]*\bwillReadFrequently\s*:\s*!?(0|1|true)/);
+    // And the idiom the hook must keep refusing is still in the same bundle,
+    // which is what makes the `alpha` half of the predicate load-bearing rather
+    // than decorative. If only this half ever fails, nothing is broken — the
+    // narrowing has simply stopped being necessary here.
+    expect(addonBundle, "the willReadFrequently-alone idiom this predicate excludes is gone")
+      .toMatch(/getContext\(\s*["']2d["']\s*,\s*\{\s*willReadFrequently\s*:\s*!?(0|1|true)\s*\}/);
+  });
+
+  it("is still taken back out of the document by the addon that owns it", () => {
+    // The hook roots a canvas that was reachable only from the addon, so its
+    // lifetime becomes the addon's `remove()` call rather than the collector's.
+    // Nothing here sweeps the holder on that basis; an addon that stops
+    // removing would accumulate one canvas per atlas rebuild, invisibly.
+    expect(addonBundle, "the atlas no longer removes its canvas when disposed")
+      .toMatch(/dispose\(\)\s*\{\s*this\._tmpCanvas\.remove\(\)/);
+  });
+});
+
+describe("the weights the terminal is allowed to draw", () => {
+  it("are the ones xterm still has options for", () => {
+    // A tripwire on the xterm upgrade, not on the values: an option xterm
+    // renames or drops is silently ignored, and the symptom is bold text that
+    // is a shade brighter than the terminal this app is matching.
+    const terminal = new Terminal(GHOSTTY_TEXT_OPTIONS);
+    try {
+      expect(terminal.options.drawBoldTextInBrightColors).toBe(false);
+      expect(terminal.options.fontWeight).toBe("normal");
+      expect(terminal.options.fontWeightBold).toBe("bold");
+      expect(terminal.options.letterSpacing).toBe(0);
+      expect(terminal.options.lineHeight).toBe(1);
+    } finally {
+      terminal.dispose();
+    }
+  });
+
+  it("leaves contrast alone, because Ghostty does", () => {
+    // Ghostty applies no contrast adjustment, and xterm's default is likewise
+    // 1 (off). Named here so raising it stays a decision rather than a drift.
+    const terminal = new Terminal(GHOSTTY_TEXT_OPTIONS);
+    try {
+      expect(terminal.options.minimumContrastRatio).toBe(1);
+    } finally {
+      terminal.dispose();
+    }
+  });
+});
+
+describe("the bundled face's cell", () => {
+  // What WebGL builds a cell from: it floors the advance into device pixels and
+  // then adds the rounded, unscaled letter spacing.
+  const webglDeviceCell = (fontSize: number, ratio: number) => {
+    const advance = fontSize * 0.6;
+    return Math.floor(advance * ratio) + Math.round(deviceSafeCellSpacing(advance, ratio));
+  };
+
+  it("keeps the 0.6em advance on a whole device-pixel grid", () => {
+    for (const ratio of [1, 1.25, 1.5, 2, 3]) {
+      expect(webglDeviceCell(13, ratio) / ratio, `${ratio}x cell`).toBe(8);
+    }
+  });
+
+  it("adds back what the floor took, and nothing at the sizes it takes nothing", () => {
+    // The correction is a function of the measured advance, not a constant. At
+    // 13px the face advances 7.8 CSS px and every supported ratio floors away a
+    // fraction, so the cell is one device pixel wider than the floor — exactly
+    // today's 8px cell. At sizes whose advance is already whole in device
+    // pixels the floor loses nothing, and adding one anyway would track every
+    // cell wider than the face asks, changing the column count tmux is sized
+    // from.
+    for (const fontSize of [10, 13, 15, 20]) {
+      for (const ratio of [1, 1.25, 1.5, 2, 3]) {
+        const advance = fontSize * 0.6;
+        const label = `${fontSize}px at ${ratio}x`;
+        const cell = webglDeviceCell(fontSize, ratio);
+        expect(cell, label).toBe(Math.ceil(advance * ratio));
+        // Never narrower than the face, and never more than the device pixel
+        // the floor discarded.
+        expect(cell - advance * ratio, label).toBeGreaterThanOrEqual(0);
+        expect(cell - advance * ratio, label).toBeLessThan(1);
+      }
+    }
+    expect(deviceSafeCellSpacing(13 * 0.6, 2), "the 13px calibration is unchanged").toBe(1);
+    expect(deviceSafeCellSpacing(10 * 0.6, 2), "6px advance is already whole at 2x").toBe(0);
+    expect(deviceSafeCellSpacing(15 * 0.6, 2), "9px advance is already whole at 2x").toBe(0);
+    expect(deviceSafeCellSpacing(20 * 0.6, 2), "12px advance is already whole at 2x").toBe(0);
+    // Nothing measured, or a nonsense ratio: the DOM-renderer value, which is
+    // the one that changes no cell.
+    expect(deviceSafeCellSpacing(undefined, 2)).toBe(0);
+    expect(deviceSafeCellSpacing(13 * 0.6, 0)).toBe(deviceSafeCellSpacing(13 * 0.6, 1));
+  });
+
+  it("leaves the DOM fallback at the face's native advance", () => {
+    const advance = 13 * 0.6;
+    for (const ratio of [1, 1.25, 1.5, 2, 3]) {
+      // DOM keeps the fractional character width. Its canvas-level round is
+      // spread across the grid instead of adding one pixel to every cell.
+      const canvas = Math.round(advance * ratio * 80);
+      expect(canvas / ratio / 80, `${ratio}x cell`).toBeCloseTo(advance, 2);
+    }
+    expect(xtermBundle, "DOM no longer preserves the measured advance")
+      .toMatch(/char\.width=this\._charSizeService\.width\*[A-Za-z_$][\w$]*[,;]/);
+  });
+
+  it("fails if WebGL stops adding spacing after flooring the face advance", () => {
+    // If xterm starts rounding the advance itself, our one-pixel correction
+    // becomes one pixel too wide and must be deleted rather than carried over.
+    expect(addonBundle, "WebGL no longer floors the measured face advance")
+      .toMatch(/char\.width=Math\.floor\([^;]+_charSizeService\.width[^;]+_devicePixelRatio\)/);
+    expect(addonBundle, "WebGL no longer adds integer spacing after the floor")
+      .toMatch(/cell\.width=[^;]+char\.width\+Math\.round\([^;]+letterSpacing\)/);
+  });
+});

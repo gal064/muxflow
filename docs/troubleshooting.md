@@ -1,0 +1,89 @@
+# Troubleshooting
+
+Run `muxflow-host doctor` first. Use `doctor --json` when a machine-readable result is useful. If support needs a durable artifact, create one with:
+
+```sh
+muxflow-host support-bundle --output ./muxflow-support.json
+```
+
+The command refuses to overwrite an existing path. Move or remove an old bundle, or select a different filename. Do not weaken its `0600` permissions.
+
+Common report states:
+
+- `dependencies.tmux.available: false` — install tmux 3.3 or newer. Muxflow
+  automatically checks standard system, Homebrew, MacPorts, pkgsrc, Linuxbrew,
+  and Nix locations. For another layout, set `MUXFLOW_TMUX_PATH` to the absolute
+  executable path and restart the helper daemon.
+- `daemon.state: not_running` — start or reconnect the desktop app, which starts the user daemon.
+- `daemon.state: unsafe_or_invalid_endpoint` — a non-socket or non-private object occupies the daemon endpoint. Stop and inspect `/tmp/muxflow-<uid>` rather than deleting an unknown object automatically.
+- `daemon.runtimeState: invalid_or_unsafe` — runtime diagnostics had unsafe permissions, an unsupported/corrupt schema, or a symlink. Restarting the daemon creates a clean bounded state only when the runtime directory itself is private.
+- A dependency marked `unavailable` or `failed` — install or repair that program and run the doctor again. Raw command errors are intentionally excluded; run the program's version command directly if you need its local detail.
+- Nonzero connection or accept error counts — reconnect and check network/SSH/tmux availability. The report intentionally records only safe error classes, so local application logs may be needed for deeper investigation.
+
+The report never includes terminal output, prompts, file contents, SSH configuration, credentials, hosts, users, or paths. See [Diagnostics, privacy, and security](diagnostics-privacy-security.md) before sharing it.
+
+# Terminal keys
+
+## Ctrl+/ and Ctrl+_
+
+Both deliver the same byte, `0x1f` (ASCII US), and a TUI cannot tell them
+apart. That is a property of the terminal encoding, not of Muxflow: Ctrl+`_`
+masks to `0x1f` directly, and terminals have long aliased Ctrl+/ onto the same
+byte. So a program that binds Ctrl+/ (undo in Emacs, comment-toggle in several
+editors) and a program that binds Ctrl+_ are binding the same input.
+
+Muxflow sends `0x1f` for Ctrl+/ explicitly, because xterm.js has no mapping for
+that key and would otherwise send nothing at all. Ctrl+_ is left to xterm.js,
+which already encodes it correctly. Ctrl+Shift+/ (Ctrl+?) is a different key and
+is unaffected.
+
+# macOS package and permissions
+
+The internal macOS build is unsigned. If a quarantined artifact is blocked,
+inspect it with `release/macos/verify-package.sh` and use the normal System
+Settings privacy/security UI; do not disable Gatekeeper globally. Notification
+denial is reported by the app and can be changed for `Muxflow` in System
+Settings. Accessibility and Screen Recording are required only by the QA
+driver, not by normal app operation.
+
+## Notifications never appear on macOS
+
+Settings → Sounds has a **Send test notification** button and a line saying what
+macOS currently permits. Read that line first; it separates the three reasons a
+notification does not arrive.
+
+- *"Not requested yet"* — nothing has ever asked. Permission is requested lazily
+  on the first agent event, so on a machine where no agent has blocked or
+  finished, the app never appears in System Settings at all. Pressing the button
+  is what raises the prompt.
+- *"Notifications are turned off for this app"* — grant them in System Settings →
+  Notifications → Muxflow.
+- *"macOS did not answer"* — the running binary is not a bundle the system will
+  register, so the permission query never comes back. There is no framework
+  status for this; the silence *is* the symptom. `pnpm tauri dev` runs an
+  unbundled binary, and a plain `tauri build` bundle can also be rejected when
+  its signature seal is broken (M10-E016). **Only the output of
+  `release/macos/build-package.sh` is expected to deliver notifications**; that
+  script is what removes `LSRequiresCarbon` and re-signs the bundle. Verify a
+  bundle with `release/macos/verify-package.sh`.
+- *"…did not report a notification permission this app understands"* — on Linux,
+  no notification daemon is answering on the session bus. On macOS, a permission
+  state newer than this build.
+
+A notification for the pane you are currently looking at is suppressed on
+purpose — the app is already showing that agent's state. Every other pane's
+notification is shown, including while the app is frontmost.
+
+**Notifications arrive but the test one is silent.** macOS fixes an app's
+notification options at the first authorization request and never asks again.
+Builds before this one asked for alerts only, so an install that granted
+permission then has no sound permission now and cannot be re-prompted from
+inside the app. Turn sound on in System Settings → Notifications → Muxflow,
+or revoke and re-grant.
+
+The local helper executable remains in the application bundle. Its private
+communication socket is `/tmp/muxflow-<uid>/host.sock` unless
+`ADE_HOST_RUNTIME_DIR` is explicitly set; durable macOS helper state is under
+`~/Library/Application Support/dev.muxflow.desktop`. Remote Linux helpers are
+ELF files in the application Resources directory; a macOS Mach-O helper is
+never uploaded to Linux.

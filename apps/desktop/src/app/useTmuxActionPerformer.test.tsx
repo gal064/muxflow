@@ -1,0 +1,187 @@
+// @vitest-environment jsdom
+import { act, create } from "react-test-renderer";
+import { describe, expect, it, vi } from "vitest";
+import type { HostScopeToken } from "../features/shell/hostScope";
+import { recordIncident } from "../diagnostics/incidents";
+import { requestTmuxAction } from "../features/tmux/actions";
+import { useTmuxActionPerformer } from "./useTmuxActionPerformer";
+
+vi.mock("../diagnostics/incidents", () => ({ recordIncident: vi.fn() }));
+vi.mock("../features/tmux/actions", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../features/tmux/actions")>(),
+  requestTmuxAction: vi.fn(async () => ({ topologyGeneration: 3 })),
+}));
+const incidents = vi.mocked(recordIncident);
+
+const scope: HostScopeToken = {
+  hostProfileId: "remote", connectionKey: "ssh:remote", connectionEpoch: 1,
+  serverIdentity: "server-a", generation: 1,
+};
+
+async function performer(requestAction?: Parameters<typeof useTmuxActionPerformer>[0]["requestAction"]) {
+  const setStatus = vi.fn();
+  let perform!: ReturnType<typeof useTmuxActionPerformer>;
+  function Harness() {
+    perform = useTmuxActionPerformer({
+      canMutate: true, clientId: "client", generation: 1,
+      hostScopeRef: { current: scope }, requestAction, serverIdentity: "server-a", setStatus,
+    });
+    return null;
+  }
+  let renderer!: ReturnType<typeof create>;
+  await act(async () => { renderer = create(<Harness />); });
+  return { perform, renderer, setStatus };
+}
+
+describe("tmux action execution feedback boundary", () => {
+  it("keeps both successful and failed internal pane navigation silent", async () => {
+    const requestAction = vi.fn().mockResolvedValueOnce({ topologyGeneration: 2 }).mockRejectedValueOnce(new Error("stale"));
+    const harness = await performer(requestAction);
+    await act(async () => {
+      await harness.perform({ kind: "focusPane", sessionId: "$1", windowId: "@1", paneId: "%1" }, undefined, {
+        kind: "navigation", feedback: "silent", measurePanePaint: false,
+      });
+      await expect(harness.perform(
+        { kind: "focusPane", sessionId: "$1", windowId: "@1", paneId: "%2" },
+        undefined,
+        { kind: "navigation", feedback: "silent", measurePanePaint: false },
+      )).rejects.toThrow("stale");
+    });
+    expect(harness.setStatus).not.toHaveBeenCalled();
+    await act(async () => harness.renderer.unmount());
+  });
+
+  it("retains routine progress reporting for ordinary user-visible actions", async () => {
+    const harness = await performer(vi.fn(async () => ({ topologyGeneration: 2 })));
+    await act(async () => { await harness.perform({ kind: "selectWindow", sessionId: "$1", windowId: "@1" }); });
+    expect(harness.setStatus).toHaveBeenCalledWith("Waiting for authoritative tmux state…");
+    await act(async () => harness.renderer.unmount());
+  });
+
+  it("reports and preserves failures for visible navigation", async () => {
+    const stale = new Error("stale topology generation");
+    const harness = await performer(vi.fn(async () => { throw stale; }));
+    await act(async () => {
+      await expect(harness.perform(
+        { kind: "selectWindow", sessionId: "$1", windowId: "@1" },
+        undefined,
+        { kind: "navigation", feedback: "visible", measurePanePaint: true },
+      )).rejects.toBe(stale);
+    });
+    expect(harness.setStatus).toHaveBeenCalledWith(String(stale));
+    await act(async () => harness.renderer.unmount());
+  });
+
+  /**
+   * A refusal that only ever became a status string was a refusal nobody could
+   * investigate: the next action overwrites the message, and a bulk close
+   * overwrote its own with the following tab's progress. The journal is where
+   * "the host said no, and this is what it said" survives the render after.
+   */
+  it("journals every refusal it turns into a status message", async () => {
+    incidents.mockClear();
+    const harness = await performer(vi.fn(async () => { throw new Error("stale topology: generation changed"); }));
+    await act(async () => {
+      await harness.perform({ kind: "closeWindow", sessionId: "$1", windowId: "@1", confirmed: true });
+    });
+    expect(incidents).toHaveBeenCalledWith("action.refused", {
+      action: "closeWindow",
+      error: expect.stringContaining("stale topology: generation changed"),
+    });
+    // Bounded: an error carrying a whole tmux transcript must not become the
+    // journal's largest line.
+    const [, detail] = incidents.mock.calls[0] as [string, { error: string }];
+    expect(detail.error.length).toBeLessThanOrEqual(200);
+    await act(async () => harness.renderer.unmount());
+  });
+
+  it("retries stale standalone pane focus because no captured precondition is supplied", async () => {
+    const scopeRef = { current: scope };
+    const request = vi.fn()
+      .mockRejectedValueOnce(new Error("stale topology: generation changed"))
+      .mockResolvedValueOnce({ topologyGeneration: 2 });
+    const waitForNewerScope = vi.fn(async () => {
+      scopeRef.current = { ...scope, generation: 2 };
+      return scopeRef.current;
+    });
+    let perform!: ReturnType<typeof useTmuxActionPerformer>;
+    function Harness() {
+      perform = useTmuxActionPerformer({
+        canMutate: true, clientId: "client", generation: 1, hostScopeRef: scopeRef,
+        reconciliation: { request, waitForNewerScope }, serverIdentity: "server-a", setStatus: vi.fn(),
+      });
+      return null;
+    }
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<Harness />); });
+    await act(async () => { await perform({ kind: "focusPane", sessionId: "$1", windowId: "@1", paneId: "%1" }); });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.map((call) => call[2].generation)).toEqual([1, 2]);
+    await act(async () => renderer.unmount());
+  });
+});
+
+describe("a target host beside the active one", () => {
+  const peer: HostScopeToken = {
+    hostProfileId: "peer", connectionKey: "ssh:peer", connectionEpoch: 4,
+    serverIdentity: "server-peer", generation: 7,
+  };
+
+  it("sends the action to the target's client under the target's scope, and keeps its result", async () => {
+    const requestAction = vi.fn<NonNullable<Parameters<typeof useTmuxActionPerformer>[0]["requestAction"]>>(
+      async () => ({ topologyGeneration: 8 }),
+    );
+    const harness = await performer(requestAction);
+    let result: unknown;
+    await act(async () => {
+      result = await harness.perform({ kind: "setPinned", sessionId: "$1", pinned: true }, undefined, undefined, {
+        clientId: "peer-client", canMutate: true, scopeRef: { current: peer },
+      });
+    });
+    expect(requestAction).toHaveBeenCalledWith(expect.objectContaining({ clientId: "peer-client", initialScope: peer }));
+    expect(requestAction.mock.calls[0]?.[0].currentScope()).toEqual(peer);
+    expect(result).toEqual({ topologyGeneration: 8 });
+    await act(async () => harness.renderer.unmount());
+  });
+
+  it("refuses a target with no live client, and discards a result once the target's scope moved on", async () => {
+    const requestAction = vi.fn(async () => ({ topologyGeneration: 8 }));
+    const harness = await performer(requestAction);
+    await act(async () => {
+      await harness.perform({ kind: "setPinned", sessionId: "$1", pinned: true }, undefined, undefined, {
+        clientId: undefined, canMutate: true, scopeRef: { current: peer },
+      });
+    });
+    expect(requestAction).not.toHaveBeenCalled();
+    expect(harness.setStatus).toHaveBeenCalledWith("This action is unavailable until the authoritative connection is live.");
+
+    const scopeRef = { current: peer };
+    let result: unknown = "unset";
+    await act(async () => {
+      const pending = harness.perform({ kind: "setPinned", sessionId: "$1", pinned: true }, undefined, undefined, {
+        clientId: "peer-client", canMutate: true, scopeRef,
+      });
+      scopeRef.current = { ...peer, connectionEpoch: 5 };
+      result = await pending;
+    });
+    expect(result).toBeUndefined();
+    await act(async () => harness.renderer.unmount());
+  });
+
+  it("does not measure a peer's round trip into the active host's latency", async () => {
+    const request = vi.mocked(requestTmuxAction);
+    request.mockClear();
+    const harness = await performer();
+    await act(async () => {
+      await harness.perform({ kind: "setPinned", sessionId: "$1", pinned: true }, undefined, undefined, {
+        clientId: "peer-client", canMutate: true, scopeRef: { current: peer },
+      });
+      await harness.perform({ kind: "setPinned", sessionId: "$1", pinned: true });
+    });
+    expect(request.mock.calls.map(([clientId, , , measureLatency]) => [clientId, measureLatency])).toEqual([
+      ["peer-client", false],
+      ["client", undefined],
+    ]);
+    await act(async () => harness.renderer.unmount());
+  });
+});

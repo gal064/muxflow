@@ -1,0 +1,32 @@
+{
+  "admissions": [
+    {
+      "major": 4,
+      "refusal": null
+    },
+    {
+      "major": 3,
+      "refusal": {
+        "kind": "protocolMajor"
+      }
+    },
+    {
+      "major": 5,
+      "refusal": {
+        "kind": "protocolMajor"
+      }
+    },
+    {
+      "major": 0,
+      "refusal": {
+        "kind": "protocolMajor"
+      }
+    }
+  ],
+  "frames": {
+    "file": "0000003e080418ffffffffffffffffff012089808080808080103001a201230a066f70656e2d3118ffffffffffffffffff012204009f929628013206646967657374",
+    "git": "00000031080418ffffffffffffffffff0120898080808080801030016217081e72133889808080808080104203610aff4a036209fe",
+    "terminal": "00000031080418ffffffffffffffffff0120898080808080801030018a01160a022533120500ff1b5b481887808080808080102801",
+    "voice": "00000030080418ffffffffffffffffff012089808080808080103001721608156a121a100a03fffb903001408580808080808010"
+  }
+}
