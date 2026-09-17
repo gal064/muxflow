@@ -7,14 +7,14 @@ import sys
 
 
 EXCLUDED_PATHS = (
-    "docs/history/",
+    "docs/history/qa/",
     "docs/bugs/",
     "docs/mobile/qa/",
     "docs/mobile/mocks/",
     "todos/",
     ".claude/",
 )
-EXCLUDED_FILES = {"todo.md"}
+EXCLUDED_FILES = {"todo.md", "docs/history/implementation.md"}
 EXAMPLE_ACCOUNTS = {
     "ade", "agents", "alice", "deploy", "dev", "example", "linuxbrew", "me",
     "operator", "operator-extra", "someone", "test", "u", "user", "x", "zed",

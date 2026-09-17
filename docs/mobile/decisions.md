@@ -1,0 +1,1433 @@
+# Muxflow Mobile — decisions log
+
+design.md §5 asks for the versions in its table unless a newer stable exists on
+the day work starts, and for anything the document leaves open to be decided
+towards the smallest change and written down here.
+
+## M0 — project skeleton
+
+### Versions chosen (2026-08-26)
+
+| Component | design.md §5 says | Chosen | Why |
+| --- | --- | --- | --- |
+| Expo SDK | latest stable | **57.0.16** | `expo@latest` on the day work started. |
+| React Native | bundled with the SDK | **0.86.2** | From the SDK 57 template. |
+| React | bundled with the SDK | **19.2.3** | Same. |
+| expo-router | bundled with the SDK | **57.0.16** | Same. |
+| react-native-webview | latest compatible | **13.16.1** | The version SDK 57 pins in `bundledNativeModules.json`. |
+| zustand | 5.x | **5.0.15** | Latest 5.x. |
+| @bufbuild/protobuf, @bufbuild/protoc-gen-es | latest 2.x | **2.14.0** | Latest 2.x. |
+| @bufbuild/buf | "latest 2.x" | **1.72.0** | The buf **CLI** has no 2.x — it is on 1.x and always has been. The "2.x" in §5 is the protobuf-es major, which is what the two packages above carry. 1.72.0 is the latest CLI. |
+| expo-notifications / -secure-store / -clipboard / -dev-client | bundled with the SDK | **57.0.14 / 57.0.1 / 57.0.1 / 57.0.15** | From SDK 57's `bundledNativeModules.json`. |
+| TypeScript | — | **6.0.3** | From the SDK 57 template. |
+| vitest | — | **4.1.11** | Latest. |
+| JDK | — | **Temurin 17.0.20.1+1** | Gradle 9.3.1 and AGP need 17+; 17 is the LTS the RN template targets. |
+| Android compileSdk / targetSdk | latest the SDK supports | **36 / 36** | React Native 0.86's version catalog. |
+| Android minSdk | 26 | **26** | Pinned through `expo-build-properties`; the RN 0.86 default is 24. |
+| Kotlin | bundled with the SDK's template | **2.2.20** | Expo SDK 57 default; not overridden. |
+
+Every runtime dependency is pinned exactly (no `~`, no `^`) so that a fresh
+`pnpm install` on another machine resolves to the same tree.
+
+### Deviations from §5's build-command list
+
+- **`pnpm apk` builds a debug APK locally instead of running EAS.** §5 spells it
+  `eas build --platform android --profile preview --local`, which needs
+  `eas-cli`, an Expo account and a signing key — none of which exist yet, and
+  none of which M0 is allowed to create. `apps/mobile/scripts/build-apk.sh`
+  does `expo prebuild --platform android` + `gradlew assembleDebug`, which is
+  the M0 gate in §16. `eas.json`'s `preview` profile is committed and correct
+  but unreachable until M7 wires `eas-cli` and signing; restore the §5 command
+  then.
+- **`pnpm protocol:check` also fails on an untracked file.** §5 says
+  `git diff --exit-code`, which only sees tracked paths — adding a second
+  `.proto` would write a new, untracked `*_pb.ts` and the check would pass.
+  The script runs the §5 diff and then asserts that
+  `git ls-files --others --exclude-standard -- src/protocol/gen` is empty.
+- **`pnpm webview:build` does not exist yet.** §5 lists it; the WebView bundles
+  (§10.2, §10.3) are M3/M5 and are owned elsewhere.
+
+### Known, deferred
+
+- `expo-dev-client` is a runtime dependency (D2 requires a development build),
+  and its config plugin writes `SYSTEM_ALERT_WINDOW`, `READ_EXTERNAL_STORAGE`
+  and `WRITE_EXTERNAL_STORAGE` into the shared `AndroidManifest.xml`. Those
+  permissions would ride along into the `preview` and `production` EAS
+  profiles. Scope it to the development profile before M7 ships an APK (§14).
+
+### Decisions the document left open
+
+- **`app/` at the repository root of `apps/mobile`, not `src/app/`.** The SDK 57
+  template puts routes in `src/app`; design.md §4 lists `app/` beside `src/`.
+  §4 wins — expo-router finds either without configuration.
+- **No `metro.config.js`.** The default Expo Metro config is enough for M0;
+  add one when the WebView bundles (§10.2, §10.3) need an asset extension.
+- **Placeholder screens share one component**
+  (`src/ui/components/PlaceholderScreen.tsx`) instead of each route
+  hand-rolling a `View`. Every M0 route renders its title in `--chrome-ink-strong`
+  on `--chrome-bg`; each will be replaced whole in its own milestone.
+- **Hosts (§9.1) renders the empty state only.** M0 has no store, so the branch
+  in §9.1 step 3 (the host list) has nothing to read. The `Add host` and
+  `Your SSH key` links navigate so the skeleton is walkable; they carry no
+  logic.
+- **`app/home/index.tsx` redirects to `/home/agents`.** §9 lists no file for
+  the bare `/home` path, but §9.1 and §9.3 both navigate to it. A directory
+  holding only a `_layout` has no screen to render, so the redirect answers
+  the path and is hidden from the tab bar with `href: null`.
+- **`typedRoutes` is off.** Expo's typed-routes codegen writes
+  `.expo/types/**` at dev-server start, which `tsc --noEmit` would then need in
+  a clean checkout for `pnpm mobile:check` to pass. Turn it on when there is a
+  dev server in the loop.
+- **`android/` is not committed.** It is regenerated by `expo prebuild` (see
+  `docs/mobile/toolchain.md`); the dev-build workflow prebuilds on demand.
+- **Fonts come from the upstream JetBrains Mono release, not from a woff2
+  conversion** of `apps/desktop/src/assets/fonts`. Same font, same version
+  family, and no converter is installed on this machine. Recorded in
+  `docs/mobile/toolchain.md`.
+
+## M5 — files browser and file viewer
+
+### Versions chosen (2026-08-26)
+
+| Component | design.md §5 says | Chosen | Why |
+| --- | --- | --- | --- |
+| marked | 18.0.9 | **18.0.9** | Same as `apps/desktop`, as D4 requires. |
+| dompurify | 3.4.13 | **3.4.13** | Same as `apps/desktop`. |
+| esbuild | — | **0.28.2** | Bundles the WebView pages; the version already in the lockfile through Vite. |
+| jsdom | — | **30.0.1** | Same as the desktop's test environment; gives `renderSafeMarkdown` a DOM. |
+| react-native-tcp-socket | — | **6.4.2** | Development-only transport (below). |
+
+All five are `devDependencies`: the Markdown page is bundled at build time, and
+nothing in the shipping JavaScript imports `marked`, `DOMPurify` or the TCP
+socket. Expo's autolinking scans `node_modules` rather than the dependency
+classification, so `react-native-tcp-socket` still links into a dev build
+(verified with `expo-modules-autolinking react-native-config`).
+
+### Decisions the document left open
+
+- **The WebView bundle is emitted as a TypeScript module, not an `.html`
+  asset.** §10.2 names `assets/webview/terminal.html`, but the page is loaded
+  with `source={{ html }}`, so what the app needs is the document *as a string*.
+  Metro cannot import `.html` without a `metro.config.js` entry, and M0 decided
+  to add that config only when something needs it. `scripts/build-webview.mjs`
+  therefore writes `src/webview/markdownBundle.ts`, which is committed the way
+  `src/protocol/gen` is, so `check`, `test` and a dev build all work without a
+  build step first.
+- **Code spans in the Markdown page fall back to the platform monospace.** §10.3
+  asks for JetBrains Mono. The WebView loads no files (`allowFileAccess` is off,
+  §10.2/§14), so the only way to get the face in is a ~365 KB base64 `@font-face`
+  — five times the rest of the bundle, for a difference nobody can see at 13 px.
+  The stack is `"JetBrains Mono", ui-monospace, monospace`, so it picks the face
+  up for free the day the terminal bundle (§10.2) embeds it.
+- **Task-list checkboxes do not render.** §9.7's acceptance note says they do,
+  but the sanitiser D4 orders copied verbatim has `input` in `FORBID_TAGS`, so
+  `- [x] done` renders as a plain list item — on the desktop too. D4 ("the same
+  function, so the same output") wins over the acceptance note; changing it
+  would mean changing the desktop. What is lost is not the checkbox styling but
+  the *state*: a plan's done and not-done items render identically. Substituting
+  `☑`/`☐` text before sanitising would keep the meaning without `<input>` ever
+  existing — but that is a change to the shared function, so it is a
+  conversation with the desktop, not a mobile decision.
+- **Every symlink in a listing is inert.** §9.6 step 4 makes a symlink navigable
+  when `symlinkTargetKind === FILE`. Directory enumeration on the host never
+  follows a link — `metadata_for_directory_entry` sets `symlink_target_kind` to
+  `UNSPECIFIED` for every entry it reports, deliberately — so in practice the
+  rule always answers "not navigable". The `FILE` branch is implemented and
+  tested anyway, for the day the host answers the question.
+- **`FILE_KIND_OTHER` (fifos, sockets, devices) is shown and inert.** §9.6 names
+  directories and files and says nothing about the rest; the host's
+  `regular_file_target` refuses them, and a refusal screen is not worth the code.
+- **Sizes are powers of 1024 with `KB`/`MB` labels, truncated.** §9.6 spells
+  `12 KB` and `1.4 MB` — one decimal below ten units, none above. The arithmetic
+  is the desktop's `formatBytes`; only the labels differ, and they are the ones
+  §9.6 wrote.
+- **A listing stops after 40 pages.** §9.6 says "follow `nextPageToken` until
+  `complete`". A host that never sets `complete` would loop forever, so the
+  40-page bound (20 000 entries at the phone's page size of 500, twice the
+  host's own `MAX_DIRECTORY_ENTRIES`) turns that into a truncated listing.
+- **The connection strip (§9) is not part of M5.** It is global chrome that
+  belongs with the Hosts/connection screens. While the connection is not
+  `connected`, the Files screens show their centred spinner and reload
+  themselves when it comes back.
+
+### Known cosmetic differences, not fixed in M5
+
+- **Ligatures.** The plain/`Source` view is native `Text` in JetBrains Mono,
+  which has ligatures on and no way to turn them off on Android, so `->` paints
+  as `→`. The Markdown page one tap away falls back to the platform monospace
+  and paints it literally. Fixing it properly means shipping `JetBrains Mono NL`
+  as a second family (a shared `app.json` change and ~500 KB of assets) or
+  embedding the face in the WebView, which §10.2's terminal bundle will have to
+  do anyway. Left for whichever lands first.
+- **The host's refusal messages are developer-facing.** §9.7 says to show the
+  host's `displayMessage`, and for a file the process cannot read that message
+  is `leaf changed or is unsafe`. The frame is right and the copy is not ours;
+  it belongs with whoever owns the host's refusals.
+
+### Development-only TCP transport
+
+The phone's transport is SSH (D1) and the native module is M1, which does not
+exist yet. To run §9.6 and §9.7 on a device before then:
+
+- `scripts/dev-tcp-bridge.mjs` listens on `127.0.0.1:7778` and spawns one real
+  `muxflow-host bridge --stdio` per accepted connection, against a scratch
+  `ADE_HOST_RUNTIME_DIR` and a private tmux server seeded with a workspace that
+  has one of everything the two screens render. One bridge per connection is
+  what makes the bulk lane (§11.1) work.
+- `src/dev/tcpTransport.ts` is a `Transport` over `react-native-tcp-socket`
+  pointed at `10.0.2.2:7778` (the emulator's alias for the host loopback),
+  refusing to dial unless `__DEV__`.
+- `app/dev/files.tsx` wires the two together and forwards to
+  `/files/<paneId>`; reach it with
+  `adb shell am start -a android.intent.action.VIEW -d "muxflow://dev/files"`.
+
+None of the three is reachable from a shipping screen, but autolinking does not
+read `devDependencies` any differently from `dependencies`: a release build
+would still carry `react-native-tcp-socket`'s native module. Delete all three —
+and the dependency — once the SSH module lands, or keep them for host-free UI
+work and exclude the package from the release profile. Either way this is a
+release-gate item for M7, not a shipping path today.
+
+## M3 — terminal screen and connection wiring
+
+### Versions chosen (2026-08-26)
+
+| Component | design.md §5 says | Chosen | Why |
+| --- | --- | --- | --- |
+| @xterm/xterm, @xterm/addon-fit | 6.0.0 / 0.11.0 | **6.0.0 / 0.11.0** | Same as the desktop; devDependencies, bundled into the page. The workspace's xterm wheel patch applies here too and is harmless. |
+| esbuild | — | **0.28.2** | Already in the monorepo; bundles the page. |
+| react-native-tcp-socket | — | **6.4.2** (devDependency) | Dev-only transport for emulator QA (below). |
+
+### Decisions the document left open
+
+- **The terminal page ships as a string constant, not an asset.**
+  `scripts/build-webview.mjs` writes `assets/webview/terminal.html` (for
+  browser debugging) and `src/features/terminal/terminalHtml.ts` (a
+  `TERMINAL_HTML` string). The WebView loads the string with
+  `source={{ html }}`, which needs no Metro asset plugin and avoids Android's
+  `file://`/`asset://` quirks. JetBrains Mono is embedded from the desktop's
+  woff2 (one third the size of the TTF); `textZoom={100}` pins the cell size
+  against the system font scale.
+- **Cell size comes from the fit addon, not the nominal 7.8 × 15.6 px.**
+  `fit.proposeDimensions()` measures the rendered face; `computeGrid` with the
+  nominal cell is the fallback and the unit-tested formula. Observed on a
+  Pixel 6 (411 dp wide): 51 × 33 portrait, 51 × 18 with the keyboard,
+  115 × 10 landscape. The page never reports a grid before layout (a 0 × 0
+  element would resize every window of the session to 2 × 1).
+- **Credit is acknowledged when bytes are handed to the page**, not when the
+  page's `written` echo returns (§10.2). The spec's "handed to xterm" allows
+  either; acking on handoff keeps `HostConnection` unchanged. `written` is
+  diagnostic only.
+- **Keyboard avoidance uses reanimated's `useAnimatedKeyboard`.** Expo SDK 57
+  is edge-to-edge on Android, where `adjustResize` no longer shrinks the
+  window and RN's `Keyboard` events under-report the height by the
+  navigation-bar inset. `react-native-keyboard-controller` was tried first
+  and segfaulted intermittently in Fabric's `MountingCoordinator` at
+  startup; reanimated reads the same IME inset without a new native module.
+- **The Terminal screen owns one `TerminalController` per focus.**
+  `useFocusEffect` starts it (init → size → select → resize → attach) and
+  stops it on blur (focus cleared, then hide), so Terminal → Files → back is
+  a hide/reveal cycle exactly as §7.6 steps 1 and 4. Backgrounding the app
+  does not hide (the spec only names unmount and Files).
+- **Design critique (accepted).** Terminal header controls are 48 dp touch
+  targets with 24–26 px glyphs; the xterm element has a 6 px left inset so
+  column 0 clears the bezel; the home tab bar adds the gesture-navigation
+  inset below its 56 dp; the gone state drops the Files button, chips and
+  input bar; single-glyph chips (arrows, y, n) render at 16 sp semibold.
+  Rejected: changing the arrow chip bytes (§9.5 fixes them; the scratch
+  host's bash has no readline, so `[A` echoes are expected), a chip-row
+  separator, and overflow/tone nits.
+- **A pane absent from a loaded topology is "gone".** New terminal waits
+  (≤ 3 s) for the created pane to reach the store before navigating, so an
+  absent pane on the Terminal screen is conclusive, including for retained
+  `present === false` agents. The host reconciles an out-of-band
+  `tmux kill-pane` on its safety interval: 15–30 s were observed before the
+  TOPOLOGY_SNAPSHOT that flips the screen to "This terminal no longer exists."
+- **New-window diagnostics are action-scoped and event-only.** They record the
+  press/guard outcome, command presence (never its text), request attempt and
+  generation, helper result/error code, pane-topology observation, command
+  byte count and sent/failed outcome, navigation, and the Terminal route's
+  available/unavailable decision. They use the shared bounded memory recorder
+  and add no polling or background task.
+- **New agent follows desktop Run command in first tab.** It creates a normal
+  interactive terminal first, then sends the configured text verbatim plus one
+  newline after the pane ID is acknowledged. Input is issued once on the
+  initiating live connection/epoch/server scope and is never retried after a
+  timeout or reconnect. A delivery failure is partial success: the terminal
+  remains visible with any shell error and the app reports that only the agent
+  command could not be sent. New terminal remains the command-free create path.
+- **`stale_topology` retry waits up to 1 s for a newer generation** before
+  re-sending CREATE_WINDOW, as the desktop does: the refusal is answered
+  directly while the fresh snapshot travels on the ordered channel.
+- **Failed attach steps retry every 2 s, three times**, then wait for a size
+  change or reconnect. The spec has no state for a refused attach.
+- **`connectionManager.connectHost` resolves on `connected`** and rejects on
+  `failed` / `incompatible` (with the strip message) or when disconnected
+  meanwhile; the store reflects `sshConnecting` immediately so §9.1 can
+  navigate before it settles. `openBulkConnection` re-dials unless the
+  memoised lane is live on the current control epoch; a lane that fails to
+  bind is disconnected so it does not keep re-dialling on a stale epoch.
+- **Hosts store is in-memory in M3.** `SavedHost` per §8.3; the connection
+  epoch is bumped from the stored record (monotonic per host id).
+  Secure-store persistence is M6's.
+- **Tab and action icons are Unicode glyphs** (✦ agents, ❐ workspaces,
+  ▤ files, `>_` terminal, ⌘ / ✱ adapter avatars): `@expo/vector-icons` is
+  not resolvable from `apps/mobile` under pnpm's strict layout and the spec
+  asks for simple glyphs.
+- **Dev-only transport for QA without SSH.** `scripts/dev-tcp-bridge.mjs`
+  spawns one `muxflow-host bridge --stdio` per TCP connection on
+  127.0.0.1:7777 against a scratch runtime and private tmux server;
+  `src/session/devTransport.ts` (react-native-tcp-socket, `__DEV__` only,
+  lazy `require`) dials 10.0.2.2:7777 from the emulator, and the Hosts
+  screen shows a "Dev: connect" link in development builds. The SSH module
+  replaces the factory through `setTransportFactory`. The native side of
+  `react-native-tcp-socket` is still autolinked into release builds (only the
+  JS is guarded); drop the devDependency before M7 if APK size matters.
+- **Metro must not run with `CI=1`** for iteration: it disables the file
+  watcher ("reloads are disabled"). Recorded because it cost an hour of QA.
+
+### QA (emulator, `docs/mobile/qa/m3/`)
+
+Pixel 6 AVD (`muxflow-api35-terminal`, API 35), dev build against Metro and
+the dev TCP bridge. Screenshots: hosts, Agents empty state, Workspaces,
+Workspace, New terminal, keyboard open (WebView shrinks to 51 × 18 and tmux
+follows), `echo hi` via the input bar, Ctrl-C / Esc / ↑ / Enter chips,
+landscape (115 × 10), a second New terminal, the gone state after
+`kill-pane`, the reconnect strip after the bridge died, and the re-attached
+terminal after it came back. Not exercised: agent rows and pills (no agent
+hooks on the scratch host), TERMINAL_EXIT banner.
+
+## Integration — Wave 2 merge
+
+### Bouncy Castle duplicate classes (2026-08-26)
+
+`modules/muxflow-ssh` (sshj) depends on `bcprov/bcpkix-jdk18on:1.80`; the
+dev-only `react-native-tcp-socket` depends on the legacy `-jdk15to18:1.78.1`
+artifacts, which contain the same classes under different coordinates.
+`assembleDebug` failed with "Duplicate class org.bouncycastle…". Fixed with a
+local Expo config plugin (`plugins/withBouncyCastleDedup.js`, registered in
+`app.json`) that substitutes the legacy coordinates project-wide. It becomes a
+no-op if `react-native-tcp-socket` is removed at M7.
+
+## M6 — hosts UX, host keys, error matrix, SSH transport
+
+### Decisions the document left open
+
+- **The full-screen rows of §12 are rendered by the Hosts screen, and a fatal
+  connection returns to it.** §12 places them "full-screen on `/home`", but
+  `app/home/**` belongs to another milestone and this branch may not touch it.
+  `ConnectionChrome` (strip + full-screen row + §9.10 dialog + §9.8 sheet) is a
+  component any screen can mount as the first child of its root view; the Hosts
+  screen mounts it with `returnOnFailure`, so a connection that fails for good
+  pops back to the host list and shows the row there. When `/home` mounts
+  `ConnectionChrome` too, the row appears there as well and the prop can go.
+- **`hostKeyNotTrusted` has no §12 row**, because it is the user answering
+  "Cancel" in the §9.10 dialog rather than a failure. It shows in the strip as
+  `"The host key for {host} wasn't trusted. Connection refused."`, phrased to
+  end like the mismatch row §9.10 spells out.
+- **The JS side names a refused host key.** `muxflow-ssh` releases a blocked
+  verifier by closing the channel, so it reports `closedByClient`;
+  `sshTransport` knows the dialog said no and reports `hostKeyNotTrusted`
+  instead (§12 needs the distinction; §7.2 must not retry it either way).
+- **"Forget host key" on the changed-host-key screen forgets and reconnects.**
+  §9.10 says "then the user can reconnect and re-trust" but the screen carries
+  one button; forgetting alone would leave the user on a dead end, and the new
+  fingerprint still has to pass the §9.10 dialog.
+- **§9.2's field validation copy** is not in the document (§9.2 only says Save
+  is disabled until valid). One short sentence per rule, sentence case, shown
+  only after the field has been touched.
+- **Host ids are `crypto.randomUUID()` when the runtime has it**, else a
+  v4-shaped id from `Math.random`. §8.3 says uuid; Hermes has no uuid and no
+  `crypto`, and a list key that never leaves the phone does not justify a
+  dependency.
+- **Auto-connect on cold start** (§12's last row) runs once per process, from
+  the Hosts screen, as soon as the persisted hosts have been read.
+- **`src/session/connectionManager.ts` is a stub.** The terminal milestone owns
+  it; this one needs `connectHost` / `getConnection` / `openBulkConnection` /
+  `disconnectHost` / `setTransportFactory` to exist so the SSH transport can be
+  registered and a host can actually be connected. Take the terminal branch's
+  file on merge.
+- **The §12 copy for the UI lives in one module**
+  (`src/features/hosts/errorMatrix.ts`). `sshTransport` stamps it onto every
+  `TransportClose` it reports, so the strip, the full-screen row and the sheet's
+  `Last error` all show the same string. `HostConnection.closeMessage`
+  (M2, `src/protocol/`) still carries its own copies of four of those strings
+  for a transport that stamps none — a `dial()` that throws a raw error, the
+  test pipes — and they are identical today. Preferring `close.message` there
+  unconditionally would surface those raw driver messages instead of §12 copy,
+  so the duplication stays until the protocol client can be given the matrix
+  without inverting the dependency.
+- **§14's "no secret in the log"** is enforced by `redactSecrets` on the way
+  into the one memory-only flight recorder: key bodies and common credential /
+  token forms are redacted before both console and the copyable buffer.
+- **The §9.10 dialog and the §9.8 sheet are mounted by the root layout**
+  (`ConnectionModals` in `app/_layout.tsx`), not by each screen.
+  react-native-screens detaches the screens under the top of the stack and a
+  `Modal` inside a detached screen never shows, so a host key raised while
+  `/home` is on top has to be drawn from a mount that is never detached.
+  `ConnectionChrome` keeps the strip and the full-screen row, and falls back to
+  drawing the two modals only where no root mount exists.
+- **The reconnecting strip's first sentence is the §12 close message when there
+  is one.** §9 spells the line `"Connection lost. Reconnecting in {n}s…"` and
+  §12 asks the same strip to say `"Couldn't reach {host}:{port}."` while it
+  retries an unreachable host; one 28 dp line carries both. Only a
+  `TransportClose` supplies it — the state machine also reconnects for reasons
+  of its own (`"sequence gap"`, `"protocol error"`), which §12 keeps out of the
+  UI. At 0 the line is §9's `"Reconnecting…"` exactly.
+- **Editing a host's `host` or `port` forgets its trusted fingerprint.** A host
+  key belongs to an address; §9.10's "something is intercepting the connection"
+  screen is for a key that changed under the same address, not for a row the
+  user re-pointed at another machine. Changing the user or the label keeps the
+  pin.
+- **`ConnectionService` stops itself through an intent, not `stopService`.**
+  Android kills the process with `ForegroundServiceDidNotStartInTimeException`
+  when a service started with `startForegroundService()` is stopped from
+  outside before it reaches the foreground — which is exactly what §12's
+  "Helper missing" row does, because the channel reports `connected` and the
+  missing helper exits 127 in the same tick. The stop is delivered as
+  `ACTION_STOP`, so `onStartCommand` is guaranteed to run and the service
+  enters and leaves the foreground in one turn. This touches
+  `modules/muxflow-ssh/` (M1's module), which no other milestone changes.
+
+### Seam review after the Wave 2 merge (2026-08-26)
+
+An independent review of the merge resolutions found, and this commit fixes:
+
+- **Transport factory ownership.** `src/session/appWiring.ts` is now the only
+  installer. It routes by host id — the two dev bridge hosts (`DEV_HOST`,
+  `DEV_FILES_HOST` in `src/session/devTransport.ts`) go to their TCP
+  transports in `__DEV__` builds, everything else goes to the SSH module —
+  so a dev build no longer dials a saved host over raw TCP and the dev Files
+  route no longer replaces the global factory. `src/ssh/registerTransport.ts`
+  only exports `sshTransportFactory`.
+- **One connection chrome.** The terminal branch's placeholder
+  `src/ui/components/ConnectionStrip.tsx` and the local dot in
+  `app/home/_layout.tsx` (neither opened the §9.8 sheet) are gone; Home,
+  Workspace and Terminal use `src/features/hosts/{ConnectionStrip,ConnectionDot}`.
+- `lastHostId` is set only by `markConnected`, and only for a saved host, so a
+  failed attempt or a dev bridge cannot become the §12 cold-start target.
+- `webview:check` now also covers the terminal bundle outputs; the duplicate
+  `webview:build` script key is gone; vitest hook timeout covers a cold
+  `cargo build` in the live tests.
+- Bare `connectHost(...)` calls catch their rejection (the chrome already
+  renders the failure).
+- The terminal dev transport reports a vanished bridge as `exited` (no endless
+  reconnect) and forwards the socket error message.
+
+Deferred to M7: a `scripts/`-only tsconfig so Node types stop leaking into app
+code, and a lint script.
+
+### Dev TCP bridge removed (2026-08-26)
+
+`react-native-tcp-socket` is a native module, so Expo autolinked it into every
+build — the `__DEV__` guards only kept the JavaScript out. With the SSH module
+working end to end against the Docker sshd (`docs/mobile/qa/integration`),
+the host-free emulator path is no longer worth shipping a raw-socket library
+for. Deleted: the dependency, `scripts/dev-tcp-bridge*.mjs`,
+`src/dev/tcpTransport.ts`, `src/session/devTransport.ts`, `app/dev/files.tsx`,
+the Hosts-screen dev link, and `plugins/withBouncyCastleDedup.js` (its only
+purpose was reconciling that package's Bouncy Castle with sshj's).
+`src/session/appWiring.ts` installs the SSH factory unconditionally. The M3/M5
+QA READMEs that mention the bridge describe how those screenshots were taken
+at the time; re-taking them means the Docker sshd route.
+
+## M4 — local notifications
+
+No new dependencies: `expo-notifications` 57.0.14 was already pinned by M0 and
+already listed in `app.json`'s plugins.
+
+### Decisions the document left open
+
+- **The platform sits behind a `NotificationHost` interface**
+  (`src/features/notifications/host.ts`). `expoHost.ts` is the only file in the
+  feature that imports `expo-notifications`, and `index.ts` the only one that
+  imports `expo-router` or `react-native`, so the decision rule, the payload
+  codec, the route and the permission flow are all plain vitest tests rather
+  than a mocked React Native runtime.
+- **§13's tag is the expo notification *identifier*.** On Android
+  expo-notifications posts with `notify(tag = identifier, id = 4712)`
+  (`ExpoPresentationDelegate.presentNotification`), so one identifier per agent
+  gives both halves of §13 step 7 for free: re-posting replaces the older
+  notification, and `dismissNotificationAsync(agentId)` is "cancel by tag".
+- **The `agents` channel omits `sound` and `vibrationPattern` rather than
+  setting them.** §13 asks for "sound default, vibration default", and
+  `AndroidXNotificationsChannelManager.createSoundUriFromArguments` reads a
+  *missing* key as `Settings.System.DEFAULT_NOTIFICATION_URI`; a literal
+  `sound: "default"` would be resolved as a bundled file named `default` and
+  end up silent.
+- **A notification handler is installed and always shows.** Without
+  `setNotificationHandler`, expo-notifications shows nothing while the JS
+  runtime is alive — which, thanks to the foreground service (§6.3), is exactly
+  when it matters. §13 step 6 has already decided the foreground question by
+  the time a notification is posted, so anything that gets this far is about a
+  pane the user cannot see and is shown.
+- **`decide.ts` is unchanged.** §13's `data` carries a bigint, which the JS ↔
+  native bridge cannot; `payload.ts` encodes `attentionGeneration` as a decimal
+  string on the way out and parses it back on a tap, so no generation is
+  rounded through a double.
+- **Cancel-on-seen is expressed as "the reason it was posted no longer holds".**
+  §13 says to cancel when `needsAttention` becomes false, but step 3's second
+  branch also notifies a fresh `blocked` lifecycle with *no* attention advance
+  behind it, and for that notification `needsAttention` is already false — a
+  literal reading would cancel it in the same tick. `notifier.ts::stale` records
+  whether the agent wanted attention at post time and cancels on: the agent
+  retired or `present === false`; an unseen notification becoming seen; or a
+  `blocked` notification whose agent left `blocked`. A `completed` one is not
+  cancelled by lifecycle, because `idle` is the state it reports.
+- **The sweep only runs while the connection is `connected`.**
+  `HostConnection.subscribe` calls `clearHostState()` on *every* Subscribe —
+  including a routine reconnect — before the snapshot refills the map. Treating
+  that empty map as "retired" would take an unread "Needs your input" off the
+  lock screen on every Wi-Fi blip, and step 4's watermark (the host sets
+  `notification_watermark` to the agent store's current generation) would then
+  stop it from ever being re-posted. §12's last row asks for the opposite. The
+  same rule means an explicit disconnect leaves posted notifications up.
+- **A refused prompt is `denied`, whatever Android says about asking again.**
+  `POST_NOTIFICATIONS` leaves `canAskAgain` true after the *first* "Don't
+  allow" (it means "you may show a rationale and ask once more"), so reading
+  the request result through the same lens as a passive check would hide §13's
+  banner from everyone who refuses once. `getPermission` still reports
+  `undetermined` for what has not been asked.
+- **The permission is re-read when the app returns to the foreground**, and may
+  only *clear* the banner. A passive read cannot tell "refused" from "not asked
+  yet", so it is not allowed to raise the banner — only a prompt that came back
+  refused can. Dismissal is in-memory: §13 says "show once", and a dismissal
+  that outlived the process would need a second persisted key for no gain.
+- **The cold-start tap is read from `getLastNotificationResponse()` and then
+  cleared.** The response is carried on the Activity's launch intent, which
+  Android hands back verbatim when it restores the task from Recents; without
+  `clearLastNotificationResponse()` the app would re-route and re-acknowledge a
+  generation the user dealt with hours ago. The route push is retried for up to
+  3 s because expo-router throws until the root layout has mounted
+  (`expo-router/build/global-state/store.js`), and on a cold start the tap is
+  what started the process.
+- **A tap's `agentMarkSeen` waits for a connection.** `agents/markSeen.ts`
+  needs the `Agent` record and gives up when nothing is connected; a tap has
+  neither — the store may not hold the agent yet, and the generation to
+  acknowledge is the one the notification carried, not whatever the store later
+  shows. `taps.ts::createTapMarkSeen` holds the newest target per agent and is
+  flushed on the next `connected`.
+- **The notification icon is a generated white `>_` on transparent**
+  (`assets/notification-icon.png`, 96 × 96, the Hosts screen's glyph in
+  JetBrains Mono Bold), tinted `--accent` `#7aa6da`. §13 names neither, and
+  Android's fallback — the full-colour app icon — renders as a white blob in
+  the status bar.
+- **§13 step 4's watermark is corrected to a per-agent floor.** The step reads
+  `next.attentionGeneration <= notificationWatermark`, and against the real
+  host those two numbers are not comparable:
+  `AgentSnapshot.notification_watermark` is the agent store's *global*
+  generation (`apps/host/src/service/agents/snapshot.rs`), bumped by every
+  agent change, while `attention_generation` is a per-agent counter
+  incremented once per attention transition (`.../ingest.rs`,
+  `attention.saturating_add(1)`). The global number outgrows every per-agent
+  one within a few events, so the literal rule silences the feature outright —
+  observed live in M4 QA (`skip … belowWatermark` for a real `blocked`
+  transition, watermark 3 against attention generation 1). `decide.ts` is
+  unchanged; `notifier.ts::reconcileBaseline` supplies the value the step is
+  *for*: what this agent had already reached the first time a snapshot showed
+  it to us. It is taken from snapshots only (an `AGENT_STATE` event leaves
+  `notificationWatermark` alone) and never raised, so attention that advanced
+  while the phone was disconnected still notifies on the way back, and a
+  backlog that was waiting before the app ever connected does not.
+- **A cancel waits until its post has had 750 ms to land.** `present()`
+  resolves when the request reaches the native scheduler, not when
+  `NotificationManager.notify` runs — a channel-aware trigger still has a JS
+  round trip (foreground) and an IO coroutine to go, while a dismiss goes
+  straight through. A mark-seen arriving in that window would strand the
+  notification on screen for good, since step 5 blocks the re-post. The queue
+  is serial, so the wait cannot let a newer post be clobbered.
+- **The tap payload carries the tmux server identity**, beyond §13's `data`.
+  Pane and session ids are tmux ids and `%12` exists on every host; without it,
+  a tap that outlived a host switch would open an unrelated pane and
+  acknowledge a generation there. A held mark-seen is likewise only flushed at
+  the host it was raised on.
+- **Step 5 keeps the highest generation notified per agent, not a set.**
+  Generations are monotonic per agent, so `>=` answers §13's "already notified"
+  in O(1) and additionally suppresses a replayed *older* generation.
+- **Notification titles use the same canonical agent/task name as the agent
+  list on mobile and desktop.** A meaningful tmux window title wins over the
+  raw adapter label, so a task such as `Fix tests` does not notify as `Codex`
+  or `Claude Code`; assigned and adapter names remain the existing fallbacks.
+
+### Rejected
+
+- **Cancelling on a `blocked → working → blocked` flap.** `stale()` cancels a
+  `blocked` notification whose agent has left `blocked`, which is broader than
+  §13's "when `needsAttention` becomes false"; the worry is a flap losing an
+  unread notification that step 5 then refuses to re-post. It cannot happen:
+  the host bumps `attention_generation` on *every* `→ Blocked` transition
+  (`ingest.rs::attention_transition`), so the re-block is a new generation and
+  posts again.
+- **Persisting the banner dismissal and the "already asked" flag.** §13 says
+  "show once"; a denied permission that is still denied on the next launch is
+  worth saying again, and a second persisted key buys nothing else.
+- **Referencing `colors.accent` from `app.json`.** The notification tint is
+  duplicated as `#7aa6da` there; sharing it would mean converting the static
+  config to `app.config.ts`, which is a change to every milestone's build.
+
+## Sync with main (2026-08-28)
+
+Merged `main` (pins, host stall fix, desktop-only work). Mobile changes:
+
+- **Pins are displayed, not set.** `Session.pinned` / `Window.pinned` are
+  carried in the store; the Workspaces tab lifts pinned workspaces into a
+  leading block under a "Pinned" divider, and the Agents tab does the same for
+  agents whose workspace or tab is pinned (the desktop sidebar/agents-panel
+  rule, `agentsList.ts`), keeping the priority order inside each block.
+  `SET_PINNED` is not offered on the phone — it is management UI, out of v1
+  scope (§1 non-goals); the desktop owns it.
+- **Request timeout drops the transport** (desktop `80c4327`): a control
+  request that misses its 20 s deadline is never replayed, and the lane it sat
+  on is torn down so later input does not queue behind it; the supervisor
+  reconnects and reconciles from a fresh snapshot. Bulk-lane timeouts stay
+  request-scoped.
+- The host visibility/credit wedge fix (`7e7106e`) needed no client change;
+  mobile already acknowledges every charged event.
+
+## Tailscale SSH without a key (2026-08-28)
+
+Goal: the phone should connect exactly like Termux's `ssh host` — on the
+tailnet it just works, elsewhere the user sets up SSH themselves and the
+app picks up whatever works.
+
+- Tailscale SSH authenticates the peer over WireGuard by node identity. Its
+  server accepts the SSH `none` method outright (and accepts any password
+  or public key without looking at it); check mode sends the sign-in URL as
+  a USERAUTH_BANNER and holds the login until approved
+  (`tailscale/ssh/tailssh/tailssh.go`).
+- `MuxflowSshModule.connect` therefore no longer fails when no key is
+  stored (`SshKeyStore.keyPairOrNull`). `SshTransport` authenticates with
+  `auth(user, [AuthNone, AuthPublickey?])`, the OpenSSH client order:
+  Tailscale accepts `none`; OpenSSH answers it with its accepted method
+  list and sshj continues to `publickey` only if a key exists. No
+  configuration, no per-host toggle — the server decides.
+- `authFailed` copy now covers both cases ("rejected this phone's SSH
+  login…"), and the key card / Your SSH key screen say a key is not needed
+  over Tailscale SSH.
+- Check mode: the login is held open server-side, so the app sits in
+  `sshConnecting` until the user approves on another device. That hold used
+  to be uncancellable — `disconnect()` had no handle on a dial that had not
+  produced a transport, and the native control thread was parked in sshj's
+  auth wait with no timeout, so every later connect to that host queued
+  behind it. Now `HostConnection` hands the dial an `AbortSignal`,
+  `disconnect()` aborts it, `sshTransport` closes the native channel, and
+  `SshTransport.onChannelCloseRequested` closes the in-flight `SSHClient`
+  once no channel still wants it; the attempt ends as `closedByClient`.
+- `SshTransport` refreshes its key on every `open`, so a key generated after
+  a refused login is what the next attempt offers.
+- Not done: surfacing the check-mode banner text (the sign-in URL), and any
+  Tailscale-specific host discovery (MagicDNS names are plain hostnames as
+  far as the app is concerned).
+
+## Sync with main (2026-08-28, slow-link branch)
+
+Merged `9532393` (sleep/reconnect noise and slow-link usability). Protocol
+gained `AgentRecord.lifecycle_changed_at_unix_millis`; regenerated.
+
+- **Stalled-lane rule replaced.** The previous sync mirrored desktop
+  `80c4327`: a control request past its deadline dropped the lane. Main
+  found that to be the cause of every drop on a shaped link (a workspace
+  switch answers ~8 s late behind 1.85 MB of seeds) and superseded it in
+  `89c210b`/`e4d58d4`. Mobile now matches: a late answer fails only its
+  request; `HostConnection` tears the lane down only after
+  `STALLED_LANE_UNANSWERED_REQUESTS` (3) misses in a row and
+  `STALLED_LANE_SILENCE_MS` (15 s) with no answer, any answer (even a refusal)
+  resetting both. Late requests are logged as `request.late`.
+- **`stale_topology` wait** 250 ms → 1 s ceiling (`4bb441f`); it already
+  returned the moment the newer snapshot landed, so a fast link is unchanged.
+- **Agent order** (`230d3e6`, `5817863`): rows inside a status now order by
+  `lifecycleChangedAtMs` (falls back to `updatedAtMs` for a helper that
+  predates the field) instead of `updatedAtMs`, so repeated hooks cannot
+  reshuffle the list; pins lead only their own status. The Agents tab's
+  leading "Pinned" block from the previous sync is gone for that reason —
+  desktop scopes pins within status — while the Workspaces tab keeps its
+  Pinned divider, since workspace pins do order workspaces.
+- Not mirrored: the desktop's link-quality notice ("Your connection to
+  <host> is slow / unstable") and its once-per-outage reconnect toast — the
+  phone's strip already shows one line per state rather than one toast per
+  attempt. Host-side changes (bridge exit line moved off stderr, connection
+  lifetime logging, `ConnectTimeout=10`) need nothing: the phone's first
+  stderr line is only used for a non-zero exit, and its connect timeout was
+  10 s already.
+
+## Sync with main (2026-09-01, switch-payload branch)
+
+Merged `f65e50f` (48 commits: screen-only seeds and scrollback paging,
+hide/reveal rework, topology acks, agent recency, git slimming). Protocol
+regenerated (`REQUEST_TERMINAL_HISTORY`, `TERMINAL_HISTORY`,
+`topology_generation`, `attention_seen_at_unix_millis`,
+`serialized_snapshot`/git display fields now reserved).
+
+- **Scrollback paging (§7.6.1)** — the change that forced mobile work: seeds
+  are screen-only now, so without it the phone would simply have no
+  scrollback. Scroll-to-top requests history pages (300 → ×2 → 4,800), the
+  splice rebuilds the buffer from retained bytes (xterm has no prepend), the
+  viewport returns to the row being read. Deliberately simpler than the
+  desktop pager: no reflow-grade row composition, no anchor/overlap trim, no
+  request correlation queue — one request in flight, duplicates possible on a
+  pane printing during the round trip, and a 4 MB retention cap instead of a
+  serialize-based rewrite. The perf motive is the same one that matters on a
+  phone: a switch no longer moves ~190 KB per pane.
+- Review round on the paging (one `vercel-code-review` pass) caught three
+  real defects, all fixed with tests: a splice replayed only the newest page
+  (older pages vanished and the next skip undercounted — now every page is
+  replayed, topmost first, and `rowsAdded` alone positions the viewport);
+  xterm's `scrollback: 1000` was below the host's 10,000 clamp (a trimmed
+  buffer threw the reader to the bottom and paging never latched on long
+  histories — now both are 10,000 and a request never asks past it); and a
+  bare `reset()` could land amid output xterm was still parsing (now ordered
+  through the write queue, seed path included). Also from QA: xterm 6's own
+  touch handling never received a drag inside this WebView, so the page
+  turns finger drags into `scrollLines`.
+
+- **Topology acks**: a TOPOLOGY_SNAPSHOT with no snapshot moves only
+  `topologyGeneration` (never backwards). Ignoring it would leave New
+  terminal quoting a stale generation.
+- **Agent order**: rank is now blocked, working, recent, idle — Done shares
+  the recent bucket so acknowledging a completion doesn't move the row under
+  the tap; a fresh idle stays recent for 4 h, clocked from
+  `attentionSeenAtMs` for a seen completion (new field; the host's markSeen
+  broadcast carries it). No re-render clock: an expiry reorders on the next
+  store update, which the desktop's `useRecentIdleClock` handles exactly —
+  accepted for v1.
+- **Seed after attach (found by the live tests)**: on main's host, ATTACH
+  alone no longer yields a seed when the session's control client already
+  exists — the pane is committed without a capture, and the reveal rework
+  made "flip visible" capture nothing. Proven by A/B: the same live tests
+  pass against the pre-merge host and fail against main's, and a probe shows
+  `REQUEST_TERMINAL_SEED` right after attach answers with the screen-only
+  seed. The controller now sends it immediately after a successful attach
+  (the 5 s fallback stays); before, every phone terminal would have sat
+  blank for 5 s under main's host. The desktop is unaffected because it
+  always reveals explicitly.
+- **No change needed**: the rest of the hide/reveal rework (mobile never
+  uploaded renderer snapshots and doesn't set
+  `terminal_renderer_holds_snapshot`, so a reveal answers with a seed); `serialized_snapshot` deletion (never
+  read); git status slimming (no git UI); host-side agent-hook and tmux
+  discovery fixes; desktop-only paging polish.
+
+## Mobile layout and terminal scroll follow-up (2026-09-03)
+
+- Fixed-height chrome had inconsistent font-scale guards: the Agents mode
+  toggle capped at 1.3×, but headers, rows, the 28 dp connection strip and
+  28–40 dp terminal/voice controls did not. Those compact labels now share
+  `fixedChromeText`; flexible title columns also opt into `minWidth: 0`.
+  Reading content remains fully scalable.
+- Terminal touchmove previously called xterm's `scrollLines` synchronously for
+  every event. xterm repaints the viewport on each call, Android may deliver
+  several moves in one display frame, and the gesture stopped dead at release.
+  `TouchScrollController` now coalesces distance to one call per animation
+  frame, preserves fractional rows, and supplies bounded decaying momentum.
+  Its scheduler is injected so batching, cancellation and fling decay are
+  deterministic under unit tests. The gdev review added two release guards:
+  a pause longer than the velocity sample window suppresses stale momentum,
+  and a sign change replaces the old velocity estimate.
+- Native release QA used a real SSH connection to a 1,200-line tmux pane at
+  320 dp width and Android font scale 1.3. Long host/workspace/window/terminal
+  titles truncated without overlap, and the header, Shift chip and composer
+  stayed aligned. Scrolling remained smooth, and leaving the scrolled pane and
+  reopening it started at the live bottom, so the reported mid-buffer start did
+  not reproduce in this rig.
+- The physical-phone pass confirmed that ordinary swipes were smooth but
+  required unusually fast thumb motion to gain useful speed. Direct finger
+  distance and the sampled release velocity initially shared a 1.5× sensitivity
+  multiplier. Batching and the decay curve are unchanged, so this increases
+  travel without reintroducing per-event xterm repaints or a longer tail.
+  Physical-phone follow-up found 1.5× better but still conservative. A second
+  comparison at 1.8× led to the current 2× multiplier.
+- The temporary per-gesture instrumentation used for that tuning was removed
+  after the physical-phone pass; production Diagnostics retains its normal
+  connection and error records only.
+
+## Alternate-screen touch scrolling (2026-09-05)
+
+Claude Code runs in tmux's alternate screen and requests SGR mouse reporting.
+That screen has no xterm scrollback: the mobile touch controller's direct
+`scrollLines` call therefore moved nothing, while desktop xterm translated its
+wheel events into the mouse reports Claude consumes. The Android emulator
+reproduced the split exactly: a normal 1,168-row pane moved from lines
+1169–1200 to 1107–1139 after one swipe; an alternate-screen pane's before and
+after screenshots were byte-identical.
+
+The touch controller remains unchanged. Its frame-sized row delta scrolls the
+normal buffer locally; on an alternate buffer the page synchronously enables
+xterm stdin, dispatches line-mode wheel events at the last touch position,
+collects xterm's text or binary mouse reports or cursor-key fallback, disables
+stdin again, and sends the batch through the existing `TERMINAL_INPUT` path.
+The page caps a frame at eight wheel events, bounding both synchronous xterm
+work and bridge payload under an arbitrarily large Android touch delta.
+This deliberately uses xterm's public wheel behavior rather than duplicating
+SGR and legacy mouse encodings. No host-protocol field or compatibility path
+was added. Because this makes a page message capable of terminal input, the
+WebView is pinned to its fixed internal document URL: every other navigation
+is blocked and messages from another origin or URL are ignored. Android's
+modern WebMessageListener reports the origin without a trailing slash; the
+older message path reports the full document URL, so both exact trusted forms
+are accepted.
+
+## Route params survive expo-router (2026-09-02)
+
+On a real host every agent opened from the Agents tab showed "This terminal
+no longer exists", New terminal created the tmux window and landed on the
+same screen, and Files failed with "active pane no longer exists". Root
+cause: expo-router 57.0.16 percent-decodes a route param twice (once in
+`getStateFromPath` for a path segment or `URLSearchParams` for a query
+param, again in `useLocalSearchParams`) against the single encode
+`router.push` applies, so `%12` becomes `%2512` on the wire, `%12` after the
+parse and U+0012 in the screen. `%1` survived only because the second decode
+throws on it, which is why the bug hid on hosts with fewer than ten panes.
+
+- **Own encoding rather than a second `encodeURIComponent`.**
+  `toRouteParam`/`fromRouteParam` write every char outside `[A-Za-z0-9_-]`
+  as `~` plus four hex digits. Double-encoding would match today's two
+  passes exactly and break the moment expo-router changes the count; the
+  `~XXXX` form is a fixed point of any number of decodes, of `URLSearchParams`
+  (`+`) and of path splitting (`/`, `.`, `..`), so it is exact for tmux ids
+  and for arbitrary paths and names. Uglier deep-link URLs are accepted:
+  nothing hand-types them.
+- **Proved against the installed router, not a re-implementation.**
+  `expoRouterPipeline.test.ts` runs the compiled `resolveHref` and
+  `getStateFromPath` (with the real `[paneId]` to `:paneId` conversion) and
+  replicates only the hook's `decodeURIComponent` loop, which lives inline in
+  a React hook. One module, `expo-router/build/react-navigation/native`, is
+  replaced in `require.cache` because it pulls in react-native; `vi.mock`
+  cannot reach a `require` inside an externalized dependency.
+- **Guard test.** A regex scan of `app/**` and `src/**` fails when a
+  `params: {}` passes one of the four keys raw, or a `useLocalSearchParams`
+  read skips `fromRouteParam`, so a future push site cannot regress this
+  silently.
+## Agents tab: real icons, docked state, two list modes (2026-09-02)
+
+- **Icons**: `react-native-svg 15.15.4` (the SDK 57 pin from `expo install`)
+  draws the desktop's exact geometry; the path data lives in
+  `agentIconPaths.ts` and `agentIconPaths.test.ts` reads the desktop's
+  `AgentIdentity.tsx` and `Icon.tsx` and compares every `d`, `viewBox`,
+  `transform` and stroke width, so the marks cannot drift. This is a native
+  module: the dev client / APK must be rebuilt before the tab renders.
+- **Docked badge replaces the status pill**: the desktop shows no text state,
+  so the pill went; `markState` is `displayState` for a present agent and
+  `idle` (no badge) for a gone one, which keeps the `Gone` pill as the one
+  textual state. The attention edge bar stays — it is the desktop's unread
+  "1" badge, distinct from the dot (seen-blocked keeps the dot, drops the
+  bar). Done's edge bar moved from `--term-2` to `--ok` so bar and badge
+  are one green.
+- **List model** (`agentListModel.ts`, pure, 41 tests): priority mode
+  buckets `sortedAgents`' order rather than re-sorting, so the flat order
+  and the headed order agree; `recentExpirationMs` / `isRecentIdle` were
+  lifted out of `rank` in `selectors.ts` so the sort, the bucket and the
+  new `useRecentIdleClock` share one Recent clock (the "no re-render clock"
+  acceptance from 2026-09-01 is withdrawn: under a `Recent` heading an
+  expired row is a visible lie). Gone agents go under `Idle`, at the bottom,
+  whatever they last reported. Workspace mode ports `byWorkspace` with the
+  mobile's session `order` / window `index` and groups by `sessionId`
+  (single host, so no host/server key).
+- **Pins**: the desktop pins a row for a pinned *tab*; a pinned workspace
+  shows as the divider. Workspace mode follows that exactly. Priority mode
+  has no divider, so its rows carry the pin for a pinned window *or*
+  workspace (`agentPinned`, the same predicate the sort already uses) —
+  otherwise the user's pinned agents were invisible in the default mode.
+- **Persistence**: no preferences layer existed, so `prefsStore.ts` mirrors
+  `hostsStore.ts` (zustand vanilla, one JSON value in expo-secure-store,
+  idempotent `hydrate`, a choice made mid-read wins over the disk); the
+  secure-store adapter moved to `secureStorage.ts` so both stores share it
+  without importing each other's module side effects.
+- `app/home/agents.tsx` keeps only the screen shell and its `open` callback;
+  rendering moved to `features/agents/ui/AgentList.tsx`.
+- **Review round** (one `vercel-code-review` pass and one design critique,
+  both fresh): fixed — the badge's `--chrome-bg` ring was a 1.07:1 step on
+  the `--chrome-raised` tile, so the badge now overhangs the corner by 5 dp
+  and the ring is 1.5 dp; the attention edge bar was an in-flow sibling and
+  jogged the avatar column 3 dp on exactly the rows the eye lands on (now
+  absolute over the gutter, Workspaces tab included); the toggle's selected
+  segment used `--chrome-selected` on `--chrome-raised` (1.16:1) instead of
+  the file viewer's `--accent-wash` / `--accent` convention, and its tap
+  target was 36 dp (a second round caught that hit slop is capped by the
+  parent's bounds, so the pressable is now the 48 dp box around the pill
+  and the track is painted behind the row); heading labels now align with row
+  titles via a constant avatar-width mark slot, so headings and dividers
+  are two visibly different levels; the count went from `--chrome-faint`
+  (2.6:1) to `--chrome-dim`; the Working heading's spinner takes the
+  heading's `--chrome-dim`; the dashed unknown badge and the spinner moved
+  to SVG (Android draws a 1.5 dp dashed border on a 10 dp circle as three
+  coarse gaps); rows got an accessibility label naming the state, since the
+  pill's text no longer exists. Deliberately not changed: inside a priority
+  heading, rows keep `sortedAgents`' finer ranks (unread blocked before seen
+  blocked, idle before unknown, pinned leading each rank) rather than the
+  desktop's pinned-leads-the-whole-bucket — the acceptance criterion was to
+  build on the existing order, and the finer rank is useful on a phone;
+  the pre-hydration first frame renders Priority (agents only arrive after
+  the SSH connect, long after the secure-store read); the Workspaces tab's
+  `WORKSPACES` divider label (the user called that tab fine); baseline
+  alignment of heading count, reduced-motion handling, and hairline-width
+  mismatch between `ListDivider` and `ListRow` (pre-existing nits).
+
+
+## Voice mode — app side (2026-09-02)
+
+Part B of `docs/mobile/voice-mode-plan.md` (§5), built against the wave-1 wire
+contract with the host still answering `voice_model_missing`. The plan's §1
+decisions stand; what follows is what the app side fixed on top of them.
+
+- **Sidecar / uv, edge-tts only, 5-minute unload, host-side keys** (plan §1):
+  the phone treats these as host facts. Its only knowledge of them is the
+  readiness enum, the `detail` string it shows verbatim on the uv card, and
+  the `modelDownloadBytes` it quotes in the consent dialog. A future
+  ElevenLabs provider changes nothing on the phone: `voiceSpeak` leaves
+  `provider` unspecified and no key ever reaches the app.
+- **Auto-play rule**: a pushed reply plays at once only when its screen is
+  focused, the app is `active` and persisted `voiceAutoPlay` is on; otherwise it is stored
+  unplayed and plays on the next focus or foreground. `AppState` is read at
+  the moment of the event and subscribed only while a Voice screen is
+  mounted, so the background costs nothing (§2c).
+- **Session lives in the registry, not the screen.** `voiceRegistry` keeps
+  one `VoiceController` per immutable local session key from the first open
+  until End session, with a second bounded index from current remote agent ID;
+  the screen only `focus()`es / `blur()`s it. Leaving the screen, backgrounding
+  and reconnecting all keep the host registration (re-sent every 5 min and on
+  `onConnected`); a user disconnect disposes sessions locally because the
+  host's registrations are per connection anyway.
+- **Native identity promotion keeps the local session.** Only an ordered Agent
+  State event that explicitly retires an empty-native-ID record while inserting
+  a same-adapter agent with a non-empty native session ID on the same non-empty
+  pane can retarget Voice. The
+  controller, messages, recorder/player ownership, playback and autoplay
+  suppression stay intact; only the current remote ID and route change. Host
+  registration moves after agent-state persistence; Agent State is queued
+  before deferred Stop reply dispatch. Dead/expired registrations are pruned
+  before transfer. Old remote indexes are deleted immediately, ambiguous live
+  sessions are rejected rather than merged, and a reused deterministic initial
+  ID receives a bounded local-key suffix rather than overwriting its retired
+  session. No alias history, store-key
+  migration, route rewrite, timer, polling or protocol field is involved.
+- **Saturated promotion publication is an accepted overload limit.** The
+  existing bounded control-event queue keeps its process-wide overflow contract:
+  a full queue schedules `RESYNC_REQUIRED` rather than blocking hook ingestion.
+  If saturation lands on the one promotion event, the local Voice session may
+  become unavailable. Guaranteeing that edge would require an async priority
+  delivery/executor expansion above this workstream's complexity limit; Voice
+  therefore adds no blocking send, retry timer, alias state or snapshot
+  identity inference.
+- **A reconnect cannot reconstruct a promotion it never received.** Reconnect
+  preserves a Voice session that already observed the identity handoff and
+  registers its current native ID again. If the control-lane disconnect overlaps
+  the first native event, however, the authoritative snapshot contains no
+  retired-ID relationship, so the local manual-ID session may become
+  unavailable. Recovering that relationship would require the same rejected
+  snapshot inference, alias history or protocol expansion; none is added here.
+- **One player, N sessions.** The expo-audio player, recorder and file
+  adapter are created once on the first Voice screen render and shared.
+  Whichever controller last loaded a file owns `playback`; another
+  controller's pause/seek are no-ops until it plays its own reply. This is
+  what makes the future multi-agent screen additive.
+- **Ports over mocks.** `audioPorts.ts` holds the recorder / player / file
+  interfaces; `recorder.ts`, `player.ts`, `files.ts` are the expo
+  implementations and are the only files importing expo-audio /
+  expo-file-system. The controller and the registry stay pure, so
+  `connectionManager` can import the registry without loading native
+  modules and the tests use in-memory fakes (`testing.ts`).
+- **Pre-warm** = `voiceStatus(op, warm: true)` on every screen focus and
+  after a reconnect while focused. Nothing on press-in.
+- **Recording preset** mono 16 kHz AAC 48 kbps `.m4a` (`RECORDING_PRESET`),
+  `audioMime: "audio/mp4"`; `prepareToRecordAsync` on focus and again right
+  after each stop, so press-in is `record()` alone.
+- **Refusal copy** lives in `voiceErrors.ts`; codes that change readiness
+  (`voice_uv_missing`, `voice_model_missing`, `voice_provisioning`,
+  `voice_provision_failed`) also re-probe STATUS so the card follows.
+- **Duplicate pushes**: a reply whose non-zero `stateGeneration` equals the
+  previous one for the agent is dropped (a reconnect racing a Stop).
+- **`expo-audio` plugin** with `enableBackgroundPlayback: false` and no
+  background recording: the plugin would otherwise add a media-playback
+  foreground service and its permission; voice is foreground-only in v1 and
+  the SSH `specialUse` service stays the only one.
+- **Deviations from plan §5**: no `Cancel` envelope is sent when the user
+  starts talking during a speak (the mobile `HostConnection` has no cancel
+  path; the phone stops local playback instead, which is what the user
+  hears); the controller does not subscribe to the agent-transition fan-out
+  — the pill in the header already reads the session store, and the
+  auto-play trigger is the pushed reply itself; haptics on press-in were
+  left out (no `VIBRATE` permission in the manifest).
+- **Refusals that are readiness.** With the host on this branch answering
+  every voice op with `voice_model_missing`, STATUS itself is refused. A
+  `voice_uv_missing` / `voice_model_missing` / `voice_provisioning` refusal
+  of STATUS or SESSION is therefore applied as the card's readiness (the
+  host's message becomes `detail`) and never toasted; the 5-minute
+  registration loop starts only after a registration succeeded and restarts
+  when a later STATUS reports ready (or a provision completes).
+- **Recorder arming.** Press-in never calls `prepare()`; it records once the
+  re-arm started at the previous release settles, and a release before that
+  finds nothing and is discarded. A denied microphone permission is a
+  phone-side state (`recorderError`) that disables the mic with a hint,
+  rather than a toast per press.
+- **Same-host reconnect keeps sessions.** `connectHost` to the host already
+  connected passes `keepVoiceSessions` to `disconnectHost`; only a real
+  disconnect or a different host disposes them. The screen re-opens a
+  disposed controller on its next focus.
+- **Review round 1** (one `vercel-code-review` pass and one design critique,
+  both fresh): fixed — the two items above; `dispose()` and a new
+  utterance now reason about the *shared* player (talking stops another
+  session's reply; ending a session leaves another's playback alone); End on
+  one session re-registers the survivors because `voiceSession("")` clears
+  the whole connection; Retry only on the newest reply; the file fake
+  mirrors the real one-path-per-agent adapter. Design: SVG marks in token
+  colours instead of an emoji mic and dingbat transport glyphs; the player
+  controls are no longer nested inside the bubble's accessible pressable;
+  the seek bar has increment/decrement actions and starts an unloaded
+  reply; `pressRetentionOffset` so a drifting thumb keeps recording; the
+  busy disc stays solid; bubbles get a hairline and the card radius;
+  `chromeDim` timestamps in locale time; `EmptyState` and `StreamingBar`
+  reused; the uv detail capped at three lines; one copy per condition.
+  Deliberately not changed: the route renders nothing for bad params (the
+  Terminal route has the same shape); construction of the controller during
+  render (idempotent, and the registry owns it anyway).
+- **APK** (debug, all ABIs, `pnpm mobile:apk` toolchain per
+  docs/mobile/toolchain.md): 275,612,362 bytes on this branch against
+  271,554,452 bytes for the last `mobile/integration` build on the same
+  machine — +4.06 MB, over the plan's +≤ 3 MB. The whole delta is
+  `expo-audio`'s media3/ExoPlayer dependency (debug dex, unminified, four
+  ABIs); there is no JS library to drop. Wave 3 measures the release build,
+  where R8 and ABI splits apply, before deciding whether the budget stands.
+  Merged manifest gains `RECORD_AUDIO` and `MODIFY_AUDIO_SETTINGS` only;
+  `FOREGROUND_SERVICE_SPECIAL_USE` stays the sole foreground-service type.
+- **Review round 2** (fresh `vercel-code-review` and design critique): fixed
+  — a new reply for A stopped B's playback when B had taken the shared
+  player since (the stop now asks the store, not the stale
+  `loadedMessageId`); a release before `record()` ran returned a bogus
+  duration from the recorder adapter (it now reports nothing recorded, and
+  `prepared` resets in a `finally`); a disconnect from the strip on the Voice
+  screen left a disposed controller under a focused screen (re-opened when
+  `connected` flips true); refresh failures behind another screen and
+  requests settling after End no longer toast; a `reregister()` during an
+  in-flight registration is queued, not dropped; `hostStatus` resets when the
+  sessions are disposed (another host must not inherit "ready"); `open()`
+  re-points a live session at the agent's current pane; End clears a
+  registration still in flight; transcripts are single-lined on the phone as
+  well; the "Checking…" card carries `Check again` so a failed STATUS is not
+  a dead end. Design: the bubble label had lost its template (announced
+  ": "), the denied-permission hint was never wired, one mic hint per
+  readiness, mic label follows the phase with a live region, 48 dp seek
+  target and a visible rail, accent border on your bubbles, 48 dp expand
+  target, centred empty state, SVG folder icon on the Terminal header.
+  Deliberately not changed: a duplicate STATUS when a disposed controller is
+  swapped on focus; `StreamingBar` (2 dp) vs the 4 dp determinate track;
+  End/Retry as bespoke 48 dp text buttons; the uv detail stays capped at
+  three lines (round 1 asked for the cap so the mic stays above the fold).
+- **Review round 3** (fresh `vercel-code-review`; design rounds stopped after
+  two, their signal down to nits): fixed — the recording is read before the
+  recorder re-arms (on iOS a bare `prepareToRecordAsync` reuses and
+  truncates the same file URL; Android mints a new one, so the tests could
+  not see it); End no longer resurrects the session it just ended while the
+  screen pops; only a denied permission disables the mic — any other
+  `prepare()` failure toasts once and the next focus or release re-arms;
+  `seekTo` rejections are caught; autoscroll follows `onContentSizeChange`.
+  Deliberately not changed: controller creation in a `useState` initializer
+  (idempotent through the registry); modelling an OS interruption from a
+  `playing: false` tick (it would misread the play → playing transition);
+  no `Cancel` envelope on talk-over-speak (no cancel path on the mobile
+  connection). The reviewer expected no further material findings.
+
+## Agents tab polish: spinner cost, waiting rule, pins, toggle (2026-09-02)
+
+The emulator QA of the rebuilt tab (`qa/integration` rows 30–38) passed
+functionally and left six observations; the user accepted every
+recommendation. What changed and why:
+
+- **Spinner cost.** The working badge was an `Animated.loop` over a
+  continuous rotation, so one working agent anywhere on the tab repainted the
+  screen every vsync (~40 % CPU on the emulator, the tab never idle). Now
+  `ui/Spinner.tsx` is the one implementation (row badge and Working heading
+  both use it) and it is *stepped*: reanimated drives a shared value with
+  `withRepeat(withTiming(360, { easing: Easing.steps(12) }))` on the UI
+  thread, so the arc jumps 30° every 100 ms (`spinnerSchedule.ts`, with a
+  test holding the numbers still) and Android repaints only when the rotation
+  actually changes; the arc is a `renderToHardwareTextureAndroid` layer, so
+  each step is a transform of a cached bitmap. The JS thread never wakes for
+  it. Every spinner reads one module-level `makeMutable` clock, reference-
+  counted by the mounted spinners, so five working rows step on the same
+  frame and cost what one does. On top of that `ui/useAnimationsAllowed.ts` (expo-router's
+  `useIsFocused`, `AppState`, `AccessibilityInfo.isReduceMotionEnabled` with
+  its change event) is read once by `AgentList` and passed to every mark,
+  and a spinner whose `animate` is false cancels its animation and freezes
+  where it is — reduced motion shows the desktop's static arc (its
+  `prefers-reduced-motion` gate on `.spinner`). Expected on the emulator
+  (`adb shell dumpsys gfxinfo dev.muxflow.mobile`, `Total frames
+  rendered` sampled twice a minute apart): ~600 frames per minute with one
+  working agent on the focused Agents tab (was ~3600), and no growth at all
+  after switching to the Workspaces tab or pressing Home. CPU for the app
+  process should drop from ~40 % to low single digits while idle on the tab.
+- **Spinner legibility.** In a still frame the 11 dp badge read as a thin
+  ring: quarter arc and track were the same stroke in the same ink, 35 % vs
+  100 %. Now the arc is a sixth of the box wide (the desktop `.spinner`'s
+  1.5 px on 9 px), covers 0.3 of a turn with round caps, and sits on a
+  thinner (1.25/12) track at the desktop's 35 %. The heading's mark is the
+  same component at 13 dp.
+- **One "waiting" rule on both tabs.** The Agents tab painted a fresh
+  completion green (badge and bar) while the Workspaces tab painted the same
+  workspace red with "1 need you"; the tab badge meanwhile counted only
+  unread *blocked* agents. The desktop has one answer for all three:
+  `needsAttention(state)` in `agentsList.ts` — display state `blocked` or
+  `done` — is what its bell counts (`unreadCount`), what the row "1" badge
+  marks and what `workspaceRows.ts` sums into a row's `unread`; the
+  workspace indicator takes the loudest state's colour, blocked red over
+  done `--ok` green (`.workspace-state.done`). Ported as `waitingState` /
+  `summarizeWaiting` / `waitingCount` in `selectors.ts` and
+  `waitingInSession` / `waitingColor` / `waitingLabel` in `agentViews.ts`,
+  and used by the tab badge, both tabs' edge bars and the Workspaces chip
+  ("{n} waiting", the desktop label's word, in the loudest state's colour).
+  Two consequences worth naming. A *seen* blocked agent now keeps its bar
+  and stays in the count — on the desktop looking at a question does not
+  answer it, and yesterday's "seen blocked drops the bar" was a mobile-only
+  rule that made the phone's badge disagree with the desktop's bell; the
+  unread-before-seen ordering inside `Blocked` is kept, it is harmless.
+  And `attentionCountInSession` (generation-based) is gone; the
+  generation-based `needsAttention(agent)` stays for what it is actually
+  for (mark-seen, the notifier, the sort). The §9.3.1 acceptance line that
+  said "opening it removes the left bar and the tab badge decrements" was
+  true only for done agents and now says so.
+- **Pins in Priority mode.** A pinned workspace and a pinned window put
+  the same glyph after the name, so the two were indistinguishable
+  (screenshot 30: `Codex 📌 work2 · build` and `Claude Code 📌 work3 ·
+  tests` meant different things). `AgentRowItem.pinned` became
+  `windowPinned` (14 dp pin after the title, the desktop's row pin) and
+  `workspacePinned` (12 dp pin beside the workspace name on line 2, drawn
+  through `ListRow`'s `subtitleContent`); a row can carry both. Workspace
+  mode sets `workspacePinned` false on every row — its heading has the pin.
+  The accessibility label names each pin.
+- **Toggle geometry.** Measured on screenshots 30 and 31 the control does
+  not actually move (both span 290–518 px with identical label columns —
+  both labels were already weight 600), so the reported 4 px shift was most
+  likely the press feedback. It is now structurally impossible anyway: both
+  segments share a 100 dp minimum width and selection changes colour only.
+  The pill's radius was `radii.pill - 2` inside a `radii.pill` track at a
+  2 dp inset, which is not concentric; it is now `radii.pill` inside
+  `radii.pill + 2`, so the corners nest.
+- **Liberty items done**: the heading count now sits on the label's
+  baseline (label and count in a nested `alignItems: "baseline"` row; Fabric's
+  `ParagraphShadowNode` supplies a real text baseline); `ListDivider` draws
+  `metrics.hairlineWidth` like `ListRow` instead of
+  `StyleSheet.hairlineWidth`, so a divider's rule is no longer thinner than
+  the row rule above it; reduced motion is honoured by the only looping
+  animation on the tab. Skipped: the Workspaces tab's `WORKSPACES` divider
+  label (unchanged from yesterday's decision), the desktop's per-heading
+  pinned-leads ordering (same).
+- **Design critique** (one fresh reviewer against the desktop's agent UI and
+  §9.3.1–9.3.2; eight findings): fixed — a `ListDivider` after a `ListRow`
+  drew two hairlines (the divider's rule now overlays the row's with a
+  negative top margin); the Workspaces chip in `--danger` was 3.75:1 on
+  `--chrome-bg` (`waitingInk`: `--danger-ink` for blocked, `--ok` for done;
+  the bars keep `--danger`); the workspace pin at the start of line 2 made
+  the subtitle column ragged (now `work2 📌 · build`, drawn as runs via
+  `ListRow`'s `subtitleContent` and `ListRowSubtitleText`, with
+  `AgentRowItem.workspaceName` / `windowName` alongside the spoken
+  `subtitle`); the resting arc sat at 3 o'clock (rotated to 12); the
+  heading spinner's 25 % track vanished in `--chrome-dim` (back to the
+  desktop's 35 %); §9.3.1 said "12 dp state mark" while the spinner is one
+  dp larger (now says so). Noted, no change: the two pin glyphs differ by
+  position more than by size (12 vs 14 dp), which is the intent; the
+  Workspace screen's `Needs you` pill (§9.4) still uses yesterday's word
+  where the tabs now say `waiting` — a follow-up for that screen, not this
+  tab.
+- **Code review** (one fresh `vercel-code-review` round; five low findings,
+  all fixed, no second round since nothing was above low): the spinner
+  started with `ReduceMotion.Never`, so a reduce-motion user saw a few
+  spinning frames before the `AccessibilityInfo` promise settled (now
+  `ReduceMotion.System`, reanimated's synchronous read, under the async
+  hook); each spinner owned its own `withRepeat`, so N working rows cost
+  ~10·N repaints a second (one ref-counted module clock now); a dead
+  `shrink` parameter and a comment describing shrinking the code did not do;
+  the divider's negative top margin clipped the hairline of a divider that
+  opens a list (now an `afterRow` prop set by the two call sites); and a
+  stale `subtitleLeading` reference in this log.
+
+## Agents tab, round three: phone feedback (2026-09-02)
+
+The first run on a real phone (the tab as of `qa/integration` rows 39–51)
+came back with four notes; all four are taken as given.
+
+- **Spinner: continuous again.** "The spinner kind of lags, it runs weirdly
+  when the agent is working." The stepped turn (12 frames of 30°, 100 ms
+  each) was chosen to cut repaints on the software-rendered emulator, and on
+  a phone's real compositor twelve frames a second reads as a stutter, not
+  as motion. Withdrawn: `Spinner.tsx` now turns the desktop's way —
+  `withRepeat(withTiming(360, { duration: 900, easing: Easing.linear }))`,
+  the `.spinner` rule's `.9s linear infinite` — and `spinnerSchedule.ts`
+  keeps only the turn, the arc and the track. The shared refcounted clock,
+  the hardware-textured layer and the `useAnimationsAllowed` gate (focus,
+  foreground, reduce motion) all stay; the gate is the real saver, since it
+  is what stops the repaints when nobody is looking. QA row 41's frame
+  counts (592 / 60 s on the focused tab) describe the withdrawn stepping and
+  no longer apply; the two zeros (Workspaces tab, Home) still do.
+- **Rows named by the tab.** "It writes me the agent name (Claude Code,
+  Codex) instead of the tab name; the icon should just tell me which agent
+  it is." That is the desktop's row too: `renderAgentRow` shows
+  `agentSessionLabel` — the tmux window name with the ticker stripped,
+  rejected when UUID-like or one of `agent` / `codex` / `claude` /
+  `claude-code`, then `displayName`, then the adapter's name — over the
+  workspace in `.agent-detail`, and the adapter only through `AgentMark`.
+  The phone had it inverted: `agentTitle` led with `displayName`, which the
+  host fills with the adapter's name unless the user renamed the agent, so
+  every row said `Codex`. `agentLabels.ts` now carries the desktop's
+  `agentSessionLabel` (with `UUID_LIKE`, `GENERIC_TAB_NAME`, the
+  non-throwing `withoutStatusGlyphs`), `agentTitle` returns it, Priority
+  and Pinned rows put the workspace alone on line 2, and Workspace rows —
+  under a heading that already names the workspace — have no line 2. The
+  `"{adapter} in pane {n}"` fallback stays for a gone agent with neither a
+  window nor a name. The Workspace screen (§9.4), whose row title is already
+  the window, keeps listing *who* is in the window on line 2 through a new
+  `agentDisplayName` (assigned name, else the adapter's) — with the tab as
+  the agent's title, line 2 would have repeated line 1.
+- **No workspace pin on rows.** "I also see a pin near the workspace name if
+  the workspace is pinned which is confusing." Yesterday's two-glyphs-two-
+  places answer (`work2 📌 · build`) read as two pinned things, not one
+  pinned workspace. Gone: `PinnedWorkspaceSubtitle` and
+  `ListRow.subtitleContent` (nothing else used it). The window pin after the
+  title stays, the desktop's row pin. `AgentRowItem.workspacePinned` is
+  still computed — Pinned mode needs it and the accessibility label speaks
+  it — but no row draws it, in any mode.
+- **A third mode, Pinned.** "Add another grouping level named pinned so I
+  can just see pinned / unpinned, and then the same decision-making process
+  re the order: if something is working it should be at the top, if it has
+  a dot and otherwise, same order." `pinnedItems` takes `sortedAgents`'
+  order — the same list Priority buckets — and cuts it once by
+  `agentPinned` (window *or* workspace pinned, the predicate that already
+  leads pinned rows inside a heading) into a `PINNED` block and an
+  `UNPINNED` block, `ListDivider`s over each, no headings inside, an empty
+  block omitted. Row copy as Priority. The toggle's fixed 100 dp segments
+  would not have fit three across a 360 dp phone inside the margins
+  (312 dp of track in 328), so the track now spans the list's width and
+  the segments share it (`flex: 1`); the colour-only selection and the
+  opacity fill layer (row 51) are unchanged, so there is still nothing a
+  tap can move. The recent-idle clock now ticks in every mode but
+  Workspace, since Pinned orders by the same buckets. `prefsStore` accepts
+  the new value through `isAgentListMode`, which reads `AGENT_LIST_MODES`
+  rather than repeating the names.
+- **Review** (one fresh `vercel-code-review` round, three low findings, and
+  one design critique against the desktop rows and §9.3.1, eight findings).
+  Fixed: the toggle label had no scaling guard, so a large system font
+  wrapped `Workspace` mid-word and grew the pill past the track (now
+  `numberOfLines={1}`, `maxFontSizeMultiplier={1.3}`, 8 dp pill padding);
+  the gone-agent "in pane N" guard tested the raw window name, so a retained
+  title that was only a spinner frame produced a bare adapter name
+  (`withoutStatusGlyphs` is exported and used there); Workspace-mode rows
+  no longer spoke their workspace once line 2 went (the label now reads
+  `AgentRowItem.workspaceName` in every mode, the desktop's `aria-label`);
+  headings and dividers were plain views (now `accessibilityRole="header"`
+  with the count spoken as "3 agents"); the first divider under the now
+  full-width track drew a second full-width line 6 dp below it (a `first`
+  divider has no rule, the desktop's `.list-block:first-child`); a one-line
+  Workspace-mode row sat its title alone in 76 dp (64 dp, the Workspaces
+  tab's); and the clock snapped every arc to 12 o'clock the moment the tab
+  lost focus, visibly, since the list is still on screen as the Terminal
+  pushes over it (it now freezes where it is, which is what §9.3.1 said).
+  Rejected: Pinned mode's blocks as `GroupHeading`s with counts rather than
+  dividers, and hiding the window pin inside the `PINNED` block — both
+  contradict the request as given (two dividers; the title pin stays);
+  dropping the pin from a workspace heading under Workspace mode's `PINNED`
+  divider — not asked, and the user saw it (screenshot 42) without comment,
+  so it is left for them to call; a "pinned workspace" phrase in the
+  spoken label of Workspace-mode rows under a pinned heading — true, and
+  cheap to hear; and doubts about `renderToHardwareTextureAndroid`
+  resampling the arc — the request keeps it, and the phone will say.
+## Send delivers the body as a paste (2026-09-02)
+
+On the phone, typing into the input bar and tapping Send submitted in Claude
+Code but only typed the text into Codex's composer; a second Send was needed.
+`sendText` sent `utf8(text) + 0d` in one `TERMINAL_INPUT`, the host wrote it
+as one unbracketed `send-keys -H`, and Codex's paste-burst detection read an
+Enter inside a fast burst as insert-newline.
+
+- **A `terminal_input_paste` flag on the request.** Send now sends the text
+  with `terminalInputPaste: true` and, 100 ms after the acknowledgement, a
+  CR as keys. The host delivers a paste through `load-buffer` +
+  `paste-buffer -d [-S] -p`, so tmux brackets the bytes iff the pane's
+  application asked (`#{bracket_paste_flag}`); only tmux knows that
+  reliably. Chips and the desktop are unchanged (keys; the desktop never
+  sets the flag).
+- **Why not two plain requests.** `TERMINAL_INPUT` is answered at enqueue
+  time and the host's dispatcher coalesces queued same-pane input, so two
+  requests can still reach tmux as one `send-keys` burst. A paste is never
+  coalesced with the input around it, in either direction; the CR that
+  follows is its own keystroke.
+- **Why not bracket in the WebView.** The page would have to guess whether
+  the pane's application is in bracketed-paste mode; sending `\x1b[200~`
+  into a plain shell would type the markers. tmux tracks the mode per pane.
+- **Experiment.** Against codex-cli 0.152.1 in a private tmux,
+  `load-buffer` + `paste-buffer -d -S -p` followed by a separate
+  `send-keys -H 0d` submits the message, even with a 0 ms gap;
+  `send-keys -H 68 65 6c 6c 6f 0d` in one write does not. Verified in the
+  host's real-tmux tests: a paste is bracketed only in a pane that enabled
+  `?2004h`, and paste + keys CR runs one command line in bash.
+
+## Sizing: the side in use takes, nobody releases (2026-09-03)
+
+The laptop stayed at phone width after the phone had been put away: the
+desktop's re-assert budget (`CLIENT_RESIZE_REASSERTS = 2` per focus gain)
+never came back for a user who never blurred the window, and the phone
+re-sent its size on every reconnect while its screen was mounted, so a
+Wi-Fi flap in a pocket shrank the laptop with nobody touching the phone.
+
+- **Take on use, never release.** Verified against tmux 3.5a with two
+  control clients on one session: a `refresh-client -C` from a client that
+  is not `latest` changes nothing, `send-keys` through a control client
+  does not make it `latest`, `refresh-client -C` followed by
+  `switch-client -E` (the host's existing resize path when another client
+  shares the session) moves the window even against an attached, silent
+  client, and a killed client hands the window back within a second. So a
+  side only has to take when a person is using it, and a stale phone client
+  can never drift back into control. No yield operation, no host protocol
+  change; the earlier release design is dropped.
+- **Desktop takes on a keystroke or pointer-down** (`useClientResize.ts`,
+  capture-phase `window` listeners) while the snapshot's window size differs
+  from the last size requested — never on focus, never on a topology
+  change, never idle. An app left open beside a phone in use stays quiet.
+- **Phone takes on input** while the topology shows the pane's window at
+  another size than the one last sent (`TerminalController.takeSizeIfLost`;
+  the window size is read off the snapshot's panes like the desktop's
+  `windowCellSize`, so the store's `Pane` now carries `left`/`top`).
+- **Reconnect runs step 1 only in the foreground.** The controller takes an
+  `AppForeground` dep (`appForeground.ts` reads `AppState`; tests run in
+  node without react-native). The whole select → resize → attach waits, not
+  just the resize: a select alone takes the host's fresh control client out
+  of `ignore-size` unsized, and tmux sizes the windows from 80x24 (the
+  M13-E005 shape). The deferred step 1 runs on the return to the
+  foreground; a size change in the background likewise waits and goes out
+  through the 150 ms debounce.
+- **Rate limit.** Both sides send at most one take per 2 s
+  (`CLIENT_RESIZE_TAKE_INTERVAL_MS`, `TAKE_INTERVAL_MS`), counted from any
+  size sent, so two people typing at once flip the window slowly rather
+  than on every key, and a keystroke right behind a resize does not repeat
+  it while the snapshot still lags. Neither side ever re-sends a size the
+  snapshot says the window already has.
+- **The return to the foreground alone takes nothing.** A phone unlocked to
+  read a message with the terminal in front is an app left open — the
+  phone's window focus — and the laptop user may be typing. The next input
+  on the phone takes, exactly as the laptop's next keystroke does. (A step
+  1 deferred by a background reconnect does run then, resize included: an
+  attach cannot be made unsized.)
+- **Host unchanged.** Comparing `ensure_size`'s remembered size against the
+  window's real size (so a desktop session switch re-states the size at
+  once) was tried and dropped: it re-sent the size and the claim on every
+  phone screen open after the laptop was used last, ahead of the phone's
+  own resize — two claims and, after a rotation, a visible flip to the
+  stale grid. The desktop's next keystroke covers the switch.
+- **Known exception.** A desktop reconnect sizes its new tmux client and
+  claims, with nobody at the laptop; the phone takes back on its next input
+  and the interval keeps it to one flip.
+- **Live test** `liveSizing.test.ts`: laptop 160x48, phone 50x30 → 50x30;
+  laptop resizes again → 160x48 with the phone attached and silent; phone
+  input → 50x30; laptop again → 160x48.
+
+## Background reconnect runs on a native timer (2026-09-03)
+
+With the app in the background under the foreground service, the phone's
+SSH session was killed on the host. logcat:
+
+```
+[muxflow] ssh.<id>.control.2 closed reason=networkLost exit=null
+[muxflow] reconnect.scheduled attempt=1 delayMs=1000 reason=Connection lost.
+```
+
+and then nothing for minutes; the reconnect ran only once the app was
+brought back to the foreground. React Native Android freezes every
+JavaScript timer while the host activity is paused —
+`react-native/ReactAndroid/.../modules/core/JavaTimerManager.kt` clears the
+timers frame callback in `onHostPause` unless a headless JS task is active —
+so the `setTimeout` in `HostConnection.scheduleReconnect` never fired. The
+native side was fine: sshj's keepalives detected the dead link and the
+`closed` event reached JavaScript in the background; only the delay was
+frozen.
+
+- **The clock moves to Kotlin.** `MuxflowSshModule` gains `scheduleWake` /
+  `cancelWake`, a `Handler` on the main looper keyed by token that answers
+  with an `onWake` event. A `Handler` runs whether or not the activity is
+  resumed, and the service's partial wake lock keeps the CPU up, so no
+  `AlarmManager` is needed. `src/session/backgroundTimer.ts` wraps it as a
+  `BackgroundTimer` (`set`/`clear`, monotonic tokens, a cleared timer never
+  fires even if its wake arrives late) with a `setTimeout` fallback for node
+  and unit tests; a refused native schedule also falls back to `setTimeout`
+  rather than losing the reconnect.
+- **Only the delays nothing else would wake up for use it.**
+  `HostConnection` takes `reconnectTimer` for the §7.2 backoff and for the
+  20 s handshake deadline — a reconnect fired from the background dials
+  natively, and a bridge that never answered would otherwise hold
+  `handshaking` until the app was next opened, the original symptom again.
+  The request and stable timers stay on `setTimeout`: one bridge call per
+  request is not worth it, and a stable timer that fires late only keeps the
+  backoff exponent a little longer. The notifier's post-settle `sleep`
+  (`POST_SETTLE_MS` before a cancel) uses the same timer: it froze the same
+  way, so a "seen on the desktop" cancel did not take the notification down
+  until the app was opened.
+- **Not a headless task.** `HeadlessJsTaskService` would keep the JS timers
+  running but is its own foreground service with its own lifetime; one
+  `Handler` in the module already there is the smaller change.
+
+## Disconnect from the notification, and what the notification says (2026-09-03)
+
+QA 69 case 3: with a 30 s backoff pending in the background, `Disconnect` on
+the persistent notification stopped the foreground service and took the
+notification down, but the app kept dialling every ≈40 s until it was
+foregrounded. The action closed every open channel — and there was none:
+between attempts the only thing alive was the native wake, and the only way
+JavaScript ever learned of the tap was the `closedByClient` close of a channel
+it no longer had. The same session showed the shade reading just "Muxflow":
+nothing ever called `startForegroundService(title, body)`, so the automatic
+start on `connected` used the app label and an empty body.
+
+- **The tap is its own event.** `MuxflowSshModule` emits
+  `onDisconnectRequested` first thing in the Disconnect action, before any
+  channel is closed and whether or not one is open; `MuxflowSsh.ts` exposes it
+  as `addDisconnectListener`. `connectionManager` subscribes once
+  (`setForegroundService`, wired with the transport in `appWiring`) and calls
+  `disconnectHost()` — the connection half of the in-app Disconnect (the sheet
+  also navigates to Hosts; the notification path does not, as before), which
+  clears the reconnect timer, so the wake for the pending backoff runs nothing. The
+  `closedByClient` path stays: an open channel still reports it, and
+  `HostConnection` still treats it as user-initiated; it is just no longer
+  the only messenger. Not chosen: having JavaScript infer the tap from the
+  service stopping (`onStopped` fires for a system kill too, which is not a
+  disconnect) or having Kotlin cancel the wakes itself (it does not know which
+  token is the backoff, and the protocol's state would still say
+  `reconnecting`).
+- **Text is set, not started.** `setServiceNotification(title, body)` stores
+  the text for the next automatic start and, while the service is running,
+  re-posts the notification under the service's id
+  (`ConnectionService.update` → `NotificationManagerCompat.notify`) — an
+  update in place, never `startForegroundService`, which Android 12+ can refuse
+  from the background, and `connected` after a background reconnect is exactly
+  there. `buildNotification` stays the one builder for the start, the stop
+  bounce and the update; the text lives in the service's companion rather
+  than the START intent, so an update that lands before `onStartCommand` is
+  not lost, and the update itself runs on the main thread so it cannot slip
+  in after `onDestroy` and leave an ongoing notification with no service
+  behind it. `connectionManager` posts `"Connected to <label>"`
+  before the dial (so the auto-start has it) and on every `connected`, and
+  `"Reconnecting to <label>"` on `reconnecting`, with the label the Hosts
+  screen shows (`hostLabel`).
+- **The stable timer moves too.** It was left on `setTimeout` a commit ago as
+  "a late reset only keeps the exponent a little longer"; in the background
+  it is not late, it never fires, so a flapping link climbs to 30 s and stays
+  there for the rest of the session. One more wake per connection is cheap.
+
+
+## Voice: the pane is the button, speed and size are preferences, haptics say what happened
+
+- **Whole pane as the hold target.** A 96 dp disc is fine when looking; the
+  screen is for not looking. The `Pressable` is the pane, the disc a picture
+  inside it. The controls row above it (speed, size) stays outside the target
+  so a tap there never starts a recording.
+- **Two sizes, not a drag.** A draggable split needs a handle, a gesture that
+  competes with the hold, and a remembered position; a `Bigger` / `Smaller`
+  toggle between the natural height and 70 % of the window covers the two
+  ways the screen is used (glancing, and thumb-only). Persisted in
+  `prefsStore` with the playback speed, the only preference store the app has.
+- **Speed in the screen, not in settings.** It is changed while listening, so
+  it sits above the talk surface; 1×, 1.5×, 2× and nothing finer.
+- **A subtle tone for the invisible steps, haptics underneath.** The maintainer wanted a
+  short sound rather than a buzz alone: three quiet synthesized clips of
+  70–165 ms (up-tick, single note, down-tick), bundled so a tone never waits on
+  the host. Recording start stays haptic only, since a sound there would land
+  in the recording. The steps: recording started, transcript accepted, agent
+  picked it up, utterance lost. The pickup is the lifecycle edge into
+  `working` after the send, once per utterance; an agent already working when
+  the message went out has not reached it, so no buzz until it turns to it.
+  expo-haptics rejects on phones without a vibrator; the calls are
+  best-effort.

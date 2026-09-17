@@ -1,0 +1,690 @@
+<title>Terminal First</title>
+<style>
+  /* ── Page ─────────────────────────────────────────────── */
+  /* Single-theme dark page: it depicts a dark-only app window. */
+  :root {
+    --page-bg: #0b0c0e;
+    --page-ink: #d7dade;
+    --page-dim: #8a9099;
+    --page-faint: #565c66;
+    --accent: #0091ff;
+    --hairline: #23262b;
+
+    /* App chrome tokens (the mock itself) */
+    --chrome-bg: #101114;
+    --chrome-raised: #16181c;
+    --chrome-ink: #c9cdd3;
+    --chrome-dim: #7d848e;
+    --chrome-faint: #4d545e;
+
+    /* Ghostty terminal tokens (exact values from this machine) */
+    --term-bg: #282c34;
+    --term-fg: #ffffff;
+    --t-red: #cc6566;
+    --t-green: #b6bd68;
+    --t-yellow: #f0c674;
+    --t-blue: #82a2be;
+    --t-magenta: #b294bb;
+    --t-cyan: #8abeb7;
+    --t-grey: #666666;
+    --t-brblue: #7aa6da;
+
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--page-bg);
+    color: var(--page-ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 56px 32px 96px; }
+  header.masthead { margin-bottom: 12px; }
+  .eyebrow {
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent); font-weight: 600; margin-bottom: 10px;
+  }
+  h1 { font-size: 34px; font-weight: 700; letter-spacing: -0.02em; text-wrap: balance; color: #f2f4f6; }
+  .standfirst { max-width: 62ch; color: var(--page-dim); margin-top: 12px; font-size: 16px; }
+  .standfirst strong { color: var(--page-ink); font-weight: 600; }
+
+  h2 { font-size: 20px; font-weight: 650; margin: 64px 0 6px; color: #eceef1; letter-spacing: -0.01em; }
+  h2 .k { color: var(--page-faint); font-weight: 500; font-size: 13px; margin-left: 10px; letter-spacing: 0.06em; }
+  .lede { color: var(--page-dim); max-width: 68ch; margin-bottom: 22px; }
+  .lede b, .lede strong { color: var(--page-ink); font-weight: 600; }
+  code { font-family: var(--mono); font-size: 0.85em; background: #16181c; border: 1px solid var(--hairline); border-radius: 4px; padding: 1px 5px; color: #c9cdd3; }
+
+  /* ── Window frame ─────────────────────────────────────── */
+  .frame { overflow-x: auto; border-radius: 12px; }
+  .window {
+    width: 1240px; border-radius: 10px; overflow: hidden;
+    background: var(--chrome-bg);
+    border: 1px solid #2a2d33;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.4);
+    font-size: 12.5px; color: var(--chrome-ink);
+    position: relative;
+  }
+  .caption { display: flex; gap: 14px; align-items: baseline; margin: 14px 2px 0; }
+  .caption .num { font-family: var(--mono); font-size: 11px; color: var(--accent); }
+  .caption p { font-size: 13.5px; color: var(--page-dim); max-width: 80ch; }
+  .caption p strong { color: var(--page-ink); font-weight: 600; }
+
+  /* Titlebar — 28px, the only full-width bar */
+  .titlebar {
+    height: 28px; display: flex; align-items: center; gap: 8px;
+    padding: 0 10px; background: var(--chrome-bg);
+    border-bottom: 1px solid #1c1e22;
+    font-size: 11.5px; color: var(--chrome-dim);
+  }
+  .lights { display: flex; gap: 7px; margin-right: 6px; }
+  .light { width: 11px; height: 11px; border-radius: 50%; }
+  .light.r { background: #ff5f57; } .light.y { background: #febc2e; } .light.g { background: #28c840; }
+  .tb-icon {
+    width: 20px; height: 18px; border-radius: 5px; display: inline-flex;
+    align-items: center; justify-content: center; color: var(--chrome-dim);
+    font-size: 11px; flex: 0 0 auto;
+  }
+  .tb-icon.on { color: var(--chrome-ink); }
+  .tb-title { margin-left: 6px; color: var(--chrome-ink); font-weight: 550; display: flex; gap: 7px; align-items: center; }
+  .tb-title .branch { font-family: var(--mono); font-size: 10.5px; color: var(--chrome-dim); font-weight: 400; }
+  .tb-spacer { flex: 1; }
+  .tb-badge {
+    min-width: 15px; height: 15px; border-radius: 8px; background: var(--accent);
+    color: #fff; font-size: 9px; font-weight: 600; display: inline-flex;
+    align-items: center; justify-content: center; padding: 0 4px; margin-left: -6px; margin-top: -10px;
+  }
+
+  .app-body { display: flex; height: 748px; }
+
+  /* Sidebar — 240px, workspace rows */
+  .sidebar {
+    width: 240px; flex: 0 0 240px; background: var(--chrome-bg);
+    border-right: 1px solid #1c1e22; display: flex; flex-direction: column;
+    padding: 8px 8px 6px;
+  }
+  .side-label {
+    font-size: 9.5px; letter-spacing: 0.12em; color: var(--chrome-faint);
+    font-weight: 600; padding: 4px 8px 6px;
+  }
+  .ws-row {
+    border-radius: 7px; padding: 7px 9px 8px; margin-bottom: 2px;
+    display: flex; flex-direction: column; gap: 3px; position: relative;
+  }
+  .ws-row .t { font-size: 12.5px; font-weight: 600; color: var(--chrome-ink); display: flex; align-items: center; gap: 6px; }
+  .ws-row .n { font-size: 10.5px; color: var(--chrome-dim); line-height: 1.35;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .ws-row .m { font-family: var(--mono); font-size: 10px; color: var(--chrome-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ws-row.active { background: var(--accent); }
+  .ws-row.active .t, .ws-row.active .n { color: #fff; }
+  .ws-row.active .m { color: rgba(255,255,255,0.72); }
+  .badge {
+    position: absolute; top: 8px; right: 8px; min-width: 16px; height: 16px;
+    border-radius: 8px; background: var(--accent); color: #fff; font-size: 9px;
+    font-weight: 600; display: inline-flex; align-items: center; justify-content: center; padding: 0 4px;
+  }
+  .spin {
+    width: 9px; height: 9px; border-radius: 50%;
+    border: 1.5px solid rgba(255,255,255,0.35); border-top-color: #fff;
+    display: inline-block; flex: 0 0 auto;
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .spin { animation: rot 0.9s linear infinite; }
+    @keyframes rot { to { transform: rotate(360deg); } }
+  }
+  /* Herdr-style agents section: sidebar splits into spaces (top) + agents (bottom) */
+  .sec-split {
+    border-top: 1px solid #1c1e22; margin: 8px 0 4px; position: relative;
+  }
+  .sec-split::after {
+    content: ""; position: absolute; top: -2px; left: 50%; width: 28px; height: 3px;
+    margin-left: -14px; border-radius: 2px; background: #24272d;
+  }
+  .sec-head { display: flex; align-items: baseline; padding: 4px 8px 4px; }
+  .sec-head .side-label { padding: 0; }
+  .sec-head .sort {
+    margin-left: auto; font-size: 9.5px; color: var(--chrome-faint); letter-spacing: 0.04em;
+  }
+  .sec-head .sort.on { color: var(--accent); }
+  .agent-item { padding: 4px 9px 5px; border-radius: 6px; position: relative; }
+  .agent-item .l1 {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11.5px; font-weight: 600; color: var(--chrome-ink);
+  }
+  .agent-item .l1 .loc { font-weight: 600; }
+  .agent-item .l1 .tabno { font-family: var(--mono); font-size: 9.5px; color: var(--chrome-faint); font-weight: 400; }
+  .agent-item .l2 { padding-left: 14px; font-size: 10.5px; color: var(--chrome-dim); }
+  .st-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+  .st-dot.working { background: var(--t-yellow); }
+  .st-dot.blocked { background: var(--t-red); }
+  .st-dot.done { background: var(--t-cyan); }
+  .st-dot.idle { background: transparent; border: 1.5px solid var(--chrome-faint); }
+  .agent-item .badge { top: 5px; }
+  .side-spacer { flex: 1; }
+  .host-row {
+    border-top: 1px solid #1c1e22; padding: 8px 8px 4px; display: flex;
+    align-items: center; gap: 7px; font-family: var(--mono); font-size: 10px; color: var(--chrome-dim);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #28c840; flex: 0 0 auto; }
+  .host-row .lat { margin-left: auto; color: var(--chrome-faint); }
+
+  /* Main area */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: #000; }
+  .tabstrip {
+    height: 28px; flex: 0 0 28px; display: flex; align-items: stretch;
+    background: var(--chrome-bg); border-bottom: 1px solid #1c1e22;
+    padding: 0 4px; gap: 1px;
+  }
+  .tab {
+    display: inline-flex; align-items: center; gap: 6px; padding: 0 12px;
+    font-size: 11.5px; color: var(--chrome-dim); position: relative;
+  }
+  .tab .idx { font-family: var(--mono); font-size: 10px; color: var(--chrome-faint); }
+  .tab.on { color: #fff; }
+  .tab.on::after {
+    content: ""; position: absolute; left: 8px; right: 8px; bottom: 0;
+    height: 2px; background: var(--accent); border-radius: 1px 1px 0 0;
+  }
+  .tab .adot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .tab-tools { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+  .tab-tools .tb-icon { font-size: 12px; }
+
+  /* Panes — full-bleed Ghostty terminals, hairline gaps */
+  .panes { flex: 1; display: flex; gap: 1px; background: #000; min-height: 0; }
+  .col { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .pane { background: var(--term-bg); position: relative; overflow: hidden; min-height: 0; }
+  .pane.focus { box-shadow: inset 0 0 0 2px var(--accent); }
+  .pane.ring { box-shadow: inset 0 0 0 2.5px var(--accent); border-radius: 0; }
+  .pane.ring::after {
+    content: ""; position: absolute; inset: 2px; border-radius: 6px;
+    border: 2.5px solid var(--accent); pointer-events: none; opacity: 0.9;
+  }
+  .term {
+    font-family: var(--mono); font-size: 13px; line-height: 1.42;
+    color: var(--term-fg); padding: 10px 14px; white-space: pre-wrap; word-break: break-word;
+  }
+  .term .p  { color: var(--t-cyan); }
+  .term .g  { color: var(--t-green); }
+  .term .y  { color: var(--t-yellow); }
+  .term .r  { color: var(--t-red); }
+  .term .b  { color: var(--t-blue); }
+  .term .bb { color: var(--t-brblue); }
+  .term .mg { color: var(--t-magenta); }
+  .term .d  { color: var(--t-grey); }
+  .term .w  { color: #eaeaea; }
+  .term .dim{ color: #9aa0a8; }
+  .cursor { display: inline-block; width: 7px; height: 15px; background: #ffffff; vertical-align: -2px; }
+
+  /* Right panel (state B) */
+  .rpanel {
+    width: 300px; flex: 0 0 300px; background: var(--chrome-bg);
+    border-left: 1px solid #1c1e22; display: flex; flex-direction: column;
+  }
+  .rp-tabs { height: 28px; display: flex; align-items: stretch; border-bottom: 1px solid #1c1e22; padding: 0 6px; }
+  .rp-tab { display: inline-flex; align-items: center; padding: 0 10px; font-size: 11px; color: var(--chrome-dim); position: relative; }
+  .rp-tab.on { color: #fff; }
+  .rp-tab.on::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: 0; height: 2px; background: var(--accent); border-radius: 1px 1px 0 0; }
+  .rp-body { flex: 1; overflow: hidden; padding: 8px 0; font-size: 11.5px; }
+  .git-group { padding: 4px 12px 2px; font-size: 9.5px; letter-spacing: 0.1em; color: var(--chrome-faint); font-weight: 600; }
+  .git-file { display: flex; align-items: center; gap: 8px; padding: 3px 12px; color: var(--chrome-ink); font-family: var(--mono); font-size: 11px; }
+  .git-file .st { width: 12px; text-align: center; font-weight: 600; }
+  .git-file .st.m { color: var(--t-yellow); } .git-file .st.a { color: var(--t-green); } .git-file .st.u { color: var(--t-blue); }
+  .git-file.sel { background: #1d2026; }
+  .commit-row { margin: 10px 12px 0; display: flex; gap: 6px; }
+  .commit-input {
+    flex: 1; border: 1px solid #26292f; border-radius: 6px; background: #14161a;
+    color: var(--chrome-faint); font-size: 11px; padding: 5px 8px;
+  }
+
+  /* Diff surface as a pane tab (state B) */
+  .pane-tabs { height: 24px; display: flex; align-items: stretch; background: #1d2026; border-bottom: 1px solid #14161a; padding: 0 2px; }
+  .ptab { display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; font-size: 10.5px; color: var(--chrome-dim); position: relative; }
+  .ptab.on { color: #e8eaed; background: #22252c; border-radius: 5px 5px 0 0; }
+  .diff { font-family: var(--mono); font-size: 12px; line-height: 1.5; padding: 8px 0; background: #1e2127; height: 100%; }
+  .dl { padding: 0 14px; white-space: pre; }
+  .dl.add { background: rgba(182,189,104,0.12); color: #cdd3b0; }
+  .dl.del { background: rgba(204,101,102,0.12); color: #d8a0a0; }
+  .dl.ctx { color: #9aa0a8; }
+  .dl.hunk { color: var(--t-brblue); background: rgba(122,166,218,0.08); padding-top: 3px; padding-bottom: 3px; }
+
+  /* Command palette (state C) */
+  .scrim { position: absolute; inset: 0; background: rgba(0,0,0,0.35); backdrop-filter: blur(1px); }
+  .palette {
+    position: absolute; top: 84px; left: 50%; transform: translateX(-50%);
+    width: 560px; background: #16181d; border: 1px solid #2c2f36; border-radius: 10px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.6); overflow: hidden;
+  }
+  .pal-input {
+    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+    border-bottom: 1px solid #24272d; font-size: 13px; color: #eceef1;
+  }
+  .pal-input .hint { margin-left: auto; font-size: 10px; color: var(--chrome-faint); }
+  .pal-group { padding: 6px 14px 2px; font-size: 9.5px; letter-spacing: 0.1em; color: var(--chrome-faint); font-weight: 600; }
+  .pal-row { display: flex; align-items: center; gap: 10px; padding: 5px 14px; font-size: 12.5px; color: var(--chrome-ink); height: 28px; }
+  .pal-row.sel { background: var(--accent); color: #fff; }
+  .pal-row .kbd { margin-left: auto; font-size: 11px; color: var(--chrome-dim); font-family: var(--sans); letter-spacing: 0.06em; }
+  .pal-row.sel .kbd { color: rgba(255,255,255,0.8); }
+
+  /* ── Comparison table ─────────────────────────────────── */
+  table { border-collapse: collapse; width: 100%; margin-top: 18px; font-size: 13.5px; }
+  th { text-align: left; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--page-faint); font-weight: 600; padding: 0 14px 10px 0; }
+  td { padding: 9px 14px 9px 0; border-top: 1px solid var(--hairline); vertical-align: top; }
+  td.metric { color: var(--page-ink); font-weight: 550; width: 30%; }
+  td.before { color: var(--t-red); font-variant-numeric: tabular-nums; }
+  td.after { color: var(--t-green); font-variant-numeric: tabular-nums; }
+  td.note { color: var(--page-dim); font-size: 12.5px; }
+
+  /* Token spec */
+  .tokens { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; margin-top: 18px; }
+  .tok { border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; background: #101114; }
+  .tok .sw { display: flex; gap: 6px; margin-bottom: 9px; }
+  .tok .chip { width: 22px; height: 22px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.08); }
+  .tok h3 { font-size: 12px; font-weight: 600; color: var(--page-ink); margin-bottom: 3px; }
+  .tok p { font-size: 11.5px; color: var(--page-dim); line-height: 1.5; }
+  .tok code { font-size: 10.5px; }
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <div class="eyebrow">Phase 11 · tmux Agent IDE</div>
+    <h1>Terminal First</h1>
+    <p class="standfirst">A redesign that deletes the chrome instead of rearranging it. Layout and density copy
+    <strong>cmux</strong> (28px bars, one 240px workspace sidebar, no status bar, one accent color);
+    the terminal is a faithful <strong>Ghostty</strong> surface — JetBrains&nbsp;Mono 13 on <code>#282c34</code>
+    with the stock dark palette from this machine. Today the terminal owns 41% of the window; here it owns ~86%,
+    and everything — terminal, file, git diff — is just a tab in one strip, like VS Code.</p>
+  </header>
+
+  <h2>Default state <span class="k">sidebar + panes, nothing else</span></h2>
+  <p class="lede">One workspace list (tmux sessions as rich rows: name, last agent event, <code>branch* · cwd</code>),
+  one slim window-tab strip, then full-bleed terminals. <b>Seven visible controls</b> at rest — down from ~20.
+  Connection state is the green dot in the host row; the "Live" banner, the pane badge, and the Active-pane block are gone.
+  The focused pane carries a 2px accent ring; the codex pane below shows the 2.5px <b>attention ring</b> — the same blue as its sidebar badge.</p>
+
+  <div class="frame"><div class="window">
+    <div class="titlebar">
+      <div class="lights"><span class="light r"></span><span class="light y"></span><span class="light g"></span></div>
+      <span class="tb-icon on" title="Toggle sidebar ⌘B">◧</span>
+      <span class="tb-icon">‹</span><span class="tb-icon">›</span>
+      <span class="tb-title">muxflow <span class="branch">main*</span></span>
+      <span class="tb-spacer"></span>
+      <span class="tb-icon">🔔</span><span class="tb-badge">3</span>
+      <span class="tb-icon">＋</span>
+      <span class="tb-icon" title="Toggle panel ⌥⌘B">◨</span>
+    </div>
+    <div class="app-body">
+      <aside class="sidebar">
+        <div class="side-label">WORKSPACES</div>
+        <div class="ws-row active">
+          <div class="t"><span class="spin"></span> muxflow</div>
+          <div class="n">Claude: explorer virtualization in — 18 tests green, running full suite.</div>
+          <div class="m">main* · ~/dev/muxflow</div>
+        </div>
+        <div class="ws-row">
+          <div class="t">project-e2e</div>
+          <div class="n">Codex: 3 review findings need approval on retry-flake fix.</div>
+          <div class="m">fix/retry-flake* · ~/dev/project-e2e</div>
+          <span class="badge">3</span>
+        </div>
+        <div class="ws-row">
+          <div class="t">infra</div>
+          <div class="n">idle</div>
+          <div class="m">main · ~/dev/infra</div>
+        </div>
+        <div class="sec-split"></div>
+        <div class="sec-head"><div class="side-label">AGENTS</div><span class="sort on">grouped</span></div>
+        <div class="agent-item">
+          <div class="l1"><span class="st-dot working"></span><span class="loc">muxflow</span><span class="tabno">1</span></div>
+          <div class="l2">claude · running suite 212/334</div>
+        </div>
+        <div class="agent-item">
+          <div class="l1"><span class="st-dot blocked"></span><span class="loc">muxflow</span><span class="tabno">3</span></div>
+          <div class="l2">codex · waiting for approval</div>
+          <span class="badge">1</span>
+        </div>
+        <div class="agent-item">
+          <div class="l1"><span class="st-dot done"></span><span class="loc">project-e2e</span><span class="tabno">2</span></div>
+          <div class="l2">claude · done — 3 findings</div>
+        </div>
+        <div class="side-spacer"></div>
+        <div class="host-row"><span class="dot"></span> remote-linux · ssh <span class="lat">41 ms</span></div>
+      </aside>
+      <div class="main">
+        <div class="tabstrip">
+          <span class="tab on"><span class="idx">1</span> claude</span>
+          <span class="tab"><span class="idx">2</span> zsh</span>
+          <span class="tab"><span class="idx">3</span> codex <span class="adot"></span></span>
+          <span class="tab"><span class="idx">4</span> build</span>
+          <div class="tab-tools"><span class="tb-icon">◫</span><span class="tb-icon">＋</span></div>
+        </div>
+        <div class="panes">
+          <div class="col" style="flex: 1.35;">
+            <div class="pane focus" style="flex: 1;"><div class="term"><span class="y">✳</span> <span class="w">Claude Code</span> <span class="d">· muxflow · main*</span>
+
+<span class="p">›</span> make the explorer tree virtualized
+
+<span class="g">⏺</span> I'll look at the current tree rendering first.
+
+<span class="g">⏺</span> <span class="w">Read</span><span class="d">(apps/desktop/src/features/files/ExplorerTree.tsx)</span>
+  <span class="d">⎿ Read 248 lines</span>
+
+<span class="g">⏺</span> The tree flattens every expanded directory into DOM rows —
+  no windowing. Adding a fixed-height virtualized list, keyed
+  on 24px rows, overscan 12.
+
+<span class="g">⏺</span> <span class="w">Update</span><span class="d">(apps/desktop/src/features/files/ExplorerTree.tsx)</span>
+  <span class="d">⎿ Updated with 61 additions and 12 removals</span>
+
+<span class="g">⏺</span> <span class="w">Bash</span><span class="d">(pnpm vitest run features/files)</span>
+  <span class="d">⎿</span> <span class="g">✓</span> <span class="d">18 passed · 412ms</span>
+
+<span class="dim">· Running full suite… (esc to interrupt)</span></div></div>
+          </div>
+          <div class="col" style="flex: 1;">
+            <div class="pane" style="flex: 1.1;"><div class="term"><span class="b">operator@remote-linux</span> <span class="p">muxflow</span> <span class="d">%</span> git status -sb
+<span class="d">## main...origin/main</span>
+ <span class="y">M</span> apps/desktop/src/features/files/ExplorerTree.tsx
+<span class="r">??</span> docs/history/qa/ui-polish/
+<span class="b">operator@remote-linux</span> <span class="p">muxflow</span> <span class="d">%</span> pnpm vitest run explorer
+ <span class="g">✓</span> features/files/ExplorerTree.test.tsx <span class="d">(18 tests)</span> 412ms
+ <span class="w">Test Files</span>  <span class="g">1 passed</span> <span class="d">(1)</span>
+<span class="b">operator@remote-linux</span> <span class="p">muxflow</span> <span class="d">%</span> <span class="cursor"></span></div></div>
+            <div class="pane ring" style="flex: 1;"><div class="term"><span class="mg">▌</span> <span class="w">codex</span> <span class="d">· reviewing diff</span>
+
+  apps/desktop/src/state/topologyStore.ts
+  <span class="g">+142</span> <span class="r">−87</span> <span class="d">·</span> 3 findings
+
+  <span class="y">⚠ waiting for approval</span> — apply fix batch?
+  <span class="d">[y] apply   [n] skip   [d] show diff</span></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+  <div class="caption"><span class="num">01</span><p><strong>Proportions:</strong> 240px sidebar (toggleable to 0 with ⌘B), 28px titlebar, 28px tab strip — everything else is terminal.
+  At 1240px wide the panes get 999px ≈ <strong>86% of the window area</strong>. Pane dividers are 1px black hairlines; splits are ⌘D / ⌘⇧D, drag-resizable, arranged by tmux's own layout.</p></div>
+
+  <h2>Diff open <span class="k">tabs work like VS Code</span></h2>
+  <p class="lede">The tab strip holds two kinds of tabs: <b>terminal tabs</b> (tmux windows) and <b>document tabs</b>
+  (files, git diffs, markdown). Clicking a file in Git or the Explorer opens a document tab; the terminal is one keystroke away (⌃1).
+  The right panel (⌥⌘B) is one 300px surface where <b>Files ⇄ Git toggle</b>, closed by default; the permanent
+  commit form is gone — the message field appears only when staged files exist.</p>
+
+  <div class="frame"><div class="window">
+    <div class="titlebar">
+      <div class="lights"><span class="light r"></span><span class="light y"></span><span class="light g"></span></div>
+      <span class="tb-icon on">◧</span>
+      <span class="tb-icon">‹</span><span class="tb-icon">›</span>
+      <span class="tb-title">muxflow <span class="branch">main*</span></span>
+      <span class="tb-spacer"></span>
+      <span class="tb-icon">🔔</span>
+      <span class="tb-icon">＋</span>
+      <span class="tb-icon on">◨</span>
+    </div>
+    <div class="app-body">
+      <aside class="sidebar">
+        <div class="side-label">WORKSPACES</div>
+        <div class="ws-row active">
+          <div class="t"><span class="spin"></span> muxflow</div>
+          <div class="n">Claude: explorer virtualization in — 18 tests green, running full suite.</div>
+          <div class="m">main* · ~/dev/muxflow</div>
+        </div>
+        <div class="ws-row">
+          <div class="t">project-e2e</div>
+          <div class="n">Codex: 3 review findings need approval on retry-flake fix.</div>
+          <div class="m">fix/retry-flake* · ~/dev/project-e2e</div>
+          <span class="badge">3</span>
+        </div>
+        <div class="ws-row">
+          <div class="t">infra</div>
+          <div class="n">idle</div>
+          <div class="m">main · ~/dev/infra</div>
+        </div>
+        <div class="sec-split"></div>
+        <div class="sec-head"><div class="side-label">AGENTS</div><span class="sort on">grouped</span></div>
+        <div class="agent-item">
+          <div class="l1"><span class="st-dot working"></span><span class="loc">muxflow</span><span class="tabno">1</span></div>
+          <div class="l2">claude · running suite 212/334</div>
+        </div>
+        <div class="agent-item">
+          <div class="l1"><span class="st-dot blocked"></span><span class="loc">muxflow</span><span class="tabno">3</span></div>
+          <div class="l2">codex · waiting for approval</div>
+          <span class="badge">1</span>
+        </div>
+        <div class="agent-item">
+          <div class="l1"><span class="st-dot done"></span><span class="loc">project-e2e</span><span class="tabno">2</span></div>
+          <div class="l2">claude · done — 3 findings</div>
+        </div>
+        <div class="side-spacer"></div>
+        <div class="host-row"><span class="dot"></span> remote-linux · ssh <span class="lat">41 ms</span></div>
+      </aside>
+      <div class="main">
+        <div class="tabstrip">
+          <span class="tab"><span class="idx">1</span> claude</span>
+          <span class="tab"><span class="idx">2</span> zsh</span>
+          <span class="tab"><span class="idx">3</span> codex <span class="adot"></span></span>
+          <span class="tab on"><span class="idx" style="color: var(--t-yellow);">±</span> ExplorerTree.tsx</span>
+          <div class="tab-tools"><span class="tb-icon">◫</span><span class="tb-icon">＋</span></div>
+        </div>
+        <div class="panes">
+          <div class="col" style="flex: 1;">
+            <div class="pane" style="flex: 1; display: flex; flex-direction: column; background: #1e2127;">
+              <div class="diff">
+<div class="dl hunk">@@ -195,12 +195,7 @@ export function ExplorerTree({ rows }: Props) {</div>
+<div class="dl ctx">   const flat = useMemo(</div>
+<div class="dl del">-    () =&gt; flattenTree(expanded, listings, root),</div>
+<div class="dl del">-    [expanded, listings, root],</div>
+<div class="dl del">-  );</div>
+<div class="dl del">-  return flat.map((row) =&gt; (</div>
+<div class="dl del">-    &lt;TreeRow key={row.path} row={row} /&gt;</div>
+<div class="dl del">-  ));</div>
+<div class="dl add">+    () =&gt; flattenTree(expanded, listings, root),</div>
+<div class="dl add">+    [expanded, listingsVersion, root],</div>
+<div class="dl add">+  );</div>
+<div class="dl add">+  return (</div>
+<div class="dl add">+    &lt;VirtualList rows={flat} rowHeight={24} overscan={12}</div>
+<div class="dl add">+                 render={(row) =&gt; &lt;TreeRow key={row.path} row={row} /&gt;} /&gt;</div>
+<div class="dl add">+  );</div>
+<div class="dl ctx">   }</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <aside class="rpanel">
+        <div class="rp-tabs">
+          <span class="rp-tab">Files</span>
+          <span class="rp-tab on">Git</span>
+        </div>
+        <div class="rp-body">
+          <div class="git-group">STAGED · 1</div>
+          <div class="git-file sel"><span class="st m">M</span> features/files/ExplorerTree.tsx</div>
+          <div class="git-group" style="margin-top:8px;">UNSTAGED · 2</div>
+          <div class="git-file"><span class="st m">M</span> features/files/useWorkspaceFiles.ts</div>
+          <div class="git-file"><span class="st u">?</span> docs/history/qa/ui-polish/</div>
+          <div class="commit-row"><span class="commit-input">Commit message…</span></div>
+        </div>
+      </aside>
+    </div>
+  </div></div>
+  <div class="caption"><span class="num">02</span><p><strong>One strip, two kinds of tabs.</strong> The diff opens as the
+  <code>± ExplorerTree.tsx</code> tab and takes the full surface, Monaco-rendered; ⌃1 returns to the claude terminal. Git file rows in the
+  panel are mono 11px with single-letter states — no per-row button clusters; clicking a row opens (or focuses) its diff tab, and
+  actions live on right-click and in the palette.</p></div>
+
+  <h2>Agents <span class="k">the Herdr model: two stacked lists</span></h2>
+  <p class="lede">Per user direction, the agents UI copies <b>Herdr</b>: the sidebar splits into two sections with a draggable
+  divider — <b>workspaces on top, a flat agents list below</b>, so you always see both the per-workspace view and the agent view.
+  The agents list is global across workspaces (Herdr shipped a per-workspace scope filter and then deleted it); the only toggle is
+  <b>ordering</b>, a one-word clickable control in the section header: <code>grouped</code> (workspace order) ⇄ <code>priority</code>
+  (blocked first, then unread-done, then working — note <b>done-but-unread outranks working</b>: the list is an inbox).
+  Rows are Herdr's two-line shape — state dot + workspace + tab, then agent + activity — and <b>clicking a row switches workspace,
+  window, and pane in one shot</b>. States are color-coded dots: yellow working, red blocked, teal done-unread, hollow idle;
+  a finished agent stays "done" until you focus its pane.</p>
+
+  <div class="frame"><div class="window" style="height: 549px;">
+    <div class="titlebar">
+      <div class="lights"><span class="light r"></span><span class="light y"></span><span class="light g"></span></div>
+      <span class="tb-icon on">◧</span>
+      <span class="tb-icon">‹</span><span class="tb-icon">›</span>
+      <span class="tb-title">muxflow <span class="branch">main*</span></span>
+      <span class="tb-spacer"></span>
+      <span class="tb-icon">🔔</span><span class="tb-badge">2</span>
+      <span class="tb-icon">＋</span>
+      <span class="tb-icon on">◨</span>
+    </div>
+    <div class="app-body" style="height: 520px;">
+      <aside class="sidebar">
+        <div class="side-label">WORKSPACES</div>
+        <div class="ws-row active">
+          <div class="t"><span class="spin"></span> muxflow</div>
+          <div class="m">main* · ~/dev/muxflow</div>
+        </div>
+        <div class="ws-row">
+          <div class="t">project-e2e</div>
+          <div class="m">fix/retry-flake* · ~/dev/project-e2e</div>
+        </div>
+        <div class="ws-row">
+          <div class="t">infra</div>
+          <div class="m">main · ~/dev/infra</div>
+        </div>
+        <div class="sec-split"></div>
+        <div class="sec-head"><div class="side-label">AGENTS</div><span class="sort on">priority</span></div>
+        <div class="agent-item">
+          <div class="l1"><span class="st-dot blocked"></span><span class="loc">muxflow</span><span class="tabno">3</span></div>
+          <div class="l2">codex · waiting for approval</div>
+          <span class="badge">1</span>
+        </div>
+        <div class="agent-item">
+          <div class="l1"><span class="st-dot done"></span><span class="loc">project-e2e</span><span class="tabno">2</span></div>
+          <div class="l2">claude · done — 3 findings</div>
+        </div>
+        <div class="agent-item">
+          <div class="l1"><span class="st-dot working"></span><span class="loc">muxflow</span><span class="tabno">1</span></div>
+          <div class="l2">claude · running suite 212/334</div>
+        </div>
+        <div class="agent-item">
+          <div class="l1"><span class="st-dot idle"></span><span class="loc">infra</span><span class="tabno">1</span></div>
+          <div class="l2">claude · idle</div>
+        </div>
+        <div class="side-spacer"></div>
+        <div class="host-row"><span class="dot"></span> remote-linux · ssh <span class="lat">41 ms</span></div>
+      </aside>
+      <div class="main">
+        <div class="tabstrip">
+          <span class="tab on"><span class="idx">1</span> claude</span>
+          <span class="tab"><span class="idx">2</span> zsh</span>
+          <span class="tab"><span class="idx">3</span> codex <span class="adot"></span></span>
+          <div class="tab-tools"><span class="tb-icon">◫</span><span class="tb-icon">＋</span></div>
+        </div>
+        <div class="panes">
+          <div class="col" style="flex: 1;">
+            <div class="pane focus" style="flex: 1;"><div class="term"><span class="y">✳</span> <span class="w">Claude Code</span> <span class="d">· muxflow · main*</span>
+
+<span class="g">⏺</span> <span class="w">Bash</span><span class="d">(pnpm vitest run)</span>
+  <span class="d">⎿ Running… 212/334</span>
+
+<span class="dim">· esc to interrupt</span></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+  <div class="caption"><span class="num">03</span><p><strong>Priority sort shown — the inbox view.</strong> Blocked (red) leads,
+  then done-unread (teal), then working (yellow), idle last (hollow). In <code>grouped</code> mode the same rows follow workspace
+  order instead. The workspace rows above keep their aggregate state (a workspace inherits its loudest agent), so the top section
+  answers "where is work happening" while the bottom answers "who needs me". Clicking an agent row focuses its exact window/pane;
+  ⌘⇧U jumps to the top of the priority order. Sounds move to Settings.</p></div>
+
+  <h2>Command palette <span class="k">where all the buttons went</span></h2>
+  <p class="lede">Every removed button becomes a palette command with a real <b>⌘-glyph shortcut</b> (fixing finding M10-E052 —
+  no more <code>Meta+Shift+P</code>). 560px wide, 28px rows, inline group labels instead of today's repeating category column,
+  no empty shortcut lozenges. Fuzzy workspace switching is ⌘P; the palette is ⌘K.</p>
+
+  <div class="frame"><div class="window" style="height: 520px;">
+    <div class="titlebar">
+      <div class="lights"><span class="light r"></span><span class="light y"></span><span class="light g"></span></div>
+      <span class="tb-icon on">◧</span>
+      <span class="tb-icon">‹</span><span class="tb-icon">›</span>
+      <span class="tb-title">muxflow <span class="branch">main*</span></span>
+      <span class="tb-spacer"></span>
+      <span class="tb-icon">🔔</span><span class="tb-icon">＋</span><span class="tb-icon">◨</span>
+    </div>
+    <div class="app-body" style="height: 491px;">
+      <aside class="sidebar" style="opacity: 0.55;">
+        <div class="side-label">WORKSPACES</div>
+        <div class="ws-row active"><div class="t">muxflow</div><div class="m">main* · ~/dev/muxflow</div></div>
+        <div class="ws-row"><div class="t">project-e2e</div><div class="m">fix/retry-flake* · ~/dev/project-e2e</div><span class="badge">3</span></div>
+        <div class="side-spacer"></div>
+        <div class="host-row"><span class="dot"></span> remote-linux · ssh <span class="lat">41 ms</span></div>
+      </aside>
+      <div class="main" style="opacity: 0.55;">
+        <div class="tabstrip">
+          <span class="tab on"><span class="idx">1</span> claude</span>
+          <span class="tab"><span class="idx">2</span> zsh</span>
+          <div class="tab-tools"><span class="tb-icon">◫</span><span class="tb-icon">＋</span></div>
+        </div>
+        <div class="panes"><div class="col" style="flex:1;"><div class="pane" style="flex:1;"><div class="term"><span class="y">✳</span> <span class="w">Claude Code</span> <span class="d">· muxflow · main*</span>
+
+<span class="p">›</span> <span class="cursor"></span></div></div></div></div>
+      </div>
+      <div class="scrim"></div>
+      <div class="palette">
+        <div class="pal-input">⌕&nbsp; spl<span class="cursor" style="height:13px;"></span><span class="hint">↑↓ navigate · ↩ run · esc</span></div>
+        <div class="pal-group">PANE</div>
+        <div class="pal-row sel">Split pane right <span class="kbd">⌘D</span></div>
+        <div class="pal-row">Split pane down <span class="kbd">⌘⇧D</span></div>
+        <div class="pal-row">Zoom pane <span class="kbd">⌘⇧↩</span></div>
+        <div class="pal-group">WINDOW</div>
+        <div class="pal-row">Equalize splits <span class="kbd">⌃⌘⇧=</span></div>
+        <div class="pal-row" style="margin-bottom: 8px;">Move pane to new tab</div>
+      </div>
+    </div>
+  </div></div>
+  <div class="caption"><span class="num">04</span><p><strong>Keyboard-first, cmux keymap.</strong> ⌘1–9 workspaces, ⌃1–9 tabs, ⌘B/⌥⌘B rails,
+  ⌘D splits, ⌘⇧U jump-to-unread. Context menus shrink to desktop scale: 13px text, 24px rows.</p></div>
+
+  <h2>Before → after</h2>
+  <table>
+    <thead><tr><th>Metric</th><th>Today</th><th>Redesign</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="metric">Fixed horizontal chrome</td><td class="before">680px, always</td><td class="after">240px, ⌘B → 0</td><td class="note">rail+sidebar+agents panel → one sidebar</td></tr>
+      <tr><td class="metric">Terminal share of window</td><td class="before">~41%</td><td class="after">~86%</td><td class="note">and never 0% — surfaces open in splits</td></tr>
+      <tr><td class="metric">Diff/editor placement</td><td class="before">silent takeover of the terminal column</td><td class="after">a document tab in the strip</td><td class="note">VS Code model; terminal is ⌃1 away</td></tr>
+      <tr><td class="metric">Agent surface</td><td class="before">258px permanent panel + sounds mixer</td><td class="after">agents section under workspaces (Herdr)</td><td class="note">flat list, grouped ⇄ priority; click focuses the exact pane</td></tr>
+      <tr><td class="metric">Visible controls at rest</td><td class="before">~20</td><td class="after">7</td><td class="note">rest → palette, context menus, shortcuts</td></tr>
+      <tr><td class="metric">Connection-state displays</td><td class="before">3</td><td class="after">1</td><td class="note">host-row dot; amber strip only on disconnect</td></tr>
+      <tr><td class="metric">Bar heights</td><td class="before">28–42px, mixed</td><td class="after">28px, all</td><td class="note">cmux constant</td></tr>
+      <tr><td class="metric">Type scale (chrome)</td><td class="before">9–17px, ad hoc</td><td class="after">12.5 / 10.5 / 10 mono</td><td class="note">cmux row typography, SF system font</td></tr>
+      <tr><td class="metric">Terminal font</td><td class="before">SFMono 13 fallback</td><td class="after">JetBrains Mono 13, bundled</td><td class="note">Ghostty default, exact palette</td></tr>
+      <tr><td class="metric">Accent colors</td><td class="before">blue + 4 reds + green banner</td><td class="after">#0091FF + one red</td><td class="note">destructive = one treatment</td></tr>
+      <tr><td class="metric">Iconography</td><td class="before">text glyphs (••• ✎ ▱ E G M)</td><td class="after">one SVG glyph set</td><td class="note">SF-Symbols-weight strokes</td></tr>
+      <tr><td class="metric">Shortcut rendering</td><td class="before">Meta+Shift+P</td><td class="after">⌘⇧P</td><td class="note">closes M10-E052</td></tr>
+      <tr><td class="metric">Sounds mixer</td><td class="before">docked, always visible</td><td class="after">Settings</td><td class="note">—</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Design tokens</h2>
+  <div class="tokens">
+    <div class="tok">
+      <div class="sw"><span class="chip" style="background:#101114"></span><span class="chip" style="background:#16181c"></span><span class="chip" style="background:#282c34"></span><span class="chip" style="background:#0091ff"></span></div>
+      <h3>Surfaces + accent</h3>
+      <p>Chrome <code>#101114</code>, raised <code>#16181c</code>, terminal <code>#282c34</code> (Ghostty), accent <code>#0091FF</code> (cmux). Hairlines <code>#1c1e22</code>. One accent for selection, attention, badges, links.</p>
+    </div>
+    <div class="tok">
+      <div class="sw"><span class="chip" style="background:#cc6566"></span><span class="chip" style="background:#b6bd68"></span><span class="chip" style="background:#f0c674"></span><span class="chip" style="background:#82a2be"></span><span class="chip" style="background:#b294bb"></span><span class="chip" style="background:#8abeb7"></span></div>
+      <h3>Terminal palette</h3>
+      <p>Ghostty Default Style Dark, verbatim: fg <code>#ffffff</code>, cursor white block, inverted selection, ANSI 0–15 from the theme file. Never used for chrome.</p>
+    </div>
+    <div class="tok">
+      <h3>Type</h3>
+      <p>Chrome: SF system font — row title 12.5 semibold, secondary 10.5, metadata 10 mono, section labels 9.5 caps. Terminal: JetBrains Mono 13 / 1.42, bundled via <code>@font-face</code> (replaces the unbundled Inter reference).</p>
+    </div>
+    <div class="tok">
+      <h3>Metrics</h3>
+      <p>All bars 28px. Sidebar 240px (min) – 1/3 window, right panel 300px default. Focus ring 2px accent, attention ring 2.5px radius 6. Palette 560×28px rows. Context menus 13px/24px rows.</p>
+    </div>
+  </div>
+</div>

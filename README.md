@@ -76,7 +76,8 @@ server. It is excluded from the ten Linux V1 release acceptance scenarios.
 
 See [setup](./docs/setup.md), [SSH setup](./docs/remote-host.md),
 [release instructions](./docs/release.md), [troubleshooting](./docs/troubleshooting.md),
-and the [test suite guide](./tests/README.md).
+the [test suite guide](./tests/README.md), and the
+[historical plans](./docs/history/README.md).
 
 ## License
 
