@@ -14,5 +14,5 @@ use the same vocabulary, for example `pnpm test:files`, `pnpm test:transfers`,
 `pnpm test:release`, and `pnpm test:performance`.
 
 Generated screenshots, logs, measurements, and raw QA results do not belong in
-Git. Write them beneath `tmp/evidence/` or upload them as CI artifacts. Test-local
-`evidence/` directories are ignored to prevent accidental commits.
+Git. Write them beneath `tmp/evidence/`. Test-local `evidence/` directories are
+ignored to prevent accidental commits.
