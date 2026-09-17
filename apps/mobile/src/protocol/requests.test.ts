@@ -7,7 +7,7 @@ describe("terminal file request builder", () => {
     const request = resolveTerminalFile("op-file", "%7", "../README.md", "server-a", 42n, {
       sessionId: "$2",
       windowId: "@5",
-      cwd: "/home/user/project/src",
+      cwd: "/home/dev/project/src",
     });
 
     expect(request.operation).toBe(Operation.RESOLVE_TERMINAL_FILE);
@@ -19,7 +19,7 @@ describe("terminal file request builder", () => {
       expectedTopologyGeneration: 42n,
       expectedSessionId: "$2",
       expectedWindowId: "@5",
-      expectedCwd: "/home/user/project/src",
+      expectedCwd: "/home/dev/project/src",
     });
   });
 });

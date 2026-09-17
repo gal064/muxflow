@@ -46,7 +46,7 @@ describe("the Android notification host (§13)", () => {
   it("presents on the agents channel with the agent id as the tag", async () => {
     await createExpoNotificationHost().present({
       tag: "a1",
-      title: "muxflow · Claude",
+      title: "dev-app · Claude",
       body: "Needs your input",
       data: payload,
     });
@@ -54,7 +54,7 @@ describe("the Android notification host (§13)", () => {
     expect(request).toMatchObject({
       identifier: "a1",
       content: {
-        title: "muxflow · Claude",
+        title: "dev-app · Claude",
         body: "Needs your input",
         data: payload,
         color: colors.accent,

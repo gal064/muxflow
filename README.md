@@ -76,5 +76,11 @@ server. It is excluded from the ten Linux V1 release acceptance scenarios.
 
 See [setup](./docs/setup.md), [SSH setup](./docs/remote-host.md),
 [release instructions](./docs/release.md), [troubleshooting](./docs/troubleshooting.md),
-and the [test suite guide](./tests/README.md). Historical implementation plans
-and QA notes are archived under [`docs/history`](./docs/history/README.md).
+and the [test suite guide](./tests/README.md).
+
+## License
+
+Muxflow source is licensed under [MIT](./LICENSE). The bundled JetBrains Mono
+fonts retain their own license in the desktop and mobile font directories. The
+optional speech model is downloaded separately; its upstream and conversion
+model cards are linked in [third-party notices](./docs/third-party.md).

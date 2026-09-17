@@ -22,8 +22,8 @@ Linux prerequisites. On Debian/Ubuntu the GUI development packages include
 ```sh
 pnpm install --frozen-lockfile
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo clippy --workspace --all-targets -- -D warnings
+TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test --workspace --all-targets
 pnpm check
 pnpm test
 pnpm build

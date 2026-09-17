@@ -16,6 +16,8 @@ use super::super::SequencerControl;
 use super::super::voice::{VoiceError, VoiceService};
 use super::{response_error, send_response};
 
+// Keep the dispatcher's request context explicit at this thin protocol boundary.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle(
     request_id: u64,
     operation: v1::Operation,

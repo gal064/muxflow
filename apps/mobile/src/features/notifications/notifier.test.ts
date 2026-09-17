@@ -113,13 +113,13 @@ describe("agent notifier (§13)", () => {
 
   it("posts §13's exact title and body when an agent becomes blocked", async () => {
     h.setState({
-      sessions: { $1: { id: "$1", name: "muxflow", windowCount: 1, order: 0, pinned: false } },
+      sessions: { $1: { id: "$1", name: "dev-app", windowCount: 1, order: 0, pinned: false } },
       windows: { "@1": { id: "@1", sessionId: "$1", index: 0, name: "⠦ Fix tests", active: true, pinned: false } },
     });
     await h.transition(agent(), blocked());
     expect(h.presented).toEqual([{
       tag: "a1",
-      title: "muxflow · Fix tests",
+      title: "dev-app · Fix tests",
       body: "Needs your input",
       data: { agentId: "a1", paneId: "%1", sessionId: "$1", attentionGeneration: "2", serverIdentity: "tmux:/s:1" },
     }]);

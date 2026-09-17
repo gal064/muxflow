@@ -11,14 +11,14 @@ import {
 const SSH_LINES = [
   "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200",
   "  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L",
-  "  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 omarchy",
+  "  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost",
 ] as const;
 
 const CLEAN_SSH = SSH_LINES.map((line) => line.trim()).join(" ");
 
 // A flagless command whose last token the renderer split after an interior hyphen.
 const SCP_LINES = [
-  "scp dev@100.112.254.120:/home/user/dev/muxflow-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-",
+  "scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-",
   "  debug.apk",
 ] as const;
 
@@ -75,7 +75,7 @@ describe("wrapped command cleanup", () => {
   it("recognizes the live Codex fenced-block geometry with heterogeneous syntax colors", () => {
     const lines = [
       "  ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L",
-      "  5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 omarchy",
+      "  5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost",
     ];
     expect(cleanWrappedCommandSelection(snapshot(lines, {
       columns: 145,

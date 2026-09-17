@@ -88,11 +88,11 @@ describe("agents list order (§8.2)", () => {
 
 describe("workspace and window names", () => {
   const state: Pick<SessionState, "sessions" | "windows"> = {
-    sessions: { $1: { id: "$1", name: "muxflow", windowCount: 1, order: 0, pinned: false } },
+    sessions: { $1: { id: "$1", name: "dev-app", windowCount: 1, order: 0, pinned: false } },
     windows: { "@1": { id: "@1", sessionId: "$1", index: 0, name: "✳ Fix tests", active: true, pinned: false } },
   };
   it("prefers live topology names, stripped of status glyphs, over route fallbacks", () => {
-    expect(agentWorkspaceName(state, agent({ id: "a" }))).toBe("muxflow");
+    expect(agentWorkspaceName(state, agent({ id: "a" }))).toBe("dev-app");
     expect(agentWindowName(state, agent({ id: "a" }))).toBe("Fix tests");
     const unrouted = agent({ id: "b", route: { sessionId: "$9", sessionNameFallback: "old-ws", windowId: "@9", windowNameFallback: "⠋ old-win", paneId: "", paneIndexFallback: 0 } });
     expect(agentWorkspaceName(state, unrouted)).toBe("old-ws");

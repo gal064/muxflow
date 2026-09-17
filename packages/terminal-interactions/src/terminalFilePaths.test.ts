@@ -46,13 +46,13 @@ describe("terminal file path links", () => {
   );
 
   it("resolves relative paths lexically from a POSIX pane cwd", () => {
-    expect(resolveTerminalFilePath("./src/../README.md", "/home/user/project")).toBe("/home/user/project/README.md");
-    expect(resolveTerminalFilePath("../../etc/hosts", "/home/user")).toBe("/etc/hosts");
+    expect(resolveTerminalFilePath("./src/../README.md", "/home/dev/project")).toBe("/home/dev/project/README.md");
+    expect(resolveTerminalFilePath("../../etc/hosts", "/home/dev")).toBe("/etc/hosts");
     expect(resolveTerminalFilePath("/tmp/file", "/ignored")).toBe("/tmp/file");
   });
 
   it("resolves current-user home paths only with an authoritative absolute home", () => {
-    expect(resolveTerminalFilePath("~/dev/../report.pdf", "/ignored", "/home/user")).toBe("/home/user/report.pdf");
+    expect(resolveTerminalFilePath("~/dev/../report.pdf", "/ignored", "/home/dev")).toBe("/home/dev/report.pdf");
     expect(resolveTerminalFilePath("~/report.pdf", "/ignored")).toBeUndefined();
     expect(resolveTerminalFilePath("~/report.pdf", "/ignored", "relative/home")).toBeUndefined();
   });
