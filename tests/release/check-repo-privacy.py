@@ -12,10 +12,9 @@ EXCLUDED_PATHS = (
     "docs/mobile/qa/",
     "docs/mobile/mocks/",
     "todos/",
-    ".agents/",
     ".claude/",
 )
-EXCLUDED_FILES = {"todo.md", "AGENTS.md", "CLAUDE.md"}
+EXCLUDED_FILES = {"todo.md"}
 EXAMPLE_ACCOUNTS = {
     "ade", "agents", "alice", "deploy", "dev", "example", "linuxbrew", "me",
     "operator", "operator-extra", "someone", "test", "u", "user", "x", "zed",
