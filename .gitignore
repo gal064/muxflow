@@ -40,6 +40,7 @@ pnpm-debug.log*
 # Private planning
 /todo.md
 /todos/
+/docs/release-readiness.md
 
 # Temporary files and directories (at any depth)
 **/tmp/
