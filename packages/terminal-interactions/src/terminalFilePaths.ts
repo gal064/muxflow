@@ -32,7 +32,7 @@ const CLOSING_WRAPPERS = new Map([
  */
 export function terminalFileLinks(line: string): TerminalFileLink[] {
   const links: TerminalFileLink[] = [];
-  for (const match of line.matchAll(/\S+/gu)) {
+  for (const match of line.matchAll(/[^\s"']+/gu)) {
     const token = match[0];
     let leading = 0;
     let trailing = token.length;
