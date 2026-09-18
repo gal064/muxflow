@@ -11,6 +11,14 @@ describe("terminal file path links", () => {
     ]);
   });
 
+  it.each(['"', "'"])("links only the path inside a %s quoted HTML attribute", (quote) => {
+    const path = "docs/assets/feature-paste.png";
+    const line = `<img src=${quote}${path}${quote} alt=${quote}Screenshot${quote}>`;
+    const start = line.indexOf(path);
+
+    expect(terminalFileLinks(line)).toEqual([{ text: path, start, end: start + path.length }]);
+  });
+
   it("preserves balanced delimiters inside paths while trimming prose wrappers", () => {
     expect(terminalFileLinks("See assets/image_(dark), (docs/[final]), and {build/{release}}.")
       .map((link) => link.text)).toEqual([
