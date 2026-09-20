@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/logo-128.png" alt="Muxflow logo" width="112" />
+<img src="docs/assets/icon-128.png" alt="Muxflow logo" width="112" />
 
 # Muxflow
 
