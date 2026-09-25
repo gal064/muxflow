@@ -60,24 +60,37 @@ clean install, upgrade, rollback, and uninstall from an isolated home/prefix.
 8. Confirm no test containers, tmux servers, daemons, SSH masters, or CUA
    sessions remain; retain only evidence under ignored `tmp`.
 
-The Linux internal release is unsigned. The macOS internal release below uses
-only an ad-hoc code identity so native macOS services can identify the bundle;
-Developer ID signing and notarization remain outside the internal scope.
+The Linux package is not code-signed; its integrity comes from the published
+SHA-256 sums.
 
-# macOS internal release
+# macOS release
 
-Run `release/macos/build-package.sh` on a physical Apple-Silicon Mac with Xcode,
+Run `release/macos/build-package.sh` on an Apple-Silicon Mac with Xcode,
 Node 24, pnpm 11, Rust 1.97.1, and Docker. The script creates an arm64 `.app`
 and DMG, embeds a native Mach-O local helper, builds separate Debian 12 Linux
-ELF helpers for `aarch64` and `x86_64`, and runs format/architecture/package
-verification. Use `release/macos/install.sh` for a transactional install
-or upgrade into `/Applications` and `release/macos/uninstall.sh` for confined
-removal. With no argument the installer publishes the bundle it just built;
+ELF helpers for `aarch64` and `x86_64` (or takes them prebuilt from
+`MUXFLOW_LINUX_HELPERS_DIR`, which needs no Docker), and runs
+format/architecture/package verification. Use `release/macos/install.sh` for a
+transactional install or upgrade into `/Applications` and
+`release/macos/uninstall.sh` for confined removal. With no argument the
+installer publishes the bundle it just built;
 `ADE_MACOS_APPLICATIONS_DIR="$HOME/Applications"` selects a rootless per-user
 install instead.
 
-This artifact remains `UNSIGNED_INTERNAL` in the distribution sense and is
-`APPLE_SILICON_ONLY`: its ad-hoc identity provides no publisher trust.
-Gatekeeper may reject a quarantined copy; Developer ID signing, notarization,
-hardened-runtime entitlement, universal-binary, and Intel runtime claims require
-their own configured release credentials and physical gates.
+Signing is chosen by `MUXFLOW_MACOS_SIGNING_IDENTITY` (see `.env.example`):
+
+- Unset: an ad-hoc seal. Native services such as notifications can identify
+  the bundle, but it carries no publisher trust and Gatekeeper rejects a
+  quarantined copy. This is the local development build.
+- A `Developer ID Application` identity from the keychain, with the App Store
+  Connect API key in `MUXFLOW_NOTARY_KEY_PATH`, `MUXFLOW_NOTARY_KEY_ID` and
+  `MUXFLOW_NOTARY_ISSUER`, and the team in `MUXFLOW_APPLE_TEAM_ID`: the helper
+  and then the app are signed with the hardened runtime and a secure
+  timestamp, the app is notarized and stapled, and the DMG is then signed,
+  notarized and stapled too. `verify-package.sh` then requires the pinned
+  team, the hardened runtime and timestamp on both Mach-O binaries, Gatekeeper
+  acceptance and a stapled ticket.
+
+No entitlements are requested: the app loads no unsigned code, WebKit runs
+JIT in its own processes, and the desktop does not use the microphone. The
+package remains `APPLE_SILICON_ONLY`.
