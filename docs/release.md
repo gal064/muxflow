@@ -1,3 +1,21 @@
+# Continuous integration and versions
+
+`.github/workflows/ci.yml` is the merge gate. It runs on every pull request and
+every push to `main`, uses no secrets, and holds only checks that are
+deterministic on a hosted runner: the privacy scan, version agreement,
+formatting, warning-free Clippy, the Rust workspace tests on Linux and macOS,
+the test-only crates outside the workspace, a bounded parser fuzz smoke, the
+TypeScript checks and tests, committed generated code, and the voice sidecar
+contracts. The Docker SSH suites, the transfer and scale matrices, performance,
+and packaged desktop journeys are not part of it; they are the manual
+release-candidate gates listed below.
+
+The desktop app, the host helper and the mobile app share one `X.Y.Z` version.
+Change it only with `release/set-version.sh X.Y.Z`, which rewrites every copy
+and derives the Android `versionCode` as `major*10000 + minor*100 + patch`;
+`release/check-version.sh` verifies them. The wire protocol version in
+`crates/protocol` is independent.
+
 # Linux internal release
 
 ## Architectures and artifacts

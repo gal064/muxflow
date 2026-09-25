@@ -16,7 +16,7 @@
         "monochromeImage": "./assets/adaptive-icon-monochrome.png",
         "backgroundColor": "#021962"
       },
-      "versionCode": 1,
+      "versionCode": 100,
       "backgroundColor": "#282c34",
       "predictiveBackGestureEnabled": false
     },

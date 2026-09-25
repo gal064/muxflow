@@ -812,8 +812,11 @@ mod tests {
     #[test]
     fn single_file_capability_authorizes_only_the_exact_existing_leaf() {
         let temp = tempfile::tempdir().unwrap();
-        let allowed = temp.path().join("allowed.md");
-        let sibling = temp.path().join("sibling.md");
+        // Capture canonicalizes, so the paths asked about must be canonical
+        // too: macOS puts the tempdir under /var, a symlink to /private/var.
+        let dir = fs::canonicalize(temp.path()).unwrap();
+        let allowed = dir.join("allowed.md");
+        let sibling = dir.join("sibling.md");
         fs::write(&allowed, "allowed").unwrap();
         fs::write(&sibling, "sibling").unwrap();
 
@@ -839,7 +842,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         let missing_sibling = reader
-            .resolve_existing(temp.path().join("missing.md").to_str().unwrap())
+            .resolve_existing(dir.join("missing.md").to_str().unwrap())
             .unwrap_err()
             .to_string();
         assert_eq!(existing_sibling, missing_sibling);
