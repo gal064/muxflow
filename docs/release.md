@@ -25,9 +25,10 @@ pushed version tag and leaves them in a draft GitHub Release:
    passes.
 2. Tag the merged commit and push the tag:
    `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. The workflow reruns the CI gate and checks that the tree's version matches
-   the tag. The signing jobs then wait for approval of the `release`
-   environment, which holds the signing secrets.
+3. The workflow stops unless the tagged commit is on `main` and the tree's
+   version matches the tag. It then reruns the CI gate. The signing secrets
+   live in the `release` environment, which only `v*` tags can use; a ruleset
+   lets only the repository admin create, move or delete those tags.
 4. The Linux x86-64 and ARM64 packages are built natively on their own runners.
    Each is then given the other architecture's helper. The macOS job takes both
    Linux helpers from those packages, then builds, signs, notarizes and
