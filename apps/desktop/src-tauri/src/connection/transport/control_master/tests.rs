@@ -501,9 +501,12 @@ fn replacement_inode_is_reclassified_external_and_bypassed() {
         }),
         needs_probe: false,
     };
-    drop(first_listener);
+    // Unlink but keep the first listener bound until the replacement exists:
+    // the bound socket pins its inode, so a filesystem that reuses freed inode
+    // numbers (ext4, unlike tmpfs) cannot hand the replacement the same one.
     fs::remove_file(&socket).unwrap();
     let replacement_listener = UnixListener::bind(&socket).unwrap();
+    drop(first_listener);
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
     let replacement_identity = validated_control_socket_identity(&socket).unwrap().unwrap();
 
@@ -681,9 +684,12 @@ fn owned_shutdown_does_not_unlink_a_replacement_socket_inode() {
         }),
         needs_probe: false,
     };
-    drop(first_listener);
+    // Unlink but keep the first listener bound until the replacement exists:
+    // the bound socket pins its inode, so a filesystem that reuses freed inode
+    // numbers (ext4, unlike tmpfs) cannot hand the replacement the same one.
     fs::remove_file(&socket).unwrap();
     let replacement_listener = UnixListener::bind(&socket).unwrap();
+    drop(first_listener);
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
     let replacement_identity = validated_control_socket_identity(&socket).unwrap().unwrap();
     assert_ne!(owned_identity, replacement_identity);

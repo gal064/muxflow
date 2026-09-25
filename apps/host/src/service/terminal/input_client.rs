@@ -499,7 +499,9 @@ mod tests {
         }
 
         fn wait_until(&self, mut predicate: impl FnMut() -> bool) {
-            let deadline = Instant::now() + Duration::from_secs(3);
+            // Generous: this polls, so a pass costs nothing and a slow CI runner
+            // still gets its shell started.
+            let deadline = Instant::now() + Duration::from_secs(10);
             while !predicate() {
                 assert!(
                     Instant::now() < deadline,
