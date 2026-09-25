@@ -134,9 +134,10 @@ location. See [setup](./docs/setup.md) and [uninstall](./docs/uninstall.md).
 ### macOS
 
 Download `Muxflow_<version>_aarch64.dmg` (Apple Silicon only), drag
-`Muxflow.app` to `/Applications`, and open it. Release builds are signed with a
-Developer ID and notarized by Apple, so macOS opens them after its usual
-"downloaded from the internet" confirmation.
+`Muxflow.app` to `/Applications`, and open it. The app is not notarized by
+Apple, so macOS blocks the first launch. To allow it, open System Settings →
+Privacy & Security and choose **Open Anyway**, or run
+`xattr -dr com.apple.quarantine /Applications/Muxflow.app`.
 
 ### Android
 

@@ -91,6 +91,10 @@ Signing is chosen by `MUXFLOW_MACOS_SIGNING_IDENTITY` (see `.env.example`):
   team, the hardened runtime and timestamp on both Mach-O binaries, Gatekeeper
   acceptance and a stapled ticket.
 
+Published releases currently use the ad-hoc seal. The Developer ID path is
+ready but unexercised until the Apple credentials exist; adding them to the
+`release` environment is all it takes.
+
 No entitlements are requested: the app loads no unsigned code, WebKit runs
 JIT in its own processes, and the desktop does not use the microphone. The
 package remains `APPLE_SILICON_ONLY`.
