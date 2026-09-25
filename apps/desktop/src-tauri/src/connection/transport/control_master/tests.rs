@@ -256,7 +256,9 @@ fn cancelled_same_socket_waiter_does_not_wait_for_the_active_establishment() {
             |_, _| Ok(MasterLiveness::Live),
             || {
                 first_started.wait();
-                thread::sleep(Duration::from_millis(200));
+                // Long enough that a waiter stuck behind this attempt cannot
+                // pass the bound below, even on a loaded CI runner.
+                thread::sleep(Duration::from_secs(2));
                 Ok((MasterProcess::External, false))
             },
         )
@@ -279,7 +281,7 @@ fn cancelled_same_socket_waiter_does_not_wait_for_the_active_establishment() {
         assert!(waiter.join().unwrap().is_err());
     });
     assert!(
-        cancel_start.elapsed() < Duration::from_millis(150),
+        cancel_start.elapsed() < Duration::from_secs(1),
         "cancelled waiter remained blocked behind the active SSH attempt"
     );
     first.join().unwrap().unwrap();
