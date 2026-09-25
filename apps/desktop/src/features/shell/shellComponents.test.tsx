@@ -1195,7 +1195,7 @@ describe("application shell accessibility contracts", () => {
   it("puts six controls and an unread count on the titlebar, and no more", () => {
     const html = renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack canGoForward={false} canJump onBack={noop} onBell={noop} onForward={noop}
-      onNewWorkspace={noop} onTogglePanel={noop}
+      onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelOpen={false} platform="mac" sidebarOpen unread={3} workspaceName="muxflow"
     />);
     expect([...html.matchAll(/<button/gu)]).toHaveLength(6);
@@ -1213,7 +1213,7 @@ describe("application shell accessibility contracts", () => {
     expect(html).toMatch(/<button aria-label="Forward"[^>]*disabled/u);
     const quiet = renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack={false} canGoForward canJump={false} onBack={noop} onBell={noop} onForward={noop}
-      onNewWorkspace={noop} onTogglePanel={noop}
+      onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen={false} unread={0}
     />);
     expect(quiet).toContain("No agents waiting");
@@ -1221,6 +1221,19 @@ describe("application shell accessibility contracts", () => {
     expect(quiet).toMatch(/<button aria-label="Back"[^>]*disabled/u);
     expect(quiet).toMatch(/<button aria-label="Forward"[^>]*title="Forward \(Ctrl\+\]\)"/u);
     expect(quiet).not.toMatch(/<button aria-label="Forward"[^>]*disabled/u);
+    expect(html).not.toContain("titlebar-update");
+  });
+
+  it("adds a red update pill before the bell only while a newer release is published", () => {
+    const html = renderToStaticMarkup(<TitleBar
+      canCreateWorkspace canGoBack canGoForward canJump={false} onBack={noop} onBell={noop} onForward={noop}
+      onNewWorkspace={noop} onTogglePanel={noop} onToggleSidebar={noop} onUpdate={noop}
+      panelOpen={false} platform="mac" sidebarOpen unread={0} update={{ version: "0.2.0" }}
+    />);
+    expect([...html.matchAll(/<button/gu)]).toHaveLength(7);
+    expect(html).toContain(">↑ Update 0.2.0</button>");
+    expect(html).toContain('title="Muxflow 0.2.0 is available. Open its release page."');
+    expect(html.indexOf("titlebar-update")).toBeLessThan(html.indexOf("bar-button-badged"));
   });
 
   it("disables the bell when it has nowhere to go, and says so", () => {
@@ -1228,7 +1241,7 @@ describe("application shell accessibility contracts", () => {
     const bell = (canJump: boolean, unread: number) => {
       const html = renderToStaticMarkup(<TitleBar
         canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell}
-        onForward={noop} onNewWorkspace={noop} onTogglePanel={noop}
+        onForward={noop} onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
         onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={unread}
       />);
       const badged = html.indexOf("bar-button-badged");
@@ -1263,7 +1276,7 @@ describe("application shell accessibility contracts", () => {
     const onBell = vi.fn();
     let renderer!: ReturnType<typeof create>;
     const bar = (canJump: boolean) => <TitleBar
-      canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell} onForward={noop} onNewWorkspace={noop} onTogglePanel={noop}
+      canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell} onForward={noop} onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={2}
     />;
     act(() => { renderer = create(bar(false)); });
@@ -1279,7 +1292,7 @@ describe("application shell accessibility contracts", () => {
   it("reserves traffic-light room on macOS only, because only macOS overlays them", () => {
     const bar = (platform: "mac" | "linux") => renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
-      onNewWorkspace={noop} onTogglePanel={noop}
+      onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelOpen={false} platform={platform} sidebarOpen unread={0}
     />);
     // `titleBarStyle: "Overlay"` is a macOS-only Tauri option; a Linux window

@@ -35,6 +35,7 @@ tmux-agent-protocol = { path = "../../../crates/protocol" }
 tmux-control = { path = "../../../crates/tmux-control" }
 tokio = { version = "1", features = ["sync", "time"] }
 uuid.workspace = true
+ureq = "3"
 
 [dev-dependencies]
 tempfile = "3"

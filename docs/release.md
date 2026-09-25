@@ -1,3 +1,62 @@
+# Continuous integration and versions
+
+`.github/workflows/ci.yml` is the merge gate. It runs on every pull request and
+every push to `main`, uses no secrets, and holds only checks that are
+deterministic on a hosted runner: the privacy scan, version agreement,
+formatting, warning-free Clippy, the Rust workspace tests on Linux and macOS,
+the test-only crates outside the workspace, a bounded parser fuzz smoke, the
+TypeScript checks and tests, committed generated code, and the voice sidecar
+contracts. The Docker SSH suites, the transfer and scale matrices, performance,
+and packaged desktop journeys are not part of it; they are the manual
+release-candidate gates listed below.
+
+The desktop app, the host helper and the mobile app share one `X.Y.Z` version.
+Change it only with `release/set-version.sh X.Y.Z`, which rewrites every copy
+and derives the Android `versionCode` as `major*10000 + minor*100 + patch`;
+`release/check-version.sh` verifies them. The wire protocol version in
+`crates/protocol` is independent.
+
+# Publishing a release
+
+`.github/workflows/release.yml` builds every downloadable artifact from a
+pushed version tag and leaves them in a draft GitHub Release:
+
+1. Run `release/set-version.sh X.Y.Z`, open a pull request, and merge it once CI
+   passes.
+2. Tag the merged commit and push the tag:
+   `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. The workflow reruns the CI gate and checks that the tree's version matches
+   the tag. The signing jobs then wait for approval of the `release`
+   environment, which holds the signing secrets.
+4. The Linux x86-64 and ARM64 packages are built natively on their own runners.
+   Each is then given the other architecture's helper. The macOS job takes both
+   Linux helpers from those packages, then builds, signs, notarizes and
+   verifies the DMG (ad-hoc signed while the Apple secrets are absent). The
+   Android job builds the APK with the release key and
+   checks its certificate against `apps/mobile/release-cert.sha256`.
+5. A draft release appears with the DMG, both Linux tarballs and their
+   `.sha256` files, the APK, `SHA256SUMS`, and `latest.json`.
+6. Review the draft: install each artifact and run the manual checks below.
+   Then press Publish.
+
+`latest.json` is the manifest the desktop and Android apps poll for updates:
+`{"version": "X.Y.Z", "url": "<release page>"}`. The apps read it through
+`releases/latest/download/latest.json`, which never resolves to a draft or a
+pre-release. So the red "Update" pill appears only once a release is
+published. A tag with a suffix such as `vX.Y.Z-rc.1` builds from a tree
+versioned `X.Y.Z` and is drafted as a pre-release. Use it to rehearse a
+release, then delete the draft and the tag.
+
+The `release` environment holds these secrets:
+
+| Secret | Contents |
+|---|---|
+| `MUXFLOW_MACOS_CERTIFICATE_P12_BASE64`, `MUXFLOW_MACOS_CERTIFICATE_PASSWORD` | Optional. The Developer ID Application certificate, exported as `.p12`; with it and the rows below, the DMG is signed and notarized |
+| `MUXFLOW_MACOS_SIGNING_IDENTITY` | `Developer ID Application: Name (TEAMID)` |
+| `MUXFLOW_APPLE_TEAM_ID` | The team ID |
+| `MUXFLOW_NOTARY_KEY_P8_BASE64`, `MUXFLOW_NOTARY_KEY_ID`, `MUXFLOW_NOTARY_ISSUER` | An App Store Connect API key with the Developer role |
+| `MUXFLOW_ANDROID_KEYSTORE_BASE64`, `MUXFLOW_ANDROID_KEYSTORE_PASSWORD`, `MUXFLOW_ANDROID_KEY_ALIAS`, `MUXFLOW_ANDROID_KEY_PASSWORD` | The Android release keystore |
+
 # Linux internal release
 
 ## Architectures and artifacts
@@ -42,24 +101,41 @@ clean install, upgrade, rollback, and uninstall from an isolated home/prefix.
 8. Confirm no test containers, tmux servers, daemons, SSH masters, or CUA
    sessions remain; retain only evidence under ignored `tmp`.
 
-The Linux internal release is unsigned. The macOS internal release below uses
-only an ad-hoc code identity so native macOS services can identify the bundle;
-Developer ID signing and notarization remain outside the internal scope.
+The Linux package is not code-signed; its integrity comes from the published
+SHA-256 sums.
 
-# macOS internal release
+# macOS release
 
-Run `release/macos/build-package.sh` on a physical Apple-Silicon Mac with Xcode,
+Run `release/macos/build-package.sh` on an Apple-Silicon Mac with Xcode,
 Node 24, pnpm 11, Rust 1.97.1, and Docker. The script creates an arm64 `.app`
 and DMG, embeds a native Mach-O local helper, builds separate Debian 12 Linux
-ELF helpers for `aarch64` and `x86_64`, and runs format/architecture/package
-verification. Use `release/macos/install.sh` for a transactional install
-or upgrade into `/Applications` and `release/macos/uninstall.sh` for confined
-removal. With no argument the installer publishes the bundle it just built;
+ELF helpers for `aarch64` and `x86_64` (or takes them prebuilt from
+`MUXFLOW_LINUX_HELPERS_DIR`, which needs no Docker), and runs
+format/architecture/package verification. Use `release/macos/install.sh` for a
+transactional install or upgrade into `/Applications` and
+`release/macos/uninstall.sh` for confined removal. With no argument the
+installer publishes the bundle it just built;
 `ADE_MACOS_APPLICATIONS_DIR="$HOME/Applications"` selects a rootless per-user
 install instead.
 
-This artifact remains `UNSIGNED_INTERNAL` in the distribution sense and is
-`APPLE_SILICON_ONLY`: its ad-hoc identity provides no publisher trust.
-Gatekeeper may reject a quarantined copy; Developer ID signing, notarization,
-hardened-runtime entitlement, universal-binary, and Intel runtime claims require
-their own configured release credentials and physical gates.
+Signing is chosen by `MUXFLOW_MACOS_SIGNING_IDENTITY` (see `.env.example`):
+
+- Unset: an ad-hoc seal. Native services such as notifications can identify
+  the bundle, but it carries no publisher trust and Gatekeeper rejects a
+  quarantined copy. This is the local development build.
+- A `Developer ID Application` identity from the keychain, with the App Store
+  Connect API key in `MUXFLOW_NOTARY_KEY_PATH`, `MUXFLOW_NOTARY_KEY_ID` and
+  `MUXFLOW_NOTARY_ISSUER`, and the team in `MUXFLOW_APPLE_TEAM_ID`: the helper
+  and then the app are signed with the hardened runtime and a secure
+  timestamp, the app is notarized and stapled, and the DMG is then signed,
+  notarized and stapled too. `verify-package.sh` then requires the pinned
+  team, the hardened runtime and timestamp on both Mach-O binaries, Gatekeeper
+  acceptance and a stapled ticket.
+
+Published releases currently use the ad-hoc seal. The Developer ID path is
+ready but unexercised until the Apple credentials exist; adding them to the
+`release` environment is all it takes.
+
+No entitlements are requested: the app loads no unsigned code, WebKit runs
+JIT in its own processes, and the desktop does not use the microphone. The
+package remains `APPLE_SILICON_ONLY`.

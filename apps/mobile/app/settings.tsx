@@ -1,7 +1,9 @@
+import Constants from "expo-constants";
 import { Stack } from "expo-router";
-import { StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { Linking, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useStore } from "zustand";
 
+import { updateStore } from "../src/features/update";
 import { prefsStore } from "../src/store/prefsStore";
 import { colors, fixedChromeText, radii, typeScale } from "../src/ui/tokens";
 
@@ -9,6 +11,7 @@ import { colors, fixedChromeText, radii, typeScale } from "../src/ui/tokens";
 export default function SettingsScreen() {
   const agentCommand = useStore(prefsStore, (state) => state.agentCommand);
   const voiceKeepAwake = useStore(prefsStore, (state) => state.voiceKeepAwake);
+  const update = useStore(updateStore, (state) => state.update);
   return (
     <View style={styles.root}>
       <Stack.Screen options={{ title: "Settings" }} />
@@ -40,6 +43,14 @@ export default function SettingsScreen() {
           value={voiceKeepAwake}
         />
       </View>
+      <View style={styles.settingRow}>
+        <Text style={styles.help}>Version {Constants.expoConfig?.version ?? "unknown"}</Text>
+        {update && (
+          <Text accessibilityRole="link" onPress={() => void Linking.openURL(update.url)} style={styles.updateLink}>
+            {update.version} available
+          </Text>
+        )}
+      </View>
     </View>
   );
 }
@@ -61,4 +72,5 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   help: { color: colors.chromeDim, fontSize: typeScale.rowSecondary, lineHeight: 18 },
+  updateLink: { color: colors.danger, fontSize: typeScale.rowSecondary, fontWeight: "600" },
 });

@@ -2,8 +2,9 @@
 # Install an already-built APK on the connected device with adb.
 # Takes a variant, debug (default) or release; build it first with build-apk.sh.
 #
-# Debug and release are both signed with the same debug keystore, so -r
-# replaces either one in place without an uninstall.
+# Debug builds are signed with the debug keystore and release builds with the
+# release key, so -r upgrades a build of the same variant in place, but
+# switching between debug and release needs an uninstall first.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

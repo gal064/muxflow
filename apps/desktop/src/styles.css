@@ -153,6 +153,15 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   color: var(--chrome-ink); font-size: var(--type-row); font-weight: 550;
 }
 .titlebar-spacer { flex: 1; min-width: 8px; align-self: stretch; }
+/* Persistent until the app is updated: red like an alert, but a pill the size
+   of the badges so it never changes the bar's height. */
+.titlebar-update {
+  display: inline-flex; align-items: center; flex: 0 0 auto;
+  height: 17px; margin-right: 6px; padding: 0 8px;
+  border: 0; border-radius: 9px; background: var(--danger); color: var(--chrome-ink-strong);
+  font-size: 10px; font-weight: 600; white-space: nowrap; cursor: pointer;
+}
+.titlebar-update:hover { filter: brightness(1.12); }
 
 .bar-button {
   display: inline-flex; align-items: center; justify-content: center; position: relative;
@@ -1517,7 +1526,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
     outline: 2px solid Highlight; outline-offset: -2px;
   }
   .pane-frame.attention::after { border-color: Highlight; }
-  .state-dot, .tab-dot, .link-dot, .badge { border: 1px solid ButtonText; }
+  .state-dot, .tab-dot, .link-dot, .badge, .titlebar-update { border: 1px solid ButtonText; }
   .bar-button:disabled, .bar-button[aria-disabled="true"] { color: GrayText; }
   /* Four state colors become one system color here, so the shape carries the
      encoding whether or not the user turned the glyph option on. The dots grow

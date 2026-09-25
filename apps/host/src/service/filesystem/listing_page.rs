@@ -213,7 +213,7 @@ fn hex_decode(value: &str) -> anyhow::Result<Vec<u8>> {
         return Err(invalid());
     }
     let mut bytes = Vec::with_capacity(value.len() / 2);
-    for pair in value.as_bytes().chunks_exact(2) {
+    for pair in value.as_bytes().as_chunks::<2>().0 {
         let text = std::str::from_utf8(pair).map_err(|_| invalid())?;
         bytes.push(u8::from_str_radix(text, 16).map_err(|_| invalid())?);
     }
