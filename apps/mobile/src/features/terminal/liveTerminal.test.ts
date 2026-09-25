@@ -138,7 +138,14 @@ describe.skipIf(!availability.available)(`live terminal (${availability.reason ?
     // The host accepts input for a pane once its session client has
     // reconciled the pane, which is also when the pane reaches the topology.
     await waitFor("cat pane in topology", () => store.getState().panes[catPane]);
-    await waitFor("cat pane in bracketed-paste mode", () => (harness.tmux(["display-message", "-p", "-t", catPane, "#{bracket_paste_flag}"]) === "1" ? true : undefined));
+    // tmux 3.4 and earlier have no #{bracket_paste_flag} (it expands empty);
+    // the pane mode still exists there, so wait for `cat`, which runs only
+    // after the mode escape was written.
+    await waitFor("cat pane in bracketed-paste mode", () => {
+      const flag = harness.tmux(["display-message", "-p", "-t", catPane, "#{bracket_paste_flag}"]);
+      if (flag === "1") return true;
+      return flag === "" && harness.tmux(["display-message", "-p", "-t", catPane, "#{pane_current_command}"]) === "cat" ? true : undefined;
+    });
     await connection.request(terminalInput(catPane, utf8Encode("phone-paste"), { paste: true }));
     const capture = await waitFor("bracketed paste on screen", () => {
       const screen = harness.tmux(["capture-pane", "-p", "-t", catPane]);
