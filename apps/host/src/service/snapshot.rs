@@ -785,9 +785,12 @@ mod tests {
         let first_listener = UnixListener::bind(&socket).unwrap();
         let first = socket_server_identity(&socket).unwrap();
         assert_eq!(first, socket_server_identity(&socket).unwrap());
-        drop(first_listener);
+        // Unlink but keep the first listener bound until the replacement
+        // exists: the bound socket pins its inode, so a filesystem that reuses
+        // freed inode numbers (ext4, unlike tmpfs) cannot hand it out again.
         fs::remove_file(&socket).unwrap();
         let _replacement = UnixListener::bind(&socket).unwrap();
+        drop(first_listener);
         let second = socket_server_identity(&socket).unwrap();
         assert_ne!(first, second);
         fs::remove_dir_all(&directory).unwrap();
