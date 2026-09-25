@@ -31,7 +31,8 @@ pushed version tag and leaves them in a draft GitHub Release:
 4. The Linux x86-64 and ARM64 packages are built natively on their own runners.
    Each is then given the other architecture's helper. The macOS job takes both
    Linux helpers from those packages, then builds, signs, notarizes and
-   verifies the DMG. The Android job builds the APK with the release key and
+   verifies the DMG (ad-hoc signed while the Apple secrets are absent). The
+   Android job builds the APK with the release key and
    checks its certificate against `apps/mobile/release-cert.sha256`.
 5. A draft release appears with the DMG, both Linux tarballs and their
    `.sha256` files, the APK, `SHA256SUMS`, and `latest.json`.
@@ -50,7 +51,7 @@ The `release` environment holds these secrets:
 
 | Secret | Contents |
 |---|---|
-| `MUXFLOW_MACOS_CERTIFICATE_P12_BASE64`, `MUXFLOW_MACOS_CERTIFICATE_PASSWORD` | The Developer ID Application certificate, exported as `.p12` |
+| `MUXFLOW_MACOS_CERTIFICATE_P12_BASE64`, `MUXFLOW_MACOS_CERTIFICATE_PASSWORD` | Optional. The Developer ID Application certificate, exported as `.p12`; with it and the rows below, the DMG is signed and notarized |
 | `MUXFLOW_MACOS_SIGNING_IDENTITY` | `Developer ID Application: Name (TEAMID)` |
 | `MUXFLOW_APPLE_TEAM_ID` | The team ID |
 | `MUXFLOW_NOTARY_KEY_P8_BASE64`, `MUXFLOW_NOTARY_KEY_ID`, `MUXFLOW_NOTARY_ISSUER` | An App Store Connect API key with the Developer role |

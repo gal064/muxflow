@@ -120,6 +120,9 @@ jobs:
     environment: release
     timeout-minutes: 120
     env:
+      # Without the Apple secrets the DMG is ad-hoc signed and not notarized;
+      # adding them to the `release` environment switches on Developer ID.
+      DEVELOPER_ID: ${{ secrets.MUXFLOW_MACOS_CERTIFICATE_P12_BASE64 != '' }}
       MUXFLOW_MACOS_SIGNING_IDENTITY: ${{ secrets.MUXFLOW_MACOS_SIGNING_IDENTITY }}
       MUXFLOW_APPLE_TEAM_ID: ${{ secrets.MUXFLOW_APPLE_TEAM_ID }}
       MUXFLOW_NOTARY_KEY_ID: ${{ secrets.MUXFLOW_NOTARY_KEY_ID }}
@@ -148,6 +151,7 @@ jobs:
           done
           echo "MUXFLOW_LINUX_HELPERS_DIR=$helpers" >> "$GITHUB_ENV"
       - name: Install the signing certificate and notary key
+        if: env.DEVELOPER_ID == 'true'
         env:
           CERTIFICATE_P12_BASE64: ${{ secrets.MUXFLOW_MACOS_CERTIFICATE_P12_BASE64 }}
           CERTIFICATE_PASSWORD: ${{ secrets.MUXFLOW_MACOS_CERTIFICATE_PASSWORD }}
@@ -165,8 +169,11 @@ jobs:
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           printf '%s' "$NOTARY_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/notary.p8"
           echo "MUXFLOW_NOTARY_KEY_PATH=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
-      - name: Build, sign, notarize and verify
-        run: release/macos/build-package.sh
+      - name: Build, sign and verify
+        run: |
+          # An empty identity is the ad-hoc seal; build-package.sh reads `-`.
+          [[ "$DEVELOPER_ID" == true ]] || unset MUXFLOW_MACOS_SIGNING_IDENTITY
+          release/macos/build-package.sh
       - name: Collect the DMG
         run: |
           mkdir -p "$RUNNER_TEMP/out"
