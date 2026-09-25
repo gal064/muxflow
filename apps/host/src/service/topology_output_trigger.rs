@@ -262,8 +262,12 @@ mod tests {
             marks >= 2,
             "sustained output must keep reconciliation alive, saw {marks} marks"
         );
+        // The module's contract is at most ~2 marks per window: a leading edge
+        // and one trailing mark. On a starved runtime the trailing mark can land
+        // just after the next leading edge, so the bound is the contract's, not
+        // one per window.
         assert!(
-            u128::from(marks) <= windows + 2,
+            u128::from(marks) <= 2 * windows + 2,
             "millions of records over {windows} windows produced {marks} marks"
         );
     }

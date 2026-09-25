@@ -742,8 +742,32 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(100));
     }
 
+    /// Whether the installed tmux has the `no-detach-on-destroy` client flag,
+    /// which arrived in tmux 3.5. Older releases ignore the unknown flag, so
+    /// their sidecar exits with its session and `ensure_input_client` starts a
+    /// fresh one on the next input instead.
+    fn tmux_keeps_clients_on_destroy() -> bool {
+        let output = Command::new("tmux").arg("-V").output().expect("tmux -V");
+        let version = String::from_utf8_lossy(&output.stdout);
+        let digits: String = version
+            .trim()
+            .trim_start_matches("tmux ")
+            .trim_start_matches("next-")
+            .chars()
+            .take_while(|value| value.is_ascii_digit() || *value == '.')
+            .collect();
+        let mut parts = digits
+            .split('.')
+            .map(|part| part.parse::<u32>().unwrap_or(0));
+        (parts.next().unwrap_or(0), parts.next().unwrap_or(0)) >= (3, 5)
+    }
+
     #[test]
     fn one_sidecar_survives_its_target_session_and_restarts_after_all_sessions_end() {
+        if !tmux_keeps_clients_on_destroy() {
+            eprintln!("skipped: needs tmux 3.5+ for no-detach-on-destroy");
+            return;
+        }
         let fixture = TmuxFixture::new();
         fixture.successful(&["new-session", "-d", "-s", "one", "exec bash --norc"]);
         fixture.successful(&["new-session", "-d", "-s", "two", "exec bash --norc"]);
@@ -860,8 +884,19 @@ mod tests {
         let session = fixture.id("session", "bracketed");
         let bracketed = fixture.id("pane", "bracketed");
         let plain = fixture.id("pane", "plain");
-        fixture.wait_until(|| fixture.format(&bracketed, "#{bracket_paste_flag}") == "1");
-        assert_eq!(fixture.format(&plain, "#{bracket_paste_flag}"), "0");
+        // tmux 3.4 and earlier have no #{bracket_paste_flag}; it expands empty
+        // there (the snapshot path defaults it too). The pane mode itself still
+        // exists, so on those versions wait for `cat`, which runs only after
+        // the mode escape was written.
+        fixture.wait_until(
+            || match fixture.format(&bracketed, "#{bracket_paste_flag}").as_str() {
+                "1" => true,
+                "" => fixture.format(&bracketed, "#{pane_current_command}") == "cat",
+                _ => false,
+            },
+        );
+        let plain_flag = fixture.format(&plain, "#{bracket_paste_flag}");
+        assert!(plain_flag == "0" || plain_flag.is_empty(), "{plain_flag}");
         let mut input = start_fixture_client(&fixture, &session);
 
         input
