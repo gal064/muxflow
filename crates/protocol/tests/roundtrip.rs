@@ -21,6 +21,7 @@ fn assigned_operation_and_enum_numbers_do_not_move() {
         (VoiceSpeak, 52),
         (VoiceSession, 53),
         (AgentDiagnostics, 54),
+        (YieldTerminalSizing, 55),
         (TestDelay, 100),
     ] {
         assert_eq!(operation as i32, number);
@@ -196,10 +197,10 @@ fn an_unknown_terminal_history_event_is_inert_rather_than_a_seed() {
         v1::EventKind::Unspecified
     );
 
-    // And the same in the other direction: an operation number a host predating
-    // 54 cannot resolve is refused at admission rather than run as its
-    // neighbour.
+    // An unknown operation number is refused at admission rather than run as
+    // its neighbour.
     assert!(v1::Operation::try_from(53).is_ok());
     assert!(v1::Operation::try_from(54).is_ok());
-    assert!(v1::Operation::try_from(55).is_err());
+    assert!(v1::Operation::try_from(55).is_ok());
+    assert!(v1::Operation::try_from(56).is_err());
 }

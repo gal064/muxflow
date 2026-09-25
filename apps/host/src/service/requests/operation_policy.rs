@@ -88,6 +88,7 @@ impl OperationPolicy {
             v1::Operation::AttachTerminal
             | v1::Operation::TerminalInput
             | v1::Operation::ResizeTerminal
+            | v1::Operation::YieldTerminalSizing
             | v1::Operation::SetTerminalVisibility
             | v1::Operation::RequestTerminalSeed
             | v1::Operation::SelectTerminalSession => {
@@ -248,6 +249,7 @@ mod tests {
             (AttachTerminal, C, I, TH),
             (TerminalInput, C, I, TH),
             (ResizeTerminal, C, I, TH),
+            (YieldTerminalSizing, C, I, TH),
             (Resync, C, I, SH),
             // Shutdown is intercepted before request registration, but remains a mutation.
             (ShutdownDaemon, C, I, DH),

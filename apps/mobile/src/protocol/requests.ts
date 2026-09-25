@@ -62,6 +62,11 @@ export function selectTerminalSession(sessionId: string): Request {
   return create(RequestSchema, { operation: Operation.SELECT_TERMINAL_SESSION, sessionId });
 }
 
+/** Keep the terminal attached while this connection's selected client stops sizing tmux. */
+export function yieldTerminalSizing(): Request {
+  return create(RequestSchema, { operation: Operation.YIELD_TERMINAL_SIZING });
+}
+
 export function requestTerminalSeed(paneId: string): Request {
   return create(RequestSchema, { operation: Operation.REQUEST_TERMINAL_SEED, scope: paneId });
 }

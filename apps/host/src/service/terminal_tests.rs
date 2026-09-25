@@ -199,6 +199,50 @@ fn sizing_a_session_a_foreign_client_shares_reclaims_the_size_pointer() {
     clients.stop();
 }
 
+#[test]
+fn yielding_sizing_keeps_the_control_client_attached_until_reselection() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_recorded_client(&recorded);
+    clients.select_session("$1").unwrap();
+    clients.resize(50, 30).unwrap();
+    assert!(
+        clients.select_session("$2").is_err(),
+        "next session is absent"
+    );
+    assert!(
+        clients.flush_input().is_err(),
+        "fixture has no input sidecar"
+    );
+    clients.yield_sizing().unwrap();
+    recorded.fence(&mut clients, 2);
+
+    let written = recorded.written();
+    let select = written.find("refresh-client -f !ignore-size").unwrap();
+    let release = written.rfind("refresh-client -f ignore-size").unwrap();
+    assert!(select < release, "yield must follow selection: {written}");
+    assert!(
+        clients.clients.contains_key("$1"),
+        "yield detached the client"
+    );
+    assert!(clients.visible_session.is_none());
+    assert!(
+        clients.resize(80, 40).is_err(),
+        "resize must require reselection"
+    );
+
+    // Re-selection re-arms sizing after an idempotent yield.
+    clients.select_session("$1").unwrap();
+    assert_eq!(clients.visible_session.as_deref(), Some("$1"));
+    clients.yield_sizing().unwrap();
+    clients.yield_sizing().unwrap();
+    clients.select_session("$1").unwrap();
+    assert_eq!(clients.visible_session.as_deref(), Some("$1"));
+    clients.resize(80, 40).unwrap();
+    recorded.fence(&mut clients, 3);
+    assert!(recorded.written().contains("refresh-client -C 80,40"));
+    clients.stop();
+}
+
 /// The common case, which must stay free. Every claim emits a
 /// `%session-changed` on this daemon's own control stream and so costs a
 /// topology reconcile; a session nobody else is attached to has no pointer to

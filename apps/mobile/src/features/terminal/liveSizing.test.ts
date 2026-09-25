@@ -6,7 +6,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { liveHostAvailability, startHostHarness, type HostHarness } from "../../../scripts/host-harness";
 import { HostConnection } from "../../protocol/HostConnection";
-import { resizeTerminal, selectTerminalSession } from "../../protocol/requests";
+import { attachTerminal, resizeTerminal, selectTerminalSession } from "../../protocol/requests";
 import { createSessionStore, type SessionStore } from "../../store/sessionStore";
 import type { ToPageMessage } from "./bridgeMessages";
 import { utf8Encode } from "./bytes";
@@ -82,11 +82,16 @@ describe.skipIf(!availability.available)(`live sizing (${availability.reason ?? 
     const page: ToPageMessage[] = [];
     let inForeground = true;
     const foregroundListeners = new Set<() => void>();
+    const backgroundListeners = new Set<() => void>();
     const foreground: AppForeground = {
       inForeground: () => inForeground,
       onForeground: (listener) => {
         foregroundListeners.add(listener);
         return () => foregroundListeners.delete(listener);
+      },
+      onBackground: (listener) => {
+        backgroundListeners.add(listener);
+        return () => backgroundListeners.delete(listener);
       },
     };
     const controller = new TerminalController({
@@ -133,10 +138,29 @@ describe.skipIf(!availability.available)(`live sizing (${availability.reason ?? 
     await waitFor("window at the laptop's size once more", windowIs("160x48"), 5_000);
     say(`laptop resize 160x48 → window ${windowSize()}`);
 
-    // The phone goes into a pocket with the screen mounted and its link
-    // flaps: the reconnect must not touch the window (§7.6 step 5) — not
-    // even select, which alone would size it from tmux's 80x24 default.
+    // The phone goes into a pocket while its SSH connection and terminal
+    // remain attached. Its sizing client yields, so a laptop resize can hold.
     inForeground = false;
+    for (const listener of backgroundListeners) listener();
+    await waitFor("phone sizing yield", () => log.some((line) => line.includes("sizing.yield.ok")) ? true : undefined);
+    expect(phone.store.getState().connection.state).toBe("connected");
+    await laptopTakes();
+    await waitFor("laptop size with phone connected", windowIs("160x48"), 5_000);
+    // Reproduce the reported tab switch: the desktop stops sizing the first
+    // session while the still-connected phone is in the background.
+    const [otherSessionId, otherPaneId] = harness.tmux([
+      "new-session", "-d", "-P", "-F", "#{session_id} #{pane_id}",
+      "-s", "other", "-c", harness.workDir, "exec bash --norc --noprofile",
+    ]).split(" ");
+    await waitFor("other pane in topology", () => laptop.store.getState().panes[otherPaneId!]?.id);
+    await laptop.connection.request(attachTerminal(otherSessionId!, otherPaneId!));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(windowSize()).toBe("160x48");
+    await laptop.connection.request(selectTerminalSession(sessionId));
+    await laptopTakes();
+    await waitFor("desktop return keeps full width", windowIs("160x48"), 5_000);
+    // A background reconnect must also leave the laptop's size alone — not
+    // even select, which would rearm the unsized client at 80x24.
     const attachedBefore = log.filter((line) => line.includes(" attached ")).length;
     phone.connection.disconnect();
     phone.connection.connect();

@@ -69,7 +69,7 @@ That is the whole product for v1.
 | D3 | Terminal rendering: **xterm.js inside a `react-native-webview`**, fed the same byte stream the desktop feeds its xterm. | The host already produces xterm-ready bytes (seed + output). Re-implementing a VT parser natively is out of scope. |
 | D4 | Markdown rendering: `marked` + `DOMPurify` inside a WebView, using the desktop's `renderSafeMarkdown` rules (§11.2) copied verbatim. | Same sanitiser as the desktop; a Markdown file that renders on desktop renders the same on the phone. |
 | D5 | Protocol messages are decoded with `@bufbuild/protobuf` code generated from `crates/protocol/proto/envelope.proto`. The `.proto` file is the only source of truth; never hand-write message shapes. | The desktop and host both generate from this file. |
-| D6 | A side **takes** the tmux window size only while a person is using it there, and nobody releases. The phone takes when its terminal opens, on rotation and keyboard show/hide, and on input while the window is not at its size; the desktop takes on a keystroke or pointer-down while the window is not at its size — never on window focus, never idle. Both rate-limit to one take per 2 s. A take is the host's existing resize: `refresh-client -C` then `switch-client -E` when another client shares the session (`terminal.rs::resize`, `claim_latest`); tmux's `window-size latest` does the rest. Verified on tmux 3.5a: a size request or input alone never makes a control client `latest`, a silent attached client loses to a take, and a killed client releases on its own. | Agents redraw their TUI at phone width, which is the only way the terminal is readable, and the laptop gets its width back the moment it is used — no dialog, no setting, no release message. A phone left open in a pocket cannot drift back into control. |
+| D6 | A visible phone terminal selects and sizes its tmux session. When the app becomes inactive or the terminal screen closes, it sends `YIELD_TERMINAL_SIZING`; the host puts that control client in `ignore-size` while keeping the SSH connection and notifications alive. Returning to the terminal selects and sizes again. The desktop retains its existing resize behavior on input and layout changes. | A phone in a pocket cannot keep a desktop window at phone width when the desktop switches tabs. The phone regains its size when the user returns to it. |
 | D6b | The terminal is the control plane, for v1 and beyond. No transcript parsing, screen scraping, or keystroke choreography behind buttons. A future read-only "Conversation" view (for voice or skimming) would tail the agents' own transcript files through the file service — reading, never controlling. | Earlier agent tools ended up with the terminal as the default and tens of thousands of lines of fragile per-vendor keystroke logic around their structured views. |
 | D7 | Attention state (`seen_generation`) is shared with the desktop through the host. Opening an agent on the phone clears its badge on the desktop and vice-versa. | It is free: the host already owns this state. |
 | D8 | Authentication is SSH **public key only**, with a key pair generated on the phone and stored in Android-encrypted storage. Host key trust is trust-on-first-use with a fingerprint confirmation. | Matches how the user already uses SSH. No passwords stored on the phone. |
@@ -591,18 +591,20 @@ For one pane displayed on the Terminal screen (§9.5):
    delivers no output while hidden, and reseeds on the next reveal or attach
    (step 1). The reseed contains output produced while hidden (verified live).
 5. On reconnect while the screen is mounted: run step 1 again — but only
-   while the app is in the foreground (`AppState` not `background`). The
+   while the app is active (`AppState` neither `inactive` nor `background`). The
    whole step waits, not just the resize: `SELECT_TERMINAL_SESSION` alone
    takes the host's fresh, unsized control client out of `ignore-size`, and
    tmux would size the windows from its 80x24 default. A phone in a pocket
    with the screen left open must not touch the laptop's windows on a Wi-Fi
    flap. The deferred step 1 runs when the app returns to the foreground
-   (one `AppState` listener).
+   (`AppState` change listeners).
 6. On rotation or keyboard show/hide: re-measure and send
    `resizeTerminal(cols, rows)` again (debounced 150 ms), again only in the
    foreground. The host emits a `TERMINAL_RESNAPSHOT_REQUIRED` or a new seed;
    handle as §7.4.
-7. Nothing is sent on unmount; the laptop takes the size on its next
+7. On unmount or app inactivity, send `YIELD_TERMINAL_SIZING` so tmux ignores
+   the phone's selected sizing client while the connection stays attached.
+   The laptop takes the size on its next
    interaction (D6). While mounted, an input sent when the topology shows the
    pane's window at another size than the one last sent re-sends that size
    before the input on the connection (the host writes them to different

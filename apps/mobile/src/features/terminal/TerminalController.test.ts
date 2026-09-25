@@ -5,7 +5,7 @@ import { EventKind, HostEventSchema, Operation, PaneResourceSchema, PaneResource
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../../protocol/testing/fakeTransport";
 import { createSessionStore } from "../../store/sessionStore";
 import type { ToPageMessage } from "./bridgeMessages";
-import { SUBMIT_DELAY_MS, TAKE_INTERVAL_MS, TerminalController, type AppForeground, type TerminalControllerOptions, type TerminalSnapshot } from "./TerminalController";
+import { ATTACH_RETRY_MS, SUBMIT_DELAY_MS, TAKE_INTERVAL_MS, TerminalController, type AppForeground, type TerminalControllerOptions, type TerminalSnapshot } from "./TerminalController";
 import { TerminalRegistry } from "./terminalRegistry";
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -432,8 +432,9 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     expect(h.store.getState().focusedPaneId).toBeUndefined();
     await settle();
     const frames = t.drain().filter((f) => f.payload.case === "request");
-    expect(frames).toHaveLength(1);
-    const hide = frames[0]!;
+    expect(frames.map((f) => f.payload.case === "request" ? f.payload.value.operation : undefined))
+      .toEqual([Operation.YIELD_TERMINAL_SIZING, Operation.SET_TERMINAL_VISIBILITY]);
+    const hide = frames[1]!;
     if (hide.payload.case !== "request") throw new Error("unreachable");
     expect(hide.payload.value).toMatchObject({
       operation: Operation.SET_TERMINAL_VISIBILITY,
@@ -490,7 +491,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     // The hide on the new connection carries the new epoch.
     void h.controller.stop();
     await settle();
-    const [hide] = t2.drain();
+    const [, hide] = t2.drain();
     if (hide?.payload.case !== "request") throw new Error("expected a hide");
     expect(hide.payload.value.terminalEpoch).toBe(2n);
   });
@@ -620,7 +621,9 @@ describe("TerminalController stop during attach", () => {
     const stopped = h.controller.stop();
     expect(h.store.getState().focusedPaneId).toBeUndefined();
     await settle();
-    expect(t.drain()).toHaveLength(0); // nothing until the attach answers
+    const [yielded] = t.drain();
+    if (yielded?.payload.case !== "request") throw new Error("expected sizing yield");
+    expect(yielded.payload.value.operation).toBe(Operation.YIELD_TERMINAL_SIZING);
     t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: attach.requestId }));
     await settle();
     const [hide] = t.drain();
@@ -644,7 +647,9 @@ describe("TerminalController attach failure", () => {
     t.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "terminal_resize_rejected", displayMessage: "no visible session control client" }) }, { requestId: select!.requestId }));
     await settle();
     expect(h.controller.snapshot.lastError).toContain("no visible session control client");
-    expect(t.drain()).toHaveLength(0);
+    const [yielded] = t.drain().filter((frame) => frame.payload.case === "request");
+    if (yielded?.payload.case !== "request") throw new Error("expected sizing yield");
+    expect(yielded.payload.value.operation).toBe(Operation.YIELD_TERMINAL_SIZING);
     await vi.advanceTimersByTimeAsync(2_000);
     const ops = [await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
     expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL]);
@@ -660,13 +665,40 @@ describe("TerminalController attach failure", () => {
     void h.controller.stop();
     t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: select!.requestId }));
     await settle();
-    expect(t.drain()).toHaveLength(0);
+    const [yielded] = t.drain();
+    if (yielded?.payload.case !== "request") throw new Error("expected sizing yield");
+    expect(yielded.payload.value.operation).toBe(Operation.YIELD_TERMINAL_SIZING);
   });
 });
 
 describe("TerminalController successor and reconnect", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
+
+  it("an old screen cannot yield a successor's sizing claim", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
+    await answerNext(t); // select
+    await answerNext(t); // resize
+    await answerNext(t); // attach
+    await answerNext(t); // seed request
+    const successor = new TerminalController({
+      paneId: "%1", sessionId: "$1", store: h.store, registry: h.registry,
+      getConnection: () => h.connection, page: { send: () => {} },
+    });
+    successor.start();
+    successor.onPageMessage({ t: "size", cols: 60, rows: 35 });
+    await settle();
+    t.drain(); // the successor's select is now the sizing claim
+    void h.controller.stop();
+    await settle();
+    const operations = t.drain().flatMap((frame) => frame.payload.case === "request" ? [frame.payload.value.operation] : []);
+    expect(operations).not.toContain(Operation.YIELD_TERMINAL_SIZING);
+    expect(operations).toContain(Operation.SET_TERMINAL_VISIBILITY);
+    await successor.stop();
+  });
 
   it("skips the late hide when a successor controller already owns the pane", async () => {
     const h = harness();
@@ -729,19 +761,24 @@ describe("TerminalController successor and reconnect", () => {
 
 /** `AppState` as the tests drive it. */
 function fakeForeground(active = true) {
-  const listeners = new Set<() => void>();
+  const foregroundListeners = new Set<() => void>();
+  const backgroundListeners = new Set<() => void>();
   const dep: AppForeground = {
     inForeground: () => active,
     onForeground: (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
+      foregroundListeners.add(listener);
+      return () => { foregroundListeners.delete(listener); };
+    },
+    onBackground: (listener) => {
+      backgroundListeners.add(listener);
+      return () => { backgroundListeners.delete(listener); };
     },
   };
   return {
     dep,
     set(next: boolean) {
       active = next;
-      if (next) for (const listener of listeners) listener();
+      for (const listener of next ? foregroundListeners : backgroundListeners) listener();
     },
   };
 }
@@ -801,11 +838,13 @@ describe("TerminalController sizing takes (D6)", () => {
     foreground.set(true);
     const ops = [await answerNext(t), await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
     expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
-    // Once, not on every foreground transition.
+    // A second background transition releases the still-attached sizing
+    // client, and a second foreground transition reclaims it.
     foreground.set(false);
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
     foreground.set(true);
-    await vi.advanceTimersByTimeAsync(200);
-    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
+    expect([await answerNext(t), await answerNext(t)].map((r) => r.operation))
+      .toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL]);
   });
 
   it("a reconnect in the foreground still resizes, as before", async () => {
@@ -816,44 +855,175 @@ describe("TerminalController sizing takes (D6)", () => {
     expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
   });
 
+  it("a background transition during select yields before the next foreground attach", async () => {
+    const foreground = fakeForeground();
+    const h = harness({ foreground: foreground.dep });
+    const t = await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 50, rows: 30 });
+    await settle();
+    const [firstSelect] = t.drain();
+    if (firstSelect?.payload.case !== "request") throw new Error("expected initial select");
+    expect(firstSelect.payload.value.operation).toBe(Operation.SELECT_TERMINAL_SESSION);
+
+    foreground.set(false);
+    foreground.set(false); // inactive then background is one yield
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
+    expect(t.drain()).toHaveLength(0);
+    foreground.set(true);
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: firstSelect.requestId }));
+    await settle();
+    expect([await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation))
+      .toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL]);
+  });
+
+  it("leaving an old pane cannot yield a newer pane in the same session", async () => {
+    const h = await seeded();
+    const t = h.transport();
+    const next = new TerminalController({
+      paneId: "%2", sessionId: "$1", store: h.store, registry: h.registry,
+      getConnection: () => h.connection, page: { send: () => {} },
+    });
+    next.start();
+    next.onPageMessage({ t: "size", cols: 60, rows: 35 });
+    await settle();
+    const [select] = t.drain();
+    if (select?.payload.case !== "request") throw new Error("expected successor select");
+    expect(select.payload.value.operation).toBe(Operation.SELECT_TERMINAL_SESSION);
+    void h.controller.stop();
+    await settle();
+    const operations = t.drain().flatMap((frame) => frame.payload.case === "request" ? [frame.payload.value.operation] : []);
+    expect(operations).not.toContain(Operation.YIELD_TERMINAL_SIZING);
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: select.requestId }));
+    await settle();
+    const resize = await answerNext(t);
+    expect(resize).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 60, rows: 35 });
+    await next.stop();
+  });
+
+  it("a new pane without a size cannot strand the old pane's sizing claim", async () => {
+    const foreground = fakeForeground();
+    const h = await seeded({ foreground: foreground.dep });
+    const t = h.transport();
+    const next = new TerminalController({
+      paneId: "%2", sessionId: "$1", store: h.store, registry: h.registry,
+      getConnection: () => h.connection, page: { send: () => {} }, foreground: foreground.dep,
+    });
+    next.start(); // No WebView size yet, so it has not selected the session.
+    foreground.set(false);
+    expect(await answerAll(t)).toEqual([Operation.YIELD_TERMINAL_SIZING]);
+    expect(h.connection.state).toBe("connected");
+    const stopping = h.controller.stop();
+    expect(await answerAll(t)).toEqual([Operation.SET_TERMINAL_VISIBILITY]);
+    await stopping;
+    await next.stop();
+  });
+
+  it("a failed session switch yields the session still selected on the host", async () => {
+    const h = await seeded();
+    const t = h.transport();
+    const next = new TerminalController({
+      paneId: "%2", sessionId: "$2", store: h.store, registry: h.registry,
+      getConnection: () => h.connection, page: { send: () => {} },
+    });
+    next.start();
+    next.onPageMessage({ t: "size", cols: 60, rows: 35 });
+    await settle();
+    const [select] = t.drain().filter((frame) => frame.payload.case === "request");
+    if (select?.payload.case !== "request") throw new Error("expected new session select");
+    t.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, {
+      ok: false, errorCode: "terminal_selection_failed", displayMessage: "session has no control client",
+    }) }, { requestId: select.requestId }));
+    await settle();
+    const [yielded] = t.drain().filter((frame) => frame.payload.case === "request");
+    if (yielded?.payload.case !== "request") throw new Error("expected sizing yield");
+    expect(yielded.payload.value).toMatchObject({ operation: Operation.YIELD_TERMINAL_SIZING, sessionId: "" });
+  });
+
+  it("foreground reclaim uses a grid measured while select is in flight", async () => {
+    const foreground = fakeForeground();
+    const h = await seeded({ foreground: foreground.dep }, { cols: 50, rows: 30 });
+    const t = h.transport();
+    foreground.set(false);
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
+    foreground.set(true);
+    await settle();
+    const [select] = t.drain();
+    if (select?.payload.case !== "request") throw new Error("expected select");
+    h.controller.onPageMessage({ t: "size", cols: 60, rows: 35 });
+    await vi.advanceTimersByTimeAsync(150);
+    const [measured] = t.drain().filter((frame) => frame.payload.case === "request");
+    if (measured?.payload.case !== "request") throw new Error("expected measured resize");
+    expect(measured.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 60, rows: 35 });
+    t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: select.requestId }));
+    await settle();
+    const [reclaimed] = t.drain().filter((frame) => frame.payload.case === "request");
+    if (reclaimed?.payload.case !== "request") throw new Error("expected reclaim resize");
+    expect(reclaimed.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 60, rows: 35 });
+    for (const frame of [measured, reclaimed]) {
+      t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
+    }
+    await settle();
+  });
+
+  it("retries a transient foreground reclaim failure while the terminal remains active", async () => {
+    const foreground = fakeForeground();
+    const h = await seeded({ foreground: foreground.dep });
+    const t = h.transport();
+    foreground.set(false);
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
+    foreground.set(true);
+    await settle();
+    const [select] = t.drain();
+    if (select?.payload.case !== "request") throw new Error("expected select");
+    t.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, {
+      ok: false, errorCode: "terminal_select_rejected", displayMessage: "temporary failure",
+    }) }, { requestId: select.requestId }));
+    await settle();
+    t.drain(); // seed delivery acknowledgement
+    await vi.advanceTimersByTimeAsync(ATTACH_RETRY_MS);
+    expect(await answerAll(t)).toEqual([Operation.SELECT_TERMINAL_SESSION]);
+    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL]);
+  });
+
   it("a size change while in the background waits for the foreground", async () => {
     const foreground = fakeForeground();
     const h = await seeded({ foreground: foreground.dep });
     foreground.set(false);
+    expect((await answerNext(h.transport())).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
     // The keyboard hides as the app goes to the background.
     h.controller.onPageMessage({ t: "size", cols: 40, rows: 44 });
     await vi.advanceTimersByTimeAsync(300);
     expect(h.transport().drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
     foreground.set(true);
-    await vi.advanceTimersByTimeAsync(150);
-    const [resize] = h.transport().drain().filter((f) => f.payload.case === "request");
-    if (resize?.payload.case !== "request") throw new Error("expected the withheld resize");
-    expect(resize.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 40, rows: 44 });
+    expect((await answerNext(h.transport())).operation).toBe(Operation.SELECT_TERMINAL_SESSION);
+    const resize = await answerNext(h.transport());
+    expect(resize).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 40, rows: 44 });
   });
 
-  it("the return to the foreground alone takes nothing — the next input does; a stopped controller ignores it", async () => {
+  it("background releases sizing and foreground reclaims it without input; a stopped controller ignores it", async () => {
     const foreground = fakeForeground();
     const h = await seeded({ foreground: foreground.dep }, { cols: 80, rows: 24 });
     const t = h.transport();
     await vi.advanceTimersByTimeAsync(TAKE_INTERVAL_MS);
     // Phone on the desk, connection alive, screen locked; the laptop took the window.
     foreground.set(false);
+    expect(await answerAll(t)).toEqual([Operation.YIELD_TERMINAL_SIZING]);
     h.store.getState().applySnapshot(topologySnapshot({
       panes: [{ id: "%1", sessionId: "$1", windowId: "@1", index: 0, active: true, width: 160, height: 48, left: 0, top: 0, currentPath: "/", currentCommand: "bash" }],
     }));
     await vi.advanceTimersByTimeAsync(300);
     expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
-    // Unlocked to read a message: an app left open does not take.
+    // Opening the terminal again is the foreground use event.
     foreground.set(true);
-    await vi.advanceTimersByTimeAsync(200);
-    expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
-    // Used: it does.
+    expect((await answerNext(t)).operation).toBe(Operation.SELECT_TERMINAL_SESSION);
+    expect((await answerNext(t)).operation).toBe(Operation.RESIZE_TERMINAL);
     const pending = h.controller.sendInput(Uint8Array.of(0x61));
-    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL, Operation.TERMINAL_INPUT]);
+    expect(await answerAll(t)).toEqual([Operation.TERMINAL_INPUT]);
     await pending;
     // After stop, a foreground event is nobody's business.
     void h.controller.stop();
-    await answerAll(t); // the hide
+    expect(await answerAll(t)).toEqual([Operation.YIELD_TERMINAL_SIZING, Operation.SET_TERMINAL_VISIBILITY]);
     foreground.set(false);
     foreground.set(true);
     await vi.advanceTimersByTimeAsync(200);
