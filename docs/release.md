@@ -16,6 +16,46 @@ and derives the Android `versionCode` as `major*10000 + minor*100 + patch`;
 `release/check-version.sh` verifies them. The wire protocol version in
 `crates/protocol` is independent.
 
+# Publishing a release
+
+`.github/workflows/release.yml` builds every downloadable artifact from a
+pushed version tag and leaves them in a draft GitHub Release:
+
+1. Run `release/set-version.sh X.Y.Z`, open a pull request, and merge it once CI
+   passes.
+2. Tag the merged commit and push the tag:
+   `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. The workflow reruns the CI gate and checks that the tree's version matches
+   the tag. The signing jobs then wait for approval of the `release`
+   environment, which holds the signing secrets.
+4. The Linux x86-64 and ARM64 packages are built natively on their own runners.
+   Each is then given the other architecture's helper. The macOS job takes both
+   Linux helpers from those packages, then builds, signs, notarizes and
+   verifies the DMG. The Android job builds the APK with the release key and
+   checks its certificate against `apps/mobile/release-cert.sha256`.
+5. A draft release appears with the DMG, both Linux tarballs and their
+   `.sha256` files, the APK, `SHA256SUMS`, and `latest.json`.
+6. Review the draft: install each artifact and run the manual checks below.
+   Then press Publish.
+
+`latest.json` is the manifest the desktop and Android apps poll for updates:
+`{"version": "X.Y.Z", "url": "<release page>"}`. The apps read it through
+`releases/latest/download/latest.json`, which never resolves to a draft or a
+pre-release. So the red "Update" pill appears only once a release is
+published. A tag with a suffix such as `vX.Y.Z-rc.1` builds from a tree
+versioned `X.Y.Z` and is drafted as a pre-release. Use it to rehearse a
+release, then delete the draft and the tag.
+
+The `release` environment holds these secrets:
+
+| Secret | Contents |
+|---|---|
+| `MUXFLOW_MACOS_CERTIFICATE_P12_BASE64`, `MUXFLOW_MACOS_CERTIFICATE_PASSWORD` | The Developer ID Application certificate, exported as `.p12` |
+| `MUXFLOW_MACOS_SIGNING_IDENTITY` | `Developer ID Application: Name (TEAMID)` |
+| `MUXFLOW_APPLE_TEAM_ID` | The team ID |
+| `MUXFLOW_NOTARY_KEY_P8_BASE64`, `MUXFLOW_NOTARY_KEY_ID`, `MUXFLOW_NOTARY_ISSUER` | An App Store Connect API key with the Developer role |
+| `MUXFLOW_ANDROID_KEYSTORE_BASE64`, `MUXFLOW_ANDROID_KEYSTORE_PASSWORD`, `MUXFLOW_ANDROID_KEY_ALIAS`, `MUXFLOW_ANDROID_KEY_PASSWORD` | The Android release keystore |
+
 # Linux internal release
 
 ## Architectures and artifacts
