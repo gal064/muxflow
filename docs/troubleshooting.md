@@ -39,11 +39,11 @@ is unaffected.
 
 # macOS package and permissions
 
-Published releases are Developer ID signed and notarized. A local build of
-`release/macos/build-package.sh` without signing credentials is only ad-hoc
-signed, so Gatekeeper blocks a quarantined copy of it; inspect it with
-`release/macos/verify-package.sh` and allow it through the normal System
-Settings privacy/security UI rather than disabling Gatekeeper globally. Notification
+The macOS build is ad-hoc signed and not notarized, so Gatekeeper blocks a
+quarantined copy on first launch. Allow it once with System Settings → Privacy
+& Security → Open Anyway (or `xattr -dr com.apple.quarantine` on the app)
+rather than disabling Gatekeeper globally; `release/macos/verify-package.sh`
+inspects a bundle. Notification
 denial is reported by the app and can be changed for `Muxflow` in System
 Settings. Accessibility and Screen Recording are required only by the QA
 driver, not by normal app operation.
