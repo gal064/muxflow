@@ -23,6 +23,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # vite's production build of the desktop (Monaco included) can exceed
+  # Node's default heap on the 7 GB macOS runners.
+  NODE_OPTIONS: --max-old-space-size=6144
 
 jobs:
   ci:
