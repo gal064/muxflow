@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { waitingCount } from "../../src/store/selectors";
 import { ConnectionDot } from "../../src/features/hosts/ConnectionDot";
 import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
+import { UpdatePill } from "../../src/features/update/ui/UpdatePill";
 import { SettingsIcon } from "../../src/ui/components/MediaIcons";
 import { useSession } from "../../src/ui/hooks";
 import { colors, fixedChromeText, metrics, typeScale } from "../../src/ui/tokens";
@@ -66,7 +67,7 @@ export default function HomeLayout() {
   );
 }
 
-/** App bar (56 dp below the status bar) with the host label and the connection dot, then the global strip. */
+/** App bar (56 dp below the status bar) with the host label, the update pill while a newer release is out, and the connection dot, then the global strip. */
 function TabHeader({ title }: { title: string; [key: string]: unknown }) {
   const insets = useSafeAreaInsets();
   const router = useRouter();
@@ -74,6 +75,7 @@ function TabHeader({ title }: { title: string; [key: string]: unknown }) {
     <View style={[styles.headerWrap, { paddingTop: insets.top }]}>
       <View style={styles.header}>
         <Text {...fixedChromeText} style={styles.headerTitle} numberOfLines={1}>{title}</Text>
+        <UpdatePill />
         <Pressable accessibilityLabel="Settings" accessibilityRole="button" onPress={() => router.push("/settings")} style={styles.headerAction}>
           <SettingsIcon color={colors.chromeDim} />
         </Pressable>

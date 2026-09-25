@@ -1,9 +1,10 @@
 // Installed once by app/_layout.tsx: the transport factory for this build, the
-// foreground service's notification and the toast sink. The SSH module (§6)
-// is the transport for every host.
+// foreground service's notification, the toast sink and the update check. The
+// SSH module (§6) is the transport for every host.
 
 import { AppState, ToastAndroid } from "react-native";
 import { startNotifications } from "../features/notifications";
+import { startAppUpdateCheck } from "../features/update";
 import { muxflowSsh } from "../ssh/MuxflowSsh";
 import { sshTransportFactory } from "../ssh/registerTransport";
 import { onToast, setForegroundService, setTransportFactory } from "./connectionManager";
@@ -18,6 +19,7 @@ export function wireApp(): void {
   startFlightRecorder();
   onToast((message) => ToastAndroid.show(message, ToastAndroid.SHORT));
   startNotifications();
+  startAppUpdateCheck();
   setTransportFactory(sshTransportFactory);
   setForegroundService(muxflowSsh());
 }

@@ -115,7 +115,9 @@ ordinary tmux window without attention tracking.
 
 Downloads are published on the
 [releases page](https://github.com/gal064/muxflow/releases/latest).
-tmux 3.3 or newer must be installed on every host you attach to.
+tmux 3.3 or newer must be installed on every host you attach to. There is no
+auto-update. When a newer release is published, the desktop title bar and the
+Android home screen show a red **Update** pill that opens its release page.
 
 ### Linux
 
