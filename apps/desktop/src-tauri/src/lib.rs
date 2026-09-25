@@ -8,6 +8,7 @@ mod menu;
 mod notifications;
 mod perf_log;
 mod power_events;
+mod update_check;
 
 use phase0_core::{NotificationRoute, ResolvedRoute, SyntheticTopology, resolve_route};
 use tauri::Manager;
@@ -264,6 +265,7 @@ pub fn run() {
             connection::files::native_clipboard::read_native_terminal_clipboard,
             connection::files::native_clipboard::write_native_terminal_clipboard,
             external_links::open_external_link,
+            update_check::check_for_update,
             perf_log::sink::perf_log_enabled,
             perf_log::sink::append_perf_log,
             perf_log::bridge::acknowledge_bridge_events,

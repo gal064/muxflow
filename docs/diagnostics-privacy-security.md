@@ -21,4 +21,4 @@ Review a bundle before sharing it. Although the schema excludes private content 
 - Authentication and host-key verification remain OpenSSH responsibilities; the app does not copy or store private keys or passwords.
 - The temporary communication directory (`/tmp/muxflow-<uid>` in production) and durable state directory are both mode `0700`; sockets, metadata, diagnostics, agent state, pins, and queued hook events are user-only.
 - The support-bundle command never overwrites a destination. Choose a new output filename and delete it after support work if it is no longer needed.
-- No telemetry is sent in v1.
+- No telemetry is sent in v1. The only request that is not to your own hosts is the update check: the desktop and Android apps each fetch `https://github.com/gal064/muxflow/releases/latest/download/latest.json` at launch and then at most once a day, to show a red "Update" pill when a newer release is published. It is a plain GET that sends nothing about you, your hosts or your usage; GitHub sees only the request itself.
