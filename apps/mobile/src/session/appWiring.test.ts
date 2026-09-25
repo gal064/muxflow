@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   startNotifications: vi.fn(),
+  startAppUpdateCheck: vi.fn(),
   onToast: vi.fn(),
   setForegroundService: vi.fn(),
   setTransportFactory: vi.fn(),
@@ -17,6 +18,7 @@ vi.mock("react-native", () => ({
   ToastAndroid: { SHORT: 0, show: mocks.toastShow },
 }));
 vi.mock("../features/notifications", () => ({ startNotifications: mocks.startNotifications }));
+vi.mock("../features/update", () => ({ startAppUpdateCheck: mocks.startAppUpdateCheck }));
 vi.mock("../ssh/MuxflowSsh", () => ({ muxflowSsh: mocks.muxflowSsh }));
 vi.mock("../ssh/registerTransport", () => ({ sshTransportFactory: mocks.sshTransportFactory }));
 vi.mock("./connectionManager", () => ({
@@ -35,6 +37,7 @@ describe("wireApp", () => {
     wireApp();
 
     expect(mocks.startNotifications).toHaveBeenCalledTimes(1);
+    expect(mocks.startAppUpdateCheck).toHaveBeenCalledTimes(1);
     expect(mocks.setTransportFactory).toHaveBeenCalledWith(mocks.sshTransportFactory);
     expect(mocks.muxflowSsh).toHaveBeenCalledTimes(1);
     expect(mocks.setForegroundService).toHaveBeenCalledWith({ native: true });

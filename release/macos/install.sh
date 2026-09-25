@@ -75,8 +75,8 @@ cleanup() {
 trap cleanup EXIT
 
 # Preserve Gatekeeper quarantine and every other extended attribute from the
-# source. This package is intentionally ad-hoc signed for internal use; the
-# installer must never suppress the operating system's trust signal.
+# source. Whether the bundle is Developer ID signed or an ad-hoc local build,
+# the installer must never suppress the operating system's trust signal.
 ditto --extattr "$source_app" "$stage"
 "$(cd "$(dirname "$0")" && pwd -P)/verify-package.sh" "$stage"
 staged=true

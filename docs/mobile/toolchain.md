@@ -128,6 +128,29 @@ Expo config changes.
 The first Gradle run downloads Gradle 9.3.1, the Android Gradle Plugin, and the
 NDK; budget ~15 minutes and ~5 GB. Later runs are incremental.
 
+## Release signing
+
+`pnpm mobile:apk:release` signs with the Muxflow release key, which lives
+outside the repository. `plugins/withReleaseSigning.js` makes Gradle read it
+from four variables and fail a release build when any is unset; there is no
+fallback to the debug key:
+
+```bash
+export MUXFLOW_ANDROID_KEYSTORE=/path/to/muxflow-release.jks
+export MUXFLOW_ANDROID_KEYSTORE_PASSWORD=...
+export MUXFLOW_ANDROID_KEY_ALIAS=muxflow
+export MUXFLOW_ANDROID_KEY_PASSWORD=...
+pnpm mobile:apk:release
+```
+
+After the build, `scripts/build-apk.sh` checks the APK's signing certificate
+against the SHA-256 pinned in `apps/mobile/release-cert.sha256`. Android only
+upgrades an app in place when the new APK has the same signer, so this key
+must never change and must never be lost: keep the keystore and its passwords
+in a password manager with a backup. Debug and release builds share the
+package name but not the signer, so switching one device between them needs an
+uninstall.
+
 ## Emulator
 
 An AVD is not created by any script. To make one:

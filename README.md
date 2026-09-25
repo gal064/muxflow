@@ -115,7 +115,9 @@ ordinary tmux window without attention tracking.
 
 Downloads are published on the
 [releases page](https://github.com/gal064/muxflow/releases/latest).
-tmux 3.3 or newer must be installed on every host you attach to.
+tmux 3.3 or newer must be installed on every host you attach to. There is no
+auto-update. When a newer release is published, the desktop title bar and the
+Android home screen show a red **Update** pill that opens its release page.
 
 ### Linux
 
@@ -134,9 +136,10 @@ location. See [setup](./docs/setup.md) and [uninstall](./docs/uninstall.md).
 ### macOS
 
 Download `Muxflow_<version>_aarch64.dmg` (Apple Silicon only), drag
-`Muxflow.app` to `/Applications`, and open it. The current build is not yet
-signed with a Developer ID or notarized, so Gatekeeper will ask you to confirm
-the first launch through System Settings.
+`Muxflow.app` to `/Applications`, and open it. The app is not notarized by
+Apple, so macOS blocks the first launch. To allow it, open System Settings →
+Privacy & Security and choose **Open Anyway**, or run
+`xattr -dr com.apple.quarantine /Applications/Muxflow.app`.
 
 ### Android
 

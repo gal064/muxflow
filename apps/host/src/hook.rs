@@ -2273,7 +2273,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_same_version_stale_daemon_cannot_consume_a_hook_event() {
-        let root = std::env::temp_dir().join(format!("ade-hs-{}", uuid::Uuid::new_v4()));
+        // A short root for the same bind-limit reason as the test below.
+        let root =
+            std::path::PathBuf::from("/tmp").join(format!("ade-hs-{}", uuid::Uuid::new_v4()));
         let runtime = root.join("runtime");
         let mailbox = root.join("state");
         fs::create_dir_all(&runtime).unwrap();

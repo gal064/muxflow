@@ -1,0 +1,124 @@
+# The merge gate: every check here must be fast, deterministic on a hosted
+# runner, and need no secrets, because it also runs on pull requests from
+# forks. Slow or environment-shaped suites (Docker SSH targets, the transfer
+# and scale matrices, performance, packaged desktop journeys) are manual
+# release-candidate gates; see docs/release.md.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # The desktop crate's build script checks that externalBin sidecars exist;
+  # only the packaging scripts stage the host helper.
+  TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+  # vite's production build of the desktop (Monaco included) can exceed
+  # Node's default heap on the 7 GB macOS runners.
+  NODE_OPTIONS: --max-old-space-size=6144
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev tmux
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # Installs the toolchain pinned in rust-toolchain.toml.
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            tests/integration
+            tests/integration/fuzz-smoke
+            tests/release/protocol-driver
+            tests/performance/runtime/perf-driver
+      - uses: astral-sh/setup-uv@v6
+      - run: pnpm install --frozen-lockfile
+
+      - name: Repository hygiene
+        run: |
+          pnpm check:privacy
+          release/check-version.sh
+          cargo fmt --all -- --check
+
+      - name: Build the desktop frontend
+        run: pnpm build
+      - name: Rust lint
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Rust tests
+        run: cargo test --locked --workspace --all-targets
+
+      - name: Test-only crates outside the workspace
+        run: |
+          for manifest in \
+            tests/integration/Cargo.toml \
+            tests/integration/fuzz-smoke/Cargo.toml \
+            tests/release/protocol-driver/Cargo.toml \
+            tests/performance/runtime/perf-driver/Cargo.toml
+          do
+            echo "::group::$manifest"
+            cargo fmt --manifest-path "$manifest" --all -- --check
+            cargo clippy --locked --manifest-path "$manifest" --workspace --all-targets -- -D warnings
+            echo "::endgroup::"
+          done
+          cargo test --locked --manifest-path tests/release/protocol-driver/Cargo.toml
+      - name: Bounded tmux control parser fuzz smoke
+        run: cargo run --locked --manifest-path tests/integration/fuzz-smoke/Cargo.toml -- 1000
+
+      - name: TypeScript
+        run: |
+          pnpm check
+          pnpm test
+          pnpm mobile:check
+          pnpm mobile:test
+          pnpm --filter @muxflow/terminal-interactions check
+          pnpm --filter @muxflow/terminal-interactions test
+      - name: Generated code is committed
+        run: |
+          pnpm --filter @muxflow/mobile protocol:check
+          pnpm --filter @muxflow/mobile webview:check
+      - name: Voice sidecar
+        run: uv run --python 3.12 --no-project --no-config python -m unittest apps/host/src/service/voice/test_sidecar.py
+
+  # The macOS-only code paths (notifications, NSWorkspace, /private/var and
+  # socket-path limits) have no other coverage.
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install tmux
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - name: Build the desktop frontend
+        run: pnpm build
+      - name: Rust lint
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Rust tests
+        run: cargo test --locked --workspace --all-targets

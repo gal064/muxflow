@@ -361,13 +361,14 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// A `#!/bin/sh` stand-in for the Python sidecar: reads header lines and
-    /// answers from a canned script, so framing and failure handling are
-    /// tested without uv or a model.
+    /// A bash stand-in for the Python sidecar: reads header lines and answers
+    /// from a canned script, so framing and failure handling are tested
+    /// without uv or a model. Bash, not `/bin/sh`: the scripts use `read -t`,
+    /// which dash (Debian and Ubuntu's `/bin/sh`) does not have.
     pub(crate) fn fake_sidecar(dir: &Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        fs::write(&path, format!("#!/bin/bash\n{body}")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
     }

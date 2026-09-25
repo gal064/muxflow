@@ -179,14 +179,13 @@ fn resample_for_model(mut pcm: PcmMono) -> Result<PcmMono, AudioError> {
     let delay = resampler.output_delay();
     let wanted_with_delay = expected_len.saturating_add(delay);
     let mut output = Vec::with_capacity(wanted_with_delay);
-    let mut chunks = pcm.samples.chunks_exact(RESAMPLE_CHUNK);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = pcm.samples.as_chunks::<RESAMPLE_CHUNK>();
+    for chunk in chunks {
         let resampled = resampler
-            .process(&[chunk], None)
+            .process(&[chunk.as_slice()], None)
             .map_err(|error| AudioError::Undecodable(format!("resample: {error}")))?;
         output.extend_from_slice(&resampled[0]);
     }
-    let remainder = chunks.remainder();
     if !remainder.is_empty() {
         let resampled = resampler
             .process_partial(Some(&[remainder]), None)

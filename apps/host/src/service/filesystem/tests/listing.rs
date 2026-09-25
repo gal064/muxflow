@@ -287,9 +287,14 @@ fn a_cancelled_listing_stops_the_bounded_scan_instead_of_completing_it() {
 fn root_token_changes_when_same_path_is_replaced() {
     let (root, _service) = fixture();
     let first = root_token(root.to_str().unwrap()).unwrap();
+    // An open handle pins the original inode while the replacement is made:
+    // a filesystem that reuses freed inode numbers (ext4, unlike tmpfs) could
+    // otherwise give the replacement the same one.
+    let original = fs::File::open(&root).unwrap();
     fs::remove_dir(&root).unwrap();
     fs::create_dir(&root).unwrap();
     let second = root_token(root.to_str().unwrap()).unwrap();
+    drop(original);
     assert_ne!(first, second);
     fs::remove_dir(root).unwrap();
 }

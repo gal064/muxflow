@@ -9,6 +9,27 @@ if [[ -f "$repo/.env" ]]; then
   source "$repo/.env"
   set +a
 fi
+# This script owns signing and notarization: tauri's own would sign before the
+# Info.plist edit below and so be invalidated by it. Keep tauri's credential
+# variables away from `tauri build` whatever the environment or .env holds.
+unset APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+  APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
+
+# MUXFLOW_MACOS_SIGNING_IDENTITY selects the code identity. Unset or `-` is an
+# ad-hoc seal for local builds; a "Developer ID Application: …" identity in the
+# keychain produces a distributable build, which also requires the notary API
+# key (MUXFLOW_NOTARY_KEY_PATH, MUXFLOW_NOTARY_KEY_ID, MUXFLOW_NOTARY_ISSUER)
+# and MUXFLOW_APPLE_TEAM_ID so verification can pin the team.
+identity=${MUXFLOW_MACOS_SIGNING_IDENTITY:--}
+if [[ "$identity" != - ]]; then
+  for required in MUXFLOW_NOTARY_KEY_PATH MUXFLOW_NOTARY_KEY_ID MUXFLOW_NOTARY_ISSUER MUXFLOW_APPLE_TEAM_ID; do
+    [[ -n "${!required:-}" ]] || { echo "Developer ID builds require $required" >&2; exit 64; }
+  done
+  [[ -f "$MUXFLOW_NOTARY_KEY_PATH" ]] || { echo "no notary key at $MUXFLOW_NOTARY_KEY_PATH" >&2; exit 64; }
+  export MUXFLOW_MACOS_EXPECT_SIGNATURE=developer-id
+else
+  export MUXFLOW_MACOS_EXPECT_SIGNATURE=adhoc
+fi
 
 [[ $(uname -s) == Darwin ]] || { echo "macOS packaging requires Darwin" >&2; exit 69; }
 [[ $(uname -m) == arm64 ]] || { echo "this internal package is Apple Silicon only" >&2; exit 69; }
@@ -69,7 +90,15 @@ build_linux_helper() {
   chmod 0755 "$helpers/muxflow-host-linux-$helper_arch"
 }
 
-if [[ ${ADE_MACOS_PACKAGE_SMOKE:-0} != 1 ]]; then
+# MUXFLOW_LINUX_HELPERS_DIR supplies helpers that build-compatible-host.sh
+# already produced elsewhere (the release workflow builds them on Linux
+# runners, since hosted macOS runners have no Docker).
+if [[ -n ${MUXFLOW_LINUX_HELPERS_DIR:-} ]]; then
+  for helper_arch in aarch64 x86_64; do
+    install -m 0755 "$MUXFLOW_LINUX_HELPERS_DIR/muxflow-host-linux-$helper_arch" \
+      "$helpers/muxflow-host-linux-$helper_arch"
+  done
+elif [[ ${ADE_MACOS_PACKAGE_SMOKE:-0} != 1 ]]; then
   build_linux_helper aarch64
   build_linux_helper x86_64
 fi
@@ -86,17 +115,58 @@ else
   pnpm --dir apps/desktop tauri build --bundles app
 fi
 app="$CARGO_TARGET_DIR/release/bundle/macos/Muxflow.app"
-# Re-seal with an ad-hoc identity after the plist edit: macOS UserNotifications
-# requires a stable application identity even for an internal build, while this
-# still makes no Developer ID, Gatekeeper, or notarization claim.
-/usr/libexec/PlistBuddy -c 'Delete :LSRequiresCarbon' "$app/Contents/Info.plist" 2>/dev/null || true
-codesign --force --sign - "$app"
-"$repo/release/macos/verify-package.sh" "$app"
 version=$(node -e 'process.stdout.write(require("./apps/desktop/src-tauri/tauri.conf.json").version)')
 dmg="$CARGO_TARGET_DIR/release/bundle/dmg/Muxflow_${version}_aarch64.dmg"
+
+# Submit one file to Apple's notary service and wait. notarytool exits 0 for a
+# finished submission whatever its verdict, so the verdict is read explicitly
+# and the service's log is printed when it is anything but Accepted.
+notarize() {
+  local file=$1 result status id
+  result=$(xcrun notarytool submit "$file" --wait --output-format json \
+    --key "$MUXFLOW_NOTARY_KEY_PATH" --key-id "$MUXFLOW_NOTARY_KEY_ID" --issuer "$MUXFLOW_NOTARY_ISSUER")
+  status=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).status ?? "")' "$result")
+  if [[ "$status" != Accepted ]]; then
+    id=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).id ?? "")' "$result")
+    echo "notarization of $(basename "$file") returned ${status:-no status}: $result" >&2
+    [[ -z "$id" ]] || xcrun notarytool log "$id" \
+      --key "$MUXFLOW_NOTARY_KEY_PATH" --key-id "$MUXFLOW_NOTARY_KEY_ID" --issuer "$MUXFLOW_NOTARY_ISSUER" >&2 || true
+    exit 1
+  fi
+}
+
+# macOS UserNotifications requires a stable application identity, and the
+# plist edit breaks the bundler's seal, so the bundle is always re-signed here.
+/usr/libexec/PlistBuddy -c 'Delete :LSRequiresCarbon' "$app/Contents/Info.plist" 2>/dev/null || true
+if [[ "$identity" == - ]]; then
+  codesign --force --sign - "$app"
+else
+  # Inside out: the nested helper first, then the bundle that seals it. The
+  # hardened runtime needs no entitlements; the app loads no unsigned code and
+  # JIT runs in WebKit's own processes.
+  codesign --force --options runtime --timestamp --sign "$identity" "$app/Contents/MacOS/muxflow-host"
+  codesign --force --options runtime --timestamp --sign "$identity" "$app"
+  app_zip="$work_dir/Muxflow-$run_id.zip"
+  ditto -c -k --keepParent "$app" "$app_zip"
+  notarize "$app_zip"
+  rm -f "$app_zip"
+  xcrun stapler staple "$app"
+fi
+"$repo/release/macos/verify-package.sh" "$app"
+
 mkdir -p "$(dirname "$dmg")"
 hdiutil create -volname 'Muxflow' -srcfolder "$app" -ov -format UDZO "$dmg"
+if [[ "$identity" != - ]]; then
+  codesign --force --timestamp --sign "$identity" "$dmg"
+  notarize "$dmg"
+  xcrun stapler staple "$dmg"
+  xcrun stapler validate "$dmg"
+fi
 
 cleanup
 trap - EXIT
-echo "MACOS_PACKAGE_READY unsigned-internal apple-silicon-only app=$app dmg=$dmg"
+if [[ "$identity" == - ]]; then
+  echo "MACOS_PACKAGE_READY ad-hoc apple-silicon-only app=$app dmg=$dmg"
+else
+  echo "MACOS_PACKAGE_READY developer-id notarized apple-silicon-only app=$app dmg=$dmg"
+fi
