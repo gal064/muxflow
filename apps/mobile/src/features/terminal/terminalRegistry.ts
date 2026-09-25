@@ -17,6 +17,20 @@ export interface RegisteredTerminal {
 
 export class TerminalRegistry implements TerminalSink {
   private readonly terminals = new Map<string, RegisteredTerminal>();
+  private sizingOwner: RegisteredTerminal | undefined;
+
+  /** The controller that most recently issued a sizing select on this connection. */
+  claimSizing(terminal: RegisteredTerminal): void {
+    this.sizingOwner = terminal;
+  }
+
+  ownsSizing(terminal: RegisteredTerminal | undefined): boolean {
+    return terminal !== undefined && this.sizingOwner === terminal;
+  }
+
+  releaseSizing(terminal: RegisteredTerminal): void {
+    if (this.sizingOwner === terminal) this.sizingOwner = undefined;
+  }
 
   register(terminal: RegisteredTerminal): () => void {
     this.terminals.set(terminal.paneId, terminal);

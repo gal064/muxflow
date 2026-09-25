@@ -168,6 +168,9 @@ enum Operation {
   // Fetches the bounded, privacy-safe host lifecycle decision trace. The
   // mobile app requests it only when the user copies diagnostics.
   OPERATION_AGENT_DIAGNOSTICS = 54;
+  // The phone stopped showing its terminal. Keep the connection and terminal
+  // output client attached, but exclude its selected session from tmux sizing.
+  OPERATION_YIELD_TERMINAL_SIZING = 55;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;

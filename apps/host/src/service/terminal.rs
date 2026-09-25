@@ -905,6 +905,34 @@ impl TerminalClients {
         self.size_visible_client(session_id)
     }
 
+    /// Stop this connection's selected control client from sizing its session.
+    /// Pane output and the notification connection remain attached. The phone
+    /// may have attempted a newer selection that failed, so release whichever
+    /// session is actually selected here.
+    pub(super) fn yield_sizing(&mut self) -> anyhow::Result<()> {
+        let Some(session_id) = self.visible_session.take() else {
+            return Ok(());
+        };
+        // Keep prior input ahead of the geometry change when the sidecar is
+        // healthy. A failed fence must not leave a hidden phone sizing tmux.
+        let input_fence_error = self.flush_input().err();
+        let result = self
+            .clients
+            .get_mut(&session_id)
+            .context("selected session control client is detached")?
+            .set_sizing(false);
+        crate::diagnostics::write_terminal_sizing_yield_log(
+            self.connection_epoch,
+            &session_id,
+            input_fence_error
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            result.as_ref().err().map(ToString::to_string).as_deref(),
+        );
+        result
+    }
+
     pub(super) fn request_seed(&mut self, pane_id: &str) -> anyhow::Result<()> {
         self.clients
             .values_mut()

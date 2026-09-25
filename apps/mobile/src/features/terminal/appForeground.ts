@@ -7,10 +7,16 @@ import type { AppForeground } from "./TerminalController";
 export const appForeground: AppForeground = {
   // Not `=== "active"`: before the first native read `currentState` can be
   // `unknown`, and a screen that attaches then must still be sized.
-  inForeground: () => AppState.currentState !== "background",
+  inForeground: () => AppState.currentState !== "background" && AppState.currentState !== "inactive",
   onForeground: (listener) => {
     const subscription = AppState.addEventListener("change", (next) => {
       if (next === "active") listener();
+    });
+    return () => subscription.remove();
+  },
+  onBackground: (listener) => {
+    const subscription = AppState.addEventListener("change", (next) => {
+      if (next === "inactive" || next === "background") listener();
     });
     return () => subscription.remove();
   },

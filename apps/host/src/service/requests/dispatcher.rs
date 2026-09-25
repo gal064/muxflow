@@ -440,6 +440,32 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
+        (Handler::Terminal, Some(v1::Operation::YieldTerminalSizing)) => {
+            let mut result = {
+                let mut terminal = terminal.lock().unwrap();
+                terminal.yield_sizing()
+            };
+            if result.is_ok() {
+                result = reconcile_internal_tmux_change(
+                    topology_lock,
+                    topology_baseline,
+                    generation,
+                    terminal,
+                    event_tx,
+                    overflowed,
+                )
+                .await;
+            }
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_sizing_yield_rejected", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
         (Handler::Terminal, Some(v1::Operation::SetTerminalVisibility)) => {
             // Reserve sequencer capacity before entering the blocking section.
             // Waiting here holds no terminal/resource lock, and the connection

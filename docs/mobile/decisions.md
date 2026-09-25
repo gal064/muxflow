@@ -1257,7 +1257,7 @@ Enter inside a fast burst as insert-newline.
   host's real-tmux tests: a paste is bracketed only in a pane that enabled
   `?2004h`, and paste + keys CR runs one command line in bash.
 
-## Sizing: the side in use takes, nobody releases (2026-09-03)
+## Sizing: the side in use takes (2026-09-03; amended 2026-09-24)
 
 The laptop stayed at phone width after the phone had been put away: the
 desktop's re-assert budget (`CLIENT_RESIZE_REASSERTS = 2` per focus gain)
@@ -1315,6 +1315,14 @@ Wi-Fi flap in a pocket shrank the laptop with nobody touching the phone.
 - **Live test** `liveSizing.test.ts`: laptop 160x48, phone 50x30 → 50x30;
   laptop resizes again → 160x48 with the phone attached and silent; phone
   input → 50x30; laptop again → 160x48.
+
+The 2026-09-24 incident showed a phone control client could remain attached
+after the app was put away. While the desktop client ignored sizing on tab
+switch, the phone's 50-column client could then shrink the window. The phone
+now explicitly yields sizing on terminal hide or app inactivity, without
+disconnecting notifications, and reselects and resizes on foreground return.
+This supersedes the earlier "never release" and "foreground alone takes
+nothing" bullets above; the desktop take behavior remains as described.
 
 ## Background reconnect runs on a native timer (2026-09-03)
 

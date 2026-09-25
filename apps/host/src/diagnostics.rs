@@ -576,6 +576,27 @@ pub fn write_sizing_latest_claim_log(connection_epoch: u64, session_id: &str) {
     eprintln!("{line}");
 }
 
+/// Records a phone terminal relinquishing only tmux sizing, while its bridge
+/// remains connected for notifications and other events.
+pub fn write_terminal_sizing_yield_log(
+    connection_epoch: u64,
+    session_id: &str,
+    input_fence_error: Option<&str>,
+    error: Option<&str>,
+) {
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "terminalSizingYield",
+        "atUnixMillis": now_epoch_millis(),
+        "connectionEpoch": connection_epoch,
+        "sessionId": session_id,
+        "ok": error.is_none(),
+        "inputFenceError": input_fence_error.map(bounded_log_text),
+        "error": error.map(bounded_log_text),
+    });
+    eprintln!("{line}");
+}
+
 /// Names every flow-control resume tmux refused, and what was done about it.
 ///
 /// A retried rejection is deliberately not an event: the host is still handling

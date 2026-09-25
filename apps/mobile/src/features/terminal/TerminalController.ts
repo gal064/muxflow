@@ -12,13 +12,14 @@ import {
   selectTerminalSession,
   setTerminalVisibility,
   terminalInput,
+  yieldTerminalSizing,
 } from "../../protocol/requests";
 import type { SessionStore } from "../../store/sessionStore";
 import type { FromPageMessage, ToPageMessage } from "./bridgeMessages";
 import { fromBase64, toBase64, utf8Encode } from "./bytes";
 import { CR } from "./chips";
 import { sameGrid, windowGrid, type Grid } from "./sizing";
-import type { TerminalRegistry } from "./terminalRegistry";
+import type { RegisteredTerminal, TerminalRegistry } from "./terminalRegistry";
 
 /** §9.5 states, as the screen renders them. */
 export type TerminalPhase =
@@ -49,10 +50,16 @@ export interface AppForeground {
   inForeground(): boolean;
   /** Calls `listener` each time the app comes to the foreground; returns the unsubscribe. */
   onForeground(listener: () => void): () => void;
+  /** Calls `listener` when the app stops being active, before JS is suspended. */
+  onBackground(listener: () => void): () => void;
 }
 
 /** A controller built without one is always in the foreground (tests, the live harness). */
-const ALWAYS_FOREGROUND: AppForeground = { inForeground: () => true, onForeground: () => () => undefined };
+const ALWAYS_FOREGROUND: AppForeground = {
+  inForeground: () => true,
+  onForeground: () => () => undefined,
+  onBackground: () => () => undefined,
+};
 
 /** Gap between Send's paste and the CR that submits it. */
 export const SUBMIT_DELAY_MS = 100;
@@ -115,6 +122,7 @@ export class TerminalController {
   private reattachWanted = false;
   private stopped = false;
   private unregister: (() => void) | undefined;
+  private registration: RegisteredTerminal | undefined;
   /** Last `TerminalBytes.generation` handed to xterm; the hide checkpoint and the stale-seed guard. */
   private lastGeneration = 0n;
   private seedRetryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -127,6 +135,11 @@ export class TerminalController {
   /** An attach asked for while the app was in the background; runs on the return to the foreground. */
   private attachOnForeground = false;
   private unsubscribeForeground: (() => void) | undefined;
+  private unsubscribeBackground: (() => void) | undefined;
+  /** The connection epoch on which this controller issued its latest select. */
+  private sizingClaimEpoch: bigint | undefined;
+  /** Invalidates a select or resize that crossed an app visibility change. */
+  private sizingIntent = 0;
   // ---- §7.6.1 history paging state, reset by every seed ----
   /** Everything handed to xterm since the seed (the seed first); a splice replays it above nothing but history. */
   private retained: Uint8Array[] = [];
@@ -166,7 +179,7 @@ export class TerminalController {
   /** Registers for events and takes focus; the attach waits for the page's size (§7.6 step 1). */
   start(): void {
     if (this.stopped) throw new Error("controller already stopped");
-    this.unregister = this.options.registry.register({
+    this.registration = {
       paneId: this.paneId,
       sessionId: this.sessionId,
       seed: (bytes, generation) => this.seed(bytes, generation),
@@ -174,21 +187,23 @@ export class TerminalController {
       history: (bytes, historySize, sizeKnown) => this.history(bytes, historySize, sizeKnown),
       exit: (detail) => this.exit(detail),
       onConnected: () => this.onConnected(),
-    });
+    };
+    this.unregister = this.options.registry.register(this.registration);
     this.options.store.getState().setFocusedPane(this.paneId);
     this.log("screen.focus");
-    // Step 1 or a size withheld while the app was in the background (see
-    // attach and resizeNow) runs when a person is looking again. Nothing more:
-    // a window the laptop took meanwhile is taken back by the next input, not
-    // by the unlock — a phone unlocked to read a message with this screen in
-    // front is an app left open, the phone's window focus.
+    this.unsubscribeBackground = this.foreground.onBackground(() => this.yieldSizing());
+    // A visible terminal claims sizing on return, including when its grid has
+    // not changed. A reconnect still runs the complete attach sequence.
     this.unsubscribeForeground = this.foreground.onForeground(() => {
       if (this.stopped) return;
-      if (this.attachOnForeground) {
+      this.attachFailures = 0;
+      if (this.attachRetryTimer !== undefined) clearTimeout(this.attachRetryTimer);
+      this.attachRetryTimer = undefined;
+      if (this.attachOnForeground || !this.attached) {
         this.attachOnForeground = false;
         void this.attach();
       } else {
-        this.scheduleResize();
+        void this.reclaimSizing();
       }
     });
     this.options.page.send({ t: "init" });
@@ -312,6 +327,7 @@ export class TerminalController {
     if (this.stopped) return;
     this.stopped = true;
     this.log("screen.blur");
+    this.yieldSizing();
     this.clearSeedTimers();
     if (this.resizeTimer !== undefined) {
       clearTimeout(this.resizeTimer);
@@ -325,6 +341,8 @@ export class TerminalController {
     this.unregister = undefined;
     this.unsubscribeForeground?.();
     this.unsubscribeForeground = undefined;
+    this.unsubscribeBackground?.();
+    this.unsubscribeBackground = undefined;
     const store = this.options.store.getState();
     if (store.focusedPaneId === this.paneId) store.setFocusedPane(undefined);
     const connection = this.liveConnection();
@@ -492,6 +510,8 @@ export class TerminalController {
     this.attached = false;
     this.attachFailures = 0;
     this.sentGrid = undefined;
+    this.sizingClaimEpoch = undefined;
+    this.sizingIntent += 1;
     // The generation counter lives in the daemon; a restarted daemon starts it
     // over, and the first seed of a fresh attach is never stale.
     this.lastGeneration = 0n;
@@ -532,13 +552,21 @@ export class TerminalController {
     try {
       // The order is load-bearing: the host sizes the *selected* session's
       // control client and refuses a resize before one exists (§7.6 step 1).
-      this.options.store.getState().setFocusedPane(this.paneId);
+      this.sizingClaimEpoch = connection.connectionEpoch;
+      this.options.registry.claimSizing(this.registration!);
+      const sizingIntent = ++this.sizingIntent;
       await connection.request(selectTerminalSession(this.sessionId));
-      if (this.stopped) return; // left before the reveal: nothing to hide
+      if (this.stopped || !this.foreground.inForeground() || sizingIntent !== this.sizingIntent) {
+        this.attachOnForeground = !this.stopped;
+        return;
+      }
       this.lastResizeAt = Date.now();
       await connection.request(resizeTerminal(grid.cols, grid.rows));
       this.sentGrid = grid;
-      if (this.stopped) return;
+      if (this.stopped || !this.foreground.inForeground() || sizingIntent !== this.sizingIntent) {
+        this.attachOnForeground = !this.stopped;
+        return;
+      }
       await connection.request(attachTerminal(this.sessionId, this.paneId));
       this.attached = true;
       this.attachFailures = 0;
@@ -566,6 +594,7 @@ export class TerminalController {
       this.lastError = describe(error);
       this.attachFailures += 1;
       this.log(`attach.failed (${this.attachFailures}) ${this.lastError}`);
+      this.yieldSizing();
       this.emit();
       if (!this.stopped && this.attachFailures < ATTACH_RETRY_LIMIT) {
         this.attachRetryTimer = setTimeout(() => {
@@ -575,13 +604,13 @@ export class TerminalController {
       }
     } finally {
       this.attaching = false;
-    }
-    if (this.reattachWanted) {
-      this.reattachWanted = false;
-      this.attached = false;
-      void this.attach();
-    } else if (this.attached && !sameGrid(this.sentGrid, this.grid)) {
-      this.scheduleResize();
+      if (!this.stopped && this.reattachWanted) {
+        this.reattachWanted = false;
+        this.attached = false;
+        void this.attach();
+      } else if (!this.stopped && this.attached && !sameGrid(this.sentGrid, this.grid)) {
+        this.scheduleResize();
+      }
     }
   }
 
@@ -633,6 +662,68 @@ export class TerminalController {
     } catch (error) {
       this.sentGrid = undefined;
       this.log(`resize.failed ${describe(error)}`);
+    }
+  }
+
+  /** Release only a select issued by this controller on the live connection. */
+  private yieldSizing(): void {
+    this.sizingIntent += 1;
+    this.sentGrid = undefined;
+    if (this.attachRetryTimer !== undefined) clearTimeout(this.attachRetryTimer);
+    this.attachRetryTimer = undefined;
+    if (this.resizeTimer !== undefined) clearTimeout(this.resizeTimer);
+    this.resizeTimer = undefined;
+    if (!this.options.registry.ownsSizing(this.registration)) return;
+    const connection = this.liveConnection();
+    if (!connection || this.sizingClaimEpoch !== connection.connectionEpoch) return;
+    this.sizingClaimEpoch = undefined;
+    this.options.registry.releaseSizing(this.registration!);
+    connection.request(yieldTerminalSizing())
+      .then(() => this.log("sizing.yield.ok"))
+      .catch((error: unknown) => this.log(`sizing.yield.failed ${describe(error)}`));
+  }
+
+  /** Foreground use reselects the session before sizing its existing terminal. */
+  private async reclaimSizing(): Promise<void> {
+    const connection = this.liveConnection();
+    if (!connection || !this.grid || this.stopped || !this.foreground.inForeground()) return;
+    if (this.attaching) {
+      this.reattachWanted = true;
+      return;
+    }
+    this.sizingClaimEpoch = connection.connectionEpoch;
+    this.options.registry.claimSizing(this.registration!);
+    const sizingIntent = ++this.sizingIntent;
+    let reclaimed = false;
+    try {
+      await connection.request(selectTerminalSession(this.sessionId));
+      if (this.stopped || !this.foreground.inForeground() || sizingIntent !== this.sizingIntent) return;
+      const grid = this.grid;
+      if (!grid) return;
+      await connection.request(resizeTerminal(grid.cols, grid.rows));
+      if (this.stopped || !this.foreground.inForeground() || sizingIntent !== this.sizingIntent) return;
+      this.sentGrid = grid;
+      this.lastResizeAt = Date.now();
+      this.attachFailures = 0;
+      reclaimed = true;
+      this.log(`sizing.reclaim.ok ${this.layoutSummary()}`);
+    } catch (error) {
+      this.log(`sizing.reclaim.failed ${describe(error)}`);
+      this.attachFailures += 1;
+      const retry = !this.stopped && this.foreground.inForeground() && this.liveConnection() === connection
+        && sizingIntent === this.sizingIntent
+        && this.attachFailures < ATTACH_RETRY_LIMIT;
+      this.yieldSizing();
+      if (retry) {
+        this.attachRetryTimer = setTimeout(() => {
+          this.attachRetryTimer = undefined;
+          void this.reclaimSizing();
+        }, ATTACH_RETRY_MS);
+      }
+    } finally {
+      if (reclaimed && !this.stopped && this.attached && this.foreground.inForeground() && !sameGrid(this.sentGrid, this.grid)) {
+        this.scheduleResize();
+      }
     }
   }
 
