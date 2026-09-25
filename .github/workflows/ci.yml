@@ -23,6 +23,9 @@ env:
   # The desktop crate's build script checks that externalBin sidecars exist;
   # only the packaging scripts stage the host helper.
   TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+  # vite's production build of the desktop (Monaco included) can exceed
+  # Node's default heap on the 7 GB macOS runners.
+  NODE_OPTIONS: --max-old-space-size=6144
 
 jobs:
   linux:
