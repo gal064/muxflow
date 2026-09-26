@@ -240,6 +240,11 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       // `false` even when an adapter was written: the answer is recorded, but
       // the thing the user asked for did not finish, and the dialog says so.
       if (questionId !== undefined) updateQuestion(questionId, { error: String(cause) });
+      // The hooks that did land still need their pane environment.
+      if (answered) {
+        asserted.current = false;
+        assertNaming(host);
+      }
       return false;
     }).finally(() => {
       // Unconditionally, including after a failure part-way through: an adapter
@@ -329,8 +334,9 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     // managed event set grew, `notWired` when the host was rebuilt since it
     // was set up or the agent was installed on it later. The consent is to
     // keeping the host set up, and each vendor still makes its user trust a
-    // new hook before running it. Withdrawing consent is an uninstall, which
-    // records a decline, so this never re-adds what the user took away.
+    // new hook before running it. An uninstall records a decline, which stops
+    // this until hooks are installed on the host again; any install counts as
+    // setting the whole host up again, deliberately — it is just hooks.
     const outdated = wiring.setupTargets;
     if (outdated.length === 0 || reassert.current.running || reassert.current.attempted) {
       // `install` asserts the naming itself when it succeeds; this is the
