@@ -10,6 +10,7 @@ import {
 import {
   copyCompletedTerminalSelection,
   installTerminalCopyOnSelect,
+  terminalClipboardAlias,
   translateTerminalKey,
   type TerminalKeyContext,
 } from "./terminalInputPolicy";
@@ -122,6 +123,23 @@ describe("terminal input translation", () => {
     expect(translateTerminalKey(key({ key: "ArrowLeft", metaKey: true, keyCode: 229 }), context())).toBeUndefined();
     expect(translateTerminalKey(key({ key: "ArrowLeft", metaKey: true, keyCode: 229 }), context({ alternateScreen: true })))
       .toBeUndefined();
+  });
+});
+
+describe("Linux clipboard aliases", () => {
+  const chord = (code: string, key: string, overrides: Partial<KeyboardEvent> = {}) =>
+    ({ altKey: false, code, ctrlKey: true, key, metaKey: false, shiftKey: true, ...overrides }) as KeyboardEvent;
+
+  it("reads Ctrl+Shift+C and Ctrl+Shift+V as copy and paste on Linux only", () => {
+    expect(terminalClipboardAlias(chord("KeyC", "C"), "linux")).toBe("copy");
+    expect(terminalClipboardAlias(chord("KeyV", "V"), "linux")).toBe("paste");
+    expect(terminalClipboardAlias(chord("KeyC", "C"), "mac")).toBeUndefined();
+  });
+
+  it("leaves the unshifted and extra-modifier chords to the keymap and the shell", () => {
+    expect(terminalClipboardAlias(chord("KeyC", "c", { shiftKey: false }), "linux")).toBeUndefined();
+    expect(terminalClipboardAlias(chord("KeyC", "C", { altKey: true }), "linux")).toBeUndefined();
+    expect(terminalClipboardAlias(chord("KeyX", "X"), "linux")).toBeUndefined();
   });
 });
 

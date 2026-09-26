@@ -179,6 +179,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    and its place in the tab order — the bell, whose whole job when it has
    nowhere to go is to say so — still has to read as frozen. */
 .bar-button:disabled, .bar-button[aria-disabled="true"] { color: var(--chrome-faint); cursor: default; }
+/* Linux window buttons at the end of the title bar, set off from the app's own
+   controls by a gap so a close aimed at the panel toggle has room to miss. */
+.window-controls { display: flex; gap: 2px; margin-left: 8px; }
+.window-controls .window-close:hover { background: var(--danger); color: var(--chrome-ink-strong); }
 
 .badge {
   display: inline-flex; align-items: center; justify-content: center;

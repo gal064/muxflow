@@ -1123,10 +1123,10 @@ describe("application shell accessibility contracts", () => {
     await act(async () => openAllTabs(renderer));
     const rows = renderer.root.findAllByProps({ role: "menuitemradio" });
     expect(rows).toHaveLength(11);
-    // The same nine tabs Control-1…9 addresses, and no lozenge on the rest.
+    // The same nine tabs Alt-1…9 addresses, and no lozenge on the rest.
     expect(rows.filter((row) => row.findAllByType("kbd").length > 0)).toHaveLength(9);
-    expect(rows[0].findByType("kbd").children.join("")).toBe("Ctrl+1");
-    expect(rows[8].findByType("kbd").children.join("")).toBe("Ctrl+9");
+    expect(rows[0].findByType("kbd").children.join("")).toBe("Alt+1");
+    expect(rows[8].findByType("kbd").children.join("")).toBe("Alt+9");
     await act(async () => renderer.unmount());
   });
 
@@ -1295,13 +1295,38 @@ describe("application shell accessibility contracts", () => {
       onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelOpen={false} platform={platform} sidebarOpen unread={0}
     />);
-    // `titleBarStyle: "Overlay"` is a macOS-only Tauri option; a Linux window
-    // keeps its native decorations, so the 78px reservation there would be
-    // dead space beside a real title bar.
+    // `titleBarStyle: "Overlay"` is a macOS-only Tauri option; Linux has no
+    // traffic lights to clear, so the 78px reservation there would be dead space.
     expect(bar("mac")).toContain("titlebar-overlay");
     expect(bar("linux")).not.toContain("titlebar-overlay");
-    // Everything else about the bar is identical across platforms.
+    // Without window buttons the bar is identical across platforms.
     expect([...bar("linux").matchAll(/<button/gu)]).toHaveLength([...bar("mac").matchAll(/<button/gu)].length);
+  });
+
+  it("ends the Linux bar in window buttons only when it is given them", async () => {
+    const controls = { maximized: false, onClose: vi.fn(), onMinimize: vi.fn(), onToggleMaximize: vi.fn() };
+    const bar = (windowControls?: typeof controls) => <TitleBar
+      canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
+      onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
+      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={0}
+      windowControls={windowControls}
+    />;
+    expect(renderToStaticMarkup(bar())).not.toContain("window-controls");
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(bar(controls)); });
+    const labels = renderer.root.findByProps({ className: "window-controls" })
+      .findAllByType("button").map((button) => button.props["aria-label"]);
+    expect(labels).toEqual(["Minimize", "Maximize", "Close window"]);
+    for (const button of renderer.root.findByProps({ className: "window-controls" }).findAllByType("button")) {
+      button.props.onClick();
+    }
+    expect(controls.onMinimize).toHaveBeenCalledOnce();
+    expect(controls.onToggleMaximize).toHaveBeenCalledOnce();
+    expect(controls.onClose).toHaveBeenCalledOnce();
+    expect(renderToStaticMarkup(bar({ ...controls, maximized: true }))).toContain('aria-label="Restore"');
+    // The title text itself drags the window, not just the space around it.
+    expect(renderToStaticMarkup(bar())).toMatch(/class="titlebar-workspace" data-tauri-drag-region/u);
+    await act(async () => renderer.unmount());
   });
 
   it("shows nothing while connected, and one explained line once the trouble persists", () => {

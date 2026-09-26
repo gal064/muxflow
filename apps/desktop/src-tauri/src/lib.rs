@@ -2,6 +2,7 @@ mod app_state;
 mod connection;
 mod external_links;
 mod incidents;
+mod linux_window;
 mod macos_window;
 #[cfg(target_os = "macos")]
 mod menu;
@@ -206,6 +207,11 @@ pub fn run() {
             ));
             for window in app.webview_windows().values() {
                 macos_window::enable_native_full_screen(window)?;
+                // Cosmetic: a window that keeps GTK's bar is still a usable one,
+                // so a failure here must not stop the app from starting.
+                if let Err(error) = linux_window::apply(window) {
+                    eprintln!("muxflow: {error}");
+                }
             }
             Ok(())
         })
@@ -225,6 +231,7 @@ pub fn run() {
             emit_test_notification,
             notification_permission_status,
             incidents::record_incident,
+            linux_window::window_chrome,
             connection::start_terminal,
             connection::stop_terminal,
             connection::prewarm_terminal_bulk,

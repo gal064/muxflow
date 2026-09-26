@@ -20,8 +20,8 @@
 //! Nothing is left for those to reach.
 //!
 //! This module is macOS-only, and so is the builder call that installs it. No
-//! other platform has the collision — the Linux binding for that command is
-//! Ctrl+Shift+W, which no menu item claims — and none has a menu to correct:
+//! other platform has the collision — Linux binds that command to Ctrl+W, but
+//! there is no menu there to claim it too — and none has a menu to correct:
 //! Tauri's default is itself macOS-gated, so a menu here would put a bar on
 //! Linux windows that never had one.
 

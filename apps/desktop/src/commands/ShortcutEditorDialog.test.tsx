@@ -13,7 +13,7 @@ describe("ShortcutEditorDialog", () => {
       renderer = create(<ShortcutEditorDialog
         onChange={onChange}
         onClose={vi.fn()}
-        overrides={{ "session.new": "Ctrl+Shift+T" }}
+        overrides={{ "session.new": "Ctrl+T" }}
         platform="linux"
       />);
     });
