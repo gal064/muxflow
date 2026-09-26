@@ -256,7 +256,7 @@ jobs:
           cp "$RUNNER_TEMP"/artifacts/linux-universal/muxflow-"$version"-linux-*.tar.gz "$out/"
           cp "$RUNNER_TEMP"/artifacts/macos/Muxflow_"$version"_aarch64.dmg "$out/"
           cp "$RUNNER_TEMP"/artifacts/android/muxflow-"$version"-android.apk "$out/"
-          cp release/linux/get.sh "$out/install.sh"
+          cp release/get.sh "$out/install.sh"
           (cd "$out" && sha256sum -- * > SHA256SUMS)
           node -e 'process.stdout.write(JSON.stringify({version: process.argv[1], url: process.argv[2]}, null, 2) + "\n")' \
             "$version" "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" > "$out/latest.json"
