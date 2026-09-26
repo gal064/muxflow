@@ -1,4 +1,4 @@
-import { keyboardEventIsComposing, type Platform } from "../../commands/registry";
+import { keyboardEventIsComposing, keyFromCode, type Platform } from "../../commands/registry";
 import { cleanWrappedCommandSelection } from "@muxflow/terminal-interactions";
 import type { TerminalRenderer } from "./TerminalRenderer";
 
@@ -48,6 +48,21 @@ export function translateTerminalKey(event: TerminalKeyEvent, context: TerminalK
   if (event.key === "ArrowLeft") return context.alternateScreen ? `\u001b${cursorKeyPrefix}H` : "\u0001";
   if (event.key === "ArrowRight") return context.alternateScreen ? `\u001b${cursorKeyPrefix}F` : "\u0005";
   return undefined;
+}
+
+/**
+ * Ctrl+Shift+C and Ctrl+Shift+V, the Linux terminal's traditional copy and
+ * paste. The keymap puts those commands on Ctrl+C / Ctrl+V; these stay as
+ * fixed aliases so a Ghostty or GNOME Terminal habit keeps working.
+ */
+export function terminalClipboardAlias(
+  event: Pick<KeyboardEvent, "altKey" | "code" | "ctrlKey" | "key" | "metaKey" | "shiftKey">,
+  platform: Platform,
+): "copy" | "paste" | undefined {
+  if (platform !== "linux" || !event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return undefined;
+  // Resolved the way the keymap resolves a Shift chord: by physical key.
+  const key = keyFromCode(event.code) ?? event.key.toUpperCase();
+  return key === "C" ? "copy" : key === "V" ? "paste" : undefined;
 }
 
 /** Copies one finalized selection without allowing an empty click to clear the clipboard. */

@@ -221,6 +221,12 @@ export interface TerminalRenderer {
   onViewportChange(listener: (state: TerminalViewportState) => void): () => void;
   getSelection(): string;
   hasSelection(): boolean;
+  /**
+   * A selection the user made, as opposed to a search match. Linux Ctrl+C
+   * copies only this; with anything else it is the shell's interrupt.
+   */
+  hasCopyableSelection(): boolean;
+  clearSelection(): void;
   /** Snapshot text and immutable buffer evidence before asynchronous clipboard I/O. */
   getSelectionSnapshot?(): TerminalSelectionSnapshot;
   onSelectionChange(listener: () => void): () => void;
@@ -393,6 +399,15 @@ export class XtermRenderer implements TerminalRenderer {
   readonly #gridListeners = new Set<() => void>();
   readonly #disposables: IDisposable[] = [];
   /**
+   * Whether the current selection is a search match rather than one the user
+   * made. SearchAddon marks its match by selecting it, synchronously inside
+   * `findNext`/`findPrevious` — including the re-search it schedules itself
+   * after every write while a search is active, which is why the flag wraps the
+   * addon's own methods rather than `search()`.
+   */
+  #searching = false;
+  #selectionFromSearch = false;
+  /**
    * Everything that only makes sense while the GPU renderer is mounted: the
    * atlas-change repaint and the staleness probe both read the addon, and a
    * pane that has dropped back to the DOM renderer has neither an atlas nor a
@@ -461,6 +476,20 @@ export class XtermRenderer implements TerminalRenderer {
     this.#terminal.loadAddon(this.#fit);
     this.#terminal.loadAddon(this.#serialize);
     this.#terminal.loadAddon(this.#search);
+    for (const method of ["findNext", "findPrevious"] as const) {
+      const find = this.#search[method].bind(this.#search);
+      this.#search[method] = (...args: Parameters<SearchAddon["findNext"]>) => {
+        this.#searching = true;
+        try {
+          return find(...args);
+        } finally {
+          this.#searching = false;
+        }
+      };
+    }
+    this.#disposables.push(this.#terminal.onSelectionChange(() => {
+      this.#selectionFromSearch = this.#searching;
+    }));
     this.#disposables.push(installOsc52ClipboardWrite(
       this.#terminal.parser,
       this.#options.onClipboardWrite ?? (() => undefined),
@@ -1045,6 +1074,14 @@ export class XtermRenderer implements TerminalRenderer {
 
   hasSelection(): boolean {
     return this.#terminal.hasSelection();
+  }
+
+  hasCopyableSelection(): boolean {
+    return this.#terminal.hasSelection() && !this.#selectionFromSearch;
+  }
+
+  clearSelection(): void {
+    this.#terminal.clearSelection();
   }
 
   paste(text: string): void {

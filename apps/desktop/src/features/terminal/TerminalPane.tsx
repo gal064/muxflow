@@ -42,6 +42,7 @@ import { writeNativeTerminalClipboard, writeTerminalApplicationClipboard } from 
 import {
   copyCompletedTerminalSelection,
   installTerminalCopyOnSelect,
+  terminalClipboardAlias,
   translateTerminalKey,
 } from "./terminalInputPolicy";
 import { armPanePaint, notePanePainted } from "./panePaintGate";
@@ -240,6 +241,8 @@ export function interceptTerminalPlainTextPaste(
 
 export interface TerminalPaneController {
   focus(): void;
+  /** See `TerminalRenderer.hasCopyableSelection`. */
+  hasCopyableSelection(): boolean;
   copy(): Promise<boolean>;
   paste(): Promise<boolean>;
   showSearch(): void;
@@ -538,9 +541,17 @@ export function TerminalPane({
       resumeLive("Returning from terminal history requires a current screen");
       inputRef.current(pane.id, input);
     };
+    // Input the user produced through this pane's own paths — translated keys
+    // and pastes. xterm clears its selection on the input it sends itself; these
+    // bypass it, and a selection left standing would turn the next Linux Ctrl+C
+    // into a copy instead of the interrupt the user is typing towards.
+    const sendUserInput = (input: TerminalInput) => {
+      if (platformRef.current === "linux") renderer.clearSelection();
+      sendTerminalInput(input);
+    };
     const returnToLiveFromUi = () => resumeLive("Returning to live terminal output requires a current screen");
     returnToLiveRef.current = returnToLiveFromUi;
-    sendTerminalInputRef.current = sendTerminalInput;
+    sendTerminalInputRef.current = sendUserInput;
     const commitRendered = (generation: number, terminalEpoch: number | undefined, establishesEpoch = false): boolean => {
       if (establishesEpoch && hub.generationEpoch === terminalEpoch) {
         rendererEpoch = terminalEpoch;
@@ -608,7 +619,7 @@ export function TerminalPane({
       // textarea. Own plain text in capture phase so xterm cannot wrap it in a
       // bracketed-paste envelope on its way through.
       interceptTerminalPlainTextPaste(event, (text) => {
-        sendTerminalInput({ kind: "text", data: text });
+        sendUserInput({ kind: "text", data: text });
       });
     };
     terminalContainer.addEventListener("paste", interceptPaste, true);
@@ -624,6 +635,17 @@ export function TerminalPane({
       // translations before xterm collapses modifiers. Every key the policy
       // does not translate continues to xterm untouched.
       keyActivityRef.current?.(pane.id);
+      const alias = terminalClipboardAlias(event, platformRef.current);
+      if (alias) {
+        // Claimed outright: preventDefault also cancels the native paste this
+        // chord would otherwise trigger, so the text is sent exactly once.
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        void (alias === "copy" ? controller.copy() : controller.paste()).catch((error) => {
+          diagnosticRef.current?.(`Could not ${alias} in the terminal: ${String(error)}`);
+        });
+        return;
+      }
       const translated = translateTerminalKey(event, {
         alternateScreen: renderer.isAlternateScreenActive(),
         applicationCursorKeys: renderer.isApplicationCursorMode(),
@@ -633,7 +655,7 @@ export function TerminalPane({
       if (translated === undefined) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      sendTerminalInput({ kind: "text", data: translated });
+      sendUserInput({ kind: "text", data: translated });
     };
     terminalContainer.addEventListener("keydown", handleTerminalKeyDown, true);
     const disposeCopyOnSelect = installTerminalCopyOnSelect({
@@ -1103,15 +1125,25 @@ export function TerminalPane({
 
     const controller: TerminalPaneController = {
       focus: () => renderer.focus(),
-      copy: () => copyCompletedTerminalSelection(
-        renderer,
-        true,
-        writeNativeTerminalClipboard,
-        cleanWrappedCommandsRef.current,
-      ),
+      hasCopyableSelection: () => renderer.hasCopyableSelection(),
+      copy: async () => {
+        try {
+          return await copyCompletedTerminalSelection(
+            renderer,
+            true,
+            writeNativeTerminalClipboard,
+            cleanWrappedCommandsRef.current,
+          );
+        } finally {
+          // Linux Ctrl+C is copy and interrupt on one chord: dropping the
+          // selection once copied — or once the copy failed — makes the next
+          // press the interrupt rather than another attempt.
+          if (platformRef.current === "linux") renderer.clearSelection();
+        }
+      },
       paste: async () => {
         if (await transferControllerRef.current?.pasteClipboard()) return true;
-        sendTerminalInput({ kind: "text", data: await navigator.clipboard.readText() });
+        sendUserInput({ kind: "text", data: await navigator.clipboard.readText() });
         return true;
       },
       showSearch: () => setSearching(true),
@@ -1149,7 +1181,7 @@ export function TerminalPane({
       disposeCopyOnSelect();
       controllerRef.current(pane.id, undefined);
       if (returnToLiveRef.current === returnToLiveFromUi) returnToLiveRef.current = undefined;
-      if (sendTerminalInputRef.current === sendTerminalInput) sendTerminalInputRef.current = undefined;
+      if (sendTerminalInputRef.current === sendUserInput) sendTerminalInputRef.current = undefined;
       const currentClientId = clientIdRef.current;
       const handoff = (async () => {
         try {
