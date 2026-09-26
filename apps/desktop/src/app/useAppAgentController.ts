@@ -127,9 +127,12 @@ export function useAppAgentController(options: AppAgentControllerOptions) {
     onHooksChanged: (action, hostProfileId, hostIdentity) => {
       runtime.refreshSnapshot(hostProfileId);
       options.recordDecision(hostProfileId, action === "install" ? "accepted" : "declined");
-      if (action === "uninstall") {
-        void runtime.removeHostNaming(hostIdentity).catch((cause) => options.setStatus(String(cause)));
-      }
+      // Both directions carry the host settings with the hooks: the naming,
+      // and the Codex pane environment that shares its request. The setup
+      // effect sends them once per connection, so an install after an
+      // uninstall on the same connection has to send them itself.
+      const settings = action === "uninstall" ? runtime.removeHostNaming : runtime.applyHostNaming;
+      void settings(hostIdentity).catch((cause) => options.setStatus(String(cause)));
     },
     onModalChange: options.setAgentModalOpen,
     onStatus: options.setStatus,
