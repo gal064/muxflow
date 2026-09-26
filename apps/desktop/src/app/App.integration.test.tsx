@@ -188,16 +188,16 @@ describe("App orchestration", () => {
 
     const close = (key: string, code: string) => {
       const event = new KeyboardEvent("keydown", {
-        key, code, ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+        key, code, ctrlKey: true, bubbles: true, cancelable: true,
       });
       act(() => { window.dispatchEvent(event); });
       return event;
     };
     // Nothing is connected, so there is no tab for "Close current tab" to act
     // on. The keystroke is still the app's, and must not travel any further.
-    expect(close("W", "KeyW").defaultPrevented).toBe(true);
+    expect(close("w", "KeyW").defaultPrevented).toBe(true);
     // A chord the keymap never claimed still belongs to whoever comes next.
-    expect(close("Y", "KeyY").defaultPrevented).toBe(false);
+    expect(close("y", "KeyY").defaultPrevented).toBe(false);
     await act(async () => renderer!.unmount());
   });
 });

@@ -418,6 +418,8 @@ export function useShellCommands(options: ShellCommandOptions): {
     hasHostProfile: Boolean(options.deletableHostProfile),
     pinnedOnly: options.appState.shell.pinnedOnly,
     rowCommands: options.rowCommands,
+    hasTerminalSelection: () => Boolean(options.activePane && !options.selectedAppTab
+      && options.controllers.current.get(options.activePane.id)?.hasCopyableSelection()),
     run: runCommand,
   }), [options, runCommand]);
 

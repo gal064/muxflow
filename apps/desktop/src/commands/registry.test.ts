@@ -28,6 +28,7 @@ const context = (overrides: Partial<CommandContext> = {}): CommandContext => ({
   hasHostProfile: true,
   pinnedOnly: false,
   rowCommands: [],
+  hasTerminalSelection: () => true,
   run: () => undefined, ...overrides,
 });
 
@@ -46,11 +47,34 @@ const eventTarget = (editable: boolean, terminal: boolean) => ({
 describe("command registry", () => {
   it("uses conventional Linux shortcuts without a tmux prefix", () => {
     const split = commandRegistry.find((command) => command.id === "pane.splitRight")!;
-    expect(shortcutFor(split, "linux", {})).toBe("Ctrl+Shift+D");
+    expect(shortcutFor(split, "linux", {})).toBe("Ctrl+Shift+O");
     const event = {
-      key: "d", ctrlKey: true, shiftKey: true, altKey: false, metaKey: false,
+      key: "O", code: "KeyO", ctrlKey: true, shiftKey: true, altKey: false, metaKey: false,
     } as KeyboardEvent;
     expect(commandForKeyboardEvent(event, "linux", {})?.id).toBe("pane.splitRight");
+  });
+
+  it("resolves a Ctrl chord typed on a non-Latin layout by its physical key", () => {
+    // Hebrew types א under Ctrl+T; the chord is still New terminal tab.
+    const event = { key: "א", code: "KeyT", ctrlKey: true, shiftKey: false, altKey: false, metaKey: false } as KeyboardEvent;
+    expect(commandForKeyboardEvent(event, "linux", {})?.id).toBe("window.new");
+  });
+
+  // The Linux keymap is the macOS one with ⌘ read as Ctrl, except where that
+  // takes a chord the shell cannot lose; those fall back to Ghostty's keys.
+  it("maps the Linux keymap from macOS with Ghostty fallbacks", () => {
+    const linux = (id: string) => commandRegistry.find((command) => command.id === id)?.defaults?.linux;
+    expect(linux("session.new")).toBe("Ctrl+N");
+    expect(linux("window.new")).toBe("Ctrl+T");
+    expect(linux("window.close")).toBe("Ctrl+W");
+    expect(linux("pane.splitDown")).toBe("Ctrl+Shift+D");
+    expect(linux("pane.focusLeft")).toBe("Ctrl+Alt+ArrowLeft");
+    expect(linux("terminal.search")).toBe("Ctrl+F");
+    expect(linux("terminal.copy")).toBe("Ctrl+C");
+    expect(linux("terminal.paste")).toBe("Ctrl+V");
+    // Ghostty fallbacks: Ctrl+D is EOF and Ctrl+E is end-of-line.
+    expect(linux("pane.splitRight")).toBe("Ctrl+Shift+O");
+    expect(linux("pane.zoom")).toBe("Ctrl+Shift+Enter");
   });
 
   it("offers New workspace when any shown host can create, independently of the active host", () => {
@@ -140,10 +164,10 @@ describe("command registry", () => {
     expect(shortcut("agents.jumpUnread", "mac")).toBe("Meta+Shift+U");
     expect(shortcut("workspace.select4", "mac")).toBe("Meta+4");
     expect(shortcut("tab.select4", "mac")).toBe("Ctrl+4");
-    // Super is the compositor's on Linux, so workspaces move to Alt there and
+    // ⌘→Ctrl puts workspaces on Ctrl there, so tabs take Ghostty's Alt+N and
     // the two positional families stay distinct.
-    expect(shortcut("workspace.select4", "linux")).toBe("Alt+4");
-    expect(shortcut("tab.select4", "linux")).toBe("Ctrl+4");
+    expect(shortcut("workspace.select4", "linux")).toBe("Ctrl+4");
+    expect(shortcut("tab.select4", "linux")).toBe("Alt+4");
   });
 
   it("resolves an Option-modified binding, which macOS rewrites into a different glyph", () => {
@@ -263,11 +287,11 @@ describe("command registry", () => {
     // as bindings move around.
     expect(shortcutCollisions("linux", {})).toEqual([]);
     expect(shortcutCollisions("mac", {})).toEqual([]);
-    expect(shortcutCollisions("linux", { "session.new": "Ctrl+Shift+T" })).toEqual([{
-      shortcut: "Ctrl+Shift+T", commandIds: ["session.new", "window.new"],
+    expect(shortcutCollisions("linux", { "session.new": "Ctrl+T" })).toEqual([{
+      shortcut: "Ctrl+T", commandIds: ["session.new", "window.new"],
     }]);
-    const event = { key: "T", ctrlKey: true, shiftKey: true, altKey: false, metaKey: false } as KeyboardEvent;
-    expect(commandForKeyboardEvent(event, "linux", { "session.new": "Ctrl+Shift+T" })).toBeUndefined();
+    const event = { key: "t", ctrlKey: true, shiftKey: false, altKey: false, metaKey: false } as KeyboardEvent;
+    expect(commandForKeyboardEvent(event, "linux", { "session.new": "Ctrl+T" })).toBeUndefined();
   });
 
   it("disables relative window moves when there is no adjacent target", () => {
@@ -409,5 +433,44 @@ describe("keyboard disposition", () => {
     // Every command flagged that way has to be one the platform can answer.
     expect(commandRegistry.filter((command) => command.nativeFallback).map((command) => command.id))
       .toEqual(["terminal.copy", "terminal.paste"]);
+  });
+});
+
+describe("Linux Ctrl+C", () => {
+  const ctrl = (key: string) => ({
+    key, code: `Key${key.toUpperCase()}`, metaKey: false, ctrlKey: true, altKey: false, shiftKey: false,
+    isComposing: false, keyCode: 0,
+    target: eventTarget(true, true),
+  }) as KeyboardEvent;
+
+  const linux = (event: KeyboardEvent, selection: boolean) =>
+    shortcutDisposition(event, "linux", {}, false, context({ hasTerminalSelection: () => selection }));
+
+  it("copies while the pane holds a copyable selection", () => {
+    expect(linux(ctrl("c"), true)).toEqual({ kind: "run", commandId: "terminal.copy" });
+  });
+
+  // Nothing copyable selected — including a search match, which the pane does
+  // not count — means the chord is the shell's interrupt.
+  it("yields to the shell as its interrupt with nothing copyable selected", () => {
+    expect(linux(ctrl("c"), false)).toEqual({ kind: "yield", commandId: "terminal.copy" });
+  });
+
+  // Only Ctrl+C doubles as the interrupt. A copy rebound elsewhere has no
+  // terminal meaning to yield to.
+  it("does not yield a copy rebound off Ctrl+C", () => {
+    const altC = { ...ctrl("c"), ctrlKey: false, altKey: true } as KeyboardEvent;
+    expect(shortcutDisposition(altC, "linux", { "terminal.copy": "Alt+C" }, false, context({ hasTerminalSelection: () => false })))
+      .toEqual({ kind: "run", commandId: "terminal.copy" });
+  });
+
+  it("pastes on Ctrl+V regardless of selection", () => {
+    expect(linux(ctrl("v"), false)).toEqual({ kind: "run", commandId: "terminal.paste" });
+  });
+
+  it("leaves macOS ⌘C a copy whatever the selection", () => {
+    const meta = { ...ctrl("c"), metaKey: true, ctrlKey: false } as KeyboardEvent;
+    expect(shortcutDisposition(meta, "mac", {}, false, context({ hasTerminalSelection: () => false })))
+      .toEqual({ kind: "run", commandId: "terminal.copy" });
   });
 });

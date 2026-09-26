@@ -21,6 +21,8 @@ import { TauriTerminalTransferClient } from "../features/terminal/terminalTransf
 import { useTerminalTransferRegistry } from "../features/terminal/terminalTransferRegistry";
 import { abandonPanePaintSpansForScope } from "../perf/probe";
 import { recordIncident } from "../diagnostics/incidents";
+import { createCopyChordJournal } from "../diagnostics/copyChordJournal";
+import { useWindowChrome } from "../features/shell/useWindowChrome";
 import type { TmuxAction } from "../features/tmux/actions";
 import { TauriAgentClient } from "../features/agents/api";
 import type { AgentRuntimeScope } from "../features/agents/types";
@@ -228,6 +230,7 @@ export function App() {
   const fileClient = useMemo(() => new TauriFileWorkspaceClient(), []);
   const gitClient = useMemo(() => new TauriGitWorkspaceClient(), []);
   const platform = useMemo(() => currentPlatform(), []);
+  const windowControls = useWindowChrome(platform);
   const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus, platform);
   const availableUpdate = useUpdateCheck();
   // Read by things that run later than the render that scheduled them — the
@@ -1239,10 +1242,14 @@ export function App() {
     || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecovery.modalOpen
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
 
+  const [journalCopyChord] = useState(() => createCopyChordJournal());
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       const disposition = shortcutDisposition(event, platform, shortcuts, modalOpen, commandContext);
-      if (disposition.kind === "ignore") return;
+      if (platform === "linux") journalCopyChord(disposition, activePane?.id);
+      // A yielded chord is the terminal's: Linux Ctrl+C with nothing to copy
+      // must reach the shell as its interrupt.
+      if (disposition.kind === "ignore" || disposition.kind === "yield") return;
       // A claimed shortcut is consumed even when its command cannot run, so it
       // never reaches the platform's own binding for the same chord.
       event.preventDefault();
@@ -1251,7 +1258,7 @@ export function App() {
     };
     window.addEventListener("keydown", handleKey, true);
     return () => window.removeEventListener("keydown", handleKey, true);
-  }, [commandContext, modalOpen, platform, runCommand, shortcuts]);
+  }, [activePane?.id, commandContext, journalCopyChord, modalOpen, platform, runCommand, shortcuts]);
 
   const handleInput = useCallback((paneId: string, input: TerminalInput) => {
     if (!clientId || !hostState.canMutate) return;
@@ -1472,6 +1479,7 @@ export function App() {
       sidebarOpen={sidebarOpen}
       unread={unread}
       update={availableUpdate ?? undefined}
+      windowControls={windowControls}
       workspaceName={activeSession?.name}
     />
     <div className="shell-body">
