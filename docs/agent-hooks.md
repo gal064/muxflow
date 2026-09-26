@@ -39,9 +39,12 @@ On connect the desktop asks once per host profile whether to set it up, and only
 when the host reports nothing at all. The answer is remembered either way, and
 `Settings → Connection → Set up agent status…` and the agents section's context
 menu are where it is revisited. Consent is to keeping the host set up: when the
-managed event set grows, an already-consented host is brought current on connect
-without asking again — merge-only, backed up and idempotent, so a host that is
-already current is not written to.
+managed event set grows, when the host was rebuilt since it was set up, or when
+an agent is installed on it later, an already-consented host is brought current
+on connect without asking again — merge-only, backed up and idempotent, so a
+host that is already current is not written to. Each vendor still asks its user
+to trust a new hook before running it. Removing hooks records a decline, so they
+are not added back until the host is set up again.
 
 The same consent also keeps Codex hooks in their pane. Codex 0.157 and newer
 run hooks inside a shared background server that has no `TMUX_PANE`, so on
