@@ -325,12 +325,13 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
     // files, so it gets no weaker a gate than the first install did.
     const host = consentedHost(optionsRef.current);
     if (!host || options.decision !== "accepted") return;
-    // Only adapters this app already owns entries in. `partial` means the
-    // managed event set grew under a host the user already approved, which is
-    // what this exists for. A `notWired` adapter that appeared *later* is one
-    // the consent dialog never named, and writing its configuration without
-    // ever showing the user its path is not what "one-time consent" bought.
-    const outdated = wiring.setupTargets.filter((adapter) => adapter.hookWiring === "partial");
+    // Every adapter the host says an install would act on: `partial` when the
+    // managed event set grew, `notWired` when the host was rebuilt since it
+    // was set up or the agent was installed on it later. The consent is to
+    // keeping the host set up, and each vendor still makes its user trust a
+    // new hook before running it. Withdrawing consent is an uninstall, which
+    // records a decline, so this never re-adds what the user took away.
+    const outdated = wiring.setupTargets;
     if (outdated.length === 0 || reassert.current.running || reassert.current.attempted) {
       // `install` asserts the naming itself when it succeeds; this is the
       // nothing-to-install path, which still has a tmux server to talk to.
