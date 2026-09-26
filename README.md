@@ -11,9 +11,7 @@
 [![macOS](https://img.shields.io/badge/macOS-Apple_Silicon-informational?logo=apple&logoColor=white)](#macos)
 [![Android](https://img.shields.io/badge/Android-APK-informational?logo=android&logoColor=white)](#android)
 
-<a href="https://gal064.github.io/muxflow/"><img src="docs/assets/demo-cover.jpg" alt="Play the Muxflow demo video" width="900" /></a>
-
-### [▶ Watch the demo](https://gal064.github.io/muxflow/)
+<a href="https://gal064.github.io/muxflow/"><img src="docs/assets/demo-cover.jpg" alt="Play the Muxflow demo video" width="760" /></a>
 
 </div>
 
