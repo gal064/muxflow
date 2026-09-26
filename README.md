@@ -121,17 +121,23 @@ Android home screen show a red **Update** pill that opens its release page.
 
 ### Linux
 
-Download `muxflow-<version>-linux-x86_64.tar.gz`, then:
-
 ```sh
-tar -xzf muxflow-*-linux-x86_64.tar.gz
-cd muxflow-*-linux-x86_64
-./install.sh
-muxflow
+curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash
 ```
 
-The default rootless prefix is `~/.local`; set `ADE_INSTALL_PREFIX` for another
-location. See [setup](./docs/setup.md) and [uninstall](./docs/uninstall.md).
+Run the same command again to upgrade. It installs under the rootless prefix
+`~/.local`; set `ADE_INSTALL_PREFIX` for another location, or
+`MUXFLOW_VERSION=X.Y.Z` to install a specific release. See
+[setup](./docs/setup.md) and [uninstall](./docs/uninstall.md).
+
+To install by hand instead, download `muxflow-<version>-linux-<arch>.tar.gz`
+(`x86_64` or `aarch64`), then:
+
+```sh
+tar -xzf muxflow-*-linux-*.tar.gz
+cd muxflow-*-linux-*/
+./install.sh
+```
 
 ### macOS
 
