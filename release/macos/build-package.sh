@@ -155,7 +155,11 @@ fi
 "$repo/release/macos/verify-package.sh" "$app"
 
 mkdir -p "$(dirname "$dmg")"
-hdiutil create -volname 'Muxflow' -srcfolder "$app" -ov -format UDZO "$dmg"
+# dmgbuild writes the Finder layout directly instead of scripting Finder, so the
+# drag-to-install window comes out the same on a headless runner. Pinned so the
+# layout cannot drift between releases.
+command -v uvx >/dev/null || { echo "building the DMG requires uv (https://docs.astral.sh/uv/)" >&2; exit 69; }
+uvx --from dmgbuild==1.6.7 dmgbuild -s "$repo/release/macos/dmg-settings.py" -D app="$app" Muxflow "$dmg"
 if [[ "$identity" != - ]]; then
   codesign --force --timestamp --sign "$identity" "$dmg"
   notarize "$dmg"

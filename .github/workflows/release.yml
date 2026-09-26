@@ -145,6 +145,8 @@ jobs:
           cache: pnpm
       - run: rustup show active-toolchain || rustup toolchain install
       - run: pnpm install --frozen-lockfile
+      # build-package.sh lays out the DMG window with dmgbuild through uvx.
+      - uses: astral-sh/setup-uv@v10.2.0
       - uses: actions/download-artifact@v4
         with:
           pattern: linux-{x86_64,aarch64}
