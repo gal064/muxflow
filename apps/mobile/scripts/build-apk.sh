@@ -27,8 +27,10 @@ if [[ "$APK_VARIANT" == release ]]; then
   # keytool prints the digest as colon-separated pairs, apksigner as bare hex.
   expected=${expected//:/}
   apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+  # The signer label varies by build-tools version ("Signer #1", "V2 Signer:"),
+  # so collect every signer's digest and require exactly one distinct value.
   actual=$("$apksigner" verify --print-certs "$APK_PATH" \
-    | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+    | sed -n 's/^.*[Ss]igner.* certificate SHA-256 digest: //p' | sort -u)
   if [[ "${actual,,}" != "${expected,,}" ]]; then
     echo "release APK is signed by certificate ${actual:-<none>}, expected $expected" >&2
     exit 1
