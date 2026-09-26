@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Muxflow — Remote first tmux IDE</title>
+<meta name="description" content="Muxflow is a remote first tmux IDE: a desktop and mobile front end for tmux and your coding agents." />
+<link rel="icon" href="assets/icon-128.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+<style>
+  /* Palette is the desktop app's (apps/desktop/src/tokens.css): Ghostty Default Style Dark. */
+  :root {
+    --bg: #282c34;
+    --raised: #2c313a;
+    --hairline: #313640;
+    --border: #3e4451;
+    --ink: #c4c8c6;
+    --ink-strong: #ffffff;
+    --dim: #8f96a1;
+    --faint: #636b78;
+    --accent: #7aa6da;
+    --accent-ink: #282c34;
+    --green: #b6bd68;
+    --yellow: #f0c674;
+    --red: #cc6566;
+    --teal: #8abeb7;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 400 15px/1.65 var(--mono);
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+
+  /* hero */
+  header { padding: 72px 0 40px; }
+  .prompt { color: var(--faint); font-size: 13px; margin: 0 0 16px; }
+  .prompt b { color: var(--green); font-weight: 400; }
+  h1 {
+    margin: 0; color: var(--ink-strong); font-weight: 700;
+    font-size: clamp(32px, 6vw, 56px); line-height: 1.1; letter-spacing: -0.02em;
+  }
+  .cursor {
+    display: inline-block; width: 0.55em; height: 0.95em; margin-left: 0.08em;
+    background: var(--accent); vertical-align: -0.08em; animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+  .lede { margin: 20px 0 0; max-width: 84ch; color: var(--dim); }
+
+  .cta { margin-top: 32px; }
+  .install {
+    display: flex; align-items: stretch; width: fit-content; max-width: 100%;
+    border: 1px solid var(--border); border-radius: 4px; background: var(--raised); font-size: 14px;
+  }
+  .install code {
+    min-width: 0; padding: 14px 18px; overflow-x: auto; white-space: nowrap; color: var(--ink-strong);
+    scrollbar-width: none;
+  }
+  .install code::-webkit-scrollbar { display: none; }
+  .install code::before { content: "$  "; color: var(--accent); }
+  button.copy {
+    flex: none; font: inherit; font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer;
+    padding: 0 20px; background: transparent; color: var(--dim); border: 0; border-left: 1px solid var(--border);
+  }
+  button.copy:hover { color: var(--ink-strong); }
+  @media (max-width: 900px) {
+    .install code { mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
+  }
+  .meta { margin: 16px 0 0; font-size: 13px; color: var(--faint); }
+  .meta .sep { margin: 0 10px; }
+  .meta a { white-space: nowrap; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* demo video */
+  .demo { padding: 24px 0 88px; }
+  .window {
+    border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: #1d1f21;
+    box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.7);
+  }
+  .window video, .play img { display: block; width: 100%; height: auto; }
+  .play { position: relative; display: block; width: 100%; padding: 0; border: 0; background: none; cursor: pointer; }
+  .play-label {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: flex; align-items: center; gap: 12px; white-space: nowrap;
+    padding: 14px 22px; border-radius: 6px; font: 600 15px var(--mono);
+    background: var(--accent); color: var(--accent-ink); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  }
+  .play-label svg { width: 14px; height: 14px; fill: currentColor; }
+  .play-label .len { font-weight: 400; opacity: 0.7; }
+  .play:hover .play-label { filter: brightness(1.08); }
+
+  /* features */
+  section.features { padding: 0 0 96px; }
+  h2 { margin: 0 0 24px; color: var(--ink-strong); font-size: 20px; font-weight: 700; }
+  h2::before { content: "## "; color: var(--faint); }
+  ol.list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--hairline); }
+  ol.list li {
+    display: grid; grid-template-columns: 3.5ch 22ch 1fr; gap: 0 24px;
+    padding: 18px 0; border-bottom: 1px solid var(--hairline);
+  }
+  .n { color: var(--faint); }
+  .t { color: var(--ink-strong); font-weight: 600; }
+  .d { color: var(--dim); }
+  .d em { font-style: normal; color: var(--yellow); }
+  @media (max-width: 720px) {
+    ol.list li { grid-template-columns: 3.5ch 1fr; }
+    ol.list .d { grid-column: 2; margin-top: 4px; }
+  }
+
+  footer { border-top: 1px solid var(--hairline); padding: 28px 0 40px; font-size: 12px; color: var(--faint); }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+  footer .links { margin-left: auto; display: flex; gap: 20px; }
+  footer a { color: var(--dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <p class="prompt"><b>~</b> $ muxflow --help</p>
+    <h1>Remote-first tmux IDE for coding agents<span class="cursor" aria-hidden="true"></span></h1>
+    <p class="lede">Cross-device notifications for Claude Code and Codex, multi-host SSH connections, seamless pasting, a file explorer, uploads and downloads, and a Git client.</p>
+    <div class="cta">
+      <div class="install">
+        <code id="install-cmd">curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash</code>
+        <button class="copy" type="button" data-copy="install-cmd">copy</button>
+      </div>
+      <p class="meta">macOS · Linux · MIT<span class="sep">—</span><a href="https://github.com/gal064/muxflow/releases/latest">dmg and manual install →</a><span class="sep">·</span><a href="https://github.com/gal064/muxflow">github →</a></p>
+    </div>
+  </div>
+</header>
+
+<section class="demo">
+  <div class="wrap">
+    <div class="window">
+      <button class="play" type="button" id="play-demo" aria-label="Play the demo video">
+        <img src="assets/demo-poster.jpg" alt="Muxflow on macOS attached to a remote host over SSH, with Codex running" />
+        <span class="play-label"><svg viewBox="0 0 12 14" aria-hidden="true"><path d="M0 0l12 7-12 7z" /></svg>play demo<span class="len">2:37</span></span>
+      </button>
+      <video id="demo-video" controls playsinline preload="none" hidden>
+        <source src="assets/demo.mp4" type="video/mp4" />
+      </video>
+    </div>
+  </div>
+</section>
+
+<section class="features" id="features">
+  <div class="wrap">
+    <h2>features</h2>
+    <ol class="list">
+      <li><span class="n">01</span><span class="t">Remote first</span><span class="d">Built to work on remote machines over SSH.</span></li>
+      <li><span class="n">02</span><span class="t">Multi-host</span><span class="d">Workspaces and agents from several SSH hosts in one sidebar, each marked with its host.</span></li>
+      <li><span class="n">03</span><span class="t">Native copy and paste</span><span class="d">Paste or drag screenshots and files from your laptop into a remote pane. Claude Code and Codex see them as if they were local.</span></li>
+      <li><span class="n">04</span><span class="t">File explorer</span><span class="d">Browse, edit and download files on the remote machine, right next to the terminal.</span></li>
+      <li><span class="n">05</span><span class="t">Git client</span><span class="d">Diff, stage, commit and push without leaving Muxflow.</span></li>
+      <li><span class="n">06</span><span class="t">tmux based</span><span class="d">Your processes keep running even when you close Muxflow.</span></li>
+      <li><span class="n">07</span><span class="t">Agent status</span><span class="d">Agent statuses and notifications on both desktop and mobile, for Claude Code and Codex.</span></li>
+      <li><span class="n">08</span><span class="t">Mobile app</span><span class="d">Android and iOS <em>(coming soon)</em>.</span></li>
+      <li><span class="n">09</span><span class="t">Open source</span><span class="d">MIT licensed.</span></li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>muxflow · MIT</span>
+    <div class="links">
+      <a href="https://github.com/gal064/muxflow">github</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  document.getElementById("play-demo").addEventListener("click", (event) => {
+    const video = document.getElementById("demo-video");
+    event.currentTarget.hidden = true;
+    video.hidden = false;
+    video.play();
+  });
+
+  document.querySelectorAll("button.copy").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const text = document.getElementById(button.dataset.copy).textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "copied";
+      } catch {
+        button.textContent = "select it";
+      }
+      setTimeout(() => { button.textContent = "copy"; }, 1500);
+    });
+  });
+</script>
+</body>
+</html>
