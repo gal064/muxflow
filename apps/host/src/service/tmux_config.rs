@@ -191,6 +191,101 @@ pub(crate) fn remove_recommended_naming() -> anyhow::Result<NamingOutcome> {
     Ok(NamingOutcome::Removed)
 }
 
+/// The variable that keeps Codex in the pane it was started from.
+///
+/// Codex 0.157 made `codex` connect to a shared background server by default,
+/// and that server runs every hook with its own environment, captured when it
+/// started, so a hook has no `TMUX_PANE` — or the first window's — and the
+/// event cannot be attributed. Codex decides whether to use that server by
+/// asking only whether `CODEX_EXEC_SERVER_URL` is *set*
+/// (`codex-rs/tui/src/daemon_startup.rs`), while the part that picks where
+/// commands run treats an empty value as unset
+/// (`codex-rs/exec-server/src/environment_provider.rs`). An empty value is
+/// therefore exactly `codex --no-daemon`, for every way of starting Codex,
+/// even with a server already running. This relies on that asymmetry; the
+/// proper fix is hook `client_env` (openai/codex#44902).
+const CODEX_EMBEDDED_ENV: &str = "CODEX_EXEC_SERVER_URL";
+
+/// Give every pane created from now on the empty `CODEX_EXEC_SERVER_URL`.
+///
+/// Held in the running tmux server only, like the naming hook, so the next
+/// connect re-asserts it after a server restart. Shells that were already
+/// running keep the environment they started with. A value the user set — any
+/// value, or tmux's own `-` removal marker — is theirs and is kept.
+pub(crate) fn apply_codex_embedded_env() -> anyhow::Result<()> {
+    if global_environment(CODEX_EMBEDDED_ENV)?.is_some() {
+        return Ok(());
+    }
+    run_tmux(
+        &["set-environment", "-g", CODEX_EMBEDDED_ENV, ""],
+        "keep Codex hooks in their tmux pane",
+    )?;
+    if global_environment(CODEX_EMBEDDED_ENV)? != Some(Some(String::new())) {
+        bail!("tmux accepted {CODEX_EMBEDDED_ENV} but did not retain it");
+    }
+    Ok(())
+}
+
+/// Take the variable back off the server, only when it is still the empty
+/// value this app sets.
+pub(crate) fn remove_codex_embedded_env() -> anyhow::Result<()> {
+    if global_environment(CODEX_EMBEDDED_ENV)? != Some(Some(String::new())) {
+        return Ok(());
+    }
+    run_tmux(
+        &["set-environment", "-gu", CODEX_EMBEDDED_ENV],
+        "remove the Codex pane setting",
+    )
+}
+
+fn run_tmux(args: &[&str], purpose: &str) -> anyhow::Result<()> {
+    let output = tmux_command()?
+        .args(args)
+        .output()
+        .with_context(|| purpose.to_owned())?;
+    if !output.status.success() {
+        bail!(
+            "tmux refused to {purpose}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// `None` when the global environment does not mention `name`, `Some(None)`
+/// for tmux's `-name` removal marker, and `Some(Some(value))` otherwise.
+///
+/// Reads the whole global environment rather than asking for one variable,
+/// because tmux answers an unknown variable with an error, which would have to
+/// be told apart from a real failure by its wording.
+fn global_environment(name: &str) -> anyhow::Result<Option<Option<String>>> {
+    let output = tmux_command()?
+        .args(["show-environment", "-g"])
+        .output()
+        .context("read the tmux global environment")?;
+    if !output.status.success() {
+        bail!(
+            "tmux could not report its global environment: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(environment_entry(
+        &String::from_utf8_lossy(&output.stdout),
+        name,
+    ))
+}
+
+fn environment_entry(listing: &str, name: &str) -> Option<Option<String>> {
+    listing.lines().find_map(|line| {
+        if line.strip_prefix('-') == Some(name) {
+            return Some(None);
+        }
+        line.strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix('='))
+            .map(|value| Some(value.to_owned()))
+    })
+}
+
 /// The other mechanism that reaches the same result. A user who put pane titles
 /// into `automatic-rename-format` has configured this as deliberately as one
 /// who wrote a hook, and is not overridden either.
@@ -269,6 +364,24 @@ mod tests {
         assert_eq!(NamingOutcome::UserConfigured.label(), "userConfigured");
         assert_eq!(NamingOutcome::Removed.label(), "removed");
         assert_eq!(NamingOutcome::NothingToRemove.label(), "nothingToRemove");
+    }
+
+    #[test]
+    fn the_codex_variable_is_read_exactly_from_the_global_environment() {
+        let listing = "CODEX_EXEC_SERVER_URL_OTHER=x\nHOME=/home/operator\n";
+        assert_eq!(environment_entry(listing, CODEX_EMBEDDED_ENV), None);
+        assert_eq!(
+            environment_entry("HOME=/h\nCODEX_EXEC_SERVER_URL=\n", CODEX_EMBEDDED_ENV),
+            Some(Some(String::new()))
+        );
+        assert_eq!(
+            environment_entry("CODEX_EXEC_SERVER_URL=ws://exec:1\n", CODEX_EMBEDDED_ENV),
+            Some(Some("ws://exec:1".into()))
+        );
+        assert_eq!(
+            environment_entry("-CODEX_EXEC_SERVER_URL\n", CODEX_EMBEDDED_ENV),
+            Some(None)
+        );
     }
 
     /// The identity has to survive a change to the guard, because the guard is

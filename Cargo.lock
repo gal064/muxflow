@@ -2318,7 +2318,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "muxflow"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -2348,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "muxflow-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2365,6 +2365,7 @@ dependencies = [
  "tmux-agent-protocol",
  "tmux-control",
  "tokio",
+ "toml_edit 0.25.13+spec-1.1.0",
  "uuid",
 ]
 
@@ -4677,6 +4678,7 @@ dependencies = [
  "indexmap 2.14.0",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

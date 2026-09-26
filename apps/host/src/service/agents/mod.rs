@@ -12,6 +12,7 @@ use super::{broadcast_control_event, snapshot::server_identity};
 
 pub(crate) mod adapters;
 mod codex_authority;
+pub(crate) mod codex_config;
 mod fallback;
 mod hooks;
 mod identity;

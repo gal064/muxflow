@@ -1,6 +1,6 @@
 [package]
 name = "muxflow-host"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 
@@ -30,6 +30,9 @@ symphonia = { version = "0.6.1", default-features = false, features = ["aac", "i
 tmux-agent-protocol = { path = "../../crates/protocol" }
 tmux-control = { path = "../../crates/tmux-control" }
 tokio.workspace = true
+# Codex keeps its settings, and its own hook trust hashes, in config.toml; the
+# one line this app owns there is edited in place so nothing else moves.
+toml_edit = "0.25"
 uuid.workspace = true
 
 [dev-dependencies]

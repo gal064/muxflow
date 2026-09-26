@@ -625,6 +625,22 @@ pub fn write_flow_resume_rejected_log(pane_id: &str, disposition: &str, reason: 
     eprintln!("{line}");
 }
 
+/// Names why the Codex `config.toml` courtesy line was not written or removed.
+///
+/// Not a failure of host setup: the tmux environment is the fix and the line
+/// is secondary, so this is recorded rather than returned. The
+/// reason is the outermost message of this app's own error — "parse Codex
+/// config.toml", a refused symlink — never the file's contents, which a TOML
+/// parse error's inner chain quotes.
+pub fn write_codex_config_skipped_log(reason: &str) {
+    let line = serde_json::json!({
+        "subsystem": "host_daemon",
+        "event": "codexConfigSkipped",
+        "reason": bounded_log_text(reason),
+    });
+    eprintln!("{line}");
+}
+
 /// How long an ordered control operation may run before it is worth retaining.
 const SLOW_ORDERED_REQUEST_THRESHOLD: Duration = Duration::from_millis(250);
 
