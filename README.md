@@ -164,6 +164,8 @@ Muxflow.
 3. Check CPU usage on the remote machine. High CPU there often causes lag, and
    it's easy to miss because it happens on the other machine.
 
+More in the [troubleshooting guide](./docs/troubleshooting.md).
+
 ## Build from source
 
 Requirements: Rust 1.97.1, Node.js 24, pnpm 11, tmux 3.3+, and the
