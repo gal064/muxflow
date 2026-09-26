@@ -146,6 +146,26 @@ Privacy & Security and choose **Open Anyway**, or run
 Download the APK from the releases page and sideload it. The app connects to a
 host that already has the Muxflow helper installed from the desktop.
 
+## Troubleshooting
+
+### Notifications don't appear
+
+Open **Settings** and click **Send test notification** under **System
+notifications**. If nothing appears, check System Settings → Notifications →
+Muxflow.
+
+### The connection drops or lags
+
+1. Open **Settings**, select the host, and click **Check helper**. If it offers
+   **Install helper…** or **Upgrade helper…**, click it to get the latest
+   helper.
+2. Make sure you have a good internet connection and that SSH is available on
+   both your machine and the remote machine.
+3. Check CPU usage on the remote machine. High CPU there often causes lag, and
+   it's easy to miss because it happens on the other machine.
+
+More in the [troubleshooting guide](./docs/troubleshooting.md).
+
 ## Build from source
 
 Requirements: Rust 1.97.1, Node.js 24, pnpm 11, tmux 3.3+, and the
