@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Drives the one-line installer (release/linux/get.sh) through `curl | bash`
+# Drives the one-line installer (release/get.sh) through `curl | bash`
 # against a local mirror of a GitHub release: fresh install, upgrade, and a
 # checksum mismatch. Takes a Linux package built for this machine, e.g.
 #   tests/release/run-get.sh tmp/release/muxflow-0.1.1-linux-x86_64.tar.gz
@@ -26,7 +26,7 @@ mkdir -p "$assets" "$mirror/latest/download"
 cp "$tarball" "$assets/"
 (cd "$assets" && sha256sum -- "$name" > SHA256SUMS)
 printf '{"version": "%s", "url": "unused"}\n' "$version" > "$mirror/latest/download/latest.json"
-cp "$repo_root/release/linux/get.sh" "$mirror/install.sh"
+cp "$repo_root/release/get.sh" "$mirror/install.sh"
 
 port=$(uv run --no-project python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 uv run --no-project python -m http.server "$port" --bind 127.0.0.1 --directory "$mirror" > "$work/server.log" 2>&1 &

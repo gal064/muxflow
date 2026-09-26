@@ -36,7 +36,7 @@ pushed version tag and leaves them in a draft GitHub Release:
    Android job builds the APK with the release key and
    checks its certificate against `apps/mobile/release-cert.sha256`.
 5. A draft release appears with the DMG, both Linux tarballs, the APK,
-   `install.sh` (the one-line Linux installer, from `release/linux/get.sh`),
+   `install.sh` (the one-line Linux and macOS installer, from `release/get.sh`),
    `SHA256SUMS`, and `latest.json`. Its notes start with the install
    instructions in `release/release-notes.md`, followed by the generated
    changelog.
