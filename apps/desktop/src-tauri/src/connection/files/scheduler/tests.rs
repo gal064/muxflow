@@ -791,6 +791,19 @@ fn silent_commit_and_silent_reconciliation_are_bounded_and_release_worker() {
     );
 }
 
+/// Waits for an armed deadline's watchdog to fire. A fixed sleep is not enough
+/// on a loaded CI runner, where the watchdog thread can be scheduled late.
+fn wait_for_transport_deadline(cancellation: &CancelState) {
+    let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !cancellation.transport_termination_requested() {
+        assert!(
+            std::time::Instant::now() < give_up,
+            "transport deadline never fired"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn authoritative_helper_bound_after_deadline_is_killed_immediately() {
     use std::process::{Command, Stdio};
@@ -801,7 +814,7 @@ fn authoritative_helper_bound_after_deadline_is_killed_immediately() {
     // transport deadline remains effective after the commit boundary.
     cancellation.cancel();
     let deadline = cancellation.arm_deadline(std::time::Duration::from_millis(30));
-    std::thread::sleep(std::time::Duration::from_millis(80));
+    wait_for_transport_deadline(&cancellation);
 
     let mut child = Command::new("sh")
         .arg("-c")
@@ -848,7 +861,7 @@ fn ordinary_helper_bound_after_timeout_is_killed_immediately() {
 
     let cancellation = Arc::new(CancelState::new());
     let deadline = cancellation.arm_deadline(std::time::Duration::from_millis(30));
-    std::thread::sleep(std::time::Duration::from_millis(80));
+    wait_for_transport_deadline(&cancellation);
     let mut child = Command::new("sh")
         .arg("-c")
         .arg("exec sleep 30")
