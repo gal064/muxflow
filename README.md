@@ -11,7 +11,9 @@
 [![macOS](https://img.shields.io/badge/macOS-Apple_Silicon-informational?logo=apple&logoColor=white)](#macos)
 [![Android](https://img.shields.io/badge/Android-APK-informational?logo=android&logoColor=white)](#android)
 
-<img src="docs/assets/hero-desktop.png" alt="Muxflow desktop mirroring a tmux server with agent attention in the sidebar" width="900" />
+<a href="https://gal064.github.io/muxflow/"><img src="docs/assets/demo-cover.jpg" alt="Play the Muxflow demo video" width="900" /></a>
+
+### [▶ Watch the demo](https://gal064.github.io/muxflow/)
 
 </div>
 
