@@ -148,6 +148,9 @@ host that already has the Muxflow helper installed from the desktop.
 
 ## Troubleshooting
 
+First, make sure every host runs the latest tmux version (3.3 or newer is
+required).
+
 ### Notifications don't appear
 
 Open **Settings** and click **Send test notification** under **System
