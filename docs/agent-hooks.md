@@ -71,6 +71,10 @@ same installer without an interface to ask through: `--yes` is where the answer
 goes. A run redirected by `--home` or `--settings-path` changes nothing of
 yours and needs no confirmation. `status` reads only, and is never gated.
 
+On a host set up from the app, the app sets missing hooks up again on every
+connect, so hooks removed with `uninstall` come back. To keep them off, remove
+them from the app instead, which records that the host is no longer set up.
+
 `--home` relocates every adapter's configuration; `--settings-path` relocates
 exactly the adapter named by `--adapter`, which it requires. Without
 `--adapter`, install acts on every adapter that is actually on the host, and
