@@ -235,6 +235,24 @@ describe("the one-time set-up prompt", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("re-asserts the host settings after setting a host up again on the same connection", async () => {
+    // An uninstall takes the naming and the Codex pane environment back off
+    // the host; setting it up again without reconnecting must put them back.
+    const setup = harness({ decision: "accepted", adapters: [adapter("claude-code", "wired")] });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    expect(setup.calls.applyHostNaming).toHaveBeenCalledTimes(1);
+    // The uninstall records a decline and leaves the host unwired.
+    await act(async () => renderer.update(<setup.Harness decision="declined" adapters={[adapter("claude-code", "notWired")]} />));
+    await act(async () => setup.current.offer());
+    const accept = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => String(node.children[0]).startsWith("Set up this host"))!;
+    await act(async () => accept.props.onClick());
+    expect(setup.calls.applyHooks).toHaveBeenCalledTimes(1);
+    expect(setup.calls.applyHostNaming).toHaveBeenCalledTimes(2);
+    await act(async () => renderer.unmount());
+  });
+
   it("keeps the hooks when the tmux naming is refused, and says so", async () => {
     // The naming is explicitly non-gating: agent status works without it.
     const setup = harness({ applyHostNaming: vi.fn(async () => { throw new Error("tmux rejected the recommended window naming"); }) });
@@ -320,14 +338,16 @@ describe("the one-time set-up prompt", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("never installs for an adapter the consent dialog did not name", async () => {
-    // Consent named the files it would touch. An adapter installed on the host
-    // months later was in none of them, so it is offered rather than written.
+  it("sets up an agent with no hooks on a consented host without asking again", async () => {
+    // A host rebuilt since it was set up, or an agent installed on it later:
+    // consent is to keeping the host set up, and each vendor still asks its
+    // user to trust a new hook before running it.
     const setup = harness({ decision: "accepted", adapters: [adapter("codex", "notWired")] });
     let renderer!: ReturnType<typeof create>;
     await act(async () => { renderer = create(<setup.Harness />); });
-    expect(setup.calls.applyHooks).not.toHaveBeenCalled();
-    expect(setup.current.offerable).toBe(true);
+    expect(renderer.toJSON()).toEqual({ type: "div", props: {}, children: null });
+    expect(setup.calls.reviewHooks.mock.calls.map(([id]) => id)).toEqual(["codex"]);
+    expect(setup.calls.applyHooks).toHaveBeenCalledTimes(1);
     await act(async () => renderer.unmount());
   });
 

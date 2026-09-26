@@ -2,7 +2,7 @@
   "expo": {
     "name": "Muxflow",
     "slug": "muxflow-mobile",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "scheme": "muxflow",
     "orientation": "default",
     "userInterfaceStyle": "dark",
@@ -16,7 +16,7 @@
         "monochromeImage": "./assets/adaptive-icon-monochrome.png",
         "backgroundColor": "#021962"
       },
-      "versionCode": 101,
+      "versionCode": 102,
       "backgroundColor": "#282c34",
       "predictiveBackGestureEnabled": false
     },
