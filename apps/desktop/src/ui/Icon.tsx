@@ -59,7 +59,9 @@ export type IconName =
   | "fileImage"
   | "fileLock"
   | "fileShell"
-  | "fileData";
+  | "fileData"
+  | "windowMaximize"
+  | "windowRestore";
 
 const paths: Record<IconName, ReactElement> = {
   sidebarLeft: <>
@@ -78,6 +80,11 @@ const paths: Record<IconName, ReactElement> = {
   </>,
   plus: <path d="M8 3.75v8.5M3.75 8h8.5" />,
   minus: <path d="M3.75 8h8.5" />,
+  windowMaximize: <rect height="8.5" rx="1" width="8.5" x="3.75" y="3.75" />,
+  windowRestore: <>
+    <rect height="7" rx="1" width="7" x="3.25" y="5.75" />
+    <path d="M5.75 5.75V4.25a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-1.5" />
+  </>,
   discard: <>
     <path d="M5.6 3.35 2.6 6.35l3 3" />
     <path d="M2.6 6.35h6.15a3.6 3.6 0 1 1 0 7.2H6.2" />

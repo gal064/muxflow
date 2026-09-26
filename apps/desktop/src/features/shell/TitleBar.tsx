@@ -1,5 +1,6 @@
 import { Icon } from "../../ui/Icon";
 import type { Platform } from "../../commands/registry";
+import type { WindowControls } from "./useWindowChrome";
 
 interface TitleBarProps {
   platform: Platform;
@@ -22,6 +23,8 @@ interface TitleBarProps {
   canGoForward: boolean;
   /** A published release newer than this app; absent renders no pill. */
   update?: { version: string };
+  /** Linux window buttons on a floating-window desktop; absent renders none. */
+  windowControls?: WindowControls;
   onBack(): void;
   onForward(): void;
   onToggleSidebar(): void;
@@ -44,6 +47,10 @@ interface TitleBarProps {
  * On macOS the OS titlebar is an overlay, so this bar draws underneath the
  * traffic lights and reserves room for them; the empty space is a drag region,
  * which is the only reason the window can still be moved.
+ *
+ * On Linux GTK's own bar is turned off (`src-tauri/src/linux_window.rs`), so
+ * the same drag region moves the window there too, and on a floating-window
+ * desktop this bar ends in minimize, maximize and close.
  */
 export function TitleBar(props: TitleBarProps) {
   const plural = props.unread === 1 ? "" : "s";
@@ -83,7 +90,7 @@ export function TitleBar(props: TitleBarProps) {
       type="button"
     ><Icon name="arrowRight" /></button>
     <div className="titlebar-title" data-tauri-drag-region>
-      <span className="titlebar-workspace">{props.workspaceName ?? "No workspace"}</span>
+      <span className="titlebar-workspace" data-tauri-drag-region={props.platform === "linux" || undefined}>{props.workspaceName ?? "No workspace"}</span>
     </div>
     <div className="titlebar-spacer" data-tauri-drag-region />
     {props.update && <button
@@ -120,5 +127,15 @@ export function TitleBar(props: TitleBarProps) {
       onClick={props.onTogglePanel}
       type="button"
     ><Icon name="panelRight" /></button>
+    {props.windowControls && <div className="window-controls">
+      <button aria-label="Minimize" className="bar-button" onClick={props.windowControls.onMinimize} type="button"><Icon name="minus" /></button>
+      <button
+        aria-label={props.windowControls.maximized ? "Restore" : "Maximize"}
+        className="bar-button"
+        onClick={props.windowControls.onToggleMaximize}
+        type="button"
+      ><Icon name={props.windowControls.maximized ? "windowRestore" : "windowMaximize"} /></button>
+      <button aria-label="Close window" className="bar-button window-close" onClick={props.windowControls.onClose} type="button"><Icon name="close" /></button>
+    </div>}
   </header>;
 }

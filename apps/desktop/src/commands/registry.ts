@@ -23,6 +23,12 @@ export interface CommandContext {
    * row, so its answer *is* the availability rule rather than an input to one.
    */
   rowCommands: readonly CommandId[];
+  /**
+   * Whether the active pane holds a selection Linux Ctrl+C should copy. A
+   * getter rather than a flag: selection changes without a render, and the
+   * answer is only wanted at the moment the key arrives.
+   */
+  hasTerminalSelection(): boolean;
   run(commandId: CommandId, target?: CommandTarget): void | Promise<void>;
 }
 
@@ -100,9 +106,8 @@ export interface CommandDefinition {
    * there *is* a selection the native Edit menu can copy. Swallowing there
    * would break copying out of a rendered Markdown file.
    *
-   * The flag sits on the command, so it covers the Linux bindings too. There it
-   * is merely inert: Ctrl+Shift+C is not what Linux copies with, so yielding it
-   * reaches nothing either way.
+   * The flag sits on the command, so it covers the Linux bindings too, where
+   * Ctrl+C and Ctrl+V are the same chords the platform copies and pastes with.
    */
   nativeFallback?: boolean;
 }
@@ -110,16 +115,15 @@ export interface CommandDefinition {
 const DIGITS: readonly IndexDigit[] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 /**
- * ⌘1–9 selects workspaces and ⌃1–9 selects tabs on macOS. On Linux ⌘ is the
- * window manager's Super key, so the same pair becomes Alt+N / Ctrl+N; they
- * must not both collapse onto Ctrl+N, which is why this is not a straight
- * Meta→Ctrl substitution like the rest of the keymap.
+ * ⌘1–9 selects workspaces and ⌃1–9 selects tabs on macOS. Linux follows the
+ * keymap's ⌘→Ctrl rule for workspaces, which leaves tabs nowhere to go but
+ * Alt+N — Ghostty's Linux tab selector, so the fallback is a familiar one.
  */
 const workspaceSelectCommands: readonly CommandDefinition[] = DIGITS.map((digit) => ({
   id: `workspace.select${digit}` as WorkspaceSelectCommandId,
   title: `Go to workspace ${digit}`,
   group: "Workspace",
-  defaults: { mac: `Meta+${digit}`, linux: `Alt+${digit}` },
+  defaults: { mac: `Meta+${digit}`, linux: `Ctrl+${digit}` },
   paletteHidden: true,
 }));
 
@@ -127,11 +131,16 @@ const tabSelectCommands: readonly CommandDefinition[] = DIGITS.map((digit) => ({
   id: `tab.select${digit}` as TabSelectCommandId,
   title: `Go to tab ${digit}`,
   group: "Terminal tab",
-  defaults: { mac: `Ctrl+${digit}`, linux: `Ctrl+${digit}` },
+  defaults: { mac: `Ctrl+${digit}`, linux: `Alt+${digit}` },
   requires: "session",
   paletteHidden: true,
 }));
 
+/**
+ * The Linux keymap is the macOS keymap with ⌘ read as Ctrl. Where that image
+ * would take Ctrl+D (EOF) or Ctrl+E (end-of-line), or collide with another
+ * binding, the Linux default is Ghostty's instead.
+ */
 export const commandRegistry: readonly CommandDefinition[] = [
   { id: "commands.show", title: "Show command palette", group: "Application", defaults: { mac: "Meta+K", linux: "Ctrl+K" } },
   { id: "workspaces.switch", title: "Switch workspace…", group: "Application", defaults: { mac: "Meta+P", linux: "Ctrl+P" } },
@@ -169,7 +178,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "agents.focusRow", title: "Focus the selected agent's pane", group: "Agents", requires: "row" },
   { id: "agents.renameRow", title: "Rename the selected agent…", group: "Agents", requires: "row" },
   { id: "agents.resumeRow", title: "Resume the selected agent", group: "Agents", requires: "row" },
-  { id: "session.new", title: "New workspace", group: "Workspace", defaults: { mac: "Meta+N", linux: "Ctrl+Shift+N" }, mutates: true },
+  { id: "session.new", title: "New workspace", group: "Workspace", defaults: { mac: "Meta+N", linux: "Ctrl+N" }, mutates: true },
   { id: "session.rename", title: "Rename workspace", group: "Workspace", mutates: true, requires: "session" },
   { id: "session.moveLeft", title: "Move workspace up", group: "Workspace", mutates: true, requires: "session" },
   { id: "session.moveRight", title: "Move workspace down", group: "Workspace", mutates: true, requires: "session" },
@@ -185,26 +194,32 @@ export const commandRegistry: readonly CommandDefinition[] = [
   // sitting apart printed a second "Terminal tab" heading.
   { id: "tab.previous", title: "Previous tab", group: "Terminal tab", defaults: { mac: "Meta+Shift+[", linux: "Ctrl+Shift+[" }, requires: "tab" },
   { id: "tab.next", title: "Next tab", group: "Terminal tab", defaults: { mac: "Meta+Shift+]", linux: "Ctrl+Shift+]" }, requires: "tab" },
-  { id: "window.new", title: "New terminal tab", group: "Terminal tab", defaults: { mac: "Meta+T", linux: "Ctrl+Shift+T" }, mutates: true, requires: "session" },
+  { id: "window.new", title: "New terminal tab", group: "Terminal tab", defaults: { mac: "Meta+T", linux: "Ctrl+T" }, mutates: true, requires: "session" },
   { id: "window.rename", title: "Rename terminal tab", group: "Terminal tab", mutates: true, requires: "window" },
   { id: "window.moveLeft", title: "Move current tab left", group: "Terminal tab", requires: "tab" },
   { id: "window.moveRight", title: "Move current tab right", group: "Terminal tab", requires: "tab" },
-  { id: "window.close", title: "Close current tab", group: "Terminal tab", defaults: { mac: "Meta+W", linux: "Ctrl+Shift+W" }, requires: "tab", destructive: true },
-  { id: "pane.splitRight", title: "Split pane right", group: "Pane", defaults: { mac: "Meta+D", linux: "Ctrl+Shift+D" }, mutates: true, requires: "pane" },
-  { id: "pane.splitDown", title: "Split pane down", group: "Pane", defaults: { mac: "Meta+Shift+D", linux: "Ctrl+Alt+Shift+D" }, mutates: true, requires: "pane" },
-  { id: "pane.focusLeft", title: "Focus pane left", group: "Pane", defaults: { mac: "Meta+Alt+ArrowLeft", linux: "Alt+ArrowLeft" }, mutates: true, requires: "pane" },
-  { id: "pane.focusRight", title: "Focus pane right", group: "Pane", defaults: { mac: "Meta+Alt+ArrowRight", linux: "Alt+ArrowRight" }, mutates: true, requires: "pane" },
-  { id: "pane.focusUp", title: "Focus pane up", group: "Pane", defaults: { mac: "Meta+Alt+ArrowUp", linux: "Alt+ArrowUp" }, mutates: true, requires: "pane" },
-  { id: "pane.focusDown", title: "Focus pane down", group: "Pane", defaults: { mac: "Meta+Alt+ArrowDown", linux: "Alt+ArrowDown" }, mutates: true, requires: "pane" },
+  { id: "window.close", title: "Close current tab", group: "Terminal tab", defaults: { mac: "Meta+W", linux: "Ctrl+W" }, requires: "tab", destructive: true },
+  // Ctrl+D is EOF, so split right takes Ghostty's Ctrl+Shift+O, which leaves
+  // the Meta→Ctrl image of ⌘⇧D free for split down.
+  { id: "pane.splitRight", title: "Split pane right", group: "Pane", defaults: { mac: "Meta+D", linux: "Ctrl+Shift+O" }, mutates: true, requires: "pane" },
+  { id: "pane.splitDown", title: "Split pane down", group: "Pane", defaults: { mac: "Meta+Shift+D", linux: "Ctrl+Shift+D" }, mutates: true, requires: "pane" },
+  { id: "pane.focusLeft", title: "Focus pane left", group: "Pane", defaults: { mac: "Meta+Alt+ArrowLeft", linux: "Ctrl+Alt+ArrowLeft" }, mutates: true, requires: "pane" },
+  { id: "pane.focusRight", title: "Focus pane right", group: "Pane", defaults: { mac: "Meta+Alt+ArrowRight", linux: "Ctrl+Alt+ArrowRight" }, mutates: true, requires: "pane" },
+  { id: "pane.focusUp", title: "Focus pane up", group: "Pane", defaults: { mac: "Meta+Alt+ArrowUp", linux: "Ctrl+Alt+ArrowUp" }, mutates: true, requires: "pane" },
+  { id: "pane.focusDown", title: "Focus pane down", group: "Pane", defaults: { mac: "Meta+Alt+ArrowDown", linux: "Ctrl+Alt+ArrowDown" }, mutates: true, requires: "pane" },
   { id: "pane.resizeLeft", title: "Resize pane left", group: "Pane", defaults: { linux: "Ctrl+Shift+ArrowLeft" }, mutates: true, requires: "pane" },
   { id: "pane.resizeRight", title: "Resize pane right", group: "Pane", defaults: { linux: "Ctrl+Shift+ArrowRight" }, mutates: true, requires: "pane" },
   { id: "pane.resizeUp", title: "Resize pane up", group: "Pane", defaults: { linux: "Ctrl+Shift+ArrowUp" }, mutates: true, requires: "pane" },
   { id: "pane.resizeDown", title: "Resize pane down", group: "Pane", defaults: { linux: "Ctrl+Shift+ArrowDown" }, mutates: true, requires: "pane" },
+  // Ctrl+E is readline's end-of-line; Ghostty's Ctrl+Shift+Enter instead.
   { id: "pane.zoom", title: "Toggle pane zoom", group: "Pane", defaults: { mac: "Meta+E", linux: "Ctrl+Shift+Enter" }, mutates: true, requires: "pane" },
   { id: "pane.close", title: "Close pane…", group: "Pane", mutates: true, requires: "pane", destructive: true },
-  { id: "terminal.copy", title: "Copy terminal selection", group: "Terminal", defaults: { mac: "Meta+C", linux: "Ctrl+Shift+C" }, requires: "pane", nativeFallback: true },
-  { id: "terminal.paste", title: "Paste into terminal", group: "Terminal", defaults: { mac: "Meta+V", linux: "Ctrl+Shift+V" }, requires: "pane", nativeFallback: true },
-  { id: "terminal.search", title: "Find in terminal", group: "Terminal", defaults: { mac: "Meta+F", linux: "Ctrl+Shift+F" }, requires: "pane" },
+  // On Linux Ctrl+C is also the interrupt. It copies only while the pane holds
+  // a copyable selection and otherwise yields to the shell — see
+  // `shortcutDisposition`. Ctrl+Shift+C/V stay as fixed aliases in the pane.
+  { id: "terminal.copy", title: "Copy terminal selection", group: "Terminal", defaults: { mac: "Meta+C", linux: "Ctrl+C" }, requires: "pane", nativeFallback: true },
+  { id: "terminal.paste", title: "Paste into terminal", group: "Terminal", defaults: { mac: "Meta+V", linux: "Ctrl+V" }, requires: "pane", nativeFallback: true },
+  { id: "terminal.search", title: "Find in terminal", group: "Terminal", defaults: { mac: "Meta+F", linux: "Ctrl+F" }, requires: "pane" },
   { id: "terminal.scrollBottom", title: "Scroll terminal to bottom", group: "Terminal", requires: "pane" },
   // Row commands. `destructive` is deliberately absent from the two that
   // destroy something: in this registry that flag means "route through the tmux
@@ -367,7 +382,12 @@ export function shortcutFromEvent(event: KeyboardEvent): string {
   // keys continue through `event.key` and are not intercepted unless a command
   // actually binds them.
   const positionalDigit = positionalDigitFromEvent(event);
-  const rewritten = positionalDigit ?? (event.shiftKey || event.altKey ? keyFromCode(event.code) : undefined);
+  // A non-Latin layout types its own letter under Ctrl too — Ctrl+T arrives as
+  // Ctrl+א on Hebrew — so a Ctrl chord whose key is not ASCII is resolved by the
+  // physical key, like the Shift and Option cases below.
+  const nonLatinControl = event.ctrlKey && event.key.length === 1 && event.key.charCodeAt(0) > 0x7f;
+  const rewritten = positionalDigit
+    ?? (event.shiftKey || event.altKey || nonLatinControl ? keyFromCode(event.code) : undefined);
   const raw = rewritten ?? event.key;
   const key = raw.length === 1 ? raw.toUpperCase() : raw;
   if (!["Control", "Alt", "Shift", "Meta"].includes(key)) parts.push(key);
@@ -437,10 +457,15 @@ export function globalShortcutAllowed(
  * spent on `terminal.copy`/`terminal.paste`, and native editing needs them to
  * reach the platform — so what actually makes the window safe is that the menu
  * offers nothing for a stray ⌘W to reach. See `src-tauri/src/menu.rs`.
+ *
+ * `yield` is a claimed chord deliberately left for the terminal: Linux Ctrl+C
+ * with nothing copyable selected is the shell's interrupt, not a copy. It acts
+ * exactly like `ignore`; the separate arm lets the caller observe it.
  */
 export type ShortcutDisposition =
   | { kind: "ignore" }
   | { kind: "swallow" }
+  | { kind: "yield"; commandId: CommandId }
   | { kind: "run"; commandId: CommandId };
 
 export function shortcutDisposition(
@@ -453,6 +478,10 @@ export function shortcutDisposition(
   const command = commandForKeyboardEvent(event, platform, overrides);
   if (!command || !globalShortcutAllowed(event, overlayOpen, command.id)) return { kind: "ignore" };
   if (!commandAvailable(command, context)) return command.nativeFallback ? { kind: "ignore" } : { kind: "swallow" };
+  if (platform === "linux" && command.id === "terminal.copy" && shortcutFromEvent(event) === "Ctrl+C"
+    && !context.hasTerminalSelection()) {
+    return { kind: "yield", commandId: command.id };
+  }
   return { kind: "run", commandId: command.id };
 }
 

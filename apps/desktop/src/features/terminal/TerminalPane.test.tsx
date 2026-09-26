@@ -22,6 +22,13 @@ const api = vi.hoisted(() => ({
   requestTerminalSeed: vi.fn(async (..._args: unknown[]) => undefined),
   requestTerminalHistory: vi.fn(async (..._args: unknown[]) => undefined),
 }));
+const clipboard = vi.hoisted(() => ({
+  writeNative: vi.fn(async (_text: string) => undefined),
+}));
+vi.mock("./terminalTransferApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./terminalTransferApi")>()),
+  writeNativeTerminalClipboard: clipboard.writeNative,
+}));
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
   setTerminalVisibility: api.setTerminalVisibility,
@@ -125,8 +132,16 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
       return this.historyOutcome;
     }
     focus(): void { this.focusCalls += 1; }
-    hasSelection(): boolean { return false; }
-    getSelection(): string { return ""; }
+    /** What the user has selected; a test sets it directly. */
+    selection = "";
+    clearSelectionCalls = 0;
+    hasSelection(): boolean { return this.selection !== ""; }
+    hasCopyableSelection(): boolean { return this.selection !== ""; }
+    getSelection(): string { return this.selection; }
+    clearSelection(): void {
+      this.selection = "";
+      this.clearSelectionCalls += 1;
+    }
     search(): boolean { return false; }
     clearSearch(): void {}
     scrollToBottom(): void {
@@ -1518,5 +1533,58 @@ describe("lazy scrollback", () => {
       { bytes: historyPage(300).length, skip: 0, columns: 80, rows: 24 },
     ]);
     await act(async () => { mounted.unmount(); });
+  });
+});
+
+describe("Linux terminal clipboard chords", () => {
+  const chord = (key: string, code: string, init: KeyboardEventInit = {}) =>
+    new KeyboardEvent("keydown", { key, code, ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true, ...init });
+
+  it("pastes exactly once on the Ctrl+Shift+V alias", async () => {
+    const readText = vi.fn(async () => "pasted");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { readText } });
+    const onInput = vi.fn();
+    const mounted = await mountPane(fixturePane("%paste"), new FakeHub(), "client-a", true, onInput);
+    const event = chord("V", "KeyV");
+    await act(async () => { paneNodes[0].dispatchEvent(event); });
+    // Claimed on keydown, which also cancels the native paste the chord would trigger.
+    expect(event.defaultPrevented).toBe(true);
+    expect(onInput.mock.calls).toEqual([["%paste", { kind: "text", data: "pasted" }]]);
+    await act(async () => mounted.unmount());
+  });
+
+  // Linux Ctrl+C copies only a standing selection, so once copied the
+  // selection goes and the next Ctrl+C is the interrupt.
+  it("copies on the Ctrl+Shift+C alias and then drops the selection", async () => {
+    clipboard.writeNative.mockClear();
+    const mounted = await mountPane(fixturePane("%copy"), new FakeHub());
+    const renderer = renderers.created[0];
+    renderer.selection = "echo hi";
+    await act(async () => { paneNodes[0].dispatchEvent(chord("C", "KeyC")); });
+    expect(clipboard.writeNative).toHaveBeenCalledWith("echo hi");
+    expect(renderer.hasSelection()).toBe(false);
+    await act(async () => mounted.unmount());
+  });
+
+  it("drops the selection even when the copy fails, so the next Ctrl+C interrupts", async () => {
+    clipboard.writeNative.mockRejectedValueOnce(new Error("clipboard unavailable"));
+    const mounted = await mountPane(fixturePane("%copyfail"), new FakeHub());
+    const renderer = renderers.created[0];
+    renderer.selection = "echo hi";
+    await act(async () => { paneNodes[0].dispatchEvent(chord("C", "KeyC")); });
+    expect(renderer.hasSelection()).toBe(false);
+    await act(async () => mounted.unmount());
+  });
+
+  it("drops the selection when the pane sends input xterm did not", async () => {
+    const mounted = await mountPane(fixturePane("%typed"), new FakeHub());
+    const renderer = renderers.created[0];
+    renderer.selection = "stale";
+    // Shift-Enter is translated by the pane and never passes through xterm.
+    await act(async () => {
+      paneNodes[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", shiftKey: true, bubbles: true, cancelable: true }));
+    });
+    expect(renderer.hasSelection()).toBe(false);
+    await act(async () => mounted.unmount());
   });
 });
