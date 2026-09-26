@@ -43,6 +43,15 @@ managed event set grows, an already-consented host is brought current on connect
 without asking again — merge-only, backed up and idempotent, so a host that is
 already current is not written to.
 
+The same consent also keeps Codex hooks in their pane. Codex 0.157 and newer
+run hooks inside a shared background server that has no `TMUX_PANE`, so on
+every connect the helper gives the tmux server's global environment an empty
+`CODEX_EXEC_SERVER_URL`, which makes Codex in new panes skip that server. It
+also adds `[features] daemon_auto_start = false` to `~/.codex/config.toml`, with
+a Muxflow marker comment, so Codex on the host no longer starts that server on
+its own or warns about running without it. Uninstalling removes both, but only
+the empty value and the marked line; anything the user set is kept. See [Troubleshooting](troubleshooting.md#codex-agents-show-unknown).
+
 The same installer is reachable without a UI, which is how it is exercised
 against a copy of a real configuration:
 

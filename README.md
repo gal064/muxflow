@@ -167,6 +167,16 @@ Muxflow.
 3. Check CPU usage on the remote machine. High CPU there often causes lag, and
    it's easy to miss because it happens on the other machine.
 
+### Codex agents show "unknown"
+
+Codex 0.157 and newer run a shared background server that hides which pane an
+event came from. Muxflow starts new tmux panes without it.
+
+1. Start Codex again in a new pane or tab. Codex windows opened before Muxflow
+   connected still use the background server.
+2. If you set `CODEX_EXEC_SERVER_URL` yourself, Muxflow leaves it alone and
+   Codex status won't work.
+
 More in the [troubleshooting guide](./docs/troubleshooting.md).
 
 ## Build from source

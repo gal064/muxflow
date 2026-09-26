@@ -471,7 +471,7 @@ impl HookManager {
     }
 }
 
-fn read_config(path: &Path) -> anyhow::Result<Vec<u8>> {
+pub(super) fn read_config(path: &Path) -> anyhow::Result<Vec<u8>> {
     let mut file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -498,13 +498,13 @@ fn ensure_unchanged(path: &Path, reviewed: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-struct ConfigLock {
+pub(super) struct ConfigLock {
     path: PathBuf,
     file: fs::File,
 }
 
 impl ConfigLock {
-    fn acquire(config: &Path) -> anyhow::Result<Self> {
+    pub(super) fn acquire(config: &Path) -> anyhow::Result<Self> {
         let parent = config.parent().context("hook config path has no parent")?;
         if !parent.exists() {
             fs::create_dir_all(parent)?;
@@ -780,7 +780,7 @@ fn redact(value: &mut Value) {
     }
 }
 
-fn inspect_config_path(path: &Path) -> anyhow::Result<()> {
+pub(super) fn inspect_config_path(path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent().filter(|parent| parent.exists()) {
         inspect_parent(parent)?;
     }
@@ -825,7 +825,7 @@ fn confirmation_token(
     hash.finalize().to_hex().to_string()
 }
 
-fn backup_path(path: &Path) -> PathBuf {
+pub(super) fn backup_path(path: &Path) -> PathBuf {
     path.with_extension(format!(
         "{}.muxflow.backup",
         path.extension()
@@ -834,14 +834,14 @@ fn backup_path(path: &Path) -> PathBuf {
     ))
 }
 
-fn write_backup_once(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(super) fn write_backup_once(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if bytes.is_empty() || backup_path(path).exists() {
         return Ok(());
     }
     write_new_private(&backup_path(path), bytes)
 }
 
-fn write_atomic(path: &Path, bytes: &[u8], reviewed: &[u8]) -> anyhow::Result<()> {
+pub(super) fn write_atomic(path: &Path, bytes: &[u8], reviewed: &[u8]) -> anyhow::Result<()> {
     let parent = path.parent().context("hook config path has no parent")?;
     if !parent.exists() {
         fs::create_dir_all(parent)?;
@@ -886,7 +886,7 @@ fn exchange_reviewed(temporary: &Path, path: &Path, reviewed: &[u8]) -> anyhow::
     Ok(())
 }
 
-fn remove_atomic(path: &Path, reviewed: &[u8]) -> anyhow::Result<()> {
+pub(super) fn remove_atomic(path: &Path, reviewed: &[u8]) -> anyhow::Result<()> {
     let parent = path.parent().context("hook config path has no parent")?;
     inspect_parent(parent)?;
     #[cfg(target_os = "linux")]

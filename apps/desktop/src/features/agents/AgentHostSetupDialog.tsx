@@ -54,6 +54,12 @@ export function AgentHostSetupDialog(props: AgentHostSetupDialogProps) {
           agent is working on. Only agent windows — everything else keeps the name
           tmux gives it — and nothing is written to your tmux config.
         </p>
+        {props.adapters.some((adapter) => adapter.id === "codex") && <p>
+          New tmux panes also get an empty <code>CODEX_EXEC_SERVER_URL</code>, which keeps
+          Codex off its shared background server so its hooks can tell which pane they came
+          from, and <code>~/.codex/config.toml</code> gets <code>daemon_auto_start = false</code>, so
+          Codex on this host no longer starts that server on its own or warns about it.
+        </p>}
         <p className="quiet-note">Until then the agents list stays honest: it shows which agents exist and says nothing about what they are doing.</p>
         {props.error && <SurfaceError className="dialog-error" detail={props.error} />}
       </div>
