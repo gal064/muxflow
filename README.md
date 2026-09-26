@@ -99,7 +99,7 @@ Hold to talk to an agent from your phone. Replies come back as voice messages, w
 
 ### Cross platform
 
-macOS, Linux, Android, and iOS.
+macOS, Linux, and Android. iOS is coming soon.
 
 </td>
 <td width="50%" valign="middle"><img src="docs/assets/social-preview.png" alt="Muxflow" width="100%" /></td>
@@ -121,17 +121,23 @@ Android home screen show a red **Update** pill that opens its release page.
 
 ### Linux
 
-Download `muxflow-<version>-linux-x86_64.tar.gz`, then:
-
 ```sh
-tar -xzf muxflow-*-linux-x86_64.tar.gz
-cd muxflow-*-linux-x86_64
-./install.sh
-muxflow
+curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash
 ```
 
-The default rootless prefix is `~/.local`; set `ADE_INSTALL_PREFIX` for another
-location. See [setup](./docs/setup.md) and [uninstall](./docs/uninstall.md).
+Run the same command again to upgrade. It installs under the rootless prefix
+`~/.local`; set `ADE_INSTALL_PREFIX` for another location, or
+`MUXFLOW_VERSION=X.Y.Z` to install a specific release. See
+[setup](./docs/setup.md) and [uninstall](./docs/uninstall.md).
+
+To install by hand instead, download `muxflow-<version>-linux-<arch>.tar.gz`
+(`x86_64` or `aarch64`), then:
+
+```sh
+tar -xzf muxflow-*-linux-*.tar.gz
+cd muxflow-*-linux-*/
+./install.sh
+```
 
 ### macOS
 
@@ -145,6 +151,10 @@ Privacy & Security and choose **Open Anyway**, or run
 
 Download the APK from the releases page and sideload it. The app connects to a
 host that already has the Muxflow helper installed from the desktop.
+
+### iOS
+
+Coming soon.
 
 ## Troubleshooting
 
