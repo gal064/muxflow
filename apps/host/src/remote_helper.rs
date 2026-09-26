@@ -847,9 +847,12 @@ mod tests {
                 socket_identity: original_identity,
             }),
         };
-        drop(original_listener);
+        // Unlink but keep the original listener bound until the replacement
+        // exists: the bound socket pins its inode, so a filesystem that reuses
+        // freed inode numbers (ext4, unlike tmpfs) cannot hand it out again.
         fs::remove_file(&socket).unwrap();
         let replacement_listener = UnixListener::bind(&socket).unwrap();
+        drop(original_listener);
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
         let replacement_identity = safe_socket_identity(&socket).unwrap().unwrap();
 

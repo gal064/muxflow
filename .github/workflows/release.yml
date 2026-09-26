@@ -28,9 +28,6 @@ env:
   NODE_OPTIONS: --max-old-space-size=6144
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
-
   version:
     runs-on: ubuntu-24.04
     outputs:
@@ -38,13 +35,24 @@ jobs:
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - id: version
         run: |
+          # Releases ship only what has been merged: the tagged commit must be on main.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main"
+            exit 1
+          fi
           tag=${GITHUB_REF_NAME#v}
           version=${tag%%-*}
           release/check-version.sh "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [[ "$tag" == *-* ]]; then echo prerelease=true; else echo prerelease=false; fi >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: version
+    uses: ./.github/workflows/ci.yml
 
   linux:
     needs: [ci, version]
