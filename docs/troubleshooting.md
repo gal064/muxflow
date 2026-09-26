@@ -22,6 +22,45 @@ Common report states:
 
 The report never includes terminal output, prompts, file contents, SSH configuration, credentials, hosts, users, or paths. See [Diagnostics, privacy, and security](diagnostics-privacy-security.md) before sharing it.
 
+# Codex agents show "unknown"
+
+Codex 0.157 and newer connect every `codex` window to a shared background
+server (`codex app-server --managed-daemon`). That server runs hooks with its
+own environment, captured when it started, so a hook cannot tell which tmux
+pane it came from and Muxflow drops the event. The agent stays `unknown` and
+never notifies.
+
+When you set up a host, Muxflow makes two changes, both re-applied on every
+connect and removed when you uninstall the agent hooks:
+
+- **The fix:** the tmux server's global environment gets an empty
+  `CODEX_EXEC_SERVER_URL`. Codex skips the background server whenever that
+  variable is set, even to an empty value, and runs everything else as usual.
+  This works even while a background server is running. It lives in the tmux
+  server's memory, not in `~/.tmux.conf`.
+- **A setting:** `~/.codex/config.toml` gets `daemon_auto_start = false` under
+  `[features]`, marked with a Muxflow comment. Without it, Codex warns on every
+  launch that it is running without the background server. It applies to all of
+  Codex on the host, so Codex started outside tmux no longer starts the server on
+  its own either. A value you set yourself is never changed, and a symlinked or
+  unreadable `config.toml` is left alone.
+
+If Codex still shows `unknown`:
+
+1. Check the variable: `tmux show-environment -g CODEX_EXEC_SERVER_URL` should
+   print `CODEX_EXEC_SERVER_URL=`. If it prints a value you set, Muxflow keeps
+   yours and Codex status can't work.
+2. Start Codex in a new pane or tab. A shell that was already open before
+   Muxflow connected started without the variable.
+3. Optionally stop the background server with `codex app-server daemon stop`.
+   It can leave its `codex app-server daemon pid-update-loop` updater running
+   ([openai/codex#48195](https://github.com/openai/codex/issues/48195)); stop that
+   process too.
+
+This relies on how Codex reads the variable today. The proper fix is for Codex
+to pass the window's environment to hooks
+([openai/codex#44902](https://github.com/openai/codex/issues/44902)).
+
 # Terminal keys
 
 ## Ctrl+/ and Ctrl+_

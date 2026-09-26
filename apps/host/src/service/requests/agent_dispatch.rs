@@ -125,21 +125,50 @@ fn handle_inner(
             });
         }
         v1::Operation::AgentHostNaming => {
-            // Requires no confirmation token of its own: nothing is written to
-            // disk, and the one-time host prompt that authorised it is the same
-            // consent as the hook install. The desktop re-sends it on every
+            // Requires no confirmation token of its own: the one-time host
+            // prompt that authorised it is the same consent as the hook
+            // install, and it names every change made here. The desktop re-sends it on every
             // connect because a tmux server restart drops the hook — and sends
             // the uninstall alongside the file hooks' own, because without an
             // explicit removal this would keep renaming the user's windows
             // until their server happened to restart.
-            let outcome = if v1::HookManagementAction::try_from(request.hook_management)
-                .unwrap_or_default()
-                == v1::HookManagementAction::Uninstall
-            {
-                super::super::tmux_config::remove_recommended_naming()?
-            } else {
-                super::super::tmux_config::apply_recommended_naming()?
-            };
+            //
+            // The same consent covers keeping Codex hooks in their pane: the
+            // tmux environment that does it lives in the server's memory just
+            // like the naming hook, and the `config.toml` line is secondary —
+            // it stops Codex warning about it — so a line that cannot be written is
+            // logged rather than failing the host's setup. Naming runs whatever
+            // the environment step did: the uninstall is sent once, and a
+            // failure here must not leave the naming hook renaming windows.
+            use super::super::{agents::codex_config, tmux_config};
+            let home = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|home| home.is_absolute());
+            let codex_config_step =
+                |step: fn(&std::path::Path) -> anyhow::Result<codex_config::Outcome>| {
+                    let result = home
+                        .as_deref()
+                        .context("HOME is unavailable")
+                        .and_then(step);
+                    // The outermost context only: a TOML parse error's
+                    // chain quotes the offending line of the user's file.
+                    if let Err(error) = result {
+                        crate::diagnostics::write_codex_config_skipped_log(&error.to_string());
+                    }
+                };
+            let (environment, outcome) =
+                if v1::HookManagementAction::try_from(request.hook_management).unwrap_or_default()
+                    == v1::HookManagementAction::Uninstall
+                {
+                    let environment = tmux_config::remove_codex_embedded_env();
+                    codex_config_step(codex_config::remove);
+                    (environment, tmux_config::remove_recommended_naming()?)
+                } else {
+                    let environment = tmux_config::apply_codex_embedded_env();
+                    codex_config_step(codex_config::ensure);
+                    (environment, tmux_config::apply_recommended_naming()?)
+                };
+            environment?;
             response.host_naming = outcome.label().into();
         }
         v1::Operation::AgentAction => {
