@@ -388,7 +388,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           {/* Decorative: the button's own accessible name already
               carries the loudest agent and the total. */}
           <AgentMark adapterId={agent.adapterId} glyphs={props.stateGlyphs} state={agent.state} />
-          <span className="workspace-activity-text">{agentLine(agent)}</span>
+          <span className="workspace-activity-text">{agent.name}</span>
         </span>)}
         {row.agentOverflow > 0 && <span className="workspace-activity-line workspace-activity-more">
           <span className="workspace-activity-text">…{row.agentOverflow} more</span>
@@ -789,7 +789,7 @@ function rowOffline(row: MergedWorkspaceRow): boolean {
   return row.phase !== "connected";
 }
 
-/** One agent's line, written the same way for the eye and for the label. */
+/** One agent's accessible description, including the state drawn by its mark. */
 function agentLine(agent: WorkspaceRowModel["agents"][number]): string {
   return `${agent.name} · ${activityWord(agent.state)}`;
 }
