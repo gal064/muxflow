@@ -109,11 +109,12 @@ jobs:
           x86=tmp/release/muxflow-${{ needs.version.outputs.version }}-linux-x86_64.tar.gz
           arm=tmp/release/muxflow-${{ needs.version.outputs.version }}-linux-aarch64.tar.gz
           # Each call reads the other archive's native helper, so both read the
-          # original archives before either is rewritten.
-          cp "$x86" tmp/x86-original.tar.gz
-          cp "$arm" tmp/arm-original.tar.gz
-          release/linux/add-cross-helper.sh "$x86" tmp/arm-original.tar.gz
-          release/linux/add-cross-helper.sh "$arm" tmp/x86-original.tar.gz
+          # original archives before either is rewritten. The copies keep their
+          # names and .sha256 files, which verify-package.sh checks.
+          mkdir tmp/originals
+          cp "$x86" "$x86.sha256" "$arm" "$arm.sha256" tmp/originals/
+          release/linux/add-cross-helper.sh "$x86" "tmp/originals/$(basename "$arm")"
+          release/linux/add-cross-helper.sh "$arm" "tmp/originals/$(basename "$x86")"
           release/linux/verify-package.sh "$x86"
           release/linux/verify-package.sh "$arm"
       - uses: actions/upload-artifact@v4
