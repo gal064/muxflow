@@ -229,7 +229,11 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
         setAsked(undefined);
       }
       // Part of the same "set up this host" answer, and deliberately after it:
-      // a tmux server that refuses the naming must not lose the hooks.
+      // a tmux server that refuses the naming must not lose the hooks. Always
+      // sent, even if this connection already asserted it: an uninstall in
+      // between took the naming and the Codex pane environment back off the
+      // host, and an install is rare enough that the subprocesses cost nothing.
+      asserted.current = false;
       assertNaming(host);
       return true;
     }).catch((cause) => {
