@@ -17,6 +17,13 @@ const MAX_NATIVE_TEXT_BYTES: usize = tmux_control::MAX_INPUT_REQUEST_BYTES;
 /// opposite lifetime — its own examples build one context and drive every
 /// operation through it, and each `Clipboard` method takes `&self` and does its
 /// own round trip — so read and write share this one.
+///
+/// Under Wayland the context holds nothing: each operation opens and closes its
+/// own compositor connection, and a copy's text is served by a thread that ends
+/// once another copy replaces it — unless a paste of it is stuck mid-transfer,
+/// which keeps that one thread until the pasting app lets go. There it only
+/// records which backend was chosen, and Wayland reads bypass it
+/// (`read_linux_clipboard`).
 #[cfg(not(target_os = "macos"))]
 static CLIPBOARD: OnceLock<Mutex<Option<ClipboardContext>>> = OnceLock::new();
 
@@ -136,11 +143,171 @@ pub async fn read_native_terminal_clipboard() -> Result<Option<Value>, String> {
     Ok(None)
 }
 
+/// How long a Wayland paste waits for the app that owns the clipboard to hand
+/// its content over. X11 reads carry clipboard-rs's own 500 ms bound.
+#[cfg(target_os = "linux")]
+const WAYLAND_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Room for a `text/uri-list` of thousands of copied files.
+#[cfg(target_os = "linux")]
+const MAX_NATIVE_URI_LIST_BYTES: usize = 1024 * 1024;
+
+/// The staging bound (`clipboard_staging.rs`), enforced here before the whole
+/// image is in memory rather than after.
+#[cfg(target_os = "linux")]
+const MAX_NATIVE_PNG_BYTES: usize = 25 * 1024 * 1024;
+
 #[cfg(target_os = "linux")]
 fn read_linux_clipboard() -> Result<Option<Value>, String> {
-    // clipboard-rs bounds X11 reads to 500 ms by default and selects its
-    // Wayland implementation at runtime when a native display is available.
-    with_clipboard(read_from_linux_clipboard)
+    // Under Wayland, clipboard-rs (its `wayland` feature) talks to the
+    // compositor through a data-control protocol, which wlroots compositors,
+    // KDE and niri offer. Without it — GNOME — or without a Wayland display, it
+    // uses X11 through XWayland, whose clipboard only reaches native Wayland apps
+    // as far as the compositor bridges it.
+    //
+    // Wayland reads are done here rather than through clipboard-rs, whose
+    // Wayland read waits on the owning app with no deadline — one frozen app
+    // would hold the shared lock, and with it every later copy, for good.
+    let wayland =
+        with_clipboard(|clipboard| Ok(matches!(clipboard, ClipboardContext::Wayland(_))))?;
+    if wayland {
+        read_wayland_clipboard()
+    } else {
+        with_clipboard(read_from_linux_clipboard)
+    }
+}
+
+/// Files, then a PNG, then text — the order `read_from_linux_clipboard` uses.
+#[cfg(target_os = "linux")]
+fn read_wayland_clipboard() -> Result<Option<Value>, String> {
+    use serde_json::json;
+    use wl_clipboard_rs::paste::{ClipboardType, Error, MimeType, Seat, get_mime_types};
+
+    let formats = match get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
+        Ok(formats) => formats,
+        Err(Error::ClipboardEmpty | Error::NoMimeType) => return Ok(None),
+        Err(error) => return Err(format!("inspect native clipboard formats: {error}")),
+    };
+
+    if formats.contains("text/uri-list")
+        && let Some(list) = read_wayland_offer(
+            MimeType::Specific("text/uri-list"),
+            MAX_NATIVE_URI_LIST_BYTES,
+        )?
+    {
+        let uris = file_uris(&String::from_utf8_lossy(&list));
+        if !uris.is_empty() {
+            return Ok(Some(json!({ "kind": "files", "uris": uris })));
+        }
+    }
+
+    let png_format = formats
+        .iter()
+        .find(|format| format.eq_ignore_ascii_case("image/png"));
+    if let Some(png_format) = png_format
+        && let Some(png) = read_wayland_offer(MimeType::Specific(png_format), MAX_NATIVE_PNG_BYTES)?
+    {
+        let staged = super::clipboard_staging::stage_clipboard_png(&png)?;
+        return Ok(Some(json!({ "kind": "image", "staged": staged })));
+    }
+
+    let Some(text) = read_wayland_offer(MimeType::Text, MAX_NATIVE_TEXT_BYTES)? else {
+        return Ok(None);
+    };
+    let text = String::from_utf8(text).map_err(|_| "native clipboard text is not UTF-8")?;
+    native_clipboard_text(text)
+}
+
+/// One offer's bytes, or `None` when the clipboard emptied or stopped offering
+/// that type since it was inspected.
+#[cfg(target_os = "linux")]
+fn read_wayland_offer(
+    format: wl_clipboard_rs::paste::MimeType<'_>,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, String> {
+    use wl_clipboard_rs::paste::{ClipboardType, Error, Seat, get_contents};
+
+    let (mut pipe, _) = match get_contents(ClipboardType::Regular, Seat::Unspecified, format) {
+        Ok(contents) => contents,
+        Err(Error::ClipboardEmpty | Error::NoMimeType) => return Ok(None),
+        Err(error) => return Err(format!("read native clipboard: {error}")),
+    };
+    read_bounded(&mut pipe, limit, WAYLAND_READ_DEADLINE).map(Some)
+}
+
+/// Read `source` to its end, refusing more than `limit` bytes and a writer that
+/// has not finished by `deadline`.
+///
+/// The descriptor is made non-blocking, so a writer that stalls mid-transfer
+/// cannot park the read past the deadline either.
+#[cfg(target_os = "linux")]
+fn read_bounded(
+    source: &mut (impl std::io::Read + std::os::fd::AsRawFd),
+    limit: usize,
+    deadline: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    use std::io::ErrorKind;
+
+    let fd = source.as_raw_fd();
+    // SAFETY: `fd` is owned by `source`, which outlives this call.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(format!(
+            "read native clipboard: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let end = std::time::Instant::now() + deadline;
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        let remaining = end.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "the app that owns the clipboard did not hand it over within {} s",
+                deadline.as_secs_f32()
+            ));
+        }
+        let mut ready = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout = i32::try_from(remaining.as_millis())
+            .unwrap_or(i32::MAX)
+            .max(1);
+        // SAFETY: one valid `pollfd` for the duration of the call.
+        if unsafe { libc::poll(&mut ready, 1, timeout) } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!("read native clipboard: {error}"));
+        }
+        match source.read(&mut chunk) {
+            Ok(0) => return Ok(bytes),
+            Ok(read) if bytes.len() + read > limit => {
+                return Err(format!(
+                    "native clipboard content exceeds the {limit}-byte bound"
+                ));
+            }
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+            Err(error) => return Err(format!("read native clipboard: {error}")),
+        }
+    }
+}
+
+/// The `file://` entries of a `text/uri-list`, which marks comments with `#`
+/// and ends lines with CRLF.
+#[cfg(any(target_os = "linux", test))]
+fn file_uris(list: &str) -> Vec<String> {
+    list.lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| line.starts_with("file://"))
+        .map(str::to_owned)
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -348,6 +515,55 @@ mod tests {
         let oversized = "a".repeat(tmux_control::MAX_INPUT_REQUEST_BYTES + 1);
         let error = native_clipboard_text(oversized).unwrap_err();
         assert!(error.contains("terminal input bound"), "{error}");
+    }
+
+    #[test]
+    fn a_uri_list_yields_only_its_file_entries() {
+        assert_eq!(
+            super::file_uris("# copied\r\nfile:///a%20b.txt\r\nhttps://x.test\r\n\r\nfile:///c\n"),
+            ["file:///a%20b.txt", "file:///c"]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    mod bounded_reads {
+        use super::super::read_bounded;
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn a_finished_writer_is_read_to_its_end() {
+            let (mut reader, mut writer) = UnixStream::pair().expect("socket pair");
+            writer.write_all(b"pasted").expect("write");
+            drop(writer);
+            assert_eq!(
+                read_bounded(&mut reader, 64, Duration::from_secs(2)).unwrap(),
+                b"pasted"
+            );
+        }
+
+        /// The owning app answered but never finished: the read gives up
+        /// instead of holding the clipboard lock, and every copy behind it,
+        /// for as long as that app stays stuck.
+        #[test]
+        fn a_writer_that_never_finishes_runs_into_the_deadline() {
+            let (mut reader, mut writer) = UnixStream::pair().expect("socket pair");
+            writer.write_all(b"partial").expect("write");
+            let started = Instant::now();
+            let error = read_bounded(&mut reader, 64, Duration::from_millis(100)).unwrap_err();
+            assert!(error.contains("did not hand it over"), "{error}");
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+
+        #[test]
+        fn content_past_the_bound_is_refused() {
+            let (mut reader, mut writer) = UnixStream::pair().expect("socket pair");
+            writer.write_all(&[b'a'; 65]).expect("write");
+            drop(writer);
+            let error = read_bounded(&mut reader, 64, Duration::from_secs(2)).unwrap_err();
+            assert!(error.contains("64-byte bound"), "{error}");
+        }
     }
 
     #[cfg(target_os = "macos")]
