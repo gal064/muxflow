@@ -99,7 +99,7 @@ Hold to talk to an agent from your phone. Replies come back as voice messages, w
 
 ### Cross platform
 
-macOS, Linux, Android, and iOS.
+macOS, Linux, and Android. iOS is coming soon.
 
 </td>
 <td width="50%" valign="middle"><img src="docs/assets/social-preview.png" alt="Muxflow" width="100%" /></td>
@@ -151,6 +151,10 @@ Privacy & Security and choose **Open Anyway**, or run
 
 Download the APK from the releases page and sideload it. The app connects to a
 host that already has the Muxflow helper installed from the desktop.
+
+### iOS
+
+Coming soon.
 
 ## Troubleshooting
 
