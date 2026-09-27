@@ -94,4 +94,13 @@ fi
 committed=true
 rm -rf "$backup" "$transaction"
 trap - EXIT
+# The bundle just built carries the same bundle id as the installed one. Left
+# under tmp/work, Spotlight indexes it and macOS can launch that stale copy in
+# place of the installed app, so once it is installed it goes. An explicitly
+# named source is the operator's own file and is left alone.
+if [[ $# -eq 0 ]]; then
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -u "$source_app" >/dev/null 2>&1 || true
+  rm -rf "$source_app"
+fi
 printf 'Installed %s; tmux sessions and user configuration were preserved.\n' "$target"

@@ -10,6 +10,15 @@ applications="$work/Applications"
 candidate="$work/candidate/Muxflow.app"
 installed="$applications/Muxflow.app"
 config_fixture="$work/config-preserved"
+# The no-argument install consumes the bundle it just built, so every such run
+# gets its own copy in a scratch target directory.
+built_target="$work/target"
+built_app="$built_target/release/bundle/macos/Muxflow.app"
+stage_build() {
+  rm -rf "$built_app"
+  mkdir -p "$(dirname "$built_app")"
+  ditto "$source_app" "$built_app"
+}
 
 cleanup() {
   [[ "$work" == "$repo/tmp/work/phase10/package-"* ]] && rm -rf "$work"
@@ -19,7 +28,9 @@ trap cleanup EXIT
 [[ $(uname -s) == Darwin && -d "$source_app" ]]
 mkdir -p "$applications" "$(dirname "$candidate")"
 printf 'preserve-me\n' >"$config_fixture"
-ADE_MACOS_APPLICATIONS_DIR="$applications" release/macos/install.sh >/dev/null
+stage_build
+CARGO_TARGET_DIR="$built_target" ADE_MACOS_APPLICATIONS_DIR="$applications" release/macos/install.sh >/dev/null
+[[ ! -e "$built_app" ]]
 ditto --noqtn "$source_app" "$candidate"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 2' "$candidate/Contents/Info.plist"
 codesign --force --deep --sign - "$candidate" >/dev/null
@@ -49,13 +60,15 @@ home_applications="$home/Applications"
 home_installed="$home_applications/Muxflow.app"
 system_installed=/Applications/Muxflow.app
 mkdir -p "$home"
-HOME="$home" ADE_MACOS_APPLICATIONS_DIR="$home_applications" \
+stage_build
+HOME="$home" CARGO_TARGET_DIR="$built_target" ADE_MACOS_APPLICATIONS_DIR="$home_applications" \
   release/macos/install.sh >/dev/null
 [[ -d "$home_installed" ]]
 [[ ! -e "$installed" ]]
 
 # A copy left behind in the other well-known location is named, not migrated.
-warning=$(HOME="$home" ADE_MACOS_APPLICATIONS_DIR="$applications" \
+stage_build
+warning=$(HOME="$home" CARGO_TARGET_DIR="$built_target" ADE_MACOS_APPLICATIONS_DIR="$applications" \
   release/macos/install.sh 2>&1 >/dev/null)
 grep -Fq "$home_installed" <<<"$warning"
 [[ -d "$installed" ]]
@@ -103,4 +116,4 @@ message=$(HOME="$home" release/macos/uninstall.sh "$home_applications" 2>&1 >/de
 grep -Fq "no Muxflow install found at $home_installed" <<<"$message"
 grep -Fxq preserve-me "$config_fixture"
 
-echo "PHASE10_PACKAGE_LIFECYCLE_PASS install=clean upgrade=pass rollback=restored uninstall=confined quarantine=preserved default=machine-wide"
+echo "PHASE10_PACKAGE_LIFECYCLE_PASS install=clean upgrade=pass rollback=restored uninstall=confined quarantine=preserved default=machine-wide build-copy=removed"
