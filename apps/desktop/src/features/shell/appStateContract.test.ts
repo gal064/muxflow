@@ -231,15 +231,16 @@ describe("reading state the previous build wrote", () => {
     expect(saved({}).shell.compactWorkspaces).toBe(false);
   });
 
-  it("persists terminal copy preferences and enables safe command cleanup for legacy saves", () => {
+  it("persists terminal copy preferences and turns them on for saves without them", () => {
     expect(saved({ copyOnSelect: true }).shell.copyOnSelect).toBe(true);
     expect(saved({ copyOnSelect: false }).shell.copyOnSelect).toBe(false);
-    expect(saved({}).shell.copyOnSelect).toBe(false);
+    expect(saved({}).shell.copyOnSelect).toBe(true);
     expect(saved({ cleanWrappedCommands: true }).shell.cleanWrappedCommands).toBe(true);
     expect(saved({ cleanWrappedCommands: false }).shell.cleanWrappedCommands).toBe(false);
     expect(saved({}).shell.cleanWrappedCommands).toBe(true);
     expect(saved({ terminalApplicationClipboard: true }).shell.terminalApplicationClipboard).toBe(true);
-    expect(saved({}).shell.terminalApplicationClipboard).toBe(false);
+    expect(saved({ terminalApplicationClipboard: false }).shell.terminalApplicationClipboard).toBe(false);
+    expect(saved({}).shell.terminalApplicationClipboard).toBe(true);
   });
 
   it("restores a bounded integer terminal font size and defaults legacy saves", () => {
