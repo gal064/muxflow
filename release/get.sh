@@ -151,7 +151,20 @@ install_linux() {
   missing=$(ldd "$prefix/lib/muxflow/muxflow" 2>/dev/null | awk '/not found/ { print $1 }' || true)
   if [[ -n "$missing" ]]; then
     printf '\nMissing system libraries:\n%s\n' "$missing" >&2
-    printf 'Install GTK 3 and WebKitGTK 4.1 (Arch: webkit2gtk-4.1; Debian/Ubuntu: libwebkit2gtk-4.1-0).\n' >&2
+    # WebKitGTK 4.1 pulls in GTK 3, libsoup 3 and JavaScriptCore itself, so one
+    # package is the whole fix. The command is printed, never run: this
+    # installer stays rootless.
+    local fix=
+    if command -v apt-get >/dev/null; then fix='sudo apt-get install -y libwebkit2gtk-4.1-0'
+    elif command -v dnf >/dev/null; then fix='sudo dnf install -y webkit2gtk4.1'
+    elif command -v pacman >/dev/null; then fix='sudo pacman -S --needed webkit2gtk-4.1'
+    elif command -v zypper >/dev/null; then fix='sudo zypper install -y libwebkit2gtk-4_1-0'
+    fi
+    if [[ -n "$fix" ]]; then
+      printf 'Install them with:\n  %s\n' "$fix" >&2
+    else
+      printf 'Install GTK 3 and WebKitGTK 4.1 (Arch: webkit2gtk-4.1; Debian/Ubuntu: libwebkit2gtk-4.1-0).\n' >&2
+    fi
   fi
   command -v tmux >/dev/null \
     || printf '\ntmux 3.3 or newer is required and was not found on PATH.\n' >&2
