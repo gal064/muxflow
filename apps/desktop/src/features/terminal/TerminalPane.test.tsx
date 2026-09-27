@@ -99,6 +99,8 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
     }
     isAlternateScreenActive(): boolean { return this.alternateScreen; }
     isApplicationCursorMode(): boolean { return false; }
+    mouseTracking = false;
+    isMouseTrackingActive(): boolean { return this.mouseTracking; }
     onInput(listener: (input: { kind: "text"; data: string }) => void): () => void {
       this.#inputListeners.add(listener);
       return () => { this.#inputListeners.delete(listener); };
@@ -198,7 +200,8 @@ vi.mock("./TerminalRenderer", async (importOriginal) => ({
   },
 }));
 
-import { TerminalPane } from "./TerminalPane";
+import type { Platform } from "../../commands/registry";
+import { TerminalPane, type TerminalPaneController } from "./TerminalPane";
 import { type TerminalEvent } from "./api";
 import { terminalCacheKey, terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
@@ -361,8 +364,10 @@ function paneElement(
   terminalFontSize = 13,
   onInput: (paneId: string, input: { kind: "text"; data: string } | { kind: "binary"; data: Uint8Array }) => void = () => undefined,
   activity: { onKeyActivity?(paneId: string): void; onPointerActivity?(paneId: string): void } = {},
+  extra: { platform?: Platform; onController?: (paneId: string, controller: TerminalPaneController | undefined) => void } = {},
 ) {
   return <TerminalPane
+    platform={extra.platform}
     appFocused={appFocused}
     cacheScope="local"
     clientId={clientId}
@@ -373,7 +378,7 @@ function paneElement(
     onPointerActivity={activity.onPointerActivity}
     onFocus={() => undefined}
     onMeasurements={() => undefined}
-    onController={() => undefined}
+    onController={extra.onController ?? (() => undefined)}
     terminalFontSize={terminalFontSize}
   />;
 }
@@ -385,10 +390,11 @@ async function mountPane(
   appFocused = true,
   onInput?: (paneId: string, input: { kind: "text"; data: string } | { kind: "binary"; data: Uint8Array }) => void,
   activity?: { onKeyActivity?(paneId: string): void; onPointerActivity?(paneId: string): void },
+  extra?: { platform?: Platform; onController?: (paneId: string, controller: TerminalPaneController | undefined) => void },
 ): Promise<ReactTestRenderer> {
   let renderer!: ReactTestRenderer;
   await act(async () => {
-    renderer = create(paneElement(pane, hub, clientId, appFocused, 13, onInput, activity), {
+    renderer = create(paneElement(pane, hub, clientId, appFocused, 13, onInput, activity, extra), {
       createNodeMock: (element) => {
         const node = document.createElement("div");
         if ((element.props as Record<string, unknown>)["data-terminal-surface"]) paneNodes.push(node);
@@ -1585,6 +1591,65 @@ describe("Linux terminal clipboard chords", () => {
       paneNodes[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", shiftKey: true, bubbles: true, cancelable: true }));
     });
     expect(renderer.hasSelection()).toBe(false);
+    await act(async () => mounted.unmount());
+  });
+});
+
+// Mac Cmd+C runs `terminal.copy` from the window shortcut layer, so the pane
+// only ever sees `controller.copy()`; these call it the way that layer does.
+describe("Mac Cmd+C without a selection", () => {
+  const mountMac = async (paneId: string, onInput = vi.fn()) => {
+    let controller: TerminalPaneController | undefined;
+    const mounted = await mountPane(fixturePane(paneId), new FakeHub(), "client-a", true, onInput, undefined, {
+      platform: "mac",
+      onController: (_paneId, next) => { controller = next; },
+    });
+    return { mounted, onInput, controller: controller! };
+  };
+
+  it("hands Super+C to an app that tracks the mouse", async () => {
+    clipboard.writeNative.mockClear();
+    const { mounted, onInput, controller } = await mountMac("%kitty");
+    renderers.created[0].mouseTracking = true;
+    let copied: boolean | undefined;
+    await act(async () => { copied = await controller.copy(); });
+    expect(copied).toBe(true);
+    expect(onInput.mock.calls).toEqual([["%kitty", { kind: "text", data: "\u001b[99;9u" }]]);
+    expect(clipboard.writeNative).not.toHaveBeenCalled();
+    await act(async () => mounted.unmount());
+  });
+
+  it("does nothing when the app does not track the mouse", async () => {
+    clipboard.writeNative.mockClear();
+    const { mounted, onInput, controller } = await mountMac("%plain");
+    let copied: boolean | undefined;
+    await act(async () => { copied = await controller.copy(); });
+    expect(copied).toBe(false);
+    expect(onInput).not.toHaveBeenCalled();
+    expect(clipboard.writeNative).not.toHaveBeenCalled();
+    await act(async () => mounted.unmount());
+  });
+
+  it("copies the xterm selection first even when the app tracks the mouse", async () => {
+    clipboard.writeNative.mockClear();
+    const { mounted, onInput, controller } = await mountMac("%selected");
+    const renderer = renderers.created[0];
+    renderer.mouseTracking = true;
+    renderer.selection = "echo hi";
+    await act(async () => { await controller.copy(); });
+    expect(clipboard.writeNative).toHaveBeenCalledWith("echo hi");
+    expect(onInput).not.toHaveBeenCalled();
+    await act(async () => mounted.unmount());
+  });
+
+  it("is mac-only: Linux Ctrl+Shift+C with no selection sends nothing", async () => {
+    const onInput = vi.fn();
+    const mounted = await mountPane(fixturePane("%linux"), new FakeHub(), "client-a", true, onInput);
+    renderers.created[0].mouseTracking = true;
+    await act(async () => {
+      paneNodes[0].dispatchEvent(new KeyboardEvent("keydown", { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    });
+    expect(onInput).not.toHaveBeenCalled();
     await act(async () => mounted.unmount());
   });
 });

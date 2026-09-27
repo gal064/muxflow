@@ -43,6 +43,7 @@ use seed::{build_seed_with_metadata, capture_metadata};
 mod startup;
 use startup::{join_workers, stop_process};
 mod attachment_startup;
+mod clipboard_forward;
 use attachment_startup::AttachmentRuntime;
 #[cfg(test)]
 use attachment_startup::tmux_supports_control_color_reports;
