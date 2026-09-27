@@ -2886,15 +2886,23 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// The probe tests hand their script to a shell rather than exec it. Any
+    /// test in this process that forks while a script is still open for
+    /// writing leaves the child holding that descriptor until it execs, and
+    /// on Linux exec'ing the script meanwhile fails with ETXTBSY.
+    const SCRIPT_SHELL: &str = "/bin/sh";
+
     #[test]
     fn dependency_probe_times_out_and_reaps_a_hung_executable() {
         let root = private_directory();
         let script = root.join("hung-version");
-        fs::write(&script, b"#!/bin/sh\nsleep 10\n").unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&script, b"sleep 10\n").unwrap();
         let started = Instant::now();
-        let result =
-            bounded_dependency_probe(script.as_os_str(), "--version", Duration::from_millis(75));
+        let result = bounded_dependency_probe(
+            SCRIPT_SHELL.as_ref(),
+            script.to_str().unwrap(),
+            Duration::from_millis(75),
+        );
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
         fs::remove_dir_all(root).unwrap();
@@ -2904,15 +2912,13 @@ mod tests {
     fn dependency_probe_retains_only_a_bounded_prefix_of_output() {
         let root = private_directory();
         let script = root.join("noisy-version");
-        fs::write(
-            &script,
-            b"#!/bin/sh\nhead -c 1048576 /dev/zero | tr '\\000' X\n",
+        fs::write(&script, b"head -c 1048576 /dev/zero | tr '\\000' X\n").unwrap();
+        let (_, stdout, stderr) = bounded_dependency_probe(
+            SCRIPT_SHELL.as_ref(),
+            script.to_str().unwrap(),
+            Duration::from_secs(2),
         )
         .unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-        let (_, stdout, stderr) =
-            bounded_dependency_probe(script.as_os_str(), "--version", Duration::from_secs(2))
-                .unwrap();
         assert!(stdout.len() <= DEPENDENCY_OUTPUT_LIMIT);
         assert!(stderr.len() <= DEPENDENCY_OUTPUT_LIMIT);
         fs::remove_dir_all(root).unwrap();
