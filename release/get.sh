@@ -115,6 +115,23 @@ fetch_verified() {
   [[ "$actual" == "$expected" ]] || fail "checksum mismatch for $name"
 }
 
+# Warns, never stops the install: tmux on this machine must be 3.3 or newer,
+# and so must tmux on every host Muxflow attaches to. $1 is how to get it here.
+# A version tmux reports in a shape this cannot read is left to the app, which
+# checks again when it connects.
+check_tmux() {
+  if ! command -v tmux >/dev/null; then
+    printf '\ntmux 3.3 or newer is required and was not found on PATH (%s).\n' "$1" >&2
+    return 0
+  fi
+  local major minor
+  read -r major minor < <(tmux -V 2>/dev/null | sed -nE 's/^tmux [^0-9]*([0-9]+)\.([0-9]+).*/\1 \2/p') || true
+  [[ -n "${major:-}" && -n "${minor:-}" ]] || return 0
+  if (( major < 3 || (major == 3 && minor < 3) )); then
+    printf '\ntmux %s.%s is installed; Muxflow needs 3.3 or newer (%s).\n' "$major" "$minor" "$1" >&2
+  fi
+}
+
 install_linux() {
   local version=$1 arch
   case "$(uname -m)" in
@@ -147,6 +164,17 @@ install_linux() {
 
   local prefix=${ADE_INSTALL_PREFIX:-"$HOME/.local"}
 
+  case ":$PATH:" in
+    *":$prefix/bin:"*) printf '\nRun muxflow, or launch it from your app menu; quit and reopen it if it was running.\n' ;;
+    *)
+      printf '\n%s/bin is not on your PATH. Add this to your shell profile:\n' "$prefix"
+      # shellcheck disable=SC2016 # $PATH is meant literally
+      printf '  export PATH="%s/bin:$PATH"\n' "$prefix"
+      printf 'Then run muxflow, or launch it from your app menu; quit and reopen it if it was running.\n'
+      ;;
+  esac
+  # Last, so a missing dependency is the final thing on screen rather than
+  # scrolled away by the lines above.
   local missing
   missing=$(ldd "$prefix/lib/muxflow/muxflow" 2>/dev/null | awk '/not found/ { print $1 }' || true)
   if [[ -n "$missing" ]]; then
@@ -166,18 +194,7 @@ install_linux() {
       printf 'Install GTK 3 and WebKitGTK 4.1 (Arch: webkit2gtk-4.1; Debian/Ubuntu: libwebkit2gtk-4.1-0).\n' >&2
     fi
   fi
-  command -v tmux >/dev/null \
-    || printf '\ntmux 3.3 or newer is required and was not found on PATH.\n' >&2
-
-  case ":$PATH:" in
-    *":$prefix/bin:"*) printf '\nRun muxflow, or launch it from your app menu; quit and reopen it if it was running.\n' ;;
-    *)
-      printf '\n%s/bin is not on your PATH. Add this to your shell profile:\n' "$prefix"
-      # shellcheck disable=SC2016 # $PATH is meant literally
-      printf '  export PATH="%s/bin:$PATH"\n' "$prefix"
-      printf 'Then run muxflow, or launch it from your app menu; quit and reopen it if it was running.\n'
-      ;;
-  esac
+  check_tmux 'install tmux with your package manager'
 }
 
 install_macos() {
@@ -241,8 +258,7 @@ install_macos() {
     [[ -n "$other" && "$other" != "$target" ]] || continue
     printf 'warning: another Muxflow is at %s and macOS may open it instead; delete it\n' "$other" >&2
   done < <(mdfind 'kMDItemCFBundleIdentifier == "dev.muxflow.desktop"' 2>/dev/null)
-  command -v tmux >/dev/null \
-    || printf '\ntmux 3.3 or newer is required on every host you attach to. For this Mac: brew install tmux\n' >&2
+  check_tmux 'brew install tmux, or brew upgrade tmux'
 }
 
 main() {
