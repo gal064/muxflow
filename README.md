@@ -123,6 +123,22 @@ your machine and on every machine you connect to.
 For Android, install the APK from the
 [releases page](https://github.com/gal064/muxflow/releases/latest).
 
+## Connect to a remote machine
+
+1. Make sure tmux 3.3 or newer is installed on the remote machine.
+2. Make sure you can run `ssh <host>` from your terminal without extra flags.
+   Muxflow uses your OpenSSH config, keys, and agent, so an alias in
+   `~/.ssh/config` works too.
+3. In Muxflow, click the host name at the bottom left, choose
+   **Connection settings…**, and click **+ Add host**.
+4. Select **SSH** and enter the host or config alias in **SSH host**.
+5. Click **Check helper**, then **Install helper…** to put the helper in
+   `~/.local/bin` on the remote machine. No root needed.
+6. Click **Connect**.
+
+Optionally, click **Set up agent status…** to get Codex and Claude Code
+notifications from that machine. More in [SSH hosts](./docs/remote-host.md).
+
 ## Troubleshooting
 
 ### Muxflow can't connect to tmux
