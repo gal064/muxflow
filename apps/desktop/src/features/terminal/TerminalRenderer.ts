@@ -233,6 +233,8 @@ export interface TerminalRenderer {
   isAlternateScreenActive(): boolean;
   /** DECCKM: whether cursor keys must be sent as SS3 rather than CSI. */
   isApplicationCursorMode(): boolean;
+  /** Any DEC mouse tracking mode is on: the app owns the mouse and its own selection. */
+  isMouseTrackingActive(): boolean;
   paste(text: string): void;
   search(query: string, direction?: "next" | "previous"): boolean;
   clearSearch(): void;
@@ -1167,6 +1169,10 @@ export class XtermRenderer implements TerminalRenderer {
 
   isApplicationCursorMode(): boolean {
     return this.#terminal.modes.applicationCursorKeysMode;
+  }
+
+  isMouseTrackingActive(): boolean {
+    return this.#terminal.modes.mouseTrackingMode !== "none";
   }
 
   dispose(): void {
