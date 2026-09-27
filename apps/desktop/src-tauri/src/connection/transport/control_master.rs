@@ -834,11 +834,13 @@ fn reap_owned_master_if_finished(master: &SshMaster, generation: u64) -> bool {
         _ => return true,
     };
     if finished {
+        // Unlink before publishing Idle: a waiter that sees Idle starts the
+        // next master at this same path, and must not find the dead one's
+        // socket still there.
+        remove_owned_control_socket(master, socket_identity);
         state.lifecycle = MasterLifecycle::Idle;
         state.generation = state.generation.wrapping_add(1);
         master.coordination.changed.notify_all();
-        drop(state);
-        remove_owned_control_socket(master, socket_identity);
     }
     finished
 }
