@@ -7,9 +7,9 @@
 **A desktop and mobile front end for tmux and your coding agents.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![Linux](https://img.shields.io/badge/Linux-x86__64-informational?logo=linux&logoColor=white)](#linux)
-[![macOS](https://img.shields.io/badge/macOS-Apple_Silicon-informational?logo=apple&logoColor=white)](#macos)
-[![Android](https://img.shields.io/badge/Android-APK-informational?logo=android&logoColor=white)](#android)
+[![Linux](https://img.shields.io/badge/Linux-x86__64-informational?logo=linux&logoColor=white)](#install)
+[![macOS](https://img.shields.io/badge/macOS-Apple_Silicon-informational?logo=apple&logoColor=white)](#install)
+[![Android](https://img.shields.io/badge/Android-APK-informational?logo=android&logoColor=white)](#install)
 
 <a href="https://gal064.github.io/muxflow/"><img src="docs/assets/demo-cover.jpg" alt="Play the Muxflow demo video" width="760" /></a>
 
@@ -113,55 +113,15 @@ ordinary tmux window without attention tracking.
 
 ## Install
 
-Downloads are published on the
+```sh
+curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash
+```
+
+Make sure [tmux](https://github.com/tmux/tmux/wiki/Installing) is installed on
+your machine and on every machine you connect to.
+
+For Android, install the APK from the
 [releases page](https://github.com/gal064/muxflow/releases/latest).
-tmux 3.3 or newer must be installed on every host you attach to. There is no
-auto-update. When a newer release is published, the desktop title bar and the
-Android home screen show a red **Update** pill that opens its release page.
-
-### Linux
-
-```sh
-curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash
-```
-
-Run the same command again to upgrade. It installs under the rootless prefix
-`~/.local`; set `ADE_INSTALL_PREFIX` for another location, or
-`MUXFLOW_VERSION=X.Y.Z` to install a specific release. See
-[setup](./docs/setup.md) and [uninstall](./docs/uninstall.md).
-
-To install by hand instead, download `muxflow-<version>-linux-<arch>.tar.gz`
-(`x86_64` or `aarch64`), then:
-
-```sh
-tar -xzf muxflow-*-linux-*.tar.gz
-cd muxflow-*-linux-*/
-./install.sh
-```
-
-### macOS
-
-Apple Silicon only. Run the same command as on Linux:
-
-```sh
-curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash
-```
-
-It installs `Muxflow.app` into `/Applications`; run it again to upgrade. To
-install by hand instead, download `Muxflow_<version>_aarch64.dmg`, drag
-`Muxflow.app` to `/Applications`, and open it. The app is not notarized by
-Apple, so macOS blocks the first launch of a downloaded DMG. To allow it, open System Settings →
-Privacy & Security and choose **Open Anyway**, or run
-`xattr -dr com.apple.quarantine /Applications/Muxflow.app`.
-
-### Android
-
-Download the APK from the releases page and sideload it. The app connects to a
-host that already has the Muxflow helper installed from the desktop.
-
-### iOS
-
-Coming soon.
 
 ## Troubleshooting
 
