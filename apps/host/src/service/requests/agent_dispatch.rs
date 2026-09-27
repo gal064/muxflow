@@ -160,9 +160,9 @@ fn handle_inner(
             // With no tmux server running there is nothing to set or take back:
             // the environment step's own first call says so, and naming is not
             // asked the same question a second time.
-            let uninstall =
-                v1::HookManagementAction::try_from(request.hook_management).unwrap_or_default()
-                    == v1::HookManagementAction::Uninstall;
+            let uninstall = v1::HookManagementAction::try_from(request.hook_management)
+                .unwrap_or_default()
+                == v1::HookManagementAction::Uninstall;
             let environment = if uninstall {
                 tmux_config::remove_codex_embedded_env()
             } else {
