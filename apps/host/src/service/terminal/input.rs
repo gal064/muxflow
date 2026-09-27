@@ -23,6 +23,10 @@ pub(super) type InputCompletion = (u64, Result<(), String>);
 /// is attached.
 pub(super) type TmuxCommandFactory = Arc<dyn Fn() -> anyhow::Result<Command> + Send + Sync>;
 
+/// Prefix of the paste buffers this path loads for its own deliveries. The
+/// clipboard forwarder skips them so a paste never rewrites the clipboard.
+pub(super) const HOST_INPUT_BUFFER_PREFIX: &str = "ade-input-";
+
 /// Largest payload written in band through the already-open control client.
 ///
 /// Below this, one `send-keys -H` command is both the whole request and its
@@ -315,7 +319,7 @@ fn send_input_batch(
     // `send-keys -H` expands every byte into argv and must be split, which can
     // partially commit a request. Loading through stdin keeps the request out
     // of ARG_MAX; the single paste-buffer command is the terminal commit point.
-    let buffer_name = format!("ade-input-{}", Uuid::new_v4().simple());
+    let buffer_name = format!("{HOST_INPUT_BUFFER_PREFIX}{}", Uuid::new_v4().simple());
     let mut load = tmux().map_err(|error| error.to_string())?;
     load.args(["load-buffer", "-b", &buffer_name, "-"])
         .stdin(Stdio::piped())

@@ -849,6 +849,11 @@ impl StreamState {
                     self.flow.cleared(&pane_id);
                 }
             }
+            // A TUI's own copy lands in a tmux buffer and its OSC 52 goes only to a
+            // tty client, which this control client is not.
+            ControlRecord::Notification { name, arguments } if name == "paste-buffer-changed" => {
+                super::clipboard_forward::forward_paste_buffer(arguments.trim(), sender);
+            }
             ControlRecord::Notification { name, .. } if is_topology_notification(&name) => {
                 emit_event(
                     sender,
