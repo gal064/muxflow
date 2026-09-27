@@ -128,15 +128,16 @@ pub struct ShellPreferences {
     pub pinned_only: bool,
     #[serde(default)]
     pub terminal_screen_reader: bool,
+    /// `None` is "never set", so the frontend's default — enabled — applies.
+    /// Keeping absence distinct lets that default survive the Rust storage
+    /// round trip instead of becoming a false boolean, which the frontend would
+    /// read as an explicit off. The same holds for the two fields below.
     #[serde(default)]
-    pub copy_on_select: bool,
-    /// `None` is a save from before command-copy cleanup, whose frontend
-    /// default is enabled. Keeping absence distinct lets that default survive
-    /// the Rust storage round trip instead of becoming a false boolean.
+    pub copy_on_select: Option<bool>,
     #[serde(default)]
     pub clean_wrapped_commands: Option<bool>,
     #[serde(default)]
-    pub terminal_application_clipboard: bool,
+    pub terminal_application_clipboard: Option<bool>,
     #[serde(default)]
     pub terminal_font_size: Option<u8>,
     /// The host most recently picked in the New workspace dialog.
@@ -589,9 +590,9 @@ mod tests {
                 compact_workspaces: true,
                 pinned_only: true,
                 terminal_screen_reader: false,
-                copy_on_select: false,
+                copy_on_select: Some(false),
                 clean_wrapped_commands: Some(false),
-                terminal_application_clipboard: false,
+                terminal_application_clipboard: Some(false),
                 terminal_font_size: Some(13),
                 new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
@@ -758,9 +759,9 @@ mod tests {
                 && value.shell.compact_workspaces
                 && value.shell.pinned_only
                 && value.shell.terminal_screen_reader
-                && value.shell.copy_on_select
+                && value.shell.copy_on_select == Some(true)
                 && value.shell.clean_wrapped_commands == Some(true)
-                && value.shell.terminal_application_clipboard
+                && value.shell.terminal_application_clipboard == Some(true)
         );
         assert!(value.shell.window_geometry.is_some());
         assert_eq!(
@@ -861,7 +862,9 @@ mod tests {
         assert_eq!(value.shell.panel_surface, PanelSurface::Files);
         assert_eq!(value.shell.agent_sort, AgentSortMode::Workspace);
         assert!(!value.shell.sidebar_collapsed);
+        assert_eq!(value.shell.copy_on_select, None);
         assert_eq!(value.shell.clean_wrapped_commands, None);
+        assert_eq!(value.shell.terminal_application_clipboard, None);
         assert_eq!(value.shell.new_workspace_host_profile_id, None);
         assert_eq!(value.shell.window_geometry.unwrap().width, 900);
     }
