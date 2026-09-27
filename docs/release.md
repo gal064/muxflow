@@ -118,7 +118,8 @@ ELF helpers for `aarch64` and `x86_64` (or takes them prebuilt from
 format/architecture/package verification. Use `release/macos/install.sh` for a
 transactional install or upgrade into `/Applications` and
 `release/macos/uninstall.sh` for confined removal. With no argument the
-installer publishes the bundle it just built;
+installer publishes the bundle it just built and then deletes that build copy,
+so macOS cannot launch it in place of the installed app;
 `ADE_MACOS_APPLICATIONS_DIR="$HOME/Applications"` selects a rootless per-user
 install instead.
 

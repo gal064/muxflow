@@ -148,6 +148,13 @@ install_macos() {
   xattr -dr com.apple.quarantine "$target" 2>/dev/null || true
 
   printf '\nInstalled %s. Open Muxflow from Launchpad or Spotlight; quit and reopen it if it was running.\n' "$target"
+  # Another copy with the same bundle id (an old download or a local build) can
+  # be launched in its place, so name every one Spotlight knows of.
+  local other
+  while IFS= read -r other; do
+    [[ -n "$other" && "$other" != "$target" ]] || continue
+    printf 'warning: another Muxflow is at %s and macOS may open it instead; delete it\n' "$other" >&2
+  done < <(mdfind 'kMDItemCFBundleIdentifier == "dev.muxflow.desktop"' 2>/dev/null)
   command -v tmux >/dev/null \
     || printf '\ntmux 3.3 or newer is required on every host you attach to. For this Mac: brew install tmux\n' >&2
 }

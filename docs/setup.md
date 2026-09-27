@@ -90,7 +90,9 @@ release/macos/uninstall.sh
 ```
 
 `install.sh` defaults to the bundle just built under `tmp/work` and takes an
-absolute path to any other `Muxflow.app`. The installer verifies ownership
+absolute path to any other `Muxflow.app`. After installing the bundle it just
+built, it deletes that copy: it has the same bundle id, and macOS would
+otherwise sometimes launch it instead of the installed app. The installer verifies ownership
 before upgrades, rolls back a failed publication, and preserves tmux sessions
 and application configuration. It installs to `/Applications`, which requires
 an account that can write there; set
