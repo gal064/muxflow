@@ -184,9 +184,9 @@ export const defaultShellState: ShellState = {
   compactWorkspaces: false,
   pinnedOnly: false,
   terminalScreenReader: false,
-  copyOnSelect: false,
+  copyOnSelect: true,
   cleanWrappedCommands: true,
-  terminalApplicationClipboard: false,
+  terminalApplicationClipboard: true,
   terminalFontSize: 13,
   newWorkspaceHostProfileId: undefined,
   defaultMarkdownView: "split",
@@ -235,11 +235,15 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       compactWorkspaces: Boolean(shell?.compactWorkspaces),
       pinnedOnly: Boolean(shell?.pinnedOnly),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
-      copyOnSelect: Boolean(shell?.copyOnSelect),
+      copyOnSelect: typeof shell?.copyOnSelect === "boolean"
+        ? shell.copyOnSelect
+        : defaultShellState.copyOnSelect,
       cleanWrappedCommands: typeof shell?.cleanWrappedCommands === "boolean"
         ? shell.cleanWrappedCommands
         : defaultShellState.cleanWrappedCommands,
-      terminalApplicationClipboard: Boolean(shell?.terminalApplicationClipboard),
+      terminalApplicationClipboard: typeof shell?.terminalApplicationClipboard === "boolean"
+        ? shell.terminalApplicationClipboard
+        : defaultShellState.terminalApplicationClipboard,
       terminalFontSize: clampedTerminalFontSize(shell?.terminalFontSize),
       newWorkspaceHostProfileId: typeof shell?.newWorkspaceHostProfileId === "string" && shell.newWorkspaceHostProfileId.trim()
         ? shell.newWorkspaceHostProfileId
