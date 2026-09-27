@@ -287,6 +287,13 @@ async fn buffered_cancel_or_eof_before_first_poll_cannot_stage_a_file() {
         client.write_all(&buffered).await.unwrap();
         if eof {
             client.shutdown().await.unwrap();
+            // Read until the host closes: dropping the client while its replies
+            // are still being written fails the host with a broken pipe.
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while read_frame(&mut client).await.unwrap().is_some() {}
+            })
+            .await
+            .unwrap();
         } else {
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
