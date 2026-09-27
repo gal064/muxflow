@@ -40,6 +40,7 @@ import type { TerminalTransferRegistry } from "./terminalTransferRegistry";
 import type { TerminalTransferClient, TerminalTransferConnectionScope, TerminalTransferScope } from "./terminalTransfers";
 import { writeNativeTerminalClipboard, writeTerminalApplicationClipboard } from "./terminalTransferApi";
 import {
+  KITTY_SUPER_C,
   copyCompletedTerminalSelection,
   installTerminalCopyOnSelect,
   terminalClipboardAlias,
@@ -314,9 +315,9 @@ export function TerminalPane({
   onController,
   onDiagnostic,
   onOpenFilePath,
-  copyOnSelect = false,
+  copyOnSelect = true,
   cleanWrappedCommands = true,
-  terminalApplicationClipboard = false,
+  terminalApplicationClipboard = true,
   terminalFontSize = 13,
   platform = "linux",
   transferClient,
@@ -1128,12 +1129,19 @@ export function TerminalPane({
       hasCopyableSelection: () => renderer.hasCopyableSelection(),
       copy: async () => {
         try {
-          return await copyCompletedTerminalSelection(
+          if (await copyCompletedTerminalSelection(
             renderer,
             true,
             writeNativeTerminalClipboard,
             cleanWrappedCommandsRef.current,
-          );
+          )) return true;
+          // No xterm selection and the app holds the mouse: the selection is its
+          // own, so hand it the copy chord. Mac only — Linux Ctrl+C without a
+          // selection already yields to the app, and Ctrl+Shift+C keeps its
+          // current meaning.
+          if (platformRef.current !== "mac" || !renderer.isMouseTrackingActive()) return false;
+          sendUserInput({ kind: "text", data: KITTY_SUPER_C });
+          return true;
         } finally {
           // Linux Ctrl+C is copy and interrupt on one chord: dropping the
           // selection once copied — or once the copy failed — makes the next

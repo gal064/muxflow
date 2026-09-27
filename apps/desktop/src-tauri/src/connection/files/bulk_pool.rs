@@ -1007,7 +1007,16 @@ mod tests {
         let cancellation = Arc::new(CancelState::new());
         cancellation.prepare_finalize().unwrap();
         let deadline = cancellation.arm_test_deadline(Duration::from_millis(30));
-        std::thread::sleep(Duration::from_millis(80));
+        // Wait for the deadline's watcher thread rather than a fixed sleep: a
+        // loaded runner can leave it unscheduled well past the timeout.
+        let expired_by = std::time::Instant::now() + Duration::from_secs(5);
+        while !cancellation.transport_termination_requested() {
+            assert!(
+                std::time::Instant::now() < expired_by,
+                "the deadline never expired"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
         let error = BulkLease::acquire_with_spawn(
             &ConnectionSpec::Local,

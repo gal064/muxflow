@@ -1,7 +1,7 @@
 use super::*;
 use std::{
     os::unix::fs::PermissionsExt,
-    os::unix::net::UnixListener,
+    os::unix::net::{UnixListener, UnixStream},
     sync::{
         Barrier,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -355,6 +355,9 @@ fn nonresponsive_control_socket_check_is_bounded() {
 
     assert_eq!(error, ControlCommandError::TimedOut);
     assert!(started.elapsed() < Duration::from_millis(250));
+    // On a loaded runner ssh can time out before it ever connects, which would
+    // leave the server blocked in accept forever.
+    let _ = UnixStream::connect(&socket);
     server.join().unwrap();
 }
 

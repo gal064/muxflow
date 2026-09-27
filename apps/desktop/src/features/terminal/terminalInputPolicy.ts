@@ -6,6 +6,14 @@ type TerminalKeyEvent = Pick<KeyboardEvent,
   "altKey" | "code" | "ctrlKey" | "isComposing" | "key" | "keyCode" | "metaKey" | "shiftKey"
 >;
 
+/**
+ * Super+C in the kitty keyboard encoding, which is how kitty and Ghostty
+ * report Cmd+C to an application. Both agent composers read it as "copy the
+ * selection" and ignore it with nothing selected. Ctrl+C is deliberately not
+ * used for this: without a selection it is their interrupt.
+ */
+export const KITTY_SUPER_C = "\u001b[99;9u";
+
 export interface TerminalKeyContext {
   alternateScreen: boolean;
   applicationCursorKeys: boolean;

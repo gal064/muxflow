@@ -109,7 +109,7 @@ export function useAppConnectionController({
   fileClient,
   gitClient,
   setStatus,
-  terminalApplicationClipboardEnabled = false,
+  terminalApplicationClipboardEnabled = true,
   onHandshakeFailure,
   onConnectionStateChanged,
 }: ControllerArguments) {
