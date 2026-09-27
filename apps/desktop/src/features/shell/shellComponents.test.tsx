@@ -269,14 +269,14 @@ describe("application shell accessibility contracts", () => {
     // about which three get a line.
     const busy = sidebar({ rows: fiveAgentRows() });
     expect(busy.match(/class="workspace-activity-line/g)).toHaveLength(4);
-    expect(busy).toContain("codex · blocked");
+    expect(busy).toContain('<span class="workspace-activity-text">codex</span>');
     expect(busy).toContain('data-agent-icon="codex"');
-    expect(busy).toContain("claude · done, unread");
-    expect(busy).toContain("aider · working");
+    expect(busy).toMatch(/class="agent-mark-badge done"><\/span><\/span><span class="workspace-activity-text">claude</);
+    expect(busy).toMatch(/class="spinner agent-mark-badge working"><\/span><\/span><span class="workspace-activity-text">aider</);
     expect(busy).toContain("…2 more");
-    // The line is a badged mark and the text, in that order — the state used
-    // to be a separate dot in front of the icon and is now docked to it.
-    expect(busy).toMatch(/class="agent-mark"><svg[^>]*data-agent-icon="codex"[\s\S]*?class="agent-mark-badge blocked"><\/span><\/span><span class="workspace-activity-text">codex · blocked/);
+    // The line is a badged mark and the agent name, in that order. The state
+    // is drawn by the badge only; the row's accessible name still says it.
+    expect(busy).toMatch(/class="agent-mark"><svg[^>]*data-agent-icon="codex"[\s\S]*?class="agent-mark-badge blocked"><\/span><\/span><span class="workspace-activity-text">codex</);
     // Four lines, one announcement: the label names the loudest and counts the
     // rest rather than reading every line of one list item.
     expect(busy).toContain('aria-label="A very long workspace name, codex · blocked, 5 agents, 2 agents waiting"');
