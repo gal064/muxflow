@@ -11,7 +11,7 @@
 [![macOS](https://img.shields.io/badge/macOS-Apple_Silicon-informational?logo=apple&logoColor=white)](#macos)
 [![Android](https://img.shields.io/badge/Android-APK-informational?logo=android&logoColor=white)](#android)
 
-<img src="docs/assets/hero-desktop.png" alt="Muxflow desktop mirroring a tmux server with agent attention in the sidebar" width="900" />
+<a href="https://gal064.github.io/muxflow/"><img src="docs/assets/demo-cover.jpg" alt="Play the Muxflow demo video" width="760" /></a>
 
 </div>
 
@@ -141,9 +141,16 @@ cd muxflow-*-linux-*/
 
 ### macOS
 
-Download `Muxflow_<version>_aarch64.dmg` (Apple Silicon only), drag
+Apple Silicon only. Run the same command as on Linux:
+
+```sh
+curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash
+```
+
+It installs `Muxflow.app` into `/Applications`; run it again to upgrade. To
+install by hand instead, download `Muxflow_<version>_aarch64.dmg`, drag
 `Muxflow.app` to `/Applications`, and open it. The app is not notarized by
-Apple, so macOS blocks the first launch. To allow it, open System Settings →
+Apple, so macOS blocks the first launch of a downloaded DMG. To allow it, open System Settings →
 Privacy & Security and choose **Open Anyway**, or run
 `xattr -dr com.apple.quarantine /Applications/Muxflow.app`.
 
