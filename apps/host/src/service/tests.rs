@@ -284,16 +284,22 @@ async fn buffered_cancel_or_eof_before_first_poll_cannot_stage_a_file() {
                 .unwrap(),
             );
         }
-        client.write_all(&buffered).await.unwrap();
-        if eof {
+        // Hang up cleanly: end the request stream, then read
+        // until the host closes. The connection is registered for process-wide
+        // events, which tests running beside this one broadcast at any moment,
+        // so dropping the client instead can catch the host writer mid-event
+        // and fail it with a broken pipe.
+        async fn hang_up(client: &mut UnixStream) {
             client.shutdown().await.unwrap();
-            // Read until the host closes: dropping the client while its replies
-            // are still being written fails the host with a broken pipe.
             tokio::time::timeout(Duration::from_secs(3), async {
-                while read_frame(&mut client).await.unwrap().is_some() {}
+                while read_frame(&mut *client).await.unwrap().is_some() {}
             })
             .await
             .unwrap();
+        }
+        client.write_all(&buffered).await.unwrap();
+        if eof {
+            hang_up(&mut client).await;
         } else {
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
@@ -308,7 +314,9 @@ async fn buffered_cancel_or_eof_before_first_poll_cannot_stage_a_file() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(git(&["diff", "--cached", "--quiet"]).status.success());
-        drop(client);
+        if !eof {
+            hang_up(&mut client).await;
+        }
         task.await.unwrap().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
