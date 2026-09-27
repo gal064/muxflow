@@ -32,6 +32,9 @@ impl NativeNotifications {
         Err(UNIMPLEMENTED.into())
     }
 
+    /// Nothing to ask for: only macOS has a permission prompt.
+    pub fn request_authorization(&self) {}
+
     /// The same word the other two backends use for "there is nothing here to
     /// grant" — the UI has one branch for it rather than a platform check.
     pub fn authorization_status(&self) -> Result<String, String> {

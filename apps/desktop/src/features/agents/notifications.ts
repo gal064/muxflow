@@ -34,11 +34,7 @@ export async function notificationPermissionStatus(): Promise<NotificationPermis
     : "unsupported";
 }
 
-/**
- * The notification the user asks for from Settings — and, on a machine where
- * no agent has ever blocked or finished, the only thing that raises the OS
- * permission prompt at all.
- */
+/** The notification the user asks for from Settings. */
 export function emitTestNotification(): Promise<NativeNotificationReceipt> {
   return invoke("emit_test_notification");
 }

@@ -63,7 +63,14 @@ pub(super) fn execute(
     let mut command = tmux_command()?;
     match kind {
         v1::TmuxActionKind::CreateSession => {
-            configure_new_session(&mut command, &action)?;
+            // Only on the create that starts the server, and only on a host
+            // whose Codex hooks this app manages — the same consent that puts
+            // the variable on the server once it exists.
+            let embedded_codex = bootstrapping
+                && super::agents::HookManager::system_default()
+                    .and_then(|hooks| hooks.managed_adapters())
+                    .is_ok_and(|managed| managed.contains(&"codex"));
+            configure_new_session(&mut command, &action, embedded_codex)?;
             let ids = run_for_ids(command, &['$', '@', '%'])?;
             result.session_id = ids[0].clone();
             result.window_id = ids[1].clone();

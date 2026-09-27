@@ -156,19 +156,37 @@ fn handle_inner(
                         crate::diagnostics::write_codex_config_skipped_log(&error.to_string());
                     }
                 };
-            let (environment, outcome) =
-                if v1::HookManagementAction::try_from(request.hook_management).unwrap_or_default()
-                    == v1::HookManagementAction::Uninstall
-                {
-                    let environment = tmux_config::remove_codex_embedded_env();
-                    codex_config_step(codex_config::remove);
-                    (environment, tmux_config::remove_recommended_naming()?)
-                } else {
-                    let environment = tmux_config::apply_codex_embedded_env();
-                    codex_config_step(codex_config::ensure);
-                    (environment, tmux_config::apply_recommended_naming()?)
-                };
-            environment?;
+            //
+            // With no tmux server running there is nothing to set or take back:
+            // the environment step's own first call says so, and naming is not
+            // asked the same question a second time.
+            let uninstall =
+                v1::HookManagementAction::try_from(request.hook_management).unwrap_or_default()
+                    == v1::HookManagementAction::Uninstall;
+            let environment = if uninstall {
+                tmux_config::remove_codex_embedded_env()
+            } else {
+                tmux_config::apply_codex_embedded_env()
+            };
+            codex_config_step(if uninstall {
+                codex_config::remove
+            } else {
+                codex_config::ensure
+            });
+            let outcome = match environment {
+                Err(error) if tmux_config::is_no_server(&error) => {
+                    tmux_config::NamingOutcome::NoServer
+                }
+                environment => {
+                    let outcome = if uninstall {
+                        tmux_config::remove_recommended_naming()?
+                    } else {
+                        tmux_config::apply_recommended_naming()?
+                    };
+                    environment?;
+                    outcome
+                }
+            };
             response.host_naming = outcome.label().into();
         }
         v1::Operation::AgentAction => {

@@ -236,6 +236,9 @@ impl NativeNotifications {
         self.post(TEST_TITLE, TEST_BODY, None)
     }
 
+    /// Nothing to ask for: only macOS has a permission prompt.
+    pub fn request_authorization(&self) {}
+
     /// Freedesktop has no per-app permission model — a notification daemon
     /// either answers or there is nothing to deliver through.
     pub fn authorization_status(&self) -> Result<String, String> {

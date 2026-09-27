@@ -164,11 +164,13 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   // two `tmux show-options` subprocesses over the link, and the effect below
   // re-runs on every snapshot — which is every topology change. Asserting it
   // per snapshot put subprocess spawns on the path this phase budgets at under
-  // a second end to end.
-  const asserted = useRef(false);
+  // a second end to end. Keyed by the host identity, which carries the
+  // connection epoch: a first session that starts the tmux server is a new
+  // epoch, and that new server is the one that needs the settings.
+  const asserted = useRef<string | undefined>(undefined);
   const assertNaming = useCallback((host: ConsentedHost) => {
-    if (asserted.current) return;
-    asserted.current = true;
+    if (asserted.current === host.identity) return;
+    asserted.current = host.identity;
     const current = optionsRef.current;
     void current.applyHostNaming(host.identity).then((outcome) => {
       // A change to the user's running tmux server is worth one line; finding
@@ -180,6 +182,9 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       current.onStatus(`Recommended tmux window naming was not applied: ${String(cause)}`);
     });
   }, []);
+
+  // The migration below runs at most once per connection; see its effect.
+  const reassert = useRef<{ running: boolean; attempted: boolean }>({ running: false, attempted: false });
 
   /**
    * Installs exactly `targets` on exactly the host the caller answered about.
@@ -195,6 +200,10 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
    */
   const install = useCallback((targets: readonly AgentAdapterDescriptor[], host: ConsentedHost, questionId?: number) => {
     const current = optionsRef.current;
+    // This connection's setup is now this install. Accepting records the host
+    // before the write lands, and a migration started on that record would race
+    // this install for the same files and report the loser as a failure.
+    reassert.current.attempted = true;
     if (questionId !== undefined) updateQuestion(questionId, { activity: "install", error: undefined });
     // The record follows the write, always in that order and never without it.
     // Recording only after *every* adapter succeeded left a part-way failure
@@ -233,7 +242,7 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       // sent, even if this connection already asserted it: an uninstall in
       // between took the naming and the Codex pane environment back off the
       // host, and an install is rare enough that the subprocesses cost nothing.
-      asserted.current = false;
+      asserted.current = undefined;
       assertNaming(host);
       return true;
     }).catch((cause) => {
@@ -242,7 +251,7 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
       if (questionId !== undefined) updateQuestion(questionId, { error: String(cause) });
       // The hooks that did land still need their pane environment.
       if (answered) {
-        asserted.current = false;
+        asserted.current = undefined;
         assertNaming(host);
       }
       return false;
@@ -316,13 +325,12 @@ export function useAgentHostSetup(options: AgentHostSetupOptions): AgentHostSetu
   // unavailable" forever and the one-time prompt, already answered, could never
   // come back to fix it. Merge-only, backed up and idempotent, so re-running it
   // on a host that is already current writes nothing at all.
-  const reassert = useRef<{ running: boolean; attempted: boolean }>({ running: false, attempted: false });
   useEffect(() => {
     if (!options.connected) {
       // A new connection is a new chance — and a restarted tmux server has
       // dropped the in-memory naming, so both are reset together.
       reassert.current = { running: false, attempted: false };
-      asserted.current = false;
+      asserted.current = undefined;
       return;
     }
     // Real, recorded consent for *this* host, and a host identity to bind the

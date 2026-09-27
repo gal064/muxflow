@@ -94,6 +94,10 @@ pub(crate) enum NamingOutcome {
     /// that removes naming from a server that never had it must not be told
     /// its owner arranged that.
     NothingToRemove,
+    /// No tmux server was running. The naming and the Codex environment live
+    /// in a server's memory, so there is nothing to set until one starts —
+    /// the first session does that, and the desktop sends this again then.
+    NoServer,
 }
 
 impl NamingOutcome {
@@ -104,6 +108,7 @@ impl NamingOutcome {
             Self::UserConfigured => "userConfigured",
             Self::Removed => "removed",
             Self::NothingToRemove => "nothingToRemove",
+            Self::NoServer => "noServer",
         }
     }
 }
@@ -204,7 +209,7 @@ pub(crate) fn remove_recommended_naming() -> anyhow::Result<NamingOutcome> {
 /// therefore exactly `codex --no-daemon`, for every way of starting Codex,
 /// even with a server already running. This relies on that asymmetry; the
 /// proper fix is hook `client_env` (openai/codex#44902).
-const CODEX_EMBEDDED_ENV: &str = "CODEX_EXEC_SERVER_URL";
+pub(crate) const CODEX_EMBEDDED_ENV: &str = "CODEX_EXEC_SERVER_URL";
 
 /// Give every pane created from now on the empty `CODEX_EXEC_SERVER_URL`.
 ///
@@ -236,6 +241,20 @@ pub(crate) fn remove_codex_embedded_env() -> anyhow::Result<()> {
         &["set-environment", "-gu", CODEX_EMBEDDED_ENV],
         "remove the Codex pane setting",
     )
+}
+
+/// Whether a tmux call failed only because no server is running: the socket
+/// is missing (`error connecting to … (No such file or directory)`) or nothing
+/// listens on it (`no server running on …`). Any other connect error, such as
+/// a socket another user owns, is a real failure. Read from the error a call already returned, so asking
+/// costs no extra subprocess.
+pub(crate) fn is_no_server(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("no server running")
+            || (message.contains("error connecting to")
+                && message.contains("(No such file or directory)"))
+    })
 }
 
 fn run_tmux(args: &[&str], purpose: &str) -> anyhow::Result<()> {
@@ -364,6 +383,25 @@ mod tests {
         assert_eq!(NamingOutcome::UserConfigured.label(), "userConfigured");
         assert_eq!(NamingOutcome::Removed.label(), "removed");
         assert_eq!(NamingOutcome::NothingToRemove.label(), "nothingToRemove");
+        assert_eq!(NamingOutcome::NoServer.label(), "noServer");
+    }
+
+    #[test]
+    fn only_a_missing_tmux_server_reads_as_no_server() {
+        let missing_socket = anyhow::anyhow!(
+            "tmux could not report its global environment: error connecting to /private/tmp/tmux-501/default (No such file or directory)"
+        );
+        let nothing_listening = anyhow::anyhow!(
+            "tmux could not report its global environment: no server running on /tmp/tmux-1000/default"
+        );
+        let other = anyhow::anyhow!("tmux could not report its global environment: unknown option");
+        let not_ours = anyhow::anyhow!(
+            "tmux could not report its global environment: error connecting to /tmp/tmux-1000/default (Permission denied)"
+        );
+        assert!(is_no_server(&missing_socket));
+        assert!(is_no_server(&nothing_listening));
+        assert!(!is_no_server(&other));
+        assert!(!is_no_server(&not_ours));
     }
 
     #[test]

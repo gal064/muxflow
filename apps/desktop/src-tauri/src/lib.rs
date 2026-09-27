@@ -141,10 +141,8 @@ async fn notification_permission_status(
 
 /// The notification the user asks for from Settings.
 ///
-/// This is also the only thing in the app that reliably *raises* the OS
-/// permission prompt: authorization is requested lazily on the first
-/// notification, so on a machine where no agent has ever blocked or finished,
-/// the app never appeared in System Settings and there was nothing to grant.
+/// The permission prompt itself is raised at launch; this is how a person
+/// checks that banners actually arrive.
 #[tauri::command]
 async fn emit_test_notification(
     notifications: tauri::State<'_, notifications::NativeNotifications>,
@@ -202,9 +200,12 @@ pub fn run() {
             app.manage(connection::files::DownloadManager::default());
             app.manage(connection::files::FileIoManager);
             app.manage(connection::files::UploadManager);
-            app.manage(notifications::NativeNotifications::new(
-                app.handle().clone(),
-            ));
+            let notifications = notifications::NativeNotifications::new(app.handle().clone());
+            // At launch, not at the first agent event, so the permission prompt
+            // is there while the person is looking. A no-op once they answered.
+            let prompt = notifications.clone();
+            tauri::async_runtime::spawn_blocking(move || prompt.request_authorization());
+            app.manage(notifications);
             for window in app.webview_windows().values() {
                 macos_window::enable_native_full_screen(window)?;
                 // Cosmetic: a window that keeps GTK's bar is still a usable one,

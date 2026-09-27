@@ -19,9 +19,16 @@ pub(super) const APP_SHELL: &str = "exec \"${SHELL:-/bin/sh}\"";
 /// it as that changes — an explicit `-n` would have turned that off, and the
 /// name it froze would not have survived anyway: Claude Code and Codex rename
 /// the window through the `pane-title-changed` hook the moment they start.
+///
+/// `embedded_codex` gives the session `CODEX_EXEC_SERVER_URL=` from its first
+/// pane on. The first session is what starts a tmux server, so its first pane
+/// is spawned before the desktop can put that variable on the new server.
+/// tmux keeps it as the session's own value, so it outlives an uninstall and
+/// wins over a global one for that session until the server restarts.
 pub(super) fn configure_new_session(
     command: &mut std::process::Command,
     action: &v1::TmuxAction,
+    embedded_codex: bool,
 ) -> anyhow::Result<()> {
     // The window id rides along so the desktop can retire the pending
     // placeholder the moment the snapshot names this window — without it, a
@@ -43,6 +50,12 @@ pub(super) fn configure_new_session(
     if !action.name.is_empty() {
         validate_name(&action.name)?;
         command.args(["-s", &escaped_format_literal(&action.name)]);
+    }
+    if embedded_codex {
+        command.args([
+            "-e",
+            &format!("{}=", crate::service::tmux_config::CODEX_EMBEDDED_ENV),
+        ]);
     }
     command.arg(APP_SHELL);
     Ok(())
@@ -274,7 +287,7 @@ mod tests {
 
     fn session_args(action: &v1::TmuxAction) -> anyhow::Result<Vec<String>> {
         let mut command = std::process::Command::new("tmux");
-        configure_new_session(&mut command, action)?;
+        configure_new_session(&mut command, action, false)?;
         Ok(command
             .get_args()
             .map(|value| value.to_string_lossy().into_owned())
@@ -302,6 +315,23 @@ mod tests {
                 "checkout",
                 APP_SHELL,
             ]
+        );
+    }
+
+    /// The server-starting create carries the Codex variable into its first
+    /// pane, placed before the shell command it applies to.
+    #[test]
+    fn a_consented_bootstrap_session_starts_with_the_codex_variable() {
+        let action = v1::TmuxAction::default();
+        let mut command = std::process::Command::new("tmux");
+        configure_new_session(&mut command, &action, true).unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args[args.len() - 3..],
+            ["-e", "CODEX_EXEC_SERVER_URL=", APP_SHELL]
         );
     }
 

@@ -264,9 +264,7 @@ impl NativeNotifications {
     /// The one notification a person can ask for directly.
     ///
     /// It carries no route — an actionable notification needs route storage
-    /// that may not exist, and "did a banner appear" is the whole question —
-    /// and it is the call that first raises the OS permission prompt on a
-    /// machine where no agent event has ever fired.
+    /// that may not exist, and "did a banner appear" is the whole question.
     pub fn send_test_notification(&self) -> Result<NotificationReceipt, String> {
         self.post(Posting {
             title: TEST_TITLE,
@@ -276,6 +274,17 @@ impl NativeNotifications {
             present_in_foreground: true,
             sound: true,
         })
+    }
+
+    /// Raises the macOS permission prompt while the choice is still open, so it
+    /// appears at launch rather than at the first agent event. Once the user
+    /// has answered, macOS returns at once and nothing is shown. Blocks until
+    /// the prompt is answered or times out, so callers run it off the main
+    /// thread; the outcome is read later through `authorization_status`.
+    pub fn request_authorization(&self) {
+        if self.bundled {
+            let _ = ensure_authorized(&UNUserNotificationCenter::currentNotificationCenter());
+        }
     }
 
     /// What macOS says about this app, in the five words the UI knows.

@@ -195,9 +195,10 @@ export interface AgentHookReview {
  * Two of the three are successes. `alreadyCurrent` is this app's own hook,
  * already covering every adapter it knows about. `userConfigured` is the
  * user's own arrangement, kept — it may carry exemptions this app knows
- * nothing about.
+ * nothing about. `noServer` means no tmux server was running to hold it; the
+ * first session starts one on a new connection epoch, which sends it again.
  */
-export const AGENT_HOST_NAMING_OUTCOMES = ["applied", "alreadyCurrent", "userConfigured", "removed", "nothingToRemove"] as const;
+export const AGENT_HOST_NAMING_OUTCOMES = ["applied", "alreadyCurrent", "userConfigured", "removed", "nothingToRemove", "noServer"] as const;
 /** `unavailable` is this side's answer to a value the host did not give. */
 export type AgentHostNamingOutcome = typeof AGENT_HOST_NAMING_OUTCOMES[number] | "unavailable";
 

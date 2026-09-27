@@ -253,6 +253,46 @@ describe("the one-time set-up prompt", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("does not start a second install when the first-time answer is recorded mid-install", async () => {
+    // Accepting records the host after the first adapter is written, while the
+    // second is still in flight. The record re-runs the migration effect with
+    // both adapters still reading as unwired; it must not race this install.
+    let release!: () => void;
+    const applyHooks = vi.fn()
+      .mockImplementationOnce(async () => undefined)
+      .mockImplementationOnce(() => new Promise<undefined>((resolve) => { release = () => resolve(undefined); }));
+    const adapters = [adapter("claude-code", "notWired"), adapter("codex", "notWired")];
+    const setup = harness({ adapters, applyHooks });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    const accept = renderer.root.findAll((node) => node.type === "button")
+      .find((node) => String(node.children[0]).startsWith("Set up this host"))!;
+    await act(async () => { accept.props.onClick(); });
+    expect(setup.calls.recordDecision).toHaveBeenCalledWith("ssh-remote-linux", "accepted");
+    await act(async () => renderer.update(<setup.Harness decision="accepted" />));
+    await act(async () => release());
+    expect(setup.calls.reviewHooks.mock.calls.map(([id]) => id)).toEqual(["claude-code", "codex"]);
+    expect(applyHooks).toHaveBeenCalledTimes(2);
+    expect(setup.calls.onStatus).not.toHaveBeenCalledWith(expect.stringContaining("Could not update"));
+    await act(async () => renderer.unmount());
+  });
+
+  it("sends the host settings again to a tmux server that starts after connecting", async () => {
+    // No server yet: nothing to set, and nothing to say about it.
+    const applyHostNaming = vi.fn(async () => "noServer" as const);
+    const setup = harness({ decision: "accepted", adapters: [adapter("claude-code", "wired")], applyHostNaming });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<setup.Harness />); });
+    expect(applyHostNaming).toHaveBeenCalledTimes(1);
+    expect(setup.calls.onStatus).not.toHaveBeenCalled();
+    // The first session starts the server on a new connection epoch.
+    await act(async () => renderer.update(<setup.Harness hostIdentity="ssh-remote-linux client-1 2" />));
+    expect(applyHostNaming).toHaveBeenCalledTimes(2);
+    await act(async () => renderer.update(<setup.Harness hostIdentity="ssh-remote-linux client-1 2" />));
+    expect(applyHostNaming).toHaveBeenCalledTimes(2);
+    await act(async () => renderer.unmount());
+  });
+
   it("keeps the hooks when the tmux naming is refused, and says so", async () => {
     // The naming is explicitly non-gating: agent status works without it.
     const setup = harness({ applyHostNaming: vi.fn(async () => { throw new Error("tmux rejected the recommended window naming"); }) });
