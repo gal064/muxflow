@@ -157,12 +157,12 @@ install_linux() {
     || printf '\ntmux 3.3 or newer is required and was not found on PATH.\n' >&2
 
   case ":$PATH:" in
-    *":$prefix/bin:"*) printf '\nRun muxflow, or launch it from your app menu.\n' ;;
+    *":$prefix/bin:"*) printf '\nRun muxflow, or launch it from your app menu; quit and reopen it if it was running.\n' ;;
     *)
       printf '\n%s/bin is not on your PATH. Add this to your shell profile:\n' "$prefix"
       # shellcheck disable=SC2016 # $PATH is meant literally
       printf '  export PATH="%s/bin:$PATH"\n' "$prefix"
-      printf 'Then run muxflow, or launch it from your app menu.\n'
+      printf 'Then run muxflow, or launch it from your app menu; quit and reopen it if it was running.\n'
       ;;
   esac
 }
