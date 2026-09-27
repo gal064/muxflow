@@ -125,8 +125,10 @@ For Android, install the APK from the
 
 ## Troubleshooting
 
-First, make sure every host runs the latest tmux version (3.3 or newer is
-required).
+### Muxflow can't connect to tmux
+
+Make sure the latest tmux is installed on your machine and on the machine
+you're connecting to (3.3 or newer is required).
 
 ### Notifications don't appear
 
