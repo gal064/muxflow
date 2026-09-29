@@ -47,11 +47,11 @@ import {
 } from "../features/shell/helperUpgrade";
 import { sameHelperInstallConnection, sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
 import { useShellCommands } from "../features/shell/useShellCommands";
-import { effectiveRails } from "../features/shell/responsiveShell";
+import { railLayout } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import {
   clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
-  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
+  PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, TERMINAL_MIN_WIDTH,
   type AppOwnedTab, type HostSetupDecision, type ShellState, type WorkspaceDefaults,
 } from "../features/shell/types";
 import {
@@ -217,7 +217,7 @@ export function App() {
     setStatusState((current) => ({ text, sequence: current.sequence + 1 }));
   }, []);
   const {
-    compactViewport, completedDownload, notice, setCompletedDownload, setNotice, windowWidth,
+    completedDownload, notice, setCompletedDownload, setNotice, windowWidth,
   } = useAppShellChrome(status, statusState.sequence);
   const [hostSessionSelection, setHostSessionSelection] = useState<{
     clientId: string;
@@ -1449,15 +1449,21 @@ export function App() {
 
   const sidebarWidth = sidebarWidthForWindow(appState.shell.sidebarWidth, windowWidth);
   const panelWidth = panelWidthForWindow(appState.shell.panelWidth, windowWidth);
-  // Derived, never stored: see `effectiveRails`.
-  const { panelOpen, sidebarOpen } = effectiveRails(appState.shell, compactViewport);
+  // Derived, never stored: see `railLayout`.
+  const { panelFits, panelOpen, sidebarFits, sidebarOpen } = railLayout(appState.shell, sidebarWidth, panelWidth, windowWidth);
+  // A drag may not widen a rail past the room it has, or letting go would hide it.
+  const sidebarMaxWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(
+    Math.floor(windowWidth / 3), windowWidth - TERMINAL_MIN_WIDTH - (panelOpen ? panelWidth : 0),
+  ));
+  const panelMaxWidth = Math.max(PANEL_MIN_WIDTH, Math.min(
+    Math.floor(windowWidth / 2), windowWidth - TERMINAL_MIN_WIDTH - (sidebarOpen ? sidebarWidth : 0),
+  ));
 
   return <main
     className={[
       "shell",
       sidebarOpen ? "" : "sidebar-collapsed",
       panelOpen ? "panel-open" : "",
-      compactViewport ? "compact" : "",
       platform === "mac" ? "platform-mac" : "platform-linux",
     ].filter(Boolean).join(" ")}
     style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
@@ -1475,8 +1481,10 @@ export function App() {
       onToggleSidebar={() => void runCommand("view.toggleSidebar")}
       onUpdate={() => { if (availableUpdate) void openExternalUrl(availableUpdate.url).catch((error) => setStatus(String(error))); }}
       panelOpen={panelOpen}
+      panelFits={panelFits}
       platform={platform}
       sidebarOpen={sidebarOpen}
+      sidebarFits={sidebarFits}
       unread={unread}
       update={availableUpdate ?? undefined}
       windowControls={windowControls}
@@ -1510,8 +1518,8 @@ export function App() {
         hosts={sidebarHosts}
         onSetUpHost={agentHostSetup.offerable ? agentHostSetup.offer : undefined}
         onAgentsRatio={(ratio) => updateShell({ agentsSectionRatio: clampedAgentsRatio(ratio) })}
-        maxWidth={Math.max(SIDEBAR_MIN_WIDTH, Math.floor(windowWidth / 3))}
-        onWidth={(width) => updateShell({ sidebarWidth: sidebarWidthForWindow(width, windowWidth) })}
+        maxWidth={sidebarMaxWidth}
+        onWidth={(width) => updateShell({ sidebarWidth: sidebarWidthForWindow(Math.min(width, sidebarMaxWidth), windowWidth) })}
         width={sidebarWidth}
         onLaunchAgent={agentWorkflow.launch}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -1700,7 +1708,7 @@ export function App() {
         fileClient={fileClient}
         fileScope={fileScope}
         ignoredPaths={ignoredPaths}
-        maxWidth={Math.max(PANEL_MIN_WIDTH, Math.floor(windowWidth / 2))}
+        maxWidth={panelMaxWidth}
         onDownload={async (intent) => { if (workspaceFiles.root) await startDownloadFlow(intent, workspaceFiles.root, "explorer"); }}
         onGitDiff={(entry, target, options) => {
           if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || !workspaceGit.status) return;
@@ -1741,7 +1749,7 @@ export function App() {
         onMutate={mutateFile}
         onOpenFile={openExplorerEntry}
         onSurface={(surface) => void runCommand(surface === "files" ? "view.showFiles" : "view.showGit")}
-        onWidth={(width) => updateShell({ panelWidth: panelWidthForWindow(width, windowWidth) })}
+        onWidth={(width) => updateShell({ panelWidth: panelWidthForWindow(Math.min(width, panelMaxWidth), windowWidth) })}
         surface={appState.shell.panelSurface}
         width={panelWidth}
         workspaceFiles={workspaceFiles}

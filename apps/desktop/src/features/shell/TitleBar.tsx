@@ -8,6 +8,9 @@ interface TitleBarProps {
   workspaceName?: string;
   sidebarOpen: boolean;
   panelOpen: boolean;
+  /** False while the window is too narrow for the rail; its toggle greys out and says why. */
+  sidebarFits: boolean;
+  panelFits: boolean;
   /** Agents waiting on a human; 0 renders no badge at all. */
   unread: number;
   /**
@@ -67,10 +70,12 @@ export function TitleBar(props: TitleBarProps) {
     : bellHint;
   return <header className={`titlebar ${props.platform === "mac" ? "titlebar-overlay" : ""}`} data-tauri-drag-region>
     <button
+      aria-disabled={!props.sidebarFits || undefined}
       aria-label="Toggle sidebar"
       aria-pressed={props.sidebarOpen}
       className="bar-button"
-      onClick={props.onToggleSidebar}
+      onClick={() => { if (props.sidebarFits) props.onToggleSidebar(); }}
+      title={props.sidebarFits ? undefined : "Widen the window to show the sidebar"}
       type="button"
     ><Icon name="sidebarLeft" /></button>
     <button
@@ -121,10 +126,12 @@ export function TitleBar(props: TitleBarProps) {
       type="button"
     ><Icon name="plus" /></button>
     <button
+      aria-disabled={!props.panelFits || undefined}
       aria-label="Toggle right panel"
       aria-pressed={props.panelOpen}
       className="bar-button"
-      onClick={props.onTogglePanel}
+      onClick={() => { if (props.panelFits) props.onTogglePanel(); }}
+      title={props.panelFits ? undefined : "Widen the window to show Files and Git"}
       type="button"
     ><Icon name="panelRight" /></button>
     {props.windowControls && <div className="window-controls">

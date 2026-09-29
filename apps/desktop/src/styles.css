@@ -206,8 +206,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* An overlay, not a row. In flow this 22px band moved the terminal surface the
    tmux client size is measured from, so every appearance and every recovery
    resized the user's real windows — for a banner that is frequently gone in
-   under a second. Above the compact sidebar/panel drawers (z-index 25) and
-   below the menus and modals, which must still cover it. */
+   under a second. Below the menus and modals, which must still cover it. */
 .link-strip {
   position: absolute; z-index: 30; top: 0; left: 0; right: 0;
   display: flex; align-items: center; gap: 10px;
@@ -1486,22 +1485,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 /* ── Narrow windows ────────────────────────────────────────────────────── */
 
-/* Below 880px the sidebar and the panel overlay the terminal rather than
-   taking width from it, so the product stays visible at any window size. */
+/* The rails themselves need nothing here: `railLayout` stops drawing them once
+   the terminal would drop below its minimum. These rules fit what is inside
+   the terminal area. */
 @media (max-width: 880px) {
-  /* Positioned inside `.shell-body` (which is `position: relative` for the
-     disconnected strip already), not against the viewport: the drawers belong
-     to the body, and the strip stays above them. */
-  .shell.compact .sidebar {
-    position: absolute; z-index: 25; top: 0; bottom: 0; left: 0;
-    width: min(var(--sidebar-width), 80vw);
-    box-shadow: 12px 0 30px rgb(0 0 0 / .7);
-  }
-  .shell.compact .right-panel {
-    position: absolute; z-index: 25; top: 0; bottom: 0; right: 0;
-    width: min(var(--panel-width), 80vw);
-    box-shadow: -12px 0 30px rgb(0 0 0 / .7);
-  }
   .tab { max-width: 150px; }
   .file-tab-surface[data-view-mode="split"] { grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--bar-height) minmax(180px, 1fr) minmax(180px, 1fr); }
   .file-tab-surface[data-view-mode="split"] .editor-toolbar { grid-column: 1; }

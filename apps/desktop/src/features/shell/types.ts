@@ -15,6 +15,8 @@ export const SIDEBAR_MAX_WINDOW_FRACTION = 1 / 3;
 export const PANEL_MIN_WIDTH = 240;
 /** Fraction of the window a dragged panel may not exceed. */
 export const PANEL_MAX_WINDOW_FRACTION = 1 / 2;
+/** The terminal width (about 60 columns) a rail may not squeeze below; past it the rail hides. */
+export const TERMINAL_MIN_WIDTH = 480;
 /** Share of the sidebar's height the agents section takes by default. */
 export const AGENTS_SECTION_DEFAULT_RATIO = 0.42;
 export const AGENTS_SECTION_MIN_RATIO = 0.15;

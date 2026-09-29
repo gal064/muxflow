@@ -15,8 +15,8 @@
         "title": "Muxflow",
         "width": 1280,
         "height": 800,
-        "minWidth": 800,
-        "minHeight": 500,
+        "minWidth": 320,
+        "minHeight": 240,
         "titleBarStyle": "Overlay",
         "trafficLightPosition": { "x": 12, "y": 13 },
         "hiddenTitle": true

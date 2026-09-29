@@ -1196,7 +1196,7 @@ describe("application shell accessibility contracts", () => {
     const html = renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack canGoForward={false} canJump onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
-      onToggleSidebar={noop} panelOpen={false} platform="mac" sidebarOpen unread={3} workspaceName="muxflow"
+      onToggleSidebar={noop} panelFits panelOpen={false} platform="mac" sidebarFits sidebarOpen unread={3} workspaceName="muxflow"
     />);
     expect([...html.matchAll(/<button/gu)]).toHaveLength(6);
     expect(html).toContain("3 agents waiting; go to the next one");
@@ -1214,7 +1214,7 @@ describe("application shell accessibility contracts", () => {
     const quiet = renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack={false} canGoForward canJump={false} onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
-      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen={false} unread={0}
+      onToggleSidebar={noop} panelFits panelOpen={false} platform="linux" sidebarFits sidebarOpen={false} unread={0}
     />);
     expect(quiet).toContain("No agents waiting");
     expect(quiet).toContain("No workspace");
@@ -1228,7 +1228,7 @@ describe("application shell accessibility contracts", () => {
     const html = renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack canGoForward canJump={false} onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop} onToggleSidebar={noop} onUpdate={noop}
-      panelOpen={false} platform="mac" sidebarOpen unread={0} update={{ version: "0.2.0" }}
+      panelFits panelOpen={false} platform="mac" sidebarFits sidebarOpen unread={0} update={{ version: "0.2.0" }}
     />);
     expect([...html.matchAll(/<button/gu)]).toHaveLength(7);
     expect(html).toContain(">↑ Update 0.2.0</button>");
@@ -1242,7 +1242,7 @@ describe("application shell accessibility contracts", () => {
       const html = renderToStaticMarkup(<TitleBar
         canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell}
         onForward={noop} onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
-        onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={unread}
+        onToggleSidebar={noop} panelFits panelOpen={false} platform="linux" sidebarFits sidebarOpen unread={unread}
       />);
       const badged = html.indexOf("bar-button-badged");
       return html.slice(html.lastIndexOf("<button", badged)).split("</button>")[0];
@@ -1277,7 +1277,7 @@ describe("application shell accessibility contracts", () => {
     let renderer!: ReturnType<typeof create>;
     const bar = (canJump: boolean) => <TitleBar
       canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell} onForward={noop} onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
-      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={2}
+      onToggleSidebar={noop} panelFits panelOpen={false} platform="linux" sidebarFits sidebarOpen unread={2}
     />;
     act(() => { renderer = create(bar(false)); });
     const button = () => renderer.root.findByProps({ className: "bar-button bar-button-badged" });
@@ -1289,11 +1289,41 @@ describe("application shell accessibility contracts", () => {
     act(() => renderer.unmount());
   });
 
+  it("greys out a rail toggle while the window is too narrow for that rail, and says so", () => {
+    const onToggleSidebar = vi.fn();
+    const onTogglePanel = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    const bar = (fits: boolean) => <TitleBar
+      canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
+      onNewWorkspace={noop} onTogglePanel={onTogglePanel} onUpdate={noop} onToggleSidebar={onToggleSidebar}
+      panelFits={fits} panelOpen={false} platform="linux" sidebarFits={fits} sidebarOpen={false} unread={0}
+    />;
+    act(() => { renderer = create(bar(false)); });
+    const sidebar = () => renderer.root.findByProps({ "aria-label": "Toggle sidebar" });
+    const panel = () => renderer.root.findByProps({ "aria-label": "Toggle right panel" });
+    // `aria-disabled`, like the bell, so the tooltip explaining it still shows.
+    expect(sidebar().props).toMatchObject({ "aria-disabled": true, title: "Widen the window to show the sidebar" });
+    expect(panel().props).toMatchObject({ "aria-disabled": true, title: "Widen the window to show Files and Git" });
+    act(() => sidebar().props.onClick());
+    act(() => panel().props.onClick());
+    expect(onToggleSidebar).not.toHaveBeenCalled();
+    expect(onTogglePanel).not.toHaveBeenCalled();
+
+    act(() => { renderer.update(bar(true)); });
+    expect(sidebar().props["aria-disabled"]).toBeUndefined();
+    expect(panel().props.title).toBeUndefined();
+    act(() => sidebar().props.onClick());
+    act(() => panel().props.onClick());
+    expect(onToggleSidebar).toHaveBeenCalledTimes(1);
+    expect(onTogglePanel).toHaveBeenCalledTimes(1);
+    act(() => renderer.unmount());
+  });
+
   it("reserves traffic-light room on macOS only, because only macOS overlays them", () => {
     const bar = (platform: "mac" | "linux") => renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
-      onToggleSidebar={noop} panelOpen={false} platform={platform} sidebarOpen unread={0}
+      onToggleSidebar={noop} panelFits panelOpen={false} platform={platform} sidebarFits sidebarOpen unread={0}
     />);
     // `titleBarStyle: "Overlay"` is a macOS-only Tauri option; Linux has no
     // traffic lights to clear, so the 78px reservation there would be dead space.
@@ -1308,7 +1338,7 @@ describe("application shell accessibility contracts", () => {
     const bar = (windowControls?: typeof controls) => <TitleBar
       canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
       onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
-      onToggleSidebar={noop} panelOpen={false} platform="linux" sidebarOpen unread={0}
+      onToggleSidebar={noop} panelFits panelOpen={false} platform="linux" sidebarFits sidebarOpen unread={0}
       windowControls={windowControls}
     />;
     expect(renderToStaticMarkup(bar())).not.toContain("window-controls");
