@@ -14,7 +14,14 @@ use super::{
 };
 
 #[tauri::command]
-pub fn probe_remote_helper(connection: ConnectionSpec) -> Result<serde_json::Value, String> {
+pub async fn probe_remote_helper(connection: ConnectionSpec) -> Result<serde_json::Value, String> {
+    // SSH and artifact hashing must not block the native UI event loop.
+    tauri::async_runtime::spawn_blocking(move || probe_remote_helper_inner(connection))
+        .await
+        .map_err(|error| format!("helper check task failed: {error}"))?
+}
+
+fn probe_remote_helper_inner(connection: ConnectionSpec) -> Result<serde_json::Value, String> {
     let ConnectionSpec::Ssh {
         profile_id,
         target,
@@ -47,11 +54,18 @@ fn compare_installed_artifact(probe: &mut serde_json::Value) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub fn install_remote_helper(
+pub async fn install_remote_helper(
     connection: ConnectionSpec,
     allow_upgrade: bool,
 ) -> HelperInstallReport {
-    helper_install_report(install_remote_helper_inner(connection, allow_upgrade))
+    // Keep the progress dialog paintable while the helper process uploads,
+    // verifies and restarts. The worker retains the SSH lease for the operation.
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        install_remote_helper_inner(connection, allow_upgrade)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("helper installation task failed: {error}")));
+    helper_install_report(result)
 }
 
 fn helper_install_report(result: Result<String, String>) -> HelperInstallReport {
