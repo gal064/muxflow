@@ -6,6 +6,9 @@
 // assert the span outcome the user's interaction would produce.
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Terminal as HeadlessTerminal } from "@xterm/headless";
+import { TerminalWriteScheduler } from "./TerminalWriteScheduler";
+import { resizeTerminalPreservingViewport } from "./terminalViewport";
 import type { Pane } from "../../app/types";
 import {
   abandonPanePaintSpansForScope,
@@ -203,7 +206,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => ({
 }));
 
 import type { Platform } from "../../commands/registry";
-import { TerminalPane, type TerminalPaneController } from "./TerminalPane";
+import { RESIZE_SCREEN_SETTLE_MS, TerminalPane, type TerminalPaneController } from "./TerminalPane";
 import { type TerminalEvent } from "./api";
 import { terminalCacheKey, terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
@@ -668,12 +671,144 @@ describe("TerminalPane pane-paint span lifecycle", () => {
   });
 });
 
-// tmux owns a pane's grid, but its answer to a resize is a debounce plus a
-// round trip away while the pane's box has already moved. These pin the handover
-// in both directions: the box may lead only while tmux has not answered for it,
-// and the moment tmux does, its numbers are what the terminal renders at.
+// tmux owns the parsing grid throughout a resize, including while the box
+// has changed but the host has not yet answered.
 describe("TerminalPane grid during a resize", () => {
-  it("refits when xterm metrics change without a CSS-box resize", async () => {
+  it("refreshes once after confirmed resize churn, then resumes output on the authoritative screen", async () => {
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const pane = fixturePane("%resize-refresh");
+    const mounted = await mountPane(pane, hub);
+    const renderer = renderers.created[0];
+    try {
+      await act(async () => { hub.deliver(seedEvent(pane.id)); renderer.flushRendered(); });
+      api.requestTerminalSeed.mockClear();
+      await updatePane(mounted, { ...pane, width: 40 }, hub);
+      await act(async () => { vi.advanceTimersByTime(RESIZE_SCREEN_SETTLE_MS - 1); });
+      await updatePane(mounted, pane, hub);
+      await act(async () => { vi.advanceTimersByTime(RESIZE_SCREEN_SETTLE_MS - 1); });
+      expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+      await act(async () => { vi.advanceTimersByTime(1); });
+      expect(api.requestTerminalSeed).toHaveBeenCalledExactlyOnceWith("client-a", pane.id);
+      const before = renderer.writes.slice();
+      await act(async () => { hub.deliver(outputEvent(pane.id, 2, "stale output")); });
+      expect(renderer.writes).toEqual(before);
+      await act(async () => { hub.deliver(seedEvent(pane.id, 3)); renderer.flushRendered(); });
+      await act(async () => { hub.deliver(outputEvent(pane.id, 4, "live")); });
+      expect(renderer.writes.at(-1)).toBe("write:4");
+      await act(async () => { vi.advanceTimersByTime(RESIZE_SCREEN_SETTLE_MS * 3); });
+      expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => mounted.unmount());
+    }
+  });
+
+  it.each([false, true])("leaves resized history in place and refreshes on return (pending resize=%s)", async (pendingResize) => {
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const pane = fixturePane("%resize-reading");
+    const mounted = await mountPane(pane, hub);
+    const renderer = renderers.created[0];
+    try {
+      await act(async () => { hub.deliver(seedEvent(pane.id)); renderer.flushRendered(); });
+      if (pendingResize) await updatePane(mounted, { ...pane, width: 60 }, hub);
+      await act(async () => { renderer.emitViewport(false); });
+      api.requestTerminalSeed.mockClear();
+      await updatePane(mounted, { ...pane, width: 40 }, hub);
+      await act(async () => { vi.advanceTimersByTime(RESIZE_SCREEN_SETTLE_MS * 3); });
+      expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+      expect(renderer.scrollBottomCalls).toBe(0);
+      await act(async () => { renderer.emitViewport(true); });
+      expect(api.requestTerminalSeed).toHaveBeenCalledExactlyOnceWith("client-a", pane.id);
+      await act(async () => { hub.deliver(seedEvent(pane.id, 3)); renderer.flushRendered(); });
+    } finally {
+      await act(async () => mounted.unmount());
+    }
+    expect(terminalStateCache.get(terminalCacheKey("local", pane.id))).toBeDefined();
+  });
+
+  it("cancels a pending resize refresh when the pane unmounts", async () => {
+    vi.useFakeTimers();
+    const hub = new FakeHub();
+    const pane = fixturePane("%resize-unmount");
+    const mounted = await mountPane(pane, hub);
+    await act(async () => { hub.deliver(seedEvent(pane.id)); renderers.created[0].flushRendered(); });
+    await updatePane(mounted, { ...pane, width: 40 }, hub);
+    await act(async () => mounted.unmount());
+    expect(terminalStateCache.get(terminalCacheKey("local", pane.id))).toBeUndefined();
+    api.requestTerminalSeed.mockClear();
+    await act(async () => { vi.advanceTimersByTime(RESIZE_SCREEN_SETTLE_MS * 3); });
+    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("preserves output across a box shrink/grow before tmux answers (alternate=%s)", async (alternate) => {
+    renderers.config.measured = { columns: 80, rows: 24 };
+    const hub = new FakeHub();
+    const pane = fixturePane("%resize-content");
+    const mounted = await mountPane(pane, hub);
+    const renderer = renderers.created[0];
+    const terminal = new HeadlessTerminal({ cols: 80, rows: 24, allowProposedApi: true });
+    const expected = new HeadlessTerminal({ cols: 80, rows: 24, allowProposedApi: true });
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0;
+    const scheduler = new TerminalWriteScheduler(
+      (bytes, done) => terminal.write(bytes, done),
+      (callback) => { frames.set(++frameId, callback); return frameId; },
+      (id) => { frames.delete(id); },
+    );
+    const applyGrid = renderer.setGrid.bind(renderer);
+    vi.spyOn(renderer, "setGrid").mockImplementation((size) => {
+      const outcome = applyGrid(size);
+      if (outcome.kind === "applied") resizeTerminalPreservingViewport(terminal, size);
+      return outcome;
+    });
+    vi.spyOn(renderer, "write").mockImplementation((bytes, done) => scheduler.enqueue(bytes, done));
+    const flush = async () => {
+      await act(async () => {
+        for (let tick = 0; scheduler.pendingBytes > 0 && tick < 100; tick++) {
+          const callbacks = [...frames.values()];
+          frames.clear();
+          callbacks.forEach((callback) => callback(tick * 16));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+      });
+      expect(scheduler.pendingBytes).toBe(0);
+    };
+    const screen = (term: HeadlessTerminal) => Array.from({ length: term.rows }, (_, row) =>
+      term.buffer.active.getLine(term.buffer.active.baseY + row)?.translateToString(true));
+    try {
+      await act(async () => { hub.deliver(seedEvent(pane.id)); renderer.flushRendered(); });
+      const initial = (alternate ? "\x1b[?1049h" : "") + "\x1b[2J\x1b[HInitial screen";
+      await new Promise<void>((resolve) => expected.write(initial, resolve));
+      await act(async () => { hub.deliver(outputEvent(pane.id, 2, initial)); });
+      await flush();
+
+      // Opening a panel shrinks the box before the backend sees the new size.
+      renderer.measured = { columns: 40, rows: 24 };
+      act(() => { resizeCallbacks[0](); });
+      const output = "\x1b[2;60HSTATUS: READY\x1b[4;1H" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".repeat(2)
+        + "\x1b[5;1HNEXT ROW\x1b[K";
+      await new Promise<void>((resolve) => expected.write(output, resolve));
+      await act(async () => { hub.deliver(outputEvent(pane.id, 3, output)); });
+      await flush();
+
+      // Closing it within the debounce restores the box. tmux never resized,
+      // and no further output arrives to accidentally repair the screen.
+      renderer.measured = { columns: 80, rows: 24 };
+      act(() => { resizeCallbacks[0](); });
+      expect(screen(terminal)).toEqual(screen(expected));
+      expect([terminal.buffer.active.cursorX, terminal.buffer.active.cursorY])
+        .toEqual([expected.buffer.active.cursorX, expected.buffer.active.cursorY]);
+    } finally {
+      await act(async () => mounted.unmount());
+      scheduler.dispose();
+      terminal.dispose();
+      expected.dispose();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("keeps tmux dimensions when xterm metrics change without a CSS-box resize", async () => {
     renderers.config.measured = { columns: 80, rows: 24 };
     const hub = new FakeHub();
     const mounted = await mountPane(fixturePane("%dpr"), hub);
@@ -683,15 +818,15 @@ describe("TerminalPane grid during a resize", () => {
     // device-pixel-rounded cell while ResizeObserver has nothing to report.
     renderer.measured = { columns: 79, rows: 23 };
     act(() => { renderer.emitMeasurementsChange(); });
-    expect(renderer.resizes).toEqual([{ columns: 79, rows: 23 }]);
+    expect(renderer.resizes).toEqual([]);
 
     await act(async () => mounted.unmount());
     renderer.measured = { columns: 78, rows: 22 };
     act(() => { renderer.emitMeasurementsChange(); });
-    expect(renderer.resizes).toEqual([{ columns: 79, rows: 23 }]);
+    expect(renderer.resizes).toEqual([]);
   });
 
-  it("fits the terminal to its own box before tmux answers, then settles on tmux's grid", async () => {
+  it("waits for tmux before changing the terminal grid", async () => {
     renderers.config.measured = { columns: 80, rows: 24 };
     const hub = new FakeHub();
     const pane = fixturePane("%grid");
@@ -703,10 +838,9 @@ describe("TerminalPane grid during a resize", () => {
     // it only after the client-resize debounce and a host round trip.
     renderer.measured = { columns: 100, rows: 30 };
     act(() => { resizeCallbacks[0](); });
-    expect(renderer.resizes).toEqual([{ columns: 100, rows: 30 }]);
+    expect(renderer.resizes).toEqual([]);
 
-    // tmux's snapshot lands on the same pixel box, so it agrees: the correcting
-    // application is a no-op resize rather than a second reflow.
+    // Only the host snapshot changes the parsing grid.
     await updatePane(mounted, { ...pane, width: 100, height: 30 }, hub);
     expect(renderer.resizes).toEqual([{ columns: 100, rows: 30 }]);
 
@@ -728,10 +862,10 @@ describe("TerminalPane grid during a resize", () => {
 
     renderer.measured = { columns: 50, rows: 24 };
     act(() => { resizeCallbacks[0](); });
-    expect(renderer.resizes.at(-1)).toEqual({ columns: 50, rows: 24 });
+    expect(renderer.resizes).toEqual([]);
 
     // tmux spends a column on the divider: 49 is what the program in the pane
-    // addressed its cursor against, and it replaces the optimistic fit.
+    // addressed its cursor against, even when the box measures 50.
     await updatePane(mounted, { ...pane, width: 49, height: 24 }, hub);
     expect(renderer.resizes.at(-1)).toEqual({ columns: 49, rows: 24 });
 
@@ -739,7 +873,7 @@ describe("TerminalPane grid during a resize", () => {
     // the box unmoved the observer keeps re-applying tmux's 49 forever.
     act(() => { resizeCallbacks[0](); });
     act(() => { resizeCallbacks[0](); });
-    expect(renderer.resizes).toEqual([{ columns: 50, rows: 24 }, { columns: 49, rows: 24 }]);
+    expect(renderer.resizes).toEqual([{ columns: 49, rows: 24 }]);
     await act(async () => mounted.unmount());
     warn.mockRestore();
   });

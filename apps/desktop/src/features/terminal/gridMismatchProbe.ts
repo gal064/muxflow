@@ -3,8 +3,8 @@ import type { TerminalSize } from "./cellMetrics";
 /**
  * A pane still rendering at a grid its own box stopped agreeing with.
  *
- * The sizing model is deliberately two-sided (see `reconcilePaneGrid` and
- * `refitPaneGridToBox`): tmux's grid is what the terminal renders at, while the
+ * The sizing model is deliberately two-sided (see `reconcilePaneGrid`):
+ * tmux's grid is what the terminal renders at, while the
  * measured CSS box only decides what client size to ask tmux for. The two are
  * allowed to disagree for as long as tmux's answer is in flight, and the pane
  * shows the cost of that window — text clipped at the bottom while a shrink is

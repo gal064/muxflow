@@ -110,6 +110,9 @@ export const REVEAL_VOID_TIMEOUT_MS = 4_000;
  */
 export const REVEAL_VOID_MAX_ATTEMPTS = 3;
 
+/** Collapse a burst of confirmed grid changes into one authoritative screen. */
+export const RESIZE_SCREEN_SETTLE_MS = 60;
+
 /** Disarms the void watch. Safe to call when nothing is armed. */
 function cancelRevealVoidWatch(timer: { current: ReturnType<typeof setTimeout> | undefined }): void {
   if (timer.current === undefined) return;
@@ -149,43 +152,6 @@ export function reconcilePaneGrid(
   if (outcome.kind === "unchanged" || !measured) return undefined;
   if (measured.columns === outcome.size.columns && measured.rows === outcome.size.rows) return undefined;
   return `Pane ${pane.id} measured ${measured.columns}x${measured.rows} from its box but tmux reports ${outcome.size.columns}x${outcome.size.rows}; rendering at tmux's grid.`;
-}
-
-/**
- * Rewraps the terminal to its own box while tmux has not yet answered for it.
- *
- * tmux stays authoritative — `reconcilePaneGrid` above is still what decides
- * the grid — but its answer costs a trailing debounce (`useClientResize`), a
- * host round trip and a topology rediscovery, and `.pane-frame` clips: for that
- * whole window a shrinking pane has its text cut off and a growing one shows a
- * dead band where the old grid ran out. The box itself re-lays-out on the drag
- * frame, so fitting to it locally is what makes a drag look continuous.
- *
- * `gridForBox` is the measurement tmux's current grid was applied for. While
- * the box still measures that, tmux's numbers *are* the numbers for this box
- * and are re-applied unchanged, so the routine divergence this file exists for
- * (a divider column, a rounded percentage) never triggers a local fit — and a
- * drag that ends back where it started restores tmux's grid rather than keeping
- * an intermediate one.
- *
- * It cannot oscillate with `reconcilePaneGrid`: applying a grid resizes the
- * terminal inside the box and never the box, so a local fit cannot provoke the
- * observer callback that produced it, and the caller re-anchors `gridForBox`
- * only where tmux's grid is applied.
- */
-function refitPaneGridToBox(
-  renderer: Pick<TerminalRenderer, "setGrid">,
-  pane: Pane,
-  measured: TerminalSize | undefined,
-  gridForBox: TerminalSize | undefined,
-): string | undefined {
-  if (measured && gridForBox && (measured.columns !== gridForBox.columns || measured.rows !== gridForBox.rows)) {
-    // A box that measures nothing usable is not an argument against tmux's
-    // grid, so a refused fit falls through to it rather than leaving the pane
-    // at whatever it happened to be showing.
-    if (renderer.setGrid(measured).kind !== "rejected") return undefined;
-  }
-  return reconcilePaneGrid(renderer, pane, measured);
 }
 
 /**
@@ -364,10 +330,6 @@ export function TerminalPane({
   const terminalApplicationClipboardRef = useRef(terminalApplicationClipboard);
   const platformRef = useRef(platform);
   const rendererEpochRef = useRef<number | undefined>(undefined);
-  // What the box measured when tmux's grid was last applied to it. The anchor
-  // `refitPaneGridToBox` compares against; written only where tmux's grid is
-  // applied, so an optimistic fit can never move it.
-  const gridForBoxRef = useRef<TerminalSize | undefined>(undefined);
   // Journal-only, and owned by the mount effect: a torn-down pane has no grid
   // left to disagree with, and a fresh mount remeasures everything it watches.
   const gridMismatchProbeRef = useRef<GridMismatchProbe | undefined>(undefined);
@@ -618,7 +580,6 @@ export function TerminalPane({
     // Before any content: everything below is parsed against this grid.
     const measuredAtOpen = renderer.measure();
     reportGrid(reconcilePaneGrid(renderer, pane, measuredAtOpen));
-    gridForBoxRef.current = measuredAtOpen;
     noteReconciledGrid(gridMismatch, pane, measuredAtOpen);
     const interceptPaste = (event: ClipboardEvent) => {
       // Native Edit > Paste bypasses the app command and targets xterm's
@@ -791,7 +752,31 @@ export function TerminalPane({
     // boundary that no longer exists. Subscribed here rather than at each of
     // the three places a grid is applied, because what matters is that the grid
     // changed and not who asked for it.
-    const unsubscribeGrid = renderer.onGridApplied(() => historyPager.noteGridChanged());
+    let resizeScreenTimer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribeGrid = renderer.onGridApplied(() => {
+      historyPager.noteGridChanged();
+      // Topology and application output arrive independently. Even correctly
+      // queued local resizes cannot repair new-grid output that reached us
+      // before its topology. Reuse return-to-live's authoritative screen path
+      // once resizing settles, including when the application stops printing.
+      if (!revealStateRef.current.ready && readingState !== "refreshing") return;
+      clearTimeout(resizeScreenTimer);
+      resizeScreenTimer = undefined;
+      if (readingState === "reading" || readingState === "outdated") {
+        skipOutputForHistoricalScreen();
+        return;
+      }
+      resizeScreenTimer = setTimeout(() => {
+        resizeScreenTimer = undefined;
+        if (!rendererActive || !surfaceVisible.current) return;
+        if (readingState === "reading" || readingState === "outdated") {
+          skipOutputForHistoricalScreen();
+          return;
+        }
+        readingState = "outdated";
+        resumeLive("Terminal resized; restoring tmux's current screen");
+      }, RESIZE_SCREEN_SETTLE_MS);
+    });
     const unsubscribeInput = renderer.onInput(sendTerminalInput);
     const unsubscribeViewport = renderer.onViewportChange((next) => {
       if (authoritativeScreenPending) {
@@ -1098,25 +1083,13 @@ export function TerminalPane({
       if (measurements) measurementsRef.current(measurements);
     };
     const reconcileBoxAndMetrics = () => {
-      // A drag moves this box every frame while tmux is still a debounce and a
-      // round trip away from hearing about it, so re-applying tmux's grid here
-      // is a no-op that leaves the pane clipped or short for the whole drag.
-      // The refit prefers the box only while the box has moved away from the
-      // measurement tmux's grid was applied for; the topology effect below
-      // hands authority back the moment tmux answers.
+      // The CSS box decides what size to request from tmux, never what grid
+      // to parse its output against. Fitting locally while tmux still writes
+      // for the old grid corrupts cursor-addressed output, even if the box
+      // returns to its original size before the resize request is sent.
       const measured = renderer.measure();
-      const anchor = gridForBoxRef.current;
-      reportGrid(refitPaneGridToBox(renderer, paneRef.current, measured, anchor));
-      // The same question the refit just asked itself. A box that has moved away
-      // from the measurement tmux's grid was applied for is a box the terminal
-      // was just fitted to, so whatever tmux's numbers say there is nothing on
-      // screen for the user to see cut off; the mismatch this journals is the
-      // one where tmux's grid is what the pane is rendering at.
-      const fittedToBox = Boolean(
-        measured && anchor && (measured.columns !== anchor.columns || measured.rows !== anchor.rows),
-      );
-      if (fittedToBox) gridMismatch.clear(paneRef.current.id);
-      else noteReconciledGrid(gridMismatch, paneRef.current, measured);
+      reportGrid(reconcilePaneGrid(renderer, paneRef.current, measured));
+      noteReconciledGrid(gridMismatch, paneRef.current, measured);
       // Re-read rather than report once: xterm rounds a cell to whole device
       // pixels, so moving the window between displays of different pixel
       // ratios changes it with no remount.
@@ -1168,6 +1141,7 @@ export function TerminalPane({
 
     return () => {
       rendererActive = false;
+      clearTimeout(resizeScreenTimer);
       clearTimeout(revealFallback);
       // This teardown is also the hide half of the visibility protocol (the
       // `setTerminalVisibility(false)` below), and a pane on its way to hidden
@@ -1203,7 +1177,7 @@ export function TerminalPane({
           const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
           if (!currentCheckpoint) return;
           const snapshotMatchesEpoch = rendererEpoch === currentCheckpoint.terminalEpoch;
-          const snapshotIsCurrent = readingScreenIsCurrent(readingState);
+          const snapshotIsCurrent = readingScreenIsCurrent(readingState) && resizeScreenTimer === undefined;
           const checkpoint = snapshotMatchesEpoch
             ? { ...currentCheckpoint, outputGeneration: drained.outputGeneration }
             : { ...currentCheckpoint, outputGeneration: 0 };
@@ -1283,7 +1257,7 @@ export function TerminalPane({
     if (!renderer) return;
     renderer.setFontSize(terminalFontSize);
     const measured = renderer.measure();
-    const report = refitPaneGridToBox(renderer, paneRef.current, measured, gridForBoxRef.current);
+    const report = reconcilePaneGrid(renderer, paneRef.current, measured);
     if (report) console.warn(report);
     const measurements = renderer.measurements();
     if (measurements) measurementsRef.current(measurements);
@@ -1582,11 +1556,6 @@ export function TerminalPane({
     // xterm's default 80x24 and says nothing.
     const measured = renderer.measure();
     const report = reconcilePaneGrid(renderer, pane, measured);
-    // tmux has now answered for this box: any fit made optimistically while its
-    // answer was in flight is superseded here, and re-anchoring means the next
-    // box change is judged against this measurement instead of the pre-drag
-    // one. This is the only other place the anchor moves.
-    gridForBoxRef.current = measured;
     noteReconciledGrid(gridMismatchProbeRef.current, pane, measured);
     if (report) console.warn(report);
   }, [pane.id, pane.width, pane.height]);

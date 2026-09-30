@@ -105,7 +105,7 @@ export interface TerminalRendererOptions {
  */
 export const DEFAULT_DRAIN_TIMEOUT_MS = 2_000;
 
-/** Why a grid was not applied, or the size that now governs the terminal. */
+/** Why a grid was not admitted, or the size ordered after preceding output. */
 export type GridOutcome =
   | { kind: "applied"; size: TerminalSize }
   | { kind: "unchanged" }
@@ -192,7 +192,7 @@ export interface TerminalRenderer {
   onMeasurementsChange(listener: () => void): () => void;
   /** Updates text metrics without replacing the terminal or its buffer. */
   setFontSize(fontSize: number): void;
-  /** Forces the grid tmux says this pane has, whatever the CSS box measured. */
+  /** Orders tmux's grid after accepted output, regardless of CSS-box size. */
   setGrid(size: TerminalSize): GridOutcome;
   /** Restores a cached viewport when its serialized buffer used the same grid. */
   restoreViewport(anchor: TerminalViewportAnchor): void;
@@ -429,6 +429,8 @@ export class XtermRenderer implements TerminalRenderer {
   #drainPromise?: Promise<DrainedTerminalSnapshot>;
   #drainAbandoned = false;
   #disposed = false;
+  /** Last admitted grid, including a resize still waiting behind output. */
+  #targetGrid?: TerminalSize;
 
   constructor(options: TerminalRendererOptions = {}) {
     this.#options = options;
@@ -596,6 +598,10 @@ export class XtermRenderer implements TerminalRenderer {
     // The seed is the recovery this pane may have asked for; the next refusal
     // is allowed to ask again.
     this.#seedRequested = false;
+    // Replacement discards queued resize barriers along with the old output.
+    // Apply their final grid before the reset; any in-flight old bytes are
+    // superseded by that reset as well.
+    if (this.#targetGrid) this.#applyGrid(this.#targetGrid);
     this.#scheduler.replace(bytes, true, this.#enqueued(generation, onRendered));
     this.#notePositionReset();
     this.#emitViewport();
@@ -628,6 +634,7 @@ export class XtermRenderer implements TerminalRenderer {
       return false;
     }
     this.#newOutput = false;
+    if (this.#targetGrid) this.#applyGrid(this.#targetGrid);
     this.#scheduler.replace(
       new TextEncoder().encode(sanitizeSerializedScreen(serialized)),
       false,
@@ -1026,10 +1033,23 @@ export class XtermRenderer implements TerminalRenderer {
     if (!Number.isInteger(columns) || !Number.isInteger(rows) || columns < 2 || rows < 2) {
       return { kind: "rejected", reason: `${columns}x${rows} is not a usable terminal grid` };
     }
-    if (this.#terminal.cols === columns && this.#terminal.rows === rows) return { kind: "unchanged" };
-    this.#mutateViewport(() => resizeTerminalPreservingViewport(this.#terminal, { columns, rows }));
+    const previous = this.#targetGrid ?? this.grid;
+    if (previous.columns === columns && previous.rows === rows) return { kind: "unchanged" };
+    const size = { columns, rows };
+    this.#targetGrid = size;
+    // Writes are asynchronous in both our scheduler and xterm. The resize
+    // must follow accepted old-grid bytes and precede new-grid bytes.
+    if (!this.#scheduler.barrier(() => this.#applyGrid(size))) {
+      this.#targetGrid = previous;
+      return { kind: "rejected", reason: "terminal write queue is not accepting a resize" };
+    }
+    return { kind: "applied", size };
+  }
+
+  #applyGrid(size: TerminalSize): void {
+    if (this.#disposed || (this.#terminal.cols === size.columns && this.#terminal.rows === size.rows)) return;
+    this.#mutateViewport(() => resizeTerminalPreservingViewport(this.#terminal, size));
     for (const listener of this.#gridListeners) listener();
-    return { kind: "applied", size: { columns, rows } };
   }
 
   restoreViewport(anchor: TerminalViewportAnchor): void {

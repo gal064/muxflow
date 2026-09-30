@@ -232,6 +232,13 @@ export class TerminalWriteScheduler {
     return records;
   }
 
+  /** Runs between writes, never coalesced with bytes on either side. */
+  barrier(apply: () => void): boolean {
+    if (!this.#admit(0)) return false;
+    this.#commit(new Uint8Array(), apply, true);
+    return true;
+  }
+
   clear(): void {
     this.#dropQueued();
     this.#overflowed = false;
