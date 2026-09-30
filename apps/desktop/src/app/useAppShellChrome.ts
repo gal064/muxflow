@@ -1,17 +1,27 @@
 import { useEffect, useRef, useState } from "react";
 import type { DownloadCompletion } from "../features/files/downloadStatus";
 import { noticeDismissDelay, noticeForStatus, type StatusNotice } from "../features/shell/statusNotice";
+import { railLayout } from "../features/shell/responsiveShell";
+import { defaultAppState, panelWidthForWindow, sidebarWidthForWindow, type ShellState } from "../features/shell/types";
 
 /** Owns viewport-derived rails and the shell's status-to-notice lifecycle. */
 /** `sequence` changes on every `setStatus`, so a repeated message re-notifies. */
-export function useAppShellChrome(status: string, sequence = 0) {
+export function useAppShellChrome(status: string, sequence = 0, shell: ShellState = defaultAppState.shell, inline = false) {
   const [windowWidth, setWindowWidth] = useState(() => window.innerWidth || 1280);
+  const sidebarWidth = sidebarWidthForWindow(shell.sidebarWidth, windowWidth);
+  const panelWidth = panelWidthForWindow(shell.panelWidth, windowWidth);
+  const layout = railLayout(shell, sidebarWidth, panelWidth, windowWidth);
+  const downloadsVisible = layout.panelOpen && shell.panelSurface === "files";
   const [completedDownload, setCompletedDownload] = useState<DownloadCompletion & { noticeId?: number }>();
   const [notice, setNotice] = useState<StatusNotice>();
   const noticeSequence = useRef(0);
 
   useEffect(() => {
-    const next = noticeForStatus(status, (noticeSequence.current += 1));
+    // The producer knows whether this particular result has a visible row.
+    // Merely opening Downloads must not hide a result from a different host.
+    const next = inline
+      ? undefined
+      : noticeForStatus(status, (noticeSequence.current += 1));
     // Routine chatter is the shell narrating itself — "Live" after every
     // snapshot, "Topology changed; reconciling…" after every mutation — and it
     // is not an instruction to take down what is already on screen. Treating it
@@ -27,7 +37,7 @@ export function useAppShellChrome(status: string, sequence = 0) {
       if (!next) return current;
       return current && current.message.trim() === next.message ? { ...current, noticeId: next.id } : undefined;
     });
-  }, [sequence, status]);
+  }, [inline, sequence, status]);
 
   // Keyed on the notice rather than on the status that produced it: a notice
   // that outlives a routine status has to keep its own clock, or holding it
@@ -51,9 +61,13 @@ export function useAppShellChrome(status: string, sequence = 0) {
 
   return {
     completedDownload,
+    downloadsVisible,
+    layout,
     notice,
+    panelWidth,
     setCompletedDownload,
     setNotice,
+    sidebarWidth,
     windowWidth,
   };
 }

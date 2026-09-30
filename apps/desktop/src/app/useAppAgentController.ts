@@ -50,7 +50,6 @@ interface AppAgentControllerOptions {
   surfacePaneDestination(
     pane: Pane,
     source: string,
-    successMessage?: string,
   ): Promise<PaneSurfaceResult>;
   switchHostProfile(profile: HostProfile): void;
   terminalEpoch: number;

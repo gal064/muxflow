@@ -27,7 +27,7 @@ export interface PaneSurfaceResult {
 
 export type PaneNavigationFeedback =
   | { kind: "silent" }
-  | { kind: "announce"; source: string; successMessage?: string };
+  | { kind: "announce"; source: string };
 
 export interface ShellNavigationOptions {
   activeSessionId?: string;
@@ -629,9 +629,6 @@ export function useShellNavigation(options: ShellNavigationOptions) {
         optionsRef.current.setAppTab(target.sessionId, undefined);
         optionsRef.current.setActiveSessionId(target.sessionId);
         optionsRef.current.setActiveWindowId(target.windowId);
-        if (feedback.kind === "announce") optionsRef.current.setStatus(feedback.successMessage
-          ? `${feedback.successMessage} Focus request accepted.`
-          : `${feedback.source} focus request accepted for ${target.sessionId}/${target.windowId}/${target.id}.`);
         window.requestAnimationFrame(() => optionsRef.current.focusPaneController(target.id));
       },
     });

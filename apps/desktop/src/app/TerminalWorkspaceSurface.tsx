@@ -15,6 +15,8 @@ import { stripAgentStatusGlyphs } from "../features/agents/agentLabels";
 import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 
 type TerminalWorkspaceSurfaceProps = {
+  /** Whether the terminal layer is on screen rather than covered by a file. */
+  visible?: boolean;
   activePane?: Pane;
   activeWindow?: Window;
   appFocused: boolean;
@@ -75,6 +77,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         style={renderedPaneStyle(pane, grid, zoomed)}
       >
       <TerminalPane
+        visible={props.visible}
         appFocused={props.appFocused}
         cacheScope={props.cacheScope}
         clientId={props.clientId}

@@ -126,6 +126,7 @@ describe("GitSidebar", () => {
     // The staged copy of a path offers the opposite direction, in the same spot.
     await act(async () => { rowActionButton(renderer, "staged.txt", "Unstage file").props.onClick(); await settle(); });
     expect(props.git.handle!.mutate).toHaveBeenCalledWith("repo", expect.objectContaining({ kind: "unstageFile", target: "staged" }));
+    expect(props.onMessage).not.toHaveBeenCalled();
     await act(async () => { renderer.unmount(); });
   });
 
@@ -247,6 +248,53 @@ describe("GitSidebar", () => {
     await act(async () => { renderer.unmount(); });
   });
 
+  it.each([
+    { ...applied(), outcome: "partialOrUnknown" as const, error: "Inspect the repository" },
+    { ...applied(), refreshFailed: true, refreshError: "Cannot refresh" },
+    { ...applied(), stderr: "warning: settings changed" },
+  ])("keeps Git row warnings and uncertain results visible: %j", async (result) => {
+    const props = baseProps();
+    vi.mocked(props.git.handle!.mutate).mockResolvedValueOnce(result);
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { rowActionButton(renderer, "changed.txt", "Stage file").props.onClick(); await settle(); });
+    expect(props.onMessage).toHaveBeenCalledTimes(1);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it.each(["closed", "nonGit", "loadingThenRemounted"] as const)("reports a commit after its original form disappears: %s", async (destination) => {
+    const props = baseProps();
+    let finish!: (result: GitCommandResult) => void;
+    vi.mocked(props.git.handle!.commit).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "message" } }); });
+    await act(async () => { renderer.root.findByType("form").props.onSubmit({ preventDefault: vi.fn() }); });
+    if (destination === "closed") await act(async () => { renderer.unmount(); });
+    else if (destination === "nonGit") {
+      await act(async () => { renderer.update(<GitSidebar {...props} root={{ ...root, gitWorktree: false }} />); });
+    } else {
+      await act(async () => { renderer.update(<GitSidebar {...props} git={gitState({ status: undefined, loading: true })} />); });
+      await act(async () => { renderer.update(<GitSidebar {...props} />); });
+    }
+    await act(async () => { finish(applied()); await settle(); });
+    expect(props.onMessage).toHaveBeenCalledWith("Commit created.");
+    if (destination !== "closed") await act(async () => { renderer.unmount(); });
+  });
+
+  it("reports a push failure after switching to a pane outside Git", async () => {
+    const props = baseProps();
+    let finish!: (result: GitCommandResult) => void;
+    vi.mocked(props.git.handle!.push).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<GitSidebar {...props} />); });
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Push to upstream" }).props.onClick(); });
+    await act(async () => { renderer.update(<GitSidebar {...props} root={{ ...root, gitWorktree: false }} />); });
+    await act(async () => { finish({ ...applied(), outcome: "notApplied", error: "remote refused" }); await settle(); });
+    expect(props.onMessage).toHaveBeenCalledWith("remote refused");
+    await act(async () => { renderer.unmount(); });
+  });
+
   it("reports a completed commit separately from a failed status refresh", async () => {
     const props = baseProps();
     vi.mocked(props.git.handle!.commit).mockResolvedValueOnce({ exitCode: 0, stdout: "created", stderr: "", applied: true, refreshFailed: true, refreshError: "root changed", outcome: "applied" });
@@ -256,7 +304,7 @@ describe("GitSidebar", () => {
     await act(async () => { renderer.root.findByType("form").props.onSubmit({ preventDefault: vi.fn() }); await settle(); });
     expect(renderer.root.findByType("textarea").props.value).toBe("");
     expect(JSON.stringify(renderer.toJSON())).toContain("Commit completed, but status refresh failed: root changed");
-    expect(props.onMessage).toHaveBeenCalledWith(expect.stringContaining("Status refresh failed: root changed"));
+    expect(props.onMessage).not.toHaveBeenCalled();
     await act(async () => { renderer.unmount(); });
   });
 

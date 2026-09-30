@@ -42,6 +42,7 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
   // is before a test can reach the instance.
   const config: { measured?: Size; wedgeDrain?: boolean } = {};
   class FakeRenderer {
+    diagnostic?: (message: string | undefined) => void;
     writes: string[] = [];
     disposed = false;
     focusCalls = 0;
@@ -193,8 +194,9 @@ const { FakeRenderer, renderers } = vi.hoisted(() => {
 vi.mock("./TerminalRenderer", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./TerminalRenderer")>()),
   XtermRenderer: class extends FakeRenderer {
-    constructor() {
+    constructor(options: { onDiagnostic?: (message: string | undefined) => void }) {
       super();
+      this.diagnostic = options.onDiagnostic;
       renderers.created.push(this);
     }
   },
@@ -364,9 +366,11 @@ function paneElement(
   terminalFontSize = 13,
   onInput: (paneId: string, input: { kind: "text"; data: string } | { kind: "binary"; data: Uint8Array }) => void = () => undefined,
   activity: { onKeyActivity?(paneId: string): void; onPointerActivity?(paneId: string): void } = {},
-  extra: { platform?: Platform; onController?: (paneId: string, controller: TerminalPaneController | undefined) => void } = {},
+  extra: { platform?: Platform; visible?: boolean; onDiagnostic?: (message: string) => void; onController?: (paneId: string, controller: TerminalPaneController | undefined) => void } = {},
 ) {
   return <TerminalPane
+    visible={extra.visible}
+    onDiagnostic={extra.onDiagnostic}
     platform={extra.platform}
     appFocused={appFocused}
     cacheScope="local"
@@ -390,7 +394,7 @@ async function mountPane(
   appFocused = true,
   onInput?: (paneId: string, input: { kind: "text"; data: string } | { kind: "binary"; data: Uint8Array }) => void,
   activity?: { onKeyActivity?(paneId: string): void; onPointerActivity?(paneId: string): void },
-  extra?: { platform?: Platform; onController?: (paneId: string, controller: TerminalPaneController | undefined) => void },
+  extra?: { platform?: Platform; visible?: boolean; onDiagnostic?: (message: string) => void; onController?: (paneId: string, controller: TerminalPaneController | undefined) => void },
 ): Promise<ReactTestRenderer> {
   let renderer!: ReactTestRenderer;
   await act(async () => {
@@ -469,6 +473,20 @@ describe("TerminalPane pane-paint span lifecycle", () => {
 
     expect(renderers.created).toHaveLength(1);
     expect(renderer.fontSizes.at(-1)).toBe(18);
+    await act(async () => { mounted.unmount(); });
+  });
+
+  it("shows renderer diagnostics inline while visible and reports covered-pane diagnostics", async () => {
+    const pane = fixturePane("%diagnostic");
+    const hub = new FakeHub();
+    const onDiagnostic = vi.fn();
+    const mounted = await mountPane(pane, hub, "client-a", true, undefined, undefined, { visible: true, onDiagnostic });
+    await act(async () => { renderers.created[0].diagnostic?.("WebGL context lost; using the slow DOM renderer."); });
+    expect(JSON.stringify(mounted.toJSON())).toContain("WebGL context lost");
+    expect(onDiagnostic).not.toHaveBeenCalled();
+    await act(async () => { mounted.update(paneElement(pane, hub, "client-a", true, 13, undefined, {}, { visible: false, onDiagnostic })); });
+    await act(async () => { renderers.created[0].diagnostic?.("WebGL unavailable; using the slow DOM renderer."); });
+    expect(onDiagnostic).toHaveBeenCalledWith("WebGL unavailable; using the slow DOM renderer.");
     await act(async () => { mounted.unmount(); });
   });
 

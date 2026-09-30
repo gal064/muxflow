@@ -29,8 +29,9 @@ const scope = (clientId: string): FileWorkspaceScope => ({
 });
 
 let actions!: ReturnType<typeof useAppFileActions>;
-function Harness(props: { client: FileWorkspaceClient; scope?: FileWorkspaceScope; root?: ActiveRoot }) {
+function Harness(props: { client: FileWorkspaceClient; scope?: FileWorkspaceScope; root?: ActiveRoot; downloadsVisible?: boolean; onStatus?: (message: string, inline?: boolean) => void }) {
   actions = useAppFileActions({
+    downloadsVisible: props.downloadsVisible,
     canMutate: true,
     client: props.client,
     currentHostProfileId: props.scope?.hostProfileId ?? "local",
@@ -40,7 +41,7 @@ function Harness(props: { client: FileWorkspaceClient; scope?: FileWorkspaceScop
     scope: props.scope,
     setActiveDownloadStatus: vi.fn(),
     setAppState: vi.fn((update) => typeof update === "function" && update(defaultAppState)),
-    setStatus: vi.fn(),
+    setStatus: props.onStatus ?? vi.fn(),
   });
   return null;
 }
@@ -48,6 +49,25 @@ function Harness(props: { client: FileWorkspaceClient; scope?: FileWorkspaceScop
 describe("useAppFileActions", () => {
   beforeEach(() => {
     picker.choose.mockReset();
+  });
+
+  it("decides download feedback using the panel's visibility when the request settles", async () => {
+    picker.choose.mockResolvedValueOnce({ destination: "/tmp/report", panelConfirmed: false });
+    let finish!: (transfer: TransferStatus) => void;
+    const client = { startDownload: vi.fn(() => new Promise<TransferStatus>((resolve) => { finish = resolve; })), cancelTransfer: vi.fn() } as unknown as FileWorkspaceClient;
+    const onStatus = vi.fn();
+    let renderer!: ReactTestRenderer;
+    const props = { client, scope: scope("a"), root, onStatus };
+    await act(async () => { renderer = create(<Harness {...props} downloadsVisible={false} />); });
+    let pending!: Promise<void>;
+    await act(async () => { pending = actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root, "explorer"); });
+    await act(async () => { renderer.update(<Harness {...props} downloadsVisible />); });
+    await act(async () => {
+      finish({ id: "transfer-1", scopeKey: "scope", path: "/work/report", destination: "/tmp/report", kind: "file", state: "queued", completedBytes: "0", filesCompleted: "0" });
+      await pending;
+    });
+    expect(onStatus).toHaveBeenCalledWith("Download queued: /work/report", true);
+    await act(async () => { renderer.unmount(); });
   });
 
   it("downloads a valid file tab whose captured root differs from the live Explorer root", async () => {

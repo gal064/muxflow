@@ -34,6 +34,11 @@ interface Props {
 type PendingDiscard = { entry: GitStatusEntry; target: GitDiffTarget; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
 
 export function GitSidebar(props: Props) {
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
   useEffect(() => {
     const dragScope = props.scope && {
@@ -91,7 +96,13 @@ export function GitSidebar(props: Props) {
         request.confirmationToken = await observation.prepareDiscard(capturedStatus.repository.id, request);
       }
       const result = await observation.mutate(capturedStatus.repository.id, request);
-      props.onMessage(gitResultMessage(result, `${labelFor(kind)} ${entry.displayPath}`));
+      // A refreshed row shows success. Warnings and uncertain results still
+      // need a notice, as does a result whose panel is no longer on screen.
+      if (!mounted.current || observation !== latest.current.git.handle
+        || result.outcome !== "applied" || result.refreshFailed || result.statusOmitted
+        || result.stderr.trim() || result.error) {
+        props.onMessage(gitResultMessage(result, `${labelFor(kind)} ${entry.displayPath}`));
+      }
     } catch (cause) { props.onMessage(String(cause)); }
     finally { markPending(entry.path, undefined); }
   };
@@ -142,7 +153,6 @@ export function GitSidebar(props: Props) {
     // weaker than its own control is a guard that does not hold.
     if (!status || !git.handle || latest.current.unavailable) return undefined;
     const result = await git.handle.commit(status.repository.id, status.generation, message);
-    latest.current.onMessage(gitResultMessage(result, result.outcome === "applied" ? "Commit created." : "Commit failed."));
     return result;
   }, []);
   // Push is reachable whenever the repository is, not only when something is
@@ -152,7 +162,6 @@ export function GitSidebar(props: Props) {
     const status = git.status;
     if (!status || !git.handle || latest.current.unavailable) throw new Error("Git is not available right now.");
     const result = await git.handle.push(status.repository.id, status.generation);
-    latest.current.onMessage(gitResultMessage(result, result.outcome === "applied" ? `Pushed to ${result.pushTarget || "the upstream"}.` : "Push failed."));
     return result;
   }, []);
 
@@ -236,6 +245,8 @@ export function GitSidebar(props: Props) {
         a transient resynchronization would throw away a half-typed commit
         message. `disabled` is what a lost connection takes away, not the form. */}
     <GitCommitForm
+      onBackgroundResult={(result, verb) => props.onMessage(gitResultMessage(result,
+        verb === "Commit" ? "Commit created." : `Pushed to ${result.pushTarget || "the upstream"}.`))}
       canPush={!unavailable && !props.git.status.repository.initial}
       commit={commit}
       disabled={unavailable}

@@ -97,33 +97,32 @@ describe("a link outage the supervisor reports once per attempt", () => {
     expect(notices(unreachable)).toBe(1);
     expect(detail()).toBe(unreachable);
 
-    // A host that answers differently is news, and is announced once too.
+    // A changed cause is shown in the strip, without another popup.
     await act(async () => { publish(failure(refused)); publish(failure(refused)); });
-    expect(notices(refused)).toBe(1);
+    expect(notices(refused)).toBe(0);
     expect(detail()).toBe(refused);
 
     // The next outage starts from silence, whatever the last one said.
     await act(async () => { publish(phase("reconnecting")); publish(phase("connected")); });
     await act(async () => { publish(phase("disconnected")); });
     await act(async () => { publish(failure(refused)); });
-    expect(notices(refused)).toBe(2);
+    expect(notices(refused)).toBe(0);
+    expect(detail()).toBe(refused);
 
     await act(async () => renderer.unmount());
   });
 
-  it("answers a Reconnect press that fails exactly the way the last attempt did", async () => {
-    const { notices, publish, reconnect, renderer } = await connected();
+  it("shows a failed Reconnect attempt in the strip without duplicating its cause", async () => {
+    const { detail, notices, publish, reconnect, renderer } = await connected();
     await act(async () => { publish(phase("connected")); });
     await act(async () => { publish(failure(unreachable)); publish(phase("disconnected")); });
     expect(notices(unreachable)).toBe(1);
 
-    // The user presses Reconnect on the strip. The bridge is replaced and never
-    // reaches `connected`, so nothing else would clear the memory — and a
-    // deliberate press whose only visible result is the strip it started from
-    // reads as a button that does nothing.
+    // The new attempt still exposes its full cause through the strip.
     await act(async () => { reconnect(); });
     await act(async () => { publish(failure(unreachable)); });
-    expect(notices(unreachable)).toBe(2);
+    expect(notices(unreachable)).toBe(1);
+    expect(detail()).toBe(unreachable);
 
     await act(async () => renderer.unmount());
   });

@@ -87,7 +87,7 @@ describe("GitDiffSurface", () => {
     await act(async () => { renderer.unmount(); });
   });
 
-  it("performs one request and one remaining-diff read for a mutation that clears the file", async () => {
+  it.each([true, false])("shows a settled hunk change inline or in a notice (visible=%s)", async (visible) => {
     const client = mockClient();
     const stagedStatus = {
       ...status,
@@ -99,7 +99,8 @@ describe("GitDiffSurface", () => {
       exitCode: 0, stdout: "", stderr: "", applied: true, refreshFailed: false, refreshError: "", outcome: "applied", status: stagedStatus,
     });
     let renderer!: ReturnType<typeof create>;
-    await act(async () => { renderer = create(<GitDiffSurface {...props(client)} />); await settle(); });
+    const config = { ...props(client), visible };
+    await act(async () => { renderer = create(<GitDiffSurface {...config} />); await settle(); });
     await act(async () => { hunkButton(renderer, "Stage")?.props.onClick(); await settle(); await settle(); });
     expect(JSON.stringify(renderer.toJSON())).toContain("no longer has unstaged changes");
     expect(renderer.root.findAllByProps({ "aria-label": "Complete hunk actions" })).toHaveLength(0);
@@ -108,6 +109,8 @@ describe("GitDiffSurface", () => {
     // the reload needs no request at all.
     expect(client.diff).toHaveBeenCalledTimes(1);
     expect(client.status).not.toHaveBeenCalled();
+    if (visible) expect(config.onMessage).not.toHaveBeenCalled();
+    else expect(config.onMessage).toHaveBeenCalledWith("Git change applied.");
     await act(async () => { renderer.unmount(); });
   });
 

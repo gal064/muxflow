@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { afterNextPaint, closePanePaintSpans, recordPerfCounter, recordPerfMilestone } from "../../perf/probe";
 import { recordIncident } from "../../diagnostics/incidents";
+import { useCommittedRef } from "../../commands/useCommittedRef";
 import { createPaintTicket } from "../../perf/paintTicket";
 import { keyboardEventIsComposing, type Platform } from "../../commands/registry";
 import type { Pane } from "../../app/types";
@@ -251,6 +252,8 @@ export interface TerminalPaneController {
 }
 
 interface Props {
+  /** Covered terminals retain a toast because their inline diagnostic is hidden. */
+  visible?: boolean;
   appFocused?: boolean;
   clientId?: string;
   /**
@@ -301,6 +304,7 @@ interface Props {
 }
 
 export function TerminalPane({
+  visible = true,
   appFocused = true,
   clientId,
   cacheScope,
@@ -351,6 +355,7 @@ export function TerminalPane({
   const queuedBytesRef = useRef(0);
   const controllerRef = useRef(onController);
   const diagnosticRef = useRef(onDiagnostic);
+  const surfaceVisible = useCommittedRef(visible);
   const openFilePathRef = useRef(onOpenFilePath);
   const clientIdRef = useRef(clientId);
   const appFocusedRef = useRef(appFocused);
@@ -475,7 +480,7 @@ export function TerminalPane({
       onDiagnostic: (message) => {
         if (!rendererActive) return;
         setRendererDiagnostic(message);
-        if (message) diagnosticRef.current?.(message);
+        if (message && !surfaceVisible.current) diagnosticRef.current?.(message);
       },
       onOpenLink: (url) => {
         openExternalUrl(url).catch((error) => {

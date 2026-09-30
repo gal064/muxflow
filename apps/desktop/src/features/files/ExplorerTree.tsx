@@ -44,6 +44,7 @@ interface Props {
    */
   onOpen(entry: FileEntry, options: { preview: boolean }): void;
   onMutate(mutation: FileMutation): Promise<void>;
+  onBackgroundMutationError?(message: string): void;
   /**
    * What to download, not how: the collision policy is the save panel's
    * business now, and the tree has no business pre-deciding it.
@@ -491,6 +492,7 @@ export function ExplorerTree(props: Props) {
       disabled={props.disabled}
       onClose={() => setPending(undefined)}
       onMutate={props.onMutate}
+      onBackgroundError={props.onBackgroundMutationError}
       pending={pending}
       root={props.root}
       scopeIdentity={props.scopeIdentity}

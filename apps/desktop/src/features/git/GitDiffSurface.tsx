@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useCommittedRef } from "../../commands/useCommittedRef";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import type { ActiveRoot, FileWorkspaceScope } from "../files/types";
 import type { AppOwnedTab } from "../shell/types";
@@ -20,6 +21,8 @@ import { useEditorPaint } from "../../perf/surfacePaint";
 const GitDiffEditor = lazy(() => import("./GitDiffEditor").then((module) => ({ default: module.GitDiffEditor })));
 
 interface Props {
+  /** Covered tabs keep running, but their inline result is not visible. */
+  visible?: boolean;
   tab: AppOwnedTab;
   scope?: FileWorkspaceScope;
   activeRoot?: ActiveRoot;
@@ -36,6 +39,12 @@ interface Props {
 type PendingDiscard = { hunkIndex: number; diff: GitDiff; status: GitStatusSnapshot; rootToken: string; connectionEpoch: number };
 
 export function GitDiffSurface(props: Props) {
+  const visible = useCommittedRef(props.visible !== false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [busy, setBusy] = useState(false);
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard>();
   const root = useMemo<ActiveRoot | undefined>(() => props.tab.rootPath && props.tab.rootToken ? {
@@ -71,7 +80,10 @@ export function GitDiffSurface(props: Props) {
     setBusy(true);
     try {
       const result = await shared.command(run);
-      if (result) reportResult(result, props.onMessage);
+      if (result && (!mounted.current || !visible.current || result.outcome !== "applied"
+        || result.refreshFailed || result.statusOmitted || result.stderr.trim() || result.error)) {
+        reportResult(result, props.onMessage);
+      }
     } finally { setBusy(false); }
   };
 

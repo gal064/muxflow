@@ -391,7 +391,6 @@ export function useAppConnectionController({
       for (const profileId of linksRef.current.order) {
         dispatchLinks({ type: "detail", profileId, detail: "System resumed; reconnecting for an authoritative state refresh." });
       }
-      setStatus("System resumed; reconnecting…");
       dispatchLinks({ type: "reconnectAll" });
     };
     const probeClientId = clientIdRef.current;
@@ -625,21 +624,6 @@ export function useAppConnectionController({
     const attach = isActive();
     let disposed = false;
     let recoveringFlowStall = false;
-    /**
-     * The last bridge failure already shown as a notice, for as long as the
-     * link stays down.
-     *
-     * The supervisor reports every failed reconnect attempt, so one overnight
-     * outage is seven or eight copies of the same sentence climbing the backoff
-     * ladder, and a connection problem is a notice the shell never
-     * auto-dismisses — the user wakes to a stack of identical errors. The
-     * disconnected strip carries the standing state; the notice only has to
-     * say what changed. Cleared when the transport reports itself connected
-     * again, and a new bridge starts from silence — the Reconnect button
-     * restarts the bridge without ever passing through `connected`, and a
-     * deliberate press that fails the same way still owes the user an answer.
-     */
-    let lastBridgeFailure: string | undefined;
     // The design says dirty→snapshot is instant: the daemon's topology actor
     // wakes on the notification and pushes as soon as tmux answers. The user
     // measures ~5s from `cd` to the Explorer moving, and the tab name — pure
@@ -709,7 +693,6 @@ export function useAppConnectionController({
             recordPerfCounter("connection.reconnect.terminalFlowStall");
             recordIncident("reconnect.flowStall", { hostProfileId: profileId, paneId: event.paneId });
             setDetail("A terminal output stream stalled; reconnecting it now.");
-            announce("Terminal output stalled; reconnecting…");
             dispatchLinks({ type: "reconnect", profileId });
           }
         } else if (event.kind === "clipboardWrite") {
@@ -745,14 +728,10 @@ export function useAppConnectionController({
           // is worth more than the reader's symptom. Only a bridge failure is
           // replaced: helper guidance and the rest keep their own words.
           setDetail((isActive() && linkQualityVerdictRef.current) || shown);
-          // Every attempt is journalled and every attempt stands in the strip;
-          // only a failure the user has not already been told about is worth a
-          // notice. While the link is up this is the first failure of an
-          // outage, which always speaks — for the host on screen. A host
-          // beside it shows its failure as its own dot and detail.
-          const repeated = !wasConnected && shown === lastBridgeFailure;
-          lastBridgeFailure = shown;
-          if (!repeated && !verdictSpoken) announce(shown);
+          // Once reconnecting, the strip already shows this exact cause.
+          // A first loss while live still needs an immediate notice; the slow
+          // or unstable network verdict remains a separate useful warning.
+          if (wasConnected && !verdictSpoken) announce(shown);
           // The message is the only thing that separates "this host has no
           // helper" from "this host cannot be reached": both arrive as a dead
           // bridge, and only the first one has a fix the app can offer. The
@@ -780,7 +759,6 @@ export function useAppConnectionController({
           dispatchHost({ type: "connection", phase: event.state });
           if (event.state === "connected") {
             setDetail("");
-            lastBridgeFailure = undefined;
           }
           announce(event.state === "connected" ? "Live" : `Connection ${event.state}…`);
         } else if (event.kind === "snapshot") {

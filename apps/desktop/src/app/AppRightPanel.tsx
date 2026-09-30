@@ -49,6 +49,7 @@ export function AppRightPanel(props: AppRightPanelProps) {
       onDownload={props.onDownload}
       onLoadMore={props.workspaceFiles.loadMore}
       onMutate={props.onMutate}
+      onBackgroundMutationError={props.onMessage}
       onOpen={props.onOpenFile}
       onRefresh={props.workspaceFiles.refresh}
       onToggle={props.workspaceFiles.toggleDirectory}

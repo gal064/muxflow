@@ -39,7 +39,6 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
     void invoke<PersistedProfiles>("delete_host_profile", { profileId: profile.id }).then((saved) => {
       options.setProfiles(saved.profiles);
       options.setSelectedProfileId("");
-      options.setStatus(`Deleted the saved host ${profile.label}.`);
     }).catch((error) => options.setStatus(
       `Could not delete the saved host ${profile.label}: ${String(error)}`,
     ));

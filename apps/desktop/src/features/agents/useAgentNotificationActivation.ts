@@ -19,7 +19,7 @@ interface ActivationOptions {
   setStatus(message: string): void;
   requestReconnect(): void;
   switchHostProfile(profile: HostProfile): void;
-  surfacePaneDestination(target: Pane, source: string, successMessage?: string): Promise<PaneSurfaceResult>;
+  surfacePaneDestination(target: Pane, source: string): Promise<PaneSurfaceResult>;
 }
 
 interface PendingActivation {
@@ -59,12 +59,10 @@ export function useAgentNotificationActivation(options: ActivationOptions) {
       }
       queueForFreshConnection(payload, retryUsed);
       current.switchHostProfile(targetProfile);
-      current.setStatus(`Switching to ${targetProfile.label} before resolving the notification…`);
       return false;
     }
     if (!current.connected || !current.agentScope) {
       queueForFreshConnection(payload, retryUsed);
-      current.setStatus("Reconnecting before resolving the notification against authoritative topology…");
       current.requestReconnect();
       return false;
     }

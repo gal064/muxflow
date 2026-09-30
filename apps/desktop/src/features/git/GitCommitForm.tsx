@@ -1,4 +1,4 @@
-import { memo, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { keyboardEventIsComposing } from "../../commands/registry";
 import { anchorForElement, ContextMenu, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { SurfaceError } from "../../ui/SurfaceError";
@@ -11,6 +11,8 @@ interface Props {
   canPush: boolean;
   commit(message: string): Promise<GitCommandResult | undefined>;
   onPush(): Promise<GitCommandResult>;
+  /** Reports a settled command whose original form is no longer on screen. */
+  onBackgroundResult?(result: GitCommandResult, verb: "Commit" | "Push"): void;
 }
 
 /**
@@ -27,6 +29,11 @@ interface Props {
  * refused is two facts, not one failure.
  */
 export const GitCommitForm = memo(function GitCommitForm(props: Props) {
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [message, setMessage] = useState("");
   const [output, setOutput] = useState<{ result: GitCommandResult; verb: "Commit" | "Push" }>();
   const [error, setError] = useState<string>();
@@ -45,6 +52,10 @@ export const GitCommitForm = memo(function GitCommitForm(props: Props) {
     }
     const result = await props.commit(message);
     if (!result) return undefined;
+    if (!mounted.current) {
+      props.onBackgroundResult?.(result, "Commit");
+      return result;
+    }
     setOutput({ result, verb: "Commit" });
     if (result.outcome === "applied") setMessage("");
     else setError(result.outcome === "partialOrUnknown" ? "Commit outcome is uncertain; inspect HEAD before retrying." : "Git did not create a commit.");
@@ -56,6 +67,10 @@ export const GitCommitForm = memo(function GitCommitForm(props: Props) {
   // a third answer that has to survive all the way to this line.
   const runPush = async (already: string): Promise<void> => {
     const result = await props.onPush();
+    if (!mounted.current) {
+      props.onBackgroundResult?.(result, "Push");
+      return;
+    }
     setOutput({ result, verb: "Push" });
     if (result.outcome === "applied") setNote(`${already}Pushed to ${result.pushTarget || "the upstream"}.`);
     else if (result.outcome === "partialOrUnknown") setError("Push outcome is unknown; check the remote before retrying.");

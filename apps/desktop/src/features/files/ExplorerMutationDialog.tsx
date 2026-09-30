@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { ActiveRoot, FileEntry, FileMutation } from "./types";
@@ -26,6 +26,8 @@ interface Props {
   scopeIdentity: string;
   disabled: boolean;
   onMutate(mutation: FileMutation): Promise<void>;
+  /** A dismissed dialog can no longer show a pending operation's failure. */
+  onBackgroundError?(message: string): void;
   onClose(): void;
 }
 
@@ -37,6 +39,11 @@ interface Props {
  * character into a text field none of them can see.
  */
 export function ExplorerMutationDialog(props: Props) {
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const { pending } = props;
   const [value, setValue] = useState(
     pending.action === "rename" || pending.action === "duplicate" ? pending.entry?.path ?? "" : "",
@@ -84,7 +91,8 @@ export function ExplorerMutationDialog(props: Props) {
       if (mutation) await props.onMutate(mutation);
       props.onClose();
     } catch (failure) {
-      setError(String(failure));
+      if (mounted.current) setError(String(failure));
+      else props.onBackgroundError?.(String(failure));
     }
   };
 
