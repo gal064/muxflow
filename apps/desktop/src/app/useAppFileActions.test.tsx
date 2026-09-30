@@ -29,9 +29,8 @@ const scope = (clientId: string): FileWorkspaceScope => ({
 });
 
 let actions!: ReturnType<typeof useAppFileActions>;
-function Harness(props: { client: FileWorkspaceClient; scope?: FileWorkspaceScope; root?: ActiveRoot; downloadsVisible?: boolean; onStatus?: (message: string, inline?: boolean) => void }) {
+function Harness(props: { client: FileWorkspaceClient; scope?: FileWorkspaceScope; root?: ActiveRoot; onStatus?: (message: string) => void }) {
   actions = useAppFileActions({
-    downloadsVisible: props.downloadsVisible,
     canMutate: true,
     client: props.client,
     currentHostProfileId: props.scope?.hostProfileId ?? "local",
@@ -51,22 +50,21 @@ describe("useAppFileActions", () => {
     picker.choose.mockReset();
   });
 
-  it("decides download feedback using the panel's visibility when the request settles", async () => {
+  it("reports a download start without requiring the caller to check panel visibility", async () => {
     picker.choose.mockResolvedValueOnce({ destination: "/tmp/report", panelConfirmed: false });
     let finish!: (transfer: TransferStatus) => void;
     const client = { startDownload: vi.fn(() => new Promise<TransferStatus>((resolve) => { finish = resolve; })), cancelTransfer: vi.fn() } as unknown as FileWorkspaceClient;
     const onStatus = vi.fn();
     let renderer!: ReactTestRenderer;
     const props = { client, scope: scope("a"), root, onStatus };
-    await act(async () => { renderer = create(<Harness {...props} downloadsVisible={false} />); });
+    await act(async () => { renderer = create(<Harness {...props} />); });
     let pending!: Promise<void>;
     await act(async () => { pending = actions.startDownloadFlow({ path: "/work/report", kind: "file" }, root, "explorer"); });
-    await act(async () => { renderer.update(<Harness {...props} downloadsVisible />); });
     await act(async () => {
       finish({ id: "transfer-1", scopeKey: "scope", path: "/work/report", destination: "/tmp/report", kind: "file", state: "queued", completedBytes: "0", filesCompleted: "0" });
       await pending;
     });
-    expect(onStatus).toHaveBeenCalledWith("Download queued: /work/report", true);
+    expect(onStatus).toHaveBeenCalledWith("Download queued: /work/report");
     await act(async () => { renderer.unmount(); });
   });
 

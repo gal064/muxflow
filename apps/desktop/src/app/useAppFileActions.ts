@@ -1,5 +1,4 @@
 import { useRef, type Dispatch, type SetStateAction } from "react";
-import { useCommittedRef } from "../commands/useCommittedRef";
 import { keyForScope, keyForTransferConnection, sameRoot } from "../features/files/api";
 import { chooseDownloadDestination, type DownloadIntent } from "../features/files/downloadFlow";
 import type {
@@ -14,7 +13,6 @@ import { relocateFileTabs } from "../features/shell/model";
 import type { PersistedAppState } from "../features/shell/types";
 
 interface AppFileActionsOptions {
-  downloadsVisible?: boolean;
   canMutate: boolean;
   client: FileWorkspaceClient;
   currentHostProfileId: string;
@@ -24,15 +22,13 @@ interface AppFileActionsOptions {
   scope?: FileWorkspaceScope;
   setActiveDownloadStatus: (status: { id: string; path: string; banner: string }) => void;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
-  /** Inline results are already visible in the current Downloads list. */
-  setStatus: (status: string, inline?: boolean) => void;
+  setStatus: (status: string) => void;
 }
 
 export type DownloadOrigin = "explorer" | "fileSurface" | "tabMenu";
 
 /** Owns filesystem mutation, native save-panel serialization, and transfer publication. */
 export function useAppFileActions(options: AppFileActionsOptions) {
-  const downloadsVisible = useCommittedRef(options.downloadsVisible === true);
   const downloadPickerOpen = useRef(false);
   const scopeRef = useRef(options.scope);
   const rootRef = useRef(options.root);
@@ -94,7 +90,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
       options.recordTransfer(transfer);
       const banner = `Download ${transfer.state}: ${request.path}`;
       options.setActiveDownloadStatus({ id: transfer.id, path: request.path, banner });
-      options.setStatus(banner, downloadsVisible.current);
+      options.setStatus(banner);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!selectionIsCurrent(scope, root, origin)) {
@@ -114,7 +110,7 @@ export function useAppFileActions(options: AppFileActionsOptions) {
         filesCompleted: "0",
         error: message,
       });
-      if (!downloadsVisible.current) options.setStatus(message);
+      options.setStatus(message);
     }
   };
 

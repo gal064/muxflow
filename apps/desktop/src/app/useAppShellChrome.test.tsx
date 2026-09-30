@@ -3,39 +3,25 @@ import { act, create } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppShellChrome } from "./useAppShellChrome";
 import { NOTICE_DISMISS_MS, type StatusNotice } from "../features/shell/statusNotice";
-import { defaultAppState, type ShellState } from "../features/shell/types";
 
 /**
  * Drives the hook the way `App` does: one status string in, the visible notice
  * out, with the ability to push a new status and watch what the old notice does.
  */
-async function shellChrome(initial: string, initialShell = defaultAppState.shell, initiallyInline = false) {
+async function shellChrome(initial: string) {
   let notice: StatusNotice | undefined;
-  let downloadsVisible = false;
   let sequence = 0;
-  let status = initial;
-  let shell = initialShell;
-  let inline = initiallyInline;
-  function Harness({ status, sequence, shell, inline }: { status: string; sequence: number; shell: ShellState; inline: boolean }) {
-    const chrome = useAppShellChrome(status, sequence, shell, inline);
-    notice = chrome.notice;
-    downloadsVisible = chrome.downloadsVisible;
+  function Harness({ status, sequence }: { status: string; sequence: number }) {
+    notice = useAppShellChrome(status, sequence).notice;
     return null;
   }
   let renderer!: ReturnType<typeof create>;
-  await act(async () => { renderer = create(<Harness sequence={sequence} status={status} shell={shell} inline={inline} />); });
+  await act(async () => { renderer = create(<Harness sequence={sequence} status={initial} />); });
   return {
     get notice() { return notice; },
-    get downloadsVisible() { return downloadsVisible; },
-    async setStatus(next: string, shownInline = false) {
-      status = next;
-      inline = shownInline;
+    async setStatus(status: string) {
       sequence += 1;
-      await act(async () => renderer.update(<Harness sequence={sequence} status={status} shell={shell} inline={inline} />));
-    },
-    async setShell(next: ShellState) {
-      shell = next;
-      await act(async () => renderer.update(<Harness sequence={sequence} status={status} shell={shell} inline={inline} />));
+      await act(async () => renderer.update(<Harness sequence={sequence} status={status} />));
     },
     async unmount() { await act(async () => renderer.unmount()); },
   };
@@ -45,38 +31,14 @@ describe("status notice lifecycle", () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
-  it("uses the visible Downloads row and keeps notices when the panel is hidden", async () => {
-    const files = { ...defaultAppState.shell, panelOpen: true, panelSurface: "files" as const };
-    const chrome = await shellChrome("Download queued: /work/report", files, true);
-    expect(chrome.downloadsVisible).toBe(true);
-    expect(chrome.notice).toBeUndefined();
-    await chrome.setStatus("Download complete: /Downloads/report", true);
-    expect(chrome.notice).toBeUndefined();
-    await chrome.setShell({ ...files, panelOpen: false });
-    expect(chrome.notice).toBeUndefined();
-    await chrome.setStatus("Download complete: /Downloads/another");
-    expect(chrome.notice?.message).toBe("Download complete: /Downloads/another");
-    await chrome.setShell(files);
-    // A notice originally needed for a hidden result must not be cleared just
-    // because another host's Downloads panel opens later.
-    expect(chrome.notice?.message).toBe("Download complete: /Downloads/another");
-    await chrome.setStatus("Your connection to devhost is unstable; Muxflow keeps losing the link and reconnecting.");
-    expect(chrome.notice?.message).toContain("is unstable");
-    await chrome.setStatus("Could not open the save panel: denied");
+  it("shows download start, completion, and failure notices", async () => {
+    const chrome = await shellChrome("Download queued: /work/report");
+    expect(chrome.notice?.message).toBe("Download queued: /work/report");
+    await chrome.setStatus("Download complete: /Downloads/report");
+    expect(chrome.notice?.message).toBe("Download complete: /Downloads/report");
+    await chrome.setStatus("Download failed: /work/report");
     expect(chrome.notice?.severity).toBe("problem");
     await chrome.unmount();
-  });
-
-  it("keeps download results visible when the window is too narrow for the panel", async () => {
-    const original = window.innerWidth;
-    window.innerWidth = 300;
-    const chrome = await shellChrome("Download complete: /Downloads/report", {
-      ...defaultAppState.shell, panelOpen: true, panelSurface: "files",
-    });
-    expect(chrome.downloadsVisible).toBe(false);
-    expect(chrome.notice?.message).toBe("Download complete: /Downloads/report");
-    await chrome.unmount();
-    window.innerWidth = original;
   });
 
   it("does not let routine chatter take down the message a mutation just made", async () => {

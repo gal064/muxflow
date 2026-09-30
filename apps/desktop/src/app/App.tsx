@@ -47,6 +47,7 @@ import {
 } from "../features/shell/helperUpgrade";
 import { sameHelperInstallConnection, sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
 import { useShellCommands } from "../features/shell/useShellCommands";
+import { railLayout } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
 import {
   clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
@@ -210,11 +211,14 @@ export function App() {
   // The sequence rides along with the text so that the same message twice —
   // a create refused for the same reason after its notice was dismissed — is
   // two notices, not one that the second attempt silently fails to re-show.
-  const [statusState, setStatusState] = useState({ text: "Discovering local tmux…", sequence: 0, inline: false });
+  const [statusState, setStatusState] = useState({ text: "Discovering local tmux…", sequence: 0 });
   const status = statusState.text;
-  const setStatus = useCallback((text: string, inline = false) => {
-    setStatusState((current) => ({ text, sequence: current.sequence + 1, inline }));
+  const setStatus = useCallback((text: string) => {
+    setStatusState((current) => ({ text, sequence: current.sequence + 1 }));
   }, []);
+  const {
+    completedDownload, notice, setCompletedDownload, setNotice, windowWidth,
+  } = useAppShellChrome(status, statusState.sequence);
   const [hostSessionSelection, setHostSessionSelection] = useState<{
     clientId: string;
     sessionId: string;
@@ -228,10 +232,6 @@ export function App() {
   const platform = useMemo(() => currentPlatform(), []);
   const windowControls = useWindowChrome(platform);
   const { appState, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus, platform);
-  const {
-    completedDownload, downloadsVisible, notice, setCompletedDownload, setNotice, windowWidth,
-    sidebarWidth, panelWidth, layout: { panelFits, panelOpen, sidebarFits, sidebarOpen },
-  } = useAppShellChrome(status, statusState.sequence, appState.shell, statusState.inline);
   const availableUpdate = useUpdateCheck();
   // Read by things that run later than the render that scheduled them — the
   // workspace-create prompt is submitted long after the command that opened it,
@@ -387,10 +387,10 @@ export function App() {
   useEffect(() => {
     if (!activeDownloadStatus) return;
     const reconciled = reconcileDownloadStatus(status, activeDownloadStatus, workspaceFiles.transfers);
-    if (reconciled.status !== status) setStatus(reconciled.status, downloadsVisible);
+    if (reconciled.status !== status) setStatus(reconciled.status);
     if (reconciled.active !== activeDownloadStatus) setActiveDownloadStatus(reconciled.active);
     if (reconciled.completion) setCompletedDownload(reconciled.completion);
-  }, [activeDownloadStatus, downloadsVisible, status, workspaceFiles.transfers]);
+  }, [activeDownloadStatus, status, workspaceFiles.transfers]);
   const performAction = useTmuxActionPerformer({
     canMutate: hostState.canMutate,
     clientId,
@@ -1419,7 +1419,6 @@ export function App() {
   const pinOpenTab = (tabId: string) => setAppState((current) => pinAppTab(current, currentHostProfileId, tabId));
 
   const { mutateFile, startDownloadFlow } = useAppFileActions({
-    downloadsVisible,
     canMutate: hostState.canMutate,
     client: fileClient,
     currentHostProfileId,
@@ -1448,6 +1447,10 @@ export function App() {
   const updateShell = (update: Partial<ShellState>) =>
     setAppState((current) => ({ ...current, shell: { ...current.shell, ...update } }));
 
+  const sidebarWidth = sidebarWidthForWindow(appState.shell.sidebarWidth, windowWidth);
+  const panelWidth = panelWidthForWindow(appState.shell.panelWidth, windowWidth);
+  // Derived, never stored: see `railLayout`.
+  const { panelFits, panelOpen, sidebarFits, sidebarOpen } = railLayout(appState.shell, sidebarWidth, panelWidth, windowWidth);
   // A drag may not widen a rail past the room it has, or letting go would hide it.
   const sidebarMaxWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(
     Math.floor(windowWidth / 3), windowWidth - TERMINAL_MIN_WIDTH - (panelOpen ? panelWidth : 0),
