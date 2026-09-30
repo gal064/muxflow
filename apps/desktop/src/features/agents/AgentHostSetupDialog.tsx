@@ -1,3 +1,4 @@
+import { SetupProgress } from "../../ui/SetupProgress";
 import { useId } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { SurfaceError } from "../../ui/SurfaceError";
@@ -63,6 +64,7 @@ export function AgentHostSetupDialog(props: AgentHostSetupDialogProps) {
         <p className="quiet-note">Until then the agents list stays honest: it shows which agents exist and says nothing about what they are doing.</p>
         {props.error && <SurfaceError className="dialog-error" detail={props.error} />}
       </div>
+      {busy && <SetupProgress detail={props.activity === "install" ? "Setting up agent hooks…" : "Loading the hook changes…"} />}
       <footer>
         <button disabled={busy} onClick={props.onDecline} type="button">Not now</button>
         <button disabled={busy} onClick={props.onReview} type="button">{props.activity === "review" ? "Loading review…" : "Review exact changes…"}</button>

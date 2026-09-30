@@ -1,3 +1,4 @@
+import { SetupProgress } from "../ui/SetupProgress";
 import { useId } from "react";
 import { useModalDialog } from "./useModalDialog";
 
@@ -5,6 +6,7 @@ interface Props {
   detail: string;
   title: string;
   confirmLabel?: string;
+  busy?: boolean;
   /**
    * Whether the confirm button is drawn as destructive.
    *
@@ -25,6 +27,7 @@ interface Props {
 export function ConfirmationDialog({
   confirmLabel = "Close permanently",
   destructive,
+  busy = false,
   detail,
   title,
   onCancel,
@@ -32,14 +35,14 @@ export function ConfirmationDialog({
 }: Props) {
   const titleId = useId();
   const detailId = useId();
-  const dialog = useModalDialog<HTMLElement>(onCancel);
+  const dialog = useModalDialog<HTMLElement>(() => { if (!busy) onCancel(); });
   return <div className="modal-backdrop" role="presentation">
     <section aria-describedby={detailId} aria-labelledby={titleId} aria-modal="true" className="confirmation" ref={dialog} role="alertdialog">
       <h2 id={titleId}>{title}</h2>
-      <p id={detailId}>{detail}</p>
+      {busy ? <div id={detailId}><SetupProgress detail={detail} /></div> : <p id={detailId}>{detail}</p>}
       <div className="dialog-actions">
-        <button autoFocus onClick={onCancel} type="button">Cancel</button>
-        <button className={destructive ? "danger" : "primary"} onClick={onConfirm} type="button">{confirmLabel}</button>
+        <button autoFocus disabled={busy} onClick={onCancel} type="button">Cancel</button>
+        <button className={destructive ? "danger" : "primary"} disabled={busy} onClick={onConfirm} type="button">{confirmLabel}</button>
       </div>
     </section>
   </div>;

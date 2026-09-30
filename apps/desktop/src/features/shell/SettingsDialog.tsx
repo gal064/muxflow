@@ -235,7 +235,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
             {props.helper.phase === "upgrading" && <p role="status">Upgrading the remote helper; the previous one is retained until the new handshake succeeds.</p>}
             {props.helper.phase === "failed" && <SurfaceError
               detail={props.helper.message}
-              summary={props.helper.rollback === "restored" ? "Upgrade failed; the previous helper was restored." : props.helper.rollback === "failed" ? "Upgrade and rollback both failed — check the helper on the host before reconnecting." : "The helper check failed."}
+              summary={props.helper.rollback === "restored" ? "Upgrade failed; the previous helper was restored." : props.helper.rollback === "failed" ? "Upgrade and rollback both failed — check the helper on the host before reconnecting." : props.helper.probe ? (props.helper.probe.installed ? "The helper upgrade failed." : "The helper installation failed.") : "The helper check failed."}
             />}
             {props.helper.phase === "succeeded" && <p role="status">Helper {props.helper.operation === "install" ? "installed" : "upgraded"}. {props.helper.message}</p>}
           </div>}

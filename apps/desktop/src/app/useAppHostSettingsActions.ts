@@ -68,6 +68,7 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
       });
       if (!options.scopeIsCurrent(scope)) return;
       if (!report.ok) {
+        options.setStatus(`Helper ${helperState.operation} failed: ${report.message}`);
         options.dispatchHelper({
           type: "upgradeFailed", connectionKey, message: report.message, rollback: report.rollback,
         });
@@ -80,6 +81,7 @@ export function useAppHostSettingsActions(options: HostSettingsActionsOptions) {
       options.setConnectionEpoch((value) => value + 1);
     } catch (error) {
       if (!options.scopeIsCurrent(scope)) return;
+      options.setStatus(`Helper ${helperState.operation} failed: ${String(error)}`);
       options.dispatchHelper({
         type: "upgradeFailed", connectionKey, message: String(error), rollback: "notNeeded",
       });

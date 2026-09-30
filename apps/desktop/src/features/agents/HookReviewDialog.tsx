@@ -1,3 +1,4 @@
+import { SetupProgress } from "../../ui/SetupProgress";
 import { useId } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { SurfaceError } from "../../ui/SurfaceError";
@@ -38,6 +39,7 @@ export function HookReviewDialog(props: HookReviewDialogProps) {
         {props.review.alreadyInstalled && <p role="status">The managed hook is already current. Confirming is idempotent.</p>}
         {props.error && <SurfaceError className="dialog-error" detail={props.error} />}
       </div>
+      {props.applying && <SetupProgress detail={installing ? "Installing agent hooks…" : "Removing agent hooks…"} />}
       <footer>
         <button disabled={props.applying} onClick={props.onCancel} type="button">Cancel</button>
         <button className={installing ? "primary" : "danger"} disabled={props.applying} onClick={props.onConfirm} type="button">{props.applying ? "Applying…" : `${installing ? "Install" : "Uninstall"} reviewed hooks`}</button>

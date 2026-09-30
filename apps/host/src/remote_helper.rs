@@ -479,28 +479,12 @@ impl SshControl {
     }
 
     fn upload_independent(&self, source: &Path, destination: &str) -> anyhow::Result<()> {
-        let mut child = self
-            .base_command()
+        let mut command = self.base_command();
+        command
             .args(["-T", "-o", "ControlMaster=no", "-o", "ControlPath=none"])
             .arg(&self.target)
-            .arg(format!("cat > {destination}"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let mut input = child.stdin.take().context("SSH upload stdin unavailable")?;
-        let mut file = File::open(source)?;
-        std::io::copy(&mut file, &mut input)?;
-        input.flush()?;
-        drop(input);
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            bail!(
-                "helper upload failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(())
+            .arg(format!("cat > {destination}"));
+        upload_helper_file(command, source)
     }
 
     fn base_command(&self) -> Command {
@@ -554,6 +538,39 @@ impl Drop for SshControl {
             terminate_child_bounded(owned.child, Some((&self.socket, owned.socket_identity)));
         }
     }
+}
+
+/// Close upload stdin and collect SSH's explanation even when copying fails.
+/// Returning directly from `copy` loses stderr and leaves the child unreaped.
+fn upload_helper_file(mut command: Command, source: &Path) -> anyhow::Result<()> {
+    let mut file = File::open(source).context("read helper artifact for upload")?;
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("start helper upload")?;
+    let mut input = child.stdin.take().context("SSH upload stdin unavailable")?;
+    let copied = std::io::copy(&mut file, &mut input).and_then(|_| input.flush());
+    drop(input);
+    let output = child.wait_with_output().context("wait for helper upload")?;
+    let detail = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        bail!(
+            "helper upload failed ({}): {}",
+            output.status,
+            detail.trim()
+        );
+    }
+    copied.with_context(|| {
+        let detail = detail.trim();
+        if detail.is_empty() {
+            "helper upload failed while copying the artifact".to_owned()
+        } else {
+            format!("helper upload failed while copying the artifact: {detail}")
+        }
+    })?;
+    Ok(())
 }
 
 fn run_control_command(mut command: Command, timeout: Duration) -> anyhow::Result<bool> {
@@ -711,6 +728,51 @@ mod tests {
         os::unix::{fs::PermissionsExt, net::UnixListener},
         sync::mpsc,
     };
+
+    #[test]
+    fn upload_preserves_ssh_error_when_the_child_stops_reading() {
+        let temporary = tempfile::tempdir().unwrap();
+        let artifact = temporary.path().join("helper");
+        fs::write(&artifact, vec![0_u8; 1024 * 1024]).unwrap();
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "exec 0<&-; echo 'Connection to fixture timed out' >&2; exit 255",
+        ]);
+        let error = upload_helper_file(command, &artifact).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Connection to fixture timed out"),
+            "{message}"
+        );
+        assert!(message.contains("255"), "{message}");
+    }
+
+    #[test]
+    fn upload_checks_the_child_result_after_all_bytes_are_copied() {
+        let temporary = tempfile::tempdir().unwrap();
+        let artifact = temporary.path().join("helper");
+        fs::write(&artifact, b"artifact").unwrap();
+        let mut command = Command::new("sh");
+        command.args(["-c", "cat >/dev/null; echo 'remote disk full' >&2; exit 1"]);
+        let error = upload_helper_file(command, &artifact).unwrap_err();
+        assert!(error.to_string().contains("remote disk full"));
+    }
+
+    #[test]
+    fn upload_delivers_the_complete_artifact_before_success() {
+        let temporary = tempfile::tempdir().unwrap();
+        let artifact = temporary.path().join("helper");
+        let received = temporary.path().join("received");
+        let bytes: Vec<_> = (0..=255).cycle().take(256 * 1024).collect();
+        fs::write(&artifact, &bytes).unwrap();
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "cat > \"$1\"", "upload-test"])
+            .arg(&received);
+        upload_helper_file(command, &artifact).unwrap();
+        assert_eq!(fs::read(received).unwrap(), bytes);
+    }
 
     #[test]
     fn remote_partial_cleanup_runs_only_when_staging_fails() {

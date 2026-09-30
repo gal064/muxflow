@@ -1270,6 +1270,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 4px solid transparent; border-top-color: var(--chrome-dim); transform: translateY(2px);
 }
 .new-workspace-host-phase + .new-workspace-host-caret { margin-left: 1px; }
+.setup-progress { display: flex; align-items: center; gap: 10px; margin: 16px 0; }
+.setup-progress .spinner { width: 14px; height: 14px; }
+
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 /* Every button inside a dialog, rather than an allow-list of the surfaces that
    happened to have one when this rule was written. The list version silently

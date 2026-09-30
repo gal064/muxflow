@@ -96,8 +96,9 @@ export function AppDialogLayer(props: AppDialogLayerProps) {
       onCancel={props.onAppRecoveryDiscardCancel}
       onConfirm={props.onAppRecoveryDiscardConfirm}
     />}
-    {helperState.phase === "confirming" && <ConfirmationDialog
-      confirmLabel={helperState.probe.installed ? "Upgrade and reconnect" : "Install and connect"}
+    {(helperState.phase === "confirming" || helperState.phase === "upgrading") && <ConfirmationDialog
+      busy={helperState.phase === "upgrading"}
+      confirmLabel={helperState.phase === "upgrading" ? "Working…" : helperState.probe.installed ? "Upgrade and reconnect" : "Install and connect"}
       destructive={false}
       // One consent for one setup. A first install used to be followed, a few
       // seconds later, by a second dialog asking to set up agent status on the
@@ -106,10 +107,14 @@ export function AppDialogLayer(props: AppDialogLayerProps) {
       // succeeded. It is named here instead, so what is agreed to is what
       // happens. An upgrade says nothing about agents: that host answered the
       // agent question long ago, and this dialog is not where it changes.
-      detail={helperState.probe.installed
+      detail={helperState.phase === "upgrading"
+        ? "Uploading and verifying the helper. This may take a little while."
+        : helperState.probe.installed
         ? `Replace the helper at ${helperState.probe.remotePath}. The current helper is backed up and restored automatically if the new helper cannot complete its handshake.`
         : `Install the packaged helper at ${helperState.probe.remotePath}, verify its digest and handshake, then connect to tmux. Agent status hooks for the agents found on this host will also be set up after connecting.`}
-      title={helperState.probe.installed ? "Upgrade remote helper?" : "Install remote helper?"}
+      title={helperState.phase === "upgrading"
+        ? (helperState.probe.installed ? "Upgrading remote helper…" : "Installing remote helper…")
+        : (helperState.probe.installed ? "Upgrade remote helper?" : "Install remote helper?")}
       onCancel={props.onHelperCancel}
       onConfirm={props.onHelperConfirm}
     />}

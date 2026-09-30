@@ -1240,7 +1240,7 @@ export function App() {
   const modalOpen = contextMenuOpen || paletteOpen || workspaceSwitcherOpen || settingsOpen || shortcutEditorOpen
     || Boolean(confirmation) || Boolean(textPrompt) || Boolean(newWorkspaceDialog)
     || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecovery.modalOpen
-    || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming";
+    || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming" || helperState.phase === "upgrading";
 
   const [journalCopyChord] = useState(() => createCopyChordJournal());
   useEffect(() => {
