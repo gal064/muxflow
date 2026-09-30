@@ -1147,3 +1147,45 @@ fn a_resnapshot_releases_a_pending_history_so_its_own_capture_is_read_as_one() {
     // Nothing was published as the answer to a question nobody asked.
     assert_eq!(harness.events(), Vec::new());
 }
+
+#[test]
+fn layout_notification_preserves_the_resize_boundary_between_output_records() {
+    let (mut state, mut harness) = Harness::new(&["%1".into()]);
+    state.pane_states.insert("%1".into(), PaneSeedState::Live);
+    {
+        let mut resources = harness.resources.lock().unwrap();
+        resources.set_visible("%1", true, 0);
+        resources.seeded("%1", 0);
+    }
+    for record in [
+        ControlRecord::Output {
+            pane_id: "%1".into(),
+            data: b"before".to_vec(),
+        },
+        ControlRecord::Notification {
+            name: "layout-change".into(),
+            arguments: "@0 ffff,40x12,0,0,1 ffff,40x12,0,0,1 *".into(),
+        },
+        ControlRecord::Output {
+            pane_id: "%1".into(),
+            data: b"after".to_vec(),
+        },
+    ] {
+        state.handle(record, harness.runtime());
+    }
+    let events = harness.events();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].terminal.as_ref().unwrap().data, b"before");
+    assert_eq!(events[1].kind, i32::from(v1::EventKind::TopologyDirty));
+    assert_eq!(events[1].detail, "layout-change [[\"%1\",40,12]]");
+    assert_eq!(events[2].terminal.as_ref().unwrap().data, b"after");
+}
+
+#[test]
+fn layout_notification_uses_the_visible_grid_for_a_zoomed_pane() {
+    let detail = super::stream_helpers::layout_notification_detail(
+        "@0 ffff,80x24,0,0{39x24,0,0,7,40x24,40,0,12} ffff,80x24,0,0,12 *Z",
+    )
+    .unwrap();
+    assert_eq!(detail, "layout-change [[\"%7\",39,24],[\"%12\",80,24]]");
+}

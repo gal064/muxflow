@@ -287,6 +287,30 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     expect(received).toHaveLength(5);
   });
 
+  it("replaces missed layout dimensions at the authoritative resync boundary before its seed", () => {
+    const hub = new TerminalEventHub();
+    const delivered: string[] = [];
+    hub.subscribePane("%1", (event) => delivered.push(event.kind), undefined,
+      (grid) => delivered.push(grid ? `${grid.columns}x${grid.rows}` : "reset"));
+    hub.publish({ kind: "topologyDirty", name: "layout-change", sequence: 1,
+      grids: [{ paneId: "%1", columns: 40, rows: 12 }] });
+    const snapshot = {
+      sessions: [], windows: [], panes: [{
+        id: "%1", sessionId: "$1", windowId: "@1", index: 0, active: true,
+        width: 80, height: 24, left: 0, top: 0, currentPath: "/", currentCommand: "sh",
+      }],
+    };
+    // Routine discovery is not an output boundary and cannot change the grid.
+    hub.publish({ kind: "snapshot", snapshot, generation: 1, serverIdentity: "server",
+      authoritative: false, sequence: 2 });
+    expect(delivered).toEqual(["40x12"]);
+    // Native recovery omitted the resize event, then delivered its barrier.
+    hub.publish({ kind: "snapshot", snapshot, generation: 2, serverIdentity: "server",
+      authoritative: true, sequence: 77 });
+    hub.publish(seed(78, 3));
+    expect(delivered).toEqual(["40x12", "80x24", "seed"]);
+  });
+
   it("fast-forwards to an authoritative snapshot without calling a jump a jump", () => {
     // The resync barrier arrives at whatever sequence the host reached. It is
     // the repair, not evidence of a loss, so it must not cost a pane reseed.
@@ -766,5 +790,23 @@ describe("TerminalEventHub hidden-pane buffering", () => {
     // %1's original request remains authoritative; touching %1 evicts %3,
     // but the repairing/host-owned event must not request %1 a second time.
     expect(requests.filter((paneId) => paneId === "%1")).toEqual(["%1"]);
+  });
+});
+
+describe("ordered pane grids", () => {
+  it("delivers grid changes between the surrounding writes and stops after unsubscribe", () => {
+    const hub = new TerminalEventHub();
+    const delivered: string[] = [];
+    const stop = hub.subscribePane("%1", (event) => delivered.push(event.kind), undefined,
+      (size) => delivered.push(size ? `${size.columns}x${size.rows}` : "reset"));
+    hub.publish(seed(1, 1));
+    hub.publish(output(2, 2));
+    const layout = { kind: "topologyDirty" as const, name: "layout-change", grids: [{ paneId: "%1", columns: 40, rows: 12 }] };
+    hub.publish({ ...layout, sequence: 3 });
+    hub.publish(output(4, 3));
+    expect(delivered).toEqual(["seed", "output", "40x12", "output"]);
+    stop();
+    hub.publish({ ...layout, sequence: 5 });
+    expect(delivered).toHaveLength(4);
   });
 });

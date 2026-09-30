@@ -206,7 +206,7 @@ vi.mock("./TerminalRenderer", async (importOriginal) => ({
 }));
 
 import type { Platform } from "../../commands/registry";
-import { RESIZE_SCREEN_SETTLE_MS, TerminalPane, type TerminalPaneController } from "./TerminalPane";
+import { TerminalPane, type TerminalPaneController } from "./TerminalPane";
 import { type TerminalEvent } from "./api";
 import { terminalCacheKey, terminalStateCache } from "./TerminalStateCache";
 import { ownTerminalBytes } from "./TerminalBytes";
@@ -219,6 +219,7 @@ class FakeHub {
   rendered: Array<{ paneId: string; generation: number; terminalEpoch: number | undefined }> = [];
   seedRetries: string[] = [];
   #paneListeners = new Map<string, (event: PaneEvent) => void>();
+  #gridListeners = new Map<string, (size: { columns: number; rows: number }) => void>();
   #healthListeners = new Map<string, (health: PaneHealth) => void>();
   #health = new Map<string, PaneHealth>();
 
@@ -226,7 +227,9 @@ class FakeHub {
     paneId: string,
     listener: (event: PaneEvent) => void,
     onHealthChange?: (health: PaneHealth) => void,
+    onGridChange?: (size: { columns: number; rows: number }) => void,
   ): () => void {
+    if (onGridChange) this.#gridListeners.set(paneId, onGridChange);
     this.#paneListeners.set(paneId, listener);
     if (onHealthChange) {
       this.#healthListeners.set(paneId, onHealthChange);
@@ -235,6 +238,7 @@ class FakeHub {
     return () => {
       this.#paneListeners.delete(paneId);
       this.#healthListeners.delete(paneId);
+      this.#gridListeners.delete(paneId);
     };
   }
 
@@ -274,6 +278,10 @@ class FakeHub {
   visibilityCheckpoint(paneId: string): { terminalEpoch: number; outputGeneration: number } | undefined {
     void paneId;
     return this.generationEpoch === undefined ? undefined : { terminalEpoch: this.generationEpoch, outputGeneration: 0 };
+  }
+
+  deliverGrid(paneId: string, size: { columns: number; rows: number }): void {
+    this.#gridListeners.get(paneId)?.(size);
   }
 
   deliver(event: PaneEvent): void {
@@ -674,71 +682,44 @@ describe("TerminalPane pane-paint span lifecycle", () => {
 // tmux owns the parsing grid throughout a resize, including while the box
 // has changed but the host has not yet answered.
 describe("TerminalPane grid during a resize", () => {
-  it("refreshes once after confirmed resize churn, then resumes output on the authoritative screen", async () => {
-    vi.useFakeTimers();
+  it("uses the ordered stream grid even when React topology is late or ahead", async () => {
     const hub = new FakeHub();
-    const pane = fixturePane("%resize-refresh");
+    const pane = fixturePane("%ordered-grid");
     const mounted = await mountPane(pane, hub);
     const renderer = renderers.created[0];
     try {
       await act(async () => { hub.deliver(seedEvent(pane.id)); renderer.flushRendered(); });
       api.requestTerminalSeed.mockClear();
+      act(() => { hub.deliverGrid(pane.id, { columns: 40, rows: 24 }); });
+      expect(renderer.grid).toEqual({ columns: 40, rows: 24 });
+      // A box change still sees old React props. It must not undo the boundary.
+      act(() => { resizeCallbacks[0](); });
+      expect(renderer.grid.columns).toBe(40);
+      await updatePane(mounted, { ...pane, width: 60 }, hub);
+      expect(renderer.grid.columns).toBe(40);
+      act(() => { hub.deliverGrid(pane.id, { columns: 80, rows: 24 }); });
       await updatePane(mounted, { ...pane, width: 40 }, hub);
-      await act(async () => { vi.advanceTimersByTime(RESIZE_SCREEN_SETTLE_MS - 1); });
-      await updatePane(mounted, pane, hub);
-      await act(async () => { vi.advanceTimersByTime(RESIZE_SCREEN_SETTLE_MS - 1); });
+      expect(renderer.grid.columns).toBe(80);
       expect(api.requestTerminalSeed).not.toHaveBeenCalled();
-      await act(async () => { vi.advanceTimersByTime(1); });
-      expect(api.requestTerminalSeed).toHaveBeenCalledExactlyOnceWith("client-a", pane.id);
-      const before = renderer.writes.slice();
-      await act(async () => { hub.deliver(outputEvent(pane.id, 2, "stale output")); });
-      expect(renderer.writes).toEqual(before);
-      await act(async () => { hub.deliver(seedEvent(pane.id, 3)); renderer.flushRendered(); });
-      await act(async () => { hub.deliver(outputEvent(pane.id, 4, "live")); });
-      expect(renderer.writes.at(-1)).toBe("write:4");
-      await act(async () => { vi.advanceTimersByTime(RESIZE_SCREEN_SETTLE_MS * 3); });
-      expect(api.requestTerminalSeed).toHaveBeenCalledTimes(1);
     } finally {
       await act(async () => mounted.unmount());
     }
   });
 
-  it.each([false, true])("leaves resized history in place and refreshes on return (pending resize=%s)", async (pendingResize) => {
-    vi.useFakeTimers();
+  it("resizes a covered pane without a reset or a visibility-dependent recovery", async () => {
     const hub = new FakeHub();
-    const pane = fixturePane("%resize-reading");
-    const mounted = await mountPane(pane, hub);
+    const pane = fixturePane("%covered-grid");
+    const mounted = await mountPane(pane, hub, "client-a", true, undefined, undefined, { visible: false });
     const renderer = renderers.created[0];
     try {
       await act(async () => { hub.deliver(seedEvent(pane.id)); renderer.flushRendered(); });
-      if (pendingResize) await updatePane(mounted, { ...pane, width: 60 }, hub);
-      await act(async () => { renderer.emitViewport(false); });
       api.requestTerminalSeed.mockClear();
-      await updatePane(mounted, { ...pane, width: 40 }, hub);
-      await act(async () => { vi.advanceTimersByTime(RESIZE_SCREEN_SETTLE_MS * 3); });
+      act(() => { hub.deliverGrid(pane.id, { columns: 40, rows: 24 }); });
+      expect(renderer.grid.columns).toBe(40);
       expect(api.requestTerminalSeed).not.toHaveBeenCalled();
-      expect(renderer.scrollBottomCalls).toBe(0);
-      await act(async () => { renderer.emitViewport(true); });
-      expect(api.requestTerminalSeed).toHaveBeenCalledExactlyOnceWith("client-a", pane.id);
-      await act(async () => { hub.deliver(seedEvent(pane.id, 3)); renderer.flushRendered(); });
     } finally {
       await act(async () => mounted.unmount());
     }
-    expect(terminalStateCache.get(terminalCacheKey("local", pane.id))).toBeDefined();
-  });
-
-  it("cancels a pending resize refresh when the pane unmounts", async () => {
-    vi.useFakeTimers();
-    const hub = new FakeHub();
-    const pane = fixturePane("%resize-unmount");
-    const mounted = await mountPane(pane, hub);
-    await act(async () => { hub.deliver(seedEvent(pane.id)); renderers.created[0].flushRendered(); });
-    await updatePane(mounted, { ...pane, width: 40 }, hub);
-    await act(async () => mounted.unmount());
-    expect(terminalStateCache.get(terminalCacheKey("local", pane.id))).toBeUndefined();
-    api.requestTerminalSeed.mockClear();
-    await act(async () => { vi.advanceTimersByTime(RESIZE_SCREEN_SETTLE_MS * 3); });
-    expect(api.requestTerminalSeed).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("preserves output across a box shrink/grow before tmux answers (alternate=%s)", async (alternate) => {
@@ -1285,6 +1266,28 @@ describe("lazy scrollback", () => {
       ...(historySize === undefined ? {} : { historySize }),
     };
   }
+
+  it("keeps paging idle history after an ordered resize without returning to the live screen", async () => {
+    const hub = new FakeHub();
+    const pane = fixturePane("%history-resize");
+    const mounted = await mountPane(pane, hub);
+    const renderer = renderers.created[0];
+    try {
+      await act(async () => { hub.deliver(seedEvent(pane.id)); renderer.flushRendered(); });
+      await act(async () => { hub.deliver(historyEvent(pane.id, "older row\r\n", 1000)); });
+      renderer.scrollbackRows = 20;
+      act(() => { renderer.emitViewport(false); });
+      api.requestTerminalHistory.mockClear();
+      api.requestTerminalSeed.mockClear();
+      act(() => { hub.deliverGrid(pane.id, { columns: 40, rows: 24 }); });
+      await act(async () => { renderer.reachTop(); });
+      expect(api.requestTerminalHistory).toHaveBeenCalledOnce();
+      expect(api.requestTerminalSeed).not.toHaveBeenCalled();
+      expect(renderer.scrollBottomCalls).toBe(0);
+    } finally {
+      await act(async () => mounted.unmount());
+    }
+  });
 
   it("asks for one page when a screen-seeded pane is scrolled to the top, and not again while the ask is outstanding", async () => {
     const hub = new FakeHub();

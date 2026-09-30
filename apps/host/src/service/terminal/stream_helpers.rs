@@ -2,6 +2,7 @@ use super::*;
 use crate::service::terminal::OutputCharge;
 use crate::service::terminal::degradation::emit_pane_degradations;
 use crate::service::topology_output_trigger::TopologyOutputTrigger;
+use anyhow::Context;
 
 pub(in crate::service::terminal) fn with_active_resources<T>(
     resources: &Arc<Mutex<PaneResourceStore>>,
@@ -267,4 +268,34 @@ pub(super) fn is_topology_notification(name: &str) -> bool {
             | "window-unlinked"
             | "pane-mode-changed"
     )
+}
+
+/// Preserve tmux's resize boundary instead of rediscovering its sizes later.
+/// Normal layout describes covered panes; visible layout overrides the zoomed
+/// pane. The native bridge already forwards this notification without delay.
+pub(super) fn layout_notification_detail(arguments: &str) -> anyhow::Result<String> {
+    fn collect(
+        node: &tmux_control::LayoutNode,
+        grids: &mut std::collections::BTreeMap<u32, (u16, u16)>,
+    ) {
+        if let Some(id) = node.pane_index {
+            grids.insert(id, (node.width, node.height));
+        }
+        for child in &node.children {
+            collect(child, grids);
+        }
+    }
+    let mut fields = arguments.split_whitespace();
+    let window = fields.next().context("missing window ID")?;
+    validate_tmux_id(window, '@')?;
+    let normal = tmux_control::parse_layout(fields.next().context("missing layout")?)?;
+    let visible = tmux_control::parse_layout(fields.next().context("missing visible layout")?)?;
+    let mut grids = std::collections::BTreeMap::new();
+    collect(&normal, &mut grids);
+    collect(&visible, &mut grids);
+    let grids: Vec<_> = grids
+        .into_iter()
+        .map(|(id, (columns, rows))| serde_json::json!([format!("%{id}"), columns, rows]))
+        .collect();
+    Ok(format!("layout-change {}", serde_json::to_string(&grids)?))
 }

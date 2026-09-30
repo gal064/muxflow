@@ -14,6 +14,49 @@ beforeAll(() => {
 });
 
 describe("renderer resize ordering", () => {
+  it("finishes a queued history rewrite before changing its grid", async () => {
+    const actual = new XtermRenderer();
+    const expected = new XtermRenderer();
+    actual.open(document.createElement("div"));
+    expected.open(document.createElement("div"));
+    const output = "\x1b[2;60HLIVE SCREEN\x1b[4;1H" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".repeat(2);
+    const history = bytes("older row " + "h".repeat(65) + "\r\n");
+    const anchor = { columns: 80, rows: 24, skip: 0 };
+    try {
+      await new Promise<void>((resolve) => expected.write(bytes(output), resolve, 1));
+      expect(await expected.prependHistory(history, anchor)).toBe("applied");
+      await new Promise<void>((resolve) => expected.write(bytes(""), resolve, 1));
+      expected.setGrid({ columns: 40, rows: 24 });
+
+      actual.write(bytes(output), undefined, 1);
+      const splice = actual.prependHistory(history, anchor);
+      actual.setGrid({ columns: 40, rows: 24 });
+      expect(await splice).toBe("applied");
+      const [actualState, expectedState] = await Promise.all([
+        actual.drainAndSerialize(), expected.drainAndSerialize(),
+      ]);
+      expect(actualState).toEqual(expectedState);
+      expect(actual.screenText()).toEqual(expected.screenText());
+    } finally {
+      actual.dispose();
+      expected.dispose();
+    }
+  });
+
+  it("uses the latest authoritative grid for a seed after queue overflow", async () => {
+    const actual = new XtermRenderer();
+    actual.open(document.createElement("div"));
+    try {
+      expect(actual.write(ownTerminalBytes(new Uint8Array(8 * 1024 * 1024 + 1)))).toBe(false);
+      expect(actual.setGrid({ columns: 40, rows: 12 }).kind).toBe("rejected");
+      await new Promise<void>((resolve) => actual.seed(bytes("recovered"), resolve, 1));
+      expect(actual.grid).toEqual({ columns: 40, rows: 12 });
+      expect(actual.serialize()).toContain("recovered");
+    } finally {
+      actual.dispose();
+    }
+  });
+
   it.each(["seed", "restore"] as const)("keeps the latest grid when %s replaces a pending resize", async (kind) => {
     const actual = new XtermRenderer();
     const expected = new XtermRenderer();

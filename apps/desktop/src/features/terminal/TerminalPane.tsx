@@ -110,9 +110,6 @@ export const REVEAL_VOID_TIMEOUT_MS = 4_000;
  */
 export const REVEAL_VOID_MAX_ATTEMPTS = 3;
 
-/** Collapse a burst of confirmed grid changes into one authoritative screen. */
-export const RESIZE_SCREEN_SETTLE_MS = 60;
-
 /** Disarms the void watch. Safe to call when nothing is armed. */
 function cancelRevealVoidWatch(timer: { current: ReturnType<typeof setTimeout> | undefined }): void {
   if (timer.current === undefined) return;
@@ -141,8 +138,9 @@ export function reconcilePaneGrid(
   renderer: Pick<TerminalRenderer, "setGrid">,
   pane: Pane,
   measured?: TerminalSize,
+  streamGrid?: TerminalSize,
 ): string | undefined {
-  const outcome = renderer.setGrid({ columns: pane.width, rows: pane.height });
+  const outcome = renderer.setGrid(streamGrid ?? { columns: pane.width, rows: pane.height });
   if (outcome.kind === "rejected") {
     const fallback = measured && renderer.setGrid(measured);
     return `Pane ${pane.id}: tmux reports no usable grid (${outcome.reason}); ${
@@ -305,6 +303,7 @@ export function TerminalPane({
     transferRenderLifetimeRef.current = { hub, paneId: pane.id, value: String(++nextTransferRenderLifetime) };
   }
   const paneRef = useRef(pane);
+  const streamGridRef = useRef<TerminalSize | undefined>(undefined);
   const inputRef = useRef(onInput);
   const keyActivityRef = useRef(onKeyActivity);
   const pointerActivityRef = useRef(onPointerActivity);
@@ -389,6 +388,7 @@ export function TerminalPane({
     // Idempotent, and armed here rather than at import so a build that never
     // mounts a terminal never installs an observer.
     startLongTaskTracker();
+    streamGridRef.current = undefined;
     const terminalContainer = container.current;
     if (!terminalContainer) return;
     const gridMismatch = createGridMismatchProbe({
@@ -752,31 +752,7 @@ export function TerminalPane({
     // boundary that no longer exists. Subscribed here rather than at each of
     // the three places a grid is applied, because what matters is that the grid
     // changed and not who asked for it.
-    let resizeScreenTimer: ReturnType<typeof setTimeout> | undefined;
-    const unsubscribeGrid = renderer.onGridApplied(() => {
-      historyPager.noteGridChanged();
-      // Topology and application output arrive independently. Even correctly
-      // queued local resizes cannot repair new-grid output that reached us
-      // before its topology. Reuse return-to-live's authoritative screen path
-      // once resizing settles, including when the application stops printing.
-      if (!revealStateRef.current.ready && readingState !== "refreshing") return;
-      clearTimeout(resizeScreenTimer);
-      resizeScreenTimer = undefined;
-      if (readingState === "reading" || readingState === "outdated") {
-        skipOutputForHistoricalScreen();
-        return;
-      }
-      resizeScreenTimer = setTimeout(() => {
-        resizeScreenTimer = undefined;
-        if (!rendererActive || !surfaceVisible.current) return;
-        if (readingState === "reading" || readingState === "outdated") {
-          skipOutputForHistoricalScreen();
-          return;
-        }
-        readingState = "outdated";
-        resumeLive("Terminal resized; restoring tmux's current screen");
-      }, RESIZE_SCREEN_SETTLE_MS);
-    });
+    const unsubscribeGrid = renderer.onGridApplied(() => historyPager.noteGridChanged());
     const unsubscribeInput = renderer.onInput(sendTerminalInput);
     const unsubscribeViewport = renderer.onViewportChange((next) => {
       if (authoritativeScreenPending) {
@@ -1073,6 +1049,12 @@ export function TerminalPane({
       else watchdog.clear("hubAwaitingSeed");
       if (health.conflictReseedRequested) watchdog.note("hubConflictReseed");
       else watchdog.clear("hubConflictReseed");
+    }, (size) => {
+      // This notification occupies tmux's resize boundary in the output
+      // stream. Later React snapshots position the pane, but must not move
+      // its parser back to an older (or prematurely newer) grid.
+      streamGridRef.current = size;
+      if (size) renderer.setGrid(size);
     });
     // Render-side only, plus the terminal's own metrics. This observer once
     // computed the tmux client size from this pane's box and its share of the
@@ -1088,7 +1070,7 @@ export function TerminalPane({
       // for the old grid corrupts cursor-addressed output, even if the box
       // returns to its original size before the resize request is sent.
       const measured = renderer.measure();
-      reportGrid(reconcilePaneGrid(renderer, paneRef.current, measured));
+      reportGrid(reconcilePaneGrid(renderer, paneRef.current, measured, streamGridRef.current));
       noteReconciledGrid(gridMismatch, paneRef.current, measured);
       // Re-read rather than report once: xterm rounds a cell to whole device
       // pixels, so moving the window between displays of different pixel
@@ -1141,7 +1123,6 @@ export function TerminalPane({
 
     return () => {
       rendererActive = false;
-      clearTimeout(resizeScreenTimer);
       clearTimeout(revealFallback);
       // This teardown is also the hide half of the visibility protocol (the
       // `setTerminalVisibility(false)` below), and a pane on its way to hidden
@@ -1177,7 +1158,7 @@ export function TerminalPane({
           const currentCheckpoint = hub.visibilityCheckpoint(pane.id);
           if (!currentCheckpoint) return;
           const snapshotMatchesEpoch = rendererEpoch === currentCheckpoint.terminalEpoch;
-          const snapshotIsCurrent = readingScreenIsCurrent(readingState) && resizeScreenTimer === undefined;
+          const snapshotIsCurrent = readingScreenIsCurrent(readingState);
           const checkpoint = snapshotMatchesEpoch
             ? { ...currentCheckpoint, outputGeneration: drained.outputGeneration }
             : { ...currentCheckpoint, outputGeneration: 0 };
@@ -1257,7 +1238,7 @@ export function TerminalPane({
     if (!renderer) return;
     renderer.setFontSize(terminalFontSize);
     const measured = renderer.measure();
-    const report = reconcilePaneGrid(renderer, paneRef.current, measured);
+    const report = reconcilePaneGrid(renderer, paneRef.current, measured, streamGridRef.current);
     if (report) console.warn(report);
     const measurements = renderer.measurements();
     if (measurements) measurementsRef.current(measurements);
@@ -1508,6 +1489,7 @@ export function TerminalPane({
       }
       terminalStateCache.delete(cacheKey);
       deferredOutputRef.current.reset();
+      streamGridRef.current = undefined;
       rendererEpochRef.current = undefined;
       revealStateRef.current = { ready: false, hasLocalState: false };
       // The reveal being waited on belongs to the epoch that just ended, and a
@@ -1555,7 +1537,7 @@ export function TerminalPane({
     // available here too; without it that case silently leaves the pane on
     // xterm's default 80x24 and says nothing.
     const measured = renderer.measure();
-    const report = reconcilePaneGrid(renderer, pane, measured);
+    const report = reconcilePaneGrid(renderer, pane, measured, streamGridRef.current);
     noteReconciledGrid(gridMismatchProbeRef.current, pane, measured);
     if (report) console.warn(report);
   }, [pane.id, pane.width, pane.height]);

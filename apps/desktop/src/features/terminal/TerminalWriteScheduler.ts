@@ -393,12 +393,15 @@ export class TerminalWriteScheduler {
     while (this.#queueLength() > 0) {
       const first = this.#queue[this.#queueHead];
       if (!first) throw new Error("terminal scheduler queue invariant violated");
-      if (first.bytes.byteLength !== 0) break;
+      if (first.bytes.byteLength !== 0 || (first.fenced && consumed > 0)) break;
       this.#queue[this.#queueHead] = undefined;
       this.#queueHead += 1;
       consumed += 1;
       this.measurements?.add("terminal.scheduler.dequeueOperations");
       if (first.onRendered) rendered.push(first.onRendered);
+      // A preceding callback may queue a rewrite; leave the fence in that
+      // queue until the rewrite settles, and never batch callbacks after it.
+      if (first.fenced) break;
     }
     if (consumed === 0) return false;
     this.#compactQueue();

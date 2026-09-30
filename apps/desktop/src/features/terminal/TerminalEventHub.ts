@@ -1,3 +1,4 @@
+import type { TerminalSize } from "./cellMetrics";
 import type { TerminalEvent } from "./api";
 import type { OperationRecorder } from "../../perf/operations";
 import { recordIncident } from "../../diagnostics/incidents";
@@ -107,6 +108,7 @@ const SEQUENCE_REPAIR_DEBOUNCE_MS = 1_000;
 export class TerminalEventHub {
   readonly #epochListeners = new Set<EpochListener>();
   readonly #paneListeners = new Map<string, PaneListener>();
+  readonly #paneGridListeners = new Map<string, (size: TerminalSize | undefined) => void>();
   readonly #paneHealthListeners = new Map<string, PaneHealthListener>();
   readonly #activePaneStates = new Map<string, PaneStreamState>();
   readonly #dormantPaneStates = new Map<string, PaneStreamState>();
@@ -176,6 +178,23 @@ export class TerminalEventHub {
           listener(event);
         } catch (error) {
           this.#reportObserverFailure("terminal epoch observer", error);
+        }
+      }
+    }
+    // A recovery snapshot is also an ordered boundary: native resync may
+    // have discarded intervening layouts, and its seed needs the new grid.
+    // Routine topology discovery has no such ordering guarantee.
+    const grids = event.kind === "topologyDirty" ? event.grids
+      : event.kind === "snapshot" && event.authoritative
+        ? event.snapshot?.panes.map((pane) => ({ paneId: pane.id, columns: pane.width, rows: pane.height }))
+        : undefined;
+    if (grids) {
+      for (const grid of grids) {
+        try {
+          this.#paneGridListeners.get(grid.paneId)?.({ columns: grid.columns, rows: grid.rows });
+        } catch (error) {
+          this.#reportObserverFailure("terminal grid observer", error);
+          this.#requireSeed(grid.paneId, "terminal pane rejected its ordered grid");
         }
       }
     }
@@ -344,7 +363,7 @@ export class TerminalEventHub {
    * subscribing — a pane can mount straight into seed debt inherited from its
    * dormant state — and again on every later change.
    */
-  subscribePane(paneId: string, listener: PaneListener, onHealthChange?: PaneHealthListener): () => void {
+  subscribePane(paneId: string, listener: PaneListener, onHealthChange?: PaneHealthListener, onGridChange?: (size: TerminalSize | undefined) => void): () => void {
     // Pane payload allocations are transferred to their renderer. A second
     // consumer would turn that move into mutable aliasing, so fail at the
     // ownership boundary instead of silently multicasting branded bytes.
@@ -356,6 +375,7 @@ export class TerminalEventHub {
     this.#activePaneStates.set(paneId, pane);
     this.#paneListeners.set(paneId, listener);
     if (onHealthChange) this.#paneHealthListeners.set(paneId, onHealthChange);
+    if (onGridChange) this.#paneGridListeners.set(paneId, onGridChange);
     const backlog = pane?.backlog;
     if (backlog) {
       this.#deleteBacklog(pane);
@@ -371,6 +391,7 @@ export class TerminalEventHub {
         // replacement instead of replaying an ambiguous suffix.
         this.#paneListeners.delete(paneId);
         this.#paneHealthListeners.delete(paneId);
+        this.#paneGridListeners.delete(paneId);
         this.#activePaneStates.delete(paneId);
         const alreadyAwaiting = pane.awaitingSeed;
         pane.awaitingSeed = true;
@@ -388,6 +409,7 @@ export class TerminalEventHub {
       if (this.#paneListeners.get(paneId) !== listener) return;
       this.#paneListeners.delete(paneId);
       this.#paneHealthListeners.delete(paneId);
+      this.#paneGridListeners.delete(paneId);
       const active = this.#activePaneStates.get(paneId);
       this.#activePaneStates.delete(paneId);
       if (active) this.#retainDormantPane(paneId, active);
@@ -505,6 +527,10 @@ export class TerminalEventHub {
   }
 
   #clearPaneState(): void {
+    for (const listener of this.#paneGridListeners.values()) {
+      try { listener(undefined); }
+      catch (error) { this.#reportObserverFailure("terminal grid reset observer", error); }
+    }
     this.#dormantPaneStates.clear();
     this.#activePaneStates.clear();
     for (const paneId of this.#paneListeners.keys()) {

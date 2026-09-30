@@ -1040,7 +1040,8 @@ export class XtermRenderer implements TerminalRenderer {
     // Writes are asynchronous in both our scheduler and xterm. The resize
     // must follow accepted old-grid bytes and precede new-grid bytes.
     if (!this.#scheduler.barrier(() => this.#applyGrid(size))) {
-      this.#targetGrid = previous;
+      // Overflow recovery must seed at the latest authoritative dimensions,
+      // even when the queue cannot accept the ordered resize itself.
       return { kind: "rejected", reason: "terminal write queue is not accepting a resize" };
     }
     return { kind: "applied", size };

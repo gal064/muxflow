@@ -1,3 +1,4 @@
+import { decodeTopologyNotification, type PaneGrid } from "./topologyNotification";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { measurePerfRequest, recordPerfCounter } from "../../perf/probe";
 import { perfProbeReady } from "../../perf/bootstrap";
@@ -35,7 +36,7 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "flowStalled"; paneId: string; message: string }
   | { kind: "flowPaused"; paneId: string; message: string }
   | { kind: "clipboardWrite"; text: string }
-  | { kind: "topologyDirty"; name: string }
+  | { kind: "topologyDirty"; name: string; grids?: PaneGrid[] }
   | { kind: "error"; message: string }
   | { kind: "exit"; reason: string }
   | { kind: "connectionState"; state: "connecting" | "connected" | "reconnecting" | "resyncing" | "disconnected"; detail?: string }
@@ -107,7 +108,7 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
     case 3:
       requireHostSequence(sequence, "topology dirty");
       requireEmptyPayload(data, "topology dirty");
-      return { kind: "topologyDirty", name: label, sequence };
+      return { kind: "topologyDirty", ...decodeTopologyNotification(label), sequence };
     case 4:
       requireLocalSequence(sequence, "error");
       requireEmptyPayload(data, "error");

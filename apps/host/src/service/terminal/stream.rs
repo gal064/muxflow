@@ -854,14 +854,34 @@ impl StreamState {
             ControlRecord::Notification { name, arguments } if name == "paste-buffer-changed" => {
                 super::clipboard_forward::forward_paste_buffer(arguments.trim(), sender);
             }
-            ControlRecord::Notification { name, .. } if is_topology_notification(&name) => {
+            ControlRecord::Notification { name, arguments } if is_topology_notification(&name) => {
+                let detail = if name == "layout-change" {
+                    match stream_helpers::layout_notification_detail(&arguments) {
+                        Ok(detail) => detail,
+                        Err(error) => {
+                            emit_event(
+                                sender,
+                                overflowed,
+                                v1::HostEvent {
+                                    kind: v1::EventKind::ResyncRequired.into(),
+                                    scope: "topology".into(),
+                                    detail: format!("invalid tmux layout notification: {error}"),
+                                    ..Default::default()
+                                },
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    name
+                };
                 emit_event(
                     sender,
                     overflowed,
                     v1::HostEvent {
                         kind: v1::EventKind::TopologyDirty.into(),
                         scope: "topology".into(),
-                        detail: name,
+                        detail,
                         ..Default::default()
                     },
                 );
