@@ -13,7 +13,7 @@ after=$3
 ssh_args=()
 if [[ $# == 4 ]]; then ssh_args+=(-F "$4"); fi
 # Match SshControl::base_command and upload_independent; do not tune away a failure.
-ssh_args+=(-T -o BatchMode=yes -o ServerAliveInterval=1 -o ServerAliveCountMax=2 -o ControlMaster=no -o ControlPath=none)
+ssh_args+=(-T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -o ControlPath=none)
 evidence=$(mktemp -d "${TMPDIR:-/tmp}/muxflow-upload-evidence.XXXXXXXX")
 echo "Evidence: $evidence"
 architecture=$(ssh "${ssh_args[@]}" "$target" 'uname -m')

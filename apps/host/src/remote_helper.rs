@@ -496,9 +496,11 @@ impl SshControl {
             "-o",
             "BatchMode=yes",
             "-o",
-            "ServerAliveInterval=1",
+            // Match the desktop transport: a brief stall during the separate
+            // upload must not kill SSH before it can finish the helper update.
+            "ServerAliveInterval=15",
             "-o",
-            "ServerAliveCountMax=2",
+            "ServerAliveCountMax=3",
         ]);
         command
     }
