@@ -70,9 +70,11 @@ jobs:
       - name: Free disk space for the release build
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - name: Install system packages
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo apt-get "${apt_options[@]}" update --error-on=any
+          sudo apt-get "${apt_options[@]}" install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -227,11 +229,26 @@ jobs:
           export MUXFLOW_ANDROID_KEYSTORE=$RUNNER_TEMP/release.keystore
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$MUXFLOW_ANDROID_KEYSTORE"
           export MUXFLOW_JAVA_HOME=$JAVA_HOME MUXFLOW_ANDROID_HOME=$ANDROID_HOME
-          pnpm mobile:apk:release
+          /usr/bin/time -v pnpm mobile:apk:release
           rm -f "$MUXFLOW_ANDROID_KEYSTORE"
           mkdir -p "$RUNNER_TEMP/out"
           cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk \
             "$RUNNER_TEMP/out/muxflow-${{ needs.version.outputs.version }}-android.apk"
+      - name: Android failure diagnostics
+        if: failure()
+        run: |
+          df -h
+          free -h
+          for log in "${GRADLE_USER_HOME:-$HOME/.gradle}"/daemon/*/daemon-*.out.log; do
+            [[ -f "$log" ]] || continue
+            echo "::group::$(basename "$log")"
+            tail -n 200 "$log"
+            echo "::endgroup::"
+          done
+          sudo dmesg | tail -n 100 || true
+      - name: Remove Android signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore"
       - uses: actions/upload-artifact@v4
         with:
           name: android
