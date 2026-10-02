@@ -1,10 +1,16 @@
 // The JSON contract between the app and the terminal WebView page (§10.2).
 // Imported by both sides so the two cannot drift.
 
+import type { Grid } from "./sizing";
+
+/** A confirmed grid change at a byte boundary in a retained output stream. */
+export interface GridFence extends Grid { offset: number }
+
 /** RN → page. */
 export type ToPageMessage =
   | { t: "init" }
-  | { t: "seed"; b64: string }
+  | { t: "seed"; b64: string; grid?: Grid }
+  | { t: "grid"; cols: number; rows: number }
   | { t: "out"; b64: string }
   /**
    * §7.6.1: rebuild the buffer as scrollback + screen. `hist` is every page
@@ -14,7 +20,7 @@ export type ToPageMessage =
    * it fully above the display, replays the tail, and puts the viewport back
    * `rowsAdded` rows below the top: the row the reader was looking at.
    */
-  | { t: "splice"; hist: string; rowsAdded: number; tail: string }
+  | { t: "splice"; hist: string; rowsAdded: number; tail: string; grids: GridFence[] }
   | { t: "measure" };
 
 /** page → RN. */

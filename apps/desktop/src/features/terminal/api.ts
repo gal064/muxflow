@@ -1,4 +1,4 @@
-import { decodeTopologyNotification, type PaneGrid } from "./topologyNotification";
+import { decodeTopologyNotification, type PaneGrid } from "@muxflow/terminal-interactions";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { measurePerfRequest, recordPerfCounter } from "../../perf/probe";
 import { perfProbeReady } from "../../perf/bootstrap";

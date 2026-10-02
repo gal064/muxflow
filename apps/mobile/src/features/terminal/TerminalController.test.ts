@@ -108,6 +108,28 @@ describe("TerminalController scrollback paging (§7.6.1)", () => {
     }, { sequence });
   }
 
+  it("preserves confirmed grid changes between output records and during history replay", async () => {
+    const h = await seeded();
+    h.transport().feed(hostEnvelope({ case: "event", value: create(HostEventSchema, {
+      kind: EventKind.TOPOLOGY_DIRTY, detail: 'layout-change [["%1",40,12]]',
+    }) }, { sequence: 2n }));
+    const out = new TextEncoder().encode("live");
+    h.transport().feed(terminalEvent(EventKind.TERMINAL_OUTPUT, 3n, out, 3n));
+    expect(h.page.map((message) => message.t)).toEqual(["grid", "out"]);
+    expect(h.page[0]).toEqual({ t: "grid", cols: 40, rows: 12 });
+    h.controller.onPageMessage({ t: "atTop", above: 0 });
+    await answerNext(h.transport());
+    h.transport().feed(historyEvent(4n, ["older"], 1));
+    const splice = h.page.at(-1);
+    if (splice?.t !== "splice") throw new Error("expected history replay");
+    expect(splice.grids).toEqual([
+      { offset: 0, cols: 80, rows: 24 },
+      { offset: SEED.byteLength, cols: 40, rows: 12 },
+    ]);
+    // Confirming the host grid does not change what the phone requests.
+    expect(h.controller.snapshot.grid).toEqual({ cols: 80, rows: 24 });
+  });
+
   it("atTop asks for a first page with the page's rows as skip, splices the answer above the retained bytes, and doubles the next page", async () => {
     const h = await seeded();
     const out = new TextEncoder().encode("more");
@@ -332,7 +354,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     await answerNext(t);
     await answerNext(t); // seed request (§7.6 step 1)
     t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 5n));
-    expect(h.page.at(-1)).toEqual({ t: "seed", b64: Buffer.from(SEED).toString("base64") });
+    expect(h.page.at(-1)).toEqual({ t: "seed", b64: Buffer.from(SEED).toString("base64"), grid: { cols: 80, rows: 24 } });
     expect(h.controller.snapshot.phase).toBe("seeded");
     expect(h.controller.generation).toBe(5n);
     await vi.advanceTimersByTimeAsync(50);

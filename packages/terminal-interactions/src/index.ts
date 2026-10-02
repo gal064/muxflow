@@ -14,3 +14,4 @@ export {
   type TerminalFileLink,
 } from "./terminalFilePaths";
 export { terminalWebLinks, type TerminalWebLink } from "./terminalWebLinks";
+export { decodeTopologyNotification, type PaneGrid } from "./topologyNotification";

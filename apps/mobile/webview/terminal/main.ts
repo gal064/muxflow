@@ -4,6 +4,7 @@
 // talks to a network; input events are captured only while synthesizing an
 // alternate-screen wheel gesture (§10.2).
 
+import { TerminalStream } from "../../src/features/terminal/TerminalStream";
 import { Terminal, type IBufferRange } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import {
@@ -44,6 +45,7 @@ function decodeBase64(b64: string): Uint8Array {
 
 let term: Terminal | undefined;
 let fit: FitAddon | undefined;
+let stream: TerminalStream | undefined;
 let lastGrid: Grid | undefined;
 let lastViewport: { width: number; height: number } | undefined;
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -62,7 +64,7 @@ function root(): HTMLElement {
   return document.getElementById("terminal") as HTMLElement;
 }
 
-/** Re-measures the viewport, resizes xterm to whole cells, and reports the grid. */
+/** Measures the requested viewport grid; confirmed host sizes drive the parser. */
 function measure(force = false): void {
   if (!term || !fit) return;
   const el = root();
@@ -79,7 +81,7 @@ function measure(force = false): void {
   if (!force && !gridChanged && !viewportChanged) return;
   lastGrid = grid;
   lastViewport = viewport;
-  if (term.cols !== grid.cols || term.rows !== grid.rows) term.resize(grid.cols, grid.rows);
+  // This is the requested viewport size. Parsing follows only confirmed host grids.
   const cellWidth = viewport.width / grid.cols;
   const cellHeight = viewport.height / grid.rows;
   post({ t: "size", cols: grid.cols, rows: grid.rows, cellWidth, cellHeight });
@@ -137,6 +139,8 @@ async function init(): Promise<void> {
     },
     theme: terminalTheme,
   });
+  stream = new TerminalStream(term, (bytes) => post({ t: "written", bytes }),
+    (error) => post({ t: "log", line: `stream error: ${String(error)}` }));
   fit = new FitAddon();
   term.loadAddon(fit);
   term.open(root());
@@ -595,47 +599,6 @@ async function init(): Promise<void> {
  * output still being parsed — those bytes would then be written into the
  * fresh buffer ahead of whatever follows the reset.
  */
-function resetInOrder(then: () => void): void {
-  if (!term) return;
-  term.write("", () => {
-    term?.reset();
-    then();
-  });
-}
-
-function write(bytes: Uint8Array, reset: boolean): void {
-  if (!term) return;
-  const go = () => term?.write(bytes, () => post({ t: "written", bytes: bytes.byteLength }));
-  if (reset) resetInOrder(go);
-  else go();
-}
-
-/**
- * §7.6.1: rebuild the buffer as history + screen. xterm has no prepend, so the
- * page resets, writes the history rows, scrolls all of them above the display
- * with one newline per screen row (the tail's seed begins with `ESC[2J ESC[H`,
- * which erases the display in place — a history row still on it would never
- * reach the scrollback), replays the tail, and puts the viewport back on the
- * first row the reader was already looking at: the history occupies exactly
- * its own row count above it.
- */
-function splice(hist: Uint8Array, rowsAdded: number, tail: Uint8Array): void {
-  if (!term) return;
-  const pushOut = new TextEncoder().encode("\r\n".repeat(term.rows));
-  resetInOrder(() => {
-    if (!term) return;
-    if (hist.byteLength > 0) term.write(hist);
-    term.write(pushOut);
-    term.write(tail, () => {
-      if (!term) return;
-      // The newest page sits above everything the reader already had, so the
-      // row they were reading is now that many rows down from the top.
-      term.scrollToLine(rowsAdded);
-      post({ t: "written", bytes: hist.byteLength + tail.byteLength });
-    });
-  });
-}
-
 function receive(message: ToPageMessage): void {
   switch (message.t) {
     case "init":
@@ -644,14 +607,17 @@ function receive(message: ToPageMessage): void {
     case "measure":
       measure(true);
       return;
+    case "grid":
+      stream?.resize(message);
+      return;
     case "seed":
-      write(decodeBase64(message.b64), true);
+      stream?.write(decodeBase64(message.b64), true, message.grid);
       return;
     case "out":
-      write(decodeBase64(message.b64), false);
+      stream?.write(decodeBase64(message.b64));
       return;
     case "splice":
-      splice(decodeBase64(message.hist), message.rowsAdded, decodeBase64(message.tail));
+      stream?.splice(decodeBase64(message.hist), message.rowsAdded, decodeBase64(message.tail), message.grids);
       return;
   }
 }

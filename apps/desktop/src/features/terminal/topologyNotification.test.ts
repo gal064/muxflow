@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeTopologyNotification } from "./topologyNotification";
+import { decodeTopologyNotification } from "@muxflow/terminal-interactions";
 import { decodeTerminalEvent } from "./api";
 
 describe("ordered layout notifications", () => {

@@ -15,7 +15,7 @@ import {
   yieldTerminalSizing,
 } from "../../protocol/requests";
 import type { SessionStore } from "../../store/sessionStore";
-import type { FromPageMessage, ToPageMessage } from "./bridgeMessages";
+import type { FromPageMessage, GridFence, ToPageMessage } from "./bridgeMessages";
 import { fromBase64, toBase64, utf8Encode } from "./bytes";
 import { CR } from "./chips";
 import { sameGrid, windowGrid, type Grid } from "./sizing";
@@ -114,6 +114,8 @@ export class TerminalController {
   readonly sessionId: string;
   private phase: TerminalPhase = "preparing";
   private grid: Grid | undefined;
+  private hostGrid: Grid | undefined;
+  private gridFences: GridFence[] = [];
   private sentGrid: Grid | undefined;
   private viewport: { width: number; height: number } | undefined;
   private lastError: string | undefined;
@@ -182,6 +184,7 @@ export class TerminalController {
     this.registration = {
       paneId: this.paneId,
       sessionId: this.sessionId,
+      grid: (cols, rows) => this.confirmGrid(cols, rows),
       seed: (bytes, generation) => this.seed(bytes, generation),
       output: (bytes, generation) => this.output(bytes, generation),
       history: (bytes, historySize, sizeKnown) => this.history(bytes, historySize, sizeKnown),
@@ -366,6 +369,14 @@ export class TerminalController {
 
   // ---- events from the connection --------------------------------------------
 
+  private confirmGrid(cols: number, rows: number): void {
+    if (this.stopped || sameGrid(this.hostGrid, { cols, rows })) return;
+    this.hostGrid = { cols, rows };
+    if (!this.historyDone) this.gridFences.push({ offset: this.retainedBytes, cols, rows });
+    if (this.grid) this.options.page.send({ t: "grid", cols, rows });
+    this.log(`grid.confirmed ${cols}x${rows}`);
+  }
+
   private seed(bytes: Uint8Array, generation: bigint): void {
     if (this.stopped) return;
     // §7.6 step 2: a seed older than output already written is stale.
@@ -378,13 +389,14 @@ export class TerminalController {
     // A seed resets the page, so it resets the history ledger too: the pane's
     // scrollback above this screen is unfetched again.
     this.retained = [bytes];
+    this.gridFences = this.hostGrid ? [{ offset: 0, ...this.hostGrid }] : [];
     this.retainedBytes = bytes.byteLength;
     this.splicedRows = 0;
     this.pages = [];
     this.historyLines = HISTORY_PAGE_LINES;
     this.historyInFlight = false;
     this.historyDone = false;
-    this.options.page.send({ t: "seed", b64: toBase64(bytes) });
+    this.options.page.send({ t: "seed", b64: toBase64(bytes), ...(this.hostGrid ? { grid: this.hostGrid } : {}) });
     this.log(`seed ${bytes.byteLength} bytes generation=${generation}`);
     if (this.phase !== "exited") this.setPhase("seeded");
   }
@@ -412,6 +424,7 @@ export class TerminalController {
       if (this.retainedBytes > 0) {
         this.retained = [];
         this.retainedBytes = 0;
+        this.gridFences = [];
         this.pages = [];
       }
       return;
@@ -423,6 +436,8 @@ export class TerminalController {
       // heavier than the scrollback is worth on a phone.
       this.retained = [];
       this.retainedBytes = 0;
+      this.gridFences = [];
+      this.pages = [];
       this.historyDone = true;
       this.log("history.retention.dropped (cap exceeded)");
     }
@@ -486,7 +501,7 @@ export class TerminalController {
       // splice rebuilds the whole buffer, so a page left out would be a hole.
       this.pages.unshift(bytes);
       const tail = concat(this.retained, this.retainedBytes);
-      this.options.page.send({ t: "splice", hist: toBase64(joinRows(this.pages)), rowsAdded: rows, tail: toBase64(tail) });
+      this.options.page.send({ t: "splice", hist: toBase64(joinRows(this.pages)), rowsAdded: rows, tail: toBase64(tail), grids: this.gridFences.slice() });
       this.splicedRows += rows;
       this.historyLines = Math.min(this.historyLines * 2, HISTORY_MAX_PAGE_LINES);
     }
