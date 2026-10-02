@@ -59,6 +59,20 @@ tag. Review the generated draft and publish it as a pre-release for direct
 downloads. This repository is public, so a published RC is public too. It does
 not replace the stable release or trigger the apps' stable update prompt.
 
+Install a published RC with the same Linux/macOS installer as production,
+pinning its release tag:
+
+```sh
+curl -fsSL https://github.com/gal064/muxflow/releases/download/vX.Y.Z-rc.N/install.sh | MUXFLOW_VERSION=vX.Y.Z-rc.N bash
+```
+
+`MUXFLOW_VERSION` accepts stable versions and `X.Y.Z-rc.N`, with or without a
+leading `v`. The installer downloads from that exact tag; package filenames
+use the base `X.Y.Z` version. Without a pin it installs the latest stable
+release. Quit and reopen the desktop after installing. For SSH hosts, use
+Settings → Check helper → Upgrade helper to deploy the bundled helper to the
+host.
+
 The `release` environment holds these secrets:
 
 | Secret | Contents |

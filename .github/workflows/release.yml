@@ -260,7 +260,7 @@ jobs:
           (cd "$out" && sha256sum -- * > SHA256SUMS)
           node -e 'process.stdout.write(JSON.stringify({version: process.argv[1], url: process.argv[2]}, null, 2) + "\n")' \
             "$version" "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" > "$out/latest.json"
-          sed "s/{{VERSION}}/$version/g" release/release-notes.md > "$RUNNER_TEMP/notes.md"
+          sed -e "s/{{VERSION}}/$version/g" -e "s/{{TAG}}/$GITHUB_REF_NAME/g" release/release-notes.md > "$RUNNER_TEMP/notes.md"
           cat "$out/SHA256SUMS" "$out/latest.json"
       - name: Create the draft release
         env:

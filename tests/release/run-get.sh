@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Drives the one-line installer (release/get.sh) through `curl | bash`
 # against a local mirror of a GitHub release: fresh install, upgrade, and a
-# checksum mismatch. Takes a Linux package built for this machine, e.g.
+# checksum mismatch, and pinned RCs. Takes a Linux package built for this machine, e.g.
 #   tests/release/run-get.sh tmp/release/muxflow-0.1.1-linux-x86_64.tar.gz
 set -euo pipefail
 
@@ -39,7 +39,7 @@ done
 prefix="$work/prefix"
 run_installer() {
   curl -fsSL "http://127.0.0.1:$port/install.sh" \
-    | MUXFLOW_RELEASES_URL="http://127.0.0.1:$port" ADE_INSTALL_PREFIX="$prefix" bash
+    | MUXFLOW_RELEASES_URL="http://127.0.0.1:$port" ADE_INSTALL_PREFIX="$prefix" MUXFLOW_VERSION="${1:-}" bash
 }
 
 run_installer > "$work/install.out"
@@ -53,6 +53,30 @@ run_installer > "$work/upgrade.out"
 grep -q "Installed Muxflow under $prefix" "$work/upgrade.out"
 echo "reinstall/upgrade: ok"
 
+run_installer "v$version" > "$work/pinned.out"
+grep -q "Downloading Muxflow $version for" "$work/pinned.out"
+echo "pinned stable install: ok"
+
+rc="$version-rc.2"
+rc_assets="$mirror/download/v$rc"
+mkdir -p "$rc_assets"
+cp "$assets/"* "$rc_assets/"
+for pin in "$rc" "v$rc"; do
+  run_installer "$pin" > "$work/rc.out"
+  grep -q "Downloading Muxflow $rc for" "$work/rc.out"
+  [[ -x "$prefix/bin/muxflow" && -x "$prefix/bin/muxflow-host" ]]
+done
+echo "pinned RC install, with and without v: ok"
+
+for pin in "$version-beta.1" "$version-rc." '../escape'; do
+  if run_installer "$pin" > "$work/invalid.out" 2>&1; then
+    echo "installer accepted invalid version: $pin" >&2
+    exit 1
+  fi
+  grep -q 'invalid version' "$work/invalid.out"
+done
+echo "invalid versions rejected: ok"
+
 printf '%064d  %s\n' 0 "$name" > "$assets/SHA256SUMS"
 if run_installer > "$work/bad.out" 2>&1; then
   echo "installer accepted a tarball with a wrong checksum" >&2
@@ -60,3 +84,11 @@ if run_installer > "$work/bad.out" 2>&1; then
 fi
 grep -q "checksum mismatch" "$work/bad.out"
 echo "checksum mismatch rejected: ok"
+
+printf '%064d  %s\n' 0 "$name" > "$rc_assets/SHA256SUMS"
+if run_installer "$rc" > "$work/rc-bad.out" 2>&1; then
+  echo "installer accepted an RC tarball with a wrong checksum" >&2
+  exit 1
+fi
+grep -q "checksum mismatch" "$work/rc-bad.out"
+echo "RC checksum mismatch rejected: ok"
