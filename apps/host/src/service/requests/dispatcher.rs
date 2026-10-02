@@ -412,12 +412,38 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
-        (Handler::Terminal, Some(v1::Operation::ResizeTerminal)) => {
+        (
+            Handler::Terminal,
+            Some(v1::Operation::ResizeTerminal | v1::Operation::ResizeTerminalWindow),
+        ) => {
+            let scoped = operation == Some(v1::Operation::ResizeTerminalWindow);
+            let target_exists = !scoped
+                || topology_baseline
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(snapshot, _)| {
+                        snapshot.windows.iter().any(|window| {
+                            window.id == request.scope && window.session_id == request.session_id
+                        })
+                    });
             let mut result = {
                 let mut terminal = terminal.lock().unwrap();
-                terminal
-                    .flush_input()
-                    .and_then(|()| terminal.resize(request.columns, request.rows))
+                terminal.flush_input().and_then(|()| {
+                    if !target_exists {
+                        anyhow::bail!("window is no longer in the requested session");
+                    }
+                    if scoped {
+                        terminal.resize_window(
+                            &request.session_id,
+                            &request.scope,
+                            request.columns,
+                            request.rows,
+                        )
+                    } else {
+                        terminal.resize(request.columns, request.rows)
+                    }
+                })
             };
             if result.is_ok() {
                 result = reconcile_internal_tmux_change(

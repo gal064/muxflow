@@ -22,6 +22,7 @@ fn assigned_operation_and_enum_numbers_do_not_move() {
         (VoiceSession, 53),
         (AgentDiagnostics, 54),
         (YieldTerminalSizing, 55),
+        (ResizeTerminalWindow, 56),
         (TestDelay, 100),
     ] {
         assert_eq!(operation as i32, number);
@@ -202,5 +203,5 @@ fn an_unknown_terminal_history_event_is_inert_rather_than_a_seed() {
     assert!(v1::Operation::try_from(53).is_ok());
     assert!(v1::Operation::try_from(54).is_ok());
     assert!(v1::Operation::try_from(55).is_ok());
-    assert!(v1::Operation::try_from(56).is_err());
+    assert!(v1::Operation::try_from(i32::MAX).is_err());
 }

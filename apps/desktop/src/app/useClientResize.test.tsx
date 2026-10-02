@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PixelBox, TerminalMeasurements, TerminalSize } from "../features/terminal/TerminalRenderer";
 import { CLIENT_RESIZE_DEBOUNCE_MS, CLIENT_RESIZE_RETRIES, CLIENT_RESIZE_RETRY_MS, CLIENT_RESIZE_TAKE_INTERVAL_MS, useClientResize } from "./useClientResize";
 
-const resizeClientMock = vi.hoisted(() => vi.fn(async (_clientId: string, _columns: number, _rows: number) => undefined));
+const resizeClientMock = vi.hoisted(() => vi.fn(async (_clientId: string, _columns: number, _rows: number, _sessionId: string, _windowId: string) => undefined));
 vi.mock("../features/terminal/api", () => ({ resizeClient: resizeClientMock }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -42,7 +42,9 @@ function setSurfaceBox(box: PixelBox) {
 }
 
 interface HarnessProps {
+  terminalVisible?: boolean;
   activeWindowId?: string;
+  activeSessionId?: string;
   actualSize?: TerminalSize;
   canMutate?: boolean;
   clientId?: string;
@@ -53,7 +55,9 @@ interface HarnessProps {
 
 function Harness(props: HarnessProps) {
   const { onMeasurements, surfaceRef } = useClientResize({
-    activeWindowId: props.activeWindowId,
+    terminalVisible: props.terminalVisible,
+    activeWindowId: props.activeWindowId ?? "@1",
+    activeSessionId: props.activeSessionId ?? "$1",
     actualSize: props.actualSize,
     canMutate: props.canMutate ?? true,
     clientId: props.clientId,
@@ -124,7 +128,7 @@ describe("useClientResize", () => {
     await render({ clientId: "client-1" });
     // 1000 − 2 frame − 12 padding − 14 scrollbar = 972 → 121 columns;
     // 800 − 2 − 12 = 786 → 46 rows.
-    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46]]);
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46, "$1", "@1"]]);
   });
 
   it("asks for nothing before a client, before mutation is allowed, or with no surface", async () => {
@@ -146,15 +150,15 @@ describe("useClientResize", () => {
     expect(statuses).toEqual([]);
     // It arrives; the value itself is the trigger.
     await update({ measurements: MEASUREMENTS });
-    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46]]);
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46, "$1", "@1"]]);
   });
 
   it("re-asks when the cell size changes under it, with no remount", async () => {
     const { update } = await render({ clientId: "client-1" });
-    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46]]);
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46, "$1", "@1"]]);
     // What a move between displays of different pixel ratios does.
     await update({ measurements: { ...MEASUREMENTS, cell: { width: 10, height: 20 } } });
-    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-1", 97, 39]]);
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46, "$1", "@1"], ["client-1", 97, 39, "$1", "@1"]]);
   });
 
   it("stays quiet when the window is merely too small for a terminal", async () => {
@@ -175,21 +179,31 @@ describe("useClientResize", () => {
     });
     expect(resizeClientMock).not.toHaveBeenCalled();
     await settle();
-    expect(resizeClientMock.mock.calls).toEqual([["client-1", 84, 46]]);
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 84, 46, "$1", "@1"]]);
     await act(async () => renderer.unmount());
   });
 
   it("recomputes for a new tmux window and a new connection, and repeats nothing", async () => {
     const { update } = await render({ clientId: "client-1", activeWindowId: "@1" });
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
-    // Same surface, different window: the answer is unchanged, and a repeated
-    // `refresh-client -C` would only re-assert this client's size over the
-    // plain terminals sharing the session.
+    // Opening another window claims that window, even at the same grid.
     await update({ activeWindowId: "@2" });
-    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+    expect(resizeClientMock).toHaveBeenCalledTimes(2);
     // A new bridge has a new tmux client, which has never been sized.
     await update({ clientId: "client-2" });
-    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-2", 121, 46]]);
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46, "$1", "@1"], ["client-1", 121, 46, "$1", "@2"], ["client-2", 121, 46, "$1", "@1"]]);
+  });
+
+  it("reclaims the same window at the same grid when returning from an app tab", async () => {
+    const { update } = await render({ clientId: "client-1", actualSize: { columns: 121, rows: 46 } });
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+    await update({ terminalVisible: false });
+    await pointerdown();
+    expect(resizeClientMock).toHaveBeenCalledTimes(1);
+    await update({ terminalVisible: true });
+    expect(resizeClientMock.mock.calls).toEqual([
+      ["client-1", 121, 46, "$1", "@1"], ["client-1", 121, 46, "$1", "@1"],
+    ]);
   });
 
   it("retries a request the bridge refused, then reports it", async () => {
@@ -249,7 +263,7 @@ describe("useClientResize", () => {
     expect(resizeClientMock).toHaveBeenCalledTimes(1);
     await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
     await keydown();
-    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-1", 121, 46]]);
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46, "$1", "@1"], ["client-1", 121, 46, "$1", "@1"]]);
   });
 
   it("takes on a pointer-down as well", async () => {
@@ -354,7 +368,7 @@ describe("useClientResize", () => {
     });
     await settle();
     await settle();
-    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46], ["client-1", 109, 46]]);
+    expect(resizeClientMock.mock.calls).toEqual([["client-1", 121, 46, "$1", "@1"], ["client-1", 109, 46, "$1", "@1"]]);
   });
 
   /**
@@ -374,7 +388,7 @@ describe("useClientResize", () => {
     await idle(CLIENT_RESIZE_TAKE_INTERVAL_MS);
     await keydown();
     expect(resizeClientMock).toHaveBeenCalledTimes(3 + CLIENT_RESIZE_RETRIES);
-    expect(resizeClientMock.mock.lastCall).toEqual(["client-1", 121, 46]);
+    expect(resizeClientMock.mock.lastCall).toEqual(["client-1", 121, 46, "$1", "@1"]);
   });
 
   /**

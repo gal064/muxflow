@@ -69,7 +69,7 @@ That is the whole product for v1.
 | D3 | Terminal rendering: **xterm.js inside a `react-native-webview`**, fed the same byte stream the desktop feeds its xterm. | The host already produces xterm-ready bytes (seed + output). Re-implementing a VT parser natively is out of scope. |
 | D4 | Markdown rendering: `marked` + `DOMPurify` inside a WebView, using the desktop's `renderSafeMarkdown` rules (§11.2) copied verbatim. | Same sanitiser as the desktop; a Markdown file that renders on desktop renders the same on the phone. |
 | D5 | Protocol messages are decoded with `@bufbuild/protobuf` code generated from `crates/protocol/proto/envelope.proto`. The `.proto` file is the only source of truth; never hand-write message shapes. | The desktop and host both generate from this file. |
-| D6 | A visible phone terminal selects and sizes its tmux session. When the app becomes inactive or the terminal screen closes, it sends `YIELD_TERMINAL_SIZING`; the host puts that control client in `ignore-size` while keeping the SSH connection and notifications alive. Returning to the terminal selects and sizes again. The desktop retains its existing resize behavior on input and layout changes. | A phone in a pocket cannot keep a desktop window at phone width when the desktop switches tabs. The phone regains its size when the user returns to it. |
+| D6 | Opening a phone or desktop terminal claims sizing for its exact tmux window; the latest client claim wins. When the app becomes inactive or the terminal screen closes, it sends `YIELD_TERMINAL_SIZING`; the host puts that control client in `ignore-size` while keeping the SSH connection and notifications alive. Returning to the terminal claims that window again, even at unchanged dimensions. The desktop retains its existing resize behavior on input and layout changes. | A phone in a pocket cannot keep a desktop window at phone width when the desktop switches tabs. The phone regains its size when the user returns to it. |
 | D6b | The terminal is the control plane, for v1 and beyond. No transcript parsing, screen scraping, or keystroke choreography behind buttons. A future read-only "Conversation" view (for voice or skimming) would tail the agents' own transcript files through the file service — reading, never controlling. | Earlier agent tools ended up with the terminal as the default and tens of thousands of lines of fragile per-vendor keystroke logic around their structured views. |
 | D7 | Attention state (`seen_generation`) is shared with the desktop through the host. Opening an agent on the phone clears its badge on the desktop and vice-versa. | It is free: the host already owns this state. |
 | D8 | Authentication is SSH **public key only**, with a key pair generated on the phone and stored in Android-encrypted storage. Host key trust is trust-on-first-use with a fingerprint confirmation. | Matches how the user already uses SSH. No passwords stored on the phone. |
@@ -523,7 +523,8 @@ refusal is retried once after waiting up to 1 s for the newer snapshot
 | `subscribeFull()` | `operation: SUBSCRIBE, scope: "full"` | `snapshot`, `acceptedSequence` |
 | `attachTerminal(sessionId, paneId)` | `operation: ATTACH_TERMINAL, sessionId, paneIds: [paneId]` | `ok`; the attach makes the pane visible, selects the session, and queues the seed, which arrives as a `TERMINAL_SEED` event |
 | `setTerminalVisibility(paneId, visible, { terminalEpoch, generationCutoff })` | `operation: SET_TERMINAL_VISIBILITY, scope: paneId, visible, data: <empty bytes>, terminalEpoch: <connectionEpoch>, terminalGenerationCutoff: <last TerminalBytes.generation rendered for the pane, or 0>` — the pane id travels in `scope`, not `paneIds` (`dispatcher.rs`), and a hide with `terminalEpoch === 0` is refused (`crates/tmux-control/src/replay.rs::hide_with_checkpoint`) | `ok` |
-| `resizeTerminal(columns, rows)` | `operation: RESIZE_TERMINAL, columns, rows` (connection-wide: sizes every window the **selected** session shows; refused with `terminal_resize_rejected: no visible session control client` until a session has been selected by `selectTerminalSession`, `attachTerminal`, or a tmux action) | `ok` |
+| `resizeTerminalWindow(sessionId, windowId, columns, rows)` | `operation: RESIZE_TERMINAL_WINDOW, sessionId, scope: windowId, columns, rows` (claims that window for this connection without changing the shared selected window; requires the RC2 helper) | `ok` |
+| `resizeTerminal(columns, rows)` (legacy) | `operation: RESIZE_TERMINAL, columns, rows` (connection-wide: sizes every window the **selected** session shows; refused with `terminal_resize_rejected: no visible session control client` until a session has been selected by `selectTerminalSession`, `attachTerminal`, or a tmux action) | `ok` |
 | `selectTerminalSession(sessionId)` | `operation: SELECT_TERMINAL_SESSION, sessionId` (names the session tmux must size from this connection's size; idempotent) | `ok` |
 | `requestTerminalSeed(paneId)` | `operation: REQUEST_TERMINAL_SEED, scope: paneId` (also forces the pane visible on the host) | `ok` |
 | `terminalInput(paneId, bytes, { paste?, agentId? })` | `operation: TERMINAL_INPUT, scope: paneId, data: bytes, terminalInputPaste: paste === true, terminalInputAgentId: agentId`. With `paste`, the host delivers the bytes through tmux's paste path (`load-buffer` + `paste-buffer -p`), which brackets them iff the pane's application asked for bracketed paste, and never coalesces them with the input queued around them; without it they are keystrokes. Voice sets `agentId`, making the host reject input unless that exact agent still owns the pane; ordinary terminal input leaves it empty. | `ok` |
@@ -554,11 +555,13 @@ implementing (`apps/desktop/src-tauri/src/connection/{bridge,agent,files}.rs`)
 For one pane displayed on the Terminal screen (§9.5):
 
 1. On screen mount, in this order: set `focusedPaneId`,
-   `selectTerminalSession(sessionId)`, `resizeTerminal(cols, rows)` with the
-   size measured by the WebView (§9.5), then `attachTerminal(sessionId, paneId)`.
-   The select must precede the resize: the host sizes the *selected* session's
-   control client and refuses a resize before one exists (verified live —
-   `terminal_resize_rejected: no visible session control client`). The
+   `resizeTerminalWindow(sessionId, windowId, cols, rows)` with the routed
+   pane’s window ID and the size measured by the WebView (§9.5), then
+   `attachTerminal(sessionId, paneId)`. The helper sets the connection’s size,
+   claims that exact window as its latest client, and restores the shared
+   selection before acknowledging. The subsequent membership attach preserves
+   that claim. Older helpers reject the new operation; the app asks for a
+   helper update instead of retrying an incompatible sizing path. The
    attach mounts the pane and makes it visible; it is followed at once by
    `requestTerminalSeed(paneId)`, which is what produces the `TERMINAL_SEED`
    event. A session whose control client already exists (selected earlier,
@@ -592,14 +595,13 @@ For one pane displayed on the Terminal screen (§9.5):
    (step 1). The reseed contains output produced while hidden (verified live).
 5. On reconnect while the screen is mounted: run step 1 again — but only
    while the app is active (`AppState` neither `inactive` nor `background`). The
-   whole step waits, not just the resize: `SELECT_TERMINAL_SESSION` alone
-   takes the host's fresh, unsized control client out of `ignore-size`, and
-   tmux would size the windows from its 80x24 default. A phone in a pocket
+   whole sizing/attach step waits, so a fresh connection never claims a
+   window while the phone is in the background. A phone in a pocket
    with the screen left open must not touch the laptop's windows on a Wi-Fi
    flap. The deferred step 1 runs when the app returns to the foreground
    (`AppState` change listeners).
 6. On rotation or keyboard show/hide: re-measure and send
-   `resizeTerminal(cols, rows)` again (debounced 150 ms), again only in the
+   `resizeTerminalWindow(sessionId, windowId, cols, rows)` again (debounced 150 ms), again only in the
    foreground. The host emits a `TERMINAL_RESNAPSHOT_REQUIRED` or a new seed;
    handle as §7.4.
 7. On unmount or app inactivity, send `YIELD_TERMINAL_SIZING` so tmux ignores
@@ -1140,7 +1142,7 @@ line-height 1.2 (glyph cell ≈ 7.8 × 15.6 px). The WebView measures its
 own width and height, computes `cols = floor(width / cellWidth)`,
 `rows = floor(height / cellHeight)` (≈ 46 × 40 on a 390 dp phone in
 portrait with the keyboard hidden), posts `{ t: "size", cols, rows }` to
-RN, and RN sends `resizeTerminal`. xterm is created with exactly those
+RN, and RN sends `resizeTerminalWindow`. xterm is created with exactly those
 cols/rows; there is never horizontal scrolling. A pinch gesture is not
 supported in v1; landscape is (re-measure → resize). Scrollback is
 xterm's default 1000 lines plus whatever the seed carried.
@@ -1714,8 +1716,9 @@ Total ≈ 23 working days.
    (`PANE_RESOURCE{ state: RELEASED, requiresSeed: true }`), delivers no
    output while hidden, and reseeds on reveal with the hidden output
    included. Two things the doc had wrong and §7.5/§7.6 now state:
-   `RESIZE_TERMINAL` must follow `SELECT_TERMINAL_SESSION`, and the pane id
-   of the pane-scoped terminal operations travels in `Request.scope`.
+   legacy `RESIZE_TERMINAL` must follow `SELECT_TERMINAL_SESSION`. Current
+   clients use `RESIZE_TERMINAL_WINDOW` without that separate select. The
+   pane/window ID of scoped terminal operations travels in `Request.scope`.
 2. **Foreground service type.** `specialUse` is acceptable for a sideloaded
    APK. If the app is ever submitted to Google Play, expect to justify it
    or switch to `dataSync` with its runtime limits.

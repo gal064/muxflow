@@ -1439,3 +1439,25 @@ start on `connected` used the app label and an empty body.
   the message went out has not reached it, so no buzz until it turns to it.
   expo-haptics rejects on phones without a vibrator; the calls are
   best-effort.
+
+
+### Window sizing claims (0.1.9-rc.2)
+
+Mobile and desktop now send `RESIZE_TERMINAL_WINDOW` with a session ID,
+window ID, and measured viewport grid. The helper claims the named window’s
+latest-client pointer rather than the session’s currently selected window.
+It preserves shared selection and forces the resize before acknowledging.
+The operation is additive to protocol 4; earlier helpers reject it and must
+be updated. Legacy session-wide requests remain available for older clients.
+
+Desktop’s scoped resize is the single viewport owner: the old session-select
+fallback and activation requests were removed, and the wake probe is a
+read-only snapshot request. Returning from an app tab forces a new claim at
+unchanged dimensions. Mobile retains background yield and foreground claims;
+viewport changes during a pending foreground claim follow after it settles.
+
+This retains tmux’s per-window latest-client policy and shared client viewport:
+changing a client’s viewport also changes windows that already follow that
+client. A claim does not transfer another client’s windows. Historical grids
+are not pinned per window; per-client window overrides would clamp a later
+plain-terminal or desktop claim to an older phone’s dimensions.

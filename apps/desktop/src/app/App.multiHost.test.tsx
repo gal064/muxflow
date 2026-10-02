@@ -191,10 +191,9 @@ describe("the shell over several hosts", () => {
     expect(app.hostRow().props["aria-label"]).toContain("Host Local over local");
 
     await act(async () => { app.workspaceButton("work").props.onClick({ shiftKey: false }); });
-    // The pointer moved and was persisted; the peer's own client was told
-    // first about the session it remembered, then about the one clicked.
+    // Persist the host switch and navigate to the clicked workspace on that host.
     expect(calls("set_last_profile_id")).toEqual([{ profileId: "remote-a" }]);
-    expect(calls("select_terminal_session")).toContainEqual({ clientId: "client-2", sessionId: "$1" });
+    expect(calls("select_terminal_session")).toEqual([]);
     expect(calls("tmux_action")).toContainEqual(expect.objectContaining({
       clientId: "client-2", action: expect.objectContaining({ kind: "selectSession", session_id: "$2" }),
     }));

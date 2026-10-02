@@ -3,13 +3,12 @@
 // debouncing, input, and the hide on unmount. The screen owns one of these per
 // focus; tests drive it against a fake or the real host.
 
-import { type HostConnection } from "../../protocol/HostConnection";
+import { HostError, type HostConnection } from "../../protocol/HostConnection";
 import {
   attachTerminal,
-  resizeTerminal,
+  resizeTerminalWindow,
   requestTerminalHistory,
   requestTerminalSeed,
-  selectTerminalSession,
   setTerminalVisibility,
   terminalInput,
   yieldTerminalSizing,
@@ -25,7 +24,7 @@ import type { RegisteredTerminal, TerminalRegistry } from "./terminalRegistry";
 export type TerminalPhase =
   /** Waiting for the page's first size and/or the connection. */
   | "preparing"
-  /** select → resize → attach in flight, or attached and waiting for the seed (< 5 s: blank). */
+  /** claim window size → attach in flight, or attached and waiting for the seed (< 5 s: blank). */
   | "attaching"
   /** A seed has been handed to xterm. */
   | "seeded"
@@ -82,7 +81,7 @@ export interface TerminalControllerOptions {
 
 export const SEED_TIMEOUT_MS = 5_000;
 export const RESIZE_DEBOUNCE_MS = 150;
-/** A failed select/resize/attach is retried after this, up to ATTACH_RETRY_LIMIT times. */
+/** A failed size claim/attach is retried after this, up to ATTACH_RETRY_LIMIT times. */
 export const ATTACH_RETRY_MS = 2_000;
 export const ATTACH_RETRY_LIMIT = 3;
 /**
@@ -142,6 +141,7 @@ export class TerminalController {
   private sizingClaimEpoch: bigint | undefined;
   /** Invalidates a select or resize that crossed an app visibility change. */
   private sizingIntent = 0;
+  private reclaimingSizing = false;
   // ---- §7.6.1 history paging state, reset by every seed ----
   /** Everything handed to xterm since the seed (the seed first); a splice replays it above nothing but history. */
   private retained: Uint8Array[] = [];
@@ -551,7 +551,7 @@ export class TerminalController {
       this.attachOnForeground = true;
       return;
     }
-    // A pending retry would otherwise re-run select → resize → attach on top
+    // A pending retry would otherwise re-run claim window size → attach on top
     // of this one, and every extra ATTACH resets the page with a new seed.
     if (this.attachRetryTimer !== undefined) {
       clearTimeout(this.attachRetryTimer);
@@ -565,18 +565,17 @@ export class TerminalController {
     this.setPhase(this.phase === "exited" ? "exited" : "attaching");
     const grid = this.grid;
     try {
-      // The order is load-bearing: the host sizes the *selected* session's
-      // control client and refuses a resize before one exists (§7.6 step 1).
+      // Claim the routed pane’s window before attaching and capturing it.
       this.sizingClaimEpoch = connection.connectionEpoch;
       this.options.registry.claimSizing(this.registration!);
       const sizingIntent = ++this.sizingIntent;
-      await connection.request(selectTerminalSession(this.sessionId));
+      // The window sizing request also selects this connection’s sizing session.
       if (this.stopped || !this.foreground.inForeground() || sizingIntent !== this.sizingIntent) {
         this.attachOnForeground = !this.stopped;
         return;
       }
       this.lastResizeAt = Date.now();
-      await connection.request(resizeTerminal(grid.cols, grid.rows));
+      await connection.request(this.windowSizingRequest(grid));
       this.sentGrid = grid;
       if (this.stopped || !this.foreground.inForeground() || sizingIntent !== this.sizingIntent) {
         this.attachOnForeground = !this.stopped;
@@ -598,7 +597,7 @@ export class TerminalController {
       if (this.stopped) {
         // Backed out mid-attach: the attach still revealed the pane, so hide it
         // (§7.6 step 4) — unless a successor controller already owns the pane,
-        // whose own select → resize → attach this late hide would undo.
+        // whose own claim window size → attach this late hide would undo.
         if (this.options.registry.get(this.paneId) === undefined) await this.hide(connection);
         else this.attached = false;
         return;
@@ -606,12 +605,12 @@ export class TerminalController {
       this.log(`attached ${this.layoutSummary()}`);
       if (this.phase !== "seeded") this.startSeedTimers();
     } catch (error) {
-      this.lastError = describe(error);
+      this.lastError = sizingError(error);
       this.attachFailures += 1;
       this.log(`attach.failed (${this.attachFailures}) ${this.lastError}`);
       this.yieldSizing();
       this.emit();
-      if (!this.stopped && this.attachFailures < ATTACH_RETRY_LIMIT) {
+      if (!this.stopped && !helperUpdateRequired(error) && this.attachFailures < ATTACH_RETRY_LIMIT) {
         this.attachRetryTimer = setTimeout(() => {
           this.attachRetryTimer = undefined;
           if (!this.attached) void this.attach();
@@ -664,15 +663,25 @@ export class TerminalController {
   private async resizeNow(take = false): Promise<void> {
     const connection = this.liveConnection();
     const grid = this.grid;
-    if (!connection || !grid || this.stopped || !this.attached || this.attaching) return;
+    if (!connection || !grid || this.stopped || !this.attached || this.attaching || this.reclaimingSizing) return;
     if (!take && sameGrid(grid, this.sentGrid)) return;
     // Nobody is looking: the keyboard hiding as the app goes to the background
     // is not the phone being used. Sent on the return to the foreground.
     if (!this.foreground.inForeground()) return;
     this.sentGrid = grid;
     this.lastResizeAt = Date.now();
+    // Every scoped resize can re-enable sizing after a failed/yielded claim.
+    // Record it before sending so background/stop can release an in-flight one.
+    this.sizingClaimEpoch = connection.connectionEpoch;
+    this.options.registry.claimSizing(this.registration!);
+    const sizingIntent = this.sizingIntent;
     try {
-      await connection.request(resizeTerminal(grid.cols, grid.rows));
+      await connection.request(this.windowSizingRequest(grid));
+      if (sizingIntent === this.sizingIntent && this.options.registry.ownsSizing(this.registration)) {
+        this.attachFailures = 0;
+        if (this.attachRetryTimer !== undefined) clearTimeout(this.attachRetryTimer);
+        this.attachRetryTimer = undefined;
+      }
       this.log(`resize.ok ${this.layoutSummary()}`);
     } catch (error) {
       this.sentGrid = undefined;
@@ -698,7 +707,7 @@ export class TerminalController {
       .catch((error: unknown) => this.log(`sizing.yield.failed ${describe(error)}`));
   }
 
-  /** Foreground use reselects the session before sizing its existing terminal. */
+  /** Foreground use claims this window even when its viewport has not changed. */
   private async reclaimSizing(): Promise<void> {
     const connection = this.liveConnection();
     if (!connection || !this.grid || this.stopped || !this.foreground.inForeground()) return;
@@ -706,28 +715,42 @@ export class TerminalController {
       this.reattachWanted = true;
       return;
     }
-    this.sizingClaimEpoch = connection.connectionEpoch;
+    if (this.reclaimingSizing) return;
+    this.reclaimingSizing = true;
+    const claimEpoch = connection.connectionEpoch;
+    this.sizingClaimEpoch = claimEpoch;
     this.options.registry.claimSizing(this.registration!);
     const sizingIntent = ++this.sizingIntent;
     let reclaimed = false;
+    let interrupted = false;
     try {
-      await connection.request(selectTerminalSession(this.sessionId));
+      // The window sizing request also selects this connection’s sizing session.
       if (this.stopped || !this.foreground.inForeground() || sizingIntent !== this.sizingIntent) return;
       const grid = this.grid;
       if (!grid) return;
-      await connection.request(resizeTerminal(grid.cols, grid.rows));
-      if (this.stopped || !this.foreground.inForeground() || sizingIntent !== this.sizingIntent) return;
+      await connection.request(this.windowSizingRequest(grid));
+      if (this.stopped || !this.foreground.inForeground() || sizingIntent !== this.sizingIntent) {
+        interrupted = true;
+        return;
+      }
       this.sentGrid = grid;
       this.lastResizeAt = Date.now();
       this.attachFailures = 0;
       reclaimed = true;
       this.log(`sizing.reclaim.ok ${this.layoutSummary()}`);
     } catch (error) {
-      this.log(`sizing.reclaim.failed ${describe(error)}`);
+      if (this.liveConnection() !== connection || connection.connectionEpoch !== claimEpoch) return;
+      if (sizingIntent !== this.sizingIntent) {
+        interrupted = true;
+        return;
+      }
+      this.lastError = sizingError(error);
+      this.emit();
+      this.log(`sizing.reclaim.failed ${this.lastError}`);
       this.attachFailures += 1;
       const retry = !this.stopped && this.foreground.inForeground() && this.liveConnection() === connection
         && sizingIntent === this.sizingIntent
-        && this.attachFailures < ATTACH_RETRY_LIMIT;
+        && !helperUpdateRequired(error) && this.attachFailures < ATTACH_RETRY_LIMIT;
       this.yieldSizing();
       if (retry) {
         this.attachRetryTimer = setTimeout(() => {
@@ -736,13 +759,23 @@ export class TerminalController {
         }, ATTACH_RETRY_MS);
       }
     } finally {
-      if (reclaimed && !this.stopped && this.attached && this.foreground.inForeground() && !sameGrid(this.sentGrid, this.grid)) {
+      this.reclaimingSizing = false;
+      if (interrupted && !this.stopped && this.attached && this.foreground.inForeground() && this.liveConnection() === connection
+        && connection.connectionEpoch === claimEpoch && sizingIntent !== this.sizingIntent && this.attachRetryTimer === undefined) {
+        void this.reclaimSizing();
+      } else if (reclaimed && !this.stopped && this.attached && this.foreground.inForeground() && !sameGrid(this.sentGrid, this.grid)) {
         this.scheduleResize();
       }
     }
   }
 
   // ---- helpers ---------------------------------------------------------------
+
+  private windowSizingRequest(grid: Grid) {
+    const pane = this.options.store.getState().panes[this.paneId];
+    if (!pane || pane.sessionId !== this.sessionId) throw new Error("This terminal is no longer in its session.");
+    return resizeTerminalWindow(this.sessionId, pane.windowId, grid.cols, grid.rows);
+  }
 
   private liveConnection(): HostConnection | null {
     const connection = this.options.getConnection();
@@ -771,6 +804,14 @@ export class TerminalController {
   private log(line: string): void {
     this.options.log?.(`[muxflow] terminal pane=${this.paneId} session=${this.sessionId} topology=${this.options.store.getState().topologyGeneration} ${line}`);
   }
+}
+
+function helperUpdateRequired(error: unknown): boolean {
+  return error instanceof HostError && error.code === "unsupported_operation";
+}
+
+function sizingError(error: unknown): string {
+  return helperUpdateRequired(error) ? "Update the host helper to use this release’s terminal sizing." : describe(error);
 }
 
 function describe(error: unknown): string {

@@ -7,6 +7,8 @@ import {
   FINAL_BRIDGE_SHUTDOWN_WAIT_MS,
   MAX_HOST_TERMINAL_INPUT_BYTES,
   requestTerminalSeed,
+  probeTerminalLink,
+  resizeClient,
   sendBinaryInput,
   sendInput,
   setTerminalVisibility,
@@ -78,6 +80,16 @@ beforeEach(() => {
 });
 
 describe("binary terminal IPC", () => {
+  it("passes the exact window through the native sizing boundary", async () => {
+    await resizeClient("client-1", 120, 40, "$2", "@7");
+    expect(invoke).toHaveBeenCalledWith("resize_terminal_client", { clientId: "client-1", columns: 120, rows: 40, sessionId: "$2", windowId: "@7" });
+  });
+
+  it("probes an existing link without selecting or resizing a terminal", async () => {
+    await probeTerminalLink("client-1");
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("probe_terminal_link", { clientId: "client-1" });
+  });
+
   it("decodes the common sequence and arbitrary output bytes without JSON byte arrays", () => {
     expect(decodeTerminalEvent(frame(2, "%4", 12, Uint8Array.from([...u64(7), 0, 255, 27])))).toEqual({
       kind: "output", paneId: "%4", sequence: 12, generation: 7, data: Uint8Array.from([0, 255, 27]),

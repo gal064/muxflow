@@ -458,11 +458,14 @@ impl TerminalClient {
         &self,
         columns: u16,
         rows: u16,
+        session_id: String,
+        window_id: String,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<(), String>>, String> {
         if self.stop_signal.is_stopped() {
             return Err("terminal bridge is stopped; resize was not queued".into());
         }
-        self.resize_queue.replace(TerminalSize { columns, rows })
+        self.resize_queue
+            .replace(TerminalSize { columns, rows }, session_id, window_id)
     }
 
     fn wait_for_reconnect(&self, delay: Duration) -> bool {
@@ -990,36 +993,21 @@ fn decode_terminal_input_frame(body: &[u8]) -> Result<(&str, &str, &[u8]), Strin
     Ok((client_id, pane_id, &body[offset..]))
 }
 
-/// Tells the host which session the desktop is showing, so tmux sizes from
-/// that one's control client. `useVisibleTerminalSession.ts` owns why this
-/// exists and when it is sent.
-///
-/// Async and spawn_blocking for the same reason `set_terminal_visibility` is:
-/// this runs on a workspace switch, and holding the WebView's main thread for
-/// an SSH round trip is a visibly frozen switch.
+/// A wake probe must check the existing transport without taking sizing.
 #[tauri::command]
-pub async fn select_terminal_session(
+pub async fn probe_terminal_link(
     client_id: String,
-    session_id: String,
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
-    validate_tmux_id(&session_id, '$')?;
     let client = get_client(&clients, &client_id)?;
-    // Recorded before the host answers: the next reconnect attaches this
-    // session whether or not the host had a control client for it yet, and the
-    // shell retries the request itself until it does.
-    *client.terminal_selection.lock().unwrap() = Some(TerminalSelection {
-        session_id: session_id.clone(),
-        pane_ids: Vec::new(),
-    });
-    let request = v1::Request {
-        operation: v1::Operation::SelectTerminalSession.into(),
-        session_id,
-        ..Default::default()
-    };
-    tauri::async_runtime::spawn_blocking(move || client.request(request))
-        .await
-        .map_err(|error| format!("terminal session selection task failed: {error}"))??;
+    tauri::async_runtime::spawn_blocking(move || {
+        client.request(v1::Request {
+            operation: v1::Operation::FullSnapshot.into(),
+            ..Default::default()
+        })
+    })
+    .await
+    .map_err(|error| format!("terminal link probe task failed: {error}"))??;
     Ok(())
 }
 
@@ -1028,10 +1016,18 @@ pub async fn resize_terminal_client(
     client_id: String,
     columns: u16,
     rows: u16,
+    session_id: String,
+    window_id: String,
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
     let client = get_client(&clients, &client_id)?;
-    let receiver = client.enqueue_resize(columns, rows)?;
+    validate_tmux_id(&session_id, '$')?;
+    validate_tmux_id(&window_id, '@')?;
+    *client.terminal_selection.lock().unwrap() = Some(TerminalSelection {
+        session_id: session_id.clone(),
+        pane_ids: Vec::new(),
+    });
+    let receiver = client.enqueue_resize(columns, rows, session_id, window_id)?;
     tokio::time::timeout(
         REQUEST_TIMEOUT + REQUEST_TIMEOUT + Duration::from_secs(1),
         receiver,

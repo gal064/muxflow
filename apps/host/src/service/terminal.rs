@@ -327,6 +327,27 @@ impl TerminalAttachment {
     }
 }
 
+/// A scoped claim uses a separate command client. Its yields must finish before
+/// acknowledging, so a later claim cannot overtake a buffered ignore-size write.
+fn set_scoped_sizing(client: &TerminalAttachment, participates: bool) -> anyhow::Result<()> {
+    let name = format!("client-{}", client.child.lock().unwrap().id());
+    let flag = if participates {
+        "!ignore-size"
+    } else {
+        "ignore-size"
+    };
+    let output = super::snapshot::tmux_command()?
+        .args(["refresh-client", "-t", &name, "-f", flag])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "terminal sizing flag failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 impl Drop for TerminalAttachment {
     fn drop(&mut self) {
         self.stop();
@@ -433,6 +454,8 @@ pub(super) struct TerminalClients {
     perf_connection_epoch: crate::diagnostics::PerfConnectionEpoch,
     clients: HashMap<String, TerminalAttachment>,
     visible_session: Option<String>,
+    /// An explicit window claim survives the membership-only attach that follows it.
+    sizing_window: Option<String>,
     /// The last size the desktop asked for, kept so the *next* client to
     /// become visible can be told it.
     ///
@@ -516,6 +539,7 @@ impl TerminalClients {
             topology_trigger,
             clients: HashMap::new(),
             visible_session: None,
+            sizing_window: None,
             last_size: None,
             session_attached: HashMap::new(),
             input_session: None,
@@ -582,7 +606,10 @@ impl TerminalClients {
                 );
                 return Err(error);
             }
-            if make_visible {
+            if make_visible
+                && !(self.visible_session.as_deref() == Some(session_id)
+                    && self.sizing_window.is_some())
+            {
                 self.select_session(session_id)?;
             }
             self.settle_owed_seeds();
@@ -857,6 +884,67 @@ impl TerminalClients {
         Ok(())
     }
 
+    /// Claim the named window without changing the session's selected window.
+    /// The command client captures the selection inside tmux and executes one
+    /// command list. It is unattached, so restoring selection does not claim
+    /// the previously selected window for the requesting control client.
+    pub(super) fn resize_window(
+        &mut self,
+        session_id: &str,
+        window_id: &str,
+        columns: u32,
+        rows: u32,
+    ) -> anyhow::Result<()> {
+        validate_tmux_id(session_id, '$')?;
+        validate_tmux_id(window_id, '@')?;
+        check_client_size(columns, rows)?;
+        let client = self
+            .clients
+            .get(session_id)
+            .context("window session control client is detached")?;
+        let client_name = format!("client-{}", client.child.lock().unwrap().id());
+        if let Some(previous) = self.visible_session.as_deref()
+            && previous != session_id
+            && let Some(client) = self.clients.get_mut(previous)
+        {
+            // A dead previous client must not block a healthy target handoff.
+            let _ = set_scoped_sizing(client, false);
+        }
+        self.visible_session = None;
+        self.sizing_window = None;
+        let commands = format!(
+            "refresh-client -t {client_name} -C {columns},{rows} ; \
+             refresh-client -t {client_name} -f !ignore-size ; \
+             switch-client -c {client_name} -E -t {session_id}:{window_id} ; \
+             refresh-client -t {client_name} -C {columns},{rows} ; \
+             select-window -t {session_id}:#{{window_id}}"
+        );
+        let output = super::snapshot::tmux_command()?
+            .args([
+                "run-shell",
+                "-C",
+                "-t",
+                &format!("{session_id}:"),
+                &commands,
+            ])
+            .output()
+            .context("apply terminal window sizing claim")?;
+        if !output.status.success() {
+            if let Some(client) = self.clients.get_mut(session_id) {
+                let _ = set_scoped_sizing(client, false);
+            }
+            bail!(
+                "terminal window sizing failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        self.clients.get_mut(session_id).unwrap().last_size = Some((columns, rows));
+        self.last_size = Some((columns, rows));
+        self.visible_session = Some(session_id.to_owned());
+        self.sizing_window = Some(window_id.to_owned());
+        Ok(())
+    }
+
     /// Names the session the desktop is showing.
     ///
     /// Called on every workspace switch *and* on every (re)connect; the desktop
@@ -866,6 +954,7 @@ impl TerminalClients {
     /// survived actually wants, and `TerminalAttachment::last_size` is what
     /// keeps that from costing a redundant `refresh-client -C`.
     pub(super) fn select_session(&mut self, session_id: &str) -> anyhow::Result<()> {
+        self.sizing_window = None;
         validate_tmux_id(session_id, '$')?;
         if !self.clients.contains_key(session_id) {
             crate::diagnostics::write_terminal_sizing_handoff_log(
@@ -917,11 +1006,18 @@ impl TerminalClients {
         // Keep prior input ahead of the geometry change when the sidecar is
         // healthy. A failed fence must not leave a hidden phone sizing tmux.
         let input_fence_error = self.flush_input().err();
+        let scoped = self.sizing_window.take().is_some();
         let result = self
             .clients
             .get_mut(&session_id)
-            .context("selected session control client is detached")?
-            .set_sizing(false);
+            .context("selected session control client is detached")
+            .and_then(|client| {
+                if scoped {
+                    set_scoped_sizing(client, false)
+                } else {
+                    client.set_sizing(false)
+                }
+            });
         crate::diagnostics::write_terminal_sizing_yield_log(
             self.connection_epoch,
             &session_id,

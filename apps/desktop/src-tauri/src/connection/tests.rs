@@ -701,7 +701,9 @@ fn full_input_channel_does_not_block_shutdown_while_resize_flush_waits() {
         })
         .unwrap();
     client.input_queue.lock().unwrap().sender = Some(dispatcher);
-    let _resize = client.enqueue_resize(100, 30).unwrap();
+    let _resize = client
+        .enqueue_resize(100, 30, "$1".into(), "@1".into())
+        .unwrap();
     let flush_client = Arc::clone(&client);
     let flush = thread::spawn(move || flush_client.flush_input());
     thread::sleep(Duration::from_millis(20));
