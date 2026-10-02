@@ -25,7 +25,7 @@ pushed version tag and leaves them in a draft GitHub Release:
    passes.
 2. Tag the merged commit and push the tag:
    `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. The workflow stops unless the tagged commit is on `main` and the tree's
+3. Stable releases stop unless the tagged commit is on `main` and the tree's
    version matches the tag. It then reruns the CI gate. The signing secrets
    live in the `release` environment, which only `v*` tags can use; a ruleset
    lets only the repository admin create, move or delete those tags.
@@ -48,8 +48,16 @@ pushed version tag and leaves them in a draft GitHub Release:
 `releases/latest/download/latest.json`, which never resolves to a draft or a
 pre-release. So the red "Update" pill appears only once a release is
 published. A tag with a suffix such as `vX.Y.Z-rc.1` builds from a tree
-versioned `X.Y.Z` and is drafted as a pre-release. Use it to rehearse a
-release, then delete the draft and the tag.
+versioned `X.Y.Z` and is drafted as a pre-release. RC tags matching
+`vX.Y.Z-rc.N` may point to a branch commit without merging it to `main`.
+Other tags still require a commit on `main`; CI, version checks, signing,
+artifact verification, and the admin-only tag rule apply to RCs too.
+
+To cut a branch RC, set the branch's version with `release/set-version.sh X.Y.Z`,
+commit it, push the branch, then tag that commit with `vX.Y.Z-rc.N` and push the
+tag. Review the generated draft and publish it as a pre-release for direct
+downloads. This repository is public, so a published RC is public too. It does
+not replace the stable release or trigger the apps' stable update prompt.
 
 The `release` environment holds these secrets:
 
