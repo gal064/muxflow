@@ -7,7 +7,7 @@
 #   git tag v0.2.0 && git push origin v0.2.0
 #
 # A tag with a suffix (v0.2.0-rc.1) builds from a tree still versioned 0.2.0
-# and is drafted as a pre-release, which releases/latest never selects.
+# can build from a branch and is drafted as a pre-release, which releases/latest never selects.
 name: release
 
 on:
@@ -39,13 +39,13 @@ jobs:
           fetch-depth: 0
       - id: version
         run: |
-          # Releases ship only what has been merged: the tagged commit must be on main.
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+          tag=${GITHUB_REF_NAME#v}
+          version=${tag%%-*}
+          # RCs can exercise a branch before merge. Other release tags must be on main.
+          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]] && ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main"
             exit 1
           fi
-          tag=${GITHUB_REF_NAME#v}
-          version=${tag%%-*}
           release/check-version.sh "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [[ "$tag" == *-* ]]; then echo prerelease=true; else echo prerelease=false; fi >> "$GITHUB_OUTPUT"
