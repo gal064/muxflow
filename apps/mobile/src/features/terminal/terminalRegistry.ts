@@ -3,11 +3,13 @@
 // (§7.6 step 5). One instance per app; the connection manager hands it to
 // HostConnection as its `terminals` sink.
 
+import type { Grid } from "./sizing";
 import type { TerminalSink } from "../../protocol/HostConnection";
 
 export interface RegisteredTerminal {
   paneId: string;
   sessionId: string;
+  grid(cols: number, rows: number): void;
   seed(bytes: Uint8Array, generation: bigint): void;
   output(bytes: Uint8Array, generation: bigint): void;
   history(bytes: Uint8Array, historySize: number, sizeKnown: boolean): void;
@@ -17,6 +19,7 @@ export interface RegisteredTerminal {
 
 export class TerminalRegistry implements TerminalSink {
   private readonly terminals = new Map<string, RegisteredTerminal>();
+  private readonly grids = new Map<string, Grid>();
   private sizingOwner: RegisteredTerminal | undefined;
 
   /** The controller that most recently issued a sizing select on this connection. */
@@ -34,6 +37,8 @@ export class TerminalRegistry implements TerminalSink {
 
   register(terminal: RegisteredTerminal): () => void {
     this.terminals.set(terminal.paneId, terminal);
+    const grid = this.grids.get(terminal.paneId);
+    if (grid) terminal.grid(grid.cols, grid.rows);
     return () => {
       if (this.terminals.get(terminal.paneId) === terminal) this.terminals.delete(terminal.paneId);
     };
@@ -41,6 +46,11 @@ export class TerminalRegistry implements TerminalSink {
 
   get(paneId: string): RegisteredTerminal | undefined {
     return this.terminals.get(paneId);
+  }
+
+  grid(paneId: string, cols: number, rows: number): void {
+    this.grids.set(paneId, { cols, rows });
+    this.terminals.get(paneId)?.grid(cols, rows);
   }
 
   seed(paneId: string, bytes: Uint8Array, generation: bigint): void {

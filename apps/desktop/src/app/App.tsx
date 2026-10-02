@@ -97,7 +97,6 @@ import { useAppConnectionController } from "./useAppConnectionController";
 import { usePerHostMemo } from "./usePerHostMemo";
 import { useAppRecoveryController } from "./useAppRecoveryController";
 import { useClientResize } from "./useClientResize";
-import { useVisibleTerminalSession } from "./useVisibleTerminalSession";
 import { commitScopedAppTabClose, reportAnnouncedPaneResult, useShellNavigation } from "./useShellNavigation";
 import { useTmuxActionPerformer, type TmuxActionTarget } from "./useTmuxActionPerformer";
 import { useWorkspaceCreate } from "./useWorkspaceCreate";
@@ -219,12 +218,6 @@ export function App() {
   const {
     completedDownload, notice, setCompletedDownload, setNotice, windowWidth,
   } = useAppShellChrome(status, statusState.sequence);
-  const [hostSessionSelection, setHostSessionSelection] = useState<{
-    clientId: string;
-    sessionId: string;
-    terminalEpoch: number;
-    version: number;
-  }>();
   const [activeDownloadStatus, setActiveDownloadStatus] = useState<ActiveDownloadStatus>();
   const agentClient = useMemo(() => new TauriAgentClient(), []);
   const fileClient = useMemo(() => new TauriFileWorkspaceClient(), []);
@@ -401,17 +394,6 @@ export function App() {
   });
   useEffect(() => () => abandonPanePaintSpansForScope(clientId), [clientId]);
 
-  const acknowledgeHostSessionSelection = useCallback((sessionId: string) => {
-    const selectedClientId = clientIdRef.current;
-    if (!selectedClientId || terminalEpoch === undefined) return;
-    setHostSessionSelection((previous) => ({
-      clientId: selectedClientId,
-      sessionId,
-      terminalEpoch,
-      version: (previous?.version ?? 0) + 1,
-    }));
-  }, [clientIdRef, terminalEpoch]);
-
   const setNavigationAppTab = useCallback((sessionId: string, appTabId: string | undefined) => {
     const scope = hostScopeRef.current;
     const session = snapshotRef.current.sessions.find((item) => item.id === sessionId);
@@ -425,7 +407,6 @@ export function App() {
   const shellNavigation = useShellNavigation({
     activeSessionId,
     activeWindowId,
-    acknowledgeHostSessionSelection,
     canMutate: hostState.canMutate,
     currentScope: currentHostScope,
     focusPaneController: (paneId) => controllers.current.get(paneId)?.focus(),
@@ -1298,19 +1279,6 @@ export function App() {
     inputLatencyReporter.sample("paint", ms);
   }, [inputLatencyReporter]);
 
-  // Which workspace tmux sizes from is decided here and nowhere else, so it is
-  // stated to the host as a fact rather than left to whichever event happened
-  // to change it.
-  useVisibleTerminalSession({
-    activeSessionId,
-    canMutate: hostState.canMutate,
-    clientId,
-    onStatus: setStatus,
-    selectionAcknowledgement: hostSessionSelection,
-    terminalEpoch,
-    topologyGeneration: hostState.generation,
-  });
-
   // The client size is computed from the tiled surface and from what a live
   // terminal turns pixels into. Both arrive here; neither is a pane's geometry.
   // `actualSize` is the other direction — what tmux settled on — and is the
@@ -1320,6 +1288,8 @@ export function App() {
     [activeWindowId, snapshot.panes],
   );
   const { onMeasurements, surfaceRef } = useClientResize({
+    terminalVisible: !selectedAppTab,
+    activeSessionId,
     activeWindowId,
     actualSize: actualWindowSize,
     canMutate: hostState.canMutate,

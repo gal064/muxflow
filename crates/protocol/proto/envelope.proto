@@ -171,6 +171,10 @@ enum Operation {
   // The phone stopped showing its terminal. Keep the connection and terminal
   // output client attached, but exclude its selected session from tmux sizing.
   OPERATION_YIELD_TERMINAL_SIZING = 55;
+  // Claim sizing for exactly one window: session_id identifies its session,
+  // scope is its window ID, and columns/rows are the requested dimensions.
+  // Unlike RESIZE_TERMINAL, this never infers the target from current selection.
+  OPERATION_RESIZE_TERMINAL_WINDOW = 56;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;

@@ -58,6 +58,11 @@ export function resizeTerminal(columns: number, rows: number): Request {
   return create(RequestSchema, { operation: Operation.RESIZE_TERMINAL, columns, rows });
 }
 
+/** Claim the exact window displayed on this device; older helpers reject this operation. */
+export function resizeTerminalWindow(sessionId: string, windowId: string, columns: number, rows: number): Request {
+  return create(RequestSchema, { operation: Operation.RESIZE_TERMINAL_WINDOW, sessionId, scope: windowId, columns, rows });
+}
+
 export function selectTerminalSession(sessionId: string): Request {
   return create(RequestSchema, { operation: Operation.SELECT_TERMINAL_SESSION, sessionId });
 }

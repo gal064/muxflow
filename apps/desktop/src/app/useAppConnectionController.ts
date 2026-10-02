@@ -18,7 +18,7 @@ import {
   fetchLinkStats,
   prewarmTerminalBulk,
   requestTerminalSeed,
-  selectTerminalSession,
+  probeTerminalLink,
   startTerminal,
   stopTerminal,
   terminalBridgeKey,
@@ -394,15 +394,14 @@ export function useAppConnectionController({
       dispatchLinks({ type: "reconnectAll" });
     };
     const probeClientId = clientIdRef.current;
-    const probeSessionId = activeSessionIdRef.current;
-    if (hostPhaseRef.current !== "connected" || !probeClientId || !probeSessionId) {
+    if (hostPhaseRef.current !== "connected" || !probeClientId) {
       rebuild("skipped");
       return;
     }
     const probedProfileId = activeProfileIdRef.current;
     const probedBridge = runtimes.current.get(probedProfileId)?.bridge;
     const probedEpoch = probedBridge?.terminalEpoch;
-    void probeResumedLink(() => selectTerminalSession(probeClientId, probeSessionId)).then((outcome) => {
+    void probeResumedLink(() => probeTerminalLink(probeClientId)).then((outcome) => {
       // The bridge that was probed is the one the outcome speaks for. A link
       // the native supervisor replaced meanwhile carries a new epoch, and one
       // the renderer restarted is a new bridge: either is already the
@@ -867,8 +866,7 @@ export function useAppConnectionController({
    * The pointer moves; the bridges do not. The host's own link keeps the
    * session the user left it on, so that is the one selected on its client —
    * which is also what turns a bridge that has only relayed topology into an
-   * attached one. A host with no session known yet is selected by the shell's
-   * visible-session assertion once its snapshot arrives. A profile that is not
+   * attached one. The viewport hook claims the exact window once its surface can be measured. A profile that is not
    * shown becomes shown by being activated; its link appears with the pointer.
    */
   const activateHost = useCallback((profileId: string) => {
@@ -878,16 +876,7 @@ export function useAppConnectionController({
     void invoke("set_last_profile_id", { profileId }).catch((error) => setStatus(String(error)));
     if (profileId === activeProfileIdRef.current) return;
     setConnection(target);
-    // Every snapshot lands a link on a session — the remembered one, or the
-    // first — so a link with none has not heard from its host yet, and the
-    // shell's visible-session assertion selects it when it does. A refusal
-    // here is journalled, not shown: that assertion retries the same fact.
-    const targetClientId = runtimes.current.get(profileId)?.bridge?.clientId;
-    if (targetClientId && link?.activeSessionId) {
-      void selectTerminalSession(targetClientId, link.activeSessionId).catch((error) => {
-        recordIncident("host.activateSelectFailed", { hostProfileId: profileId, message: String(error) });
-      });
-    }
+    // The scoped viewport claim takes sizing when this host’s terminal is shown.
   }, [setConnection, setStatus]);
   const reconnectHost = useCallback((profileId: string) => dispatchLinks({ type: "reconnect", profileId }), []);
   const hubFor = useCallback((profileId: string) => runtimeFor(profileId).hub, [runtimeFor]);

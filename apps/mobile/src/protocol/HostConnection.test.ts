@@ -677,3 +677,33 @@ describe("requests (§7.5) and close policy (§7.2)", () => {
     expect(h.store.getState().connection.state).toBe("reconnecting");
   });
 });
+
+describe("confirmed terminal grids", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("delivers layout changes between their surrounding output records", async () => {
+    const order: string[] = [];
+    const h = harness({ terminals: {
+      grid: (id, cols, rows) => order.push(`${id}:${cols}x${rows}`),
+      output: (_id, bytes) => order.push(new TextDecoder().decode(bytes)),
+    } });
+    const t = await connectHappily(h);
+    expect(order).toEqual(["%1:80x24"]);
+    order.length = 0;
+    const output = (sequence: bigint, value: string) => event(EventKind.TERMINAL_OUTPUT, sequence, {
+      terminal: create(TerminalBytesSchema, { paneId: "%1", data: new TextEncoder().encode(value) }),
+    });
+    t.feed(output(1n, "wide"));
+    t.feed(event(EventKind.TOPOLOGY_DIRTY, 2n, { detail: 'layout-change [["%1",40,12]]' }));
+    t.feed(output(3n, "narrow"));
+    expect(order).toEqual(["wide", "%1:40x12", "narrow"]);
+  });
+
+  it("reconnects instead of continuing to render after invalid grid metadata", async () => {
+    const h = harness();
+    const t = await connectHappily(h);
+    t.feed(event(EventKind.TOPOLOGY_DIRTY, 1n, { detail: 'layout-change [["%1",0,24]]' }));
+    expect(h.store.getState().connection.state).toBe("reconnecting");
+  });
+});

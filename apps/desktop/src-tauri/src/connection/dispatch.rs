@@ -107,10 +107,12 @@ pub(super) struct TerminalSize {
     pub(super) rows: u16,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct VersionedTerminalSize {
     pub(super) version: u64,
     pub(super) size: TerminalSize,
+    pub(super) session_id: String,
+    pub(super) window_id: String,
 }
 
 #[derive(Default)]
@@ -132,6 +134,8 @@ impl ResizeQueue {
     pub(super) fn replace(
         &self,
         size: TerminalSize,
+        session_id: String,
+        window_id: String,
     ) -> Result<oneshot::Receiver<Result<(), String>>, String> {
         let (sender, receiver) = oneshot::channel();
         let mut state = self.state.lock().unwrap();
@@ -140,7 +144,12 @@ impl ResizeQueue {
         }
         state.next_version = state.next_version.saturating_add(1);
         let version = state.next_version;
-        state.desired = Some(VersionedTerminalSize { version, size });
+        state.desired = Some(VersionedTerminalSize {
+            version,
+            size,
+            session_id,
+            window_id,
+        });
         // Only the final dimensions matter. Resolve the superseded caller
         // promptly instead of retaining one sender (and one async waiter) per
         // resize event until a slow remote request completes.
@@ -161,10 +170,10 @@ impl ResizeQueue {
             if state.stopped {
                 return None;
             }
-            if let Some(desired) = state.desired {
+            if let Some(desired) = state.desired.as_ref() {
                 let key = (desired.version, state.connection_epoch);
                 if Some(key) != previous {
-                    return Some((desired, state.connection_epoch));
+                    return Some((desired.clone(), state.connection_epoch));
                 }
             }
             state = self.wake.wait(state).unwrap();
@@ -341,7 +350,9 @@ pub(super) fn run_client_resize_dispatch(client: Arc<TerminalClient>) {
                 return Err("terminal bridge stopped before resize landed".into());
             }
             client.request(v1::Request {
-                operation: v1::Operation::ResizeTerminal.into(),
+                operation: v1::Operation::ResizeTerminalWindow.into(),
+                session_id: desired.session_id.clone(),
+                scope: desired.window_id.clone(),
                 columns: desired.size.columns.into(),
                 rows: desired.size.rows.into(),
                 ..Default::default()
@@ -429,22 +440,34 @@ mod tests {
     fn resize_queue_replaces_intermediate_sizes_so_the_final_size_wins() {
         let queue = ResizeQueue::default();
         let first = queue
-            .replace(TerminalSize {
-                columns: 80,
-                rows: 24,
-            })
+            .replace(
+                TerminalSize {
+                    columns: 80,
+                    rows: 24,
+                },
+                "$1".into(),
+                "@1".into(),
+            )
             .unwrap();
         let second = queue
-            .replace(TerminalSize {
-                columns: 120,
-                rows: 40,
-            })
+            .replace(
+                TerminalSize {
+                    columns: 120,
+                    rows: 40,
+                },
+                "$1".into(),
+                "@1".into(),
+            )
             .unwrap();
         let final_receiver = queue
-            .replace(TerminalSize {
-                columns: 160,
-                rows: 50,
-            })
+            .replace(
+                TerminalSize {
+                    columns: 160,
+                    rows: 50,
+                },
+                "$1".into(),
+                "@1".into(),
+            )
             .unwrap();
         let (desired, epoch) = queue.wait_for_attempt(None).unwrap();
         assert_eq!(
@@ -461,13 +484,41 @@ mod tests {
     }
 
     #[test]
+    fn same_grid_for_a_new_window_retains_the_new_target_across_reconnect() {
+        let queue = ResizeQueue::default();
+        let size = TerminalSize {
+            columns: 120,
+            rows: 40,
+        };
+        let first = queue.replace(size, "$1".into(), "@1".into()).unwrap();
+        let final_receiver = queue.replace(size, "$2".into(), "@2".into()).unwrap();
+        assert_eq!(first.blocking_recv().unwrap(), Ok(()));
+        let (desired, epoch) = queue.wait_for_attempt(None).unwrap();
+        assert_eq!(desired.session_id, "$2");
+        assert_eq!(desired.window_id, "@2");
+        queue.reconnected();
+        let (retried, next_epoch) = queue
+            .wait_for_attempt(Some((desired.version, epoch)))
+            .unwrap();
+        assert_eq!(retried.session_id, "$2");
+        assert_eq!(retried.window_id, "@2");
+        assert_eq!(retried.size, size);
+        queue.complete(retried.version, next_epoch, Ok(()));
+        assert_eq!(final_receiver.blocking_recv().unwrap(), Ok(()));
+    }
+
+    #[test]
     fn failed_resize_is_retained_and_retried_after_reconnect() {
         let queue = ResizeQueue::default();
         let receiver = queue
-            .replace(TerminalSize {
-                columns: 132,
-                rows: 43,
-            })
+            .replace(
+                TerminalSize {
+                    columns: 132,
+                    rows: 43,
+                },
+                "$1".into(),
+                "@1".into(),
+            )
             .unwrap();
         let (desired, epoch) = queue.wait_for_attempt(None).unwrap();
         let attempt = Some((desired.version, epoch));
@@ -484,10 +535,14 @@ mod tests {
     fn resize_ack_from_a_replaced_connection_is_not_reported_as_landed() {
         let queue = ResizeQueue::default();
         let receiver = queue
-            .replace(TerminalSize {
-                columns: 101,
-                rows: 31,
-            })
+            .replace(
+                TerminalSize {
+                    columns: 101,
+                    rows: 31,
+                },
+                "$1".into(),
+                "@1".into(),
+            )
             .unwrap();
         let (desired, stale_epoch) = queue.wait_for_attempt(None).unwrap();
         queue.reconnected();

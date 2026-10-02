@@ -4,6 +4,7 @@
 // a child process.
 
 import { create } from "@bufbuild/protobuf";
+import { decodeTopologyNotification } from "@muxflow/terminal-interactions";
 import { OutputCreditLedger } from "./credit";
 import { PROTOCOL_MAJOR, validateHostContract } from "./contract";
 import { FrameAccumulator, encodeFrame } from "./framing";
@@ -78,6 +79,7 @@ export class ConnectionClosedError extends Error {
 
 /** Where terminal bytes go (§7.4, §7.6). The terminal feature (M3) implements it. */
 export interface TerminalSink {
+  grid?(paneId: string, cols: number, rows: number): void;
   seed(paneId: string, bytes: Uint8Array, generation: bigint): void;
   output(paneId: string, bytes: Uint8Array, generation: bigint): void;
   /**
@@ -503,6 +505,7 @@ export class HostConnection {
     store.getState().clearHostState();
     store.getState().setServerIdentity(hello.serverIdentity);
     this.applySnapshotWithAgents(snapshot);
+    for (const pane of snapshot.panes) this.options.terminals?.grid?.(pane.id, pane.width, pane.height);
     attempt.lastSequence = response.acceptedSequence;
     this.goLive(attempt);
     this.clearStableTimer();
@@ -619,6 +622,13 @@ export class HostConnection {
         else if (event.topologyGeneration > 0n) store.getState().applyTopologyAck(event.topologyGeneration);
         break;
       case EventKind.TOPOLOGY_DIRTY:
+        try {
+          const notification = decodeTopologyNotification(event.detail);
+          for (const grid of notification.grids ?? []) terminals?.grid?.(grid.paneId, grid.columns, grid.rows);
+        } catch {
+          this.reconnectNow(attempt, "invalid terminal layout notification");
+          return;
+        }
         break;
       case EventKind.RESYNC_REQUIRED:
         this.reconnectNow(attempt, "resync required");

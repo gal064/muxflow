@@ -83,7 +83,6 @@ describe("TerminalController scrollback paging (§7.6.1)", () => {
     await h.connect();
     h.controller.start();
     h.controller.onPageMessage({ t: "size", cols: 80, rows: 24 });
-    await answerNext(h.transport()); // select
     await answerNext(h.transport()); // resize
     await answerNext(h.transport()); // attach
     await answerNext(h.transport()); // seed request (§7.6 step 1)
@@ -107,6 +106,28 @@ describe("TerminalController scrollback paging (§7.6.1)", () => {
       }),
     }, { sequence });
   }
+
+  it("preserves confirmed grid changes between output records and during history replay", async () => {
+    const h = await seeded();
+    h.transport().feed(hostEnvelope({ case: "event", value: create(HostEventSchema, {
+      kind: EventKind.TOPOLOGY_DIRTY, detail: 'layout-change [["%1",40,12]]',
+    }) }, { sequence: 2n }));
+    const out = new TextEncoder().encode("live");
+    h.transport().feed(terminalEvent(EventKind.TERMINAL_OUTPUT, 3n, out, 3n));
+    expect(h.page.map((message) => message.t)).toEqual(["grid", "out"]);
+    expect(h.page[0]).toEqual({ t: "grid", cols: 40, rows: 12 });
+    h.controller.onPageMessage({ t: "atTop", above: 0 });
+    await answerNext(h.transport());
+    h.transport().feed(historyEvent(4n, ["older"], 1));
+    const splice = h.page.at(-1);
+    if (splice?.t !== "splice") throw new Error("expected history replay");
+    expect(splice.grids).toEqual([
+      { offset: 0, cols: 80, rows: 24 },
+      { offset: SEED.byteLength, cols: 40, rows: 12 },
+    ]);
+    // Confirming the host grid does not change what the phone requests.
+    expect(h.controller.snapshot.grid).toEqual({ cols: 80, rows: 24 });
+  });
 
   it("atTop asks for a first page with the page's rows as skip, splices the answer above the retained bytes, and doubles the next page", async () => {
     const h = await seeded();
@@ -298,7 +319,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("takes focus, inits the page, and after the first size sends select → resize → attach in that order", async () => {
+  it("takes focus, inits the page, and after the first size sends claim window size → attach in that order", async () => {
     const h = harness();
     const t = await h.connect();
     h.controller.start();
@@ -308,10 +329,8 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
 
     h.controller.onPageMessage({ t: "ready" });
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
-    const select = await answerNext(t);
-    expect(select).toMatchObject({ operation: Operation.SELECT_TERMINAL_SESSION, sessionId: "$1" });
     const resize = await answerNext(t);
-    expect(resize).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 46, rows: 40 });
+    expect(resize).toMatchObject({ operation: Operation.RESIZE_TERMINAL_WINDOW, sessionId: "$1", scope: "@1", columns: 46, rows: 40 });
     const attach = await answerNext(t);
     expect(attach).toMatchObject({ operation: Operation.ATTACH_TERMINAL, sessionId: "$1", paneIds: ["%1"] });
     // The attach mounts; the seed is asked for explicitly right behind it.
@@ -329,10 +348,9 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
     await answerNext(t);
     await answerNext(t);
-    await answerNext(t);
     await answerNext(t); // seed request (§7.6 step 1)
     t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, SEED, 5n));
-    expect(h.page.at(-1)).toEqual({ t: "seed", b64: Buffer.from(SEED).toString("base64") });
+    expect(h.page.at(-1)).toEqual({ t: "seed", b64: Buffer.from(SEED).toString("base64"), grid: { cols: 80, rows: 24 } });
     expect(h.controller.snapshot.phase).toBe("seeded");
     expect(h.controller.generation).toBe(5n);
     await vi.advanceTimersByTimeAsync(50);
@@ -362,7 +380,6 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
     await answerNext(t);
     await answerNext(t);
-    await answerNext(t);
     await answerNext(t); // seed request (§7.6 step 1)
     const big = new Uint8Array(300); // window is 1000 bytes; 25 % is 250
     t.feed(terminalEvent(EventKind.TERMINAL_SEED, 1n, big, 1n));
@@ -375,7 +392,6 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     const t = await h.connect();
     h.controller.start();
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
-    await answerNext(t);
     await answerNext(t);
     await answerNext(t);
     await answerNext(t); // seed request (§7.6 step 1)
@@ -402,7 +418,6 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
     await answerNext(t);
     await answerNext(t);
-    await answerNext(t);
     await answerNext(t); // seed request (§7.6 step 1)
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 20 });
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 22 });
@@ -411,7 +426,7 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     await vi.advanceTimersByTimeAsync(1);
     const [resize] = t.drain();
     if (resize?.payload.case !== "request") throw new Error("expected a resize");
-    expect(resize.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 46, rows: 22 });
+    expect(resize.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL_WINDOW, columns: 46, rows: 22 });
     // Same grid again: nothing.
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 22 });
     await vi.advanceTimersByTimeAsync(200);
@@ -423,7 +438,6 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     const t = await h.connect();
     h.controller.start();
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
-    await answerNext(t);
     await answerNext(t);
     await answerNext(t);
     await answerNext(t); // seed request (§7.6 step 1)
@@ -467,12 +481,11 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     expect(h.page.filter((m) => m.t === "out")).toHaveLength(0);
   });
 
-  it("re-runs select → resize → attach on reconnect while mounted", async () => {
+  it("re-runs claim window size → attach on reconnect while mounted", async () => {
     const h = harness();
     const t1 = await h.connect();
     h.controller.start();
     h.controller.onPageMessage({ t: "size", cols: 40, rows: 30 });
-    await answerNext(t1);
     await answerNext(t1);
     await answerNext(t1);
     await answerNext(t1); // seed request (§7.6 step 1)
@@ -485,8 +498,8 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
     t2.drain(); // ClientHello + Subscribe
     t2.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: 2n, terminalOutputWindowBytes: 1000n }) }, { requestId: 1n }));
     t2.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
-    const ops = [await answerNext(t2), await answerNext(t2), await answerNext(t2), await answerNext(t2)].map((r) => r.operation);
-    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
+    const ops = [await answerNext(t2), await answerNext(t2), await answerNext(t2)].map((r) => r.operation);
+    expect(ops).toEqual([Operation.RESIZE_TERMINAL_WINDOW, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
     expect(h.store.getState().focusedPaneId).toBe("%1");
     // The hide on the new connection carries the new epoch.
     void h.controller.stop();
@@ -612,7 +625,6 @@ describe("TerminalController stop during attach", () => {
     const t = await h.connect();
     h.controller.start();
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
-    await answerNext(t); // select
     await answerNext(t); // resize
     await settle();
     const [attach] = t.drain();
@@ -651,11 +663,29 @@ describe("TerminalController attach failure", () => {
     if (yielded?.payload.case !== "request") throw new Error("expected sizing yield");
     expect(yielded.payload.value.operation).toBe(Operation.YIELD_TERMINAL_SIZING);
     await vi.advanceTimersByTimeAsync(2_000);
-    const ops = [await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
-    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL]);
+    const ops = [await answerNext(t), await answerNext(t)].map((r) => r.operation);
+    expect(ops).toEqual([Operation.RESIZE_TERMINAL_WINDOW, Operation.ATTACH_TERMINAL]);
   });
 
-  it("stops sending the remaining steps once stopped mid-select", async () => {
+  it("asks for a helper update instead of retrying an unsupported window claim", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
+    await settle();
+    const [claim] = t.drain();
+    expect(claim?.payload.case === "request" && claim.payload.value.operation).toBe(Operation.RESIZE_TERMINAL_WINDOW);
+    t.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, {
+      ok: false, errorCode: "unsupported_operation", displayMessage: "unsupported operation 56",
+    }) }, { requestId: claim!.requestId }));
+    await settle();
+    expect(h.controller.snapshot.lastError).toContain("Update the host helper");
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
+    await vi.advanceTimersByTimeAsync(ATTACH_RETRY_MS * 4);
+    expect(t.drain()).toHaveLength(0);
+  });
+
+  it("stops sending the remaining steps once stopped mid-claim", async () => {
     const h = harness();
     const t = await h.connect();
     h.controller.start();
@@ -680,7 +710,6 @@ describe("TerminalController successor and reconnect", () => {
     const t = await h.connect();
     h.controller.start();
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
-    await answerNext(t); // select
     await answerNext(t); // resize
     await answerNext(t); // attach
     await answerNext(t); // seed request
@@ -705,7 +734,6 @@ describe("TerminalController successor and reconnect", () => {
     const t = await h.connect();
     h.controller.start();
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
-    await answerNext(t); // select
     await answerNext(t); // resize
     await settle();
     const [attach] = t.drain();
@@ -734,7 +762,6 @@ describe("TerminalController successor and reconnect", () => {
     let t = await h.connect();
     h.controller.start();
     h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
-    await answerNext(t); // select
     await answerNext(t); // resize
     await answerNext(t); // attach
     await answerNext(t); // seed request (§7.6 step 1)
@@ -748,7 +775,6 @@ describe("TerminalController successor and reconnect", () => {
     t.drain();
     t.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: 2n, terminalOutputWindowBytes: 1000n }) }, { requestId: 1n }));
     t.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
-    await answerNext(t); // select
     await answerNext(t); // resize
     await answerNext(t); // attach
     await answerNext(t); // seed request (§7.6 step 1)
@@ -793,7 +819,6 @@ describe("TerminalController sizing takes (D6)", () => {
     const t = await h.connect();
     h.controller.start();
     h.controller.onPageMessage({ t: "size", ...grid });
-    await answerNext(t); // select
     await answerNext(t); // resize
     await answerNext(t); // attach
     await answerNext(t); // seed request
@@ -836,26 +861,25 @@ describe("TerminalController sizing takes (D6)", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
     foreground.set(true);
-    const ops = [await answerNext(t), await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
-    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
+    const ops = [await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
+    expect(ops).toEqual([Operation.RESIZE_TERMINAL_WINDOW, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
     // A second background transition releases the still-attached sizing
     // client, and a second foreground transition reclaims it.
     foreground.set(false);
     expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
     foreground.set(true);
-    expect([await answerNext(t), await answerNext(t)].map((r) => r.operation))
-      .toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL]);
+    expect((await answerNext(t)).operation).toBe(Operation.RESIZE_TERMINAL_WINDOW);
   });
 
   it("a reconnect in the foreground still resizes, as before", async () => {
     const foreground = fakeForeground();
     const h = await seeded({ foreground: foreground.dep });
     const t = await reconnect(h);
-    const ops = [await answerNext(t), await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
-    expect(ops).toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
+    const ops = [await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation);
+    expect(ops).toEqual([Operation.RESIZE_TERMINAL_WINDOW, Operation.ATTACH_TERMINAL, Operation.REQUEST_TERMINAL_SEED]);
   });
 
-  it("a background transition during select yields before the next foreground attach", async () => {
+  it("a background transition during a size claim yields before the next foreground attach", async () => {
     const foreground = fakeForeground();
     const h = harness({ foreground: foreground.dep });
     const t = await h.connect();
@@ -864,7 +888,7 @@ describe("TerminalController sizing takes (D6)", () => {
     await settle();
     const [firstSelect] = t.drain();
     if (firstSelect?.payload.case !== "request") throw new Error("expected initial select");
-    expect(firstSelect.payload.value.operation).toBe(Operation.SELECT_TERMINAL_SESSION);
+    expect(firstSelect.payload.value.operation).toBe(Operation.RESIZE_TERMINAL_WINDOW);
 
     foreground.set(false);
     foreground.set(false); // inactive then background is one yield
@@ -873,13 +897,17 @@ describe("TerminalController sizing takes (D6)", () => {
     foreground.set(true);
     t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: firstSelect.requestId }));
     await settle();
-    expect([await answerNext(t), await answerNext(t), await answerNext(t)].map((r) => r.operation))
-      .toEqual([Operation.SELECT_TERMINAL_SESSION, Operation.RESIZE_TERMINAL, Operation.ATTACH_TERMINAL]);
+    expect([await answerNext(t), await answerNext(t)].map((r) => r.operation))
+      .toEqual([Operation.RESIZE_TERMINAL_WINDOW, Operation.ATTACH_TERMINAL]);
   });
 
   it("leaving an old pane cannot yield a newer pane in the same session", async () => {
     const h = await seeded();
     const t = h.transport();
+    h.store.getState().applySnapshot(topologySnapshot({ panes: [
+      ...Object.values(h.store.getState().panes),
+      { ...h.store.getState().panes["%1"]!, id: "%2", windowId: "@2" },
+    ] }));
     const next = new TerminalController({
       paneId: "%2", sessionId: "$1", store: h.store, registry: h.registry,
       getConnection: () => h.connection, page: { send: () => {} },
@@ -889,22 +917,27 @@ describe("TerminalController sizing takes (D6)", () => {
     await settle();
     const [select] = t.drain();
     if (select?.payload.case !== "request") throw new Error("expected successor select");
-    expect(select.payload.value.operation).toBe(Operation.SELECT_TERMINAL_SESSION);
+    expect(select.payload.value.operation).toBe(Operation.RESIZE_TERMINAL_WINDOW);
     void h.controller.stop();
     await settle();
     const operations = t.drain().flatMap((frame) => frame.payload.case === "request" ? [frame.payload.value.operation] : []);
     expect(operations).not.toContain(Operation.YIELD_TERMINAL_SIZING);
     t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: select.requestId }));
     await settle();
-    const resize = await answerNext(t);
-    expect(resize).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 60, rows: 35 });
-    await next.stop();
+    expect((await answerNext(t)).operation).toBe(Operation.ATTACH_TERMINAL);
+    const stopped = next.stop();
+    await answerAll(t);
+    await stopped;
   });
 
   it("a new pane without a size cannot strand the old pane's sizing claim", async () => {
     const foreground = fakeForeground();
     const h = await seeded({ foreground: foreground.dep });
     const t = h.transport();
+    h.store.getState().applySnapshot(topologySnapshot({ panes: [
+      ...Object.values(h.store.getState().panes),
+      { ...h.store.getState().panes["%1"]!, id: "%2", windowId: "@2" },
+    ] }));
     const next = new TerminalController({
       paneId: "%2", sessionId: "$1", store: h.store, registry: h.registry,
       getConnection: () => h.connection, page: { send: () => {} }, foreground: foreground.dep,
@@ -922,6 +955,10 @@ describe("TerminalController sizing takes (D6)", () => {
   it("a failed session switch yields the session still selected on the host", async () => {
     const h = await seeded();
     const t = h.transport();
+    h.store.getState().applySnapshot(topologySnapshot({ panes: [
+      ...Object.values(h.store.getState().panes),
+      { ...h.store.getState().panes["%1"]!, id: "%2", sessionId: "$2", windowId: "@2" },
+    ] }));
     const next = new TerminalController({
       paneId: "%2", sessionId: "$2", store: h.store, registry: h.registry,
       getConnection: () => h.connection, page: { send: () => {} },
@@ -940,7 +977,7 @@ describe("TerminalController sizing takes (D6)", () => {
     expect(yielded.payload.value).toMatchObject({ operation: Operation.YIELD_TERMINAL_SIZING, sessionId: "" });
   });
 
-  it("foreground reclaim uses a grid measured while select is in flight", async () => {
+  it("foreground reclaim uses a grid measured while a size claim is in flight", async () => {
     const foreground = fakeForeground();
     const h = await seeded({ foreground: foreground.dep }, { cols: 50, rows: 30 });
     const t = h.transport();
@@ -952,18 +989,13 @@ describe("TerminalController sizing takes (D6)", () => {
     if (select?.payload.case !== "request") throw new Error("expected select");
     h.controller.onPageMessage({ t: "size", cols: 60, rows: 35 });
     await vi.advanceTimersByTimeAsync(150);
-    const [measured] = t.drain().filter((frame) => frame.payload.case === "request");
-    if (measured?.payload.case !== "request") throw new Error("expected measured resize");
-    expect(measured.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 60, rows: 35 });
+    expect(t.drain().filter((frame) => frame.payload.case === "request")).toHaveLength(0);
     t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: select.requestId }));
-    await settle();
-    const [reclaimed] = t.drain().filter((frame) => frame.payload.case === "request");
-    if (reclaimed?.payload.case !== "request") throw new Error("expected reclaim resize");
-    expect(reclaimed.payload.value).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 60, rows: 35 });
-    for (const frame of [measured, reclaimed]) {
-      t.feed(hostEnvelope({ case: "response", value: okResponse() }, { requestId: frame.requestId }));
-    }
-    await settle();
+    await vi.advanceTimersByTimeAsync(150);
+    const reclaimed = await answerNext(t);
+    expect(reclaimed).toMatchObject({ operation: Operation.RESIZE_TERMINAL_WINDOW, sessionId: "$1", scope: "@1", columns: 60, rows: 35 });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(t.drain().filter((frame) => frame.payload.case === "request")).toHaveLength(0);
   });
 
   it("retries a transient foreground reclaim failure while the terminal remains active", async () => {
@@ -982,8 +1014,51 @@ describe("TerminalController sizing takes (D6)", () => {
     await settle();
     t.drain(); // seed delivery acknowledgement
     await vi.advanceTimersByTimeAsync(ATTACH_RETRY_MS);
-    expect(await answerAll(t)).toEqual([Operation.SELECT_TERMINAL_SESSION]);
-    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL]);
+    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL_WINDOW]);
+  });
+
+  it("reclaims after a failed pending claim crosses a rapid background and foreground return", async () => {
+    const foreground = fakeForeground();
+    const h = await seeded({ foreground: foreground.dep }, { cols: 50, rows: 30 });
+    const t = h.transport();
+    foreground.set(false);
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
+    foreground.set(true);
+    await settle();
+    const [oldClaim] = t.drain();
+    foreground.set(false);
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
+    foreground.set(true);
+    t.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, {
+      ok: false, errorCode: "terminal_resize_rejected", displayMessage: "temporary failure",
+    }) }, { requestId: oldClaim!.requestId }));
+    expect(await answerNext(t)).toMatchObject({ operation: Operation.RESIZE_TERMINAL_WINDOW,
+      sessionId: "$1", scope: "@1", columns: 50, rows: 30 });
+    foreground.set(false);
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
+  });
+
+  it("a viewport claim after a failed foreground claim still yields on background", async () => {
+    const foreground = fakeForeground();
+    const h = await seeded({ foreground: foreground.dep }, { cols: 50, rows: 30 });
+    const t = h.transport();
+    foreground.set(false);
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
+    foreground.set(true);
+    await settle();
+    const [claim] = t.drain();
+    t.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, {
+      ok: false, errorCode: "terminal_resize_rejected", displayMessage: "temporary failure",
+    }) }, { requestId: claim!.requestId }));
+    await settle();
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
+    h.controller.onPageMessage({ t: "size", cols: 60, rows: 35 });
+    await vi.advanceTimersByTimeAsync(150);
+    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL_WINDOW]);
+    await vi.advanceTimersByTimeAsync(ATTACH_RETRY_MS);
+    expect(t.drain().filter((frame) => frame.payload.case === "request")).toHaveLength(0);
+    foreground.set(false);
+    expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
   });
 
   it("a size change while in the background waits for the foreground", async () => {
@@ -996,9 +1071,8 @@ describe("TerminalController sizing takes (D6)", () => {
     await vi.advanceTimersByTimeAsync(300);
     expect(h.transport().drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
     foreground.set(true);
-    expect((await answerNext(h.transport())).operation).toBe(Operation.SELECT_TERMINAL_SESSION);
     const resize = await answerNext(h.transport());
-    expect(resize).toMatchObject({ operation: Operation.RESIZE_TERMINAL, columns: 40, rows: 44 });
+    expect(resize).toMatchObject({ operation: Operation.RESIZE_TERMINAL_WINDOW, columns: 40, rows: 44 });
   });
 
   it("background releases sizing and foreground reclaims it without input; a stopped controller ignores it", async () => {
@@ -1016,8 +1090,7 @@ describe("TerminalController sizing takes (D6)", () => {
     expect(t.drain().filter((f) => f.payload.case === "request")).toHaveLength(0);
     // Opening the terminal again is the foreground use event.
     foreground.set(true);
-    expect((await answerNext(t)).operation).toBe(Operation.SELECT_TERMINAL_SESSION);
-    expect((await answerNext(t)).operation).toBe(Operation.RESIZE_TERMINAL);
+    expect((await answerNext(t)).operation).toBe(Operation.RESIZE_TERMINAL_WINDOW);
     const pending = h.controller.sendInput(Uint8Array.of(0x61));
     expect(await answerAll(t)).toEqual([Operation.TERMINAL_INPUT]);
     await pending;
@@ -1049,7 +1122,7 @@ describe("TerminalController sizing takes (D6)", () => {
     pending = h.controller.sendInput(Uint8Array.of(0x62));
     await settle();
     const frames = t.drain().filter((f) => f.payload.case === "request");
-    expect(frames.map((f) => f.payload.case === "request" ? f.payload.value.operation : undefined)).toEqual([Operation.RESIZE_TERMINAL, Operation.TERMINAL_INPUT]);
+    expect(frames.map((f) => f.payload.case === "request" ? f.payload.value.operation : undefined)).toEqual([Operation.RESIZE_TERMINAL_WINDOW, Operation.TERMINAL_INPUT]);
     const resize = frames[0]!;
     if (resize.payload.case !== "request") throw new Error("unreachable");
     expect(resize.payload.value).toMatchObject({ columns: 80, rows: 24 });
@@ -1062,7 +1135,7 @@ describe("TerminalController sizing takes (D6)", () => {
     // Past it, the next input takes again.
     await vi.advanceTimersByTimeAsync(TAKE_INTERVAL_MS);
     pending = h.controller.sendInput(Uint8Array.of(0x64));
-    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL, Operation.TERMINAL_INPUT]);
+    expect(await answerAll(t)).toEqual([Operation.RESIZE_TERMINAL_WINDOW, Operation.TERMINAL_INPUT]);
     await pending;
   });
 });

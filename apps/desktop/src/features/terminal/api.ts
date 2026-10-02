@@ -1,4 +1,4 @@
-import { decodeTopologyNotification, type PaneGrid } from "./topologyNotification";
+import { decodeTopologyNotification, type PaneGrid } from "@muxflow/terminal-interactions";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { measurePerfRequest, recordPerfCounter } from "../../perf/probe";
 import { perfProbeReady } from "../../perf/bootstrap";
@@ -670,7 +670,7 @@ export async function startTerminal(
   connection: ConnectionSpec,
   /**
    * Whether the bridge attaches a terminal at all. A host shown beside the
-   * active one relays topology and agents only, until `selectTerminalSession`
+   * active one relays topology and agents only, until `resizeClient`
    * names a session on it.
    */
   attach: boolean,
@@ -827,23 +827,16 @@ function oversizedTerminalInput(byteLength: number): Promise<never> {
   ));
 }
 
-export function resizeClient(clientId: string, columns: number, rows: number): Promise<void> {
-  const boundary = { clientId, columns, rows };
+export function resizeClient(clientId: string, columns: number, rows: number, sessionId: string, windowId: string): Promise<void> {
+  const boundary = { clientId, columns, rows, sessionId, windowId };
   return measurePerfRequest(
     "invoke.resize_terminal_client", "terminal", boundary, (request) => invoke("resize_terminal_client", request),
   );
 }
 
-/**
- * Tells the host which workspace is on screen, so tmux sizes from that one's
- * control client. `useVisibleTerminalSession.ts` is the only caller and owns
- * why this exists and when it is sent.
- */
-export function selectTerminalSession(clientId: string, sessionId: string): Promise<void> {
-  const boundary = { clientId, sessionId };
-  return measurePerfRequest(
-    "invoke.select_terminal_session", "terminal", boundary, (request) => invoke("select_terminal_session", request),
-  );
+/** A correlated read on the existing link; probing never claims terminal sizing. */
+export function probeTerminalLink(clientId: string): Promise<void> {
+  return invoke("probe_terminal_link", { clientId });
 }
 
 export function setTerminalVisibility(

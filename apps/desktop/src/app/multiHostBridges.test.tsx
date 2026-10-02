@@ -181,7 +181,7 @@ describe("one bridge per shown host", () => {
     await unmount();
   });
 
-  it("activates a peer by selecting its remembered session on its own client, restarting nothing", async () => {
+  it("activates a peer at its remembered session without an unscoped sizing request or restart", async () => {
     const { bridgeFor, controller, unmount } = await twoShownHosts();
     await act(async () => {
       bridgeFor("local").publish(connected);
@@ -194,7 +194,7 @@ describe("one bridge per shown host", () => {
     expect(controller().activeSessionId).toBe("$0");
 
     await act(async () => { controller().activateHost("remote-a"); });
-    expect(calls("select_terminal_session")).toEqual([{ clientId: "client-2", sessionId: "$1" }]);
+    expect(calls("select_terminal_session")).toEqual([]);
     expect(calls("set_last_profile_id")).toEqual([{ profileId: "remote-a" }]);
     expect(startTerminalMock).toHaveBeenCalledTimes(2);
     expect(stopTerminalMock).not.toHaveBeenCalled();
@@ -213,10 +213,7 @@ describe("one bridge per shown host", () => {
 
     // Back again lands on the session Local was left on.
     await act(async () => { controller().activateHost("local"); });
-    expect(calls("select_terminal_session")).toEqual([
-      { clientId: "client-2", sessionId: "$1" },
-      { clientId: "client-1", sessionId: "$0" },
-    ]);
+    expect(calls("select_terminal_session")).toEqual([]);
     expect(startTerminalMock).toHaveBeenCalledTimes(2);
     expect(controller().snapshot.sessions.map((session) => session.id)).toEqual(["$0"]);
     await unmount();

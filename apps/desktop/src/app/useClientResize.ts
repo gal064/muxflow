@@ -22,6 +22,9 @@ export const CLIENT_RESIZE_RETRIES = 4;
 export const CLIENT_RESIZE_TAKE_INTERVAL_MS = 2000;
 
 interface ClientResizeOptions {
+  /** Returning from an app tab is a new sizing claim, even at the same grid. */
+  terminalVisible?: boolean;
+  activeSessionId?: string;
   /** Recomputes when the workspace shows a different tmux window. */
   activeWindowId?: string;
   /**
@@ -61,6 +64,8 @@ interface ClientResize {
  * is busiest.
  */
 export function useClientResize({
+  terminalVisible = true,
+  activeSessionId,
   activeWindowId,
   actualSize,
   canMutate,
@@ -74,9 +79,12 @@ export function useClientResize({
   const surfaceRefValue = useRef(surface);
   const measurementsRef = useRef(measurements);
   const clientIdRef = useRef(clientId);
+  const terminalVisibleRef = useRef(terminalVisible);
+  const sessionIdRef = useRef(activeSessionId);
+  const windowIdRef = useRef(activeWindowId);
   const canMutateRef = useRef(canMutate);
   const actualSizeRef = useRef(actualSize);
-  const lastRequested = useRef<{ clientId: string; columns: number; rows: number } | undefined>(undefined);
+  const lastRequested = useRef<{ clientId: string; sessionId: string; windowId: string; columns: number; rows: number } | undefined>(undefined);
   const lastReported = useRef<string | undefined>(undefined);
   const pending = useRef<{ timer: number; attempt: number }>({ timer: 0, attempt: 0 });
   /** When the last request went out, for the take interval. */
@@ -86,13 +94,18 @@ export function useClientResize({
   surfaceRefValue.current = surface;
   measurementsRef.current = measurements;
   clientIdRef.current = clientId;
+  terminalVisibleRef.current = terminalVisible;
+  sessionIdRef.current = activeSessionId;
+  windowIdRef.current = activeWindowId;
   canMutateRef.current = canMutate;
   actualSizeRef.current = actualSize;
 
   const send = useCallback(() => {
     const element = surfaceRefValue.current;
     const currentClientId = clientIdRef.current;
-    if (!element || !currentClientId || !canMutateRef.current) return;
+    const sessionId = sessionIdRef.current;
+    const windowId = windowIdRef.current;
+    if (!terminalVisibleRef.current || !element || !currentClientId || !sessionId || !windowId || !canMutateRef.current) return;
     // Measured here rather than taken from the observer's last report. The
     // surface moves when the connection banner and the sidebars do, and the
     // request is gated on `canMutate`, so the box that arrives with the gate
@@ -117,11 +130,11 @@ export function useClientResize({
     // 3 identical `refresh-client -C` requests costing 15 topology-dirty events
     // on the real link (6 on a local one), which is the churn this stage exists
     // to remove.
-    if (previous && previous.clientId === currentClientId && previous.columns === columns && previous.rows === rows) return;
-    lastRequested.current = { clientId: currentClientId, columns, rows };
+    if (previous && previous.clientId === currentClientId && previous.sessionId === sessionId && previous.windowId === windowId && previous.columns === columns && previous.rows === rows) return;
+    lastRequested.current = { clientId: currentClientId, sessionId, windowId, columns, rows };
     lastReported.current = undefined;
     lastSentAt.current = Date.now();
-    void resizeClient(currentClientId, columns, rows).then(() => {
+    void resizeClient(currentClientId, columns, rows, sessionId, windowId).then(() => {
       // The retry budget is per *failure run*, not per connection. Counting it
       // across the whole connection meant four transient failures early on left
       // every later failure — including the first resize after a reconnect, the
@@ -133,7 +146,7 @@ export function useClientResize({
       // deduplicated away — unless a later request already replaced this
       // record, in which case it is not ours to clear.
       const recorded = lastRequested.current;
-      if (recorded?.clientId === currentClientId && recorded.columns === columns && recorded.rows === rows) {
+      if (recorded?.clientId === currentClientId && recorded.sessionId === sessionId && recorded.windowId === windowId && recorded.columns === columns && recorded.rows === rows) {
         lastRequested.current = undefined;
       }
       // And retry, because nothing else will: the triggers are a window change,
@@ -141,7 +154,7 @@ export function useClientResize({
       // resize after connect — the likeliest moment for one — would otherwise
       // leave the client at whatever size the other terminals on that session
       // set, for the whole session, on a desktop nobody resizes.
-      if (clientIdRef.current !== currentClientId) return;
+      if (clientIdRef.current !== currentClientId || sessionIdRef.current !== sessionId || windowIdRef.current !== windowId) return;
       if (pending.current.attempt < CLIENT_RESIZE_RETRIES) {
         pending.current.attempt += 1;
         window.clearTimeout(pending.current.timer);
@@ -188,10 +201,15 @@ export function useClientResize({
   }, [clientId]);
 
   useEffect(() => {
+    if (!terminalVisible) {
+      lastRequested.current = undefined;
+      window.clearTimeout(pending.current.timer);
+      return;
+    }
     if (!clientId || !canMutate || !surface || !box || !measurements) return;
     const timer = window.setTimeout(send, CLIENT_RESIZE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [activeWindowId, box, canMutate, clientId, measurements, send, surface]);
+  }, [activeSessionId, activeWindowId, box, canMutate, clientId, measurements, send, surface, terminalVisible]);
 
   /**
    * Takes the size back when tmux's answer is not the one that was asked for,
@@ -245,7 +263,7 @@ export function useClientResize({
     const element = surfaceRefValue.current;
     // `surface` because a request needs one: with an app tab showing there is
     // no tiled surface to measure, and `send` would return immediately.
-    if (!clientIdRef.current || !canMutateRef.current || !actual || !element) return false;
+    if (!terminalVisibleRef.current || !clientIdRef.current || !canMutateRef.current || !actual || !element) return false;
     const rect = element.getBoundingClientRect();
     const decision = clientSizeForSurface({ width: rect.width, height: rect.height }, measurementsRef.current);
     if (decision.kind !== "size") return false;

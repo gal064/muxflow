@@ -6,7 +6,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { liveHostAvailability, startHostHarness, type HostHarness } from "../../../scripts/host-harness";
 import { HostConnection } from "../../protocol/HostConnection";
-import { attachTerminal, resizeTerminal, selectTerminalSession } from "../../protocol/requests";
+import { attachTerminal, resizeTerminal, resizeTerminalWindow, selectTerminalSession } from "../../protocol/requests";
 import { createSessionStore, type SessionStore } from "../../store/sessionStore";
 import type { ToPageMessage } from "./bridgeMessages";
 import { utf8Encode } from "./bytes";
@@ -177,4 +177,67 @@ describe.skipIf(!availability.available)(`live sizing (${availability.reason ?? 
 
     await controller.stop();
   }, 90_000);
+
+  it("claims each named window across four shared windows without moving the selected window", async () => {
+    const sessionId = harness.primarySessionId;
+    const first = Object.values(phone.store.getState().windows).find((window) => window.sessionId === sessionId)!;
+    const windows = [first.id];
+    for (let i = 0; i < 3; i += 1) {
+      windows.push(harness.tmux(["new-window", "-d", "-P", "-F", "#{window_id}", "-t", sessionId, "sleep 120"]));
+    }
+    await waitFor("all four windows", () => windows.every((id) => phone.store.getState().windows[id]) ? true : undefined);
+    harness.tmux(["select-window", "-t", `${sessionId}:${windows[3]}`]);
+    const selected = () => harness.tmux(["display-message", "-p", "-t", `${sessionId}:`, "#{window_id}"]);
+    const size = (id: string) => harness.tmux(["display-message", "-p", "-t", id, "#{window_width}x#{window_height}"]);
+    for (const id of windows) await laptop.connection.request(resizeTerminalWindow(sessionId, id, 160, 48));
+    for (const id of windows) expect(size(id)).toBe("160x48");
+
+    // Open an idle, nonselected window. No input or prompt causes the resize.
+    const paneId = harness.tmux(["display-message", "-p", "-t", windows[0]!, "#{pane_id}"]);
+    const page: ToPageMessage[] = [];
+    const controller = new TerminalController({ paneId, sessionId, store: phone.store, registry: phone.registry,
+      getConnection: () => phone.connection, page: { send: (message) => page.push(message) } });
+    try {
+      controller.start();
+      controller.onPageMessage({ t: "size", cols: 50, rows: 30 });
+      const seed = await waitFor("seed for nonselected window", () => page.find((message) => message.t === "seed"));
+      expect(seed).toMatchObject({ grid: { cols: 50, rows: 30 } });
+      expect(size(windows[0]!)).toBe("50x30");
+      expect(selected()).toBe(windows[3]);
+      expect(size(windows[1]!)).toBe("160x48");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(size(windows[0]!)).toBe("50x30");
+
+      // The same requested dimensions still claim a different window.
+      for (const id of windows.slice(1)) {
+        await phone.connection.request(resizeTerminalWindow(sessionId, id, 50, 30));
+        expect(size(id)).toBe("50x30");
+        expect(selected()).toBe(windows[3]);
+        await laptop.connection.request(resizeTerminalWindow(sessionId, id, 160, 48));
+        expect(size(id)).toBe("160x48");
+        expect(selected()).toBe(windows[3]);
+      }
+      await laptop.connection.request(resizeTerminalWindow(sessionId, windows[0]!, 160, 48));
+      expect(size(windows[0]!)).toBe("160x48");
+      controller.onPageMessage({ t: "size", cols: 42, rows: 18 });
+      await waitFor("changed mobile viewport", () => size(windows[0]!) === "42x18" ? true : undefined);
+      expect(selected()).toBe(windows[3]);
+
+      await expect(phone.connection.request(resizeTerminalWindow("$99999", windows[0]!, 80, 24)))
+        .rejects.toThrow("window is no longer in the requested session");
+      expect(size(windows[0]!)).toBe("42x18");
+      expect(size(windows[1]!)).toBe("160x48");
+      expect(size(windows[3]!)).toBe("160x48");
+      const closed = windows[2]!;
+      harness.tmux(["kill-window", "-t", closed]);
+      await waitFor("closed window disappears", () => !phone.store.getState().windows[closed] ? true : undefined);
+      await expect(phone.connection.request(resizeTerminalWindow(sessionId, closed, 80, 24)))
+        .rejects.toThrow("window is no longer in the requested session");
+      expect(selected()).toBe(windows[3]);
+      expect(size(windows[0]!)).toBe("42x18");
+    } finally {
+      await controller.stop();
+    }
+  }, 90_000);
+
 });

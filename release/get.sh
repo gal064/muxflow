@@ -3,6 +3,9 @@
 #
 #   curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash
 #
+# RC example (use the installer from that release):
+#   curl -fsSL https://github.com/gal064/muxflow/releases/download/v0.1.9-rc.2/install.sh | MUXFLOW_VERSION=0.1.9-rc.2 bash
+#
 # Downloads the release package for this machine and checks it against the
 # release SHA256SUMS. On Linux it runs the tarball's own install.sh; on macOS
 # it copies Muxflow.app out of the DMG into /Applications. Running it again
@@ -133,7 +136,7 @@ check_tmux() {
 }
 
 install_linux() {
-  local version=$1 arch
+  local version=$1 package_version=${1%%-*} arch
   case "$(uname -m)" in
     x86_64|amd64) arch=x86_64 ;;
     aarch64|arm64) arch=aarch64 ;;
@@ -144,7 +147,7 @@ install_linux() {
     command -v "$tool" >/dev/null || fail "$tool is required"
   done
 
-  local package="muxflow-$version-linux-$arch"
+  local package="muxflow-$package_version-linux-$arch"
   printf 'Downloading Muxflow %s for %s...\n' "$version" "$arch"
   fetch_verified "$package.tar.gz" "$version" 5 80
 
@@ -198,7 +201,7 @@ install_linux() {
 }
 
 install_macos() {
-  local version=$1
+  local version=$1 package_version=${1%%-*}
   [[ "$(uname -m)" == arm64 ]] || fail "the macOS build is for Apple Silicon only"
 
   # The machine-wide /Applications, as release/macos/install.sh uses: any admin
@@ -213,7 +216,7 @@ install_macos() {
       || fail "$target exists and is not a Muxflow install; move it aside and run again"
   fi
 
-  local dmg="Muxflow_${version}_aarch64.dmg"
+  local dmg="Muxflow_${package_version}_aarch64.dmg"
   printf 'Downloading Muxflow %s for macOS...\n' "$version"
   fetch_verified "$dmg" "$version" 5 75
 
@@ -277,7 +280,7 @@ main() {
     version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$work/latest.json")
   fi
   version=${version#v}
-  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid version: '$version'"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || fail "invalid version: '$version'"
 
   "install_$os" "$version"
 }
