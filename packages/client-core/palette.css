@@ -1,0 +1,47 @@
+/* GENERATED from src/palette.ts; run pnpm --filter @muxflow/client-core palette:gen. */
+:root {
+  --chrome-bg: #282c34;
+  --chrome-raised: #2c313a;
+  --chrome-hairline: #313640;
+  --chrome-border: #3e4451;
+  --chrome-hover: #2f343e;
+  --chrome-selected: #353b45;
+  --chrome-ink: #c4c8c6;
+  --chrome-ink-strong: #ffffff;
+  --chrome-dim: #8f96a1;
+  --chrome-faint: #636b78;
+  --accent: #7aa6da;
+  --accent-ink: #282c34;
+  --accent-wash: #7aa6da1f;
+  --danger: #cc6566;
+  --danger-ink: #e79596;
+  --danger-wash: #cc656622;
+  --ok: #28c840;
+  --warn: #febc2e;
+  --term-bg: #282c34;
+  --term-fg: #ffffff;
+  --term-cursor: #ffffff;
+  --term-cursor-text: #353a44;
+  --term-selection-bg: #ffffff;
+  --term-selection-fg: #282c34;
+  --term-0: #1d1f21;
+  --term-1: #cc6566;
+  --term-2: #b6bd68;
+  --term-3: #f0c674;
+  --term-4: #82a2be;
+  --term-5: #b294bb;
+  --term-6: #8abeb7;
+  --term-7: #c4c8c6;
+  --term-8: #666666;
+  --term-9: #d54e53;
+  --term-10: #b9ca4b;
+  --term-11: #e7c547;
+  --term-12: #7aa6da;
+  --term-13: #c397d8;
+  --term-14: #70c0b1;
+  --term-15: #eaeaea;
+  --state-working: #f0c674;
+  --state-blocked: #cc6566;
+  --state-done: #8abeb7;
+  --state-unknown: #8f96a1;
+}

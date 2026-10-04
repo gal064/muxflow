@@ -1,0 +1,566 @@
+# Muxflow iOS — implementation plan
+
+Status: implementation started on `feat/ios-mobile`. Phase 0 shared sources
+and documentation have passed independent review and affected existing tests.
+Native iOS implementation and simulator/device QA have not yet run.
+
+## 1. Objective and scope
+
+Add iOS support to the existing Expo/React Native app in `apps/mobile`.
+Share Android and iOS screens and application logic, and move equivalent
+desktop/mobile behavior into shared packages so macOS also benefits.
+
+Develop on Linux. Use GitHub Actions macOS runners for native builds and
+simulator testing. An Apple Developer account is not required for simulator
+builds; signed iPhone distribution and TestFlight require credentials later.
+
+Proposed delivery milestones:
+
+1. **Working iOS client:** existing mobile features, native SSH, shared code,
+   reliable foreground reconnect, automated simulator coverage, and a signed
+   real-iPhone lifecycle/Local Network permission gate by the end of Phase 2.
+2. **Background agent alerts:** host-originated push delivery through APNs.
+
+The second milestone's priority remains open. This staging is a recommendation,
+not a decision to drop background notification parity.
+
+The existing Android design remains the starting point for product behavior.
+The first implementation commit must update `design.md` and `decisions.md`:
+remove iOS from the non-goals, replace D4's verbatim-copy requirement with
+shared-source ownership, and distinguish Android's background service from
+iOS lifecycle and the proposed push milestone. Update the other Android-only
+stack, key-storage, notification and font requirements where they now differ.
+Do this alongside the first isolated sharing change, before iOS feature work.
+That first commit must also update the comments above `PROTOCOL_MAJOR` in
+`crates/protocol/src/lib.rs` and the admission function in
+`apps/mobile/src/protocol/contract.ts` to state the bump rule in section 4.
+Both comments were updated with the initial shared-source change; major 4
+and admission behavior remain unchanged.
+
+## 2. What exists today
+
+| Area | Current implementation | Consequence for iOS |
+| --- | --- | --- |
+| Mobile frontend | Expo, React Native, TypeScript, Expo Router, Zustand | Extend the same application rather than create a SwiftUI frontend. |
+| Mobile connection and protocol | TypeScript framing, generated protobuf bindings, request handling, reconnect, control/bulk lanes | Reuse with a different native SSH adapter and lifecycle policy. |
+| Native mobile SSH | Android-only Expo module wrapping SSHJ | Add an Apple implementation of the byte transport and key storage. |
+| Android background operation | Foreground service and native wake timers | Keep the Android behavior; implement a different iOS lifecycle policy. |
+| Desktop frontend | Tauri, React, TypeScript | Share suitable functions and data through workspace packages. |
+| Desktop SSH | Rust invokes system OpenSSH | Keep the existing transport behind desktop's own adapter. |
+| Host | Rust host, tmux integration, agent state, filesystem and voice services | Continue using the same host and protocol schema. |
+| Terminal interactions | `packages/terminal-interactions` | Already shared; extend only where equivalent behavior exists. |
+| Markdown and agent labels | Equivalent code copied between desktop and mobile | Replace copies with shared imports and preserve behavior. |
+| Design palette | Mobile TypeScript values copied from desktop CSS | Share palette data while retaining platform layout and typography. |
+| CI | Linux mobile checks and macOS desktop checks/releases | Add an explicit iOS build and simulator job. |
+
+Repository access was checked during planning: the existing `gal064` GitHub
+authentication has write access to `gal064/muxflow`, and Actions is enabled.
+An iOS runner job and UI automation harness have not yet been built or proven.
+
+## 3. Sharing boundaries
+
+### Android and iOS
+
+Keep one mobile application and one copy of:
+
+- Hosts, agents, terminal, files and voice screens.
+- Stores, navigation, host-key trust decisions and connection diagnostics.
+- Protocol framing, requests, topology reconciliation and terminal credit flow.
+- Terminal controllers, xterm WebView content, selection and touch logic.
+- Voice controllers, recording coordination, playback state and preferences.
+- Notification eligibility, attention state and target routing where the
+  platform delivery mechanism allows the same behavior.
+
+Use small platform adapters for SSH, secure key storage, lifecycle and timers,
+notification presentation, user messages, audio integration and update links.
+Prefer existing owners and interfaces to a general plugin or capability system.
+
+The native SSH interface currently includes foreground-service and wake-timer
+methods. Separate those concerns before adding iOS. Do not implement pretend
+foreground-service methods on iOS that silently do nothing.
+
+Android keeps its native `scheduleWake` implementation. iOS uses the existing
+JavaScript `BackgroundTimer` implementation while active; it does not expose
+Android's wake API or promise timer callbacks during suspension. Cancel
+connection/reconnect deadlines when their attempt is invalidated and create
+fresh deadlines on resume. If measurements justify a shutdown grace period,
+a native lifecycle timer owns its expiry; JavaScript timers do not own that
+cleanup. The initial teardown-and-reconnect implementation needs no grace timer.
+
+### Mobile and macOS
+
+Proposed package boundaries, to be confirmed against actual dependencies:
+
+- `packages/client-core`: platform-independent agent label functions,
+  equivalent notification decision primitives and shared palette data.
+- `packages/markdown`: the existing Markdown renderer and sanitization rules,
+  consumed by the desktop DOM and mobile WebView. Keep its DOM dependency out
+  of the React Native runtime.
+- `packages/terminal-interactions`: retain the existing shared selection/link
+  behavior; move additional terminal helpers only when their contracts match.
+
+Keep platform projections small: desktop CSS versus React Native styles,
+desktop agent records versus mobile topology records, and native notification
+presentation versus mobile notification presentation.
+
+Do not assume the two notification policies are identical: mobile's current
+policy is a simplified desktop policy. Extract common decisions without
+erasing intentional differences. Existing outputs and sanitization must remain
+unchanged during extraction.
+
+Retain the shared protocol schema and platform-appropriate bindings. Sharing
+the schema does not require replacing the desktop Rust client with the mobile
+TypeScript client, or replacing all SSH implementations with a new Rust core.
+
+## 4. iOS lifecycle and notification behavior
+
+iOS has no general equivalent to Android's foreground service for indefinitely
+maintaining an ordinary SSH connection. An app normally becomes suspended
+after entering the background. Native timers do not remove that limit.
+
+For the first milestone:
+
+1. On background entry, stop recording, prevent background autoplay, yield
+   terminal sizing ownership using the existing terminal mechanism, and cancel
+   reconnect work that should not run while suspended. Treat transient iOS
+   `inactive` states, such as a permission prompt, separately from background.
+2. Initially close or invalidate mobile transports through one lifecycle owner
+   on background entry. Preserve the selected host and useful in-memory state;
+   explicit user disconnect still disables automatic reconnect. Do not add a
+   grace timer to this first implementation.
+3. On foreground entry, reconnect once if the user still wants a connection.
+   Reconcile authoritative topology and agent state, invalidate stale bulk
+   channels, reattach terminals and reclaim the measured viewport. Guard
+   callbacks so the old connection cannot close or publish into the new one.
+4. Restore voice registration through existing reconnect hooks. Received
+   messages can remain in memory, but replies sent while disconnected are not
+   guaranteed to be recovered: the current voice service pushes replies over
+   the live connection and does not provide a durable reply inbox.
+5. Keep Android's background service, native timer and notification Disconnect
+   behavior intact.
+
+Measure foreground-to-usable-terminal reconnect time on a real iPhone in
+Phase 2, including brief switches to copy a public key or paste text. If those
+switches prove annoying, add the following second step; it is not an initial
+acceptance requirement:
+
+- Allow a short, best-effort grace for brief app switches, with a maximum of
+  five seconds. A finite iOS background task may protect completion of pending
+  user-initiated writes and orderly cleanup; do not manufacture work or hold
+  an idle task just to keep SSH alive. End the task when that work finishes.
+- The native deadline, task expiration or failed task acquisition must lead
+  to bounded cleanup; iOS does not guarantee all five seconds are given.
+- If the app returns before teardown and the transport is healthy, reuse it
+  and reclaim the viewport without a full terminal reattach. Validate health
+  and reconcile state using an existing bounded, read-only snapshot request;
+  do not trust cached `connected` state or add a new wire-level health protocol.
+  Otherwise use the initial reconnect path.
+- Generation guards must prevent a stale shutdown deadline or callback from
+  closing a resumed or new connection. Test deadline/foreground and background
+  task expiration races on device before enabling this optimization.
+
+Foreground notification policy: retain the mobile eligibility, watermark and
+deduplication rules. Suppress notifications for the currently viewed agent or
+terminal pane. For another eligible agent, present a banner and keep the
+notification in Notification Center, without adding sound or badge behavior
+in the first milestone. Request permission through the existing connection
+flow and keep in-app agent status usable after denial. Verify identifier-based
+replacement and tap routing on iOS rather than assuming Android tag semantics.
+
+Without a push path, do not promise immediate blocked/completed alerts while
+the iOS app is suspended. The host's tmux sessions and agents continue running
+independently of the phone's connection. Interrupted connections can lose
+voice replies, including when the phone is locked; this product limitation
+requires an explicit decision before calling the first milestone ready.
+
+### Proposed push milestone
+
+Delivery path:
+
+```text
+Muxflow host -> authenticated push relay -> APNs -> iPhone notification
+                                                    |
+                                               notification tap
+                                                    |
+                                         reconnect and reconcile via SSH
+```
+
+The host observes agent transitions even when the phone is disconnected.
+A relay is the proposed sender so Apple provider credentials do not need to
+be installed on every user's host. Interactive terminal and file traffic
+continues over SSH.
+
+Before implementation, specify:
+
+- Device registration, host pairing, authorization and token revocation.
+- Which hosts may notify which devices, and handling of invalid APNs tokens.
+- Minimal payload contents and whether agent labels are included.
+- Stable event identity, deduplication, expiry, and notification tap routing.
+- Interaction with host-owned seen state, desktop/mobile attention, and
+  duplicate alerts around background/foreground transitions.
+- Relay ownership, hosting and Apple credentials.
+
+Push is an alert channel; it is not an authoritative agent-state store or a
+replacement for fetching the current state over SSH. A delivered alert may
+already be stale when tapped. APNs delivery is not guaranteed.
+
+Any required host/protocol changes must update every affected client in the
+same change and undergo the two-direction review below. Bump the major only
+if the change requires it under the bump rule below, not merely because push adds a
+field or message. Do not add compatibility arms, legacy fields or
+version-dependent branches.
+
+### Release skew and admission policy
+
+Today `validateHostContract` checks only the envelope's `protocolMajor`
+(currently 4). `HostConnection.onHelloFrame` logs `helperVersion` and the build
+digest but does not compare either with the app version. A newer helper with
+the same major is admitted; a different major becomes a terminal
+`incompatible` state. The host also refuses a different client major.
+The source comment saying "exact current contract" does not mean the code
+compares schema fingerprints or release versions. Desktop separately compares
+the installed helper's digest with its bundled artifact in
+`compare_installed_artifact`; a mismatch is incompatible. Desktop and helper
+therefore stay matched, while mobile can update independently. The major's
+release-skew role is protecting mobile, not replacing desktop's artifact check.
+Existing additive changes in `c5ba15c` and `d378228` shipped with major 4.
+
+Decision: retain strict major equality at admission, but bump
+`protocolMajor` only for a real incompatibility: the previous released mobile
+app would break or misbehave against the new host, or the new mobile app would
+break or misbehave against the previous released host. Both directions matter:
+desktop may update the helper before the phone updates, or the phone may
+update first. Additive changes that the other side ignores harmlessly do not
+bump. Harmless unknown fields rely only on protobuf's normal handling; do not
+add compatibility arms, legacy fields or version-dependent branches. Do not
+add a semver equality fence or infer mobile compatibility from the helper
+digest. Desktop's existing bundled-artifact digest check remains unchanged.
+
+For every wire change, review must identify the last released mobile build
+and host release used as baselines and explicitly answer:
+
+1. What does the last released mobile app do with the new host's change?
+2. What does the new mobile app do against the last released host, including
+   how that host handles any new fields sent by the app?
+
+If either answer is "breaks or misbehaves", bump; otherwise do not. Include
+behavioral evidence for the answers. Additive syntax alone is not proof of
+safety: an app relying on a new operation, or on a field that an older host
+ignores, can still misbehave. Do not work around that with version-dependent
+request paths. Change affected host/desktop/mobile implementations together
+and regenerate bindings and fixtures whether or not the major changes.
+
+If the host is newer and advertises a different major, iOS must refuse it,
+show the app/helper protocol mismatch and the appropriate distribution update
+destination, and stop automatic retry. The same applies when the app is newer
+than the host. Resume or notification taps must not bypass admission, and
+control/bulk lanes must not become usable after refusal. Test:
+
+- An older app against a newer host with a different major.
+- A newer app against an older host with a different major.
+- An older released app against a newer host with harmless additive fields
+  under the same major.
+- A newer app against an older released host that harmlessly ignores its new
+  fields under the same major; absent new response fields must also be harmless.
+
+Use the released baseline's real decoder/behavior for additive tests, not just
+the new decoder with a different version label. Inspect the existing pipelined
+Hello/Subscribe path to ensure no state from a refused attempt is published
+or accepted as a usable connection.
+
+Apple distribution cannot guarantee that all installed applications update
+simultaneously. The desktop/host synchronized-release assumption remains;
+iOS users may temporarily be unable to connect after a major bump.
+Failing closed addresses that state without supporting old protocol paths.
+Do not describe the rollout as guaranteed synchronized installation.
+
+Only for a release that bumps `protocolMajor`, prepare affected artifacts from
+the same release source and hold publication of the desktop/host draft until
+the matching iOS build is actually available through the selected distribution
+channel. Upload success alone is not readiness. Releases without a major bump
+do not wait for iOS, including harmless additive wire changes. The major-bump
+gate reduces the unavailable-update window, but user-paced adoption still
+leaves some old iOS installations unable to connect. Document that consequence
+in release notes. Do not quietly implement compatibility arms to avoid it.
+
+## 5. Implementation phases and acceptance gates
+
+### Phase 0 — isolated sharing and documentation
+
+- Update the design and decisions in the first implementation commit as
+  described in section 1.
+- Extract Markdown, agent labels and suitable palette data into the shared
+  packages; change desktop and mobile consumers together. Extract notification
+  primitives only where their current behavior is equivalent.
+- Land this as a separate change from iOS transport and lifecycle work. It
+  does not depend on an Apple account or native iOS build.
+
+Gate: desktop/mobile tests preserve rendering, sanitization, labels and palette
+outputs. Type checks and WebView generation checks pass on Linux. Any desktop
+regression is resolved before starting the iOS lifecycle change.
+
+### Phase 1 — native feasibility and CI
+
+- Separate SSH transport from Android service/timer concerns before adding the
+  iOS adapter. Verify the separation on Linux and Android, preserving the
+  existing foreground service, native wake timers and Disconnect action.
+- Add iOS Expo configuration, provisional bundle ID `dev.muxflow.mobile`,
+  native-module registration and reproducible native project generation.
+- Select a supported deployment target and pin a compatible GitHub macOS
+  image/Xcode combination based on the installed Expo/RN versions.
+- Add a simulator build containing its JavaScript bundle so QA does not rely
+  on a development server outside the runner.
+- Prototype the SSH implementation before committing to a library. Check
+  maintenance, licensing, supported algorithms and native build integration.
+- Start Apple account/signing setup in parallel so device validation can run
+  in Phase 2. Use internal TestFlight for the first device build; final
+  TestFlight-only versus App Store distribution remains an open decision.
+- Include `NSLocalNetworkUsageDescription` in the first LAN-capable build,
+  not only after the permission is encountered during later feature QA.
+
+Library spike gate: a simulator prototype demonstrates `none` authentication
+with no phone key, Ed25519 public-key authentication, a host-key verification
+callback, two independent exec channels on one authenticated transport, and
+keepalive-based loss detection. Use this small gate to select the library
+before implementing the entire module and application integration.
+
+Full contract gate: a real simulator app builds, installs and launches without
+an Apple account; the native SSH adapter meets the transport/event contract
+exposed by `MuxflowSsh.ts` after separating Android service/timer methods, with
+Android's `SshSession.kt` as the behavior reference:
+
+- Offer SSH `none` authentication first, then Ed25519 public-key authentication
+  when a key exists and the server offers it. A server accepting `none`, such
+  as a Tailscale SSH host, must work with no phone key. Do not force key
+  generation before such a connection, or add password authentication.
+- Validate SHA-256 host-key fingerprints, including initial trust,
+  rejection and changed-key refusal; `none` auth does not bypass host trust.
+- Detect lost links using keepalives equivalent to the current 15-second
+  interval and three unanswered probes, without timing out a healthy idle
+  bridge. Treat this as a detection policy, not an exact 45-second wall clock.
+- Emit all seven close reasons accurately: `hostKeyNotTrusted`,
+  `hostKeyMismatch`, `authFailed`, `connectFailed`, `exited`,
+  `closedByClient` and `networkLost`.
+- Deliver stderr diagnostics and exit status, including command-not-found
+  status 127 and a null status when none was obtained, without mixing stderr
+  into the binary stdout stream or dropping it before the close event.
+- Preserve per-channel ordered writes and the facade's chunking contract:
+  at most 65,536 base64 characters (48 KiB decoded) per native write. A failed
+  write must not wedge later writes or corrupt another channel.
+- Run the host bridge and keep control/bulk exec channels independent on one
+  authenticated transport, including independent channel close and cleanup.
+
+Reject the transport choice if it cannot meet the existing contract. Do not
+weaken authentication or host-key verification to make the prototype pass.
+
+### Phase 2 — lifecycle and early physical-device validation
+
+- Implement iOS key generation and Keychain storage with
+  `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, no iCloud synchronization,
+  and stable app-owned service/account identifiers. Private key material stays
+  native. This accessibility class permits access only while unlocked and
+  does not migrate the item to another device; no background reauthentication
+  while locked is required by the initial lifecycle policy.
+- On reinstall, reuse an existing accessible SSH key under those identifiers;
+  do not rotate it just because application files were removed. Keychain
+  persistence across uninstall is not a guarantee, so handle an absent item
+  as no key without silently generating one. Explicit Delete/Replace removes
+  the app-owned item; verify deletion and reinstall/reuse on an iPhone.
+- Add the background/foreground behavior from section 4, including prevention
+  of duplicate dials, stale channel callbacks and unintended reconnect after
+  user disconnect. Start with teardown-and-reconnect, measure time to a usable
+  terminal on device, and add the specified grace only if brief switches prove
+  annoying.
+- Implement the strict admission/update experience from section 4 using the
+  existing major check. Add both mismatch-direction and same-major additive
+  behavior tests, with released baselines and the two-direction wire review;
+  do not add a second compatibility mechanism.
+- Produce a signed internal TestFlight build by the end of this phase and
+  validate brief app switches, locking/unlocking, longer background periods,
+  network loss and explicit disconnect on an iPhone.
+- Include LAN permission grant/denial/recovery in this early device pass. Do
+  not interpret a generic socket failure as proof of permission denial.
+
+Gate: lifecycle tests cover interrupted dials, host-key prompts, transient
+inactive states, user disconnect, reconnect, control epoch changes and
+independent bulk-channel failures. A real iPhone demonstrates the lifecycle
+behavior and records reconnect timing; simulator switching is insufficient.
+Grace/expiration races become an additional gate only if grace is implemented.
+If credentials or device access are unavailable, other work can proceed, but
+this gate stays open and the lifecycle milestone is not complete. Android and
+desktop checks continue to pass.
+
+### Phase 3 — existing mobile features on iOS
+
+- Configure icons and microphone/notification permission text.
+- Verify the Local Network system prompt, denial, Settings recovery and
+  subsequent reconnect on an iPhone, using the permission text added in
+  Phase 1; the simulator does not enforce Local Network privacy.
+  Keep the seven SSH close reasons unchanged. When native APIs cannot identify
+  denial reliably, show a conditional Local Network Settings hint alongside
+  connection diagnostics rather than labeling every `connectFailed` a denial.
+- Implement iOS font registration. `expo-font` currently has only Android
+  configuration; register bundled JetBrains Mono faces for iOS, determine
+  their actual family/PostScript names and map regular/bold text appropriately.
+  Verify native Text and WebView fonts separately.
+- Replace Android-only toasts and service wiring with platform adapters.
+- Adapt notifications, permission handling and update destinations. iOS must
+  not offer Android release artifacts as an update path.
+- Validate terminal WebView startup, sizing, keyboard insets, safe areas,
+  rotation, selection/copy, links, alternate-screen scrolling and input.
+- Make the embedded WebView bundles target the supported Safari/WKWebView
+  version as well as Android's WebView.
+- Validate file listing, plain text and sanitized Markdown rendering.
+- Validate voice recording, interruption, playback and foreground re-register
+  behavior. Retain platform audio options where required.
+
+Gate: hosts, agents, terminal, files and voice are usable on iOS within the
+first milestone's lifecycle limits. No Android or desktop regression is
+accepted as the cost of sharing code.
+
+### Phase 4 — end-to-end evidence and distribution readiness
+
+- Complete the simulator harness described below and run it in Actions.
+- Save app screenshots, relevant logs and test results as workflow artifacts.
+- Run shared/mobile checks, protocol/WebView generation checks and affected
+  desktop/Rust tests.
+- Extend the signed-device path already used in Phase 2 for the chosen
+  distribution channel. Final device QA covers keyboard, fonts, rotation,
+  audio interruptions/routes, notification presentation and permission recovery.
+- Integrate iOS version/build checks and distribution readiness into release
+  preparation as described in section 7. Hold the desktop/host draft only
+  when the major bumps; releases without a bump do not wait for iOS. Test
+  both mismatch/update directions and same-major additive behavior with actual
+  released builds, not just mocked hello frames.
+
+Gate: report exactly which flows ran and passed. Failed, unavailable or
+unimplemented checks remain explicit blockers rather than assumed coverage.
+
+### Phase 5 — background push
+
+Implement the specification from section 4 after its scope and infrastructure
+are settled. Test host-to-relay authorization, delivery, deduplication and tap
+routing, then validate real background alerts on an iPhone.
+
+Gate: an agent transition while the app is backgrounded can produce an alert;
+tapping it reconnects and opens the correct current target. Document offline,
+stale-event and notification-permission behavior.
+
+## 6. QA that can run from Linux
+
+The proposed simulator activity is **automated end-to-end QA**, not an
+interactive manual session with a remote simulator desktop. It does not need
+an Apple Developer account.
+
+A GitHub Actions macOS job will:
+
+1. Build the simulator app with Xcode.
+2. Use `xcrun simctl` to boot a compatible simulator, install the app and
+   launch it.
+3. Start an isolated SSH/tmux/Muxflow-host fixture reachable from that
+   simulator, with disposable keys and deterministic terminal/agent state.
+4. Run a CLI UI driver such as Maestro locally on the runner. It can tap
+   controls, enter text, inspect the accessibility hierarchy and capture
+   screenshots. No Maestro Cloud account is needed for local CLI execution.
+5. Drive host setup, verify the presented host-key fingerprint, connect,
+   open a terminal, send a command with a distinctive result, and check
+   input/output through the real SSH transport. Use fixture observations as
+   well as UI evidence where xterm's canvas has no accessible text nodes.
+   Include both a key-based fixture and a server accepting SSH `none` with
+   no phone key. The latter verifies the auth path; it does not alone prove
+   real Tailscale identity/routing behavior. Validate a real tailnet host in
+   device QA where one is available.
+6. Exercise files/Markdown, switch away and reopen the app, and confirm
+   state reconciliation and terminal reattachment. Force a transport loss
+   to test recovery independently of simulator suspension behavior.
+7. Collect screenshots, logs and reports for inspection from Linux.
+
+Build and prove a minimal launch/tap/screenshot flow before expanding this
+harness. Maestro is a candidate, not a confirmed working integration in this
+repository. If it cannot exercise an essential control reliably, evaluate the
+smallest suitable XCTest UI flow instead of bypassing the product surface.
+
+Simulator app switching is not proof of real iOS suspension timing, process
+termination, lock-screen delivery, hardware keyboard behavior, microphone
+quality, Bluetooth routing, Local Network permission or haptic behavior.
+Start hands-on device QA in Phase 2 and expand it in later phases. Simulator
+artifacts can support visual inspection, but do not replace that device QA.
+
+## 7. Inputs and open decisions
+
+| Input or decision | Needed when |
+| --- | --- |
+| Whether background alerts are required in the first shipped release | Before fixing release scope; the foreground client can be developed independently. |
+| TestFlight-only versus App Store distribution | Decide before release automation is finalized. Recommend staying on internal TestFlight while the protocol changes often, then reassessing broader distribution. It reduces review friction but does not eliminate user-paced adoption or major-mismatch refusal. External TestFlight may require beta review and builds expire after 90 days; an App Store release needs its own review/readiness gate. |
+| Accepting missed voice replies during lock/suspension | Decide before the first milestone is called ready. Default scope preserves existing live delivery, without a durable inbox. If missed replies are unacceptable, plan host-side bounded retention/replay as a separate product/protocol change; APNs alerts alone do not recover voice audio. |
+| SSH library and supported iOS/Xcode versions | Resolve through the initial feasibility phase; no user decision required unless a material tradeoff appears. |
+| Bundle ID | Use `dev.muxflow.mobile` provisionally; confirm availability before Apple registration. |
+| Apple Developer membership and team ID | Begin setup during Phase 1; required for the chosen signed TestFlight path and the Phase 2 device gate. |
+| Signing certificate/profile and App Store Connect credentials in GitHub secrets | Before the Phase 2 signed build. Do not paste private keys into chat. |
+| Encryption export declaration | Resolve before the first TestFlight upload, including the selected SSH library and third-party crypto. Determine the required declaration/documents and set `ITSAppUsesNonExemptEncryption` accurately; do not assume an SSH app uses only exempt OS encryption. |
+| An iPhone and user participation | By Phase 2 for lifecycle and LAN permission; later for audio and background alerts. |
+| Push relay ownership, hosting and APNs credentials | Before the push milestone. |
+
+### Versioning and release integration
+
+- Keep the shared `X.Y.Z` app/helper version managed by
+  `release/set-version.sh`. Set the iOS marketing version from that same
+  value; do not give iOS a separate product semver.
+- Extend that script to accept and persist an explicit Apple-valid,
+  monotonically increasing `ios.buildNumber` separately from Android's
+  semver-derived `versionCode`. Extend `release/check-version.sh` to validate
+  the iOS fields and fail when they are missing or inconsistent.
+- Allocate a new build number for each distinct binary uploaded, including
+  rebuilt/release-candidate binaries under the same marketing version.
+  Re-running an upload of the same artifact must reuse the artifact or skip
+  the existing upload, not rebuild different bytes under the same number.
+  Do not derive this number solely from `X.Y.Z` or a workflow attempt count.
+- Extend `release.yml` or a dedicated iOS workflow to build/upload from the
+  release source, validate the recorded versions and capture the App Store
+  Connect build identifier. Native prebuild must retain the recorded number.
+  Source changes needed for a rejected build require a new release candidate
+  for affected artifacts, not a silent iOS-only wire change. Assess any wire
+  change in both directions under the bump rule in section 4; a new candidate or new build
+  number alone is not a reason to bump the major.
+- Record per-channel install/update destinations and readiness separately
+  from the existing Android/Desktop GitHub release manifest. Follow the
+  major-bump release gate in section 4. A release without a major bump does
+  not wait for iOS readiness; App Store processing or review is not a
+  synchronous successful GitHub job.
+
+Neither a personal Mac nor an Expo account is required for the proposed
+GitHub Actions build path.
+
+## 8. References
+
+- [Existing mobile design](design.md), [decisions](decisions.md), and
+  [voice plan](voice-mode-plan.md).
+- [Native SSH facade](../../apps/mobile/src/ssh/MuxflowSsh.ts),
+  [Android auth/keepalive/channel behavior](../../apps/mobile/modules/muxflow-ssh/android/src/main/java/dev/muxflow/ssh/SshSession.kt),
+  [connection manager](../../apps/mobile/src/session/connectionManager.ts),
+  and [Android Expo module](../../apps/mobile/modules/muxflow-ssh).
+- [Mobile contract validation](../../apps/mobile/src/protocol/contract.ts),
+  [mobile handshake](../../apps/mobile/src/protocol/HostConnection.ts), and
+  [shared Rust contract](../../crates/protocol/src/lib.rs).
+- [Desktop helper artifact comparison](../../apps/desktop/src-tauri/src/connection/helper.rs).
+- [Shared terminal interactions](../../packages/terminal-interactions).
+- [Current CI](../../.github/workflows/ci.yml) and
+  [release workflow](../../.github/workflows/release.yml).
+- [Release version writer](../../release/set-version.sh) and
+  [release version checks](../../release/check-version.sh).
+- [Expo simulator builds: no Apple Developer account required](https://docs.expo.dev/build-reference/simulators/).
+- [Expo native modules](https://docs.expo.dev/modules/overview/).
+- [GitHub macOS runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+- [Apple Xcode command-line tools](https://developer.apple.com/documentation/xcode/xcode-command-line-tool-reference).
+- [Maestro iOS support](https://docs.maestro.dev/get-started/supported-platform/ios)
+  and [how it drives UI](https://docs.maestro.dev/get-started/how-maestro-works).
+- [Apple background execution limits](https://developer.apple.com/forums/thread/685525).
+- [Apple finite background task guidance](https://developer.apple.com/forums/thread/85066/).
+- [Keychain accessibility class](https://developer.apple.com/documentation/security/ksecattraccessiblewhenunlockedthisdeviceonly)
+  and [uninstall/persistence caveat](https://developer.apple.com/forums/thread/36442).
+- [Protobuf unknown-field behavior](https://protobuf.dev/programming-guides/proto3/#unknowns).
+- [Apple Local Network privacy, including simulator limitations](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
+- [TestFlight review and build expiration](https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview/).
+- [App Store Connect version/build identification](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/).
+- [Encryption export declarations](https://developer.apple.com/help/app-store-connect/manage-app-information/overview-of-export-compliance).
+- [Apple remote notification servers](https://developer.apple.com/documentation/usernotifications/setting-up-a-remote-notification-server).
