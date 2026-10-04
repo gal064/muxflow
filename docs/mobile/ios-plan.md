@@ -593,10 +593,12 @@ keepalive sends. All 597 mobile tests passed, including the real helper/tmux
 terminal and file suites; both desktop/mobile TypeScript checks passed.
 Additional tests freeze the real generated descriptor from released `v0.1.9`
 (`e48f46c`) for same-major unknown-field decoding in both directions. Those
-codec tests do not claim a released iPhone binary has been exercised. There
+codec tests do not claim a released iPhone binary has been exercised. The
+current mobile live terminal/file suites also passed against the actual
+SHA-256-verified Linux helper asset from the published `v0.1.9` release. There
 are no wire changes in this implementation and the major remains 4.
 
-`.github/workflows/ios.yml` selects Xcode 26.3 on `macos-15`. It runs the native
+`.github/workflows/ios.yml` selects Xcode 26.6 on `macos-26`. It runs the native
 engine harness, builds an unsigned standalone simulator app, then drives
 host setup, host-key trust, terminal input, Markdown and foreground reconnect
 with local Maestro 2.11.0 and the real helper/tmux. It includes keyless none
@@ -613,3 +615,15 @@ team, signing/App Store Connect inputs, export declaration and distribution
 choice. The real-iPhone lifecycle/LAN/audio/notification gates are still open.
 Push delivery and the missed-voice-reply product decision remain separate open
 scope; this work does not claim either milestone is ready to ship.
+
+
+The native contract suite passed in Actions run
+[37176795634](https://github.com/gal064/muxflow/actions/runs/37176795634),
+including all seven reasons, delayed auth/cancellation, rekey pins, binary
+writes, bounded EOF and cancelled-open cleanup, and healthy-idle/lost-link
+keepalives. That run's app build failed in ExpoModulesJSI before simulator
+installation, so it supplies no UI evidence. SDK 57 requires Xcode 26.4+;
+the job now selects 26.6. A narrow package patch removes invalid ownership
+annotations from the pinned ExpoModulesJSI constructors, as described in the
+[upstream issue](https://github.com/expo/expo/issues/49214). Simulator QA remains
+open until the updated app build and real UI flows pass.

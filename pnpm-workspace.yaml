@@ -33,6 +33,12 @@ allowBuilds:
 # count (bounded to 5 rows per DOM event), and repeats the encoded report inside
 # the single existing data event so N rows still cost one input round trip.
 # Drop it if a later xterm release fixes this upstream.
+# ExpoModulesJSI 57.0.5 annotates constructors with SWIFT_RETURNS_RETAINED,
+# which Xcode 26 rejects. Constructors already return an owned instance; keep
+# the class ownership annotation and remove only these two invalid attributes.
+# Remove this patch when upgrading to an upstream fix:
+# https://github.com/expo/expo/issues/49214
 patchedDependencies:
   '@xterm/addon-webgl@0.19.0': patches/@xterm__addon-webgl@0.19.0.patch
   '@xterm/xterm@6.0.0': patches/@xterm__xterm@6.0.0.patch
+  expo-modules-jsi@57.0.5: patches/expo-modules-jsi@57.0.5.patch

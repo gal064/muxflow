@@ -4,6 +4,7 @@ set -euo pipefail
 mobile_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 repo_root=$(cd "$mobile_root/../.." && pwd)
 command -v xcodebuild >/dev/null || { echo 'iOS builds require macOS and Xcode.' >&2; exit 1; }
+"$repo_root/release/check-version.sh"
 cd "$mobile_root"
 pnpm exec expo prebuild --platform ios --no-install
 (cd ios && pod install)

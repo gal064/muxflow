@@ -7,6 +7,14 @@ on:
     paths:
       - 'apps/mobile/**'
       - 'packages/**'
+      - 'apps/host/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'patches/**'
+      - 'release/**'
       - 'pnpm-lock.yaml'
       - 'tests/mobile/ios/**'
       - '.github/workflows/ios.yml'
@@ -14,6 +22,14 @@ on:
     paths:
       - 'apps/mobile/**'
       - 'packages/**'
+      - 'apps/host/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'patches/**'
+      - 'release/**'
       - 'pnpm-lock.yaml'
       - 'tests/mobile/ios/**'
       - '.github/workflows/ios.yml'
@@ -27,10 +43,10 @@ concurrency:
 
 jobs:
   simulator:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 90
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       NODE_OPTIONS: --max-old-space-size=6144
       # The pinned pod supports prebuilt OpenSSL artifacts; libssh2 builds locally.
       OPENSSL_DOWNLOAD: '1'
