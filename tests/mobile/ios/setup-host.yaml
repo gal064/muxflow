@@ -60,9 +60,9 @@ appId: dev.muxflow.mobile
 # Files navigation blurs the terminal input and dismisses its keyboard.
 - tapOn: Files
 - extendedWaitUntil:
-    visible: '^README\.md,.*'
+    visible: '.*README\.md,.*'
     timeout: 30000
-- tapOn: '^README\.md,.*'
+- tapOn: '.*README\.md,.*'
 - extendedWaitUntil:
     visible: iOS fixture document
     timeout: 30000
