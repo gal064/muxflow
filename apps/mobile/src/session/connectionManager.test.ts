@@ -1,9 +1,15 @@
+import { create } from "@bufbuild/protobuf";
+import { VoiceSpeechSchema } from "../protocol/gen/envelope_pb";
+import { voiceRegistry } from "../features/voice/voiceRegistry";
+import { voiceStore } from "../features/voice/voiceStore";
+import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder } from "../features/voice/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../protocol/testing/fakeTransport";
 import { sessionStore } from "../store/sessionStore";
 import type { SavedHost } from "../store/hostsStore";
-import { createMuxflowSsh, type NativeMuxflowSshModule } from "../ssh/MuxflowSsh";
-import { connectHost, disconnectHost, getConnection, onToast, openBulkConnection, setForegroundService, setTransportFactory, toast } from "./connectionManager";
+import { type NativeMuxflowSshModule } from "../ssh/MuxflowSsh";
+import { createAndroidConnectionServices, type NativeAndroidConnectionServices } from "./AndroidConnectionServices";
+import { connectHost, disconnectHost, getConnection, onToast, openBulkConnection, setConnectionAppActive, setForegroundService, setTransportFactory, toast } from "./connectionManager";
 import { logStore } from "./log";
 
 const host: SavedHost = { id: "h1", label: "Dev box", host: "dev.local", port: 22, user: "dev", trustedHostKeyFingerprint: null, connectionEpoch: 0, lastConnectedAtMs: null };
@@ -14,7 +20,7 @@ function fakeNative() {
   const disconnectListeners = new Set<(payload: unknown) => void>();
   const notifications: Array<[string, string]> = [];
   const unsupported = () => Promise.reject(new Error("not part of this fake"));
-  const native: NativeMuxflowSshModule = {
+  const native: NativeMuxflowSshModule & NativeAndroidConnectionServices = {
     generateKeyPair: unsupported,
     getPublicKey: unsupported,
     deleteKeyPair: unsupported,
@@ -48,6 +54,7 @@ describe("connectionManager", () => {
   const dials: Array<{ lane: string; transport: FakeTransport }> = [];
   let fake: ReturnType<typeof fakeNative>;
   beforeEach(() => {
+    setConnectionAppActive(true);
     vi.useFakeTimers();
     dials.length = 0;
     setTransportFactory(async (_host, lane) => {
@@ -56,10 +63,11 @@ describe("connectionManager", () => {
       return transport;
     });
     fake = fakeNative();
-    setForegroundService(createMuxflowSsh(fake.native));
+    setForegroundService(createAndroidConnectionServices(fake.native));
   });
   afterEach(async () => {
     await disconnectHost();
+    setConnectionAppActive(true);
     setForegroundService(undefined);
     vi.useRealTimers();
   });
@@ -82,6 +90,91 @@ describe("connectionManager", () => {
     expect(sessionStore.getState().connection).toMatchObject({ state: "connected", host: { label: "Dev box" } });
     expect(getConnection()?.connectionEpoch).toBe(epoch);
     expect(epoch).toBeGreaterThanOrEqual(1n);
+  });
+
+  it("tears down both lanes on iOS background and admits a fresh control epoch on resume", async () => {
+    const { control, epoch } = await connectControl();
+    const pending = openBulkConnection();
+    await settle();
+    dials[1]!.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: epoch }) }, { requestId: 1n }));
+    await pending;
+    setConnectionAppActive(false);
+    expect(control.closed).toBe(true);
+    expect(dials[1]!.transport.closed).toBe(true);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(dials).toHaveLength(2);
+    setConnectionAppActive(true);
+    setConnectionAppActive(true);
+    await settle();
+    expect(dials).toHaveLength(3);
+    const resumed = getConnection()!;
+    expect(resumed.connectionEpoch).toBeGreaterThan(epoch);
+    dials[2]!.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: resumed.connectionEpoch }) }, { requestId: 1n }));
+    dials[2]!.transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
+    await settle();
+    expect(sessionStore.getState().connection.state).toBe("connected");
+  });
+
+  it("retains voice history/audio and server identity until foreground reconciliation", async () => {
+    await connectControl();
+    const voiceConnection = new FakeConnection();
+    const controller = voiceRegistry.open({
+      serverIdentity: "server-a", paneId: "%1", sessionId: "$1",
+      getConnection: () => voiceConnection.asHostConnection(),
+      recorder: new FakeRecorder(), player: new FakePlayer(), files: new FakeFiles(), appInForeground: () => false,
+    });
+    controller.onVoiceReply(create(VoiceSpeechSchema, { paneId: "%1", displayMarkdown: "Keep this reply", speechText: "Keep this reply", audio: new Uint8Array([1, 2]), audioMime: "audio/mpeg" }));
+    await settle();
+    const messages = voiceStore.getState().sessions["%1"]!.messages;
+    expect(messages[0]?.fileUri).toBeDefined();
+    setConnectionAppActive(false);
+    expect(sessionStore.getState().serverIdentity).toBe("server-a");
+    expect(voiceRegistry.get("%1")).toBe(controller);
+    setConnectionAppActive(true);
+    await settle();
+    const connection = getConnection()!;
+    dials[1]!.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello({ connectionEpoch: connection.connectionEpoch }) }, { requestId: 1n }));
+    dials[1]!.transport.feed(hostEnvelope({ case: "response", value: okResponse({ snapshot: topologySnapshot() }) }, { requestId: 2n }));
+    await settle();
+    expect(controller.isDisposed).toBe(false);
+    expect(voiceRegistry.get("%1")).toBe(controller);
+    expect(voiceStore.getState().sessions["%1"]!.messages).toEqual(messages);
+  });
+
+  it("does not resume after an explicit disconnect during background", async () => {
+    await connectControl();
+    setConnectionAppActive(false);
+    await disconnectHost();
+    setConnectionAppActive(true);
+    await settle();
+    expect(dials).toHaveLength(1);
+    expect(getConnection()).toBeNull();
+  });
+
+  it.each([3, 5])("does not let resume retry a protocol-major %s refusal", async (protocolMajor) => {
+    const pending = connectHost(host).catch((error: Error) => error);
+    await settle();
+    dials[0]!.transport.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n, protocolMajor }));
+    expect(await pending).toBeInstanceOf(Error);
+    setConnectionAppActive(false);
+    setConnectionAppActive(true);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(dials).toHaveLength(1);
+    expect(sessionStore.getState().connection.state).toBe("incompatible");
+  });
+
+  it("cancels a pending dial before suspension and ignores its late transport", async () => {
+    let finishDial!: (transport: FakeTransport) => void;
+    setTransportFactory(() => new Promise((resolve) => { finishDial = resolve; }));
+    const pending = connectHost(host).catch((error: Error) => error);
+    await settle();
+    setConnectionAppActive(false);
+    expect(await pending).toBeInstanceOf(Error);
+    const transport = new FakeTransport();
+    finishDial(transport);
+    await settle();
+    expect(transport.closed).toBe(true);
+    expect(sessionStore.getState().connection.state).toBe("idle");
   });
 
   it("shows host-provided toast text without copying that content into diagnostics", () => {

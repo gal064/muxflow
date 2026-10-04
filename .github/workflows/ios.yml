@@ -1,0 +1,77 @@
+name: ios
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/ios-mobile]
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
+      - 'tests/mobile/ios/**'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
+      - 'tests/mobile/ios/**'
+      - '.github/workflows/ios.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  simulator:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      NODE_OPTIONS: --max-old-space-size=6144
+      # The pinned pod supports prebuilt OpenSSL artifacts; libssh2 builds locally.
+      OPENSSL_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: astral-sh/setup-uv@v6
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available
+          pod --version
+      - name: Native SSH contract
+        run: bash tests/mobile/ios/check-native.sh
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm mobile:check
+      - name: Install simulator UI driver
+        run: |
+          curl --fail --location --retry 3 https://github.com/mobile-dev-inc/maestro/releases/download/cli-2.11.0/maestro.zip -o "$RUNNER_TEMP/maestro.zip"
+          unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/maestro/bin" >> "$GITHUB_PATH"
+      - name: Build fixture host
+        run: |
+          brew install tmux ripgrep
+          cargo build --locked -p muxflow-host
+      - name: Build standalone simulator app
+        run: pnpm mobile:ios:simulator > "$RUNNER_TEMP/ios-build.log" 2>&1
+      - name: Install and launch
+        run: bash tests/mobile/ios/launch-simulator.sh
+      - name: SSH, terminal, Markdown and resume UI flows
+        run: bash tests/mobile/ios/test-simulator.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-simulator-evidence
+          path: |
+            ${{ runner.temp }}/ios-build.log
+            tmp/ios-evidence/
+            tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
+          if-no-files-found: warn

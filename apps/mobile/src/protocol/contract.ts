@@ -13,7 +13,7 @@ export function validateHostContract(envelopeMajor: number): HostContractRefusal
     return {
       kind: "protocolMajor",
       advertised: envelopeMajor,
-      message: `This host's Muxflow helper speaks protocol v${envelopeMajor}; this app needs v${PROTOCOL_MAJOR}. Update the app or the helper from Muxflow desktop.`,
+      message: `This host's Muxflow helper speaks protocol v${envelopeMajor}; this app needs v${PROTOCOL_MAJOR}. Update Muxflow on this phone, or update the helper from Muxflow desktop.`,
     };
   }
   return undefined;

@@ -26,6 +26,9 @@
         {
           "android": {
             "minSdkVersion": 26
+          },
+          "ios": {
+            "deploymentTarget": "16.4"
           }
         }
       ],
@@ -34,7 +37,8 @@
       [
         "expo-audio",
         {
-          "enableBackgroundPlayback": false
+          "enableBackgroundPlayback": false,
+          "microphonePermission": "Record speech to send to your coding agent."
         }
       ],
       "expo-secure-store",
@@ -64,13 +68,28 @@
                 ]
               }
             ]
+          },
+          "ios": {
+            "fonts": [
+              "./assets/fonts/JetBrainsMono-Regular.ttf",
+              "./assets/fonts/JetBrainsMono-Bold.ttf"
+            ]
           }
         }
       ],
-      "./plugins/withReleaseSigning"
+      "./plugins/withReleaseSigning",
+      "./plugins/withLibssh2"
     ],
     "experiments": {
       "typedRoutes": false
+    },
+    "ios": {
+      "bundleIdentifier": "dev.muxflow.mobile",
+      "buildNumber": "1",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Muxflow connects to your development hosts over SSH on your local network."
+      }
     }
   }
 }

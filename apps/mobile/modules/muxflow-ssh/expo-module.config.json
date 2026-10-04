@@ -1,5 +1,8 @@
 {
-  "platforms": ["android"],
+  "platforms": ["android", "ios"],
+  "apple": {
+    "modules": ["MuxflowSshModule"]
+  },
   "android": {
     "modules": ["dev.muxflow.ssh.MuxflowSshModule"]
   }

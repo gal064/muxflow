@@ -16,14 +16,14 @@ import { terminalRegistry } from "../features/terminal/terminalRegistry";
 import { filesStore } from "../features/files/filesStore";
 import { connectedNotificationText, reconnectingNotificationText } from "../features/hosts/connectionLabels";
 import { notificationAttention } from "../features/notifications/attention";
-import type { MuxflowSsh } from "../ssh/MuxflowSsh";
+import type { AndroidConnectionServices } from "./AndroidConnectionServices";
 import { backgroundTimer } from "./backgroundTimer";
 import { voiceRegistry } from "../features/voice/voiceRegistry";
 import { log } from "./log";
 
 export type Lane = "control" | "bulk";
 export type TransportFactory = (host: SavedHost, lane: Lane, signal?: AbortSignal) => Promise<Transport>;
-export type ForegroundService = Pick<MuxflowSsh, "setServiceNotification" | "addDisconnectListener">;
+export type ForegroundService = Pick<AndroidConnectionServices, "setServiceNotification" | "addDisconnectListener">;
 
 /** §6.3: the ongoing notification's title. */
 export const SERVICE_NOTIFICATION_TITLE = "Muxflow";
@@ -33,6 +33,8 @@ let service: ForegroundService | undefined;
 let unwireService: (() => void) | undefined;
 let control: HostConnection | null = null;
 let controlHost: SavedHost | null = null;
+let resumeHost: SavedHost | null = null;
+let suspended = false;
 let bulk: { epoch: bigint; connection: HostConnection; store: SessionStore; ready: Promise<HostConnection> } | null = null;
 const listeners = new Set<(transition: AgentTransition) => void>();
 const toasts = new Set<(message: string) => void>();
@@ -127,7 +129,10 @@ export async function connectHost(host: SavedHost): Promise<void> {
   if (!factory) throw new Error("no transport factory: call setTransportFactory first");
   // A reconnect to the same host keeps the voice sessions: their host-side
   // registrations are per connection and are re-sent on `onConnected`.
-  await disconnectHost({ keepVoiceSessions: controlHost?.id === host.id });
+  if (suspended) throw new Error("app is in the background");
+  const resuming = control === null && resumeHost?.id === host.id;
+  closeHostConnection({ keepVoiceSessions: controlHost?.id === host.id || resuming, keepHostState: resuming });
+  resumeHost = host;
   const dial = factory;
   controlHost = host;
   const connection = new HostConnection({
@@ -218,7 +223,29 @@ export function openBulkConnection(): Promise<HostConnection> {
   return ready;
 }
 
-export async function disconnectHost({ keepVoiceSessions = false }: { keepVoiceSessions?: boolean } = {}): Promise<void> {
+/** iOS ships teardown first; a measured device gate decides whether grace is needed. */
+export function setConnectionAppActive(active: boolean): void {
+  if (active === !suspended) return;
+  suspended = !active;
+  if (!active) {
+    // Fatal admission/auth outcomes remain visible and never become resume retries.
+    if (!control || control.state === "failed" || control.state === "incompatible" || control.state === "idle") {
+      resumeHost = null;
+      return;
+    }
+    closeHostConnection({ keepVoiceSessions: true, keepHostState: true });
+    return;
+  }
+  const host = resumeHost;
+  if (host) void connectHost(host).catch(() => { /* The connection store shows the outcome. */ });
+}
+
+export async function disconnectHost(options: { keepVoiceSessions?: boolean } = {}): Promise<void> {
+  resumeHost = null;
+  closeHostConnection(options);
+}
+
+function closeHostConnection({ keepVoiceSessions = false, keepHostState = false }: { keepVoiceSessions?: boolean; keepHostState?: boolean } = {}): void {
   dropBulk();
   const connection = control;
   control = null;
@@ -227,8 +254,8 @@ export async function disconnectHost({ keepVoiceSessions = false }: { keepVoiceS
   filesStore.getState().clearAll();
   // Voice sessions are registered per connection on the host; without one (or on another host) they are dead weight.
   if (!keepVoiceSessions) voiceRegistry.disposeAll();
-  sessionStore.getState().clearHostState();
-  sessionStore.getState().setConnection({ state: "idle", attempt: 0, message: undefined, host: undefined });
+  if (!keepHostState) sessionStore.getState().clearHostState();
+  sessionStore.getState().setConnection({ state: "idle", attempt: 0, message: undefined, ...(keepHostState ? {} : { host: undefined }) });
 }
 
 function dropBulk(): void {

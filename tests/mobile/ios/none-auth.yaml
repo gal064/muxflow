@@ -1,0 +1,13 @@
+appId: dev.muxflow.mobile
+---
+- launchApp:
+    clearState: true
+    clearKeychain: true
+    permissions:
+      notifications: allow
+- assertVisible: No hosts yet
+- tapOn: Your SSH key
+- assertVisible: This phone has no SSH key.*
+- takeScreenshot: no-phone-key
+- tapOn: Back
+- runFlow: setup-host.yaml

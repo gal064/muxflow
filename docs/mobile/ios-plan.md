@@ -2,7 +2,8 @@
 
 Status: implementation started on `feat/ios-mobile`. Phase 0 shared sources
 and documentation have passed independent review and affected existing tests.
-Native iOS implementation and simulator/device QA have not yet run.
+The native iOS implementation and simulator harness are written. Apple builds
+and device QA remain unverified; see implementation evidence below.
 
 ## 1. Objective and scope
 
@@ -564,3 +565,51 @@ GitHub Actions build path.
 - [App Store Connect version/build identification](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/).
 - [Encryption export declarations](https://developer.apple.com/help/app-store-connect/manage-app-information/overview-of-export-compliance).
 - [Apple remote notification servers](https://developer.apple.com/documentation/usernotifications/setting-up-a-remote-notification-server).
+
+
+## 8. Implementation evidence
+
+Work is on `feat/ios-mobile`; the shared-source extraction is commit `2773203`.
+The implementation keeps the mobile protocol client, screens, terminals,
+files and voice in TypeScript. Android service/wake APIs have a separate
+adapter; iOS uses JS timers and immediate background teardown with foreground
+reconnect. Retained voice conversations survive that reconnect. The optional
+five-second grace remains deferred to measured iPhone behavior.
+
+The native candidate is libssh2 1.11.1 through the pinned Apple build
+`libssh2-iosx` 1.11.1.0 with OpenSSL `openssl-iosx` 3.5.9.1. Contract patches
+preserve exit-status presence, enforce the approved host pin during rekey,
+retain/retry keepalive packets and permit channel cleanup without waiting for
+a remote close acknowledgement. Pending outbound operations retain their
+original arguments until completed; channel-open replies are bounded to ten
+seconds after authentication, and EOF/status wait is bounded to five seconds.
+The native harness exercises these behaviors against an isolated SSH server;
+changing dependency pins requires rerunning that harness and simulator flows.
+Private keys remain native in Keychain under the specified accessibility class.
+
+Linux evidence so far: the library spike passed none and Ed25519 auth,
+host-key comparison, independent channels, stderr/status presence and
+keepalive sends. All 597 mobile tests passed, including the real helper/tmux
+terminal and file suites; both desktop/mobile TypeScript checks passed.
+Additional tests freeze the real generated descriptor from released `v0.1.9`
+(`e48f46c`) for same-major unknown-field decoding in both directions. Those
+codec tests do not claim a released iPhone binary has been exercised. There
+are no wire changes in this implementation and the major remains 4.
+
+`.github/workflows/ios.yml` selects Xcode 26.3 on `macos-15`. It runs the native
+engine harness, builds an unsigned standalone simulator app, then drives
+host setup, host-key trust, terminal input, Markdown and foreground reconnect
+with local Maestro 2.11.0 and the real helper/tmux. It includes keyless none
+auth and a phone-generated public key, and checks fixture observations where
+xterm's canvas has no accessible text. Screenshots, app/build logs and reports
+are retained as artifacts. Written flows and Linux prebuild are not evidence
+that this native build or simulator QA has passed.
+
+The initial update action opens TestFlight; iOS does not poll the Android
+release manifest. Release scripts preserve the shared marketing version and
+accept an explicit increasing iOS build number; a retry must reuse the binary.
+Signed upload automation and publication readiness remain gated on the Apple
+team, signing/App Store Connect inputs, export declaration and distribution
+choice. The real-iPhone lifecycle/LAN/audio/notification gates are still open.
+Push delivery and the missed-voice-reply product decision remain separate open
+scope; this work does not claim either milestone is ready to ship.

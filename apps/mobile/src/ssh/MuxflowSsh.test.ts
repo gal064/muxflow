@@ -1,10 +1,9 @@
+import { createAndroidConnectionServices, NATIVE_DISCONNECT_EVENT_NAME, NATIVE_WAKE_EVENT_NAME, type NativeAndroidConnectionServices } from "../session/AndroidConnectionServices";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   createMuxflowSsh,
-  NATIVE_DISCONNECT_EVENT_NAME,
   NATIVE_EVENT_NAME,
-  NATIVE_WAKE_EVENT_NAME,
   WRITE_CHUNK_BASE64_CHARS,
   type NativeMuxflowSshModule,
   type SshCloseReason,
@@ -12,7 +11,7 @@ import {
 } from "./MuxflowSsh";
 
 interface Harness {
-  native: NativeMuxflowSshModule;
+  native: NativeMuxflowSshModule & NativeAndroidConnectionServices;
   /** Pushes a raw payload the way the Kotlin module would. */
   emit: (payload: unknown) => void;
   /** Pushes a raw `onWake` payload. */
@@ -33,7 +32,7 @@ function harness(options: { deferWrites?: boolean } = {}): Harness {
   const pending: Array<() => void> = [];
   let removeCalls = 0;
 
-  const native: NativeMuxflowSshModule = {
+  const native: NativeMuxflowSshModule & NativeAndroidConnectionServices = {
     generateKeyPair: vi.fn(async () => ({ publicKeyOpenSsh: "ssh-ed25519 AAAA muxflow-mobile" })),
     getPublicKey: vi.fn(async () => null),
     deleteKeyPair: vi.fn(async () => undefined),
@@ -181,10 +180,10 @@ describe("wake timer", () => {
     const h = harness();
     const ssh = createMuxflowSsh(h.native);
     const tokens: string[] = [];
-    const unsubscribe = ssh.addWakeListener((token) => tokens.push(token));
+    const unsubscribe = createAndroidConnectionServices(h.native).addWakeListener((token) => tokens.push(token));
 
-    await ssh.scheduleWake("7", 1000);
-    await ssh.cancelWake("7");
+    await createAndroidConnectionServices(h.native).scheduleWake("7", 1000);
+    await createAndroidConnectionServices(h.native).cancelWake("7");
     expect(h.native.scheduleWake).toHaveBeenCalledWith("7", 1000);
     expect(h.native.cancelWake).toHaveBeenCalledWith("7");
 
@@ -209,11 +208,11 @@ describe("foreground service notification", () => {
     const h = harness();
     const ssh = createMuxflowSsh(h.native);
     let taps = 0;
-    const unsubscribe = ssh.addDisconnectListener(() => {
+    const unsubscribe = createAndroidConnectionServices(h.native).addDisconnectListener(() => {
       taps += 1;
     });
 
-    await ssh.setServiceNotification("Muxflow", "Connected to dev box");
+    await createAndroidConnectionServices(h.native).setServiceNotification("Muxflow", "Connected to dev box");
     expect(h.native.setServiceNotification).toHaveBeenCalledWith("Muxflow", "Connected to dev box");
 
     h.emitDisconnect();
@@ -339,8 +338,8 @@ describe("pass-through", () => {
     await ssh.connect("c1", target, "muxflow-host bridge --stdio", null);
     await ssh.trustHostKey("c1", "SHA256:abc");
     await ssh.close("c1");
-    await ssh.startForegroundService("Connected to example.test", "1 agent");
-    await ssh.stopForegroundService();
+    await createAndroidConnectionServices(h.native).startForegroundService("Connected to example.test", "1 agent");
+    await createAndroidConnectionServices(h.native).stopForegroundService();
 
     expect(h.native.connect).toHaveBeenCalledWith(
       "c1",

@@ -16,6 +16,22 @@ and derives the Android `versionCode` as `major*10000 + minor*100 + patch`;
 `release/check-version.sh` verifies them. The wire protocol version in
 `crates/protocol` is independent.
 
+For each new iOS binary intended for upload, pass a new explicit build number:
+`release/set-version.sh X.Y.Z IOS_BUILD_NUMBER`. The integer must increase
+(1–9999); omitting it preserves the recorded number for releases that do not
+upload iOS. Reuse the exact existing artifact when retrying an upload. iOS
+marketing versions follow the shared version, but installed phones update
+independently through TestFlight. The unsigned simulator workflow proves
+neither signing nor availability to testers.
+
+Before publishing a release that bumps the protocol major, verify that its
+matching iOS build is actually available in the selected Apple distribution
+channel and include the refusal/update consequence in the release notes.
+Releases without a bump do not wait for iOS. Bump only when either the last
+released mobile app against the new host, or the new app against the last
+released host, breaks or misbehaves; harmless unknown protobuf fields do not
+require a bump. See [the iOS plan](mobile/ios-plan.md) for readiness gates.
+
 # Publishing a release
 
 `.github/workflows/release.yml` builds every downloadable artifact from a

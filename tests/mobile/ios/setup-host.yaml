@@ -1,0 +1,72 @@
+appId: dev.muxflow.mobile
+---
+- tapOn:
+    text: Add host
+    index: 0
+- tapOn: Host
+- inputText: 127.0.0.1
+- tapOn: Port
+- eraseText
+- inputText: ${SSH_PORT}
+- tapOn: User
+- inputText: fixture
+- tapOn: Label
+- inputText: iOS fixture
+- hideKeyboard
+- scrollUntilVisible:
+    element: Save
+- tapOn: Save
+- tapOn: iOS fixture
+- extendedWaitUntil:
+    visible: Trust this host?
+    timeout: 30000
+- assertVisible: ${HOST_FINGERPRINT}
+- takeScreenshot: trust
+- tapOn: Trust
+- runFlow:
+    when:
+      visible: Allow
+    commands:
+      - tapOn: Allow
+- extendedWaitUntil:
+    visible: Workspaces
+    timeout: 30000
+- tapOn: Workspaces
+- extendedWaitUntil:
+    visible: primary
+    timeout: 30000
+- tapOn: primary
+- extendedWaitUntil:
+    visible: "0: shell"
+    timeout: 30000
+- tapOn: "0: shell"
+- extendedWaitUntil:
+    visible: Type, then Send
+    timeout: 30000
+- tapOn: Type, then Send
+- inputText: "printf 'ios-e2e-ok\\n'; printf 'ran\\n' > ios-e2e.marker"
+- tapOn: Send
+- hideKeyboard
+- takeScreenshot: terminal
+- tapOn: Files
+- extendedWaitUntil:
+    visible: README.md
+    timeout: 30000
+- tapOn: README.md
+- extendedWaitUntil:
+    visible: iOS fixture document
+    timeout: 30000
+- takeScreenshot: markdown
+- tapOn: Back
+- tapOn: Back
+- pressKey: Home
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: Type, then Send
+    timeout: 30000
+- tapOn: Type, then Send
+- inputText: "printf 'resumed\\n' > ios-resumed.marker"
+- tapOn: Send
+- hideKeyboard
+- takeScreenshot: resumed
