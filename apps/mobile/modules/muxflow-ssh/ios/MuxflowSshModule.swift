@@ -38,7 +38,9 @@ public final class MuxflowSshModule: Module {
       self.registry.async {
         guard self.channels[identifier] == nil,
               let host = raw["host"] as? String, !host.isEmpty,
-              let port = raw["port"] as? Int, (1...65535).contains(port),
+              // Expo hydrates numbers in [String: Any] as Double.
+              let rawPort = raw["port"] as? Double,
+              let port = Int(exactly: rawPort), (1...65535).contains(port),
               let user = raw["user"] as? String, !user.isEmpty else {
           promise.reject("E_TARGET", "Invalid SSH target or duplicate channel")
           return

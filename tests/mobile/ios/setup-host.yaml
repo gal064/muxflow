@@ -26,7 +26,7 @@ appId: dev.muxflow.mobile
 # iOS groups each row's title and subtitle into one accessibility label.
 - tapOn: '^iOS fixture,.*'
 - extendedWaitUntil:
-    visible: Trust this host?
+    visible: 'Trust this host\?'
     timeout: 30000
 - assertVisible: ${HOST_FINGERPRINT}
 - takeScreenshot: trust

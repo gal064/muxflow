@@ -669,6 +669,14 @@ into one accessibility label. The harness now matches grouped row labels
 and uses Files navigation to dismiss the terminal keyboard; host trust and
 the downstream SSH UI gates remain open until those flows pass.
 
+[Run 37187836341](https://github.com/gal064/muxflow/actions/runs/37187836341)
+passed grouped host-row selection, then failed before host trust with native
+`E_TARGET`. Expo's pinned dictionary conversion hydrates JavaScript numbers
+as Swift `Double`; the adapter's direct `Int` cast rejected valid ports before
+opening a socket. The adapter now converts with `Int(exactly:)`, preserving
+integer/range validation. This requires a fresh app build and full UI rerun;
+the engine-only native harness does not exercise the Expo argument bridge.
+
 UI flows now use native back/input identifiers and assert that a missing-key
 state has no read error. The workflow caches only an exact app/dependency and
 resolved runner/Xcode/Node/CocoaPods match, before installation creates generated
