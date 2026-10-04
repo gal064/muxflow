@@ -714,7 +714,16 @@ Workspaces navigation now wait for animations and assert their destinations
 inside a single bounded retry, retaining failed-attempt screenshots. This
 does not establish whether the missed taps originate in the driver or app;
 verify both interactions on a device. No auth, terminal or reconnect operation
-is retried by this harness change. Generated-key auth remains unverified.
+is retried by this harness change. The subsequent
+[run 37196285422](https://github.com/gal064/muxflow/actions/runs/37196285422)
+passed the full keyless flow, recovery and key-generation UI, then stopped
+at clipboard export before key-auth started. App logs confirm a native
+pasteboard write; the exported value was not retained, so the failed read or
+format check cannot yet be distinguished. The harness now polls the clipboard
+read and retains its public value and error. Generated-key auth remains
+unverified. For the earlier Workspaces miss, the logs show iOS becoming
+inactive for notification permission immediately before the tap; that
+specific miss was an OS prompt timing race.
 
 UI flows now use native back/input identifiers and assert that a missing-key
 state has no read error. The workflow caches only an exact app/dependency and

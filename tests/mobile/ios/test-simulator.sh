@@ -58,8 +58,20 @@ rm "$fixture_root/work/ios-e2e.marker" "$fixture_root/work/ios-resumed.marker"
 maestro --device "$device_id" test --format junit --output "$evidence/key-generation.xml" \
   --test-output-dir "$evidence/key-generation" tests/mobile/ios/generate-key.yaml
 # Copy exports only the public key through the product UI.
-xcrun simctl pbpaste "$device_id" > "$fixture_root/authorized_keys"
-rg '^ssh-ed25519 [A-Za-z0-9+/]+=* muxflow-mobile$' "$fixture_root/authorized_keys" > /dev/null
+# Retain the observed clipboard value and command error for diagnosis. iOS
+# pasteboard writes are asynchronous; poll the read without repeating Copy.
+for attempt in $(seq 1 20); do
+  if xcrun simctl pbpaste "$device_id" > "$evidence/public-key.txt" 2> "$evidence/public-key-error.txt" \
+    && rg '^ssh-ed25519 [A-Za-z0-9+/]+=* muxflow-mobile$' "$evidence/public-key.txt" > /dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+if ! rg '^ssh-ed25519 [A-Za-z0-9+/]+=* muxflow-mobile$' "$evidence/public-key.txt" > /dev/null; then
+  echo 'Public key clipboard export failed; see public-key.txt and public-key-error.txt.' >&2
+  exit 1
+fi
+cp "$evidence/public-key.txt" "$fixture_root/authorized_keys"
 maestro --device "$device_id" test --format junit --output "$evidence/key-auth.xml" \
   --test-output-dir "$evidence/key-auth" -e "SSH_PORT=$(fixture_value publickey)" -e "HOST_FINGERPRINT=$fingerprint" tests/mobile/ios/key-auth.yaml
 test "$(cat "$fixture_root/work/ios-e2e.marker")" = ran
