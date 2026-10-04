@@ -725,6 +725,16 @@ unverified. For the earlier Workspaces miss, the logs show iOS becoming
 inactive for notification permission immediately before the tap; that
 specific miss was an OS prompt timing race.
 
+[Run 37197667874](https://github.com/gal064/muxflow/actions/runs/37197667874)
+did not reach clipboard export: the driver reported entering `127.0.0.1`,
+but the saved host was `1`, so it dialled the wrong endpoint. The pinned
+[iOS text-input helper](https://github.com/mobile-dev-inc/maestro/blob/cli-2.11.0/maestro-ios-xctest-runner/maestro-driver-iosUITests/Routes/Helpers/TextInputHelper.swift)
+already slows its first character to work around dropped input. The harness
+now enters the initial address through that single-character path and checks
+the exact host and port before saving. This isolates scripted input loss;
+normal device typing remains part of device QA. The clipboard diagnostic
+and generated-key authentication still need a run that reaches those steps.
+
 UI flows now use native back/input identifiers and assert that a missing-key
 state has no read error. The workflow caches only an exact app/dependency and
 resolved runner/Xcode/Node/CocoaPods match, before installation creates generated

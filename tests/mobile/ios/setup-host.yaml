@@ -12,13 +12,34 @@ appId: dev.muxflow.mobile
           index: 1 # The always-present floating Add host control.
       - assertVisible:
           id: host-field-host
-- tapOn:
-    id: host-field-host
-- inputText: 127.0.0.1
+# The pinned iOS driver's fast remainder can drop characters on the first
+# keyboard entry. Single-character inputs use its slower path; verify the
+# actual field value before dialing rather than trusting inputText success.
+- retry:
+    maxRetries: 1
+    commands:
+      - tapOn:
+          id: host-field-host
+      - eraseText
+      - inputText: '1'
+      - inputText: '2'
+      - inputText: '7'
+      - inputText: '.'
+      - inputText: '0'
+      - inputText: '.'
+      - inputText: '0'
+      - inputText: '.'
+      - inputText: '1'
+      - assertVisible:
+          id: host-field-host
+          text: '^127\.0\.0\.1$'
 - tapOn:
     id: host-field-port
 - eraseText
 - inputText: ${SSH_PORT}
+- assertVisible:
+    id: host-field-port
+    text: ${SSH_PORT}
 - tapOn:
     id: host-field-user
 - inputText: fixture
