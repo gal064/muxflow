@@ -44,6 +44,7 @@ static void assertClose(NSString *identifier, NSString *reason, id status) {
 
 int main(int argc, const char **argv) {
   @autoreleasepool {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     require(argc == 2, @"usage: native-transport fixture.json");
     NSDictionary *fixture = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:@(argv[1])] options:0 error:NULL];
     require(fixture != nil, @"fixture missing");
@@ -86,6 +87,7 @@ int main(int argc, const char **argv) {
       [ssh write:third data:[@"still connected\n" dataUsingEncoding:NSUTF8StringEncoding] completion:^(NSString *error) { require(error == nil, @"sibling write failed"); }];
       waitEvent(third, @"data", 15); [ssh close:third]; assertClose(third, @"closedByClient", NSNull.null);
     }
+    puts("PASS native: none/publickey auth, trust, binary writes, stderr and independent channels");
     MFSSHTransport *mismatch = transport(fixture, @"none", nil);
     [mismatch open:@"mismatch" command:@"cat" fingerprint:@"SHA256:wrong"];
     assertClose(@"mismatch", @"hostKeyMismatch", NSNull.null);
@@ -105,6 +107,7 @@ int main(int argc, const char **argv) {
     MFSSHTransport *zero = transport(fixture, @"none", nil);
     [zero open:@"zero" command:@"exit 0" fingerprint:fingerprint];
     assertClose(@"zero", @"exited", @0);
+    puts("PASS native: refusal/cancel, nullable exit status and bounded EOF");
     MFSSHTransport *sameKey = transport(fixture, @"none", nil);
     [sameKey open:@"same-key" command:@"rekey-same" fingerprint:fingerprint]; waitEvent(@"same-key", @"connected", 15);
     [NSThread sleepForTimeInterval:1];
@@ -113,6 +116,7 @@ int main(int argc, const char **argv) {
     MFSSHTransport *changedKey = transport(fixture, @"none", nil);
     [changedKey open:@"changed-key" command:@"rekey-changed" fingerprint:fingerprint];
     assertClose(@"changed-key", @"hostKeyMismatch", NSNull.null);
+    puts("PASS native: unchanged/changed host key during rekey");
     MFSSHTransport *openBound = transport(fixture, @"delayed-open", nil);
     [openBound open:@"open-control" command:@"cat" fingerprint:fingerprint]; waitEvent(@"open-control", @"connected", 15);
     [openBound open:@"open-cancel" command:@"cat" fingerprint:fingerprint];
@@ -134,15 +138,18 @@ int main(int argc, const char **argv) {
     [cancelAuth open:@"cancel-auth" command:@"cat" fingerprint:fingerprint];
     [NSThread sleepForTimeInterval:1]; [cancelAuth close:@"cancel-auth"];
     assertClose(@"cancel-auth", @"closedByClient", NSNull.null);
+    puts("PASS native: cancelled channel-open, delayed auth and auth cancellation");
     MFSSHTransport *idle = transport(fixture, @"none", nil);
     [idle open:@"idle" command:@"cat" fingerprint:fingerprint]; waitEvent(@"idle", @"connected", 15);
     [NSThread sleepForTimeInterval:50];
     [idle write:@"idle" data:[@"alive" dataUsingEncoding:NSUTF8StringEncoding] completion:^(NSString *error) { require(error == nil, @"healthy idle connection timed out"); }];
     waitEvent(@"idle", @"data", 15); [idle close:@"idle"]; assertClose(@"idle", @"closedByClient", NSNull.null);
+    puts("PASS native: healthy idle survives keepalive interval");
     MFSSHTransport *silent = transport(fixture, @"silent", nil);
     [silent open:@"silent" command:@"cat" fingerprint:fingerprint]; waitEvent(@"silent", @"connected", 15);
     NSDictionary *lost = waitEvent(@"silent", @"closed", 50);
     require([lost[@"reason"] isEqual:@"networkLost"], @"silent link did not fail via keepalives");
+    puts("PASS native: silent link detected within 15s x 3");
     MFSSHTransport *untrusted = transport(fixture, @"none", nil);
     [untrusted open:@"untrusted" command:@"cat" fingerprint:nil]; waitEvent(@"untrusted", @"hostKey", 15);
     NSDictionary *untrustedClose = waitEvent(@"untrusted", @"closed", 65);

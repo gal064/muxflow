@@ -79,4 +79,6 @@ replace_once("#{root}/src/channel.c",
 replace_once("#{root}/src/libssh2_priv.h", 'int keepalive_interval;',
              'unsigned char muxflow_channel_reply[5]; int keepalive_interval;')
 replace_once("#{root}/src/packet.c", 'unsigned char packet[5];',
-             'unsigned char *packet = session->muxflow_channel_reply;')
+             'unsigned char *packet;')
+replace_once("#{root}/src/packet.c", 'libssh2_packet_add_jump_point4:',
+             "libssh2_packet_add_jump_point4:\n                    packet = session->muxflow_channel_reply;")

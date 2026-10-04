@@ -1,6 +1,6 @@
 import { router } from "expo-router";
 import { useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Linking, Platform, StyleSheet, Text, View } from "react-native";
 import { createStore } from "zustand/vanilla";
 import { useStore } from "zustand";
 
@@ -71,6 +71,12 @@ export function ConnectionSheet() {
         <Row label="State" value={connectionStateLabel(connection.state)} />
         <Hairline />
         <Row label="Last error" value={connection.message ?? lastClose?.message ?? "—"} />
+        {Platform.OS === "ios" && lastClose?.reason === "connectFailed" ? (
+          <>
+            <Row label="Local network" value="For a LAN host, check that Muxflow has Local Network access in iOS Settings." />
+            <Button label="Open iOS Settings" variant="text" onPress={() => void Linking.openSettings()} />
+          </>
+        ) : null}
         <View style={styles.actions}>
           <Button label="Show log" variant="text" onPress={() => setLogVisible(true)} />
           <View style={styles.spacer} />

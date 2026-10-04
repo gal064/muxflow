@@ -37,6 +37,10 @@ test "$(cat "$fixture_root/work/ios-e2e.marker")" = ran
 test "$(cat "$fixture_root/work/ios-resumed.marker")" = resumed
 tmux -L "$ADE_TMUX_SOCKET_NAME" capture-pane -p -t primary > "$evidence/none-terminal.txt"
 rg 'ios-e2e-ok' "$evidence/none-terminal.txt"
+touch "$fixture_root/drop-connections"
+maestro --device "$device_id" test --format junit --output "$evidence/recovery.xml" \
+  --test-output-dir "$evidence/recovery" tests/mobile/ios/recover.yaml
+test "$(cat "$fixture_root/work/ios-recovered.marker")" = recovered
 rm "$fixture_root/work/ios-e2e.marker" "$fixture_root/work/ios-resumed.marker"
 maestro --device "$device_id" test --format junit --output "$evidence/key-generation.xml" \
   --test-output-dir "$evidence/key-generation" tests/mobile/ios/generate-key.yaml

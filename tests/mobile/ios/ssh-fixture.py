@@ -34,6 +34,7 @@ public_base64 = base64.b64encode(wire_key).decode()
 class Server(paramiko.ServerInterface):
     def __init__(self, mode):
         self.mode = mode
+        self.silent = False
 
     def get_allowed_auths(self, username):
         return "publickey"
@@ -44,7 +45,7 @@ class Server(paramiko.ServerInterface):
         return paramiko.AUTH_SUCCESSFUL if self.mode != "publickey" and username == "fixture" else paramiko.AUTH_FAILED
 
     def check_global_request(self, kind, message):
-        if self.mode == "silent":
+        if self.mode == "silent" and self.silent:
             # Keep TCP open but withhold SSH replies, modeling a blackholed link.
             time.sleep(120)
         return False
@@ -59,6 +60,8 @@ class Server(paramiko.ServerInterface):
         return paramiko.OPEN_SUCCEEDED if kind == "session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
 
     def check_channel_exec_request(self, channel, command):
+        if self.mode == "silent":
+            self.silent = True
         def execute():
             if args.host_binary and command == b"$HOME/.local/bin/muxflow-host bridge --stdio":
                 process = subprocess.Popen([args.host_binary, "bridge", "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=os.environ.copy())
@@ -114,6 +117,8 @@ class Server(paramiko.ServerInterface):
 
 listeners = []
 ports = {}
+active_transports = set()
+transport_lock = threading.Lock()
 for mode in ["none", "publickey", "delayed-none", "silent", "delayed-open"]:
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -136,6 +141,8 @@ for mode in ["none", "publickey", "delayed-none", "silent", "delayed-open"]:
                     super()._send_message(message)
             transport = FixtureTransport(client)
             transport.add_server_key(host_key)
+            with transport_lock:
+                active_transports.add(transport)
             channels = []
             try:
                 transport.start_server(server=Server(mode))
@@ -146,6 +153,8 @@ for mode in ["none", "publickey", "delayed-none", "silent", "delayed-open"]:
                     channels = [item for item in channels if not item.closed]
             finally:
                 transport.close()
+                with transport_lock:
+                    active_transports.discard(transport)
         while True:
             client, _ = listener.accept()
             threading.Thread(target=session, args=(client,), daemon=True).start()
@@ -158,4 +167,13 @@ ports["refused"] = refused.getsockname()[1]
 info = dict(ports, fingerprint=hashlib.sha256(host_key.asbytes()).hexdigest(), key=str(key_path), publicKey="ssh-ed25519 " + public_base64 + " muxflow-mobile")
 (directory / "fixture.json").write_text(json.dumps(info))
 print("SSH fixture ready", flush=True)
-threading.Event().wait()
+while True:
+    drop = directory / "drop-connections"
+    if drop.exists():
+        drop.unlink()
+        with transport_lock:
+            current = list(active_transports)
+        for transport in current:
+            transport.close()
+        print("Forced SSH transport loss", flush=True)
+    time.sleep(0.1)

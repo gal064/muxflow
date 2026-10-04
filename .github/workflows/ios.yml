@@ -48,7 +48,7 @@ jobs:
           xcrun simctl list devices available
           pod --version
       - name: Native SSH contract
-        run: bash tests/mobile/ios/check-native.sh
+        run: bash tests/mobile/ios/check-native.sh 2>&1 | tee "$RUNNER_TEMP/ios-native.log"
       - run: pnpm install --frozen-lockfile
       - run: pnpm mobile:check
       - name: Install simulator UI driver
@@ -71,6 +71,7 @@ jobs:
         with:
           name: ios-simulator-evidence
           path: |
+            ${{ runner.temp }}/ios-native.log
             ${{ runner.temp }}/ios-build.log
             tmp/ios-evidence/
             tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
