@@ -2,7 +2,9 @@ appId: dev.muxflow.mobile
 ---
 - tapOn:
     text: Add host
-    index: 0
+    index: 1 # The always-present floating Add host control.
+- assertVisible:
+    id: host-field-host
 - tapOn:
     id: host-field-host
 - inputText: 127.0.0.1

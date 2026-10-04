@@ -686,6 +686,17 @@ was already granted. The harness now relies on its declared launch permission
 and waits for the application UI. Terminal, Markdown, resume, generated-key
 auth and forced-loss recovery still need the subsequent UI pass.
 
+[Run 37191748811](https://github.com/gal064/muxflow/actions/runs/37191748811)
+passed the full keyless flow: real terminal input/output, rendered Markdown
+and foreground resume, corroborated by screenshots, tmux output and marker
+files. Forced-loss recovery and phone-generated Ed25519 key/public export also
+passed. The key-auth setup then stopped because a reported centre Add host
+tap left the app on the empty host list. Its cause is unconfirmed; no navigation
+error was logged. The harness now selects the observed floating Add host
+control and asserts the form before typing. Verify the centre action after
+key copy/back during device QA; generated-key SSH auth remains open until
+the final flow runs.
+
 UI flows now use native back/input identifiers and assert that a missing-key
 state has no read error. The workflow caches only an exact app/dependency and
 resolved runner/Xcode/Node/CocoaPods match, before installation creates generated
