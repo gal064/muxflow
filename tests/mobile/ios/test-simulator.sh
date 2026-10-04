@@ -27,7 +27,9 @@ for attempt in $(seq 1 60); do
   sleep 1
 done
 fixture_value() { node -e 'process.stdout.write(String(require(process.argv[1])[process.argv[2]]))' "$fixture_root/fixture.json" "$1"; }
-fingerprint=$(node -e 'const f=require(process.argv[1]);process.stdout.write("SHA256:"+Buffer.from(f.fingerprint,"hex").toString("base64").replace(/=+$/, ""))' "$fixture_root/fixture.json")
+# Maestro text selectors are regular expressions. Escape the base64 '+' so
+# this asserts the exact key even when a disposable fingerprint contains it.
+fingerprint=$(node -e 'const f=require(process.argv[1]);const hash=Buffer.from(f.fingerprint,"hex").toString("base64").replace(/=+$/, "");process.stdout.write("^SHA256:"+hash.replace(/\+/g,"\\+")+"$")' "$fixture_root/fixture.json")
 device_id=$(cat "$evidence/device-id.txt")
 maestro --device "$device_id" test --format junit --output "$evidence/none-auth.xml" \
   --test-output-dir "$evidence/none-auth" -e "SSH_PORT=$(fixture_value none)" -e "HOST_FINGERPRINT=$fingerprint" tests/mobile/ios/none-auth.yaml

@@ -987,7 +987,7 @@ fn color_reports_are_capability_gated_for_tmux_33() {
 
 #[test]
 fn control_client_palette_matches_terminal_theme_tokens() {
-    let tokens = include_str!("../../../desktop/src/tokens.css");
+    let tokens = include_str!("../../../../packages/client-core/palette.css");
     let token = |name: &str| {
         tokens
             .lines()

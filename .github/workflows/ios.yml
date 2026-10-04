@@ -3,7 +3,7 @@ name: ios
 on:
   workflow_dispatch:
   push:
-    branches: [main, feat/ios-mobile]
+    branches: [main]
     paths:
       - 'apps/mobile/**'
       - 'packages/**'

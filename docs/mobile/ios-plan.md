@@ -56,7 +56,8 @@ and admission behavior remain unchanged.
 
 Repository access was checked during planning: the existing `gal064` GitHub
 authentication has write access to `gal064/muxflow`, and Actions is enabled.
-An iOS runner job and UI automation harness have not yet been built or proven.
+The iOS runner job and UI automation harness are implemented; their observed
+results and remaining gates are recorded in section 9.
 
 ## 3. Sharing boundaries
 
@@ -567,7 +568,7 @@ GitHub Actions build path.
 - [Apple remote notification servers](https://developer.apple.com/documentation/usernotifications/setting-up-a-remote-notification-server).
 
 
-## 8. Implementation evidence
+## 9. Implementation evidence
 
 Work is on `feat/ios-mobile`; the shared-source extraction is commit `2773203`.
 The implementation keeps the mobile protocol client, screens, terminals,
@@ -589,7 +590,7 @@ Private keys remain native in Keychain under the specified accessibility class.
 
 Linux evidence so far: the library spike passed none and Ed25519 auth,
 host-key comparison, independent channels, stderr/status presence and
-keepalive sends. All 597 mobile tests passed, including the real helper/tmux
+keepalive sends. All 601 mobile tests passed, including the real helper/tmux
 terminal and file suites; both desktop/mobile TypeScript checks passed.
 Additional tests freeze the real generated descriptor from released `v0.1.9`
 (`e48f46c`) for same-major unknown-field decoding in both directions. Those
@@ -627,3 +628,19 @@ the job now selects 26.6. A narrow package patch removes invalid ownership
 annotations from the pinned ExpoModulesJSI constructors, as described in the
 [upstream issue](https://github.com/expo/expo/issues/49214). Simulator QA remains
 open until the updated app build and real UI flows pass.
+
+To reproduce the automated checks from a macOS checkout, install the pinned
+pnpm dependencies, uv, tmux, ripgrep and Maestro 2.11.0, then run:
+
+```sh
+bash tests/mobile/ios/check-native.sh
+pnpm mobile:ios:simulator
+bash tests/mobile/ios/launch-simulator.sh
+bash tests/mobile/ios/test-simulator.sh
+```
+
+The UI harness also needs `cargo build --locked -p muxflow-host` first. It
+creates an isolated SSH server and tmux socket, cleans them up on exit, and
+writes evidence to `tmp/ios-evidence`. The Actions job runs these same steps
+and retains its logs, reports, screenshots and simulator app. On Linux, use
+the `ios` Actions workflow rather than attempting to run Xcode locally.
