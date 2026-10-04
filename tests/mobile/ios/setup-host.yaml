@@ -31,11 +31,8 @@ appId: dev.muxflow.mobile
 - assertVisible: ${HOST_FINGERPRINT}
 - takeScreenshot: trust
 - tapOn: Trust
-- runFlow:
-    when:
-      visible: Allow
-    commands:
-      - tapOn: Allow
+# launchApp already declares notifications: allow. A second alert tap races
+# with that permission handler; continue once the application UI is available.
 - extendedWaitUntil:
     visible: '^Workspaces.*'
     timeout: 30000

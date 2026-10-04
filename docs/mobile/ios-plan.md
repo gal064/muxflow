@@ -677,6 +677,15 @@ opening a socket. The adapter now converts with `Int(exactly:)`, preserving
 integer/range validation. This requires a fresh app build and full UI rerun;
 the engine-only native harness does not exercise the Expo argument bridge.
 
+[Run 37189097150](https://github.com/gal064/muxflow/actions/runs/37189097150)
+rebuilt the app and passed clean no-key handling, the exact fixture fingerprint
+assertion, host trust, `none` authentication and the real helper protocol
+handshake/topology. The port conversion fix is verified through the Expo bridge.
+The next action stopped at a redundant `Allow` tap after notification permission
+was already granted. The harness now relies on its declared launch permission
+and waits for the application UI. Terminal, Markdown, resume, generated-key
+auth and forced-loss recovery still need the subsequent UI pass.
+
 UI flows now use native back/input identifiers and assert that a missing-key
 state has no read error. The workflow caches only an exact app/dependency and
 resolved runner/Xcode/Node/CocoaPods match, before installation creates generated

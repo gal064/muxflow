@@ -21,7 +21,14 @@ cleanup() {
       --predicate 'process == "Muxflow"' > "$evidence/app.log" || true
   fi
   kill "$fixture_pid" 2>/dev/null || true
+  wait "$fixture_pid" 2>/dev/null || true
   "$repo_root/target/debug/muxflow-host" daemon-stop || true
+  # Shutdown acknowledges before the daemon flushes diagnostics and removes
+  # its metadata. Let that finish before deleting this fixture's runtime.
+  for attempt in $(seq 1 50); do
+    if [ ! -f "$ADE_HOST_RUNTIME_DIR/daemon.json" ]; then break; fi
+    sleep 0.1
+  done
   tmux -L "$ADE_TMUX_SOCKET_NAME" kill-server || true
   rm -rf "$fixture_root"
 }
