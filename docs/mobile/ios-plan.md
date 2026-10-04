@@ -697,6 +697,15 @@ control and asserts the form before typing. Verify the centre action after
 key copy/back during device QA; generated-key SSH auth remains open until
 the final flow runs.
 
+[Run 37193438193](https://github.com/gal064/muxflow/actions/runs/37193438193)
+repeated the keyless terminal/Markdown/resume, recovery and key-generation
+passes. The floating Add host tap also left the separate key-auth flow on the
+empty host list, so changing controls did not resolve it. That flow lacked
+the explicit app launch used by the others. It now starts a fresh app session
+without clearing state or Keychain, which also tests that the generated key
+survives a process restart. Authentication and the activation diagnosis still
+need the next actual result; no app-navigation cause is established.
+
 UI flows now use native back/input identifiers and assert that a missing-key
 state has no read error. The workflow caches only an exact app/dependency and
 resolved runner/Xcode/Node/CocoaPods match, before installation creates generated
