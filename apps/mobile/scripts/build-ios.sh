@@ -10,9 +10,10 @@ pnpm exec expo prebuild --platform ios --no-install
 (cd ios && pod install)
 export NODE_BINARY
 NODE_BINARY=$(command -v node)
+# This QA artifact runs on this machine's simulator, so build only its arch.
 xcodebuild -workspace ios/Muxflow.xcworkspace -scheme Muxflow \
   -configuration Release -sdk iphonesimulator \
   -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath "$repo_root/tmp/work/ios" \
-  CODE_SIGNING_ALLOWED=NO build
+  ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO build
 test -d "$repo_root/tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app"

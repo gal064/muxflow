@@ -16,6 +16,10 @@ uv run --with paramiko==4.0.0 --no-project tests/mobile/ios/ssh-fixture.py \
   --directory "$fixture_root" --host-binary "$repo_root/target/debug/muxflow-host" > "$evidence/fixture.log" 2>&1 &
 fixture_pid=$!
 cleanup() {
+  if [ -n "${device_id:-}" ]; then
+    xcrun simctl spawn "$device_id" log show --last 10m --style compact \
+      --predicate 'process == "Muxflow"' > "$evidence/app.log" || true
+  fi
   kill "$fixture_pid" 2>/dev/null || true
   "$repo_root/target/debug/muxflow-host" daemon-stop || true
   tmux -L "$ADE_TMUX_SOCKET_NAME" kill-server || true
@@ -56,4 +60,3 @@ test "$(cat "$fixture_root/work/ios-resumed.marker")" = resumed
 tmux -L "$ADE_TMUX_SOCKET_NAME" capture-pane -p -t primary > "$evidence/key-terminal.txt"
 rg 'ios-e2e-ok' "$evidence/key-terminal.txt"
 xcrun simctl io "$device_id" screenshot "$evidence/final.png"
-xcrun simctl spawn "$device_id" log show --last 5m --style compact --predicate 'process == "Muxflow"' > "$evidence/app.log"

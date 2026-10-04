@@ -41,7 +41,9 @@ appId: dev.muxflow.mobile
     timeout: 30000
 - tapOn: "0: shell"
 - extendedWaitUntil:
-    visible: Type, then Send
+    visible:
+      text: Send
+      enabled: true
     timeout: 30000
 - tapOn: Type, then Send
 - inputText: "printf 'ios-e2e-ok\\n'; printf 'ran\\n' > ios-e2e.marker"
@@ -63,7 +65,9 @@ appId: dev.muxflow.mobile
 - launchApp:
     stopApp: false
 - extendedWaitUntil:
-    visible: Type, then Send
+    visible:
+      text: Send
+      enabled: true
     timeout: 30000
 - tapOn: Type, then Send
 - inputText: "printf 'resumed\\n' > ios-resumed.marker"

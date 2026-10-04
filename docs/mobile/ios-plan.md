@@ -2,8 +2,9 @@
 
 Status: implementation started on `feat/ios-mobile`. Phase 0 shared sources
 and documentation have passed independent review and affected existing tests.
-The native iOS implementation and simulator harness are written. Apple builds
-and device QA remain unverified; see implementation evidence below.
+The native iOS implementation and simulator harness are written. Native SSH
+contract tests pass on macOS; standalone app/UI and device gates remain open.
+See implementation evidence below.
 
 ## 1. Objective and scope
 
@@ -592,6 +593,10 @@ Linux evidence so far: the library spike passed none and Ed25519 auth,
 host-key comparison, independent channels, stderr/status presence and
 keepalive sends. All 601 mobile tests passed, including the real helper/tmux
 terminal and file suites; both desktop/mobile TypeScript checks passed.
+Full Linux/macOS repository CI passed in
+[run 37179091755](https://github.com/gal064/muxflow/actions/runs/37179091755),
+including desktop builds, Rust lint/tests and Linux frontend/mobile/generated
+checks. The Android debug APK also builds successfully on Linux.
 Additional tests freeze the real generated descriptor from released `v0.1.9`
 (`e48f46c`) for same-major unknown-field decoding in both directions. Those
 codec tests do not claim a released iPhone binary has been exercised. The
@@ -626,8 +631,14 @@ keepalives. That run's app build failed in ExpoModulesJSI before simulator
 installation, so it supplies no UI evidence. SDK 57 requires Xcode 26.4+;
 the job now selects 26.6. A narrow package patch removes invalid ownership
 annotations from the pinned ExpoModulesJSI constructors, as described in the
-[upstream issue](https://github.com/expo/expo/issues/49214). Simulator QA remains
-open until the updated app build and real UI flows pass.
+[upstream issue](https://github.com/expo/expo/issues/49214). The next
+[run 37179091744](https://github.com/gal064/muxflow/actions/runs/37179091744)
+compiled the native Swift/Objective-C module for both simulator architectures,
+then failed because Expo's app provider imported the vendored libssh2 pod as
+an Expo module. An explicit module podspec path now restricts that registration
+to `MuxflowSsh`, verified with Expo's resolver on Linux. Future simulator builds
+compile only the runner's architecture. Simulator QA remains open until the
+updated standalone app build and real UI flows pass.
 
 To reproduce the automated checks from a macOS checkout, install the pinned
 pnpm dependencies, uv, tmux, ripgrep and Maestro 2.11.0, then run:
