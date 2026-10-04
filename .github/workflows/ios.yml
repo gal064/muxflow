@@ -59,10 +59,31 @@ jobs:
           cache: pnpm
       - uses: astral-sh/setup-uv@v6
       - name: Toolchain
+        id: toolchain
         run: |
           xcodebuild -version
           xcrun simctl list devices available
           pod --version
+          toolchain_key=$(
+            {
+              printf '%s\n' "${ImageVersion:?Missing runner image version}"
+              xcodebuild -version
+              node --version
+              pod --version
+            } | shasum -a 256 | cut -d ' ' -f 1
+          )
+          printf 'cache-key=%s\n' "$toolchain_key" >> "$GITHUB_OUTPUT"
+      - name: Release versions
+        run: release/check-version.sh
+      # Hash before installation/prebuild creates generated files. Restore only
+      # an exact app/dependency/toolchain match; no prefix fallback. This is an
+      # locally ad hoc signed QA artifact, never a distribution build.
+      - name: Restore compiled simulator app
+        id: simulator-app
+        uses: actions/cache/restore@v4
+        with:
+          path: tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
+          key: ios-simulator-app-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('apps/mobile/**', 'packages/**', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'patches/**', 'release/**', '.github/workflows/ios.yml') }}
       - name: Native SSH contract
         run: bash tests/mobile/ios/check-native.sh 2>&1 | tee "$RUNNER_TEMP/ios-native.log"
       - run: pnpm install --frozen-lockfile
@@ -72,12 +93,21 @@ jobs:
           curl --fail --location --retry 3 https://github.com/mobile-dev-inc/maestro/releases/download/cli-2.11.0/maestro.zip -o "$RUNNER_TEMP/maestro.zip"
           unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/maestro/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/maestro/bin/maestro" --version
       - name: Build fixture host
         run: |
           brew install tmux ripgrep
           cargo build --locked -p muxflow-host
       - name: Build standalone simulator app
+        if: steps.simulator-app.outputs.cache-hit != 'true'
         run: pnpm mobile:ios:simulator > "$RUNNER_TEMP/ios-build.log" 2>&1
+      # Keep a successfully built app even when a later UI assertion fails.
+      - name: Cache compiled simulator app
+        if: steps.simulator-app.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
+          key: ${{ steps.simulator-app.outputs.cache-primary-key }}
       - name: Install and launch
         run: bash tests/mobile/ios/launch-simulator.sh
       - name: SSH, terminal, Markdown and resume UI flows

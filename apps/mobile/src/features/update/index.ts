@@ -52,6 +52,11 @@ export async function openAppUpdates(): Promise<void> {
     try { await Linking.openURL("itms-beta://"); }
     catch { await Linking.openURL("https://apps.apple.com/app/testflight/id899247664"); }
   } else {
-    await Linking.openURL("https://github.com/gal064/muxflow/releases/latest");
+    await openDesktopUpdates();
   }
+}
+
+/** Desktop installs the matching helper; both update together from GitHub. */
+export function openDesktopUpdates(): Promise<void> {
+  return Linking.openURL("https://github.com/gal064/muxflow/releases/latest");
 }

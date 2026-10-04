@@ -19,5 +19,5 @@ xcrun simctl launch "$device_id" dev.muxflow.mobile | tee tmp/ios-evidence/launc
 # A launch screenshot is evidence of startup, not completion of the SSH/UI QA gate.
 sleep 5
 xcrun simctl io "$device_id" screenshot tmp/ios-evidence/launch.png
-xcrun simctl spawn "$device_id" log show --last 2m --style compact \
+xcrun simctl spawn "$device_id" log show --last 2m --style compact --info --debug \
   --predicate 'process == "Muxflow"' > tmp/ios-evidence/app.log

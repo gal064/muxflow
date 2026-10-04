@@ -1,7 +1,7 @@
 import { router } from "expo-router";
 import { StyleSheet, Text, View } from "react-native";
 
-import { openAppUpdates } from "../update";
+import { openAppUpdates, openDesktopUpdates } from "../update";
 import { connectHost } from "../../session/connectionManager";
 import { findHost, hostsStore } from "../../store/hostsStore";
 import { Button } from "../../ui/components/Button";
@@ -48,6 +48,7 @@ export function ConnectionErrorScreen({ failure, hostId, incompatible = false }:
       <Text style={styles.message}>{failure.message}</Text>
       <View style={styles.actions}>
         {incompatible ? <Button label="Update app" onPress={() => void openAppUpdates()} /> : null}
+        {incompatible ? <Button label="Update desktop" variant="text" onPress={() => void openDesktopUpdates()} /> : null}
         {failure.action ? (
           <Button label={failure.action.label} onPress={act} disabled={failure.action.kind !== "sshKey" && !host} />
         ) : null}

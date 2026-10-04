@@ -8,6 +8,8 @@ appId: dev.muxflow.mobile
 - assertVisible: No hosts yet
 - tapOn: Your SSH key
 - assertVisible: This phone has no SSH key.*
+- assertNotVisible: This phone's SSH key could not be read.
 - takeScreenshot: no-phone-key
-- tapOn: Back
+- tapOn:
+    id: BackButton
 - runFlow: setup-host.yaml

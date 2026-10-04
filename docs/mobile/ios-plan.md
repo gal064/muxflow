@@ -3,8 +3,8 @@
 Status: implementation started on `feat/ios-mobile`. Phase 0 shared sources
 and documentation have passed independent review and affected existing tests.
 The native iOS implementation and simulator harness are written. Native SSH
-contract tests pass on macOS; standalone app/UI and device gates remain open.
-See implementation evidence below.
+contract tests pass on macOS; a standalone app builds, installs and launches
+in the simulator. SSH UI and device gates remain open. See evidence below.
 
 ## 1. Objective and scope
 
@@ -591,7 +591,7 @@ Private keys remain native in Keychain under the specified accessibility class.
 
 Linux evidence so far: the library spike passed none and Ed25519 auth,
 host-key comparison, independent channels, stderr/status presence and
-keepalive sends. All 601 mobile tests passed, including the real helper/tmux
+keepalive sends. All 605 mobile tests passed, including the real helper/tmux
 terminal and file suites; both desktop/mobile TypeScript checks passed.
 Full Linux/macOS repository CI passed in
 [run 37179091755](https://github.com/gal064/muxflow/actions/runs/37179091755),
@@ -605,7 +605,8 @@ SHA-256-verified Linux helper asset from the published `v0.1.9` release. There
 are no wire changes in this implementation and the major remains 4.
 
 `.github/workflows/ios.yml` selects Xcode 26.6 on `macos-26`. It runs the native
-engine harness, builds an unsigned standalone simulator app, then drives
+engine harness, builds a standalone simulator app with local ad hoc signing,
+then drives
 host setup, host-key trust, terminal input, Markdown and foreground reconnect
 with local Maestro 2.11.0 and the real helper/tmux. It includes keyless none
 auth and a phone-generated public key, and checks fixture observations where
@@ -614,7 +615,9 @@ are retained as artifacts. Written flows and Linux prebuild are not evidence
 that this native build or simulator QA has passed.
 
 The initial update action opens TestFlight; iOS does not poll the Android
-release manifest. Release scripts preserve the shared marketing version and
+release manifest. The mismatch screen also links to the desktop release so
+users can update its matched helper when the phone is ahead. Release scripts
+preserve the shared marketing version and
 accept an explicit increasing iOS build number; a retry must reuse the binary.
 Signed upload automation and publication readiness remain gated on the Apple
 team, signing/App Store Connect inputs, export declaration and distribution
@@ -639,6 +642,24 @@ an Expo module. An explicit module podspec path now restricts that registration
 to `MuxflowSsh`, verified with Expo's resolver on Linux. Future simulator builds
 compile only the runner's architecture. Simulator QA remains open until the
 updated standalone app build and real UI flows pass.
+
+[Run 37181184025](https://github.com/gal064/muxflow/actions/runs/37181184025)
+built, installed and launched the app without an Apple account. Its first UI
+flow stopped at the key screen: the native back button was labeled `Muxflow`
+with ID `BackButton`, and the screenshot showed a key-read failure. App logs
+reported Keychain error `-34018` while build settings disabled signing. The
+simulator script now enables local ad hoc signing, following Xcode's simulator
+path, and retains signature/entitlement diagnostics. This uses no distribution
+certificate or profile. Keychain behavior still needs the next actual UI pass;
+the earlier missing-key assertion alone was insufficient evidence.
+
+UI flows now use native back/input identifiers and assert that a missing-key
+state has no read error. The workflow caches only an exact app/dependency and
+resolved runner/Xcode/Node/CocoaPods match, before installation creates generated
+files. Version checks, native contract tests and UI fixtures still run on cache
+hits. A successfully built simulator app is saved before UI assertions so
+test-flow-only corrections can reuse it. These simulator artifacts are separate
+from signed device/distribution builds.
 
 To reproduce the automated checks from a macOS checkout, install the pinned
 pnpm dependencies, uv, tmux, ripgrep and Maestro 2.11.0, then run:

@@ -24,6 +24,7 @@ export function HostFormField({
     <View style={styles.field}>
       <Text style={styles.label}>{label}</Text>
       <TextInput
+        testID={`host-field-${label.toLowerCase()}`}
         style={[styles.input, error === undefined ? null : styles.inputError]}
         value={value}
         onChangeText={onChangeText}

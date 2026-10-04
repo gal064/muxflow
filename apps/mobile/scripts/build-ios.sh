@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Unsigned, standalone simulator app. Distribution signing is a separate gate.
+# Standalone simulator app with local ad hoc signing for Keychain access.
+# Distribution certificates and provisioning remain a separate gate.
 set -euo pipefail
 mobile_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 repo_root=$(cd "$mobile_root/../.." && pwd)
@@ -15,5 +16,10 @@ xcodebuild -workspace ios/Muxflow.xcworkspace -scheme Muxflow \
   -configuration Release -sdk iphonesimulator \
   -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath "$repo_root/tmp/work/ios" \
-  ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO build
-test -d "$repo_root/tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app"
+  ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES \
+  CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=- build
+simulator_app="$repo_root/tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app"
+test -f "$simulator_app/Muxflow"
+codesign --verify --strict "$simulator_app"
+codesign --display --verbose=2 "$simulator_app"
+codesign --display --entitlements - --xml "$simulator_app"

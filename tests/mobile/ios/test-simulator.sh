@@ -17,7 +17,7 @@ uv run --with paramiko==4.0.0 --no-project tests/mobile/ios/ssh-fixture.py \
 fixture_pid=$!
 cleanup() {
   if [ -n "${device_id:-}" ]; then
-    xcrun simctl spawn "$device_id" log show --last 10m --style compact \
+    xcrun simctl spawn "$device_id" log show --last 10m --style compact --info --debug \
       --predicate 'process == "Muxflow"' > "$evidence/app.log" || true
   fi
   kill "$fixture_pid" 2>/dev/null || true

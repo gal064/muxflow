@@ -12,4 +12,5 @@ appId: dev.muxflow.mobile
     timeout: 15000
 - tapOn: Copy
 - takeScreenshot: public-key
-- tapOn: Back
+- tapOn:
+    id: BackButton
