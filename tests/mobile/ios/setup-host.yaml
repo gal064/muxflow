@@ -23,7 +23,8 @@ appId: dev.muxflow.mobile
 - scrollUntilVisible:
     element: Save
 - tapOn: Save
-- tapOn: iOS fixture
+# iOS groups each row's title and subtitle into one accessibility label.
+- tapOn: '^iOS fixture,.*'
 - extendedWaitUntil:
     visible: Trust this host?
     timeout: 30000
@@ -36,17 +37,17 @@ appId: dev.muxflow.mobile
     commands:
       - tapOn: Allow
 - extendedWaitUntil:
-    visible: Workspaces
+    visible: '^Workspaces.*'
     timeout: 30000
-- tapOn: Workspaces
+- tapOn: '^Workspaces.*'
 - extendedWaitUntil:
-    visible: primary
+    visible: '^primary,.*'
     timeout: 30000
-- tapOn: primary
+- tapOn: '^primary,.*'
 - extendedWaitUntil:
-    visible: "0: shell"
+    visible: '^0: shell,.*'
     timeout: 30000
-- tapOn: "0: shell"
+- tapOn: '^0: shell,.*'
 - extendedWaitUntil:
     visible:
       text: Send
@@ -55,13 +56,13 @@ appId: dev.muxflow.mobile
 - tapOn: Type, then Send
 - inputText: "printf 'ios-e2e-ok\\n'; printf 'ran\\n' > ios-e2e.marker"
 - tapOn: Send
-- hideKeyboard
 - takeScreenshot: terminal
+# Files navigation blurs the terminal input and dismisses its keyboard.
 - tapOn: Files
 - extendedWaitUntil:
-    visible: README.md
+    visible: '^README\.md,.*'
     timeout: 30000
-- tapOn: README.md
+- tapOn: '^README\.md,.*'
 - extendedWaitUntil:
     visible: iOS fixture document
     timeout: 30000
@@ -81,5 +82,4 @@ appId: dev.muxflow.mobile
 - tapOn: Type, then Send
 - inputText: "printf 'resumed\\n' > ios-resumed.marker"
 - tapOn: Send
-- hideKeyboard
 - takeScreenshot: resumed

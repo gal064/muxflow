@@ -594,7 +594,7 @@ host-key comparison, independent channels, stderr/status presence and
 keepalive sends. All 605 mobile tests passed, including the real helper/tmux
 terminal and file suites; both desktop/mobile TypeScript checks passed.
 Full Linux/macOS repository CI passed in
-[run 37179091755](https://github.com/gal064/muxflow/actions/runs/37179091755),
+[run 37183766249](https://github.com/gal064/muxflow/actions/runs/37183766249),
 including desktop builds, Rust lint/tests and Linux frontend/mobile/generated
 checks. The Android debug APK also builds successfully on Linux.
 Additional tests freeze the real generated descriptor from released `v0.1.9`
@@ -650,8 +650,24 @@ with ID `BackButton`, and the screenshot showed a key-read failure. App logs
 reported Keychain error `-34018` while build settings disabled signing. The
 simulator script now enables local ad hoc signing, following Xcode's simulator
 path, and retains signature/entitlement diagnostics. This uses no distribution
-certificate or profile. Keychain behavior still needs the next actual UI pass;
-the earlier missing-key assertion alone was insufficient evidence.
+certificate or profile. The earlier missing-key assertion alone was
+insufficient evidence.
+
+[Run 37183766233](https://github.com/gal064/muxflow/actions/runs/37183766233)
+passed the native contract suite, built an ad hoc signed simulator app, and
+installed and launched it. The clean no-key UI assertions passed, including
+absence of the key-read error; the screenshot and app logs confirm that the
+earlier Keychain failure is absent. Back navigation and host-field input also
+passed. The flow stopped before Save because Maestro's iOS swipe-based
+`hideKeyboard` did not dismiss the host form's keyboard. The flow now taps
+its observed native `Return` key instead.
+
+[Run 37186526164](https://github.com/gal064/muxflow/actions/runs/37186526164)
+reused the exact cached app and passed Return dismissal and host Save. It
+stopped before connection because iOS groups the host title/address/chevron
+into one accessibility label. The harness now matches grouped row labels
+and uses Files navigation to dismiss the terminal keyboard; host trust and
+the downstream SSH UI gates remain open until those flows pass.
 
 UI flows now use native back/input identifiers and assert that a missing-key
 state has no read error. The workflow caches only an exact app/dependency and

@@ -8,5 +8,4 @@ appId: dev.muxflow.mobile
 - tapOn: Type, then Send
 - inputText: "printf 'recovered\\n' > ios-recovered.marker"
 - tapOn: Send
-- hideKeyboard
 - takeScreenshot: recovered
