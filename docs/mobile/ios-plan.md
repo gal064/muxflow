@@ -1,10 +1,10 @@
 # Muxflow iOS — implementation plan
 
-Status: implementation started on `feat/ios-mobile`. Phase 0 shared sources
-and documentation have passed independent review and affected existing tests.
-The native iOS implementation and simulator harness are written. Native SSH
-contract tests pass on macOS; a standalone app builds, installs and launches
-in the simulator. SSH UI and device gates remain open. See evidence below.
+Status: foreground iOS implementation is on `feat/ios-mobile`, with shared
+sources and independent reviews complete. Native SSH contract tests and all
+four simulator UI flows pass on macOS. Signed distribution and real-iPhone
+lifecycle, Local Network, keyboard, audio and notification gates remain open.
+This is ready for device QA, not a completed shipping milestone. See evidence below.
 
 ## 1. Objective and scope
 
@@ -571,6 +571,24 @@ GitHub Actions build path.
 
 ## 9. Implementation evidence
 
+The automated foreground gate passed at `adfd81f` in
+[iOS run 37198926444](https://github.com/gal064/muxflow/actions/runs/37198926444),
+using an iPhone 17 Pro simulator on iOS 26.4 under Xcode 26.6. All four reports
+have zero failures: keyless `none` auth, forced-loss recovery, key generation,
+and generated-key auth after an app process restart. Both authentication flows
+verified host trust, a real helper handshake, terminal commands/output,
+Markdown and app-switch resume. The script checked host-side marker files and
+tmux output; retained screenshots show the rendered document and terminal
+results. The copied public key was retained as a canonical OpenSSH line;
+private key material stayed native. No bounded navigation or input retry was
+needed in this run. This verifies Keychain reuse across that restart, not
+reinstall or locked-device behavior.
+
+[Repository CI run 37198926358](https://github.com/gal064/muxflow/actions/runs/37198926358)
+also passed on Linux and macOS for that revision. The earlier failures below
+record build and harness corrections; they are not outstanding simulator gates.
+Their remaining device checks and unconfirmed causes are explicitly noted.
+
 Work is on `feat/ios-mobile`; the shared-source extraction is commit `2773203`.
 The implementation keeps the mobile protocol client, screens, terminals,
 files and voice in TypeScript. Android service/wake APIs have a separate
@@ -594,7 +612,7 @@ host-key comparison, independent channels, stderr/status presence and
 keepalive sends. All 605 mobile tests passed, including the real helper/tmux
 terminal and file suites; both desktop/mobile TypeScript checks passed.
 Full Linux/macOS repository CI passed in
-[run 37183766249](https://github.com/gal064/muxflow/actions/runs/37183766249),
+[run 37198926358](https://github.com/gal064/muxflow/actions/runs/37198926358),
 including desktop builds, Rust lint/tests and Linux frontend/mobile/generated
 checks. The Android debug APK also builds successfully on Linux.
 Additional tests freeze the real generated descriptor from released `v0.1.9`
@@ -666,15 +684,15 @@ its observed native `Return` key instead.
 reused the exact cached app and passed Return dismissal and host Save. It
 stopped before connection because iOS groups the host title/address/chevron
 into one accessibility label. The harness now matches grouped row labels
-and uses Files navigation to dismiss the terminal keyboard; host trust and
-the downstream SSH UI gates remain open until those flows pass.
+and uses Files navigation to dismiss the terminal keyboard. This run did not
+exercise host trust or the downstream SSH UI gates.
 
 [Run 37187836341](https://github.com/gal064/muxflow/actions/runs/37187836341)
 passed grouped host-row selection, then failed before host trust with native
 `E_TARGET`. Expo's pinned dictionary conversion hydrates JavaScript numbers
 as Swift `Double`; the adapter's direct `Int` cast rejected valid ports before
 opening a socket. The adapter now converts with `Int(exactly:)`, preserving
-integer/range validation. This requires a fresh app build and full UI rerun;
+integer/range validation. This required a fresh app build and full UI rerun;
 the engine-only native harness does not exercise the Expo argument bridge.
 
 [Run 37189097150](https://github.com/gal064/muxflow/actions/runs/37189097150)
@@ -683,8 +701,8 @@ assertion, host trust, `none` authentication and the real helper protocol
 handshake/topology. The port conversion fix is verified through the Expo bridge.
 The next action stopped at a redundant `Allow` tap after notification permission
 was already granted. The harness now relies on its declared launch permission
-and waits for the application UI. Terminal, Markdown, resume, generated-key
-auth and forced-loss recovery still need the subsequent UI pass.
+and waits for the application UI. This run did not complete terminal,
+Markdown, resume, generated-key auth or forced-loss recovery.
 
 [Run 37191748811](https://github.com/gal064/muxflow/actions/runs/37191748811)
 passed the full keyless flow: real terminal input/output, rendered Markdown
@@ -694,8 +712,7 @@ passed. The key-auth setup then stopped because a reported centre Add host
 tap left the app on the empty host list. Its cause is unconfirmed; no navigation
 error was logged. The harness now selects the observed floating Add host
 control and asserts the form before typing. Verify the centre action after
-key copy/back during device QA; generated-key SSH auth remains open until
-the final flow runs.
+key copy/back during device QA. This run did not exercise generated-key SSH auth.
 
 [Run 37193438193](https://github.com/gal064/muxflow/actions/runs/37193438193)
 repeated the keyless terminal/Markdown/resume, recovery and key-generation
@@ -703,8 +720,8 @@ passes. The floating Add host tap also left the separate key-auth flow on the
 empty host list, so changing controls did not resolve it. That flow lacked
 the explicit app launch used by the others. It now starts a fresh app session
 without clearing state or Keychain, which also tests that the generated key
-survives a process restart. Authentication and the activation diagnosis still
-need the next actual result; no app-navigation cause is established.
+survives a process restart. The final passing flow verifies that restart and
+authentication; the earlier missed taps' cause remains unconfirmed.
 
 [Run 37195070411](https://github.com/gal064/muxflow/actions/runs/37195070411)
 stopped earlier in the unchanged keyless flow: the connection was healthy,
@@ -720,8 +737,8 @@ passed the full keyless flow, recovery and key-generation UI, then stopped
 at clipboard export before key-auth started. App logs confirm a native
 pasteboard write; the exported value was not retained, so the failed read or
 format check cannot yet be distinguished. The harness now polls the clipboard
-read and retains its public value and error. Generated-key auth remains
-unverified. For the earlier Workspaces miss, the logs show iOS becoming
+read and retains its public value and error. This run did not exercise
+generated-key auth. For the earlier Workspaces miss, the logs show iOS becoming
 inactive for notification permission immediately before the tap; that
 specific miss was an OS prompt timing race.
 
@@ -732,8 +749,9 @@ but the saved host was `1`, so it dialled the wrong endpoint. The pinned
 already slows its first character to work around dropped input. The harness
 now enters the initial address through that single-character path and checks
 the exact host and port before saving. This isolates scripted input loss;
-normal device typing remains part of device QA. The clipboard diagnostic
-and generated-key authentication still need a run that reaches those steps.
+normal device typing remains part of device QA. The final passing run reached
+clipboard export and generated-key authentication; the earlier clipboard
+failure's cause remains unconfirmed because its value was not retained.
 
 UI flows now use native back/input identifiers and assert that a missing-key
 state has no read error. The workflow caches only an exact app/dependency and
