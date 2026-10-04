@@ -16,7 +16,10 @@ appId: dev.muxflow.mobile
 - tapOn:
     id: host-field-label
 - inputText: iOS fixture
-- hideKeyboard
+# Use the standard single-line input's Return key. Maestro's iOS swipe-based
+# hideKeyboard does not dismiss this form's keyboard on the current simulator.
+- tapOn:
+    id: Return
 - scrollUntilVisible:
     element: Save
 - tapOn: Save
