@@ -706,6 +706,16 @@ without clearing state or Keychain, which also tests that the generated key
 survives a process restart. Authentication and the activation diagnosis still
 need the next actual result; no app-navigation cause is established.
 
+[Run 37195070411](https://github.com/gal064/muxflow/actions/runs/37195070411)
+stopped earlier in the unchanged keyless flow: the connection was healthy,
+but a reported Workspaces tap left Agents selected. Maestro considered an
+unrelated hierarchy change sufficient to finish the tap. Add host and
+Workspaces navigation now wait for animations and assert their destinations
+inside a single bounded retry, retaining failed-attempt screenshots. This
+does not establish whether the missed taps originate in the driver or app;
+verify both interactions on a device. No auth, terminal or reconnect operation
+is retried by this harness change. Generated-key auth remains unverified.
+
 UI flows now use native back/input identifiers and assert that a missing-key
 state has no read error. The workflow caches only an exact app/dependency and
 resolved runner/Xcode/Node/CocoaPods match, before installation creates generated

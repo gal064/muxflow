@@ -1,10 +1,17 @@
 appId: dev.muxflow.mobile
 ---
-- tapOn:
-    text: Add host
-    index: 1 # The always-present floating Add host control.
-- assertVisible:
-    id: host-field-host
+# Maestro can report a successful tap when an unrelated hierarchy change
+# occurs. Verify the destination and retry this navigation once; retain the
+# failed attempt's screenshot rather than retrying any authentication work.
+- retry:
+    maxRetries: 1
+    commands:
+      - waitForAnimationToEnd
+      - tapOn:
+          text: Add host
+          index: 1 # The always-present floating Add host control.
+      - assertVisible:
+          id: host-field-host
 - tapOn:
     id: host-field-host
 - inputText: 127.0.0.1
@@ -38,7 +45,12 @@ appId: dev.muxflow.mobile
 - extendedWaitUntil:
     visible: '^Workspaces.*'
     timeout: 30000
-- tapOn: '^Workspaces.*'
+- retry:
+    maxRetries: 1
+    commands:
+      - waitForAnimationToEnd
+      - tapOn: '^Workspaces.*'
+      - assertVisible: '^primary,.*'
 - extendedWaitUntil:
     visible: '^primary,.*'
     timeout: 30000
