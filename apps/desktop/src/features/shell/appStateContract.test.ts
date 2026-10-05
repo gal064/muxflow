@@ -87,6 +87,16 @@ describe("persisted app state contract", () => {
     expect((contract as unknown as PersistedAppState).shell.pinnedOnly).toBe(true);
   });
 
+  it("restores whichever right-panel surface was showing, and Files for anything else", () => {
+    const surface = (value: unknown) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: { panelSurface: value },
+    }).shell.panelSurface;
+    expect(surface("git")).toBe("git");
+    expect(surface("ports")).toBe("ports");
+    expect(surface("agents")).toBe("files");
+    expect(surface(undefined)).toBe("files");
+  });
+
   it("ignores the pin records left behind by the build that kept pins in app state", () => {
     // Pins are the host's now, read off every snapshot. The records that used
     // to be here are not a migration — an unknown key is simply dropped — and

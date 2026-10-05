@@ -51,7 +51,7 @@
     }
   ],
   "shell": {
-    "panelSurface": "git",
+    "panelSurface": "ports",
     "sidebarCollapsed": true,
     "sidebarWidth": 260,
     "panelOpen": true,

@@ -1176,9 +1176,10 @@ describe("application shell accessibility contracts", () => {
     await act(async () => renderer.unmount());
   });
 
-  it("keeps Files and Git mutually exclusive in the one right panel", () => {
+  it("keeps Files, Git and Ports mutually exclusive in the one right panel", () => {
     const html = renderToStaticMarkup(<RightPanel
       files={<p>files surface</p>} git={<p>git surface</p>} maxWidth={800} onSurface={noop}
+      ports={<p>ports surface</p>}
       onWidth={noop} surface="git" width={320}
     />);
     expect(html).toContain('aria-selected="false"');
@@ -1187,9 +1188,31 @@ describe("application shell accessibility contracts", () => {
     expect(html).toContain('id="panel-surface-git"');
     expect(html).toContain("git surface");
     expect(html).not.toContain("files surface");
+    expect(html).not.toContain("ports surface");
+    expect(html).toContain('id="panel-tab-ports"');
     // Resizable from its left edge, like the sidebar is from its right.
     expect(html).toContain("--panel-width:320px");
     expect(html).toContain('aria-label="Resize the panel"');
+  });
+
+  it("cycles the panel's three tabs with the arrow keys, wrapping at both ends", () => {
+    const onSurface = vi.fn();
+    const press = (surface: "files" | "git" | "ports", key: string) => {
+      let renderer!: ReturnType<typeof create>;
+      act(() => {
+        renderer = create(<RightPanel
+          files={null} git={null} maxWidth={800} onSurface={onSurface}
+          onWidth={noop} ports={null} surface={surface} width={320}
+        />);
+      });
+      renderer.root.findByProps({ id: `panel-tab-${surface}` }).props.onKeyDown({ key, preventDefault: vi.fn() });
+      renderer.unmount();
+      return onSurface.mock.lastCall?.[0];
+    };
+    expect(press("git", "ArrowRight")).toBe("ports");
+    expect(press("ports", "ArrowRight")).toBe("files");
+    expect(press("files", "ArrowLeft")).toBe("ports");
+    expect(press("ports", "ArrowLeft")).toBe("git");
   });
 
   it("puts six controls and an unread count on the titlebar, and no more", () => {

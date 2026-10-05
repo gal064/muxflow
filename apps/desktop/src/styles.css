@@ -1033,6 +1033,49 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .git-output.error { color: var(--danger-ink); }
 
+/* ── Ports ─────────────────────────────────────────────────────────────── */
+
+.ports-panel { display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+.ports-host { display: flex; align-items: center; gap: 8px; padding: 8px 12px 0; }
+.ports-host select { flex: 1; min-width: 0; }
+.ports-form { display: flex; align-items: center; gap: 6px; padding: 8px 12px; color: var(--chrome-faint); }
+.ports-form input {
+  flex: 1 1 0; min-width: 0; padding: 4px 6px;
+  border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px;
+}
+.ports-form button { flex: 0 0 auto; padding: 4px 10px; border: 1px solid; border-radius: 4px; font-size: 11px; }
+.ports-list { margin: 0; padding: 0; list-style: none; }
+.port-forward {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px 8px 2px 12px;
+}
+.port-forward:hover, .port-forward:focus-within { background: var(--chrome-hover); }
+.port-forward-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--state-unknown); }
+.port-forward.active .port-forward-dot { background: var(--state-done); }
+.port-forward.starting .port-forward-dot { background: var(--state-working); }
+.port-forward.failed .port-forward-dot { background: var(--danger); }
+.port-forward-link {
+  flex: 1 1 auto; min-width: 0; padding: 2px 0; border: 0; background: transparent;
+  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.port-forward-link:hover:not(:disabled) { color: var(--accent); text-decoration: underline; }
+.port-forward-link:disabled { color: var(--chrome-dim); cursor: default; }
+.port-forward-error {
+  flex: 1 0 100%; padding-left: 13px; color: var(--danger-ink);
+  font-size: var(--type-meta); overflow-wrap: anywhere;
+}
+.ports-detected { padding: 8px 12px; }
+.ports-detected-header { display: flex; align-items: center; justify-content: space-between; }
+.ports-suggestions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.port-suggestion {
+  display: inline-flex; align-items: baseline; gap: 4px; padding: 2px 7px;
+  border: 1px solid var(--chrome-border); border-radius: 10px;
+  background: var(--chrome-raised); color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px;
+}
+.port-suggestion:hover { border-color: var(--accent); }
+.port-suggestion small { color: var(--chrome-faint); font-family: var(--font-sans); font-size: var(--type-meta); }
+
 /* ── Document surfaces ─────────────────────────────────────────────────── */
 
 /* Every document surface paints its own background. They are drawn over a

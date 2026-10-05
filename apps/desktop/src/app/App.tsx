@@ -113,6 +113,8 @@ import { AppNoticeLayer } from "./AppNoticeLayer";
 import { AppRightPanel } from "./AppRightPanel";
 import { useBulkTabClose } from "./useBulkTabClose";
 import { useTerminalFileOpen } from "./useTerminalFileOpen";
+import { usePortForwards } from "../features/ports/usePortForwards";
+import type { PortsHost } from "../features/ports/PortsPanel";
 
 const AppTabSurface = lazy(() => import("../features/shell/AppTabSurface").then((module) => ({ default: module.AppTabSurface })));
 const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then((module) => ({ default: module.GitDiffSurface })));
@@ -298,6 +300,17 @@ export function App() {
   const currentHelperConnectionKey = helperConnectionKey(connection);
   const terminalTransferClient = useMemo(() => new TauriTerminalTransferClient(), []);
   const terminalTransferRegistry = useTerminalTransferRegistry();
+  const portHosts = useMemo<readonly PortsHost[]>(() => links.flatMap((link) => link.connection.mode === "ssh"
+    ? [{
+      profileId: link.profileId,
+      label: profiles.find((profile) => profile.id === link.profileId)?.label ?? link.profileId,
+      connection: link.connection,
+    }]
+    : []), [links, profiles]);
+  const portForwards = usePortForwards(
+    useMemo(() => portHosts.map((host) => host.profileId), [portHosts]),
+    connectionController.profilesHydrated,
+  );
   const latency = useHostLatency();
   useEffect(() => dispatchHelper({ type: "reset" }), [connectionEpoch, currentHelperConnectionKey]);
   const remoteHelperRecovery = useRemoteHelperRecovery({
@@ -1676,6 +1689,7 @@ export function App() {
         </div>
       </section>
       {panelOpen && <AppRightPanel
+        activeHostProfileId={currentHostProfileId}
         canMutate={hostState.canMutate}
         fileClient={fileClient}
         fileScope={fileScope}
@@ -1720,8 +1734,10 @@ export function App() {
         onMessage={setStatus}
         onMutate={mutateFile}
         onOpenFile={openExplorerEntry}
-        onSurface={(surface) => void runCommand(surface === "files" ? "view.showFiles" : "view.showGit")}
+        onSurface={(surface) => void runCommand(surface === "files" ? "view.showFiles" : surface === "git" ? "view.showGit" : "view.showPorts")}
         onWidth={(width) => updateShell({ panelWidth: panelWidthForWindow(Math.min(width, panelMaxWidth), windowWidth) })}
+        portForwards={portForwards}
+        portHosts={portHosts}
         surface={appState.shell.panelSurface}
         width={panelWidth}
         workspaceFiles={workspaceFiles}

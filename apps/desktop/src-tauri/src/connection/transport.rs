@@ -229,7 +229,7 @@ pub(super) fn host_helper_path() -> Result<PathBuf, String> {
     ))
 }
 
-fn ssh_base(config_path: Option<&str>) -> Command {
+pub(super) fn ssh_base(config_path: Option<&str>) -> Command {
     let mut command = Command::new("ssh");
     if let Some(path) = config_path {
         command.arg("-F").arg(path);

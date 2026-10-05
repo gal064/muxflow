@@ -93,7 +93,7 @@ enum LeaseRoute {
 }
 
 impl SshLease {
-    pub(super) fn configure(
+    pub(in crate::connection) fn configure(
         &self,
         command: &mut Command,
         target: &str,
