@@ -39,7 +39,7 @@ esac
 for binary in "$package_root/bin/muxflow" "$package_root/bin/muxflow-host"; do
   readelf -h "$binary" | grep -F "Machine:                           $expected_machine" >/dev/null
 done
-for helper in "$package_root"/bin/muxflow-host-x86_64 "$package_root"/bin/muxflow-host-aarch64; do
+for helper in "$package_root"/bin/muxflow-host-linux-x86_64 "$package_root"/bin/muxflow-host-linux-aarch64; do
   [[ -f "$helper" ]] || continue
   case "$helper" in
     *-x86_64) helper_machine='Advanced Micro Devices X86-64' ;;
@@ -47,6 +47,14 @@ for helper in "$package_root"/bin/muxflow-host-x86_64 "$package_root"/bin/muxflo
   esac
   readelf -h "$helper" | grep -F "Machine:                           $helper_machine" >/dev/null
 done
+# A thin 64-bit arm64 Mach-O: magic feedfacf, CPU type 0100000c, little-endian.
+mac_helper="$package_root/bin/muxflow-host-macos-aarch64"
+if [[ -f "$mac_helper" ]]; then
+  [[ "$(od -An -tx1 -N8 "$mac_helper" | tr -d ' \n')" == cffaedfe0c000001 ]] || {
+    echo "macOS helper is not an arm64 Mach-O executable" >&2
+    exit 1
+  }
+fi
 strings "$package_root/bin/muxflow" | grep -F "default-src 'self' customprotocol: asset:" >/dev/null
 if strings "$package_root/bin/muxflow-host" | grep -E 'phase0-lanes|phase0-ssh|phase1-client' >/dev/null; then
   echo "release host contains development-only phase drivers" >&2

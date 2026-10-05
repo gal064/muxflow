@@ -310,3 +310,49 @@ not a listener line
         ]
     );
 }
+
+#[test]
+fn detected_ports_on_a_mac_come_from_lsof() {
+    // `lsof -nP -iTCP -sTCP:LISTEN -Fcn`, as macOS prints it.
+    let output = "\
+p41
+cnode
+f20
+n*:3000
+f21
+n[::1]:5173
+p7
+cControlCe
+f9
+n*:5000
+f10
+n192.168.0.195:7000
+p9
+cpython3
+f3
+n127.0.0.1:8000
+f4
+n*:80
+";
+    assert_eq!(
+        parse_listening_ports(output),
+        vec![
+            DetectedPort {
+                port: 3000,
+                process: Some("node".into())
+            },
+            DetectedPort {
+                port: 5000,
+                process: Some("ControlCe".into())
+            },
+            DetectedPort {
+                port: 5173,
+                process: Some("node".into())
+            },
+            DetectedPort {
+                port: 8000,
+                process: Some("python3".into())
+            },
+        ]
+    );
+}
