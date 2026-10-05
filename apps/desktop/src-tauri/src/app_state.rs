@@ -184,13 +184,14 @@ pub struct CommandPreferences {
     pub shortcut_overrides: HashMap<String, Option<String>>,
 }
 
-/// Which half of the right panel is showing when it is open.
+/// Which segment of the right panel is showing when it is open.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum PanelSurface {
     #[default]
     Files,
     Git,
+    Ports,
 }
 
 /// The agents section's ordering: workspace order, attention order, or
@@ -743,7 +744,7 @@ mod tests {
             include_str!("../../src/features/shell/persistedAppState.contract.json");
         let value: PersistedAppState =
             serde_json::from_str(CONTRACT).expect("the frontend's own payload must deserialize");
-        assert_eq!(value.shell.panel_surface, PanelSurface::Git);
+        assert_eq!(value.shell.panel_surface, PanelSurface::Ports);
         assert_eq!(value.shell.agent_sort, AgentSortMode::Status);
         assert_eq!(value.shell.sidebar_width, Some(260.0));
         assert_eq!(value.shell.panel_width, Some(320.0));

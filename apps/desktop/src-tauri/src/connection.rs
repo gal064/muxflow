@@ -44,6 +44,7 @@ pub(crate) mod files;
 pub(crate) mod git;
 pub(crate) mod git_content;
 use git_content::GitContentReads;
+pub(crate) mod ports;
 pub(crate) mod tmux_action;
 // Switch-timeline instrumentation. Compiled out of a plain release build with
 // the rest of `perf_log`; see `perf_log/switch_timing.rs` for what each stamp
