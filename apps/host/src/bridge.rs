@@ -216,12 +216,7 @@ async fn inspect_existing_daemon(path: &Path, auto_start: bool) -> anyhow::Resul
     if !auto_start {
         bail!("host daemon build differs and --no-start forbids replacing it");
     }
-    let stopped = timeout(Duration::from_secs(2), daemon::stop(path.to_owned())).await;
-    if !matches!(stopped, Ok(Ok(()))) {
-        daemon::retire_verified(path)
-            .await
-            .context("retire host daemon after cooperative shutdown failed")?;
-    }
+    daemon::stop_or_retire(path).await?;
     for _ in 0..100 {
         if UnixStream::connect(path).await.is_err() {
             return Ok(ExistingDaemon::Retired);

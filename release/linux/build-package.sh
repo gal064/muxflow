@@ -116,11 +116,11 @@ package_root="$build_root/$package_name"
 mkdir -p "$package_root/bin" "$package_root/share/applications" "$package_root/share/icons/hicolor/256x256/apps"
 install -m 0755 "$binary_dir/muxflow" "$package_root/bin/muxflow"
 install -m 0755 "$host_binary" "$package_root/bin/muxflow-host"
-install -m 0755 "$host_binary" "$package_root/bin/muxflow-host-$arch"
+install -m 0755 "$host_binary" "$package_root/bin/muxflow-host-linux-$arch"
 if [[ "$arch" == x86_64 && -n "${ADE_HOST_HELPER_AARCH64_OVERRIDE:-}" ]]; then
-  install -m 0755 "$ADE_HOST_HELPER_AARCH64_OVERRIDE" "$package_root/bin/muxflow-host-aarch64"
+  install -m 0755 "$ADE_HOST_HELPER_AARCH64_OVERRIDE" "$package_root/bin/muxflow-host-linux-aarch64"
 elif [[ "$arch" == aarch64 && -n "${ADE_HOST_HELPER_X86_64_OVERRIDE:-}" ]]; then
-  install -m 0755 "$ADE_HOST_HELPER_X86_64_OVERRIDE" "$package_root/bin/muxflow-host-x86_64"
+  install -m 0755 "$ADE_HOST_HELPER_X86_64_OVERRIDE" "$package_root/bin/muxflow-host-linux-x86_64"
 fi
 install -m 0755 release/linux/install.sh "$package_root/install.sh"
 install -m 0755 release/linux/uninstall.sh "$package_root/uninstall.sh"

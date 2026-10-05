@@ -77,7 +77,7 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 ssh -F "$run_root/ssh-config" phase8-cua-remote 'mkdir -p "$HOME/.local/bin" "$HOME/phase8-repo"'
-scp -q -F "$run_root/ssh-config" "$prefix/lib/muxflow/muxflow-host-x86_64" phase8-cua-remote:/home/ade/.local/bin/muxflow-host
+scp -q -F "$run_root/ssh-config" "$prefix/lib/muxflow/muxflow-host-linux-x86_64" phase8-cua-remote:/home/ade/.local/bin/muxflow-host
 ssh -F "$run_root/ssh-config" phase8-cua-remote '
   chmod 0700 "$HOME/.local/bin/muxflow-host"
   repo="$HOME/phase8-repo"

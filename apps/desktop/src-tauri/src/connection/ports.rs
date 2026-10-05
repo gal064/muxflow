@@ -353,14 +353,39 @@ fn guarded(inner: &Command) -> Command {
     command
 }
 
-/// Parses `ss -ltnHp` into the ports worth suggesting: unprivileged, reachable
-/// through a loopback forward, one row per port, the user's own processes first.
+/// Lists listening TCP sockets: `ss` on Linux, `lsof` where there is no `ss`
+/// (macOS).
+const DETECT_COMMAND: &str = "ss -ltnHp 2>/dev/null || lsof -nP -iTCP -sTCP:LISTEN -Fcn";
+
+/// Parses `ss -ltnHp` or `lsof -Fcn` into the ports worth suggesting:
+/// unprivileged, reachable through a loopback forward, one row per port, the
+/// user's own processes first.
 pub(crate) fn parse_listening_ports(output: &str) -> Vec<DetectedPort> {
     let mut ports: Vec<DetectedPort> = Vec::new();
+    let mut lsof_process: Option<String> = None;
     for line in output.lines() {
-        // State Recv-Q Send-Q Local:Port Peer:Port [Process]
-        let Some(local) = line.split_whitespace().nth(3) else {
-            continue;
+        let (local, process) = match line.as_bytes().first() {
+            // lsof: `p` starts a process, `c` names it, `n` is one of its sockets.
+            Some(b'p') => {
+                lsof_process = None;
+                continue;
+            }
+            Some(b'c') => {
+                lsof_process = Some(line[1..].to_owned());
+                continue;
+            }
+            Some(b'n') => (&line[1..], lsof_process.clone()),
+            // ss: State Recv-Q Send-Q Local:Port Peer:Port [Process]
+            _ => {
+                let Some(local) = line.split_whitespace().nth(3) else {
+                    continue;
+                };
+                let process = line
+                    .split_once("users:((\"")
+                    .and_then(|(_, rest)| rest.split_once('"'))
+                    .map(|(name, _)| name.to_owned());
+                (local, process)
+            }
         };
         let Some((address, port)) = local.rsplit_once(':') else {
             continue;
@@ -371,10 +396,6 @@ pub(crate) fn parse_listening_ports(output: &str) -> Vec<DetectedPort> {
         if port < 1024 || !reachable_through_loopback(address) {
             continue;
         }
-        let process = line
-            .split_once("users:((\"")
-            .and_then(|(_, rest)| rest.split_once('"'))
-            .map(|(name, _)| name.to_owned());
         match ports.iter_mut().find(|existing| existing.port == port) {
             Some(existing) => {
                 if existing.process.is_none() {
@@ -404,7 +425,7 @@ fn detect_ports(connection: &ConnectionSpec) -> Result<Vec<DetectedPort>, String
     lease.configure(&mut command, target, config_path)?;
     let output = command
         .arg(target)
-        .arg("ss -ltnHp")
+        .arg(DETECT_COMMAND)
         .stdin(Stdio::null())
         .output()
         .map_err(|error| format!("failed to run ssh: {error}"))?;
