@@ -7,10 +7,13 @@ import type { FileEntry, FileMutation } from "../features/files/types";
 import type { GitDiffTarget, GitStatusEntry } from "../features/git/types";
 import type { WorkspaceGitState } from "../features/git/useWorkspaceGit";
 import { GitSidebar } from "../features/git/GitSidebar";
+import type { PortForward } from "../features/ports/api";
+import { PortsPanel, type PortsHost } from "../features/ports/PortsPanel";
 import { RightPanel } from "../features/shell/RightPanel";
 import type { ShellState } from "../features/shell/types";
 
 interface AppRightPanelProps {
+  activeHostProfileId: string;
   canMutate: boolean;
   fileClient: FileWorkspaceClient;
   fileScope?: FileWorkspaceScope;
@@ -27,11 +30,13 @@ interface AppRightPanelProps {
   /** The cap the caller applies — half the window. */
   maxWidth: number;
   onWidth: (width: number) => void;
+  portForwards: readonly PortForward[];
+  portHosts: readonly PortsHost[];
   workspaceFiles: ReturnType<typeof useWorkspaceFiles>;
   workspaceGit: WorkspaceGitState;
 }
 
-/** Explorer and Git rail wiring, kept outside the root application coordinator. */
+/** Explorer, Git and Ports rail wiring, kept outside the root application coordinator. */
 export function AppRightPanel(props: AppRightPanelProps) {
   return <RightPanel
     files={<ExplorerTree
@@ -70,6 +75,7 @@ export function AppRightPanel(props: AppRightPanelProps) {
     maxWidth={props.maxWidth}
     onSurface={props.onSurface}
     onWidth={props.onWidth}
+    ports={<PortsPanel activeProfileId={props.activeHostProfileId} forwards={props.portForwards} hosts={props.portHosts} />}
     surface={props.surface}
     width={props.width}
   />;
