@@ -414,8 +414,9 @@ impl SshControl {
             borrowed_identity: None,
             owned_master: None,
         };
-        // No `ControlPersist`, for the reason the desktop's control-master lane
-        // documents: it makes OpenSSH daemonize once the socket exists, so this
+        // `ControlPersist=no`, overriding any value in the user's ssh_config, for
+        // the reason the desktop's control-master lane documents: `ControlPersist`
+        // makes OpenSSH daemonize once the socket exists, so this
         // child exits while the real master keeps running reparented to init.
         // Everything below owns `child` as if it were the master — the loop
         // reads an exit as "died before creating its socket", and `Drop` kills
@@ -426,7 +427,14 @@ impl SshControl {
         // this type's ownership real.
         let mut child = value
             .base_command()
-            .args(["-M", "-N", "-o", "ControlMaster=yes"])
+            .args([
+                "-M",
+                "-N",
+                "-o",
+                "ControlMaster=yes",
+                "-o",
+                "ControlPersist=no",
+            ])
             .arg("-S")
             .arg(&value.socket)
             .arg(&value.target)
