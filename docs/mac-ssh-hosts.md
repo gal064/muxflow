@@ -165,6 +165,12 @@ then share one socket, and they work together only when their digests match:
   from another machine.
 - This plan does not fix version skew. It documents it in
   `docs/remote-host.md`: keep both machines on the same release.
+- **Agent-status hooks are shared too.** Both the Mac app and a remote
+  install write the Mac's Claude/Codex hooks under the same `muxflow` owner.
+  A first install over SSH repoints the Mac app's hooks to
+  `~/.local/bin/muxflow-host`. Removing hooks from a remote desktop then
+  removes the Mac app's hooks as well, together with the Muxflow lines in
+  `~/.codex/config.toml`. Found in rc.3 QA; see Todo.
 
 ## macOS-only behaviour to verify, not code
 
@@ -235,6 +241,30 @@ isolated runtime folder.
   its socket, never offered the helper install, and leaked one master per
   reconnect. Both master spawns now pass `-o ControlPersist=no`. This affects
   Linux hosts too.
+
+### 0.1.11-rc.3, the Linux app with the Mac as host (end to end)
+
+The real rc.3 Linux app ran with isolated settings and used the test
+ssh_config, which sets `ControlPersist 300`. All eight cases passed:
+
+- The install offer appeared within 4 s, so the `ControlPersist` fix holds.
+  One master per connection, and none left after a normal quit.
+- Installing the helper and its agent-status hooks took about 6 s. The
+  installed file matches the packaged `muxflow-host-macos-aarch64`, has no
+  quarantine attribute, and its daemon runs from `~/.local/bin`.
+- Terminal: a new tmux session on the Mac ran zsh, with Homebrew tmux 3.7b.
+- Files listed home and `~/Documents`. Git showed a repository read-only, and
+  its status matched `git status`.
+- Ports: `lsof` detected a test listener. Forwarding it served `hello` to
+  `curl` on Linux, and ✕ closed the local port.
+- After a relaunch the app reconnected with no install prompt, and the
+  session and its scrollback were still there.
+
+Found:
+- Killing the app (SIGTERM, a crash, or `kill -9`) leaves its control master
+  running under init; only a normal quit stops it. This predates this plan
+  and affects Linux hosts too (see Todo).
+- The hooks conflict described under coexistence.
 
 ## Tests
 
@@ -371,3 +401,18 @@ from the Linux dev machine until manual QA of the RC is done:
   check `xcode-select -p` before running git on Darwin.
 - **Privacy with full disk access off.** Confirm what Files and Git show on a
   Mac host when "Allow full disk access for remote users" is off.
+- **Hooks on a Mac that also runs the app.** A remote install takes over the
+  Mac app's agent-status hooks, and a remote hook removal deletes them
+  (see coexistence). Options:
+  - skip hook setup over SSH when the host already has Muxflow-managed hooks;
+  - point hooks at a path both share.
+- **Control master outlives a killed app.** The forward processes in
+  `connection/ports.rs` are tied to the app by a pipe guard. The control
+  master has no such guard, so a crash or `kill` leaves it running under
+  init. It could reuse the same guard.
+- **Small UI issues from rc.3 QA:**
+  - the "Uninstall Claude Code hooks?" dialog says "before confirming
+    installation";
+  - Enter in the host menu toggled "Local" instead of opening the
+    highlighted item;
+  - the port chips shift under the pointer after a forward is added.
