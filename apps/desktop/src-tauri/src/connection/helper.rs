@@ -37,11 +37,7 @@ fn probe_remote_helper_inner(connection: ConnectionSpec) -> Result<serde_json::V
 
 /// Match the installed executable against the artifact this desktop can install.
 fn compare_installed_artifact(probe: &mut serde_json::Value) -> Result<(), String> {
-    let architecture = probe
-        .get("architecture")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("remote helper probe omitted architecture")?;
-    let expected = sha256_file(&helper_artifact_for_arch(architecture)?)?;
+    let expected = sha256_file(&helper_artifact(probe)?)?;
     let matches = probe
         .get("digest")
         .and_then(serde_json::Value::as_str)
@@ -127,7 +123,7 @@ fn install_remote_helper_inner(
         .get("architecture")
         .and_then(serde_json::Value::as_str)
         .ok_or("remote helper probe omitted architecture")?;
-    let artifact = helper_artifact_for_arch(remote_arch)?;
+    let artifact = helper_artifact(&probe)?;
     let digest = sha256_file(&artifact)?;
     let mut command = Command::new(host_helper_path()?);
     command
@@ -187,37 +183,62 @@ fn run_remote_probe_with_lease(
     serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())
 }
 
-fn helper_artifact_for_arch(architecture: &str) -> Result<PathBuf, String> {
-    let architecture = normalize_architecture(architecture);
-    let variable = match architecture {
-        "x86_64" => "ADE_HOST_HELPER_X86_64_PATH",
-        "aarch64" => "ADE_HOST_HELPER_AARCH64_PATH",
-        other => return Err(format!("unsupported remote helper architecture {other}")),
-    };
+/// The helper this desktop uploads to a host whose probe reported `uname -s`
+/// and `uname -m`.
+fn helper_artifact(probe: &serde_json::Value) -> Result<PathBuf, String> {
+    let os = probe
+        .get("operatingSystem")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("remote helper probe omitted the operating system")?;
+    let architecture = probe
+        .get("architecture")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("remote helper probe omitted architecture")?;
+    let target = helper_target(os, architecture)?;
+    let variable = format!(
+        "ADE_HOST_HELPER_{}_PATH",
+        target.to_ascii_uppercase().replace('-', "_")
+    );
     if let Some(path) = std::env::var_os(variable) {
         return Ok(path.into());
     }
-    // A native desktop helper is reusable only when the desktop itself is a
-    // Linux ELF. A same-architecture macOS helper is Mach-O and must never be
-    // uploaded to a Linux host.
-    if cfg!(target_os = "linux") && architecture == normalize_architecture(std::env::consts::ARCH) {
+    // The desktop's own helper is the right upload only for a host of the same
+    // OS and architecture: a Mach-O must never reach a Linux host, nor an ELF
+    // a Mac. A Mac uploading its own signed sidecar also keeps both machines
+    // on one build, so they share the Mac's daemon instead of replacing it.
+    if helper_target(DESKTOP_OS, std::env::consts::ARCH).as_ref() == Ok(&target) {
         return host_helper_path();
     }
+    let name = format!("muxflow-host-{target}");
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
     if let Some(parent) = current.parent() {
-        let filename = format!("muxflow-host-linux-{architecture}");
-        for packaged in [
-            parent.join(&filename),
-            parent.join("../Resources").join(&filename),
-        ] {
+        for packaged in [parent.join(&name), parent.join("../Resources").join(&name)] {
             if packaged.is_file() {
                 return Ok(packaged);
             }
         }
     }
-    Err(format!(
-        "no packaged {architecture} remote helper artifact is available"
-    ))
+    Err(format!("no packaged {name} remote helper is available"))
+}
+
+/// This desktop's `uname -s`.
+const DESKTOP_OS: &str = if cfg!(target_os = "macos") {
+    "Darwin"
+} else {
+    "Linux"
+};
+
+/// The helper build a host needs, e.g. `macos-aarch64` — packaged as
+/// `muxflow-host-macos-aarch64` — or why that host is unsupported.
+fn helper_target(os: &str, architecture: &str) -> Result<String, String> {
+    let architecture = normalize_architecture(architecture);
+    let platform = match (os, architecture) {
+        ("Linux", "x86_64" | "aarch64") => "linux",
+        ("Darwin", "aarch64") => "macos",
+        ("Darwin", _) => return Err("Intel Macs aren't supported as SSH hosts".into()),
+        _ => return Err(format!("{os} {architecture} hosts aren't supported")),
+    };
+    Ok(format!("{platform}-{architecture}"))
 }
 
 fn normalize_architecture(value: &str) -> &str {
@@ -245,6 +266,30 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_host_gets_the_helper_built_for_its_os_and_architecture() {
+        assert_eq!(helper_target("Linux", "x86_64"), Ok("linux-x86_64".into()));
+        assert_eq!(helper_target("Linux", "arm64"), Ok("linux-aarch64".into()));
+        assert_eq!(helper_target("Darwin", "arm64"), Ok("macos-aarch64".into()));
+        assert_eq!(
+            helper_target("Darwin", "x86_64"),
+            Err("Intel Macs aren't supported as SSH hosts".into())
+        );
+        assert_eq!(
+            helper_target("FreeBSD", "amd64"),
+            Err("FreeBSD x86_64 hosts aren't supported".into())
+        );
+    }
+
+    #[test]
+    fn a_probe_without_an_operating_system_is_refused() {
+        let probe = serde_json::json!({ "architecture": "x86_64" });
+        assert_eq!(
+            helper_artifact(&probe),
+            Err("remote helper probe omitted the operating system".into())
+        );
+    }
 
     #[test]
     fn helper_install_result_exposes_typed_rollback_without_ui_message_parsing() {

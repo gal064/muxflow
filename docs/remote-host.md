@@ -12,9 +12,9 @@ The remote `muxflow-host` binary is installed under
 `~/.local/bin/muxflow-host` only after explicit confirmation. Installation:
 
 1. probes OS and architecture;
-2. chooses the matching x86-64 or ARM64 artifact;
+2. chooses the helper built for that OS and architecture;
 3. uploads to a private temporary path;
-4. verifies SHA-256 and architecture;
+4. verifies SHA-256, OS and architecture;
 5. atomically replaces the managed binary; and
 6. restores the previous helper if the new handshake fails.
 
@@ -23,12 +23,16 @@ succeeds. Mutations created before a disconnect are never replayed.
 
 ## Remote requirements
 
-- Linux x86-64 for the validated package; ARM64 only after producing and
-  validating the native ARM64 artifact described in the release guide
-- tmux 3.3 or newer
+- Linux (x86-64 or ARM64), or macOS on Apple Silicon. Intel Macs are not
+  supported as hosts.
+- tmux 3.3 or newer. On a Mac, Homebrew (`/opt/homebrew/bin/tmux`) and
+  MacPorts are found even though macOS SSH sessions do not have them on PATH.
 - Git for Git features
 - a writable home directory
-- OpenSSH access as the normal user
+- OpenSSH access as the normal user. On a Mac, turn on System Settings →
+  General → Sharing → Remote Login (Tailscale's own SSH server does not run in
+  the Tailscale Mac app), and turn on "Allow full disk access for remote users"
+  under its ⓘ so the helper can read Documents, Desktop and Downloads.
 
 The daemon socket and runtime files are user-only. A daemon restart does not
 restart tmux. If remote setup fails, run the packaged helper's `doctor` command

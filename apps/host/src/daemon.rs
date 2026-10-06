@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::{
     net::{UnixListener, UnixStream},
     sync::mpsc,
-    time::sleep,
+    time::{sleep, timeout},
 };
 
 use tmux_agent_protocol::{
@@ -232,6 +232,24 @@ pub async fn stop(socket_path: PathBuf) -> anyhow::Result<()> {
             return Ok(());
         }
     }
+}
+
+/// Stops the daemon cooperatively, or, when it cannot cooperate within two
+/// seconds, retires it by its verified PID. Shared by the bridge replacing a
+/// different build and by `daemon-stop --force` in the remote install scripts.
+pub async fn stop_or_retire(socket_path: &Path) -> anyhow::Result<()> {
+    let stopped = timeout(Duration::from_secs(2), stop(socket_path.to_owned())).await;
+    if matches!(stopped, Ok(Ok(()))) {
+        return Ok(());
+    }
+    let retired = retire_verified(socket_path).await;
+    // A slow but cooperative daemon can exit after the timeout and delete its
+    // metadata before the retire reads it; an endpoint that no longer accepts
+    // connections is the stop that was asked for.
+    if retired.is_err() && UnixStream::connect(socket_path).await.is_err() {
+        return Ok(());
+    }
+    retired.context("retire host daemon after cooperative shutdown failed")
 }
 
 #[derive(Deserialize)]

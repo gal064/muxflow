@@ -30,9 +30,12 @@ pushed version tag and leaves them in a draft GitHub Release:
    live in the `release` environment, which only `v*` tags can use; a ruleset
    lets only the repository admin create, move or delete those tags.
 4. The Linux x86-64 and ARM64 packages are built natively on their own runners.
-   Each is then given the other architecture's helper. The macOS job takes both
-   Linux helpers from those packages, then builds, signs, notarizes and
-   verifies the DMG (ad-hoc signed while the Apple secrets are absent). The
+   The macOS job takes both Linux helpers from those packages, then builds,
+   signs, notarizes and verifies the DMG (ad-hoc signed while the Apple
+   secrets are absent), and exports the app's signed helper. Each Linux
+   package is then given the other architecture's helper and that Mac helper
+   (`muxflow-host-macos-aarch64`), so a Linux desktop can install on a Mac
+   host the same bytes a Mac desktop would. The
    Android job builds the APK with the release key and
    checks its certificate against `apps/mobile/release-cert.sha256`.
 5. A draft release appears with the DMG, both Linux tarballs, the APK,
