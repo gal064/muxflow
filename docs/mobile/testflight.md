@@ -82,3 +82,22 @@ on the iPhone. See [Apple's internal testing instructions](https://developer.app
 Test LAN permission, SSH authentication, terminal interaction, brief app
 switches, lock/resume, and microphone/audio on the physical device. Simulator
 evidence cannot close those device gates.
+
+## First signed upload evidence
+
+[Run 37434806475](https://github.com/gal064/muxflow/actions/runs/37434806475)
+successfully built and uploaded `0.1.9 (2)` from candidate `bebfc43` on
+2026-10-06. Apple build/upload ID is
+`bf468001-025c-44c6-ae1f-278de5a3b782`, with processing state `VALID`.
+Apple validation and upload completed without errors.
+
+Independent QA verified the retained IPA's metadata, App Store profile,
+signed binary entitlements and digest, with no push/background modes. The
+runner passed strict/deep native signature verification. The IPA SHA-256 is
+`3836046445113c1b37295c0f4cf3bc0855c689194b66b57a1954770944351951`.
+
+At verification, Apple reported `MISSING_EXPORT_COMPLIANCE` and
+`usesNonExemptEncryption: null`. Upload/processing are complete; the account
+holder must complete the **build-level** TestFlight compliance form and
+internal tester setup before installation. The app-level questionnaire alone
+does not prove the build is eligible. Real-iPhone QA remains open.

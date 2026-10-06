@@ -776,3 +776,19 @@ creates an isolated SSH server and tmux socket, cleans them up on exit, and
 writes evidence to `tmp/ios-evidence`. The Actions job runs these same steps
 and retains its logs, reports, screenshots and simulator app. On Linux, use
 the `ios` Actions workflow rather than attempting to run Xcode locally.
+
+### Signed TestFlight candidate — 2026-10-06
+
+The signed workflow in [run 37434806475](https://github.com/gal064/muxflow/actions/runs/37434806475)
+successfully archived, exported, verified and uploaded `0.1.9 (2)` from
+`bebfc43`. Apple validation/upload succeeded and processing reached `VALID`.
+Independent QA verified shipped metadata, profile, permissions, entitlements
+and the retained IPA digest. No push entitlement or background modes ship.
+See [TestFlight setup and evidence](testflight.md) for reproduction and the
+Apple build identifier. Protocol major remains 4; no wire changes were made.
+
+Apple still reported `MISSING_EXPORT_COMPLIANCE` at verification. Build-level
+compliance, internal tester setup and real-iPhone QA remain open. The first
+attempt failed before archive because Apple's P12 importer rejected the
+OpenSSL 3 package format; repackaging the same identity/password into the
+documented macOS-compatible format resolved import without regenerating keys.
