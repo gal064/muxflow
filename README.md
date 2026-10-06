@@ -203,6 +203,6 @@ Package builds: `pnpm release:linux -- x86_64`, `pnpm release:macos`, and
 ## License
 
 Muxflow source is licensed under [MIT](./LICENSE). The bundled JetBrains Mono
-fonts retain their own license in the desktop and mobile font directories. The
-optional speech model is downloaded separately; its upstream and conversion
+and Inter fonts retain their own licenses in the desktop and mobile font
+directories. The optional speech model is downloaded separately; its upstream and conversion
 model cards are linked in [third-party notices](./docs/third-party.md).
