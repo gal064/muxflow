@@ -76,6 +76,31 @@ that key and would otherwise send nothing at all. Ctrl+_ is left to xterm.js,
 which already encodes it correctly. Ctrl+Shift+/ (Ctrl+?) is a different key and
 is unaffected.
 
+# A Mac as an SSH host
+
+- **Connection refused on port 22.** Turn on System Settings → General →
+  Sharing → Remote Login on the Mac. `tailscale set --ssh` does not help: the
+  Tailscale Mac app cannot run Tailscale's SSH server ("does not run in
+  sandboxed Tailscale GUI builds"), but plain SSH over the tailnet works.
+- **Files or Git fail with "Operation not permitted" in Documents, Desktop or
+  Downloads.** macOS privacy protection applies to SSH sessions. Click the ⓘ
+  next to Remote Login and turn on **Allow full disk access for remote users**,
+  then reconnect.
+- **"tmux executable was not found".** Install tmux with Homebrew
+  (`brew install tmux`) or MacPorts. Both locations are checked even though
+  macOS SSH sessions do not put them on PATH. For anything else, set
+  `MUXFLOW_TMUX_PATH`.
+- **"Intel Macs aren't supported as SSH hosts".** Only Apple Silicon Macs can
+  be hosts.
+- **The phone says "muxflow-host isn't installed on this host" for a Mac that
+  runs Muxflow.** The Mac app's Local connection uses the helper inside the
+  app, but the phone (like any SSH client) looks for
+  `~/.local/bin/muxflow-host`. Connect to the Mac once from a Muxflow desktop
+  over SSH and install the helper when asked; the phone then works.
+- **Panes on the Mac keep reattaching.** A Mac that runs the Muxflow app and
+  is also an SSH host shares one helper between both, and only when both are
+  the same Muxflow version. Update both machines to the same release.
+
 # macOS package and permissions
 
 The macOS build is ad-hoc signed and not notarized, so Gatekeeper blocks a
