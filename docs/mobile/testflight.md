@@ -96,8 +96,11 @@ signed binary entitlements and digest, with no push/background modes. The
 runner passed strict/deep native signature verification. The IPA SHA-256 is
 `3836046445113c1b37295c0f4cf3bc0855c689194b66b57a1954770944351951`.
 
-At verification, Apple reported `MISSING_EXPORT_COMPLIANCE` and
-`usesNonExemptEncryption: null`. Upload/processing are complete; the account
-holder must complete the **build-level** TestFlight compliance form and
-internal tester setup before installation. The app-level questionnaire alone
-does not prove the build is eligible. Real-iPhone QA remains open.
+At initial verification, Apple reported `MISSING_EXPORT_COMPLIANCE` and
+`usesNonExemptEncryption: null`. After the account holder completed the
+build-level compliance form, live API verification confirms
+`usesNonExemptEncryption: false`, processing state `VALID` and internal state
+`READY_FOR_BETA_TESTING`. Credential setup, signed build/upload automation,
+encryption compliance and Apple upload/processing (steps 1–4) are complete.
+Internal tester setup and real-iPhone QA remain separate installation/device
+gates.

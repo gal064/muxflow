@@ -787,8 +787,11 @@ and the retained IPA digest. No push entitlement or background modes ship.
 See [TestFlight setup and evidence](testflight.md) for reproduction and the
 Apple build identifier. Protocol major remains 4; no wire changes were made.
 
-Apple still reported `MISSING_EXPORT_COMPLIANCE` at verification. Build-level
-compliance, internal tester setup and real-iPhone QA remain open. The first
+Apple initially reported `MISSING_EXPORT_COMPLIANCE`. After the account
+holder completed build-level compliance, live API verification confirms
+`usesNonExemptEncryption: false` and `READY_FOR_BETA_TESTING` for internal
+testing. Steps 1–4 of TestFlight setup are complete; internal tester setup
+and real-iPhone QA remain open. The first
 attempt failed before archive because Apple's P12 importer rejected the
 OpenSSL 3 package format; repackaging the same identity/password into the
 documented macOS-compatible format resolved import without regenerating keys.
