@@ -218,6 +218,24 @@ isolated runtime folder.
   host needs Remote Login, though the connection can still go over the
   tailnet.
 
+### 0.1.11-rc.1 helper on the Mac (CLI, Linux to Mac)
+
+- The RC's Linux helper installed the RC's Mac helper in 8.3 s. Installing
+  the same build again took 1 s, and `doctor` found Homebrew tmux 3.7b, which
+  is not on PATH.
+- **Forced retire after replacement works.** The daemon was frozen with
+  SIGSTOP the moment the install lock appeared, so cooperative shutdown timed
+  out. `retire_verified` then matched the start time and the
+  `proc_pidpath` of the old daemon even though `mv` had already replaced its
+  file. It sent SIGTERM, which ends a stopped process on macOS immediately,
+  and the upgrade passed in 9.5 s with no rollback.
+- **Found: `ControlPersist` in ssh_config broke connect.** With
+  `ControlPersist` set in the user's ssh_config, OpenSSH daemonized the
+  control master. The app took the exited child for a dead master, unlinked
+  its socket, never offered the helper install, and leaked one master per
+  reconnect. Both master spawns now pass `-o ControlPersist=no`. This affects
+  Linux hosts too.
+
 ## Tests
 
 - **Rust, host:**
@@ -347,13 +365,6 @@ from the Linux dev machine until manual QA of the RC is done:
   `protocol-check`. Deferred from the first version: getting `sshd` up on a
   hosted runner needs iteration, and manual QA against a real Mac covered the
   same path.
-- **macOS retire after the helper file is replaced.** An upgrade replaces
-  `~/.local/bin/muxflow-host` with `mv` and then stops the old daemon. If
-  cooperative shutdown fails (for example across a `PROTOCOL_MAJOR` bump),
-  `retire_verified` compares `proc_pidpath` with the recorded path. On Linux
-  the ` (deleted)` suffix is handled; on macOS, what `proc_pidpath` returns
-  for a replaced executable is unverified. If it differs, that upgrade fails
-  and rolls back. To do: verify on a real Mac.
 - **git without the Command Line Tools.** On such a Mac, `/usr/bin/git` is a
   shim that may pop the "install developer tools" dialog on the Mac's screen
   when the probe or the Git tab runs git over SSH. To do: confirm, and if so
