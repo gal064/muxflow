@@ -18,6 +18,12 @@ The GitHub `ios-testflight` environment holds:
 Private keys and passwords stay outside the repository. The macOS runner imports
 the signing identity into a temporary keychain and removes it and the installed
 profile after export. API key material exists only for validation/upload.
+P12 packages created with OpenSSL 3 defaults may fail Apple's importer with
+a MAC-verification error despite a valid password. Package the existing
+identity using macOS-compatible PKCS12 encryption (PBESv1 SHA-1/3DES with a
+SHA-1 MAC) and keep it protected by encrypted GitHub Secrets and a strong
+export password. Certificate import runs before prebuild/pod installation
+so an import failure stops promptly.
 
 ## Build and upload
 

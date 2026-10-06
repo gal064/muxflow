@@ -120,8 +120,6 @@ def build():
     if list(OUTPUT.glob("*.ipa")):
         raise ValueError("An IPA already exists; upload those exact bytes or allocate a new build number")
     run(["bash", "release/check-version.sh"])
-    run(["pnpm", "exec", "expo", "prebuild", "--platform", "ios", "--no-install"], cwd=MOBILE, log="prebuild.log")
-    run(["pod", "install"], cwd=MOBILE / "ios", log="pods.log")
     original_keychains = run(["security", "list-keychains", "-d", "user"], capture=True).decode().splitlines()
     original_keychains = [line.strip().strip('"') for line in original_keychains]
     installed_profile = None
@@ -150,6 +148,9 @@ def build():
             run(["security", "import", str(certificate), "-k", str(keychain), "-P", password, "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"])
             run(["security", "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", keychain_password, str(keychain)], capture=True)
             run(["security", "list-keychains", "-d", "user", "-s", str(keychain), *original_keychains])
+            print("Distribution certificate imported; generating the iOS project.", flush=True)
+            run(["pnpm", "exec", "expo", "prebuild", "--platform", "ios", "--no-install"], cwd=MOBILE, log="prebuild.log")
+            run(["pod", "install"], cwd=MOBILE / "ios", log="pods.log")
             os.environ["MUXFLOW_IOS_PROFILE_UUID"] = profile["UUID"]
             run(["node", "release/ios/configure-signing.cjs"])
             os.environ["NODE_BINARY"] = shutil.which("node")
