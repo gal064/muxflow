@@ -57,12 +57,17 @@ const DIAGNOSTIC_LINE_CHARS: usize = 300;
 /// an asynchronous list `/dev/null` as stdin unless it is redirected
 /// explicitly. When ssh exits on its own, the watcher subshell is ended and its
 /// `cat` lingers only until Muxflow drops the pipe for the failed forward.
+///
+/// Once both are started, the wrapper's own stderr goes to `/dev/null`: ssh
+/// keeps the pipe it inherited, while the shell's job notices — macOS `sh`
+/// reports the killed watcher as "Terminated: 15" — never reach the error a
+/// failed forward shows.
 const GUARD_SCRIPT: &str = r#"exec 3<&0
 "$@" </dev/null 3<&- &
 forward=$!
 ( cat >/dev/null; kill "$forward" 2>/dev/null ) <&3 >/dev/null 2>&1 &
 watch=$!
-exec 3<&-
+exec 3<&- 2>/dev/null
 wait "$forward"
 status=$?
 kill "$watch" 2>/dev/null
