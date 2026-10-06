@@ -2,6 +2,11 @@ name: ios
 
 on:
   workflow_dispatch:
+    inputs:
+      testflight:
+        description: Build, validate and upload a signed TestFlight IPA
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -38,11 +43,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ios-${{ github.ref }}
-  cancel-in-progress: true
+  group: ios-${{ inputs.testflight && 'testflight' || github.ref }}
+  cancel-in-progress: ${{ !inputs.testflight }}
 
 jobs:
   simulator:
+    if: ${{ !inputs.testflight }}
     runs-on: macos-26
     timeout-minutes: 90
     env:
@@ -75,6 +81,8 @@ jobs:
           printf 'cache-key=%s\n' "$toolchain_key" >> "$GITHUB_OUTPUT"
       - name: Release versions
         run: release/check-version.sh
+      - name: Distribution refusal checks
+        run: uv run --no-project tests/mobile/ios/test-distribution.py
       # Hash before installation/prebuild creates generated files. Restore only
       # an exact app/dependency/toolchain match; no prefix fallback. This is an
       # locally ad hoc signed QA artifact, never a distribution build.
@@ -122,3 +130,73 @@ jobs:
             tmp/ios-evidence/
             tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
           if-no-files-found: warn
+
+  testflight:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.testflight }}
+    runs-on: macos-26
+    environment: ios-testflight
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      NODE_OPTIONS: --max-old-space-size=6144
+      OPENSSL_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a fresh run
+        # Retry upload with the retained IPA; a new binary needs a new number.
+        run: test "$GITHUB_RUN_ATTEMPT" = 1
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: astral-sh/setup-uv@v6
+      - name: Toolchain and release versions
+        run: |
+          xcodebuild -version
+          pod --version
+          release/check-version.sh
+          uv run --no-project tests/mobile/ios/test-distribution.py
+      - name: Refuse an already uploaded build number
+        env:
+          MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64 }}
+          MUXFLOW_APP_STORE_CONNECT_KEY_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_ID }}
+          MUXFLOW_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_ISSUER_ID }}
+        run: uv run --no-project release/ios/testflight.py check
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm mobile:check
+      - name: Archive, export and verify the signed IPA
+        env:
+          MUXFLOW_IOS_CERTIFICATE_P12_BASE64: ${{ secrets.MUXFLOW_IOS_CERTIFICATE_P12_BASE64 }}
+          MUXFLOW_IOS_CERTIFICATE_PASSWORD: ${{ secrets.MUXFLOW_IOS_CERTIFICATE_PASSWORD }}
+          MUXFLOW_IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.MUXFLOW_IOS_PROVISIONING_PROFILE_BASE64 }}
+          MUXFLOW_APPLE_TEAM_ID: ${{ secrets.MUXFLOW_APPLE_TEAM_ID }}
+        run: uv run --no-project release/ios/testflight.py build
+      - name: Retain the exact upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-testflight-${{ github.sha }}
+          path: |
+            tmp/release/ios/*.ipa
+            tmp/release/ios/manifest.json
+          if-no-files-found: error
+      - name: Validate and upload to App Store Connect
+        env:
+          MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64 }}
+          MUXFLOW_APP_STORE_CONNECT_KEY_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_ID }}
+          MUXFLOW_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_ISSUER_ID }}
+        run: uv run --no-project release/ios/testflight.py upload
+      - name: Build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-testflight-logs-${{ github.run_id }}
+          path: tmp/release/ios/*.log
+          if-no-files-found: ignore
+      - name: Apple build record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-testflight-apple-${{ github.run_id }}
+          path: tmp/release/ios/apple-build.json
+          if-no-files-found: ignore

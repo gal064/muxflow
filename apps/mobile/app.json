@@ -87,7 +87,7 @@
     "ios": {
       "bundleIdentifier": "dev.muxflow.mobile",
       "icon": "./assets/icon.png",
-      "buildNumber": "1",
+      "buildNumber": "2",
       "supportsTablet": true,
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "Muxflow connects to your development hosts over SSH on your local network."

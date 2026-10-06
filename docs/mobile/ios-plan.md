@@ -500,7 +500,7 @@ artifacts can support visual inspection, but do not replace that device QA.
 | Bundle ID | Use `dev.muxflow.mobile` provisionally; confirm availability before Apple registration. |
 | Apple Developer membership and team ID | Begin setup during Phase 1; required for the chosen signed TestFlight path and the Phase 2 device gate. |
 | Signing certificate/profile and App Store Connect credentials in GitHub secrets | Before the Phase 2 signed build. Do not paste private keys into chat. |
-| Encryption export declaration | Resolve before the first TestFlight upload, including the selected SSH library and third-party crypto. Determine the required declaration/documents and set `ITSAppUsesNonExemptEncryption` accurately; do not assume an SSH app uses only exempt OS encryption. |
+| Encryption export declaration | Resolve before enabling TestFlight installation, including the selected SSH library and third-party crypto. The first upload may remain Missing Compliance until the account holder completes Apple's questionnaire; leave `ITSAppUsesNonExemptEncryption` unset until resolved. See [TestFlight setup](testflight.md). Do not assume an SSH app uses only exempt OS encryption. |
 | An iPhone and user participation | By Phase 2 for lifecycle and LAN permission; later for audio and background alerts. |
 | Push relay ownership, hosting and APNs credentials | Before the push milestone. |
 
