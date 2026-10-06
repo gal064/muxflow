@@ -4,6 +4,10 @@ The bundled JetBrains Mono fonts are licensed under the SIL Open Font License
 1.1. Their license texts are in `apps/desktop/src/assets/fonts/LICENSE.txt` and
 `apps/mobile/assets/fonts/LICENSE.txt`.
 
+The desktop app also bundles the Inter variable fonts, licensed under the SIL
+Open Font License 1.1. Their license text is in
+`apps/desktop/src/assets/fonts/LICENSE-Inter.txt`.
+
 The patches under `patches/` modify `@xterm/xterm` and `@xterm/addon-webgl`.
 Both packages use MIT licenses; their copyright notices and license texts are
 retained under `patches/licenses/`.
