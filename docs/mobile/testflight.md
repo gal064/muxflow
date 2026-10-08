@@ -27,11 +27,24 @@ so an import failure stops promptly.
 
 ## Release to testers
 
-Push a reviewed version tag to build all platforms. The release workflow signs
-and notarizes the Mac app, uploads the signed iOS build, waits for Apple to
-finish processing it, and assigns it to the internal group. The GitHub release
-stays a draft until you publish it. RC tags may point to a branch; stable tags
-must point to `main`.
+Choose the tag's iOS audience when releasing:
+
+| Tag | iOS behavior |
+|---|---|
+| `vX.Y.Z` | No iOS upload |
+| `vX.Y.Z-ios-internal` | Signed upload and internal Checksum testing |
+| `vX.Y.Z-ios` | Signed upload, internal Checksum testing, and external Beta submission |
+
+The same suffixes work after `-rc.N`. All these tags still package the other
+platforms. RC tags may point to a branch; stable tags must point to `main`.
+The GitHub release stays a draft until you publish it. iOS upload and
+TestFlight submission do not wait for GitHub draft publication.
+
+Before either iOS tag, record a fresh build number with
+`release/set-version.sh X.Y.Z IOS_BUILD_NUMBER`. Omitting the number keeps the
+old value; another iOS upload using build 3 will be refused now that Apple
+already has it. For example, use `release/set-version.sh 0.1.14 4` for the next
+new iOS binary.
 
 The `ios-testflight` environment has `MUXFLOW_TESTFLIGHT_INTERNAL_GROUP=Checksum`
 and `MUXFLOW_TESTFLIGHT_EXTERNAL_GROUP=Beta`. Manage testers in these existing
@@ -43,7 +56,16 @@ choice, and instructions that let Apple test the SSH connection. Provide a
 reachable review host and credentials there if needed. The workflow checks
 that the required fields are filled; only Apple can judge whether they suffice.
 
-Then open GitHub Actions → **Distribute TestFlight build** → **Run workflow**,
+The `-ios` release path automatically performs external distribution after
+Apple finishes processing the upload. It preserves the saved app-level privacy
+URL and other metadata, and validates the description, feedback address,
+contact and SSH review instructions. Update `release/ios/what-to-test.txt` with
+the release's testing focus before tagging. Its initial notes cover SSH connections,
+terminal scrolling, files and reconnecting. The iOS workflow can also be
+dispatched with a chosen audience and custom notes.
+
+To promote an existing internal build, or recover an external-distribution
+failure without rebuilding, open GitHub Actions → **Distribute TestFlight build** → **Run workflow**,
 enter the uploaded build number, choose `external`, and enter What to Test.
 It uses the existing signed build, assigns it to Beta, submits beta review if
 needed, and enables distribution to testers after approval. Pending reviews
@@ -54,7 +76,7 @@ For an existing build on a reviewed ref, the equivalent command is:
 
 ```bash
 gh workflow run testflight-distribute.yml --ref main \
-  -f build_number=3 -f audience=external -f notes='Test terminal scrolling and reconnect.'
+  -f build_number=EXISTING_BUILD_NUMBER -f audience=external -f notes='Test terminal scrolling and reconnect.'
 ```
 
 The internal and external jobs refuse unfinished, expired or non-compliant
@@ -62,10 +84,20 @@ builds and refuse a group with the wrong audience. A failure after upload does
 not require rebuilding: use **Distribute TestFlight build** with the retained
 build number after resolving the error.
 
+Apple allows up to six TestFlight App Review submissions in a 24-hour period,
+and only one build of each app version can be in review at a time. Later builds
+for the same version may not require a full review. Use `-ios-internal` for
+frequent internal testing; it does not submit beta review. If Apple refuses a
+new external submission because another build is pending or the limit is
+reached, keep the successful upload and rerun **Distribute TestFlight build**
+when submission is available. Do not rebuild or re-upload under the same number.
+These workflows distribute TestFlight builds; public App Store submission is
+a separate process.
+
 ## Build and upload
 
 1. Review the source and complete simulator QA for app behavior changes.
-2. Allocate a new build number using `release/set-version.sh 0.1.13 3` (replace
+2. Allocate a new build number using `release/set-version.sh 0.1.14 4` (replace
    both values with the intended version and a number greater than the current
    number). Commit it with the candidate. The protocol major is independent:
    this distribution change does not bump it.

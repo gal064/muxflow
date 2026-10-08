@@ -6,12 +6,27 @@ on:
       testflight:
         type: boolean
         default: true
+      audience:
+        type: string
+        default: internal
+      notes:
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       testflight:
         description: Build, validate and upload a signed TestFlight IPA
         type: boolean
         default: false
+      audience:
+        description: TestFlight audience after upload
+        type: choice
+        options: [internal, external]
+        default: internal
+      notes:
+        description: What to Test (blank uses release/ios/what-to-test.txt)
+        type: string
+        default: ''
   push:
     branches: [main]
     paths:
@@ -149,6 +164,24 @@ jobs:
       OPENSSL_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v4
+      - name: Validate TestFlight audience
+        env:
+          TESTFLIGHT_AUDIENCE: ${{ inputs.audience }}
+          TESTFLIGHT_NOTES: ${{ inputs.notes }}
+        run: |
+          [[ "$TESTFLIGHT_AUDIENCE" == internal || "$TESTFLIGHT_AUDIENCE" == external ]] || {
+            echo '::error::TestFlight audience must be internal or external'
+            exit 1
+          }
+          if [[ "$TESTFLIGHT_AUDIENCE" == external ]]; then
+            if [[ ! "$TESTFLIGHT_NOTES" =~ [^[:space:]] ]]; then
+              TESTFLIGHT_NOTES=$(cat release/ios/what-to-test.txt)
+            fi
+            [[ "$TESTFLIGHT_NOTES" =~ [^[:space:]] ]] || {
+              echo '::error::External testing requires What to Test notes'
+              exit 1
+            }
+          fi
       - name: Require a fresh run
         # Retry upload with the retained IPA; a new binary needs a new number.
         run: test "$GITHUB_RUN_ATTEMPT" = 1
@@ -201,6 +234,20 @@ jobs:
           MUXFLOW_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_ISSUER_ID }}
           TESTFLIGHT_GROUP: ${{ vars.MUXFLOW_TESTFLIGHT_INTERNAL_GROUP }}
         run: uv run --no-project release/ios/distribute.py internal
+      - name: Submit the processed build for external beta review
+        if: inputs.audience == 'external'
+        env:
+          MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64 }}
+          MUXFLOW_APP_STORE_CONNECT_KEY_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_ID }}
+          MUXFLOW_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_ISSUER_ID }}
+          TESTFLIGHT_GROUP: ${{ vars.MUXFLOW_TESTFLIGHT_EXTERNAL_GROUP }}
+          TESTFLIGHT_NOTES: ${{ inputs.notes }}
+        run: |
+          if [[ ! "$TESTFLIGHT_NOTES" =~ [^[:space:]] ]]; then
+            TESTFLIGHT_NOTES=$(cat release/ios/what-to-test.txt)
+            export TESTFLIGHT_NOTES
+          fi
+          uv run --no-project release/ios/distribute.py external
       - name: Build logs
         if: always()
         uses: actions/upload-artifact@v4

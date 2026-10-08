@@ -5,6 +5,8 @@
 #
 #   release/set-version.sh 0.2.0   # merged to main through a pull request
 #   git tag v0.2.0 && git push origin v0.2.0
+# Append -ios for an iOS upload + external review, or -ios-internal for an
+# internal tester upload. Each upload requires a fresh recorded build number.
 #
 # A tag with a suffix (v0.2.0-rc.1) builds from a tree still versioned 0.2.0
 # can build from a branch and is drafted as a pre-release, which releases/latest never selects.
@@ -33,22 +35,24 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      ios_audience: ${{ steps.version.outputs.ios_audience }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - id: version
         run: |
-          tag=${GITHUB_REF_NAME#v}
-          version=${tag%%-*}
+          info=$(bash release/tag-info.sh "$GITHUB_REF_NAME")
+          printf '%s\n' "$info" >> "$GITHUB_OUTPUT"
+          version=$(printf '%s\n' "$info" | sed -n 's/^version=//p')
+          prerelease=$(printf '%s\n' "$info" | sed -n 's/^prerelease=//p')
           # RCs can exercise a branch before merge. Other release tags must be on main.
-          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]] && ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+          if [[ "$prerelease" != true ]] && ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main"
             exit 1
           fi
           release/check-version.sh "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [[ "$tag" == *-* ]]; then echo prerelease=true; else echo prerelease=false; fi >> "$GITHUB_OUTPUT"
+          printf '### Release tag: %s\n\n```text\n%s\n```\n' "$GITHUB_REF_NAME" "$info" >> "$GITHUB_STEP_SUMMARY"
 
   ci:
     needs: version
@@ -56,9 +60,11 @@ jobs:
 
   ios:
     needs: [ci, version]
+    if: needs.version.outputs.ios_audience != 'none'
     uses: ./.github/workflows/ios.yml
     with:
       testflight: true
+      audience: ${{ needs.version.outputs.ios_audience }}
     secrets: inherit
 
   linux:
@@ -298,8 +304,8 @@ jobs:
           cp "$RUNNER_TEMP"/artifacts/android/muxflow-"$version"-android.apk "$out/"
           cp release/get.sh "$out/install.sh"
           (cd "$out" && sha256sum -- * > SHA256SUMS)
-          node -e 'process.stdout.write(JSON.stringify({version: process.argv[1], url: process.argv[2]}, null, 2) + "\n")' \
-            "$version" "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" > "$out/latest.json"
+          node -e 'process.stdout.write(JSON.stringify({version: process.argv[1], tag: process.argv[2], url: process.argv[3]}, null, 2) + "\n")' \
+            "$version" "$GITHUB_REF_NAME" "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" > "$out/latest.json"
           sed -e "s/{{VERSION}}/$version/g" -e "s/{{TAG}}/$GITHUB_REF_NAME/g" release/release-notes.md > "$RUNNER_TEMP/notes.md"
           cat "$out/SHA256SUMS" "$out/latest.json"
       - name: Create the draft release

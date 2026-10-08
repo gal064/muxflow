@@ -11,7 +11,7 @@ and packaged desktop journeys are not part of it; they are the manual
 release-candidate gates listed below.
 
 The desktop app, the host helper and the mobile app share one `X.Y.Z` version.
-Change it only with `release/set-version.sh X.Y.Z IOS_BUILD_NUMBER`, which rewrites every copy
+Change it only with `release/set-version.sh X.Y.Z [IOS_BUILD_NUMBER]`, which rewrites every copy
 and derives the Android `versionCode` as `major*10000 + minor*100 + patch`;
 `release/check-version.sh` verifies them. The wire protocol version in
 `crates/protocol` is independent.
@@ -19,7 +19,8 @@ and derives the Android `versionCode` as `major*10000 + minor*100 + patch`;
 For each new iOS binary intended for upload, pass a new explicit build number:
 `release/set-version.sh X.Y.Z IOS_BUILD_NUMBER`. The integer must increase
 (1–9999); omitting it preserves the recorded number for local version changes. Every
-version-tag release uploads iOS, so it requires a fresh build number. Reuse the exact existing artifact when retrying an upload. iOS
+tag ending in `-ios` or `-ios-internal` uploads iOS, so it requires a fresh build number.
+Ordinary tags skip iOS and can leave its build number unchanged. Reuse the exact existing artifact when retrying an upload. iOS
 marketing versions follow the shared version, but installed phones update
 independently through TestFlight. The unsigned simulator workflow proves
 neither signing nor availability to testers.
@@ -41,10 +42,30 @@ require a bump. See [the iOS plan](mobile/ios-plan.md) for readiness gates.
 `.github/workflows/release.yml` builds every downloadable artifact from a
 pushed version tag and leaves them in a draft GitHub Release:
 
-1. Run `release/set-version.sh X.Y.Z IOS_BUILD_NUMBER`, open a pull request, and merge it once CI
+| Tag example | iOS upload and distribution | GitHub release |
+|---|---|---|
+| `v0.1.14` | Skip iOS | Stable draft |
+| `v0.1.14-ios` | Upload, assign internal testers, submit external Beta review | Stable draft |
+| `v0.1.14-ios-internal` | Upload and assign internal testers only | Stable draft |
+| `v0.1.14-rc.1` | Skip iOS | Prerelease draft |
+| `v0.1.14-rc.1-ios` | Upload, assign internal testers, submit external Beta review | Prerelease draft |
+| `v0.1.14-rc.1-ios-internal` | Upload and assign internal testers only | Prerelease draft |
+
+The suffix controls iOS distribution; all six tags still build Linux, macOS,
+and Android packages. `-ios` does not make a stable version a prerelease.
+Unsupported tag formats fail before any build or upload.
+Choose one stable tag variant for each product version; do not publish both
+`vX.Y.Z` and `vX.Y.Z-ios` for the same version. To promote a build already
+uploaded internally, use the distribution action instead of another release tag.
+
+1. Run `release/set-version.sh X.Y.Z` for a release without iOS, or pass a fresh
+   `IOS_BUILD_NUMBER` for either iOS tag. Open a pull request, and merge it once CI
    passes.
 2. Tag the merged commit and push the tag:
-   `git tag vX.Y.Z && git push origin vX.Y.Z`.
+   `git tag vX.Y.Z && git push origin vX.Y.Z`. Append `-ios` or `-ios-internal`
+   when the release should upload iOS. For example, the next external iOS
+   release after build 3 can use `release/set-version.sh 0.1.14 4`, followed by
+   `git tag v0.1.14-ios && git push origin v0.1.14-ios` after merging.
 3. Stable releases stop unless the tagged commit is on `main` and the tree's
    version matches the tag. It then reruns the CI gate. The signing secrets
    live in the `release` environment, which only `v*` tags can use; a ruleset
@@ -58,11 +79,18 @@ pushed version tag and leaves them in a draft GitHub Release:
    host the same bytes a Mac desktop would. The
    Android job builds the APK with the release key and
    checks its certificate against `apps/mobile/release-cert.sha256`.
-   The iOS job signs and uploads an IPA using the `ios-testflight` environment,
+   For either iOS suffix, the iOS job signs and uploads an IPA using the `ios-testflight` environment,
    waits for valid Apple processing and assigns it to the internal TestFlight
-   group. The IPA and digest remain in Actions artifacts; iOS installs through
-   TestFlight. Promote the same build to external testing with the
-   **Distribute TestFlight build** action; see [TestFlight releases](mobile/testflight.md).
+   group. For `-ios`, it then submits the processed build to the external Beta
+   group using the saved app-level review information and What to Test notes.
+   Update `release/ios/what-to-test.txt` with the release's testing focus before
+   tagging. Its initial notes cover SSH, terminal scrolling, files and reconnecting;
+   a manually dispatched iOS workflow can supply different notes. The IPA and
+   digest remain in Actions artifacts; iOS installs through TestFlight.
+   `-ios-internal` stops after internal assignment. Promote that same uploaded
+   build later with **Distribute TestFlight build**, choosing `external` and
+   providing What to Test. Do not push another iOS tag to re-upload the same
+   build number; see [TestFlight releases](mobile/testflight.md).
 5. A draft release appears with the DMG, both Linux tarballs, the APK,
    `install.sh` (the one-line Linux and macOS installer, from `release/get.sh`),
    `SHA256SUMS`, and `latest.json`. Its notes start with the install
@@ -72,18 +100,20 @@ pushed version tag and leaves them in a draft GitHub Release:
    Then press Publish.
 
 `latest.json` is the manifest the desktop and Android apps poll for updates:
-`{"version": "X.Y.Z", "url": "<release page>"}`. The apps read it through
+`{"version": "X.Y.Z", "tag": "<exact tag>", "url": "<release page>"}`. The apps read it through
 `releases/latest/download/latest.json`, which never resolves to a draft or a
 pre-release. So the red "Update" pill appears only once a release is
-published. A tag with a suffix such as `vX.Y.Z-rc.1` builds from a tree
-versioned `X.Y.Z` and is drafted as a pre-release. RC tags matching
-`vX.Y.Z-rc.N` may point to a branch commit without merging it to `main`.
+published. The installer uses the exact `tag`, including an iOS suffix;
+package filenames and the app's version keep the base `X.Y.Z`.
+Tags containing `-rc.N` build from a tree versioned `X.Y.Z` and are drafted as
+prereleases. RC tags, with or without an iOS suffix, may point to a branch commit without merging it to `main`.
 Other tags still require a commit on `main`; CI, version checks, signing,
 artifact verification, and the admin-only tag rule apply to RCs too.
 
-To cut a branch RC, set the branch's version with `release/set-version.sh X.Y.Z IOS_BUILD_NUMBER`,
+To cut a branch RC, set the branch's version with `release/set-version.sh X.Y.Z`,
+adding a fresh `IOS_BUILD_NUMBER` only when uploading iOS,
 commit it, push the branch, then tag that commit with `vX.Y.Z-rc.N` and push the
-tag. Review the generated draft and publish it as a pre-release for direct
+tag. Add `-ios` or `-ios-internal` to the RC tag when needed. Review the generated draft and publish it as a pre-release for direct
 downloads. This repository is public, so a published RC is public too. It does
 not replace the stable release or trigger the apps' stable update prompt.
 
@@ -94,8 +124,9 @@ pinning its release tag:
 curl -fsSL https://github.com/gal064/muxflow/releases/download/vX.Y.Z-rc.N/install.sh | MUXFLOW_VERSION=vX.Y.Z-rc.N bash
 ```
 
-`MUXFLOW_VERSION` accepts stable versions and `X.Y.Z-rc.N`, with or without a
-leading `v`. The installer downloads from that exact tag; package filenames
+`MUXFLOW_VERSION` accepts stable versions and `X.Y.Z-rc.N`, optionally followed
+by `-ios` or `-ios-internal`, with or without a leading `v`.
+The installer downloads from that exact tag; package filenames
 use the base `X.Y.Z` version. Without a pin it installs the latest stable
 release. Quit and reopen the desktop after installing. For SSH hosts, use
 Settings → Check helper → Upgrade helper to deploy the bundled helper to the
