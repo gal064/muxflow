@@ -1215,13 +1215,15 @@ describe("application shell accessibility contracts", () => {
     expect(press("ports", "ArrowLeft")).toBe("git");
   });
 
-  it("puts six controls and an unread count on the titlebar, and no more", () => {
+  it("puts seven controls and an unread count on the titlebar, and no more", () => {
     const html = renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack canGoForward={false} canJump onBack={noop} onBell={noop} onForward={noop}
-      onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
+      onNewWorkspace={noop} onOpenSettings={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelFits panelOpen={false} platform="mac" sidebarFits sidebarOpen unread={3} workspaceName="muxflow"
     />);
-    expect([...html.matchAll(/<button/gu)]).toHaveLength(6);
+    expect([...html.matchAll(/<button/gu)]).toHaveLength(7);
+    // Settings leads the bar, ahead of the sidebar toggle.
+    expect(html).toMatch(/^<header[^>]*><button aria-label="Settings"[^>]*title="Settings \(⌘,\)"/u);
     expect(html).toContain("3 agents waiting; go to the next one");
     expect(html).toContain("Go to the next agent waiting (blocked first, then unread completed)");
     expect(html).toContain("muxflow");
@@ -1236,7 +1238,7 @@ describe("application shell accessibility contracts", () => {
     expect(html).toMatch(/<button aria-label="Forward"[^>]*disabled/u);
     const quiet = renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack={false} canGoForward canJump={false} onBack={noop} onBell={noop} onForward={noop}
-      onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
+      onNewWorkspace={noop} onOpenSettings={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelFits panelOpen={false} platform="linux" sidebarFits sidebarOpen={false} unread={0}
     />);
     expect(quiet).toContain("No agents waiting");
@@ -1250,10 +1252,10 @@ describe("application shell accessibility contracts", () => {
   it("adds a red update pill before the bell only while a newer release is published", () => {
     const html = renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack canGoForward canJump={false} onBack={noop} onBell={noop} onForward={noop}
-      onNewWorkspace={noop} onTogglePanel={noop} onToggleSidebar={noop} onUpdate={noop}
+      onNewWorkspace={noop} onOpenSettings={noop} onTogglePanel={noop} onToggleSidebar={noop} onUpdate={noop}
       panelFits panelOpen={false} platform="mac" sidebarFits sidebarOpen unread={0} update={{ version: "0.2.0" }}
     />);
-    expect([...html.matchAll(/<button/gu)]).toHaveLength(7);
+    expect([...html.matchAll(/<button/gu)]).toHaveLength(8);
     expect(html).toContain(">↑ Update 0.2.0</button>");
     expect(html).toContain('title="Muxflow 0.2.0 is available. Open its release page."');
     expect(html.indexOf("titlebar-update")).toBeLessThan(html.indexOf("bar-button-badged"));
@@ -1264,7 +1266,7 @@ describe("application shell accessibility contracts", () => {
     const bell = (canJump: boolean, unread: number) => {
       const html = renderToStaticMarkup(<TitleBar
         canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell}
-        onForward={noop} onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
+        onForward={noop} onNewWorkspace={noop} onOpenSettings={noop} onTogglePanel={noop} onUpdate={noop}
         onToggleSidebar={noop} panelFits panelOpen={false} platform="linux" sidebarFits sidebarOpen unread={unread}
       />);
       const badged = html.indexOf("bar-button-badged");
@@ -1299,7 +1301,7 @@ describe("application shell accessibility contracts", () => {
     const onBell = vi.fn();
     let renderer!: ReturnType<typeof create>;
     const bar = (canJump: boolean) => <TitleBar
-      canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell} onForward={noop} onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
+      canCreateWorkspace canGoBack={false} canGoForward={false} canJump={canJump} onBack={noop} onBell={onBell} onForward={noop} onNewWorkspace={noop} onOpenSettings={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelFits panelOpen={false} platform="linux" sidebarFits sidebarOpen unread={2}
     />;
     act(() => { renderer = create(bar(false)); });
@@ -1318,7 +1320,7 @@ describe("application shell accessibility contracts", () => {
     let renderer!: ReturnType<typeof create>;
     const bar = (fits: boolean) => <TitleBar
       canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
-      onNewWorkspace={noop} onTogglePanel={onTogglePanel} onUpdate={noop} onToggleSidebar={onToggleSidebar}
+      onNewWorkspace={noop} onOpenSettings={noop} onTogglePanel={onTogglePanel} onUpdate={noop} onToggleSidebar={onToggleSidebar}
       panelFits={fits} panelOpen={false} platform="linux" sidebarFits={fits} sidebarOpen={false} unread={0}
     />;
     act(() => { renderer = create(bar(false)); });
@@ -1345,7 +1347,7 @@ describe("application shell accessibility contracts", () => {
   it("reserves traffic-light room on macOS only, because only macOS overlays them", () => {
     const bar = (platform: "mac" | "linux") => renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
-      onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
+      onNewWorkspace={noop} onOpenSettings={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelFits panelOpen={false} platform={platform} sidebarFits sidebarOpen unread={0}
     />);
     // `titleBarStyle: "Overlay"` is a macOS-only Tauri option; Linux has no
@@ -1360,7 +1362,7 @@ describe("application shell accessibility contracts", () => {
     const controls = { maximized: false, onClose: vi.fn(), onMinimize: vi.fn(), onToggleMaximize: vi.fn() };
     const bar = (windowControls?: typeof controls) => <TitleBar
       canCreateWorkspace canGoBack={false} canGoForward={false} canJump={false} onBack={noop} onBell={noop} onForward={noop}
-      onNewWorkspace={noop} onTogglePanel={noop} onUpdate={noop}
+      onNewWorkspace={noop} onOpenSettings={noop} onTogglePanel={noop} onUpdate={noop}
       onToggleSidebar={noop} panelFits panelOpen={false} platform="linux" sidebarFits sidebarOpen unread={0}
       windowControls={windowControls}
     />;

@@ -35,15 +35,16 @@ interface TitleBarProps {
   onNewWorkspace(): void;
   onBell(): void;
   onUpdate(): void;
+  onOpenSettings(): void;
 }
 
 /**
  * The only full-width bar: 38px on macOS, where it has to clear the native
  * traffic lights drawn over it, and 28px like every other bar elsewhere.
  *
- * It carries six controls, plus a seventh while a newer release is published:
- * a red pill that opens its release page. It has no dismiss on purpose; it is
- * gone once the app is updated. Back and Forward walk the focus history — through
+ * It carries seven controls, Settings first, plus an eighth while a newer
+ * release is published: a red pill that opens its release page. It has no
+ * dismiss on purpose; it is gone once the app is updated. Back and Forward walk the focus history — through
  * terminals and document tabs alike — and are disabled when nothing that
  * still exists lies in that direction; ⌘[ and ⌘] run the same commands.
  *
@@ -69,6 +70,13 @@ export function TitleBar(props: TitleBarProps) {
     ? `${props.unread} agent${plural} waiting; go to the next one`
     : bellHint;
   return <header className={`titlebar ${props.platform === "mac" ? "titlebar-overlay" : ""}`} data-tauri-drag-region>
+    <button
+      aria-label="Settings"
+      className="bar-button"
+      onClick={props.onOpenSettings}
+      title={props.platform === "mac" ? "Settings (⌘,)" : "Settings (Ctrl+,)"}
+      type="button"
+    ><Icon name="settings" /></button>
     <button
       aria-disabled={!props.sidebarFits || undefined}
       aria-label="Toggle sidebar"

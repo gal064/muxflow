@@ -19,6 +19,7 @@ export type IconName =
   | "panelRight"
   | "bell"
   | "plus"
+  | "settings"
   // Source Control's row and header actions. `minus` is `plus` with one stroke
   // taken away, so stage and unstage read as one pair; `discard` is the return
   // arrow VS Code uses for it, and `refresh` the circular one.
@@ -79,6 +80,12 @@ const paths: Record<IconName, ReactElement> = {
     <path d="M6.6 13.2a1.6 1.6 0 0 0 2.8 0" />
   </>,
   plus: <path d="M8 3.75v8.5M3.75 8h8.5" />,
+  // A six-tooth outline around an open hub, so it reads as a gear at 14px
+  // rather than as `fileConfig`'s spoked one, which marks config files.
+  settings: <>
+    <path d="M6.16 3.46 L6.78 1.72 L9.22 1.72 L9.84 3.46 A4.9 4.9 0 0 1 11.02 4.14 L12.83 3.80 L14.05 5.92 L12.85 7.32 A4.9 4.9 0 0 1 12.85 8.68 L14.05 10.08 L12.83 12.20 L11.02 11.86 A4.9 4.9 0 0 1 9.84 12.54 L9.22 14.28 L6.78 14.28 L6.16 12.54 A4.9 4.9 0 0 1 4.98 11.86 L3.17 12.20 L1.95 10.08 L3.15 8.68 A4.9 4.9 0 0 1 3.15 7.32 L1.95 5.92 L3.17 3.80 L4.98 4.14 A4.9 4.9 0 0 1 6.16 3.46Z" />
+    <circle cx="8" cy="8" r="2" />
+  </>,
   minus: <path d="M3.75 8h8.5" />,
   windowMaximize: <rect height="8.5" rx="1" width="8.5" x="3.75" y="3.75" />,
   windowRestore: <>

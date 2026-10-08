@@ -1460,6 +1460,7 @@ export function App() {
       onBell={() => void runCommand("agents.jumpUnread")}
       onForward={() => void runCommand("focus.forward")}
       onNewWorkspace={() => void runCommand("session.new")}
+      onOpenSettings={() => void runCommand("settings.show")}
       onTogglePanel={() => void runCommand("view.togglePanel")}
       onToggleSidebar={() => void runCommand("view.toggleSidebar")}
       onUpdate={() => { if (availableUpdate) void openExternalUrl(availableUpdate.url).catch((error) => setStatus(String(error))); }}
