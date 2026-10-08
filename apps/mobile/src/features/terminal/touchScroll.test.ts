@@ -40,7 +40,7 @@ describe("TouchScrollController", () => {
     expect(h.calls).toEqual([]);
     expect(h.pendingFrames()).toBe(1);
     h.frame(16);
-    expect(h.calls).toEqual([4]);
+    expect(h.calls).toEqual([3]);
   });
 
   it("carries sub-row drag distance across frames", () => {
@@ -56,6 +56,10 @@ describe("TouchScrollController", () => {
 
     h.controller.move(82, 48, 16);
     h.frame(48);
+    expect(h.calls).toEqual([1]);
+
+    h.controller.move(76, 64, 16);
+    h.frame(64);
     expect(h.calls).toEqual([1, 1]);
   });
 
