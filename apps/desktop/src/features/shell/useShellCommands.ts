@@ -310,6 +310,7 @@ export function useShellCommands(options: ShellCommandOptions): {
       case "view.togglePanel":
       case "view.showFiles":
       case "view.showGit":
+      case "view.showPorts":
         options.setAppState((current) => ({
           ...current,
           shell: shellAfterSidebarCommand(current.shell, commandId),

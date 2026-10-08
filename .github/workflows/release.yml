@@ -96,7 +96,7 @@ jobs:
   # Each architecture's package also carries the other architecture's helper,
   # so a desktop can install onto a remote host of either kind.
   linux-universal:
-    needs: [version, linux]
+    needs: [version, linux, macos]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -105,6 +105,10 @@ jobs:
           pattern: linux-{x86_64,aarch64}
           path: tmp/release
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-helper
+          path: tmp/macos-helper
       - name: Add the cross-architecture helpers
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
@@ -115,8 +119,11 @@ jobs:
           # names and .sha256 files, which verify-package.sh checks.
           mkdir tmp/originals
           cp "$x86" "$x86.sha256" "$arm" "$arm.sha256" tmp/originals/
-          release/linux/add-cross-helper.sh "$x86" "tmp/originals/$(basename "$arm")"
-          release/linux/add-cross-helper.sh "$arm" "tmp/originals/$(basename "$x86")"
+          # The Mac helper is the signed sidecar from the DMG's app, byte for
+          # byte, so a Mac host runs the same build whichever desktop installed it.
+          mac=tmp/macos-helper/muxflow-host-macos-aarch64
+          release/linux/add-cross-helper.sh "$x86" "tmp/originals/$(basename "$arm")" "$mac"
+          release/linux/add-cross-helper.sh "$arm" "tmp/originals/$(basename "$x86")" "$mac"
           release/linux/verify-package.sh "$x86"
           release/linux/verify-package.sh "$arm"
       - uses: actions/upload-artifact@v4
@@ -187,14 +194,21 @@ jobs:
           # An empty identity is the ad-hoc seal; build-package.sh reads `-`.
           [[ "$DEVELOPER_ID" == true ]] || unset MUXFLOW_MACOS_SIGNING_IDENTITY
           release/macos/build-package.sh
-      - name: Collect the DMG
+      - name: Collect the DMG and the Mac helper
         run: |
-          mkdir -p "$RUNNER_TEMP/out"
-          cp "tmp/work/cache/release-target/macos/release/bundle/dmg/Muxflow_${{ needs.version.outputs.version }}_aarch64.dmg" "$RUNNER_TEMP/out/"
+          mkdir -p "$RUNNER_TEMP/out" "$RUNNER_TEMP/helper"
+          bundle=tmp/work/cache/release-target/macos/release/bundle
+          cp "$bundle/dmg/Muxflow_${{ needs.version.outputs.version }}_aarch64.dmg" "$RUNNER_TEMP/out/"
+          cp "$bundle/macos/Muxflow.app/Contents/MacOS/muxflow-host" "$RUNNER_TEMP/helper/muxflow-host-macos-aarch64"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
           path: ${{ runner.temp }}/out/*.dmg
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-helper
+          path: ${{ runner.temp }}/helper/muxflow-host-macos-aarch64
           if-no-files-found: error
       - name: Remove signing material
         if: always()

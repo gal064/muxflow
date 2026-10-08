@@ -72,6 +72,7 @@ describe("responsive shell state", () => {
     const second = shellAfterSidebarCommand(first, "view.showGit");
     expect(second).toMatchObject({ panelOpen: true, panelSurface: "git" });
     expect(shellAfterSidebarCommand(second, "view.showFiles").panelSurface).toBe("files");
+    expect(shellAfterSidebarCommand(second, "view.showPorts")).toMatchObject({ panelOpen: true, panelSurface: "ports" });
   });
 
   it("keeps a rail command meaning the same thing at any width", () => {

@@ -124,8 +124,9 @@ fn parse_options(arguments: &[String]) -> anyhow::Result<Options> {
 fn probe(connection: &SshControl, remote_path: &str) -> anyhow::Result<ProbeReport> {
     let path = expand_remote_path(remote_path);
     let script = format!(
-        "set -eu; os=$(uname -s); arch=$(uname -m); printf '%s\\n%s\\n' \"$os\" \"$arch\"; {}; if git_version=$(git --version 2>/dev/null); then printf '%s\\n' \"$git_version\"; else printf 'unavailable\\n'; fi; if [ -x {path} ]; then printf 'installed\\n'; if version=$({path} version 2>/dev/null); then printf '%s\\n' \"$version\"; else printf '\\n'; fi; sha256sum {path} | cut -d' ' -f1; else printf 'absent\\n\\n\\n'; fi",
+        "set -eu; os=$(uname -s); arch=$(uname -m); printf '%s\\n%s\\n' \"$os\" \"$arch\"; {}; if git_version=$(git --version 2>/dev/null); then printf '%s\\n' \"$git_version\"; else printf 'unavailable\\n'; fi; if [ -x {path} ]; then printf 'installed\\n'; if version=$({path} version 2>/dev/null); then printf '%s\\n' \"$version\"; else printf '\\n'; fi; {}; else printf 'absent\\n\\n\\n'; fi",
         remote_tmux_version_command(),
+        remote_sha256(&path),
     );
     let output = connection.command(&script)?;
     let text = String::from_utf8(output)?;
@@ -154,11 +155,20 @@ fn probe(connection: &SshControl, remote_path: &str) -> anyhow::Result<ProbeRepo
     })
 }
 
+/// Prints a remote file's SHA-256. GNU coreutils has `sha256sum`; macOS before
+/// 14 has only `shasum`. Both print `digest  path`.
+fn remote_sha256(path: &str) -> String {
+    format!(
+        "{{ if command -v sha256sum >/dev/null 2>&1; then sha256sum {path}; else shasum -a 256 {path}; fi; }} | cut -d' ' -f1"
+    )
+}
+
 /// Finds tmux in the non-interactive SSH environment without sourcing a shell
-/// profile. Kept in step with `tmux-control`'s Linux candidates: this probe runs
-/// before a helper is necessarily installed, so it cannot delegate yet.
+/// profile. Kept in step with `tmux-control`'s Linux and macOS candidates: this
+/// probe runs before a helper is necessarily installed, so it cannot delegate
+/// yet. macOS `sshd` runs commands with no Homebrew or MacPorts on PATH.
 fn remote_tmux_version_command() -> &'static str {
-    r#"tmux_bin=''; if [ "${MUXFLOW_TMUX_PATH+x}" = x ]; then case "$MUXFLOW_TMUX_PATH" in /*) ;; *) echo 'MUXFLOW_TMUX_PATH must be absolute' >&2; exit 1;; esac; [ -f "$MUXFLOW_TMUX_PATH" ] && [ -x "$MUXFLOW_TMUX_PATH" ] || { echo 'MUXFLOW_TMUX_PATH is not executable' >&2; exit 1; }; tmux_bin=$MUXFLOW_TMUX_PATH; elif resolved=$(command -v tmux 2>/dev/null) && [ "${resolved#/}" != "$resolved" ] && [ -f "$resolved" ] && [ -x "$resolved" ]; then tmux_bin=$resolved; else for candidate in /usr/local/bin/tmux /usr/bin/tmux /bin/tmux /home/linuxbrew/.linuxbrew/bin/tmux /run/current-system/sw/bin/tmux /nix/var/nix/profiles/default/bin/tmux /usr/pkg/bin/tmux /snap/bin/tmux "$HOME/.local/bin/tmux" "$HOME/.nix-profile/bin/tmux" "$HOME/.linuxbrew/bin/tmux"; do if [ -f "$candidate" ] && [ -x "$candidate" ]; then tmux_bin=$candidate; break; fi; done; fi; [ -n "$tmux_bin" ] || { echo 'tmux executable was not found' >&2; exit 127; }; "$tmux_bin" -V"#
+    r#"tmux_bin=''; if [ "${MUXFLOW_TMUX_PATH+x}" = x ]; then case "$MUXFLOW_TMUX_PATH" in /*) ;; *) echo 'MUXFLOW_TMUX_PATH must be absolute' >&2; exit 1;; esac; [ -f "$MUXFLOW_TMUX_PATH" ] && [ -x "$MUXFLOW_TMUX_PATH" ] || { echo 'MUXFLOW_TMUX_PATH is not executable' >&2; exit 1; }; tmux_bin=$MUXFLOW_TMUX_PATH; elif resolved=$(command -v tmux 2>/dev/null) && [ "${resolved#/}" != "$resolved" ] && [ -f "$resolved" ] && [ -x "$resolved" ]; then tmux_bin=$resolved; else for candidate in /usr/local/bin/tmux /usr/bin/tmux /bin/tmux /home/linuxbrew/.linuxbrew/bin/tmux /run/current-system/sw/bin/tmux /nix/var/nix/profiles/default/bin/tmux /usr/pkg/bin/tmux /snap/bin/tmux /opt/homebrew/bin/tmux /opt/local/bin/tmux /opt/pkg/bin/tmux "$HOME/.local/bin/tmux" "$HOME/.nix-profile/bin/tmux" "$HOME/.linuxbrew/bin/tmux"; do if [ -f "$candidate" ] && [ -x "$candidate" ]; then tmux_bin=$candidate; break; fi; done; fi; [ -n "$tmux_bin" ] || { echo 'tmux executable was not found' >&2; exit 127; }; "$tmux_bin" -V"#
 }
 
 fn install(connection: &SshControl, options: &Options) -> anyhow::Result<()> {
@@ -179,16 +189,16 @@ fn install(connection: &SshControl, options: &Options) -> anyhow::Result<()> {
     if actual_digest != expected_digest {
         bail!("local helper digest mismatch; refusing upload");
     }
-    let artifact_arch = elf_architecture(artifact)?;
+    let (artifact_os, artifact_arch) = executable_target(artifact)?;
     if let Some(expected_arch) = &options.expected_arch
         && normalize_arch(expected_arch) != artifact_arch
     {
         bail!("helper architecture {artifact_arch} does not match expected {expected_arch}");
     }
     let before = probe(connection, &options.remote_path)?;
-    if before.operating_system != "Linux" {
+    if before.operating_system != artifact_os {
         bail!(
-            "remote helper supports Linux only, found {}",
+            "helper is built for {artifact_os}, but the host runs {}",
             before.operating_system
         );
     }
@@ -224,11 +234,9 @@ fn install(connection: &SshControl, options: &Options) -> anyhow::Result<()> {
             "set -eu; install -d -m 0700 {parent}; umask 077; : > {partial}"
         ))?;
         connection.upload_independent(artifact, &partial)?;
-        let remote_digest = String::from_utf8(
-            connection.command(&format!("sha256sum {partial} | cut -d' ' -f1"))?,
-        )?
-        .trim()
-        .to_owned();
+        let remote_digest = String::from_utf8(connection.command(&remote_sha256(&partial))?)?
+            .trim()
+            .to_owned();
         if remote_digest != expected_digest {
             bail!("uploaded helper digest mismatch; existing helper was not replaced");
         }
@@ -255,7 +263,8 @@ fn install(connection: &SshControl, options: &Options) -> anyhow::Result<()> {
         restart_remote_daemon(connection, &final_path, options.test_fail_after_shutdown)
     {
         let rollback = connection.command(&format!(
-            "set -eu; runtime=/tmp/muxflow-$(id -u); install -d -m 0700 \"$runtime\"; metadata=\"$runtime/daemon.json\"; socket=\"$runtime/host.sock\"; log=\"$runtime/daemon-start.log\"; if [ -S \"$socket\" ]; then if ! {final_path} daemon-stop >/dev/null 2>&1; then pid=$(sed -n 's/.*\"pid\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_start=$(sed -n 's/.*\"processStartTime\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_exe=$(sed -n 's/.*\"executable\":\"\\([^\"]*\\)\".*/\\1/p' \"$metadata\"); [ -n \"$pid\" ] && [ -n \"$recorded_start\" ] && [ -n \"$recorded_exe\" ]; actual_start=$(awk '{{print $22}}' \"/proc/$pid/stat\"); actual_exe=$(readlink \"/proc/$pid/exe\"); actual_exe=${{actual_exe% (deleted)}}; [ \"$actual_start\" = \"$recorded_start\" ] && [ \"$actual_exe\" = \"$recorded_exe\" ]; kill -TERM \"$pid\"; for i in $(seq 1 100); do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.05; done; ! kill -0 \"$pid\" 2>/dev/null; rm -f \"$socket\" \"$metadata\"; fi; fi; for i in $(seq 1 100); do [ ! -S \"$socket\" ] && break; sleep 0.05; done; [ ! -S \"$socket\" ]; if [ -e {backup} ]; then mv -f {backup} {final_path}; nohup {final_path} daemon </dev/null >\"$log\" 2>&1 & for i in $(seq 1 100); do [ -S \"$socket\" ] && break; sleep 0.05; done; {final_path} protocol-check >/dev/null || {{ cat \"$log\" >&2; false; }}; else rm -f {final_path}; fi"
+            "set -eu; {} if [ -e {backup} ]; then mv -f {backup} {final_path}; nohup {final_path} daemon </dev/null >\"$log\" 2>&1 & for i in $(seq 1 100); do [ -S \"$socket\" ] && break; sleep 0.05; done; {final_path} protocol-check >/dev/null || {{ cat \"$log\" >&2; false; }}; else rm -f {final_path}; fi",
+            stop_remote_daemon(&final_path),
         ));
         return match rollback {
             Ok(_) => Err(error).context(
@@ -310,6 +319,16 @@ impl Drop for RemoteInstallLock<'_> {
     }
 }
 
+/// Sets `$socket` and `$log` and stops whatever daemon holds the socket.
+/// `daemon-stop --force` asks it to shut down and, if it cannot, sends SIGTERM
+/// only after proving the recorded PID is still that daemon — the same check
+/// on Linux and macOS, so this script needs no `/proc`.
+fn stop_remote_daemon(final_path: &str) -> String {
+    format!(
+        "runtime=/tmp/muxflow-$(id -u); install -d -m 0700 \"$runtime\"; socket=\"$runtime/host.sock\"; log=\"$runtime/daemon-start.log\"; if [ -S \"$socket\" ]; then {final_path} daemon-stop --force >/dev/null; fi; for i in $(seq 1 100); do [ ! -S \"$socket\" ] && break; sleep 0.05; done; [ ! -S \"$socket\" ];"
+    )
+}
+
 fn restart_remote_daemon(
     connection: &SshControl,
     final_path: &str,
@@ -321,7 +340,8 @@ fn restart_remote_daemon(
         ""
     };
     let script = format!(
-        "set -eu; runtime=/tmp/muxflow-$(id -u); install -d -m 0700 \"$runtime\"; metadata=\"$runtime/daemon.json\"; socket=\"$runtime/host.sock\"; log=\"$runtime/daemon-start.log\"; if [ -S \"$socket\" ]; then if ! {final_path} daemon-stop >/dev/null 2>&1; then pid=$(sed -n 's/.*\"pid\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_start=$(sed -n 's/.*\"processStartTime\":\\([0-9][0-9]*\\).*/\\1/p' \"$metadata\"); recorded_exe=$(sed -n 's/.*\"executable\":\"\\([^\"]*\\)\".*/\\1/p' \"$metadata\"); [ -n \"$pid\" ] && [ -n \"$recorded_start\" ] && [ -n \"$recorded_exe\" ]; actual_start=$(awk '{{print $22}}' \"/proc/$pid/stat\"); actual_exe=$(readlink \"/proc/$pid/exe\"); actual_exe=${{actual_exe% (deleted)}}; [ \"$actual_start\" = \"$recorded_start\" ] && [ \"$actual_exe\" = \"$recorded_exe\" ]; kill -TERM \"$pid\"; for i in $(seq 1 100); do kill -0 \"$pid\" 2>/dev/null || break; sleep 0.05; done; ! kill -0 \"$pid\" 2>/dev/null; rm -f \"$socket\" \"$metadata\"; fi; fi; for i in $(seq 1 100); do [ ! -S \"$socket\" ] && break; sleep 0.05; done; [ ! -S \"$socket\" ]; {fault} nohup {final_path} daemon </dev/null >\"$log\" 2>&1 & for i in $(seq 1 100); do [ -S \"$socket\" ] && break; sleep 0.05; done; [ -S \"$socket\" ]; {final_path} protocol-check >/dev/null || {{ cat \"$log\" >&2; false; }}"
+        "set -eu; {} {fault} nohup {final_path} daemon </dev/null >\"$log\" 2>&1 & for i in $(seq 1 100); do [ -S \"$socket\" ] && break; sleep 0.05; done; [ -S \"$socket\" ]; {final_path} protocol-check >/dev/null || {{ cat \"$log\" >&2; false; }}",
+        stop_remote_daemon(final_path),
     );
     connection
         .command(&script)
@@ -394,8 +414,9 @@ impl SshControl {
             borrowed_identity: None,
             owned_master: None,
         };
-        // No `ControlPersist`, for the reason the desktop's control-master lane
-        // documents: it makes OpenSSH daemonize once the socket exists, so this
+        // `ControlPersist=no`, overriding any value in the user's ssh_config, for
+        // the reason the desktop's control-master lane documents: `ControlPersist`
+        // makes OpenSSH daemonize once the socket exists, so this
         // child exits while the real master keeps running reparented to init.
         // Everything below owns `child` as if it were the master — the loop
         // reads an exit as "died before creating its socket", and `Drop` kills
@@ -406,7 +427,14 @@ impl SshControl {
         // this type's ownership real.
         let mut child = value
             .base_command()
-            .args(["-M", "-N", "-o", "ControlMaster=yes"])
+            .args([
+                "-M",
+                "-N",
+                "-o",
+                "ControlMaster=yes",
+                "-o",
+                "ControlPersist=no",
+            ])
             .arg("-S")
             .arg(&value.socket)
             .arg(&value.target)
@@ -690,18 +718,27 @@ fn sha256_file(path: &Path) -> anyhow::Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn elf_architecture(path: &Path) -> anyhow::Result<&'static str> {
+/// The `uname -s` and architecture a helper executable runs on, read from its
+/// header: a little-endian ELF for Linux or a thin 64-bit Mach-O for macOS.
+fn executable_target(path: &Path) -> anyhow::Result<(&'static str, &'static str)> {
     let mut file = File::open(path)?;
     let mut header = [0_u8; 20];
     file.read_exact(&mut header)?;
-    if &header[..4] != b"\x7fELF" || header[5] != 1 {
-        bail!("helper artifact is not a little-endian ELF executable");
+    if &header[..4] == b"\x7fELF" && header[5] == 1 {
+        return match u16::from_le_bytes([header[18], header[19]]) {
+            62 => Ok(("Linux", "x86_64")),
+            183 => Ok(("Linux", "aarch64")),
+            machine => bail!("unsupported ELF machine {machine}"),
+        };
     }
-    match u16::from_le_bytes([header[18], header[19]]) {
-        62 => Ok("x86_64"),
-        183 => Ok("aarch64"),
-        machine => bail!("unsupported ELF machine {machine}"),
+    if header[..4] == 0xfeed_facf_u32.to_le_bytes() {
+        return match u32::from_le_bytes([header[4], header[5], header[6], header[7]]) {
+            0x0100_0007 => Ok(("Darwin", "x86_64")),
+            0x0100_000c => Ok(("Darwin", "aarch64")),
+            cpu => bail!("unsupported Mach-O CPU type {cpu:#x}"),
+        };
     }
+    bail!("helper artifact is neither a little-endian ELF nor a 64-bit Mach-O executable")
 }
 
 fn normalize_arch(value: &str) -> &str {
@@ -853,6 +890,71 @@ mod tests {
             fixed < home,
             "fixed-prefix candidates must precede home candidates"
         );
+        // macOS sshd runs commands without Homebrew or MacPorts on PATH.
+        let homebrew = script.find("/opt/homebrew/bin/tmux").unwrap();
+        assert!(homebrew < home);
+        assert!(script.contains("/opt/local/bin/tmux"));
+    }
+
+    #[test]
+    fn executable_target_reads_elf_and_mach_o_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, header: &[u8]| {
+            let path = dir.path().join(name);
+            let mut bytes = header.to_vec();
+            bytes.resize(64, 0);
+            fs::write(&path, bytes).unwrap();
+            path
+        };
+        let elf = |machine: u16| {
+            let mut header = [0_u8; 20];
+            header[..4].copy_from_slice(b"\x7fELF");
+            header[5] = 1;
+            header[18..20].copy_from_slice(&machine.to_le_bytes());
+            header
+        };
+        let mach_o = |cpu: u32| {
+            let mut header = [0_u8; 8];
+            header[..4].copy_from_slice(&0xfeed_facf_u32.to_le_bytes());
+            header[4..8].copy_from_slice(&cpu.to_le_bytes());
+            header
+        };
+        for (name, header, expected) in [
+            ("linux-x86_64", elf(62).to_vec(), ("Linux", "x86_64")),
+            ("linux-aarch64", elf(183).to_vec(), ("Linux", "aarch64")),
+            (
+                "macos-aarch64",
+                mach_o(0x0100_000c).to_vec(),
+                ("Darwin", "aarch64"),
+            ),
+            (
+                "macos-x86_64",
+                mach_o(0x0100_0007).to_vec(),
+                ("Darwin", "x86_64"),
+            ),
+        ] {
+            assert_eq!(executable_target(&write(name, &header)).unwrap(), expected);
+        }
+        // A universal binary, a 32-bit ARM Mach-O and junk are all refused.
+        for header in [
+            0xcafe_babe_u32.to_be_bytes().to_vec(),
+            mach_o(12).to_vec(),
+            b"#!/bin/sh\n".to_vec(),
+        ] {
+            assert!(executable_target(&write("refused", &header)).is_err());
+        }
+    }
+
+    #[test]
+    fn remote_digest_falls_back_to_shasum() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("helper");
+        fs::write(&file, b"helper bytes").unwrap();
+        let expected = sha256_file(&file).unwrap();
+        let script = remote_sha256(&file.display().to_string());
+        let output = Command::new("sh").args(["-c", &script]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        assert!(script.contains("shasum -a 256"));
     }
 
     #[test]

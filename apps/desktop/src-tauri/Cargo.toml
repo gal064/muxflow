@@ -1,6 +1,6 @@
 [package]
 name = "muxflow"
-version = "0.1.9"
+version = "0.1.12"
 description = "A graphical IDE on top of tmux"
 edition.workspace = true
 rust-version.workspace = true

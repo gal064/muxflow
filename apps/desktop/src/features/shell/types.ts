@@ -4,8 +4,8 @@ import { isAgentSortMode, type AgentSortMode } from "../agents/agentsList";
 export type AppTabKind = "file" | "markdown" | "gitDiff";
 /** How a Markdown tab is drawn; also the shape of the persisted default. */
 export type AppTabViewMode = "source" | "preview" | "split";
-/** The two halves of the right panel; they share one 300px surface. */
-export type PanelSurface = "files" | "git";
+/** The segments of the right panel; they share one 300px surface. */
+export type PanelSurface = "files" | "git" | "ports";
 
 /** Sidebar geometry, from the plan's token table (cmux). */
 export const SIDEBAR_MIN_WIDTH = 240;
@@ -226,7 +226,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
     appTabs: candidate.appTabs,
     workspaceUi: candidate.workspaceUi,
     shell: {
-      panelSurface: shell?.panelSurface === "git" ? "git" : "files",
+      panelSurface: shell?.panelSurface === "git" || shell?.panelSurface === "ports" ? shell.panelSurface : "files",
       sidebarCollapsed: Boolean(shell?.sidebarCollapsed),
       sidebarWidth: clampedSidebarWidth(shell?.sidebarWidth),
       panelOpen: Boolean(shell?.panelOpen),

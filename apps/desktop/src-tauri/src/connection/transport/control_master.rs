@@ -93,7 +93,7 @@ enum LeaseRoute {
 }
 
 impl SshLease {
-    pub(super) fn configure(
+    pub(in crate::connection) fn configure(
         &self,
         command: &mut Command,
         target: &str,
@@ -615,7 +615,8 @@ fn establish_control_master(
 ) -> Result<(MasterProcess, bool), String> {
     let mut command = ssh_base(config_path);
     apply_control_lane_options(&mut command);
-    // No `ControlPersist`: it makes OpenSSH daemonize once the socket is up, so
+    // `ControlPersist=no`, overriding any value in the user's ssh_config:
+    // `ControlPersist` makes OpenSSH daemonize once the socket is up, so
     // the process spawned here exits immediately while the real master keeps
     // running reparented to init. Every other part of this module treats the
     // owned child as the master — `reap_owned_master` reads `try_wait` as proof
@@ -627,7 +628,14 @@ fn establish_control_master(
     // with "OpenSSH control socket disappeared or was replaced". Staying in the
     // foreground makes this module's ownership model true instead of assumed.
     let mut child = command
-        .args(["-M", "-N", "-o", "ControlMaster=yes"])
+        .args([
+            "-M",
+            "-N",
+            "-o",
+            "ControlMaster=yes",
+            "-o",
+            "ControlPersist=no",
+        ])
         .arg("-S")
         .arg(socket)
         .arg(target)

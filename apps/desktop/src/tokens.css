@@ -54,10 +54,29 @@
   font-display: block;
   src: url("./assets/fonts/JetBrainsMono-BoldItalic.woff2") format("woff2");
 }
+/* Variable, so the 550/600 weights the chrome asks for are real weights. The
+   italic file is needed too: `font-synthesis: none` would draw italic upright. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: block;
+  src: url("./assets/fonts/InterVariable.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: block;
+  src: url("./assets/fonts/InterVariable-Italic.woff2") format("woff2");
+}
 
 :root {
   /* ── Type ────────────────────────────────────────────────────────────── */
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  /* Bundled Inter first, on every platform: Linux has none of the Apple faces
+     and fell through to Liberation Sans, which has no semibold, so every 600
+     drew as bold and its wider glyphs truncated rows SF Pro fits. */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
   --type-row: 12.5px;
   --type-secondary: 10.5px;

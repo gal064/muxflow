@@ -6,6 +6,7 @@ interface RightPanelProps {
   surface: PanelSurface;
   files: ReactNode;
   git: ReactNode;
+  ports: ReactNode;
   onSurface(surface: PanelSurface): void;
   /** Current width in CSS pixels, already clamped against the window. */
   width: number;
@@ -17,11 +18,12 @@ interface RightPanelProps {
 const SURFACES: readonly { id: PanelSurface; label: string }[] = [
   { id: "files", label: "Files" },
   { id: "git", label: "Git" },
+  { id: "ports", label: "Ports" },
 ];
 
 /**
  * One surface on the right — 300px by default, drag-resizable from its left
- * edge — with Files and Git as two segments of it.
+ * edge — with Files, Git and Ports as segments of it.
  *
  * It is closed by default and reserves nothing when closed — the caller does
  * not render it at all — which is the difference between this and the panel it
@@ -35,13 +37,15 @@ export function RightPanel(props: RightPanelProps) {
   const selectRelative = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
-    const surface: PanelSurface = props.surface === "files" ? "git" : "files";
+    const index = SURFACES.findIndex((surface) => surface.id === props.surface);
+    const step = event.key === "ArrowRight" ? 1 : SURFACES.length - 1;
+    const surface = SURFACES[(index + step) % SURFACES.length].id;
     props.onSurface(surface);
     window.requestAnimationFrame(() => document.getElementById(panelTabId(surface))?.focus());
   };
 
   return <aside
-    aria-label="Files and Git"
+    aria-label="Files, Git and Ports"
     className="right-panel"
     ref={container}
     style={{ "--panel-width": `${displayedWidth}px` } as CSSProperties}
@@ -66,7 +70,7 @@ export function RightPanel(props: RightPanelProps) {
       id={panelPanelId(props.surface)}
       role="tabpanel"
       tabIndex={0}
-    >{props.surface === "files" ? props.files : props.git}</div>
+    >{props.surface === "files" ? props.files : props.surface === "git" ? props.git : props.ports}</div>
 
     {/* The panel's own width, dragged from its left edge — so ArrowLeft grows
         it and ArrowRight shrinks it, the mirror of the sidebar's handle. The
