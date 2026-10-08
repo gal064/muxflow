@@ -39,7 +39,7 @@ Sessions stay on the host. Close the app, reboot your laptop, or switch machines
 Attach to a [remote host](./docs/remote-host.md), Linux or macOS, through your existing OpenSSH config. The helper talks over SSH and a private Unix socket, never a TCP port, and several hosts can be shown [side by side](./docs/multi-host.md). The Ports tab lists what is listening on the host and forwards a port to your machine with one click.
 
 </td>
-<td width="50%" valign="middle"><img src="docs/assets/feature-ssh.gif" alt="Adding an SSH host in connection settings" width="100%" /></td>
+<td width="50%" valign="middle"><img src="docs/assets/feature-ssh.png" alt="Connection settings with an SSH host" width="100%" /></td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
