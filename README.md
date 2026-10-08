@@ -196,6 +196,7 @@ Package builds: `pnpm release:linux -- x86_64`, `pnpm release:macos`, and
 - [Key bindings](./docs/keybindings.md)
 - [Agent hooks](./docs/agent-hooks.md)
 - [Diagnostics, privacy, and security](./docs/diagnostics-privacy-security.md)
+- [Privacy policy](./site/privacy/README.md)
 - [Troubleshooting](./docs/troubleshooting.md)
 - [Release guide](./docs/release.md) and [test suite](./tests/README.md)
 - [Historical plans](./docs/history/README.md)
