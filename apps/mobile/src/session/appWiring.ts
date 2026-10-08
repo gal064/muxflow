@@ -2,12 +2,13 @@
 // foreground service's notification, the toast sink and the update check. The
 // SSH module (§6) is the transport for every host.
 
-import { AppState, ToastAndroid } from "react-native";
+import { Alert, AppState, Platform, ToastAndroid } from "react-native";
 import { startNotifications } from "../features/notifications";
 import { startAppUpdateCheck } from "../features/update";
-import { muxflowSsh } from "../ssh/MuxflowSsh";
+import { androidConnectionServices } from "./AndroidConnectionServices";
+import { createNativeBackgroundTimer, jsBackgroundTimer, setBackgroundTimer } from "./backgroundTimer";
 import { sshTransportFactory } from "../ssh/registerTransport";
-import { onToast, setForegroundService, setTransportFactory } from "./connectionManager";
+import { onToast, setConnectionAppActive, setForegroundService, setTransportFactory } from "./connectionManager";
 import { log } from "./log";
 import { sessionStore } from "../store/sessionStore";
 
@@ -17,11 +18,24 @@ export function wireApp(): void {
   if (wired) return;
   wired = true;
   startFlightRecorder();
-  onToast((message) => ToastAndroid.show(message, ToastAndroid.SHORT));
+  const services = Platform.OS === "android" ? androidConnectionServices() : undefined;
+  setBackgroundTimer(services ? createNativeBackgroundTimer(services) : jsBackgroundTimer);
+  setForegroundService(services);
+  onToast((message) => {
+    if (Platform.OS === "android") ToastAndroid.show(message, ToastAndroid.SHORT);
+    else Alert.alert("Muxflow", message);
+  });
   startNotifications();
   startAppUpdateCheck();
   setTransportFactory(sshTransportFactory);
-  setForegroundService(muxflowSsh());
+  if (Platform.OS === "ios") {
+    setConnectionAppActive(AppState.currentState !== "background");
+    AppState.addEventListener("change", (state) => {
+      // Permission prompts and Control Center are `inactive`, not background.
+      if (state === "background") setConnectionAppActive(false);
+      else if (state === "active") setConnectionAppActive(true);
+    });
+  }
 }
 
 /** Always-on, transition-only instrumentation. No polling or background work. */

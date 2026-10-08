@@ -1,5 +1,9 @@
 {
-  "platforms": ["android"],
+  "platforms": ["android", "ios"],
+  "apple": {
+    "podspecPath": "MuxflowSsh.podspec",
+    "modules": ["MuxflowSshModule"]
+  },
   "android": {
     "modules": ["dev.muxflow.ssh.MuxflowSshModule"]
   }

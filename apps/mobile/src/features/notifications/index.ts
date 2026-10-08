@@ -5,7 +5,7 @@
 // without them.
 
 import { router } from "expo-router";
-import { AppState } from "react-native";
+import { AppState, Platform } from "react-native";
 
 import { createExpoNotificationHost, installForegroundPresentation } from "./expoHost";
 import { notificationAttention } from "./attention";
@@ -24,9 +24,10 @@ let started = false;
 export function startNotifications(): void {
   if (started) return;
   started = true;
-  const host = createExpoNotificationHost();
+  const platform = Platform.OS === "ios" ? "ios" : "android";
+  const host = createExpoNotificationHost(platform);
   notificationAttention.setAppActive(AppState.currentState === "active");
-  installForegroundPresentation();
+  installForegroundPresentation(platform);
   // §13: the channel exists from first launch, whether or not a host is added.
   void host.ensureChannel().catch(reportFailure("channel"));
 
@@ -37,9 +38,8 @@ export function startNotifications(): void {
     onAgentTransition,
     appInForeground: () => AppState.currentState === "active",
     viewedAgentId: () => notificationAttention.viewedAgentId(),
-    // The post-settle wait runs in the background too — a cancel for an agent
-    // seen on the desktop must take the notification down without the app
-    // being opened — and a JS timer would not (see `backgroundTimer.ts`).
+    // Android uses native background wakes. iOS uses JS timers while active;
+    // suspended delivery needs the separate push milestone.
     sleep: backgroundSleep,
     log,
   }).start();

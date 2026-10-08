@@ -1,6 +1,7 @@
 import { router } from "expo-router";
 import { StyleSheet, Text, View } from "react-native";
 
+import { openAppUpdates, openDesktopUpdates } from "../update";
 import { connectHost } from "../../session/connectionManager";
 import { findHost, hostsStore } from "../../store/hostsStore";
 import { Button } from "../../ui/components/Button";
@@ -12,6 +13,7 @@ import { useHosts } from "./hooks";
 export interface ConnectionErrorScreenProps {
   failure: ConnectionErrorInfo;
   hostId: string | undefined;
+  incompatible?: boolean;
 }
 
 /**
@@ -19,7 +21,7 @@ export interface ConnectionErrorScreenProps {
  * helper missing, helper incompatible (§7.3), and the changed host key of
  * §9.10. Covers the screen it is mounted on.
  */
-export function ConnectionErrorScreen({ failure, hostId }: ConnectionErrorScreenProps) {
+export function ConnectionErrorScreen({ failure, hostId, incompatible = false }: ConnectionErrorScreenProps) {
   const host = useHosts((state) => findHost(state, hostId));
   const sheet = useConnectionSheet();
 
@@ -45,6 +47,8 @@ export function ConnectionErrorScreen({ failure, hostId }: ConnectionErrorScreen
       <Text style={styles.glyph}>{"!"}</Text>
       <Text style={styles.message}>{failure.message}</Text>
       <View style={styles.actions}>
+        {incompatible ? <Button label="Update app" onPress={() => void openAppUpdates()} /> : null}
+        {incompatible ? <Button label="Update desktop" variant="text" onPress={() => void openDesktopUpdates()} /> : null}
         {failure.action ? (
           <Button label={failure.action.label} onPress={act} disabled={failure.action.kind !== "sshKey" && !host} />
         ) : null}

@@ -1,6 +1,8 @@
+@import "@muxflow/client-core/palette.css";
+
 /*
- * Phase 11 design tokens — the single source of truth for every color, metric,
- * and type step in the app.
+ * Desktop metrics and type steps, plus the shared generated palette above.
+ * Palette values live in packages/client-core/src/palette.ts.
  *
  * The rule this file exists to enforce: nothing else in the desktop client
  * writes a raw color literal. `styles.css` reads these variables, and
@@ -70,88 +72,6 @@
 }
 
 :root {
-  /* ── Chrome surfaces ─────────────────────────────────────────────────── */
-  /* The base *is* the terminal background, and every other surface is a step
-     lighter than it. Note the direction: before this ramp, hairline/hover/
-     selected were all darker than the base, because the base was near-black and
-     there was nowhere else to go. */
-  --chrome-bg: #282c34;
-  --chrome-raised: #2c313a;
-  --chrome-hairline: #313640;
-  --chrome-border: #3e4451;
-  --chrome-hover: #2f343e;
-  --chrome-selected: #353b45;
-
-  /* ── Chrome ink ──────────────────────────────────────────────────────── */
-  --chrome-ink: #c4c8c6;
-  --chrome-ink-strong: #ffffff;
-  /* Dim and faint are lifted, because a lighter ground makes a grey quieter and
-     these two greys were already the quietest text in the app. Kept honest by
-     contrast rather than by eye: --chrome-dim carries 11.5px labels and clears
-     4.5:1 on the new ground (4.70:1, against 5.00:1 on the old one), and
-     --chrome-faint carries the 9.5-10.5px metadata that no ramp gets to AA and
-     is at least no worse than it was (2.60:1, against 2.47:1 before). */
-  --chrome-dim: #8f96a1;
-  --chrome-faint: #636b78;
-
-  /* ── The one accent, and the one destructive treatment ───────────────── */
-  /* Ghostty's bright blue and red (--term-12 / --term-1), so a selected row and
-     a terminal's own bright text are the same two colours.
-
-     `--accent-ink` is misnamed and worth reading carefully: it is the knockout
-     for every *filled* control, the destructive ones included (the danger
-     buttons, the destructive context-menu row, `.primary`), not only the accent
-     ones. It goes dark because the accent went light — white on #7aa6da is
-     2.53:1 and not text anyone reads, where the terminal background on it is
-     5.53:1, which is what Ghostty does with its own selection. The danger fills
-     come along: white on #cc6566 was 3.75:1 and dark on it is 3.74:1, so those
-     buttons change visibly and legibility does not. Splitting the two inks is
-     the honest fix and is a rename across a dozen rules in styles.css; it is
-     named here instead so the coupling is at least deliberate. */
-  --accent: #7aa6da;
-  --accent-ink: #282c34;
-  --accent-wash: #7aa6da1f;
-  --danger: #cc6566;
-  --danger-ink: #e79596;
-  --danger-wash: #cc656622;
-
-  /* Connection health. Green is reserved for "the link is up" and nothing
-     else; amber is the disconnected strip; red reuses --danger. */
-  --ok: #28c840;
-  --warn: #febc2e;
-
-  /* ── Terminal: Ghostty Default Style Dark, verbatim ──────────────────── */
-  --term-bg: #282c34;
-  --term-fg: #ffffff;
-  --term-cursor: #ffffff;
-  --term-cursor-text: #353a44;
-  --term-selection-bg: #ffffff;
-  --term-selection-fg: #282c34;
-  --term-0: #1d1f21;
-  --term-1: #cc6566;
-  --term-2: #b6bd68;
-  --term-3: #f0c674;
-  --term-4: #82a2be;
-  --term-5: #b294bb;
-  --term-6: #8abeb7;
-  --term-7: #c4c8c6;
-  --term-8: #666666;
-  --term-9: #d54e53;
-  --term-10: #b9ca4b;
-  --term-11: #e7c547;
-  --term-12: #7aa6da;
-  --term-13: #c397d8;
-  --term-14: #70c0b1;
-  --term-15: #eaeaea;
-
-  /* Agent state encoding (mock: yellow working, red blocked, teal done-unread,
-     hollow idle). Drawn from the terminal palette so the dots and the terminal
-     agree about what "warning" looks like. */
-  --state-working: var(--term-3);
-  --state-blocked: var(--term-1);
-  --state-done: var(--term-6);
-  --state-unknown: var(--chrome-dim);
-
   /* ── Type ────────────────────────────────────────────────────────────── */
   /* Bundled Inter first, on every platform: Linux has none of the Apple faces
      and fell through to Liberation Sans, which has no semibold, so every 600

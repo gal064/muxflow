@@ -132,3 +132,22 @@ describe("the Android notification host (§13)", () => {
     expect(await handler.handleNotification()).toMatchObject({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true });
   });
 });
+
+
+describe("the iOS notification host", () => {
+  beforeEach(() => vi.clearAllMocks());
+  it("posts a local notification immediately without an Android channel", async () => {
+    const host = createExpoNotificationHost("ios");
+    await host.ensureChannel();
+    await host.present({ tag: "a1", title: "Agent", body: "Needs input", data: payload });
+    expect(notifications.setNotificationChannelAsync).not.toHaveBeenCalled();
+    expect(notifications.scheduleNotificationAsync).toHaveBeenCalledWith({
+      identifier: "a1", content: { title: "Agent", body: "Needs input", data: payload }, trigger: null,
+    });
+  });
+  it("shows foreground banners and list entries quietly", async () => {
+    installForegroundPresentation("ios");
+    const handler = notifications.setNotificationHandler.mock.calls[0]![0] as { handleNotification: () => Promise<Record<string, boolean>> };
+    expect(await handler.handleNotification()).toEqual({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: false, shouldSetBadge: false });
+  });
+});

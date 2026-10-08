@@ -2,7 +2,7 @@
   "expo": {
     "name": "Muxflow",
     "slug": "muxflow-mobile",
-    "version": "0.1.12",
+    "version": "0.1.13",
     "scheme": "muxflow",
     "orientation": "default",
     "userInterfaceStyle": "dark",
@@ -16,7 +16,7 @@
         "monochromeImage": "./assets/adaptive-icon-monochrome.png",
         "backgroundColor": "#021962"
       },
-      "versionCode": 112,
+      "versionCode": 113,
       "backgroundColor": "#282c34",
       "predictiveBackGestureEnabled": false
     },
@@ -26,6 +26,9 @@
         {
           "android": {
             "minSdkVersion": 26
+          },
+          "ios": {
+            "deploymentTarget": "16.4"
           }
         }
       ],
@@ -34,10 +37,12 @@
       [
         "expo-audio",
         {
-          "enableBackgroundPlayback": false
+          "enableBackgroundPlayback": false,
+          "microphonePermission": "Record speech to send to your coding agent."
         }
       ],
       "expo-secure-store",
+      "./plugins/withLocalNotifications",
       [
         "expo-notifications",
         {
@@ -64,13 +69,30 @@
                 ]
               }
             ]
+          },
+          "ios": {
+            "fonts": [
+              "./assets/fonts/JetBrainsMono-Regular.ttf",
+              "./assets/fonts/JetBrainsMono-Bold.ttf"
+            ]
           }
         }
       ],
-      "./plugins/withReleaseSigning"
+      "./plugins/withReleaseSigning",
+      "./plugins/withLibssh2"
     ],
     "experiments": {
       "typedRoutes": false
+    },
+    "ios": {
+      "bundleIdentifier": "dev.muxflow.mobile",
+      "icon": "./assets/icon.png",
+      "buildNumber": "3",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSLocalNetworkUsageDescription": "Muxflow connects to your development hosts over SSH on your local network."
+      }
     }
   }
 }

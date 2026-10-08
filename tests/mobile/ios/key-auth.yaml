@@ -1,0 +1,6 @@
+appId: dev.muxflow.mobile
+---
+# Start a fresh app session while retaining the generated Keychain item.
+# Separate Maestro CLI invocations must explicitly activate their target app.
+- launchApp
+- runFlow: setup-host.yaml
