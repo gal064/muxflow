@@ -3,8 +3,19 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Muxflow — Remote first tmux IDE</title>
-<meta name="description" content="Muxflow is a remote first tmux IDE: a desktop and mobile front end for tmux and your coding agents." />
+<title>Muxflow — Remote-first tmux IDE</title>
+<meta name="description" content="Muxflow is a remote-first tmux IDE for coding agents. Agent notifications on desk and phone, voice replies, screenshot paste over SSH, multi-host, ports, files, and Git." />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Muxflow — Remote-first tmux IDE for coding agents" />
+<meta property="og:description" content="A desktop and mobile front end for tmux and your coding agents. Agent status and notifications on desktop and phone, SSH hosts side by side, native paste across SSH. macOS, Linux, Android. MIT." />
+<meta property="og:url" content="https://gal064.github.io/muxflow/" />
+<meta property="og:image" content="https://gal064.github.io/muxflow/assets/social-preview.png" />
+<meta property="og:image:width" content="1280" />
+<meta property="og:image:height" content="640" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Muxflow — Remote-first tmux IDE for coding agents" />
+<meta name="twitter:description" content="A desktop and mobile front end for tmux and your coding agents. macOS, Linux, Android. MIT." />
+<meta name="twitter:image" content="https://gal064.github.io/muxflow/assets/social-preview.png" />
 <link rel="icon" href="assets/icon-128.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -127,13 +138,13 @@
   <div class="wrap">
     <p class="prompt"><b>~</b> $ muxflow --help</p>
     <h1>Remote-first tmux IDE for coding agents<span class="cursor" aria-hidden="true"></span></h1>
-    <p class="lede">Cross-device notifications for Claude Code and Codex, multi-host SSH connections, seamless pasting, a file explorer, uploads and downloads, and a Git client.</p>
+    <p class="lede">Agent notifications on desk and phone, voice replies, screenshot paste over SSH, multi-host, ports, files, and Git.</p>
     <div class="cta">
       <div class="install">
         <code id="install-cmd">curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash</code>
         <button class="copy" type="button" data-copy="install-cmd">copy</button>
       </div>
-      <p class="meta">macOS · Linux · MIT<span class="sep">—</span><a href="https://github.com/gal064/muxflow/releases/latest">dmg and manual install →</a><span class="sep">·</span><a href="https://github.com/gal064/muxflow">github →</a></p>
+      <p class="meta">macOS · Linux · Android · MIT<span class="sep">—</span><a href="https://github.com/gal064/muxflow/releases/latest">dmg and manual install →</a><span class="sep">·</span><a href="https://github.com/gal064/muxflow">github →</a></p>
     </div>
   </div>
 </header>
@@ -157,14 +168,15 @@
     <h2>features</h2>
     <ol class="list">
       <li><span class="n">01</span><span class="t">Remote first</span><span class="d">Built to work on remote machines over SSH.</span></li>
-      <li><span class="n">02</span><span class="t">Multi-host</span><span class="d">Workspaces and agents from several SSH hosts in one sidebar, each marked with its host.</span></li>
-      <li><span class="n">03</span><span class="t">Native copy and paste</span><span class="d">Paste or drag screenshots and files from your laptop into a remote pane. Claude Code and Codex see them as if they were local.</span></li>
-      <li><span class="n">04</span><span class="t">File explorer</span><span class="d">Browse, edit and download files on the remote machine, right next to the terminal.</span></li>
-      <li><span class="n">05</span><span class="t">Git client</span><span class="d">Diff, stage, commit and push without leaving Muxflow.</span></li>
-      <li><span class="n">06</span><span class="t">tmux based</span><span class="d">Your processes keep running even when you close Muxflow.</span></li>
-      <li><span class="n">07</span><span class="t">Agent status</span><span class="d">Agent statuses and notifications on both desktop and mobile, for Claude Code and Codex.</span></li>
-      <li><span class="n">08</span><span class="t">Mobile app</span><span class="d">Android and iOS <em>(coming soon)</em>.</span></li>
-      <li><span class="n">09</span><span class="t">Open source</span><span class="d">MIT licensed.</span></li>
+      <li><span class="n">02</span><span class="t">Mobile app</span><span class="d">Read an agent's terminal, reply, or hold to talk from your phone. Android today, iOS <em>(coming soon)</em>.</span></li>
+      <li><span class="n">03</span><span class="t">Agent status</span><span class="d">Agent statuses and notifications on both desktop and mobile, for Claude Code and Codex.</span></li>
+      <li><span class="n">04</span><span class="t">Multi-host</span><span class="d">Workspaces and agents from several SSH hosts, Linux or macOS, in one sidebar, each marked with its host.</span></li>
+      <li><span class="n">05</span><span class="t">Native copy and paste</span><span class="d">Paste or drag screenshots and files from your laptop into a remote pane. Claude Code and Codex see them as if they were local.</span></li>
+      <li><span class="n">06</span><span class="t">Ports</span><span class="d">See what is listening on the host and forward a port to your machine with one click.</span></li>
+      <li><span class="n">07</span><span class="t">File explorer</span><span class="d">Browse, edit and download files on the remote machine, right next to the terminal.</span></li>
+      <li><span class="n">08</span><span class="t">Git client</span><span class="d">Diff, stage, commit and push without leaving Muxflow.</span></li>
+      <li><span class="n">09</span><span class="t">tmux based</span><span class="d">Your processes keep running even when you close Muxflow.</span></li>
+      <li><span class="n">10</span><span class="t">Open source</span><span class="d">MIT licensed.</span></li>
     </ol>
   </div>
 </section>

@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://gal064.github.io/muxflow/sitemap.xml
