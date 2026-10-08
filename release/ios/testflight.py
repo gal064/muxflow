@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 
 REPO = Path(__file__).resolve().parents[2]
@@ -50,15 +51,26 @@ def decode_secret(name, destination):
 
 
 def apple_get(path, params):
+    return apple_request("GET", path, params=params)
+
+
+def apple_request(method, path, *, params=None, payload=None):
     import jwt
 
     now = int(time.time())
     key = base64.b64decode(require("MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64"), validate=True)
     token = jwt.encode({"iss": require("MUXFLOW_APP_STORE_CONNECT_ISSUER_ID"), "iat": now, "exp": now + 300, "aud": "appstoreconnect-v1"}, key, algorithm="ES256", headers={"kid": require("MUXFLOW_APP_STORE_CONNECT_KEY_ID"), "typ": "JWT"})
-    url = "https://api.appstoreconnect.apple.com/v1/" + path + "?" + urllib.parse.urlencode(params)
-    request = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+    url = "https://api.appstoreconnect.apple.com/v1/" + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, method=method, data=json.dumps(payload).encode() if payload is not None else None,
+                                     headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response) if response.status != 204 else None
+    except urllib.error.HTTPError as error:
+        # Do not expose API tokens, contact details or demo credentials.
+        raise RuntimeError(f"Apple {method} {path} failed (HTTP {error.code})") from None
 
 
 def app_id():
@@ -111,6 +123,8 @@ def validate_app(info, entitlement, config, team):
         raise ValueError("This milestone has no background modes")
     if not info.get("NSLocalNetworkUsageDescription") or not info.get("NSMicrophoneUsageDescription"):
         raise ValueError("Exported IPA lacks required permission text")
+    if info.get("ITSAppUsesNonExemptEncryption") is not False:
+        raise ValueError("Exported IPA lacks the account holder's recorded encryption declaration")
 
 
 def build():
@@ -207,10 +221,14 @@ def upload():
             if builds:
                 build_record = builds[0]
                 (OUTPUT / "apple-build.json").write_text(json.dumps(build_record, indent=2) + "\n")
-                print(f'Apple build {build_record["id"]}: {build_record["attributes"]["processingState"]}; export compliance and device QA remain to be checked.', flush=True)
-                return
+                state = build_record["attributes"]["processingState"]
+                print(f'Apple build {build_record["id"]}: {state}', flush=True)
+                if state == "VALID":
+                    return
+                if state in {"FAILED", "INVALID"}:
+                    raise ValueError("Apple rejected build processing; inspect the retained build record")
             time.sleep(15)
-        raise ValueError("Upload accepted, but Apple build record is not visible yet; inspect App Store Connect before starting another build")
+        raise ValueError("Upload accepted, but processing has not completed; inspect App Store Connect before starting another build")
 
 
 if __name__ == "__main__":

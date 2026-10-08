@@ -22,6 +22,7 @@ class DistributionChecks(unittest.TestCase):
         }
         self.config = {"version": "0.1.9", "ios": {"buildNumber": "2"}}
         self.info = {
+            "ITSAppUsesNonExemptEncryption": False,
             "CFBundleIdentifier": "dev.muxflow.mobile", "CFBundleShortVersionString": "0.1.9", "CFBundleVersion": "2",
             "NSLocalNetworkUsageDescription": "SSH", "NSMicrophoneUsageDescription": "Voice",
         }
@@ -60,7 +61,7 @@ class DistributionChecks(unittest.TestCase):
                 distribution.validate_profile(profile, TEAM)
 
     def test_refuse_wrong_binary_metadata(self):
-        for changes in ({"CFBundleIdentifier": "other"}, {"CFBundleShortVersionString": "0.1.8"}, {"CFBundleVersion": "1"}, {"UIBackgroundModes": ["remote-notification"]}, {"NSLocalNetworkUsageDescription": ""}, {"NSMicrophoneUsageDescription": ""}):
+        for changes in ({"ITSAppUsesNonExemptEncryption": True}, {"ITSAppUsesNonExemptEncryption": None}, {"CFBundleIdentifier": "other"}, {"CFBundleShortVersionString": "0.1.8"}, {"CFBundleVersion": "1"}, {"UIBackgroundModes": ["remote-notification"]}, {"NSLocalNetworkUsageDescription": ""}, {"NSMicrophoneUsageDescription": ""}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 distribution.validate_app({**self.info, **changes}, self.entitlement, self.config, TEAM)
 

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Muxflow",
     "slug": "muxflow-mobile",
-    "version": "0.1.12",
+    "version": "0.1.13",
     "scheme": "muxflow",
     "orientation": "default",
     "userInterfaceStyle": "dark",
@@ -16,7 +16,7 @@
         "monochromeImage": "./assets/adaptive-icon-monochrome.png",
         "backgroundColor": "#021962"
       },
-      "versionCode": 112,
+      "versionCode": 113,
       "backgroundColor": "#282c34",
       "predictiveBackGestureEnabled": false
     },
@@ -87,9 +87,10 @@
     "ios": {
       "bundleIdentifier": "dev.muxflow.mobile",
       "icon": "./assets/icon.png",
-      "buildNumber": "2",
+      "buildNumber": "3",
       "supportsTablet": true,
       "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
         "NSLocalNetworkUsageDescription": "Muxflow connects to your development hosts over SSH on your local network."
       }
     }

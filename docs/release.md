@@ -11,15 +11,15 @@ and packaged desktop journeys are not part of it; they are the manual
 release-candidate gates listed below.
 
 The desktop app, the host helper and the mobile app share one `X.Y.Z` version.
-Change it only with `release/set-version.sh X.Y.Z`, which rewrites every copy
+Change it only with `release/set-version.sh X.Y.Z IOS_BUILD_NUMBER`, which rewrites every copy
 and derives the Android `versionCode` as `major*10000 + minor*100 + patch`;
 `release/check-version.sh` verifies them. The wire protocol version in
 `crates/protocol` is independent.
 
 For each new iOS binary intended for upload, pass a new explicit build number:
 `release/set-version.sh X.Y.Z IOS_BUILD_NUMBER`. The integer must increase
-(1–9999); omitting it preserves the recorded number for releases that do not
-upload iOS. Reuse the exact existing artifact when retrying an upload. iOS
+(1–9999); omitting it preserves the recorded number for local version changes. Every
+version-tag release uploads iOS, so it requires a fresh build number. Reuse the exact existing artifact when retrying an upload. iOS
 marketing versions follow the shared version, but installed phones update
 independently through TestFlight. The unsigned simulator workflow proves
 neither signing nor availability to testers.
@@ -27,7 +27,11 @@ neither signing nor availability to testers.
 Before publishing a release that bumps the protocol major, verify that its
 matching iOS build is actually available in the selected Apple distribution
 channel and include the refusal/update consequence in the release notes.
-Releases without a bump do not wait for iOS. Bump only when either the last
+Releases without a bump do not wait for iOS tester availability or beta review.
+The iOS job runs alongside desktop packaging; an Apple failure does not prevent
+the desktop draft from appearing. Check its separate status before promising
+an iOS release. Recover accepted uploads using the retained IPA or distribution
+action rather than rebuilding under the same number. Bump only when either the last
 released mobile app against the new host, or the new app against the last
 released host, breaks or misbehaves; harmless unknown protobuf fields do not
 require a bump. See [the iOS plan](mobile/ios-plan.md) for readiness gates.
@@ -37,7 +41,7 @@ require a bump. See [the iOS plan](mobile/ios-plan.md) for readiness gates.
 `.github/workflows/release.yml` builds every downloadable artifact from a
 pushed version tag and leaves them in a draft GitHub Release:
 
-1. Run `release/set-version.sh X.Y.Z`, open a pull request, and merge it once CI
+1. Run `release/set-version.sh X.Y.Z IOS_BUILD_NUMBER`, open a pull request, and merge it once CI
    passes.
 2. Tag the merged commit and push the tag:
    `git tag vX.Y.Z && git push origin vX.Y.Z`.
@@ -54,6 +58,11 @@ pushed version tag and leaves them in a draft GitHub Release:
    host the same bytes a Mac desktop would. The
    Android job builds the APK with the release key and
    checks its certificate against `apps/mobile/release-cert.sha256`.
+   The iOS job signs and uploads an IPA using the `ios-testflight` environment,
+   waits for valid Apple processing and assigns it to the internal TestFlight
+   group. The IPA and digest remain in Actions artifacts; iOS installs through
+   TestFlight. Promote the same build to external testing with the
+   **Distribute TestFlight build** action; see [TestFlight releases](mobile/testflight.md).
 5. A draft release appears with the DMG, both Linux tarballs, the APK,
    `install.sh` (the one-line Linux and macOS installer, from `release/get.sh`),
    `SHA256SUMS`, and `latest.json`. Its notes start with the install
@@ -72,7 +81,7 @@ versioned `X.Y.Z` and is drafted as a pre-release. RC tags matching
 Other tags still require a commit on `main`; CI, version checks, signing,
 artifact verification, and the admin-only tag rule apply to RCs too.
 
-To cut a branch RC, set the branch's version with `release/set-version.sh X.Y.Z`,
+To cut a branch RC, set the branch's version with `release/set-version.sh X.Y.Z IOS_BUILD_NUMBER`,
 commit it, push the branch, then tag that commit with `vX.Y.Z-rc.N` and push the
 tag. Review the generated draft and publish it as a pre-release for direct
 downloads. This repository is public, so a published RC is public too. It does
@@ -109,7 +118,7 @@ The `release` environment holds these secrets:
 | `MUXFLOW_MACOS_CERTIFICATE_P12_BASE64`, `MUXFLOW_MACOS_CERTIFICATE_PASSWORD` | Optional. The Developer ID Application certificate, exported as `.p12`; with it and the rows below, the DMG is signed and notarized |
 | `MUXFLOW_MACOS_SIGNING_IDENTITY` | `Developer ID Application: Name (TEAMID)` |
 | `MUXFLOW_APPLE_TEAM_ID` | The team ID |
-| `MUXFLOW_NOTARY_KEY_P8_BASE64`, `MUXFLOW_NOTARY_KEY_ID`, `MUXFLOW_NOTARY_ISSUER` | An App Store Connect API key with the Developer role |
+| `MUXFLOW_NOTARY_KEY_P8_BASE64`, `MUXFLOW_NOTARY_KEY_ID`, `MUXFLOW_NOTARY_ISSUER` | An App Store Connect API key with Developer or App Manager access (currently the shared App Manager key) |
 | `MUXFLOW_ANDROID_KEYSTORE_BASE64`, `MUXFLOW_ANDROID_KEYSTORE_PASSWORD`, `MUXFLOW_ANDROID_KEY_ALIAS`, `MUXFLOW_ANDROID_KEY_PASSWORD` | The Android release keystore |
 
 # Linux internal release
