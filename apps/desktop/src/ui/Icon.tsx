@@ -26,6 +26,8 @@ export type IconName =
   | "minus"
   | "discard"
   | "refresh"
+  | "eye"
+  | "eyeOff"
   | "splitRight"
   | "close"
   // The tab strip's bulk closes, which are buttons now rather than menu items
@@ -99,6 +101,13 @@ const paths: Record<IconName, ReactElement> = {
   refresh: <>
     <path d="M12.6 5.9A5 5 0 1 0 13 8" />
     <path d="M9.7 5.9h2.9V3" />
+  </>,
+  eye: <>
+    <path d="M1.3 8s2.4-4 6.7-4 6.7 4 6.7 4-2.4 4-6.7 4-6.7-4-6.7-4Z" />
+    <circle cx="8" cy="8" r="2" />
+  </>,
+  eyeOff: <>
+    <path d="M6.1 4.3A7.2 7.2 0 0 1 8 4c4.3 0 6.7 4 6.7 4a12 12 0 0 1-1.9 2.3M10.2 11.6a7 7 0 0 1-2.2.4c-4.3 0-6.7-4-6.7-4a12 12 0 0 1 2.4-2.7M2 2l12 12" />
   </>,
   splitRight: <>
     <rect height="11" rx="2" width="13" x="1.5" y="2.5" />

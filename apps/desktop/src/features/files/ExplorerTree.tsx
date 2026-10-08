@@ -4,6 +4,7 @@ import { usePublishedRowCommands, type RowCommandSource } from "../../commands/r
 import { useCommittedRef } from "../../commands/useCommittedRef";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { SurfaceError } from "../../ui/SurfaceError";
+import { Icon } from "../../ui/Icon";
 import type { DownloadIntent } from "./downloadFlow";
 import { DownloadTransfers } from "./DownloadTransfers";
 import { ExplorerMutationDialog, type PendingMutation } from "./ExplorerMutationDialog";
@@ -85,9 +86,8 @@ const INERT_ROW_ACTIONS: ExplorerRowActions = {
 };
 
 export function ExplorerTree(props: Props) {
-  // One right-click menu replaces the per-row `•••` button that used to appear
-  // on hover, and the three header buttons above it. Nothing in this tree is a
-  // resting control any more.
+  // File actions live in one right-click menu; the ignored-file toggle is
+  // also available directly from the header.
   const [menu, setMenu] = useState<{ entry?: FileEntry; anchor: ContextMenuAnchor }>();
   const [pending, setPending] = useState<PendingMutation>();
   // Which *row* has the keyboard, not which position. A precise external
@@ -342,12 +342,12 @@ export function ExplorerTree(props: Props) {
   // authoritative status the tree already shows everything, and a toggle that
   // changes nothing is worse than none.
   //
-  // It is on *both* menus deliberately. The header is not a focusable element,
-  // so a header-only item would make the single escape hatch out of a feature
-  // that hides content by default reachable by mouse alone; Shift+F10 on any
-  // row reaches the entry menu.
+  // Keep the menu action as well as the header button: Shift+F10 on a row
+  // reaches the same preference without moving focus to the header.
+  const ignoredLabel = showIgnored ? "Hide ignored files" : "Show ignored files";
+  const toggleIgnored = () => setShowIgnored((current) => !current);
   const ignoredToggle = props.ignoredPaths?.size
-    ? [{ id: "ignored", label: showIgnored ? "Hide ignored files" : "Show ignored files", run: () => setShowIgnored((current) => !current) }]
+    ? [{ id: "ignored", label: ignoredLabel, run: toggleIgnored }]
     : [];
 
   return <div className="explorer-tree">
@@ -363,6 +363,14 @@ export function ExplorerTree(props: Props) {
           which is what made the row-shaped version flicker. Only reads the user
           asked for reach this — a refresh nobody requested stays silent. */}
       {props.requestedReads > 0 && <small className="explorer-refreshing" role="status">Refreshing…</small>}
+      {ignoredToggle.length > 0 && <button
+        aria-label={ignoredLabel}
+        aria-pressed={showIgnored}
+        className="bar-button explorer-ignored-toggle"
+        onClick={toggleIgnored}
+        title={ignoredLabel}
+        type="button"
+      ><Icon name={showIgnored ? "eye" : "eyeOff"} /></button>}
     </header>
     {props.error && <SurfaceError detail={props.error} />}
     <div
@@ -453,7 +461,7 @@ export function ExplorerTree(props: Props) {
           sends people looking for a filesystem problem. */}
       {props.root && props.listings.has(props.root.path) && rows.length === 0 && <p className="quiet-empty">
         {hidden && (props.listings.get(props.root.path)?.entries.length ?? 0) > 0
-          ? "Everything here is ignored by git. Right-click the Explorer header to show ignored files."
+          ? "Everything here is ignored by git. Use the eye button in the Explorer header to show ignored files."
           : "This directory is empty."}
       </p>}
     </div>
