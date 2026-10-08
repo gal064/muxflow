@@ -859,8 +859,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 .explorer-tree { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; overflow: hidden; }
 .explorer-root {
-  display: flex; align-items: baseline; gap: 7px;
-  padding: 7px 12px; border-bottom: 1px solid var(--chrome-hairline);
+  display: flex; align-items: center; gap: 7px; min-height: 35px;
+  padding: 5px 12px; border-bottom: 1px solid var(--chrome-hairline);
 }
 /* Sits in the header, never in the scrolling tree: an indicator inside the tree
    changes its content height, which is what made the Explorer flicker. */
@@ -869,7 +869,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--chrome-ink); font-family: var(--font-sans); font-size: var(--type-row); font-weight: 600;
 }
-.explorer-root > small { color: var(--chrome-faint); font-size: var(--type-label); }
+.explorer-root > small { flex-shrink: 0; white-space: nowrap; color: var(--chrome-faint); font-size: var(--type-label); }
+.explorer-ignored-toggle { flex-shrink: 0; width: 24px; height: 24px; margin-left: auto; border: 1px solid transparent; }
+.explorer-ignored-toggle[aria-pressed="true"] { color: var(--accent); background: var(--accent-wash); border-color: var(--accent-wash); }
+.explorer-ignored-toggle[aria-pressed="true"]:hover { color: var(--accent); }
 /* Every row is exactly `--explorer-row-height` tall, and nothing sits above the
    first one. Both are load-bearing rather than cosmetic: above 200 rows the
    tree reserves the rows it does not mount as spacer height and places the

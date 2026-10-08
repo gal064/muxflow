@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Muxflow · Explorer ignored files toggle</title>
+<link rel="stylesheet" href="../../apps/desktop/src/tokens.css">
+<style>
+*{box-sizing:border-box}body{margin:0;background:var(--term-0);color:var(--chrome-ink);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}.wrap{max-width:900px;padding:48px 40px;margin:auto}.eyebrow{color:var(--accent);font-size:11px;letter-spacing:.1em;text-transform:uppercase}h1{font-size:27px;font-weight:600;color:var(--chrome-ink-strong);margin:12px 0}p{font-size:14px;color:var(--chrome-dim);line-height:1.65;margin:0}.lede{max-width:640px}.comparison{display:flex;gap:56px;justify-content:center;margin:36px 0 0}.example{width:300px;flex-shrink:0}.state{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--chrome-dim);margin-bottom:12px}.dot{width:6px;height:6px;border-radius:50%;background:var(--chrome-faint)}.state.visible .dot{background:var(--accent)}.panel{width:300px;height:450px;background:var(--chrome-bg);border:1px solid var(--chrome-border);border-radius:8px;overflow:hidden;box-shadow:0 16px 40px #0003}.panel-tabs{height:28px;display:flex;align-items:stretch;border-bottom:1px solid var(--chrome-hairline);padding:0 8px;gap:4px}.panel-tab{font-size:10.5px;padding:0 10px;display:flex;align-items:center;color:var(--chrome-dim);position:relative}.panel-tab.active{color:var(--chrome-ink-strong)}.panel-tab.active:after{content:"";position:absolute;bottom:0;left:10px;right:10px;height:2px;background:var(--accent)}.explorer-root{display:flex;align-items:center;gap:7px;padding:5px 12px;border-bottom:1px solid var(--chrome-hairline);height:35px}.root-name{min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;font-size:12.5px;font-weight:600}.explorer-root small{color:var(--chrome-faint);font-size:9.5px;white-space:nowrap}.toggle-wrap{margin-left:auto;position:relative}.toggle{padding:0;width:24px;height:24px;border:1px solid transparent;background:transparent;display:flex;align-items:center;justify-content:center;color:var(--chrome-dim);border-radius:5px;cursor:pointer}.toggle:hover{background:var(--chrome-hover);color:var(--chrome-ink-strong)}.toggle[aria-pressed=true]{background:var(--accent-wash);color:var(--accent);border-color:var(--accent-wash)}.toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.tooltip{position:absolute;top:30px;right:0;padding:6px 8px;border:1px solid var(--chrome-border);border-radius:5px;background:var(--chrome-raised);color:var(--chrome-ink);font-size:11px;white-space:nowrap;z-index:2;pointer-events:none;display:none}.toggle-wrap:hover .tooltip,.toggle-wrap:focus-within .tooltip{display:block}svg{flex-shrink:0}.tree{padding-bottom:12px}.file-row{height:22px;display:flex;align-items:center;gap:4px;padding:0 8px;font-size:12.5px}.file-row:hover{background:var(--chrome-hover)}.file-row[data-depth="1"]{padding-left:22px}.twisty{width:12px;height:12px;color:var(--chrome-faint);display:flex;align-items:center}.file-icon{width:16px;display:flex;align-items:center;justify-content:center;color:var(--term-4)}.file-icon.config{color:var(--chrome-dim)}.file-icon.data{color:var(--term-3)}.file-icon.lock{color:var(--chrome-faint)}.file-row[hidden]{display:none}.caption{margin-top:16px;font-size:13px;line-height:1.65}.caption strong{color:var(--chrome-ink);font-weight:500}.details{display:flex;gap:12px;align-items:center;justify-content:center;font-size:12px;margin-top:28px;color:var(--chrome-dim)}kbd{padding:3px 6px;border:1px solid var(--chrome-border);border-radius:4px;color:var(--chrome-ink);font-size:11px}.foot{margin-top:28px;padding-top:20px;border-top:1px solid var(--chrome-hairline);font-size:12px;color:var(--chrome-faint)}code{font-family:var(--font-mono);font-size:.9em}@media(max-width:740px){.wrap{padding:32px 20px}.comparison{flex-wrap:wrap;gap:28px}.details{flex-wrap:wrap}}
+</style>
+</head>
+<body><main class="wrap">
+<div class="eyebrow">Muxflow / Design mock</div>
+<h1>Show ignored files, right in the explorer.</h1>
+<p class="lede">One button beside the repository name. Ignored files stay hidden by default; click the eye to show them. Click again to hide them.</p>
+<div class="comparison">
+<section class="example" data-show="false" aria-label="Ignored files hidden example">
+<div class="state"><span class="dot"></span><span class="state-label">Ignored files hidden · default</span></div><div class="panel"></div>
+<p class="caption"><strong>Off:</strong> the eye is neutral. Tooltip: “Show ignored files”. <code>.gitignore</code> itself stays visible.</p>
+</section>
+<section class="example" data-show="true" aria-label="Ignored files visible example">
+<div class="state visible"><span class="dot"></span><span class="state-label">Ignored files visible</span></div><div class="panel"></div>
+<p class="caption"><strong>On:</strong> the eye turns blue. Tooltip: “Hide ignored files”. Ignored entries appear in their usual positions.</p>
+</section>
+</div>
+<div class="details">Both previews are interactive.<span><kbd>Tab</kbd> to focus · <kbd>Space</kbd> to toggle</span></div>
+<p class="foot">Planning mock only. Uses the existing explorer’s 300px panel, 22px file rows and theme tokens.</p>
+</main>
+<script>
+const svg=(inner,size=14)=>'<svg aria-hidden="true" width="'+size+'" height="'+size+'" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">'+inner+'</svg>';
+const eye=svg('<path d="M1.3 8s2.4-4 6.7-4 6.7 4 6.7 4-2.4 4-6.7 4-6.7-4-6.7-4Z"/><circle cx="8" cy="8" r="2"/>',16);
+const eyeOff=svg('<path d="M6.1 4.3A7.2 7.2 0 0 1 8 4c4.3 0 6.7 4 6.7 4a12 12 0 0 1-1.9 2.3M10.2 11.6a7 7 0 0 1-2.2.4c-4.3 0-6.7-4-6.7-4a12 12 0 0 1 2.4-2.7M2 2l12 12"/>',16);
+const folder=svg('<path d="M1.8 4h4.5l1.2 1.5h6.7v7H1.8Z"/>');
+const file=svg('<path d="M4 2.5h4.5L12 6v7.5H4Z"/><path d="M8.25 2.6V6H11.9"/>');
+const chevron=svg('<path d="m6.25 3.75 4.25 4.25-4.25 4.25"/>',11);
+const down=svg('<path d="m3.75 6.25 4.25 4.25 4.25-4.25"/>',11);
+const entries=[['apps','folder',0,false,true],['desktop','folder',1,false],['mobile','folder',1,false],['dist','folder',0,true],['docs','folder',0,false],['node_modules','folder',0,true],['src-tauri','folder',0,false],['target','folder',0,true],['tests','folder',0,false],['.env.local','config',0,true],['.gitignore','config',0,false],['package.json','data',0,false],['pnpm-lock.yaml','lock',0,false],['README.md','file',0,false]];
+for(const example of document.querySelectorAll('.example')){
+example.querySelector('.panel').innerHTML='<div class="panel-tabs"><span class="panel-tab active">Files</span><span class="panel-tab">Git</span><span class="panel-tab">Ports</span></div><header class="explorer-root"><span class="root-name" title="/workspace/muxflow">muxflow</span><small>git worktree</small><div class="toggle-wrap"><button type="button" class="toggle" aria-label="Show ignored files" aria-pressed="false"></button><span class="tooltip" role="tooltip"></span></div></header><div class="tree">'+entries.map(([name,kind,depth,ignored,expanded])=>'<div class="file-row" data-depth="'+depth+'" data-ignored="'+ignored+'"><span class="twisty">'+(kind==='folder'?(expanded?down:chevron):'')+'</span><span class="file-icon '+kind+'">'+(kind==='folder'?folder:file)+'</span><span>'+name+'</span></div>').join('')+'</div>';
+const button=example.querySelector('.toggle');
+function render(){const show=example.dataset.show==='true';button.setAttribute('aria-pressed',String(show));button.setAttribute('aria-label',show?'Hide ignored files':'Show ignored files');button.innerHTML=show?eye:eyeOff;example.querySelector('.tooltip').textContent=button.getAttribute('aria-label');example.querySelector('.state').classList.toggle('visible',show);example.querySelector('.state-label').textContent=show?'Ignored files visible':'Ignored files hidden · default';for(const row of example.querySelectorAll('[data-ignored=true]'))row.hidden=!show;}
+button.addEventListener('click',()=>{example.dataset.show=String(example.dataset.show!=='true');render();});render();
+}
+</script></body></html>

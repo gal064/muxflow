@@ -430,8 +430,8 @@ describe("ExplorerTree", () => {
     expect(html).toContain('role="treeitem"');
     expect(html).toContain('aria-level="1"');
     expect(html).toContain('tabindex="0"');
-    // The tree carries no resting controls at all now: creating, renaming,
-    // downloading and refreshing are right-click items, not header buttons.
+    // Creating, renaming, downloading and refreshing remain right-click
+    // items, not header buttons.
     expect(html).not.toContain('aria-label="New file"');
     expect(html).not.toContain('aria-label="Refresh Explorer"');
     expect(html).not.toContain("•••");
@@ -477,7 +477,7 @@ describe("ExplorerTree", () => {
     expect(shown(new Set())).toBe(everything);
   });
 
-  it("offers the show-ignored escape hatch only when something is actually hidden", async () => {
+  it("shares the ignored-file preference between the header button and context menu", async () => {
     const listings = new Map([["/r", listing]]);
     const shown = async (ignoredPaths?: ReadonlySet<string>) => {
       let renderer!: ReturnType<typeof create>;
@@ -493,13 +493,97 @@ describe("ExplorerTree", () => {
     expect(JSON.stringify(degraded.toJSON())).not.toContain("ignored files");
     await act(async () => { degraded.unmount(); });
 
+    const empty = await shown(new Set());
+    expect(JSON.stringify(empty.toJSON())).not.toContain("ignored files");
+    await act(async () => { empty.unmount(); });
+
     const filtering = await shown(new Set(["/r/ignored.log"]));
+    const button = () => filtering.root.findByProps({ className: "bar-button explorer-ignored-toggle" });
     expect(JSON.stringify(filtering.toJSON())).not.toContain("ignored.log");
-    expect(JSON.stringify(filtering.toJSON())).toContain("Show ignored files");
-    const toggle = filtering.root.findByProps({ "data-menu-item": "ignored" });
-    await act(async () => { toggle.props.onClick(); });
+    expect(button().props["aria-pressed"]).toBe(false);
+    expect(button().props["aria-label"]).toBe("Show ignored files");
+    expect(button().props.title).toBe("Show ignored files");
+    await act(async () => { button().props.onClick(); });
     expect(JSON.stringify(filtering.toJSON())).toContain("ignored.log");
+    expect(button().props["aria-pressed"]).toBe(true);
+    expect(button().props["aria-label"]).toBe("Hide ignored files");
+    expect(button().props.title).toBe("Hide ignored files");
+    const menuToggle = filtering.root.findByProps({ "data-menu-item": "ignored" });
+    expect(menuToggle.findByType("span").children).toEqual(["Hide ignored files"]);
+    await act(async () => { menuToggle.props.onClick(); });
+    expect(JSON.stringify(filtering.toJSON())).not.toContain("ignored.log");
+    expect(button().props["aria-pressed"]).toBe(false);
+    await act(async () => { button().props.onClick(); });
+    expect(JSON.stringify(filtering.toJSON())).toContain("ignored.log");
+    await act(async () => { button().props.onClick(); });
+    expect(JSON.stringify(filtering.toJSON())).not.toContain("ignored.log");
     await act(async () => { filtering.unmount(); });
+  });
+
+  it.each(["root", "scope"])("resets the header toggle when the %s changes", async (change) => {
+    const view = (activeRoot = root, scopeIdentity = "scope") => <ExplorerTree root={activeRoot} scopeIdentity={scopeIdentity}
+      listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+      ignoredPaths={new Set(["/r/ignored.log"])} onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()}
+      onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />;
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => { renderer = create(view()); });
+      const button = () => renderer.root.findByProps({ className: "bar-button explorer-ignored-toggle" });
+      await act(async () => { button().props.onClick(); });
+      expect(JSON.stringify(renderer.toJSON())).toContain("ignored.log");
+      await act(async () => { renderer.update(change === "root" ? view({ ...root, token: "root-2" }) : view(root, "scope-2")); });
+      expect(button().props["aria-pressed"]).toBe(false);
+      expect(JSON.stringify(renderer.toJSON())).not.toContain("ignored.log");
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
+  });
+
+  it("reveals an entirely ignored listing from the empty-state header button", async () => {
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope"
+        listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={1} transfers={[]} disabled={false}
+        ignoredPaths={new Set(listing.entries.map((entry) => entry.path))} onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()}
+        onDownload={vi.fn()} onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />); });
+      expect(renderer.root.findAllByProps({ className: "file-row" })).toHaveLength(0);
+      expect(JSON.stringify(renderer.toJSON())).toContain("Use the eye button");
+      expect(renderer.root.findByProps({ className: "explorer-refreshing" }).children).toEqual(["Refreshing…"]);
+      const button = renderer.root.findByProps({ "aria-label": "Show ignored files" });
+      await act(async () => { button.props.onClick(); });
+      expect(renderer.root.findAllByProps({ className: "file-row" })).toHaveLength(listing.entries.length);
+      expect(JSON.stringify(renderer.toJSON())).not.toContain("Everything here is ignored");
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
+  });
+
+  it("keeps the row cursor when the header toggle hides the selected ignored file", async () => {
+    const focus = vi.fn();
+    const treeNode = { scrollTop: 0, clientHeight: 400, querySelector: () => ({ offsetHeight: 22, focus }) };
+    let renderer!: ReturnType<typeof create>;
+    try {
+      await act(async () => { renderer = create(<ExplorerTree root={root} scopeIdentity="scope"
+        listings={new Map([["/r", listing]])} expanded={new Set(["/r"])} loading={new Set()} requestedReads={0} transfers={[]} disabled={false}
+        ignoredPaths={new Set(["/r/ignored.log"])} onToggle={vi.fn()} onOpen={vi.fn()} onMutate={vi.fn()} onDownload={vi.fn()}
+        onCancelTransfer={vi.fn()} onRefresh={vi.fn()} onLoadMore={vi.fn()} />, {
+          createNodeMock: (element) => (element.props as { role?: string }).role === "tree" ? treeNode : null,
+        }); });
+      const button = () => renderer.root.findByProps({ className: "bar-button explorer-ignored-toggle" });
+      await act(async () => { button().props.onClick(); });
+      await act(async () => { renderer.root.findByProps({ "data-tree-index": 1 }).props.onFocus(); });
+      // Moving to the header gives DOM focus away; hiding the selected row
+      // should update the tree's tab stop without stealing focus back.
+      await act(async () => { renderer.root.findByProps({ role: "tree" }).props.onBlur({ relatedTarget: {}, currentTarget: { contains: () => false } }); });
+      await act(async () => { button().props.onClick(); });
+      expect(JSON.stringify(renderer.toJSON())).not.toContain("ignored.log");
+      const tabStops = renderer.root.findAllByProps({ className: "file-row" }).filter((row) => row.props.tabIndex === 0);
+      expect(tabStops).toHaveLength(1);
+      expect(tabStops[0].props["data-tree-index"]).toBe(1);
+      expect(focus).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+    }
   });
 
   it("asks for a preview on a single click and a permanent tab on every deliberate open", async () => {
