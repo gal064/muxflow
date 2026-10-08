@@ -42,19 +42,20 @@ afterEach(() => {
 
 function select(anchorNode: unknown) { selection = { isCollapsed: false, anchorNode, focusNode: anchorNode }; }
 
-function preview(source: string, onStatus = vi.fn()) {
+function preview(source: string, onStatus = vi.fn(), onFileLink = vi.fn()) {
   let renderer!: ReturnType<typeof create>;
   act(() => {
-    renderer = create(<MarkdownPreview source={source} onStatus={onStatus} />, { createNodeMock: () => articleNode });
+    renderer = create(<MarkdownPreview source={source} onStatus={onStatus} onFileLink={onFileLink} />, { createNodeMock: () => articleNode });
   });
   const article = () => renderer.root.findByProps({ className: "markdown-preview" });
   return {
     renderer,
     onStatus,
+    onFileLink,
     article,
     html: () => article().props.dangerouslySetInnerHTML.__html as string,
     retype: async (next: string) => {
-      await act(async () => { renderer.update(<MarkdownPreview source={next} onStatus={onStatus} />); });
+      await act(async () => { renderer.update(<MarkdownPreview source={next} onStatus={onStatus} onFileLink={onFileLink} />); });
     },
     /** Long enough for the debounce and the idle fallback behind it. */
     settle: async () => { await act(async () => { await vi.advanceTimersByTimeAsync(500); }); },
@@ -200,12 +201,31 @@ describe("MarkdownPreview selection", () => {
     act(() => { surface.renderer.unmount(); });
   });
 
-  it("still reports a non-external link as a status message", () => {
+  it("routes a relative link to file navigation", () => {
     const surface = preview("[doc](./other.md)");
     press(surface);
     expect(click(surface, "./other.md")).toHaveBeenCalled();
-    expect(surface.onStatus).toHaveBeenCalledWith("Markdown link: ./other.md");
+    expect(surface.onFileLink).toHaveBeenCalledWith("./other.md");
     expect(opened(surface)).toBe(false);
+    act(() => { surface.renderer.unmount(); });
+  });
+
+  it("keeps file navigation inert during a drag or standing selection", () => {
+    const surface = preview("[task](todos/T003.md)");
+    press(surface, 10, 10);
+    expect(click(surface, "todos/T003.md", 60, 10)).toHaveBeenCalled();
+    expect(surface.onFileLink).not.toHaveBeenCalled();
+    select(insideArticle);
+    expect(click(surface, "todos/T003.md")).toHaveBeenCalled();
+    expect(surface.onFileLink).not.toHaveBeenCalled();
+    act(() => { surface.renderer.unmount(); });
+  });
+
+  it("routes bare TODO paths on keyboard activation", () => {
+    const surface = preview("[task](todos/T003.md)");
+    expect(surface.html()).toContain('href="todos/T003.md"');
+    expect(click(surface, "todos/T003.md", 0, 0, 0)).toHaveBeenCalled();
+    expect(surface.onFileLink).toHaveBeenCalledWith("todos/T003.md");
     act(() => { surface.renderer.unmount(); });
   });
 });
@@ -263,7 +283,7 @@ describe("MarkdownPreview against the DOM", () => {
   });
 
   const render = async (source: string) => {
-    await domAct(async () => { root.render(<MarkdownPreview source={source} onStatus={vi.fn()} />); });
+    await domAct(async () => { root.render(<MarkdownPreview source={source} onStatus={vi.fn()} onFileLink={vi.fn()} />); });
   };
   const paragraph = () => host.querySelector("p")!;
   const send = (target: EventTarget, type: string, init: MouseEventInit = {}) => domAct(async () => {

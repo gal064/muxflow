@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { CLICK_SLOP_PX, selectionHolds, useSanitizedMarkdown } from "../files/markdownPreview";
-import { renderSafeSvg } from "../files/markdown";
+import { markdownFilePath, renderSafeSvg } from "../files/markdown";
 import { useOpenFileTab } from "../files/useOpenFileTab";
 import { IMAGE_PREVIEW_LIMIT_BYTES, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
 import { DelayedLoading } from "../../ui/DelayedLoading";
@@ -35,6 +35,7 @@ interface Props {
    */
   onDirty(): void;
   onStatus(message: string): void;
+  onOpenFile(path: string): void;
   onViewMode(mode: "source" | "preview" | "split"): void;
 }
 
@@ -140,7 +141,15 @@ export function AppTabSurface(props: Props) {
         />
       </Suspense>
     </div>}
-    {props.tab.kind === "markdown" && mode !== "source" && <MarkdownPreview source={source} onStatus={props.onStatus} />}
+    {props.tab.kind === "markdown" && mode !== "source" && <MarkdownPreview source={source} onStatus={props.onStatus} onFileLink={(href) => {
+      try {
+        const path = markdownFilePath(props.tab.resource, href);
+        if (path) props.onOpenFile(path);
+        else props.onStatus(`Markdown link: ${href}`);
+      } catch (error) {
+        props.onStatus(`Could not open ${href}: ${String(error)}`);
+      }
+    }} />}
   </section>;
 }
 
@@ -184,7 +193,11 @@ function EditorToolbar({ canWrite, download, mode, onViewMode, saveState, tab }:
  * selected. The gesture is tracked here and handed to the hook, which parks a
  * finished sanitize until the selection is gone.
  */
-export function MarkdownPreview({ source, onStatus }: { source: string; onStatus(message: string): void }) {
+export function MarkdownPreview({ source, onStatus, onFileLink }: {
+  source: string;
+  onStatus(message: string): void;
+  onFileLink(href: string): void;
+}) {
   const article = useRef<HTMLElement>(null);
   const [selecting, setSelecting] = useState(false);
   // Where the press landed, so a release far from it reads as a drag.
@@ -239,7 +252,7 @@ export function MarkdownPreview({ source, onStatus }: { source: string; onStatus
     if (event.detail > 0 && pressed && Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > CLICK_SLOP_PX) return;
     if (selectionHolds(article.current)) return;
     if (/^https?:/i.test(href)) setExternalUrl(href);
-    else onStatus(`Markdown link: ${href}`);
+    else onFileLink(href);
   }} dangerouslySetInnerHTML={inner} />
   {externalUrl && <ConfirmationDialog
     confirmLabel="Open link"
