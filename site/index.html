@@ -129,13 +129,19 @@
 
   /* clips */
   section.clips { padding: 0 0 96px; }
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-  .clip { margin: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #1d1f21; }
-  .clip video { display: block; width: 100%; height: auto; }
-  .clip.tall { grid-row: span 2; }
-  .clip figcaption { padding: 10px 14px; font-size: 13px; color: var(--dim); border-top: 1px solid var(--hairline); }
-  .clip figcaption b { color: var(--ink-strong); font-weight: 600; }
-  @media (max-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
+  .row {
+    display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 32px; align-items: center;
+    padding: 36px 0; border-bottom: 1px solid var(--hairline);
+  }
+  .row:first-of-type { border-top: 1px solid var(--hairline); }
+  .row h3 { margin: 0 0 10px; color: var(--ink-strong); font-size: 17px; font-weight: 700; }
+  .row p { margin: 0; color: var(--dim); }
+  .shot { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #1d1f21; }
+  .shot video { display: block; width: 100%; height: auto; }
+  .phones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  @media (max-width: 720px) {
+    .row { grid-template-columns: 1fr; gap: 16px; padding: 28px 0; }
+  }
 
   footer { border-top: 1px solid var(--hairline); padding: 28px 0 40px; font-size: 12px; color: var(--faint); }
   footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; }
@@ -196,61 +202,29 @@
 <section class="clips" id="clips">
   <div class="wrap">
     <h2>in action</h2>
-    <div class="grid">
-      <figure class="clip">
-        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-remote-first.jpg" aria-label="Remote first">
-          <source src="assets/features/feature-remote-first.mp4" type="video/mp4" />
-        </video>
-        <figcaption><b>Remote first</b> — Every window and pane is a tmux pane on the host.</figcaption>
-      </figure>
-      <figure class="clip">
-        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-ssh.jpg" aria-label="Connect over SSH">
-          <source src="assets/features/feature-ssh.mp4" type="video/mp4" />
-        </video>
-        <figcaption><b>Connect over SSH</b> — Add a host from your OpenSSH config.</figcaption>
-      </figure>
-      <figure class="clip">
-        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-paste.jpg" aria-label="Paste over SSH">
-          <source src="assets/features/feature-paste.mp4" type="video/mp4" />
-        </video>
-        <figcaption><b>Paste over SSH</b> — A screenshot from your laptop lands in a remote pane.</figcaption>
-      </figure>
-      <figure class="clip">
-        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-files.jpg" aria-label="File explorer">
-          <source src="assets/features/feature-files.mp4" type="video/mp4" />
-        </video>
-        <figcaption><b>File explorer</b> — Browse, edit and download files on the host.</figcaption>
-      </figure>
-      <figure class="clip">
-        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-git.jpg" aria-label="Git">
-          <source src="assets/features/feature-git.mp4" type="video/mp4" />
-        </video>
-        <figcaption><b>Git</b> — Diff, stage, commit and push.</figcaption>
-      </figure>
-      <figure class="clip">
-        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-ports.jpg" aria-label="Ports">
-          <source src="assets/features/feature-ports.mp4" type="video/mp4" />
-        </video>
-        <figcaption><b>Ports</b> — Forward a detected port with one click.</figcaption>
-      </figure>
-      <figure class="clip tall">
-        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/mobile-notifications.jpg" aria-label="Mobile notifications">
-          <source src="assets/features/mobile-notifications.mp4" type="video/mp4" />
-        </video>
-        <figcaption><b>Mobile notifications</b> — An agent finishes; your phone tells you.</figcaption>
-      </figure>
-      <figure class="clip tall">
-        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/mobile-agents.jpg" aria-label="Mobile agents">
-          <source src="assets/features/mobile-agents.mp4" type="video/mp4" />
-        </video>
-        <figcaption><b>Mobile agents</b> — Every agent and its state, from your phone.</figcaption>
-      </figure>
-      <figure class="clip tall">
-        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/mobile-voice.jpg" aria-label="Voice mode">
-          <source src="assets/features/mobile-voice.mp4" type="video/mp4" />
-        </video>
-        <figcaption><b>Voice mode</b> — Hold to talk; the reply comes back as voice.</figcaption>
-      </figure>
+    <div class="row">
+      <div><h3>Remote first</h3><p>Every window and pane is a tmux pane on the host. Close Muxflow, reboot, switch machines: it is all still there.</p></div>
+      <div class="shot"><video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-remote-first.jpg" aria-label="Remote first"><source src="assets/features/feature-remote-first.mp4" type="video/mp4" /></video></div>
+    </div>
+    <div class="row">
+      <div><h3>Connect over SSH</h3><p>Add a host from your existing OpenSSH config. The helper talks over SSH and a private Unix socket, never a TCP port.</p></div>
+      <div class="shot"><video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-ssh.jpg" aria-label="Connect over SSH"><source src="assets/features/feature-ssh.mp4" type="video/mp4" /></video></div>
+    </div>
+    <div class="row">
+      <div><h3>Paste over SSH</h3><p>Copy a screenshot on your laptop and paste it into a remote pane. Claude Code and Codex see it as if it were local.</p></div>
+      <div class="shot"><video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-paste.jpg" aria-label="Paste over SSH"><source src="assets/features/feature-paste.mp4" type="video/mp4" /></video></div>
+    </div>
+    <div class="row">
+      <div><h3>Files, Git, and Ports</h3><p>Browse, edit, and download files on the host; diff, stage, commit, and push; forward a detected port with one click.</p></div>
+      <div class="shot"><video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-files-git-ports.jpg" aria-label="Files, Git, and Ports"><source src="assets/features/feature-files-git-ports.mp4" type="video/mp4" /></video></div>
+    </div>
+    <div class="row">
+      <div><h3>On your phone</h3><p>Get told when an agent needs you, read its terminal and reply, or hold to talk and get the answer back as voice. Android today, iOS <em style="font-style:normal;color:var(--yellow)">(coming soon)</em>.</p></div>
+      <div class="phones">
+        <div class="shot"><video autoplay muted loop playsinline preload="metadata" poster="assets/features/mobile-notifications.jpg" aria-label="Mobile notifications"><source src="assets/features/mobile-notifications.mp4" type="video/mp4" /></video></div>
+        <div class="shot"><video autoplay muted loop playsinline preload="metadata" poster="assets/features/mobile-agents.jpg" aria-label="Mobile agents"><source src="assets/features/mobile-agents.mp4" type="video/mp4" /></video></div>
+        <div class="shot"><video autoplay muted loop playsinline preload="metadata" poster="assets/features/mobile-voice.jpg" aria-label="Voice mode"><source src="assets/features/mobile-voice.mp4" type="video/mp4" /></video></div>
+      </div>
     </div>
   </div>
 </section>
