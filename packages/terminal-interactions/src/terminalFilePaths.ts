@@ -15,8 +15,8 @@ interface TerminalBufferLine {
   getCell(index: number): TerminalBufferCell | undefined;
 }
 
-const LEADING_WRAPPERS = new Set(["(", "[", "{", "'", '"', "`"]);
-const TRAILING_WRAPPERS = new Set([")", "]", "}", "'", '"', "`", ",", ";", ":", "!", "?", "."]);
+const TRAILING_PUNCTUATION = new Set([",", ";", ":", "!", "?", "."]);
+const NON_FILE_PREFIX = /^(?:\/\/|[^/(){}]*:|(?:www\.[^/()[\]{}]*|[a-z\d-]+(?:\.[a-z\d-]+)+)\/)/iu;
 const CLOSING_WRAPPERS = new Map([
   [")", "("],
   ["]", "["],
@@ -26,40 +26,68 @@ const CLOSING_WRAPPERS = new Map([
 /**
  * Finds only the deliberately small P0 path vocabulary in one terminal line.
  *
- * Tokens are whitespace-delimited. Absolute paths and relative paths with a
- * slash qualify; a trailing line/column location is left outside the link.
- * URLs and bare filenames do not qualify.
+ * Whitespace, quotes, and prose delimiters separate tokens. Balanced delimiters
+ * inside path components remain part of the filename. Absolute paths and
+ * relative paths with a slash qualify; a trailing line/column location is left
+ * outside the link. URLs and bare filenames do not qualify.
  */
 export function terminalFileLinks(line: string): TerminalFileLink[] {
   const links: TerminalFileLink[] = [];
-  for (const match of line.matchAll(/[^\s"']+/gu)) {
-    const token = match[0];
-    let leading = 0;
+  for (const match of filePathTokens(line)) {
+    const token = match.text;
     let trailing = token.length;
-    while (leading < trailing && LEADING_WRAPPERS.has(token.charAt(leading))) leading += 1;
-    while (trailing > leading && TRAILING_WRAPPERS.has(token.charAt(trailing - 1))) {
-      const closing = token.charAt(trailing - 1);
-      const opening = CLOSING_WRAPPERS.get(closing);
-      if (opening
-        && delimiterCount(token, opening, leading, trailing) >= delimiterCount(token, closing, leading, trailing)) break;
-      trailing -= 1;
-    }
-    const wrappedText = token.slice(leading, trailing);
+    while (trailing > 0 && TRAILING_PUNCTUATION.has(token.charAt(trailing - 1))) trailing -= 1;
+    const wrappedText = token.slice(0, trailing);
     const location = /:\d+(?::\d+)?$/u.exec(wrappedText);
     const text = location ? wrappedText.slice(0, location.index) : wrappedText;
     if (!isExplicitTerminalFilePath(text)) continue;
-    const start = (match.index ?? 0) + leading;
+    const start = match.start;
     links.push({ text, start, end: start + text.length });
   }
   return links;
 }
 
-function delimiterCount(value: string, delimiter: string, start: number, end: number): number {
-  let count = 0;
-  for (let index = start; index < end; index += 1) {
-    if (value[index] === delimiter) count += 1;
+/** Splits attached labels and unmatched delimiters without losing valid filenames. */
+function* filePathTokens(line: string): Generator<{ text: string; start: number }> {
+  for (const match of line.matchAll(/[^\s"'`]+/gu)) {
+    const token = match[0];
+    let firstSlash = token.indexOf("/");
+    const paired = new Map<number, number>();
+    const openings: number[] = [];
+    for (let index = 0; index < token.length; index += 1) {
+      const char = token.charAt(index);
+      if (char === "(" || char === "[" || char === "{") openings.push(index);
+      const opening = CLOSING_WRAPPERS.get(char);
+      if (!opening) continue;
+      const start = openings.pop();
+      if (start !== undefined && token.charAt(start) === opening) paired.set(start, index);
+      else openings.length = 0;
+    }
+
+    let start = 0;
+    let hasSlash = false;
+    for (let index = 0; index < token.length; index += 1) {
+      // A URL or host reference owns the rest of its token. Splitting its
+      // unmatched delimiters must not create separate file targets.
+      if (index === start && NON_FILE_PREFIX.test(token.slice(start))) {
+        start = token.length;
+        break;
+      }
+      const char = token.charAt(index);
+      if (char === "/") hasSlash = true;
+      if (char !== "(" && char !== "[" && char !== "{" && !CLOSING_WRAPPERS.has(char)) continue;
+      const closing = paired.get(index);
+      if (closing !== undefined && (hasSlash || closing < firstSlash)) {
+        index = closing;
+        continue;
+      }
+      if (start < index) yield { text: token.slice(start, index), start: match.index + start };
+      start = index + 1;
+      firstSlash = token.indexOf("/", start);
+      hasSlash = false;
+    }
+    if (start < token.length) yield { text: token.slice(start), start: match.index + start };
   }
-  return count;
 }
 
 export function isExplicitTerminalFilePath(value: string): boolean {
