@@ -137,7 +137,7 @@
   .row h3 { margin: 0 0 10px; color: var(--ink-strong); font-size: 17px; font-weight: 700; }
   .row p { margin: 0; color: var(--dim); }
   .shot { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #1d1f21; }
-  .shot video { display: block; width: 100%; height: auto; }
+  .shot video, .shot img { display: block; width: 100%; height: auto; }
   .phones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
   @media (max-width: 720px) {
     .row { grid-template-columns: 1fr; gap: 16px; padding: 28px 0; }
@@ -208,7 +208,7 @@
     </div>
     <div class="row">
       <div><h3>Connect over SSH</h3><p>Add a host from your existing OpenSSH config. The helper talks over SSH and a private Unix socket, never a TCP port.</p></div>
-      <div class="shot"><video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-ssh.jpg" aria-label="Connect over SSH"><source src="assets/features/feature-ssh.mp4" type="video/mp4" /></video></div>
+      <div class="shot"><img src="assets/features/feature-ssh.jpg" alt="Connection settings with an SSH host" loading="lazy" /></div>
     </div>
     <div class="row">
       <div><h3>Paste over SSH</h3><p>Copy a screenshot on your laptop and paste it into a remote pane. Claude Code and Codex see it as if it were local.</p></div>
