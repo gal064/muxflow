@@ -1182,6 +1182,14 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .markdown-preview pre code { padding: 0; background: transparent; }
 .markdown-preview img { max-width: 100%; cursor: default; }
 .markdown-preview blockquote { margin-left: 0; padding-left: 14px; border-left: 3px solid var(--chrome-border); color: var(--chrome-dim); }
+/* Typora-style table grid, with the approved roomier cell spacing. */
+.markdown-preview table { width: 100%; margin: .8em 0 1.6em; border-collapse: collapse; border-spacing: 0; word-break: initial; font-size: 14px; line-height: 1.55; }
+.markdown-preview th, .markdown-preview td { padding: 12px 18px; border: 1px solid var(--chrome-border); text-align: left; vertical-align: top; }
+.markdown-preview thead, .markdown-preview tbody tr:nth-child(even) { background: var(--chrome-raised); }
+.markdown-preview th { color: var(--chrome-ink-strong); font-weight: 600; }
+.markdown-preview td:first-child { color: color-mix(in srgb, var(--chrome-ink-strong) 40%, var(--chrome-ink)); }
+.markdown-preview :is(th, td)[align="center"] { text-align: center; }
+.markdown-preview :is(th, td)[align="right"] { text-align: right; }
 .binary-surface {
   position: absolute; inset: 0; display: grid; align-content: center; justify-items: center;
   gap: 10px; padding: 28px; overflow: auto; background: var(--chrome-bg); color: var(--chrome-dim); text-align: center;

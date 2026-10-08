@@ -204,6 +204,7 @@ route, label, or control an inner tmux server.
 7. Binary files show metadata and download actions rather than Monaco.
 8. Images up to 25 MiB may be previewed.
 9. Markdown supports source, preview, and split modes with continuous rendered updates.
+   - Desktop preview tables fill the available width, use a Typora-style cell grid and subtle alternating row backgrounds, and have 12 px vertical / 18 px horizontal cell padding. Headers default to left alignment; explicit Markdown column alignment is preserved. Wide content remains scrollable within the preview.
 10. Markdown WYSIWYG editing is not required in v1.
 11. Restore open editor/diff tabs by host and workspace after app restart.
 
