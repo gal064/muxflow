@@ -1,0 +1,44 @@
+name: Distribute TestFlight build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: Existing processed iOS build number (no rebuild)
+        type: string
+        required: true
+      audience:
+        description: TestFlight audience
+        type: choice
+        options: [external, internal]
+        default: external
+      notes:
+        description: What to Test (required for external testing)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight-distribute-${{ inputs.build_number }}
+  cancel-in-progress: false
+
+jobs:
+  distribute:
+    runs-on: ubuntu-24.04
+    environment: ios-testflight
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Assign build and submit external beta review if needed
+        env:
+          MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64 }}
+          MUXFLOW_APP_STORE_CONNECT_KEY_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_ID }}
+          MUXFLOW_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_ISSUER_ID }}
+          TESTFLIGHT_GROUP: ${{ inputs.audience == 'internal' && vars.MUXFLOW_TESTFLIGHT_INTERNAL_GROUP || vars.MUXFLOW_TESTFLIGHT_EXTERNAL_GROUP }}
+          TESTFLIGHT_NOTES: ${{ inputs.notes }}
+          TESTFLIGHT_BUILD: ${{ inputs.build_number }}
+          TESTFLIGHT_AUDIENCE: ${{ inputs.audience }}
+        run: uv run --no-project release/ios/distribute.py "$TESTFLIGHT_AUDIENCE" --build-number "$TESTFLIGHT_BUILD"

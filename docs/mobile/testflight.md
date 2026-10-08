@@ -1,6 +1,6 @@
-# Internal TestFlight
+# TestFlight releases
 
-Muxflow's first iOS distribution is internal TestFlight, with foreground SSH
+Muxflow uses internal and external TestFlight, with foreground SSH
 and local notifications. It needs no APNs credentials or Push Notifications
 capability. The App Store Connect record uses `dev.muxflow.mobile`.
 
@@ -12,7 +12,7 @@ The GitHub `ios-testflight` environment holds:
 - `MUXFLOW_IOS_CERTIFICATE_PASSWORD`: the P12 export password.
 - `MUXFLOW_IOS_PROVISIONING_PROFILE_BASE64`: App Store distribution profile.
 - `MUXFLOW_APPLE_TEAM_ID`: Apple Developer membership team.
-- `MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64`: team API key with Developer access.
+- `MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64`: team API key with App Manager access.
 - `MUXFLOW_APP_STORE_CONNECT_KEY_ID` and `MUXFLOW_APP_STORE_CONNECT_ISSUER_ID`.
 
 Private keys and passwords stay outside the repository. The macOS runner imports
@@ -25,10 +25,47 @@ SHA-1 MAC) and keep it protected by encrypted GitHub Secrets and a strong
 export password. Certificate import runs before prebuild/pod installation
 so an import failure stops promptly.
 
+## Release to testers
+
+Push a reviewed version tag to build all platforms. The release workflow signs
+and notarizes the Mac app, uploads the signed iOS build, waits for Apple to
+finish processing it, and assigns it to the internal group. The GitHub release
+stays a draft until you publish it. RC tags may point to a branch; stable tags
+must point to `main`.
+
+The `ios-testflight` environment has `MUXFLOW_TESTFLIGHT_INTERNAL_GROUP=Checksum`
+and `MUXFLOW_TESTFLIGHT_EXTERNAL_GROUP=Beta`. Manage testers in these existing
+App Store Connect groups; no invitations or public links are created by CI.
+
+For external testing, first complete Muxflow → TestFlight → Test Information in
+App Store Connect: beta description, feedback email, review contact, sign-in
+choice, and instructions that let Apple test the SSH connection. Provide a
+reachable review host and credentials there if needed. The workflow checks
+that the required fields are filled; only Apple can judge whether they suffice.
+
+Then open GitHub Actions → **Distribute TestFlight build** → **Run workflow**,
+enter the uploaded build number, choose `external`, and enter What to Test.
+It uses the existing signed build, assigns it to Beta, submits beta review if
+needed, and enables distribution to testers after approval. Pending reviews
+are not submitted again. Apple can require review for later builds too.
+See [Apple’s external testing instructions](https://developer.apple.com/help/app-store-connect/test-a-beta-version/invite-external-testers/).
+The Actions button is available after this workflow reaches the default branch.
+For an existing build on a reviewed ref, the equivalent command is:
+
+```bash
+gh workflow run testflight-distribute.yml --ref main \
+  -f build_number=3 -f audience=external -f notes='Test terminal scrolling and reconnect.'
+```
+
+The internal and external jobs refuse unfinished, expired or non-compliant
+builds and refuse a group with the wrong audience. A failure after upload does
+not require rebuilding: use **Distribute TestFlight build** with the retained
+build number after resolving the error.
+
 ## Build and upload
 
 1. Review the source and complete simulator QA for app behavior changes.
-2. Allocate a new build number using `release/set-version.sh 0.1.9 2` (replace
+2. Allocate a new build number using `release/set-version.sh 0.1.13 3` (replace
    both values with the intended version and a number greater than the current
    number). Commit it with the candidate. The protocol major is independent:
    this distribution change does not bump it.
@@ -47,8 +84,8 @@ so an import failure stops promptly.
    recorded versions, team, profile, permission strings and absence of push
    or development entitlements before retaining the IPA and SHA-256 manifest.
 5. Apple's `altool` validates that exact IPA, then uploads it using the API key.
-   It waits for Apple's build record and retains its identifier/status.
-   Upload success does not mean processing, compliance or device QA passed.
+   It waits for Apple’s processing state `VALID`, retains the build record,
+   and assigns it to the configured internal group. Device QA remains separate.
 
 Do not rerun a signed build under an uploaded build number. Workflow reruns are
 refused. If only upload failed, download the retained IPA and `manifest.json`
@@ -62,19 +99,13 @@ processing and inspect App Store Connect before dispatching again.
 
 Muxflow uses standard SSH encryption via bundled libssh2 and OpenSSL, in
 addition to Apple's Keychain/CryptoKit. It is not limited to OS encryption and
-does not implement proprietary encryption. The build leaves
-`ITSAppUsesNonExemptEncryption` unset until the account holder completes Apple's
-questionnaire; upload can succeed while the build shows Missing Compliance.
-Do not answer that the app uses no encryption or only OS encryption.
-
-In App Store Connect, open Muxflow → TestFlight → the build → Manage / Provide
-Export Compliance Information. The current Developer-role API key cannot
-complete this account-holder/App Manager step. Apple lists a French declaration
-for standard encryption outside the OS when distributing on the App Store in
-France; confirm intended distribution and any required documents in the
-questionnaire before setting an exemption or compliance code in future builds.
-See Apple's [encryption documentation requirements](https://developer.apple.com/help/app-store-connect/reference/app-information/export-compliance-documentation-for-encryption)
-and [beta compliance instructions](https://developer.apple.com/help/app-store-connect/test-a-beta-version/provide-export-compliance-information-for-beta-builds/).
+does not implement proprietary encryption. The account holder completed Apple's
+questionnaire for the current encryption and distribution outside France;
+Apple recorded `usesNonExemptEncryption: false` on build 2. New builds record
+that declaration as `ITSAppUsesNonExemptEncryption: false` so the same questions
+do not block every upload. This declares an exemption from documentation,
+not an absence of encryption. Reassess before changing encryption or extending
+distribution to France. See Apple's [encryption documentation requirements](https://developer.apple.com/help/app-store-connect/reference/app-information/export-compliance-documentation-for-encryption).
 
 After processing and compliance, create an Internal Testing group, add your
 App Store Connect user and the build, then accept the invitation in TestFlight

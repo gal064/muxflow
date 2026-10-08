@@ -54,6 +54,13 @@ jobs:
     needs: version
     uses: ./.github/workflows/ci.yml
 
+  ios:
+    needs: [ci, version]
+    uses: ./.github/workflows/ios.yml
+    with:
+      testflight: true
+    secrets: inherit
+
   linux:
     needs: [ci, version]
     strategy:
@@ -270,6 +277,8 @@ jobs:
           if-no-files-found: error
 
   publish:
+    # Apple upload/processing is independent. Recover post-upload failures with
+    # the retained IPA or distribution action without blocking the desktop draft.
     needs: [version, linux-universal, macos, android]
     runs-on: ubuntu-24.04
     permissions:

@@ -1,6 +1,11 @@
 name: ios
 
 on:
+  workflow_call:
+    inputs:
+      testflight:
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       testflight:
@@ -82,7 +87,9 @@ jobs:
       - name: Release versions
         run: release/check-version.sh
       - name: Distribution refusal checks
-        run: uv run --no-project tests/mobile/ios/test-distribution.py
+        run: |
+          uv run --no-project tests/mobile/ios/test-distribution.py
+          uv run --no-project tests/mobile/ios/test-tester-distribution.py
       # Hash before installation/prebuild creates generated files. Restore only
       # an exact app/dependency/toolchain match; no prefix fallback. This is an
       # locally ad hoc signed QA artifact, never a distribution build.
@@ -132,7 +139,7 @@ jobs:
           if-no-files-found: warn
 
   testflight:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.testflight }}
+    if: ${{ inputs.testflight }}
     runs-on: macos-26
     environment: ios-testflight
     timeout-minutes: 90
@@ -157,6 +164,7 @@ jobs:
           pod --version
           release/check-version.sh
           uv run --no-project tests/mobile/ios/test-distribution.py
+          uv run --no-project tests/mobile/ios/test-tester-distribution.py
       - name: Refuse an already uploaded build number
         env:
           MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64 }}
@@ -186,6 +194,13 @@ jobs:
           MUXFLOW_APP_STORE_CONNECT_KEY_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_ID }}
           MUXFLOW_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_ISSUER_ID }}
         run: uv run --no-project release/ios/testflight.py upload
+      - name: Make the processed build available to internal testers
+        env:
+          MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64 }}
+          MUXFLOW_APP_STORE_CONNECT_KEY_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_ID }}
+          MUXFLOW_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_ISSUER_ID }}
+          TESTFLIGHT_GROUP: ${{ vars.MUXFLOW_TESTFLIGHT_INTERNAL_GROUP }}
+        run: uv run --no-project release/ios/distribute.py internal
       - name: Build logs
         if: always()
         uses: actions/upload-artifact@v4
