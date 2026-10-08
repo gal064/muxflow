@@ -3,6 +3,47 @@ import { describe, expect, it } from "vitest";
 import { terminalLinksForBufferLine } from "./terminalLinks";
 
 describe("terminal links across rendered rows", () => {
+  it.each([
+    ["Update(docs/history/14-ui-feedback-2026-10-08.md)", "docs/history/14-ui-feedback-2026-10-08.md"],
+    ["Update(docs/history/14-ui-feedback-2026-10{-08[.md)", "docs/history/14-ui-feedback-2026-10"],
+  ])("keeps the reported attached wrappers out of %s", async (line, path) => {
+    const terminal = await terminalWith(line, 80);
+    const start = line.indexOf(path);
+
+    expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, 1)).toEqual([{
+      kind: "file",
+      text: path,
+      range: { start: { x: start + 1, y: 1 }, end: { x: start + path.length, y: 1 } },
+    }]);
+  });
+
+  it("excludes an attached label across a soft wrap", async () => {
+    const path = "docs/history/14-ui-feedback-2026-10-08.md";
+    const terminal = await terminalWith(`Update(${path})`, 30);
+    const expected = {
+      kind: "file",
+      text: path,
+      range: { start: { x: 8, y: 1 }, end: { x: 18, y: 2 } },
+    };
+
+    for (const row of [1, 2]) {
+      expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, row)).toEqual([expected]);
+    }
+  });
+
+  it("excludes an attached label across application hard rows", async () => {
+    const terminal = await terminalWith("Update(docs/history/14-ui-feedback-2026-\r\n  10-08.md)", 80);
+    const expected = {
+      kind: "file",
+      text: "docs/history/14-ui-feedback-2026-10-08.md",
+      range: { start: { x: 8, y: 1 }, end: { x: 10, y: 2 } },
+    };
+
+    for (const row of [1, 2]) {
+      expect(terminalLinksForBufferLine(terminal.buffer.active, terminal.cols, row)).toEqual([expected]);
+    }
+  });
+
   it("joins a parenthesized relative path whose first hard row is not a path by itself", async () => {
     const lines = [
       "PowerPoint (sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/output/Sampleco-Partnerco-2026-09-10.pptx) · PDF (sampleco-projectx-strategic-",

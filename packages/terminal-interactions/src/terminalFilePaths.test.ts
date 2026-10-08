@@ -19,6 +19,30 @@ describe("terminal file path links", () => {
     expect(terminalFileLinks(line)).toEqual([{ text: path, start, end: start + path.length }]);
   });
 
+  it.each(["()", "[]", "{}"])("excludes an attached label and %s wrappers", (wrappers) => {
+    const path = "docs/history/14-ui-feedback-2026-10-08.md";
+    const line = `Update${wrappers[0]}${path}${wrappers[1]}`;
+    const start = line.indexOf(path);
+
+    expect(terminalFileLinks(line)).toEqual([{ text: path, start, end: start + path.length }]);
+  });
+
+  it.each(["(", ")", "[", "]", "{", "}"])("ends a file link at an unmatched %s", (delimiter) => {
+    const path = "docs/history/14-ui-feedback-2026-10";
+    const line = `Update(${path}${delimiter}-08.md`;
+    const start = line.indexOf(path);
+
+    expect(terminalFileLinks(line)).toEqual([{ text: path, start, end: start + path.length }]);
+  });
+
+  it("ends the reported malformed path at its first unmatched brace", () => {
+    const text = "docs/history/14-ui-feedback-2026-10";
+    const line = "Update(docs/history/14-ui-feedback-2026-10{-08[.md)";
+    const start = line.indexOf(text);
+
+    expect(terminalFileLinks(line)).toEqual([{ text, start, end: start + text.length }]);
+  });
+
   it("preserves balanced delimiters inside paths while trimming prose wrappers", () => {
     expect(terminalFileLinks("See assets/image_(dark), (docs/[final]), and {build/{release}}.")
       .map((link) => link.text)).toEqual([
@@ -26,6 +50,28 @@ describe("terminal file path links", () => {
       "docs/[final]",
       "build/{release}",
     ]);
+  });
+
+  it.each(["repo(copy)/src/main.ts", "project[1]/src/main.ts", "project{copy}/src/main.ts"])(
+    "preserves balanced delimiters in the first component of %s",
+    (path) => expect(terminalFileLinks(path)).toEqual([{ text: path, start: 0, end: path.length }]),
+  );
+
+  it("preserves a bracketed directory after another delimited path", () => {
+    const line = "[docs/API](project[1]/src/main.ts)";
+    expect(terminalFileLinks(line)).toEqual([
+      { text: "docs/API", start: 1, end: 9 },
+      { text: "project[1]/src/main.ts", start: 11, end: 33 },
+    ]);
+  });
+
+  it.each([
+    "https://example.com/a)/b", "https://example.com/a(foo/bar",
+    "http://[::1]/a)/b", "example.com/a)/b", "mailto:foo(bar/baz", "user@host:path)/to",
+    "Update(https://example.com/a)/b", "(http://[::1]/a)/b",
+    "user@[::1]:path)/to", "[::1]:path)/to", "(user@[::1]:path)/to",
+  ])("does not turn fragments of %s into file links", (value) => {
+    expect(terminalFileLinks(value)).toEqual([]);
   });
 
   it("leaves a closing parenthesis and following colon outside the file link", () => {
