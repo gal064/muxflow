@@ -95,6 +95,7 @@ async function mountFile(options: { opened?: OpenFile; tab?: Partial<AppOwnedTab
       onDirty={vi.fn()}
       onDownload={vi.fn()}
       onStatus={vi.fn()}
+      onOpenFile={vi.fn()}
       onViewMode={vi.fn()}
       scope={options.connected === false ? undefined : scope}
       tab={{ ...fileTab, ...options.tab }}

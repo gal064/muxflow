@@ -1682,6 +1682,14 @@ export function App() {
               onDownload={(path, kind, root) => void startDownloadFlow({ path, kind }, root, "fileSurface")}
               onDirty={() => pinOpenTab(tab.id)}
               onStatus={setStatus}
+              onOpenFile={(path) => {
+                if (!fileScope || fileScope.hostProfileId !== tab.hostProfileId
+                  || fileScope.serverIdentity !== tab.serverIdentity || fileScope.sessionId !== tab.sessionId) {
+                  setStatus("Reconnect and select this file's workspace before opening a link.");
+                  return;
+                }
+                void openTerminalFilePath(fileScope.paneId, path);
+              }}
               onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, tab.id, viewMode))}
               scope={fileScope}
               tab={tab}

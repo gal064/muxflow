@@ -2,7 +2,7 @@
 // jsdom, because the surface mounts an editor host and measures its layout.
 import { act, create } from "react-test-renderer";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { AppTabSurface } from "./AppTabSurface";
+import { AppTabSurface, MarkdownPreview } from "./AppTabSurface";
 import type { AppOwnedTab } from "./types";
 import type {
   ActiveRoot,
@@ -130,6 +130,8 @@ function surfaceClient(fixture: Fixture) {
 
 async function mount(fixture: Fixture, options: { tab?: AppOwnedTab; activeRoot?: ActiveRoot } = {}) {
   const surface = surfaceClient(fixture);
+  const onOpenFile = vi.fn();
+  const onStatus = vi.fn();
   let renderer!: ReturnType<typeof create>;
   await act(async () => {
     renderer = create(<AppTabSurface
@@ -138,7 +140,8 @@ async function mount(fixture: Fixture, options: { tab?: AppOwnedTab; activeRoot?
       activeRoot={options.activeRoot ?? root}
       onDirty={vi.fn()}
       onDownload={vi.fn()}
-      onStatus={vi.fn()}
+      onStatus={onStatus}
+      onOpenFile={onOpenFile}
       onViewMode={vi.fn()}
       scope={scope}
       tab={options.tab ?? tab}
@@ -146,7 +149,7 @@ async function mount(fixture: Fixture, options: { tab?: AppOwnedTab; activeRoot?
   });
   await act(async () => { await Promise.resolve(); });
   await act(async () => { await Promise.resolve(); });
-  return { ...surface, renderer };
+  return { ...surface, renderer, onOpenFile, onStatus };
 }
 
 describe("AppTabSurface", () => {
@@ -155,6 +158,20 @@ describe("AppTabSurface", () => {
   // front leaves these tests measuring the surface rather than however long the
   // runner takes to transform a file.
   beforeAll(async () => { await import("../files/FileEditor"); });
+
+  it("opens Markdown links relative to the tab's file and reports malformed links", async () => {
+    const surface = await mount({ bootstrap: listing([]) }, {
+      tab: { ...tab, kind: "markdown", resource: "/repo/todos/T003.md", viewMode: "preview" },
+    });
+    const follow = surface.renderer.root.findByType(MarkdownPreview).props.onFileLink;
+    act(() => { follow("../docs/03-pre-launch.md"); });
+    expect(surface.onOpenFile).toHaveBeenCalledWith("/repo/todos/../docs/03-pre-launch.md");
+    surface.onOpenFile.mockClear();
+    act(() => { follow("bad%XX.md"); });
+    expect(surface.onOpenFile).not.toHaveBeenCalled();
+    expect(surface.onStatus).toHaveBeenCalledWith(expect.stringContaining("Could not open bad%XX.md"));
+    await act(async () => { surface.renderer.unmount(); });
+  });
 
   it("waits before it says it is loading, and says it the same way the editor stage does", async () => {
     const surface = await mount({ bootstrap: listing([entry("/repo/note.txt", "g1")]), holdOpens: true });

@@ -137,6 +137,7 @@ async function mountMarkdown(content: string) {
     onDirty={vi.fn()}
     onDownload={vi.fn()}
     onStatus={vi.fn()}
+    onOpenFile={vi.fn()}
     onViewMode={vi.fn()}
     scope={scope}
     tab={tab}
@@ -174,6 +175,7 @@ describe("the editor chunk boundary", () => {
       onDirty={vi.fn()}
       onDownload={vi.fn()}
       onStatus={vi.fn()}
+      onOpenFile={vi.fn()}
       onViewMode={vi.fn()}
       scope={liveScope}
       tab={markdownTab}
