@@ -29,7 +29,7 @@ SSH, multi-host, ports, files, and Git.
 Sessions stay on the host. Close the app, reboot your laptop, or switch machines and every window, pane, and process is still there when you come back. Sessions are workspaces, windows are tabs, and renames flow both ways.
 
 </td>
-<td width="50%" valign="middle"><img src="docs/assets/feature-tmux.png" alt="Muxflow mirroring a tmux session with three panes" width="100%" /></td>
+<td width="50%" valign="middle"><img src="docs/assets/feature-remote-first.gif" alt="Muxflow attached to a remote tmux session: every window and pane is a tmux pane" width="100%" /></td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
@@ -39,7 +39,7 @@ Sessions stay on the host. Close the app, reboot your laptop, or switch machines
 Attach to a [remote host](./docs/remote-host.md), Linux or macOS, through your existing OpenSSH config. The helper talks over SSH and a private Unix socket, never a TCP port, and several hosts can be shown [side by side](./docs/multi-host.md). The Ports tab lists what is listening on the host and forwards a port to your machine with one click.
 
 </td>
-<td width="50%" valign="middle"><img src="docs/assets/feature-ssh.png" alt="Connection settings with the SSH transport selected" width="100%" /></td>
+<td width="50%" valign="middle"><img src="docs/assets/feature-ssh.gif" alt="Adding an SSH host in connection settings" width="100%" /></td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
@@ -49,7 +49,7 @@ Attach to a [remote host](./docs/remote-host.md), Linux or macOS, through your e
 Copy a screenshot or a file on your laptop and paste it into a pane on a remote host. Muxflow uploads it over the same SSH connection and drops the path into the terminal, so Codex or Claude Code sees the image as if it were local.
 
 </td>
-<td width="50%" valign="middle"><img src="docs/assets/feature-paste.png" alt="A pasted screenshot showing up as an image in a Claude Code prompt" width="100%" /></td>
+<td width="50%" valign="middle"><img src="docs/assets/feature-paste.gif" alt="Pasting a screenshot into a remote pane; Claude Code sees it as an image" width="100%" /></td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
@@ -59,7 +59,27 @@ Copy a screenshot or a file on your laptop and paste it into a pane on a remote 
 Browse and edit files next to the terminal with a Markdown preview, paste screenshots and files straight into a pane, and download files from the host.
 
 </td>
-<td width="50%" valign="middle"><img src="docs/assets/editor-desktop.png" alt="Markdown split editor with the Files panel" width="100%" /></td>
+<td width="50%" valign="middle"><img src="docs/assets/feature-files.gif" alt="Browsing and downloading files on the remote host" width="100%" /></td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Git
+
+Diff, stage, commit, and push on the host without leaving Muxflow.
+
+</td>
+<td width="50%" valign="middle"><img src="docs/assets/feature-git.gif" alt="Git panel with a diff, staging and commit" width="100%" /></td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Ports
+
+See what is listening on an SSH host and forward a port to your machine with one click. Forwards stop when Muxflow does.
+
+</td>
+<td width="50%" valign="middle"><img src="docs/assets/feature-ports.gif" alt="Ports tab forwarding a detected port" width="100%" /></td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
@@ -69,7 +89,7 @@ Browse and edit files next to the terminal with a Markdown preview, paste screen
 Get told when a Codex or Claude Code agent blocks on a question or finishes, whether you are at the desk or on your phone. Lifecycle comes from reviewable [agent hooks](./docs/agent-hooks.md).
 
 </td>
-<td width="50%" align="center" valign="middle"><img src="docs/assets/mobile-notification.png" alt="Android notification shade with Muxflow agent notifications" width="55%" /></td>
+<td width="50%" align="center" valign="middle"><img src="docs/assets/mobile-notifications.gif" alt="An agent notification on Android, opened into the agent's terminal" width="55%" /></td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
@@ -79,7 +99,7 @@ Get told when a Codex or Claude Code agent blocks on a question or finishes, whe
 The Android app shows your agents and their state, lets you read an agent's terminal and type a reply, browse files, and start new agents in any workspace.
 
 </td>
-<td width="50%" align="center" valign="middle"><img src="docs/assets/mobile-agents.png" alt="Muxflow mobile agents list" width="48%" /> <img src="docs/assets/mobile-terminal.png" alt="Agent terminal on the phone with a reply box" width="48%" /></td>
+<td width="50%" align="center" valign="middle"><img src="docs/assets/mobile-agents.gif" alt="Agents list on the phone" width="55%" /></td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
@@ -89,7 +109,7 @@ The Android app shows your agents and their state, lets you read an agent's term
 Hold to talk to an agent from your phone. Replies come back as voice messages, walkie-talkie style.
 
 </td>
-<td width="50%" align="center" valign="middle"><img src="docs/assets/mobile-voice.png" alt="Muxflow mobile voice mode" width="55%" /></td>
+<td width="50%" align="center" valign="middle"><img src="docs/assets/mobile-voice.gif" alt="Voice mode: hold to talk, the reply comes back as voice" width="55%" /></td>
 </tr>
 <tr>
 <td width="50%" valign="middle">

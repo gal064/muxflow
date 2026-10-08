@@ -126,6 +126,17 @@
     ol.list .d { grid-column: 2; margin-top: 4px; }
   }
 
+
+  /* clips */
+  section.clips { padding: 0 0 96px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .clip { margin: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #1d1f21; }
+  .clip video { display: block; width: 100%; height: auto; }
+  .clip.tall { grid-row: span 2; }
+  .clip figcaption { padding: 10px 14px; font-size: 13px; color: var(--dim); border-top: 1px solid var(--hairline); }
+  .clip figcaption b { color: var(--ink-strong); font-weight: 600; }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
+
   footer { border-top: 1px solid var(--hairline); padding: 28px 0 40px; font-size: 12px; color: var(--faint); }
   footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; }
   footer .links { margin-left: auto; display: flex; gap: 20px; }
@@ -178,6 +189,69 @@
       <li><span class="n">09</span><span class="t">tmux based</span><span class="d">Your processes keep running even when you close Muxflow.</span></li>
       <li><span class="n">10</span><span class="t">Open source</span><span class="d">MIT licensed.</span></li>
     </ol>
+  </div>
+</section>
+
+
+<section class="clips" id="clips">
+  <div class="wrap">
+    <h2>in action</h2>
+    <div class="grid">
+      <figure class="clip">
+        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-remote-first.jpg" aria-label="Remote first">
+          <source src="assets/features/feature-remote-first.mp4" type="video/mp4" />
+        </video>
+        <figcaption><b>Remote first</b> — Every window and pane is a tmux pane on the host.</figcaption>
+      </figure>
+      <figure class="clip">
+        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-ssh.jpg" aria-label="Connect over SSH">
+          <source src="assets/features/feature-ssh.mp4" type="video/mp4" />
+        </video>
+        <figcaption><b>Connect over SSH</b> — Add a host from your OpenSSH config.</figcaption>
+      </figure>
+      <figure class="clip">
+        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-paste.jpg" aria-label="Paste over SSH">
+          <source src="assets/features/feature-paste.mp4" type="video/mp4" />
+        </video>
+        <figcaption><b>Paste over SSH</b> — A screenshot from your laptop lands in a remote pane.</figcaption>
+      </figure>
+      <figure class="clip">
+        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-files.jpg" aria-label="File explorer">
+          <source src="assets/features/feature-files.mp4" type="video/mp4" />
+        </video>
+        <figcaption><b>File explorer</b> — Browse, edit and download files on the host.</figcaption>
+      </figure>
+      <figure class="clip">
+        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-git.jpg" aria-label="Git">
+          <source src="assets/features/feature-git.mp4" type="video/mp4" />
+        </video>
+        <figcaption><b>Git</b> — Diff, stage, commit and push.</figcaption>
+      </figure>
+      <figure class="clip">
+        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/feature-ports.jpg" aria-label="Ports">
+          <source src="assets/features/feature-ports.mp4" type="video/mp4" />
+        </video>
+        <figcaption><b>Ports</b> — Forward a detected port with one click.</figcaption>
+      </figure>
+      <figure class="clip tall">
+        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/mobile-notifications.jpg" aria-label="Mobile notifications">
+          <source src="assets/features/mobile-notifications.mp4" type="video/mp4" />
+        </video>
+        <figcaption><b>Mobile notifications</b> — An agent finishes; your phone tells you.</figcaption>
+      </figure>
+      <figure class="clip tall">
+        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/mobile-agents.jpg" aria-label="Mobile agents">
+          <source src="assets/features/mobile-agents.mp4" type="video/mp4" />
+        </video>
+        <figcaption><b>Mobile agents</b> — Every agent and its state, from your phone.</figcaption>
+      </figure>
+      <figure class="clip tall">
+        <video autoplay muted loop playsinline preload="metadata" poster="assets/features/mobile-voice.jpg" aria-label="Voice mode">
+          <source src="assets/features/mobile-voice.mp4" type="video/mp4" />
+        </video>
+        <figcaption><b>Voice mode</b> — Hold to talk; the reply comes back as voice.</figcaption>
+      </figure>
+    </div>
   </div>
 </section>
 
