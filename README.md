@@ -54,32 +54,12 @@ Copy a screenshot or a file on your laptop and paste it into a pane on a remote 
 <tr>
 <td width="50%" valign="middle">
 
-### File explorer and transfers
+### Files, Git, and Ports
 
-Browse and edit files next to the terminal with a Markdown preview, paste screenshots and files straight into a pane, and download files from the host.
-
-</td>
-<td width="50%" valign="middle"><img src="docs/assets/feature-files.gif" alt="Browsing and downloading files on the remote host" width="100%" /></td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
-
-### Git
-
-Diff, stage, commit, and push on the host without leaving Muxflow.
+Browse, edit, and download files on the host with a Markdown preview; diff, stage, commit, and push; see what is listening on an SSH host and forward a port with one click.
 
 </td>
-<td width="50%" valign="middle"><img src="docs/assets/feature-git.gif" alt="Git panel with a diff, staging and commit" width="100%" /></td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
-
-### Ports
-
-See what is listening on an SSH host and forward a port to your machine with one click. Forwards stop when Muxflow does.
-
-</td>
-<td width="50%" valign="middle"><img src="docs/assets/feature-ports.gif" alt="Ports tab forwarding a detected port" width="100%" /></td>
+<td width="50%" valign="middle"><img src="docs/assets/feature-files-git-ports.gif" alt="File explorer, Git panel and Ports tab on a remote host" width="100%" /></td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
