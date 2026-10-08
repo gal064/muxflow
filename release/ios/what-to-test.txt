@@ -1,0 +1,1 @@
+Test SSH connection, terminal scrolling, files, and reconnecting after switching apps.

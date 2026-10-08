@@ -277,10 +277,13 @@ main() {
   local version=${MUXFLOW_VERSION:-}
   if [[ -z "$version" ]]; then
     fetch "$releases/latest/download/latest.json" "$work/latest.json"
-    version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$work/latest.json")
+    version=$(sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$work/latest.json")
+    if [[ -z "$version" ]]; then
+      version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$work/latest.json")
+    fi
   fi
   version=${version#v}
-  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || fail "invalid version: '$version'"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?(-ios(-internal)?)?$ ]] || fail "invalid version: '$version'"
 
   "install_$os" "$version"
 }

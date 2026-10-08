@@ -68,7 +68,28 @@ for pin in "$rc" "v$rc"; do
 done
 echo "pinned RC install, with and without v: ok"
 
-for pin in "$version-beta.1" "$version-rc." '../escape'; do
+for release_tag in "$version-ios" "$version-ios-internal" "$rc-ios" "$rc-ios-internal"; do
+  mkdir -p "$mirror/download/v$release_tag"
+  cp "$assets/"* "$mirror/download/v$release_tag/"
+  for pin in "$release_tag" "v$release_tag"; do
+    run_installer "$pin" > "$work/ios.out"
+    grep -q "Downloading Muxflow $release_tag for" "$work/ios.out"
+    [[ -x "$prefix/bin/muxflow" && -x "$prefix/bin/muxflow-host" ]]
+  done
+done
+echo "pinned iOS release tags: ok"
+
+# The public stable tag can carry -ios; latest installs must use the exact tag,
+# while the package filename and application version remain the base semver.
+for release_tag in "$version-ios" "$version-ios-internal"; do
+  printf '{"version": "%s", "tag": "v%s", "url": "unused"}\n' "$version" "$release_tag" > "$mirror/latest/download/latest.json"
+  run_installer > "$work/latest-ios.out"
+  grep -q "Downloading Muxflow $release_tag for" "$work/latest-ios.out"
+done
+printf '{"version": "%s", "url": "unused"}\n' "$version" > "$mirror/latest/download/latest.json"
+echo "latest stable iOS-tag install: ok"
+
+for pin in "$version-beta.1" "$version-rc." "$version-ios-external" "$version-ios-rc.1" '../escape'; do
   if run_installer "$pin" > "$work/invalid.out" 2>&1; then
     echo "installer accepted invalid version: $pin" >&2
     exit 1
