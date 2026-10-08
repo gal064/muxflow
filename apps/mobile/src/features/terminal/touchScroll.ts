@@ -23,7 +23,7 @@ const FLING_STOP_ROWS_PER_MS = 0.0025;
 const FLING_TIME_CONSTANT_MS = 325;
 const VELOCITY_SAMPLE_MAX_AGE_MS = 80;
 const VELOCITY_BLEND = 0.35;
-const TOUCH_SCROLL_SENSITIVITY = 2;
+const TOUCH_SCROLL_SENSITIVITY = 1.5;
 const MAX_FRAME_MS = 34;
 
 function clamp(value: number, minimum: number, maximum: number): number {
