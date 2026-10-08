@@ -4,7 +4,7 @@
 
 # Muxflow
 
-**A desktop and mobile front end for tmux and your coding agents.**
+**Remote-first tmux IDE for coding agents.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-informational?logo=linux&logoColor=white)](#install)
@@ -15,11 +15,8 @@
 
 </div>
 
-Muxflow mirrors an existing tmux server. tmux stays authoritative for sessions,
-windows, panes, and the processes inside them; Muxflow adds a graphical
-terminal, editor, file explorer, Git view, and a sidebar that tells you which
-Codex or Claude Code agent needs you next. Close the window, switch machines,
-or open the Android app: every session keeps running on the host.
+Agent notifications on desk and phone, voice replies, screenshot paste over
+SSH, multi-host, ports, files, and Git.
 
 ## Features
 
@@ -39,7 +36,7 @@ Sessions stay on the host. Close the app, reboot your laptop, or switch machines
 
 ### Works across SSH
 
-Attach to a [remote host](./docs/remote-host.md) through your existing OpenSSH config. The helper talks over SSH and a private Unix socket, never a TCP port, and several hosts can be shown [side by side](./docs/multi-host.md).
+Attach to a [remote host](./docs/remote-host.md), Linux or macOS, through your existing OpenSSH config. The helper talks over SSH and a private Unix socket, never a TCP port, and several hosts can be shown [side by side](./docs/multi-host.md). The Ports tab lists what is listening on the host and forwards a port to your machine with one click.
 
 </td>
 <td width="50%" valign="middle"><img src="docs/assets/feature-ssh.png" alt="Connection settings with the SSH transport selected" width="100%" /></td>
@@ -109,7 +106,8 @@ macOS, Linux, and Android. iOS is coming soon.
 ## Supported agents
 
 Codex and Claude Code have lifecycle adapters. Any other CLI agent runs as an
-ordinary tmux window without attention tracking.
+ordinary tmux window without attention tracking; add your own with
+[agent hooks](./docs/agent-hooks.md).
 
 ## Install
 
