@@ -1,6 +1,6 @@
 import { TERMINAL_MIN_WIDTH, type ShellState } from "./types";
 
-export type SidebarCommand = "view.toggleSidebar" | "view.togglePanel" | "view.showFiles" | "view.showGit";
+export type SidebarCommand = "view.toggleSidebar" | "view.togglePanel" | "view.showFiles" | "view.showGit" | "view.showPorts";
 
 export interface RailLayout {
   /** Whether each rail is drawn right now. */
@@ -55,12 +55,13 @@ export function shellAfterSidebarCommand(shell: ShellState, command: SidebarComm
       return { ...shell, panelOpen: !shell.panelOpen };
     case "view.showFiles":
     case "view.showGit":
+    case "view.showPorts":
       // Asking for a surface opens the panel on it; it is not a toggle, so
       // running the command twice does not close what you just asked for.
       return {
         ...shell,
         panelOpen: true,
-        panelSurface: command === "view.showFiles" ? "files" : "git",
+        panelSurface: command === "view.showFiles" ? "files" : command === "view.showGit" ? "git" : "ports",
       };
   }
 }

@@ -200,6 +200,7 @@ pub fn run() {
             app.manage(connection::files::DownloadManager::default());
             app.manage(connection::files::FileIoManager);
             app.manage(connection::files::UploadManager);
+            app.manage(connection::ports::PortForwards::default());
             let notifications = notifications::NativeNotifications::new(app.handle().clone());
             // At launch, not at the first agent event, so the permission prompt
             // is there while the person is looking. A no-op once they answered.
@@ -256,6 +257,11 @@ pub fn run() {
             connection::git::cancel_git_request,
             connection::git_content::read_git_diff_content,
             connection::git_content::cancel_git_diff_content,
+            connection::ports::ports_forward,
+            connection::ports::ports_stop,
+            connection::ports::ports_stop_host,
+            connection::ports::ports_list,
+            connection::ports::ports_detect,
             connection::files::download_manager::start_download,
             connection::files::download_manager::cancel_download,
             connection::files::download_manager::suggest_download_destination,
@@ -281,8 +287,9 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Muxflow")
-        .run(|_, event| {
+        .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                app.state::<connection::ports::PortForwards>().stop_all();
                 connection::close_all_control_masters();
             }
         });

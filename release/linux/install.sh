@@ -124,7 +124,7 @@ trap cleanup EXIT
 
 install -m 0755 "$package_root/bin/muxflow" "$stage_dir/muxflow"
 install -m 0755 "$package_root/bin/muxflow-host" "$stage_dir/muxflow-host"
-for qualified in "$package_root"/bin/muxflow-host-x86_64 "$package_root"/bin/muxflow-host-aarch64; do
+for qualified in "$package_root"/bin/muxflow-host-linux-x86_64 "$package_root"/bin/muxflow-host-linux-aarch64 "$package_root"/bin/muxflow-host-macos-aarch64; do
   [[ -f "$qualified" ]] && install -m 0755 "$qualified" "$stage_dir/$(basename "$qualified")"
 done
 install -m 0755 "$package_root/uninstall.sh" "$stage_dir/uninstall.sh"

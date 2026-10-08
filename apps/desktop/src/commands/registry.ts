@@ -51,7 +51,7 @@ export type CommandId =
   | "shortcuts.configure"
   | "settings.show"
   | "host.delete"
-  | "view.toggleSidebar" | "view.togglePanel" | "view.showFiles" | "view.showGit"
+  | "view.toggleSidebar" | "view.togglePanel" | "view.showFiles" | "view.showGit" | "view.showPorts"
   | "focus.workspaces" | "focus.tabs" | "focus.back" | "focus.forward"
   | "tab.previous" | "tab.next"
   | "agents.jumpUnread" | "agents.toggleSort"
@@ -164,6 +164,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "view.togglePanel", title: "Toggle right panel", group: "View", defaults: { mac: "Meta+L", linux: "Ctrl+L" } },
   { id: "view.showFiles", title: "Show Files", group: "View", defaults: { mac: "Meta+Shift+E", linux: "Ctrl+Shift+E" } },
   { id: "view.showGit", title: "Show Source Control", group: "View", defaults: { mac: "Meta+Shift+G", linux: "Ctrl+Shift+G" } },
+  { id: "view.showPorts", title: "Show Ports", group: "View" },
   { id: "focus.workspaces", title: "Focus workspace list", group: "View" },
   { id: "focus.tabs", title: "Focus tab strip", group: "View" },
   // The titlebar's Back and Forward arrows run these same commands; the

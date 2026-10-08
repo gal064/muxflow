@@ -60,7 +60,7 @@ if [[ "$digest_a" != "$digest_b" ]]; then
   root_b=$(find "$compare_b" -mindepth 1 -maxdepth 1 -type d -print -quit)
   diff -u "$root_a/SHA256SUMS" "$root_b/SHA256SUMS" \
     > "$evidence/reproducibility-content.diff" || true
-  for binary in muxflow muxflow-host muxflow-host-x86_64; do
+  for binary in muxflow muxflow-host muxflow-host-linux-x86_64; do
     printf '%s\ta\t%s\n' "$binary" "$(sha256sum "$root_a/bin/$binary" | cut -d' ' -f1)"
     printf '%s\tb\t%s\n' "$binary" "$(sha256sum "$root_b/bin/$binary" | cut -d' ' -f1)"
   done > "$evidence/reproducibility-binaries.tsv"
@@ -102,7 +102,7 @@ fi
 HOME="$fixture_home" ADE_INSTALL_PREFIX="$prefix" "$package_root/install.sh" > "$evidence/install.log"
 [[ -x "$prefix/lib/muxflow/muxflow" ]]
 [[ -x "$prefix/lib/muxflow/muxflow-host" ]]
-[[ -x "$prefix/lib/muxflow/muxflow-host-$architecture" ]]
+[[ -x "$prefix/lib/muxflow/muxflow-host-linux-$architecture" ]]
 [[ -L "$prefix/bin/muxflow-host" ]]
 [[ -f "$prefix/share/applications/muxflow.desktop" ]]
 [[ -f "$prefix/share/icons/hicolor/256x256/apps/muxflow.png" ]]

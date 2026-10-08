@@ -37,7 +37,7 @@ done
 grep -Fxq "$owner" "$lib_dir/.package-owner"
 while IFS= read -r installed; do
   case "${installed#"$lib_dir/"}" in
-    muxflow|muxflow-host|muxflow-host-x86_64|muxflow-host-aarch64|uninstall.sh|SHA256SUMS|.package-owner|.owned-assets|.created-dirs) ;;
+    muxflow|muxflow-host|muxflow-host-linux-x86_64|muxflow-host-linux-aarch64|muxflow-host-macos-aarch64|uninstall.sh|SHA256SUMS|.package-owner|.owned-assets|.created-dirs) ;;
     *) echo "refusing to remove unowned file from package directory: $installed" >&2; exit 73 ;;
   esac
 done < <(find "$lib_dir" -mindepth 1 -type f -print)

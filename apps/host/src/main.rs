@@ -31,7 +31,12 @@ async fn main() -> anyhow::Result<()> {
             daemon::run(argument_path("--socket").unwrap_or_else(paths::default_socket_path)).await
         }
         Some("daemon-stop") => {
-            daemon::stop(argument_path("--socket").unwrap_or_else(paths::default_socket_path)).await
+            let socket = argument_path("--socket").unwrap_or_else(paths::default_socket_path);
+            if std::env::args().any(|argument| argument == "--force") {
+                daemon::stop_or_retire(&socket).await
+            } else {
+                daemon::stop(socket).await
+            }
         }
         Some("protocol-check") => {
             daemon::check(argument_path("--socket").unwrap_or_else(paths::default_socket_path))
@@ -151,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(debug_assertions)]
         Some("phase1-client") => phase1_client::run(std::env::args().skip(2).collect()),
         _ => bail!(
-            "usage: muxflow-host <daemon|daemon-stop|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|host-naming|helper|version|doctor [--json]|support-bundle --output PATH|discover|voice <status|provision --yes|transcribe FILE|speak TEXT --out FILE>>"
+            "usage: muxflow-host <daemon|daemon-stop [--force]|protocol-check|bridge --stdio|hook <ingest|status|install|uninstall>|hooks-status|host-naming|helper|version|doctor [--json]|support-bundle --output PATH|discover|voice <status|provision --yes|transcribe FILE|speak TEXT --out FILE>>"
         ),
     }
 }
