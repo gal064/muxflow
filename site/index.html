@@ -85,6 +85,20 @@
   @media (max-width: 900px) {
     .install code { mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
   }
+  .os { display: flex; gap: 4px; margin: 0 0 10px; }
+  .os button {
+    font: inherit; font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer;
+    padding: 6px 12px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--dim);
+  }
+  .os button:hover { color: var(--ink-strong); }
+  .os button[aria-selected="true"] { background: var(--raised); color: var(--ink-strong); border-color: var(--accent); }
+  .panel .install, .panel .dl { min-height: 50px; }
+  .dl {
+    display: inline-flex; align-items: center; gap: 12px; padding: 0 18px; height: 50px;
+    border: 1px solid var(--border); border-radius: 4px; background: var(--raised); color: var(--ink-strong); font-size: 14px;
+  }
+  .dl .soon { color: var(--yellow); }
+  .dl a { color: var(--accent); }
   .meta { margin: 16px 0 0; font-size: 13px; color: var(--faint); }
   .meta .sep { margin: 0 10px; }
   .meta a { white-space: nowrap; }
@@ -157,11 +171,35 @@
     <h1>Remote-first tmux IDE for coding agents<span class="cursor" aria-hidden="true"></span></h1>
     <p class="lede">Agent notifications on desk and phone, voice replies, screenshot paste over SSH, multi-host, ports, files, and Git.</p>
     <div class="cta">
-      <div class="install">
-        <code id="install-cmd">curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash</code>
-        <button class="copy" type="button" data-copy="install-cmd">copy</button>
+      <div class="os" role="tablist" aria-label="Platform">
+        <button type="button" role="tab" aria-selected="true" data-os="mac">macOS</button>
+        <button type="button" role="tab" aria-selected="false" data-os="linux">Linux</button>
+        <button type="button" role="tab" aria-selected="false" data-os="android">Android</button>
+        <button type="button" role="tab" aria-selected="false" data-os="ios">iOS</button>
       </div>
-      <p class="meta">macOS · Linux · Android · MIT<span class="sep">—</span><a href="https://github.com/gal064/muxflow/releases/latest">dmg and manual install →</a><span class="sep">·</span><a href="https://github.com/gal064/muxflow">github →</a></p>
+      <div class="panel" data-panel="mac">
+        <div class="install">
+          <code id="install-cmd">curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash</code>
+          <button class="copy" type="button" data-copy="install-cmd">copy</button>
+        </div>
+        <p class="meta">Apple Silicon · needs tmux 3.3+<span class="sep">—</span><a href="https://github.com/gal064/muxflow/releases/latest">dmg and manual install →</a></p>
+      </div>
+      <div class="panel" data-panel="linux" hidden>
+        <div class="install">
+          <code id="install-cmd-linux">curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash</code>
+          <button class="copy" type="button" data-copy="install-cmd-linux">copy</button>
+        </div>
+        <p class="meta">x86-64 · needs tmux 3.3+<span class="sep">—</span><a href="https://github.com/gal064/muxflow/releases/latest">manual install →</a></p>
+      </div>
+      <div class="panel" data-panel="android" hidden>
+        <div class="dl"><a href="https://github.com/gal064/muxflow/releases/latest">Download the APK from the latest release →</a></div>
+        <p class="meta">Connects to a desktop or host that already runs Muxflow.</p>
+      </div>
+      <div class="panel" data-panel="ios" hidden>
+        <div class="dl"><span class="soon">Coming soon</span></div>
+        <p class="meta">In testing. Watch the <a href="https://github.com/gal064/muxflow/releases">releases page</a>.</p>
+      </div>
+      <p class="meta">MIT<span class="sep">·</span><a href="https://github.com/gal064/muxflow">github →</a></p>
     </div>
   </div>
 </header>
@@ -240,6 +278,15 @@
 </footer>
 
 <script>
+  document.querySelectorAll(".os button").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".os button").forEach((b) => b.setAttribute("aria-selected", String(b === tab)));
+      document.querySelectorAll(".panel").forEach((p) => { p.hidden = p.dataset.panel !== tab.dataset.os; });
+    });
+  });
+  const ua = navigator.userAgent;
+  const guess = /Android/.test(ua) ? "android" : /iPhone|iPad/.test(ua) ? "ios" : /Linux/.test(ua) ? "linux" : "mac";
+  document.querySelector(`.os button[data-os="${guess}"]`)?.click();
   document.getElementById("play-demo").addEventListener("click", (event) => {
     const video = document.getElementById("demo-video");
     event.currentTarget.hidden = true;
