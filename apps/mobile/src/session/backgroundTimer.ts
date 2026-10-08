@@ -14,12 +14,12 @@
 // timeouts stay on `setTimeout`.
 
 import { jsBackgroundTimer, type BackgroundTimer } from "../protocol/backgroundTimer";
-import { muxflowSsh, type MuxflowSsh } from "../ssh/MuxflowSsh";
+import type { AndroidConnectionServices } from "./AndroidConnectionServices";
 import { log } from "./log";
 
 export { jsBackgroundTimer, type BackgroundTimer, type BackgroundTimerHandle } from "../protocol/backgroundTimer";
 
-export type WakeClock = Pick<MuxflowSsh, "scheduleWake" | "cancelWake" | "addWakeListener">;
+export type WakeClock = Pick<AndroidConnectionServices, "scheduleWake" | "cancelWake" | "addWakeListener">;
 
 /**
  * Tokens are monotonic per timer, so a wake for a token that was cleared and
@@ -61,19 +61,14 @@ export function createNativeBackgroundTimer(ssh: WakeClock, report: (line: strin
   };
 }
 
-let instance: BackgroundTimer | null = null;
+let instance: BackgroundTimer = jsBackgroundTimer;
 
-/** The app-wide timer: native when the module is present, `setTimeout` otherwise (node, unit tests). */
+/** Installed before connecting: Android's native clock or iOS's active JS clock. */
+export function setBackgroundTimer(timer: BackgroundTimer): void {
+  instance = timer;
+}
+
 export function backgroundTimer(): BackgroundTimer {
-  if (instance === null) {
-    let ssh: MuxflowSsh | null = null;
-    try {
-      ssh = muxflowSsh();
-    } catch {
-      log("backgroundTimer: no native module, using setTimeout");
-    }
-    instance = ssh === null ? jsBackgroundTimer : createNativeBackgroundTimer(ssh);
-  }
   return instance;
 }
 

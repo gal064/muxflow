@@ -1,0 +1,217 @@
+name: ios
+
+on:
+  workflow_call:
+    inputs:
+      testflight:
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      testflight:
+        description: Build, validate and upload a signed TestFlight IPA
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/**'
+      - 'apps/host/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'patches/**'
+      - 'release/**'
+      - 'pnpm-lock.yaml'
+      - 'tests/mobile/ios/**'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/**'
+      - 'apps/host/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'patches/**'
+      - 'release/**'
+      - 'pnpm-lock.yaml'
+      - 'tests/mobile/ios/**'
+      - '.github/workflows/ios.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ inputs.testflight && 'testflight' || github.ref }}
+  cancel-in-progress: ${{ !inputs.testflight }}
+
+jobs:
+  simulator:
+    if: ${{ !inputs.testflight }}
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      NODE_OPTIONS: --max-old-space-size=6144
+      # The pinned pod supports prebuilt OpenSSL artifacts; libssh2 builds locally.
+      OPENSSL_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: astral-sh/setup-uv@v6
+      - name: Toolchain
+        id: toolchain
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available
+          pod --version
+          toolchain_key=$(
+            {
+              printf '%s\n' "${ImageVersion:?Missing runner image version}"
+              xcodebuild -version
+              node --version
+              pod --version
+            } | shasum -a 256 | cut -d ' ' -f 1
+          )
+          printf 'cache-key=%s\n' "$toolchain_key" >> "$GITHUB_OUTPUT"
+      - name: Release versions
+        run: release/check-version.sh
+      - name: Distribution refusal checks
+        run: |
+          uv run --no-project tests/mobile/ios/test-distribution.py
+          uv run --no-project tests/mobile/ios/test-tester-distribution.py
+      # Hash before installation/prebuild creates generated files. Restore only
+      # an exact app/dependency/toolchain match; no prefix fallback. This is an
+      # locally ad hoc signed QA artifact, never a distribution build.
+      - name: Restore compiled simulator app
+        id: simulator-app
+        uses: actions/cache/restore@v4
+        with:
+          path: tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
+          key: ios-simulator-app-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('apps/mobile/**', 'packages/**', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'patches/**', 'release/**', '.github/workflows/ios.yml') }}
+      - name: Native SSH contract
+        run: bash tests/mobile/ios/check-native.sh 2>&1 | tee "$RUNNER_TEMP/ios-native.log"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm mobile:check
+      - name: Install simulator UI driver
+        run: |
+          curl --fail --location --retry 3 https://github.com/mobile-dev-inc/maestro/releases/download/cli-2.11.0/maestro.zip -o "$RUNNER_TEMP/maestro.zip"
+          unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/maestro/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/maestro/bin/maestro" --version
+      - name: Build fixture host
+        run: |
+          brew install tmux ripgrep
+          cargo build --locked -p muxflow-host
+      - name: Build standalone simulator app
+        if: steps.simulator-app.outputs.cache-hit != 'true'
+        run: pnpm mobile:ios:simulator > "$RUNNER_TEMP/ios-build.log" 2>&1
+      # Keep a successfully built app even when a later UI assertion fails.
+      - name: Cache compiled simulator app
+        if: steps.simulator-app.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
+          key: ${{ steps.simulator-app.outputs.cache-primary-key }}
+      - name: Install and launch
+        run: bash tests/mobile/ios/launch-simulator.sh
+      - name: SSH, terminal, Markdown and resume UI flows
+        run: bash tests/mobile/ios/test-simulator.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-simulator-evidence
+          path: |
+            ${{ runner.temp }}/ios-native.log
+            ${{ runner.temp }}/ios-build.log
+            tmp/ios-evidence/
+            tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
+          if-no-files-found: warn
+
+  testflight:
+    if: ${{ inputs.testflight }}
+    runs-on: macos-26
+    environment: ios-testflight
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      NODE_OPTIONS: --max-old-space-size=6144
+      OPENSSL_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require a fresh run
+        # Retry upload with the retained IPA; a new binary needs a new number.
+        run: test "$GITHUB_RUN_ATTEMPT" = 1
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: astral-sh/setup-uv@v6
+      - name: Toolchain and release versions
+        run: |
+          xcodebuild -version
+          pod --version
+          release/check-version.sh
+          uv run --no-project tests/mobile/ios/test-distribution.py
+          uv run --no-project tests/mobile/ios/test-tester-distribution.py
+      - name: Refuse an already uploaded build number
+        env:
+          MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64 }}
+          MUXFLOW_APP_STORE_CONNECT_KEY_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_ID }}
+          MUXFLOW_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_ISSUER_ID }}
+        run: uv run --no-project release/ios/testflight.py check
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm mobile:check
+      - name: Archive, export and verify the signed IPA
+        env:
+          MUXFLOW_IOS_CERTIFICATE_P12_BASE64: ${{ secrets.MUXFLOW_IOS_CERTIFICATE_P12_BASE64 }}
+          MUXFLOW_IOS_CERTIFICATE_PASSWORD: ${{ secrets.MUXFLOW_IOS_CERTIFICATE_PASSWORD }}
+          MUXFLOW_IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.MUXFLOW_IOS_PROVISIONING_PROFILE_BASE64 }}
+          MUXFLOW_APPLE_TEAM_ID: ${{ secrets.MUXFLOW_APPLE_TEAM_ID }}
+        run: uv run --no-project release/ios/testflight.py build
+      - name: Retain the exact upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-testflight-${{ github.sha }}
+          path: |
+            tmp/release/ios/*.ipa
+            tmp/release/ios/manifest.json
+          if-no-files-found: error
+      - name: Validate and upload to App Store Connect
+        env:
+          MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64 }}
+          MUXFLOW_APP_STORE_CONNECT_KEY_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_ID }}
+          MUXFLOW_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_ISSUER_ID }}
+        run: uv run --no-project release/ios/testflight.py upload
+      - name: Make the processed build available to internal testers
+        env:
+          MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_P8_BASE64 }}
+          MUXFLOW_APP_STORE_CONNECT_KEY_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_KEY_ID }}
+          MUXFLOW_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.MUXFLOW_APP_STORE_CONNECT_ISSUER_ID }}
+          TESTFLIGHT_GROUP: ${{ vars.MUXFLOW_TESTFLIGHT_INTERNAL_GROUP }}
+        run: uv run --no-project release/ios/distribute.py internal
+      - name: Build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-testflight-logs-${{ github.run_id }}
+          path: tmp/release/ios/*.log
+          if-no-files-found: ignore
+      - name: Apple build record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-testflight-apple-${{ github.run_id }}
+          path: tmp/release/ios/apple-build.json
+          if-no-files-found: ignore

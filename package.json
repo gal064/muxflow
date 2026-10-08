@@ -44,6 +44,7 @@
     "release:linux": "bash release/linux/build-package.sh",
     "release:macos": "bash release/macos/build-package.sh",
     "tauri": "pnpm --filter @muxflow/desktop tauri",
-    "test": "pnpm --filter @muxflow/desktop test"
+    "test": "pnpm --filter @muxflow/desktop test",
+    "mobile:ios:simulator": "pnpm --filter @muxflow/mobile ios:simulator"
   }
 }

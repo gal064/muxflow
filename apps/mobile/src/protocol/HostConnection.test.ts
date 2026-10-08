@@ -130,7 +130,7 @@ describe("handshake (§7.3)", () => {
     h.transports[0]!.feed(hostEnvelope({ case: "serverHello", value: serverHello() }, { requestId: 1n, protocolMajor: 5 }));
     expect(h.store.getState().connection).toMatchObject({
       state: "incompatible",
-      message: "This host's Muxflow helper speaks protocol v5; this app needs v4. Update the app or the helper from Muxflow desktop.",
+      message: "This host's Muxflow helper speaks protocol v5; this app needs v4. Update Muxflow on this phone, or update the helper from Muxflow desktop.",
     });
     expect(h.transports[0]!.closed).toBe(true);
     await vi.advanceTimersByTimeAsync(60_000);

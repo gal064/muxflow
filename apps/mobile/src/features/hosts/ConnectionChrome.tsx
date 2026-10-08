@@ -59,7 +59,7 @@ export function ConnectionChrome({ returnOnFailure = false }: ConnectionChromePr
     <>
       {focused ? <ConnectionStrip /> : null}
       {focused && failure?.presentation === "fullScreen" ? (
-        <ConnectionErrorScreen failure={failure} hostId={connection.host?.id} />
+        <ConnectionErrorScreen failure={failure} hostId={connection.host?.id} incompatible={connection.state === "incompatible"} />
       ) : null}
       {owns ? <HostKeyDialog /> : null}
       {owns ? <ConnectionSheet /> : null}

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Set the release version everywhere it is recorded, then verify.
 #
-#   release/set-version.sh 0.2.0
+#   release/set-version.sh 0.2.0 [ios-build-number]
 #
-# The desktop app, the host helper and the mobile app always ship together, so
-# they share one X.Y.Z. The Android versionCode is derived from it as
+# Desktop, host and mobile share one X.Y.Z.; iOS adoption is independent.
+# The Android versionCode is derived from it as
 # major*10000 + minor*100 + patch, which keeps every release an in-place
 # upgrade of the one before. The wire protocol version (crates/protocol) is
 # separate and is not touched.
@@ -14,10 +14,18 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 version=${1:?usage: release/set-version.sh X.Y.Z}
 version=${version#v}
 
-node - "$repo" "$version" <<'NODE'
+ios_build_number=${2:-}
+
+node - "$repo" "$version" "$ios_build_number" <<'NODE'
 const fs = require("fs");
 const path = require("path");
-const [repo, version] = process.argv.slice(2);
+const [repo, version, requestedBuild] = process.argv.slice(2);
+const currentBuild = JSON.parse(fs.readFileSync(path.join(repo, "apps/mobile/app.json"), "utf8")).expo.ios.buildNumber;
+const validBuild = (value) => typeof value === "string" && /^[1-9][0-9]{0,3}$/.test(value);
+if (!validBuild(currentBuild)) throw new Error("iOS buildNumber must be an integer from 1 to 9999");
+if (requestedBuild && (!validBuild(requestedBuild) || Number(requestedBuild) <= Number(currentBuild))) {
+  throw new Error("An explicit iOS build number must increase (1–9999)");
+}
 const semver = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
 if (!semver) throw new Error(`${version} is not X.Y.Z`);
 const [major, minor, patch] = semver.slice(1).map(Number);
@@ -36,6 +44,7 @@ edit("apps/desktop/src-tauri/tauri.conf.json", topLevelVersion, `$1"${version}"`
 edit("apps/desktop/package.json", topLevelVersion, `$1"${version}"`);
 edit("apps/mobile/package.json", topLevelVersion, `$1"${version}"`);
 edit("apps/mobile/app.json", topLevelVersion, `$1"${version}"`);
+if (requestedBuild) edit("apps/mobile/app.json", /("buildNumber":\s*)"[^"]*"/, `$1"${requestedBuild}"`);
 edit("apps/mobile/app.json", /("versionCode":\s*)\d+/, `$1${major * 10000 + minor * 100 + patch}`);
 const cargoVersion = /^(\[package\][^[]*?^version = )"[^"]+"/m;
 edit("apps/desktop/src-tauri/Cargo.toml", cargoVersion, `$1"${version}"`);

@@ -3,9 +3,8 @@
  *
  * The native side emits one `onSshEvent` event discriminated by `type`; this module fans that out
  * into the `SshEvent` union, keeps writes ordered and chunked, and is the only place that knows the
- * native module exists. The module's second event, `onWake`, answers `scheduleWake` — the native
- * clock `src/session/backgroundTimer.ts` builds on. The third, `onDisconnectRequested`, is the
- * persistent notification's Disconnect action (§6.3).
+ * native module exists. Android service and wake events are owned by
+ * `AndroidConnectionServices.ts`, outside this transport facade.
  */
 
 export interface SshTarget {
@@ -53,28 +52,8 @@ export interface MuxflowSsh {
   /** stdin bytes for the remote command. Writes on one connection are serialised. */
   write(connectionId: string, base64: string): Promise<void>;
   close(connectionId: string): Promise<void>;
-  startForegroundService(title: string, body: string): Promise<void>;
-  stopForegroundService(): Promise<void>;
-  /**
-   * The text of the ongoing notification (§6.3): kept for the service's next automatic start and,
-   * while it is running, re-posted in place. Never starts the service itself.
-   */
-  setServiceNotification(title: string, body: string): Promise<void>;
   addListener(listener: (event: SshEvent) => void): () => void;
-  /**
-   * The notification's Disconnect action. Sent before the native side closes anything, and whether
-   * or not a channel is open — between reconnect attempts there is none to report `closedByClient`.
-   */
-  addDisconnectListener(listener: () => void): () => void;
-  /**
-   * Hands `token` back through `addWakeListener` after `delayMs` on a native `Handler`, which keeps
-   * running while React Native has the JS timers frozen in the background. Scheduling a pending
-   * token again replaces its deadline.
-   */
-  scheduleWake(token: string, delayMs: number): Promise<void>;
-  /** A token that is not pending is a no-op. */
-  cancelWake(token: string): Promise<void>;
-  addWakeListener(listener: (token: string) => void): () => void;
+
 }
 
 export interface NativeSubscription {
@@ -95,23 +74,13 @@ export interface NativeMuxflowSshModule {
   trustHostKey(connectionId: string, fingerprintSha256: string): Promise<void>;
   write(connectionId: string, base64: string): Promise<void>;
   close(connectionId: string): Promise<void>;
-  startForegroundService(title: string, body: string): Promise<void>;
-  stopForegroundService(): Promise<void>;
-  setServiceNotification(title: string, body: string): Promise<void>;
-  scheduleWake(token: string, delayMs: number): Promise<void>;
-  cancelWake(token: string): Promise<void>;
   addListener(
-    eventName:
-      | typeof NATIVE_EVENT_NAME
-      | typeof NATIVE_WAKE_EVENT_NAME
-      | typeof NATIVE_DISCONNECT_EVENT_NAME,
+    eventName: string,
     listener: (payload: unknown) => void,
   ): NativeSubscription;
 }
 
 export const NATIVE_EVENT_NAME = "onSshEvent";
-export const NATIVE_WAKE_EVENT_NAME = "onWake";
-export const NATIVE_DISCONNECT_EVENT_NAME = "onDisconnectRequested";
 
 /**
  * Longest base64 payload handed to a single native `write`. A multiple of 4 so every chunk decodes
@@ -194,20 +163,11 @@ export function chunkBase64(base64: string): string[] {
   return chunks;
 }
 
-/** The `onWake` payload is nothing but the token `scheduleWake` was given. */
-export function normalizeWakeToken(payload: unknown): string | null {
-  if (typeof payload !== "object" || payload === null) {
-    return null;
-  }
-  const token = (payload as Record<string, unknown>).token;
-  return typeof token === "string" ? token : null;
-}
-
 /**
  * Fans one native event out to any number of listeners, holding the native subscription only
  * while someone is listening.
  */
-function fanOut<T>(
+export function fanOut<T>(
   subscribe: (deliver: (payload: unknown) => void) => NativeSubscription,
   normalize: (payload: unknown) => T | null,
 ): (listener: (event: T) => void) => () => void {
@@ -276,21 +236,8 @@ export function createMuxflowSsh(native: NativeMuxflowSshModule): MuxflowSsh {
         }
       }),
     close: (connectionId) => native.close(connectionId),
-    startForegroundService: (title, body) => native.startForegroundService(title, body),
-    stopForegroundService: () => native.stopForegroundService(),
-    setServiceNotification: (title, body) => native.setServiceNotification(title, body),
     addListener: fanOut((deliver) => native.addListener(NATIVE_EVENT_NAME, deliver), normalizeSshEvent),
-    // The event carries nothing; every delivery is a tap.
-    addDisconnectListener: fanOut<true>(
-      (deliver) => native.addListener(NATIVE_DISCONNECT_EVENT_NAME, deliver),
-      () => true,
-    ),
-    scheduleWake: (token, delayMs) => native.scheduleWake(token, delayMs),
-    cancelWake: (token) => native.cancelWake(token),
-    addWakeListener: fanOut(
-      (deliver) => native.addListener(NATIVE_WAKE_EVENT_NAME, deliver),
-      normalizeWakeToken,
-    ),
+
   };
 }
 

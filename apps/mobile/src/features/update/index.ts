@@ -1,7 +1,7 @@
 // Installs the update check once, from wireApp.
 
 import Constants from "expo-constants";
-import { AppState } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 
 import { log } from "../../session/log";
 import { MANIFEST_URL, startUpdateCheck } from "./updateCheck";
@@ -23,7 +23,8 @@ async function fetchManifest(): Promise<unknown> {
 let started = false;
 
 export function startAppUpdateCheck(): void {
-  if (started) return;
+  // GitHub publishes Android artifacts; iOS testers update through TestFlight.
+  if (started || Platform.OS === "ios") return;
   started = true;
   const runningVersion = Constants.expoConfig?.version;
   if (!runningVersion) return;
@@ -43,3 +44,19 @@ export function startAppUpdateCheck(): void {
 }
 
 export { updateStore, type AvailableUpdate } from "./updateCheck";
+
+
+/** Initial iOS distribution uses TestFlight; change this when App Store ships. */
+export async function openAppUpdates(): Promise<void> {
+  if (Platform.OS === "ios") {
+    try { await Linking.openURL("itms-beta://"); }
+    catch { await Linking.openURL("https://apps.apple.com/app/testflight/id899247664"); }
+  } else {
+    await openDesktopUpdates();
+  }
+}
+
+/** Desktop installs the matching helper; both update together from GitHub. */
+export function openDesktopUpdates(): Promise<void> {
+  return Linking.openURL("https://github.com/gal064/muxflow/releases/latest");
+}

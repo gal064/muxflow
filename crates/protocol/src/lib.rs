@@ -48,8 +48,10 @@ pub mod v1 {
     }
 }
 
-// Mobile is independently released. A differing contract is rejected at admission;
-// desktop and host are shipped together and have no version-skew mode.
+// Mobile updates independently; admission requires exact major equality. Bump only
+// when the last released mobile app misbehaves with the new host, or the new app
+// misbehaves with the last released host. Harmless additive fields do not bump.
+// No compatibility arms or version-dependent paths; desktop matches helper digests.
 pub const PROTOCOL_MAJOR: u32 = 4;
 pub const HELPER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;

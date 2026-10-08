@@ -96,6 +96,9 @@ jobs:
           pnpm mobile:test
           pnpm --filter @muxflow/terminal-interactions check
           pnpm --filter @muxflow/terminal-interactions test
+          pnpm --filter @muxflow/client-core check
+          pnpm --filter @muxflow/markdown check
+          pnpm --filter @muxflow/client-core palette:check
       - name: Generated code is committed
         run: |
           pnpm --filter @muxflow/mobile protocol:check

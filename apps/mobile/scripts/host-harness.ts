@@ -6,6 +6,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import type { Transport, TransportClose } from "../src/protocol/Transport";
 
 export const REPO_ROOT = path.resolve(import.meta.dirname, "../../..");
@@ -96,10 +97,9 @@ class ChildTransport implements Transport {
 
 export async function startHostHarness(): Promise<HostHarness> {
   const binary = buildHost();
-  // Under /tmp on purpose: the daemon's Unix socket lives here and socket
-  // paths are limited to ~104 bytes, which a deep scratch path exceeds.
-  const runtime = mkdtempSync("/tmp/mxm-");
-  const workDir = mkdtempSync("/tmp/mxm-work-");
+  // Keep TMPDIR short: the daemon's Unix socket path is limited to ~104 bytes.
+  const runtime = mkdtempSync(path.join(tmpdir(), "mxm-"));
+  const workDir = mkdtempSync(path.join(tmpdir(), "mxm-work-"));
   const socket = `mxm-${process.pid}-${path.basename(runtime).slice(4)}`;
   const env = { ...process.env, ADE_HOST_RUNTIME_DIR: runtime, ADE_TMUX_SOCKET_NAME: socket };
   const tmux = (args: string[]): string => {

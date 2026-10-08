@@ -47,6 +47,9 @@ if (semver) {
     problems.push(`apps/mobile/app.json: versionCode ${app.android.versionCode}, expected ${code}`);
   }
 }
+if (typeof app.ios?.buildNumber !== "string" || !/^[1-9][0-9]{0,3}$/.test(app.ios.buildNumber)) {
+  problems.push("apps/mobile/app.json: iOS buildNumber must be an integer from 1 to 9999");
+}
 if (problems.length) {
   for (const problem of problems) console.error(`VERSION_MISMATCH ${problem}`);
   process.exit(1);

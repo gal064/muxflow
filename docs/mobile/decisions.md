@@ -1,5 +1,24 @@
 # Muxflow Mobile — decisions log
 
+## iOS preparation — shared sources and protocol admission (2026-10-03)
+
+- The approved [iOS plan](ios-plan.md) extends the Android application; it
+  supersedes Android-only lifecycle/transport requirements for the Apple target.
+- `@muxflow/client-core` owns agent labels and palette values. Desktop CSS is
+  generated from that palette and checked in CI; platform layout/typography
+  remains local. Existing desktop hex-alpha and mobile rgba treatments stay
+  unchanged. Existing tests exercise both consumers.
+- `@muxflow/markdown` owns Markdown rendering and sanitization for desktop and
+  the mobile WebView. Desktop-only SVG sanitization remains at its existing
+  owner. The React Native runtime does not import the DOM renderer.
+- Per Gal, protocol admission keeps strict major equality. Bump the major only
+  if either previous-mobile/new-host or new-mobile/previous-host breaks or
+  misbehaves. Review every wire change against both released baselines;
+  harmless additive fields do not bump. No compatibility arms or
+  version-dependent request paths. Desktop keeps its helper digest check.
+- Initial iOS lifecycle uses teardown-and-reconnect. Any five-second grace is
+  a later optimization justified by real-iPhone reconnect measurements.
+
 design.md §5 asks for the versions in its table unless a newer stable exists on
 the day work starts, and for anything the document leaves open to be decided
 towards the smallest change and written down here.

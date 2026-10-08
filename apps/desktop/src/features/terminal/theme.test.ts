@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 // The token file itself, as text: this test's whole purpose is to compare the
 // renderer's fallback against what tokens.css actually declares.
-import tokensCss from "../../tokens.css?raw";
+import layoutCss from "../../tokens.css?raw";
+import paletteCss from "@muxflow/client-core/palette.css?raw";
+const tokensCss = `${paletteCss}\n${layoutCss}`;
 import { CHROME_FALLBACKS, GHOSTTY_DEFAULT_DARK, searchDecorations, terminalFacesReady, terminalFont, terminalFontFaces, terminalTheme } from "./theme";
 
 function token(name: string): string | undefined {

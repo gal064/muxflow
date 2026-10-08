@@ -1,6 +1,6 @@
 {
   "name": "@muxflow/desktop",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "private": true,
   "type": "module",
   "scripts": {
@@ -25,7 +25,9 @@
     "marked": "18.0.9",
     "monaco-editor": "0.56.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "@muxflow/client-core": "workspace:*",
+    "@muxflow/markdown": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "26.3.0",

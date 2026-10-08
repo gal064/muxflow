@@ -1,4 +1,4 @@
-// The Android side of §13, over expo-notifications. The only file in this
+// Native notification presentation for Android and iOS, over expo-notifications. The only file in this
 // feature that imports a native module.
 //
 // Two notification channels exist in this app and they are not the same thing:
@@ -15,9 +15,10 @@ import { colors } from "../../ui/tokens";
 /** §13: channel `agents`, importance HIGH, sound default, vibration default. */
 export const AGENTS_CHANNEL_ID = "agents";
 
-export function createExpoNotificationHost(): NotificationHost {
+export function createExpoNotificationHost(platform: "android" | "ios" = "android"): NotificationHost {
   return {
     async ensureChannel() {
+      if (platform === "ios") return;
       await Notifications.setNotificationChannelAsync(AGENTS_CHANNEL_ID, {
         name: "Agents",
         description: "An agent is blocked waiting for you, or has finished.",
@@ -62,11 +63,13 @@ export function createExpoNotificationHost(): NotificationHost {
           // No `sound` here: from API 26 the channel owns sound and vibration
           // (`ExpoNotificationBuilder.applySoundsAndVibrations`), and minSdk is
           // 26. `color` tints the small icon in the status bar and shade.
-          color: colors.accent,
-          priority: Notifications.AndroidNotificationPriority.HIGH,
+          ...(platform === "android" ? {
+            color: colors.accent,
+            priority: Notifications.AndroidNotificationPriority.HIGH,
+          } : {}),
         },
         // A channel-aware trigger with no schedule: present now, on `agents`.
-        trigger: { channelId: AGENTS_CHANNEL_ID },
+        trigger: platform === "android" ? { channelId: AGENTS_CHANNEL_ID } : null,
       });
     },
 
@@ -107,12 +110,12 @@ export function createExpoNotificationHost(): NotificationHost {
  * the foreground service (§6.3) keeps it alive precisely when the app is in the
  * background, which is when these notifications matter.
  */
-export function installForegroundPresentation(): void {
+export function installForegroundPresentation(platform: "android" | "ios" = "android"): void {
   Notifications.setNotificationHandler({
     handleNotification: async () => ({
       shouldShowBanner: true,
       shouldShowList: true,
-      shouldPlaySound: true,
+      shouldPlaySound: platform === "android",
       shouldSetBadge: false,
     }),
   });

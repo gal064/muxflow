@@ -1,0 +1,16 @@
+appId: dev.muxflow.mobile
+---
+- launchApp:
+    clearState: true
+    clearKeychain: true
+    permissions:
+      notifications: allow
+- tapOn: Your SSH key
+- tapOn: Generate key
+- extendedWaitUntil:
+    visible: ssh-ed25519.*
+    timeout: 15000
+- tapOn: Copy
+- takeScreenshot: public-key
+- tapOn:
+    id: BackButton

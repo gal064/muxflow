@@ -1,9 +1,9 @@
 import Constants from "expo-constants";
 import { Stack } from "expo-router";
-import { Linking, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { Linking, Platform, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useStore } from "zustand";
 
-import { updateStore } from "../src/features/update";
+import { openAppUpdates, updateStore } from "../src/features/update";
 import { prefsStore } from "../src/store/prefsStore";
 import { colors, fixedChromeText, radii, typeScale } from "../src/ui/tokens";
 
@@ -45,7 +45,9 @@ export default function SettingsScreen() {
       </View>
       <View style={styles.settingRow}>
         <Text style={styles.help}>Version {Constants.expoConfig?.version ?? "unknown"}</Text>
-        {update && (
+        {Platform.OS === "ios" ? (
+          <Text accessibilityRole="link" onPress={() => void openAppUpdates()} style={styles.updateLink}>Open TestFlight</Text>
+        ) : update && (
           <Text accessibilityRole="link" onPress={() => void Linking.openURL(update.url)} style={styles.updateLink}>
             {update.version} available
           </Text>

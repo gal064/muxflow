@@ -1,0 +1,117 @@
+appId: dev.muxflow.mobile
+---
+# Maestro can report a successful tap when an unrelated hierarchy change
+# occurs. Verify the destination and retry this navigation once; retain the
+# failed attempt's screenshot rather than retrying any authentication work.
+- retry:
+    maxRetries: 1
+    commands:
+      - waitForAnimationToEnd
+      - tapOn:
+          text: Add host
+          index: 1 # The always-present floating Add host control.
+      - assertVisible:
+          id: host-field-host
+# The pinned iOS driver's fast remainder can drop characters on the first
+# keyboard entry. Single-character inputs use its slower path; verify the
+# actual field value before dialing rather than trusting inputText success.
+- retry:
+    maxRetries: 1
+    commands:
+      - tapOn:
+          id: host-field-host
+      - eraseText
+      - inputText: '1'
+      - inputText: '2'
+      - inputText: '7'
+      - inputText: '.'
+      - inputText: '0'
+      - inputText: '.'
+      - inputText: '0'
+      - inputText: '.'
+      - inputText: '1'
+      - assertVisible:
+          id: host-field-host
+          text: '^127\.0\.0\.1$'
+- tapOn:
+    id: host-field-port
+- eraseText
+- inputText: ${SSH_PORT}
+- assertVisible:
+    id: host-field-port
+    text: ${SSH_PORT}
+- tapOn:
+    id: host-field-user
+- inputText: fixture
+- tapOn:
+    id: host-field-label
+- inputText: iOS fixture
+# Use the standard single-line input's Return key. Maestro's iOS swipe-based
+# hideKeyboard does not dismiss this form's keyboard on the current simulator.
+- tapOn:
+    id: Return
+- scrollUntilVisible:
+    element: Save
+- tapOn: Save
+# iOS groups each row's title and subtitle into one accessibility label.
+- tapOn: '^iOS fixture,.*'
+- extendedWaitUntil:
+    visible: 'Trust this host\?'
+    timeout: 30000
+- assertVisible: ${HOST_FINGERPRINT}
+- takeScreenshot: trust
+- tapOn: Trust
+# launchApp already declares notifications: allow. A second alert tap races
+# with that permission handler; continue once the application UI is available.
+- extendedWaitUntil:
+    visible: '^Workspaces.*'
+    timeout: 30000
+- retry:
+    maxRetries: 1
+    commands:
+      - waitForAnimationToEnd
+      - tapOn: '^Workspaces.*'
+      - assertVisible: '^primary,.*'
+- extendedWaitUntil:
+    visible: '^primary,.*'
+    timeout: 30000
+- tapOn: '^primary,.*'
+- extendedWaitUntil:
+    visible: '^0: shell,.*'
+    timeout: 30000
+- tapOn: '^0: shell,.*'
+- extendedWaitUntil:
+    visible:
+      text: Send
+      enabled: true
+    timeout: 30000
+- tapOn: Type, then Send
+- inputText: "printf 'ios-e2e-ok\\n'; printf 'ran\\n' > ios-e2e.marker"
+- tapOn: Send
+- takeScreenshot: terminal
+# Files navigation blurs the terminal input and dismisses its keyboard.
+- tapOn: Files
+- extendedWaitUntil:
+    visible: '.*README\.md,.*'
+    timeout: 30000
+- tapOn: '.*README\.md,.*'
+- extendedWaitUntil:
+    visible: iOS fixture document
+    timeout: 30000
+- takeScreenshot: markdown
+- tapOn:
+    id: BackButton
+- tapOn:
+    id: BackButton
+- pressKey: Home
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      text: Send
+      enabled: true
+    timeout: 30000
+- tapOn: Type, then Send
+- inputText: "printf 'resumed\\n' > ios-resumed.marker"
+- tapOn: Send
+- takeScreenshot: resumed

@@ -46,7 +46,7 @@ export async function buildTerminalBundle() {
     write: false,
     format: "iife",
     platform: "browser",
-    target: ["es2020"],
+    target: ["chrome100", "safari16.4"],
     minify: true,
     legalComments: "none",
     logLevel: "error",
@@ -86,9 +86,8 @@ async function inlinePage({ template, styles, entry }) {
     entryPoints: [entry],
     bundle: true,
     format: "iife",
-    // The Android System WebView on API 26+; esbuild only has to keep the
-    // syntax inside what that engine parses.
-    target: ["chrome100"],
+    // Android System WebView and WKWebView on the minimum supported iOS.
+    target: ["chrome100", "safari16.4"],
     minify: true,
     legalComments: "none",
     write: false,
