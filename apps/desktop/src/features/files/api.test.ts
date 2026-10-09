@@ -16,6 +16,28 @@ beforeEach(() => { invokeMock.mockReset(); channels.length = 0; });
 afterEach(() => resetPerfProbe());
 
 describe("TauriFileWorkspaceClient", () => {
+  it("binds filename search to its pane and propagates cancellation to the host", async () => {
+    const abort = new AbortController();
+    invokeMock.mockImplementation((command: string) => command === "cancel_file_request" ? Promise.resolve() : new Promise(() => undefined));
+    const pane = { sessionId: "$1", windowId: "@1", cwd: "/repo/src" };
+    const pending = new TauriFileWorkspaceClient().searchFiles(scope, root, pane, "work", abort.signal);
+    expect(invokeMock.mock.calls[0]).toEqual(["file_request", { clientId: "client", command: expect.objectContaining({
+      operation: "searchFiles", rootToken: "token", expectedServerIdentity: "server", expectedCwd: "/repo/src",
+      expectedSessionId: "$1", expectedWindowId: "@1", searchQuery: "work",
+    }) }]);
+    abort.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(invokeMock).toHaveBeenCalledWith("cancel_file_request", { clientId: "client", operationId: expect.any(String) });
+  });
+
+  it("refuses filename results outside the captured CWD and oversized replies", async () => {
+    const pane = { sessionId: "$1", windowId: "@1", cwd: "/repo/src" };
+    invokeMock.mockResolvedValue({ search: { matches: [{ path: "/repo/elsewhere", relativePath: "../elsewhere", score: 10 }], complete: true } });
+    await expect(new TauriFileWorkspaceClient().searchFiles(scope, root, pane, "x")).rejects.toThrow("captured directory");
+    invokeMock.mockResolvedValue({ search: { matches: Array.from({ length: 76 }, () => ({ path: "/repo/src/a", relativePath: "a", score: 10 })), complete: true } });
+    await expect(new TauriFileWorkspaceClient().searchFiles(scope, root, pane, "a")).rejects.toThrow("malformed");
+  });
+
   it("accounts for Phase 14 directory list and shared-watch operations exactly", async () => {
     enablePerfProbe(async () => undefined);
     const directory = {
