@@ -733,7 +733,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = fs::canonicalize(temp.path()).unwrap();
         let mut nested = root.clone();
-        for _ in 0..10 {
+        // Stay below macOS PATH_MAX while still forcing 75 matches over 32 KiB.
+        for _ in 0..3 {
             nested.push("a".repeat(200));
         }
         fs::create_dir_all(&nested).unwrap();
