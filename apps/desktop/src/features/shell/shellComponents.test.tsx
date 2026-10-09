@@ -1006,6 +1006,57 @@ describe("application shell accessibility contracts", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("preserves manual tab scrolling through background updates and reveals a new selection", async () => {
+    const node = {
+      ...stripNode(900, 300), scrollLeft: 0,
+      querySelector: vi.fn(() => ({ scrollIntoView: reveal })),
+    };
+    function reveal() { node.scrollLeft = 0; }
+    let renderer!: ReturnType<typeof create>;
+    const render = (tabs: readonly CombinedTab[], activeKey = "terminal:@1") => tabStripOver(tabs, { activeKey });
+    await act(async () => {
+      renderer = create(render(mixedStrip), {
+        createNodeMock: (mocked: ReactElement<{ className?: string }>) =>
+          mocked.props.className === "tabstrip-tabs" ? node : null,
+      });
+    });
+    expect(node.querySelector).toHaveBeenCalledTimes(1);
+    node.scrollLeft = 450;
+    // A host snapshot can replace the array without changing any tab; an
+    // agent update or title change can replace its contents too.
+    await act(async () => renderer.update(render([...mixedStrip])));
+    const updated: CombinedTab[] = mixedStrip.map((tab) => tab.kind === "terminal"
+      ? { ...tab, attention: "working", title: `${tab.title} updated` } : { ...tab });
+    await act(async () => renderer.update(render(updated)));
+    await act(async () => renderer.update(render([...updated, pendingTab])));
+    expect(node.scrollLeft).toBe(450);
+    expect(node.querySelector).toHaveBeenCalledTimes(1);
+
+    await act(async () => renderer.update(render(updated, "app:file")));
+    expect(node.scrollLeft).toBe(0);
+    expect(node.querySelector).toHaveBeenLastCalledWith(`#${CSS.escape(workspaceTabDomId("app:file"))}`);
+    expect(node.querySelector).toHaveBeenCalledTimes(2);
+    await act(async () => renderer.unmount());
+  });
+
+  it("reveals the selected tab when it arrives after its selection", async () => {
+    const reveal = vi.fn();
+    let tabPresent = false;
+    const node = { ...stripNode(900, 300), querySelector: vi.fn(() => tabPresent ? { scrollIntoView: reveal } : null) };
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(tabStripOver([], { activeKey: "app:file" }), {
+        createNodeMock: (mocked: ReactElement<{ className?: string }>) =>
+          mocked.props.className === "tabstrip-tabs" ? node : null,
+      });
+    });
+    expect(reveal).not.toHaveBeenCalled();
+    tabPresent = true;
+    await act(async () => renderer.update(tabStripOver(mixedStrip, { activeKey: "app:file" })));
+    expect(reveal).toHaveBeenCalledExactlyOnceWith({ block: "nearest", inline: "nearest" });
+    await act(async () => renderer.unmount());
+  });
+
   it("lists every tab in the all-tabs menu, in strip order and without selecting one", async () => {
     const onSelect = vi.fn();
     let renderer!: ReturnType<typeof create>;
