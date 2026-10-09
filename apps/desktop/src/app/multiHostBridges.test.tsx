@@ -245,10 +245,12 @@ describe("one bridge per shown host", () => {
     resume.outcome = "alive";
     await act(async () => { resume.trigger?.("native"); });
     expect(stopTerminalMock).not.toHaveBeenCalled();
+    expect(calls("discard_ssh_masters")).toHaveLength(0);
     expect(controller().links.map((link) => link.connectionEpoch)).toEqual(epochsBefore);
 
     resume.outcome = "dead";
     await act(async () => { resume.trigger?.("native"); });
+    expect(calls("discard_ssh_masters")).toHaveLength(1);
     expect(stopTerminalMock.mock.calls.map(([clientId]) => clientId).sort()).toEqual(["client-1", "client-2"]);
     expect(startTerminalMock).toHaveBeenCalledTimes(4);
     const epochsAfter = controller().links.map((link) => link.connectionEpoch);

@@ -108,8 +108,8 @@ pub use profiles::ProfileStore;
 pub(crate) mod helper;
 mod transport;
 use transport::{
-    SshLease, acquire_control_master, acquire_control_master_for_socket, host_helper_path,
-    ssh_profile_control_socket,
+    SshLease, acquire_control_master, acquire_control_master_for_socket,
+    discard_owned_control_masters, host_helper_path, ssh_profile_control_socket,
 };
 pub(crate) use transport::{close_all_control_masters, spawn_orphan_reaper};
 
@@ -1010,6 +1010,14 @@ pub async fn probe_terminal_link(
     .await
     .map_err(|error| format!("terminal link probe task failed: {error}"))??;
     Ok(())
+}
+
+/// A resume whose probe found the link dead reconnects over fresh SSH masters.
+#[tauri::command]
+pub async fn discard_ssh_masters() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(discard_owned_control_masters)
+        .await
+        .map_err(|error| format!("SSH master discard task failed: {error}"))
 }
 
 #[tauri::command]

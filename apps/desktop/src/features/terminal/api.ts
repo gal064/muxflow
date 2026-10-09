@@ -839,6 +839,11 @@ export function probeTerminalLink(clientId: string): Promise<void> {
   return invoke("probe_terminal_link", { clientId });
 }
 
+/** Kills the app-owned SSH masters so the next connection opens a fresh one. */
+export function discardSshMasters(): Promise<void> {
+  return invoke("discard_ssh_masters");
+}
+
 export function setTerminalVisibility(
   clientId: string,
   paneId: string,

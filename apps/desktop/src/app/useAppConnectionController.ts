@@ -14,6 +14,7 @@ import { TerminalEventHub } from "../features/terminal/TerminalEventHub";
 import { createEchoLagProbe } from "../features/terminal/echoLagProbe";
 import { createInputLatencyReporter } from "../features/terminal/inputLatencyStats";
 import {
+  discardSshMasters,
   fetchInputLatencyStats,
   fetchLinkStats,
   prewarmTerminalBulk,
@@ -391,7 +392,11 @@ export function useAppConnectionController({
       for (const profileId of linksRef.current.order) {
         dispatchLinks({ type: "detail", profileId, detail: "System resumed; reconnecting for an authoritative state refresh." });
       }
-      dispatchLinks({ type: "reconnectAll" });
+      // The SSH master outlives the suspend and still answers locally, but its
+      // TCP connection did not: reconnecting through it waits out the
+      // keepalive. Fresh masters reconnect as fast as an app restart does.
+      const reconnect = () => dispatchLinks({ type: "reconnectAll" });
+      void discardSshMasters().then(reconnect, reconnect);
     };
     const probeClientId = clientIdRef.current;
     if (hostPhaseRef.current !== "connected" || !probeClientId) {
