@@ -2,7 +2,7 @@
 //!
 //! There is no auto-update: this only reads the small manifest the release
 //! workflow attaches to every GitHub release, so the title bar can say that a
-//! newer version exists and link to its release page. `releases/latest` never
+//! newer version exists and link to the latest release page. `releases/latest` never
 //! resolves to a draft or a pre-release, so a version appears here only once it
 //! has been published. The fetch happens here rather than in the webview so the
 //! content security policy stays closed to every outside origin.
@@ -12,6 +12,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 const MANIFEST_URL: &str = "https://github.com/gal064/muxflow/releases/latest/download/latest.json";
+const LATEST_RELEASE_URL: &str = "https://github.com/gal064/muxflow/releases/latest";
 /// The only links the notice may open, whatever the manifest says.
 const RELEASE_PAGE_PREFIX: &str = "https://github.com/gal064/muxflow/releases/";
 /// The manifest is a two-field object; anything larger is not it.
@@ -73,7 +74,9 @@ fn evaluate(running: (u64, u64, u64), body: &str) -> Result<Option<AvailableUpda
     }
     Ok((published > running).then_some(AvailableUpdate {
         version: manifest.version,
-        url: manifest.url,
+        // The version is the last check's answer; the destination stays current
+        // even if another release is published before the next successful check.
+        url: LATEST_RELEASE_URL.into(),
     }))
 }
 
@@ -102,12 +105,12 @@ mod tests {
     const PAGE: &str = "https://github.com/gal064/muxflow/releases/tag/v0.2.0";
 
     #[test]
-    fn a_newer_release_is_offered_with_its_page() {
+    fn a_newer_release_links_to_latest_even_when_the_manifest_pins_a_tag() {
         assert_eq!(
             evaluate((0, 1, 0), &manifest("0.2.0", PAGE)).unwrap(),
             Some(AvailableUpdate {
                 version: "0.2.0".into(),
-                url: PAGE.into()
+                url: LATEST_RELEASE_URL.into()
             })
         );
         assert!(

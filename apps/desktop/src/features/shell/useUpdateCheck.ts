@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 /** A published release newer than the running app, as `check_for_update` returns it. */
 export interface AvailableUpdate {
   version: string;
-  /** Its GitHub release page; the shell only ever returns one under the Muxflow releases. */
+  /** The latest GitHub release page, independent of the last observed version. */
   url: string;
 }
 
