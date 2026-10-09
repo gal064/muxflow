@@ -14,7 +14,9 @@ pub(super) use control_master::{
     SshLease, acquire_control_master, acquire_control_master_cancellable,
     acquire_control_master_for_socket, ssh_profile_control_socket,
 };
-pub(crate) use control_master::{close_all_control_masters, spawn_orphan_reaper};
+pub(crate) use control_master::{
+    close_all_control_masters, discard_owned_control_masters, spawn_orphan_reaper,
+};
 
 pub(super) fn spawn_bridge(
     connection: &ConnectionSpec,

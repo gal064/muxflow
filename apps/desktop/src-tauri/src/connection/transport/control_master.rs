@@ -900,6 +900,52 @@ fn close_master(master: &SshMaster) {
     }
 }
 
+/// Kills every master this process owns so the next lease opens a new one.
+///
+/// After a suspend the master process is still running and still answers
+/// `-O check` — that is a local round trip to the socket — but the TCP
+/// connection beneath it is dead. A bridge multiplexed over it hangs until
+/// the keepalive gives up (`ServerAliveInterval` × `ServerAliveCountMax`),
+/// which is the long "Connecting to tmux…" after opening the lid that a
+/// restart never shows: quitting kills the master. A resume that already
+/// found the link dead pays for the same fresh connection here instead.
+/// External masters belong to another process and are left alone.
+pub(crate) fn discard_owned_control_masters() {
+    let masters: Vec<_> = ssh_masters()
+        .lock()
+        .unwrap()
+        .masters
+        .values()
+        .cloned()
+        .collect();
+    for master in masters {
+        discard_owned_master(&master);
+    }
+}
+
+fn discard_owned_master(master: &SshMaster) {
+    let mut state = master.coordination.state.lock().unwrap();
+    if !matches!(
+        state.lifecycle,
+        MasterLifecycle::Ready {
+            process: MasterProcess::Owned(_),
+            ..
+        }
+    ) {
+        return;
+    }
+    let MasterLifecycle::Ready { process, .. } =
+        std::mem::replace(&mut state.lifecycle, MasterLifecycle::Establishing)
+    else {
+        unreachable!("owned ready lifecycle was just matched")
+    };
+    state.generation = state.generation.wrapping_add(1);
+    master.coordination.changed.notify_all();
+    drop(state);
+    dispose_process(master, process);
+    finish_in_flight(master);
+}
+
 pub(crate) fn close_all_control_masters() {
     let masters: Vec<_> = {
         let mut registry = ssh_masters().lock().unwrap();

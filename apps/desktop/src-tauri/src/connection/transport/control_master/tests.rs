@@ -862,3 +862,53 @@ fn control_socket_rejects_regular_files_and_symlinks() {
     std::os::unix::fs::symlink("missing", &socket).unwrap();
     assert!(validate_control_socket(&socket).is_err());
 }
+
+#[test]
+fn discarding_an_owned_master_kills_it_and_frees_the_socket_for_a_fresh_one() {
+    let temporary = tempfile::tempdir().unwrap();
+    let socket = temporary.path().join("discard-owned.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let socket_identity = validated_control_socket_identity(&socket).unwrap().unwrap();
+    let master = master_entry("discard-owned-host", None, &socket).unwrap();
+    let child = Command::new("sh").args(["-c", "sleep 5"]).spawn().unwrap();
+    master.coordination.state.lock().unwrap().lifecycle = MasterLifecycle::Ready {
+        process: MasterProcess::Owned(OwnedMaster {
+            child,
+            socket_identity,
+        }),
+        needs_probe: false,
+    };
+
+    discard_owned_master(&master);
+
+    assert!(matches!(
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Idle
+    ));
+    assert!(!socket.exists(), "discarded owned socket was not unlinked");
+}
+
+#[test]
+fn discarding_leaves_an_external_master_alone() {
+    let temporary = tempfile::tempdir().unwrap();
+    let socket = temporary.path().join("discard-external.sock");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let master = master_entry("discard-external-host", None, &socket).unwrap();
+    master.coordination.state.lock().unwrap().lifecycle = MasterLifecycle::Ready {
+        process: MasterProcess::External,
+        needs_probe: false,
+    };
+
+    discard_owned_master(&master);
+
+    assert!(matches!(
+        master.coordination.state.lock().unwrap().lifecycle,
+        MasterLifecycle::Ready {
+            process: MasterProcess::External,
+            ..
+        }
+    ));
+    assert!(socket.exists());
+}
