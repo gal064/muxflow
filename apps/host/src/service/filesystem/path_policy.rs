@@ -552,6 +552,19 @@ fn stat_modified(stat: &libc::stat) -> (i64, i64) {
 }
 
 fn directory_entry_names(directory: &File) -> anyhow::Result<Vec<OsString>> {
+    let mut entries = Vec::new();
+    visit_directory_entries(directory, |name| {
+        entries.push(name);
+        Ok(true)
+    })?;
+    Ok(entries)
+}
+
+/// Streams names so bounded searches can stop without buffering a wide directory.
+pub(super) fn visit_directory_entries(
+    directory: &File,
+    mut visit: impl FnMut(OsString) -> anyhow::Result<bool>,
+) -> anyhow::Result<()> {
     // `fdopendir` owns the descriptor it is given, so this needs one of its
     // own — and it must be an *independent* one. A `dup` shares the file
     // offset with the descriptor it copied, so the second enumeration of a
@@ -577,7 +590,13 @@ fn directory_entry_names(directory: &File) -> anyhow::Result<Vec<OsString>> {
         unsafe { libc::close(duplicate) };
         return Err(error.into());
     }
-    let mut entries = Vec::new();
+    struct DirectoryStream(*mut libc::DIR);
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) {
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let _stream = DirectoryStream(stream);
     loop {
         let entry = unsafe { libc::readdir(stream) };
         if entry.is_null() {
@@ -588,12 +607,11 @@ fn directory_entry_names(directory: &File) -> anyhow::Result<Vec<OsString>> {
             continue;
         }
         use std::os::unix::ffi::OsStringExt as _;
-        entries.push(OsString::from_vec(name.to_bytes().to_vec()));
+        if !visit(OsString::from_vec(name.to_bytes().to_vec()))? {
+            break;
+        }
     }
-    if unsafe { libc::closedir(stream) } < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(entries)
+    Ok(())
 }
 
 /// A path backed by a live descriptor. Linux exposes descriptors through

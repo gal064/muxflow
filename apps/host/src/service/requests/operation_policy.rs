@@ -104,7 +104,9 @@ impl OperationPolicy {
             v1::Operation::RequestTerminalHistory => {
                 (Lane::Control, Scheduling::Detached, Handler::Terminal)
             }
-            v1::Operation::ResolveActiveRoot | v1::Operation::ResolveTerminalFile => {
+            v1::Operation::ResolveActiveRoot
+            | v1::Operation::ResolveTerminalFile
+            | v1::Operation::SearchFiles => {
                 (Lane::Control, Scheduling::Detached, Handler::ActiveRoot)
             }
             v1::Operation::ListDirectory => {
@@ -262,6 +264,7 @@ mod tests {
             (ResolveActiveRoot, C, Dd, AR),
             (ResolveTerminalFile, C, Dd, AR),
             (ListDirectory, C, Dd, FH),
+            (SearchFiles, C, Dd, Handler::ActiveRoot),
             (WatchDirectory, C, Dd, FH),
             (UnwatchDirectory, C, Dd, FH),
             (FileMutation, C, Dd, FH),

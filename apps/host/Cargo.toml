@@ -1,6 +1,6 @@
 [package]
 name = "muxflow-host"
-version = "0.1.17"
+version = "0.1.18"
 edition.workspace = true
 rust-version.workspace = true
 
@@ -16,6 +16,7 @@ perf-log = []
 anyhow.workspace = true
 blake3.workspace = true
 libc.workspace = true
+ignore = "0.4"
 notify.workspace = true
 phase0-core = { path = "../../crates/phase0-core" }
 prost.workspace = true

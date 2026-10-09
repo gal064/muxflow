@@ -15,6 +15,10 @@ import { agent } from "./testFixtures";
 import type { AgentRecord } from "./types";
 
 const noop = vi.fn();
+const quickOpenProps = {
+  tabs: [], client: { resolveActiveRoot: vi.fn(), searchFiles: vi.fn() }, hostLabel: "remote",
+  hostLabelFor: (id: string) => id, onSelectTab: noop, onOpenFile: noop,
+};
 const commandScope = { hostProfileId: "remote", connectionKey: "ssh:remote", connectionEpoch: 1, serverIdentity: "server-a", generation: 1 };
 const session: Session = { id: "$1", name: "work", windowCount: 1, attachedClients: 1, order: 0 };
 
@@ -173,7 +177,7 @@ describe("one derivation, three surfaces", () => {
           rollups.byWindow,
         )}
       />),
-      renderToStaticMarkup(<WorkspaceSwitcher
+      renderToStaticMarkup(<WorkspaceSwitcher {...quickOpenProps}
         onClose={noop} onSelect={noop} stateGlyphs
         rows={[mergedRow({ session, active: true, attention: "blocked", unread: 1, working: false, pinned: false, agents: [], agentOverflow: 0 })]}
       />),
@@ -185,7 +189,7 @@ describe("one derivation, three surfaces", () => {
     // The switcher had reached past the shared indicator to the dot underneath,
     // so the one surface you meet by keyboard was the one saying "working" as a
     // state while every other surface said it as a process.
-    const switcherRow = (attention: "working" | "blocked") => renderToStaticMarkup(<WorkspaceSwitcher
+    const switcherRow = (attention: "working" | "blocked") => renderToStaticMarkup(<WorkspaceSwitcher {...quickOpenProps}
       onClose={noop} onSelect={noop} stateGlyphs={false}
       rows={[mergedRow({ session, active: true, attention, unread: 0, working: attention === "working", pinned: false, agents: [], agentOverflow: 0 })]}
     />);
@@ -254,7 +258,7 @@ describe("idle shows nothing, on every surface that draws state", () => {
     expect(heading).toContain("<span>Idle</span>");
     expect(heading).toContain('<span aria-hidden="true" class="state-dot agent-group-dot idle"></span>');
     // The workspace switcher's rows share the same dot and the same rule.
-    const switcher = renderToStaticMarkup(<WorkspaceSwitcher
+    const switcher = renderToStaticMarkup(<WorkspaceSwitcher {...quickOpenProps}
       onClose={noop} onSelect={noop} stateGlyphs={false}
       rows={[mergedRow({ session, active: true, attention: "idle", unread: 0, working: false, pinned: false, agents: [], agentOverflow: 0 })]}
     />);

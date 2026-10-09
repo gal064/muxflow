@@ -27,6 +27,8 @@ use tmux_agent_protocol::{
     write_frame_sync,
 };
 
+mod quick_open;
+
 #[derive(Clone)]
 enum Transport {
     Local {
@@ -3171,6 +3173,7 @@ fn main() -> Result<()> {
             .unwrap_or(2_000),
     );
     match scenario.as_str() {
+        "quick-open" => quick_open::run(transport, &primary, &label, reconcile_timeout),
         "perf" => run_perf(
             transport,
             &primary,
