@@ -213,6 +213,7 @@ impl Search<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit bounds let tests exercise the same traversal.
 fn search(
     root: &RootCapability,
     cwd: &Path,
