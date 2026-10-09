@@ -10,6 +10,12 @@ pub(crate) fn file_response_json(value: &v1::FileServiceResponse) -> Value {
         "metadata": value.metadata.as_ref().map(metadata_json),
         "deleted": value.deleted,
         "rootUnchanged": value.root_unchanged,
+        "search": value.search.as_ref().map(|search| json!({
+            "matches": search.matches.iter().map(|item| json!({
+                "path": item.path, "relativePath": item.relative_path, "score": item.score,
+            })).collect::<Vec<_>>(),
+            "complete": search.complete,
+        })),
     })
 }
 

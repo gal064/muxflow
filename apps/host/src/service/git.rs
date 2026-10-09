@@ -67,6 +67,121 @@ use status::{
 };
 mod watch;
 
+/// Standard repository excludes, including the common directory of a linked
+/// worktree. This is configuration only, never a directory-list capability.
+pub(super) fn file_search_excludes(
+    root: &str,
+    cancellation: &AtomicBool,
+) -> anyhow::Result<(Vec<String>, bool)> {
+    use std::{
+        io::Read,
+        os::unix::{ffi::OsStringExt, fs::OpenOptionsExt},
+        path::PathBuf,
+    };
+    let configured = runner::git_output_with_deadline(
+        root,
+        &[
+            OsStr::new("config"),
+            OsStr::new("--path"),
+            OsStr::new("--get"),
+            OsStr::new("core.excludesFile"),
+        ],
+        None,
+        Some(cancellation),
+        Duration::from_millis(100),
+    )?;
+    let repository = runner::git_output_with_deadline(
+        root,
+        &[
+            OsStr::new("rev-parse"),
+            OsStr::new("--path-format=absolute"),
+            OsStr::new("--git-path"),
+            OsStr::new("info/exclude"),
+        ],
+        None,
+        Some(cancellation),
+        Duration::from_millis(100),
+    )?;
+    let case = runner::git_output_with_deadline(
+        root,
+        &[
+            OsStr::new("config"),
+            OsStr::new("--bool"),
+            OsStr::new("--get"),
+            OsStr::new("core.ignorecase"),
+        ],
+        None,
+        Some(cancellation),
+        Duration::from_millis(100),
+    )?;
+    if case.interrupted.is_some() || cancellation.load(Ordering::Acquire) {
+        bail!("Git ignore lookup exceeded the file search budget");
+    }
+    let case_insensitive = case.output.status.success() && case.output.stdout == b"true\n";
+    let default_global = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|path| PathBuf::from(path).join(".config")))
+        .map(|path| path.join("git/ignore").into_os_string());
+    let mut sources = Vec::new();
+    for (output, default, configured) in [
+        (configured, default_global, true),
+        (repository, None, false),
+    ] {
+        if cancellation.load(Ordering::Acquire) {
+            bail!("cancelled: file search excludes");
+        }
+        if output.interrupted.is_some() {
+            bail!("Git ignore lookup exceeded the file search budget");
+        }
+        let path = if output.output.status.success() {
+            let mut path = output.output.stdout;
+            if path.last() == Some(&b'\n') {
+                path.pop();
+            }
+            if configured && path.is_empty() && !output.stdout_truncated {
+                continue;
+            }
+            if path.is_empty() || output.stdout_truncated {
+                bail!("repository exclude path is invalid");
+            }
+            Some(OsString::from_vec(path))
+        } else {
+            default
+        };
+        let Some(path) = path else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            Path::new(root).join(path)
+        };
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            // Git permits symlinked configuration files. Nonblocking open and
+            // descriptor classification still refuse FIFOs and devices.
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if !file.metadata()?.is_file() {
+            bail!("repository excludes must be a regular file");
+        }
+        let mut content = String::new();
+        file.take(65_537).read_to_string(&mut content)?;
+        if content.len() > 65_536 {
+            bail!("repository excludes exceed the file search limit");
+        }
+        sources.push(content);
+    }
+    Ok((sources, case_insensitive))
+}
+
 static REPOSITORY_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
 

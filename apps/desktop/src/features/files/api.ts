@@ -12,6 +12,7 @@ import type {
   FileMutation,
   FileWorkspaceClient,
   FileWorkspaceScope,
+  FileSearchResults,
   ListDirectoryOptions,
   OpenFile,
   ResolveRootOptions,
@@ -81,15 +82,40 @@ export class TauriFileWorkspaceClient implements FileWorkspaceClient {
   readonly #watches = new Map<string, WatchRecord>();
 
   async resolveActiveRoot(scope: FileWorkspaceScope, options: ResolveRootOptions = {}): Promise<ActiveRoot> {
+    const operationId = crypto.randomUUID();
     return this.#request(scope, {
-      operation: "resolveActiveRoot", operationId: crypto.randomUUID(), paneId: scope.paneId,
+      operation: "resolveActiveRoot", operationId, paneId: scope.paneId,
       expectedServerIdentity: scope.serverIdentity, expectedTopologyGeneration: String(scope.generation),
       knownRootToken: options.knownRootToken ?? "",
     }, (response) => {
       if (!response.activeRoot) throw new Error("Host omitted the active root.");
       if (response.rootUnchanged) recordPerfCounter("explorer.rootProbeUnchanged");
       return mapRoot(response.activeRoot);
-    }, "files.resolveActiveRoot");
+    }, "files.resolveActiveRoot", { operationId, signal: options.signal });
+  }
+
+  async searchFiles(scope: FileWorkspaceScope, root: ActiveRoot, pane: TerminalFilePaneRoute, query: string, signal?: AbortSignal): Promise<FileSearchResults> {
+    const operationId = crypto.randomUUID();
+    return this.#request(scope, this.#rootCommand(root, {
+      operation: "searchFiles", operationId, paneId: scope.paneId,
+      expectedServerIdentity: scope.serverIdentity, expectedTopologyGeneration: String(scope.generation),
+      expectedSessionId: pane.sessionId, expectedWindowId: pane.windowId, expectedCwd: pane.cwd,
+      searchQuery: query,
+    }), (response) => {
+      const search = response.search;
+      if (!search || !Array.isArray(search.matches) || search.matches.length > 75 || typeof search.complete !== "boolean") {
+        throw new Error("Host returned malformed file search results.");
+      }
+      const prefix = pane.cwd.replace(/\/+$/u, "") + "/";
+      for (const match of search.matches) {
+        if (typeof match.relativePath !== "string" || !match.relativePath || match.relativePath.startsWith("/")
+          || match.relativePath.split("/").some((part) => part === ".." || part === "." || !part)
+          || match.path !== prefix + match.relativePath || !Number.isInteger(match.score)) {
+          throw new Error("Host returned a file search match outside the captured directory.");
+        }
+      }
+      return search;
+    }, "quickOpen.search", { operationId, signal });
   }
 
   async resolveTerminalFile(

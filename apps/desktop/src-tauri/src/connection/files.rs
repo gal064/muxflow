@@ -90,6 +90,8 @@ pub struct FileCommand {
     pub page_size: u32,
     #[serde(default)]
     pub known_root_token: String,
+    #[serde(default)]
+    pub search_query: String,
 }
 
 /// Async so the host round trip never runs on the WebView's main thread: a
@@ -127,6 +129,7 @@ pub async fn file_request(
         page_token: command.page_token,
         page_size: command.page_size,
         known_root_token: command.known_root_token,
+        search_query: command.search_query,
         ..Default::default()
     };
     let client = get_client(&clients, &client_id)?;
@@ -135,7 +138,10 @@ pub async fn file_request(
     // remote mutation reach an unknown outcome it could have avoided.
     let cancellable = matches!(
         operation,
-        v1::Operation::ListDirectory | v1::Operation::WatchDirectory
+        v1::Operation::ListDirectory
+            | v1::Operation::WatchDirectory
+            | v1::Operation::SearchFiles
+            | v1::Operation::ResolveActiveRoot
     );
     // Claimed here, on the command thread, before anything is dispatched: a
     // caller that abandons its read in the same tick must find something to
@@ -188,6 +194,7 @@ fn operation_from_name(value: &str) -> Result<v1::Operation, String> {
         "resolveActiveRoot" => Ok(v1::Operation::ResolveActiveRoot),
         "resolveTerminalFile" => Ok(v1::Operation::ResolveTerminalFile),
         "listDirectory" => Ok(v1::Operation::ListDirectory),
+        "searchFiles" => Ok(v1::Operation::SearchFiles),
         "watchDirectory" => Ok(v1::Operation::WatchDirectory),
         "unwatchDirectory" => Ok(v1::Operation::UnwatchDirectory),
         "mutate" => Ok(v1::Operation::FileMutation),

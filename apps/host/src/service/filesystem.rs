@@ -33,6 +33,7 @@ mod listing_page;
 mod mutations;
 mod open_stream;
 mod path_policy;
+mod search;
 mod terminal_upload;
 pub(crate) use failure::FileFailure;
 pub(crate) use terminal_upload::UploadCommitFailure;
@@ -123,6 +124,8 @@ pub(super) struct FileService {
     /// connection's, which is a far worse failure than a queue of one
     /// desktop's own opens.
     pub(super) open_permits: tokio::sync::Semaphore,
+    /// Superseded picker requests cannot enumerate simultaneously.
+    search_lock: Mutex<()>,
 }
 
 impl FileService {
@@ -137,6 +140,7 @@ impl FileService {
             fallback_signal: tokio::sync::Notify::new(),
             pages: DirectoryPageCache::default(),
             open_permits: tokio::sync::Semaphore::new(MAX_CONCURRENT_OPENS),
+            search_lock: Mutex::new(()),
         }
     }
 

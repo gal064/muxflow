@@ -82,12 +82,13 @@ describe("the host letter", () => {
   });
 
   it("marks ⌘P rows before the title", () => {
-    const html = renderToStaticMarkup(<WorkspaceSwitcher onClose={noop} onSelect={noop} rows={[row(peer, "$0", "delta")]} stateGlyphs={false} />);
+    const html = renderToStaticMarkup(<WorkspaceSwitcher onClose={noop} onSelect={noop} rows={[row(peer, "$0", "delta")]} stateGlyphs={false}
+      tabs={[]} client={{ resolveActiveRoot: vi.fn(), searchFiles: vi.fn() }} hostLabel="peer" hostLabelFor={(id) => id} onSelectTab={noop} onOpenFile={noop} />);
     // Announced, not hidden: it is the only host cue a ⌘P row has.
-    expect(html).toContain('<span class="host-letter">P</span><span class="palette-title">delta</span>');
+    expect(html).toContain('<span class="host-letter">P</span><span class="palette-title quick-open-title">delta</span>');
     // The row key holds a NUL; the DOM id must not.
     expect(html).not.toContain("\0");
-    expect(html).toContain('id="workspace-option-peer%00%240"');
+    expect(html).toContain('workspace%3Apeer%00%240');
   });
 
   it("takes the shortcut index's slot and flips to the knockout ink on the active row", () => {

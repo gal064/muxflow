@@ -1,4 +1,4 @@
-import type { ActiveRoot, DirectoryListing, DownloadRequest, FileEntry, FileWorkspaceScope, TextFile, TransferStatus } from "./types";
+import type { ActiveRoot, DirectoryListing, DownloadRequest, FileEntry, FileWorkspaceScope, FileSearchResults, TextFile, TransferStatus } from "./types";
 import {
   isTerminalTransferState,
   transferCleanupStatusFromWire,
@@ -30,7 +30,7 @@ export interface WireRoot { paneId: string; root: string; rootToken: string; git
  */
 export interface WireDirectory { watchId: string; root: string; path: string; generation: string; entries: WireMetadata[]; authoritative: boolean; nextPageToken: string; complete: boolean; recoveredFromOverflow?: boolean }
 export interface WireContent { metadata?: WireMetadata; kind: "text" | "binary" | "image" | "tooLarge" | "unspecified"; content: number[]; generation: string }
-export interface WireResponse { operationId: string; activeRoot?: WireRoot; directory?: WireDirectory; content?: WireContent; metadata?: WireMetadata; rootUnchanged?: boolean }
+export interface WireResponse { operationId: string; activeRoot?: WireRoot; directory?: WireDirectory; content?: WireContent; metadata?: WireMetadata; rootUnchanged?: boolean; search?: FileSearchResults }
 export interface WireFileEvent { operationId: string; activeRoot?: WireRoot; directory?: WireDirectory; metadata?: WireMetadata; deleted?: boolean; rootToken?: string; watchId?: string; transferId: string; transferredBytes: string; totalBytes: string; state: string; error: string }
 export interface WireDownloadEvent {
   transferId: string; state: string; transferredBytes?: string; totalBytes?: string; totalKnown?: boolean;

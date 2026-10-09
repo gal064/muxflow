@@ -175,6 +175,8 @@ enum Operation {
   // scope is its window ID, and columns/rows are the requested dimensions.
   // Unlike RESIZE_TERMINAL, this never infers the target from current selection.
   OPERATION_RESIZE_TERMINAL_WINDOW = 56;
+  // Bounded filename search under the explicitly captured pane cwd.
+  OPERATION_SEARCH_FILES = 57;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -593,6 +595,7 @@ message FileServiceRequest {
   string expected_session_id = 29;
   string expected_window_id = 30;
   string expected_cwd = 31;
+  string search_query = 32;
 }
 
 // One frame of an OpenFileStream body.
@@ -715,6 +718,19 @@ message FileServiceResponse {
   // describes the active pane's root. The active_root payload repeats the
   // caller's own identity and no ActiveRoot event was broadcast.
   bool root_unchanged = 10;
+  FileSearchResults search = 11;
+}
+
+message FileSearchMatch {
+  string path = 1;
+  string relative_path = 2;
+  sint32 score = 3;
+}
+
+message FileSearchResults {
+  repeated FileSearchMatch matches = 1;
+  // False when traversal or response budgets stopped the search early.
+  bool complete = 2;
 }
 
 message FileServiceEvent {

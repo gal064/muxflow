@@ -143,7 +143,7 @@ const tabSelectCommands: readonly CommandDefinition[] = DIGITS.map((digit) => ({
  */
 export const commandRegistry: readonly CommandDefinition[] = [
   { id: "commands.show", title: "Show command palette", group: "Application", defaults: { mac: "Meta+K", linux: "Ctrl+K" } },
-  { id: "workspaces.switch", title: "Switch workspace…", group: "Application", defaults: { mac: "Meta+P", linux: "Ctrl+P" } },
+  { id: "workspaces.switch", title: "Quick Open…", group: "Application", defaults: { mac: "Meta+P", linux: "Ctrl+P" } },
   { id: "shortcuts.configure", title: "Configure keyboard shortcuts", group: "Application" },
   { id: "settings.show", title: "Settings", group: "Application", defaults: { mac: "Meta+,", linux: "Ctrl+," } },
   // `requires: "hostProfile"` for the same reason `requires: "row"` exists: the

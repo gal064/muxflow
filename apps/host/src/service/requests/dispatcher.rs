@@ -144,7 +144,11 @@ pub(crate) async fn handle_request(
 
         (
             Handler::ActiveRoot,
-            Some(v1::Operation::ResolveActiveRoot | v1::Operation::ResolveTerminalFile),
+            Some(
+                v1::Operation::ResolveActiveRoot
+                | v1::Operation::ResolveTerminalFile
+                | v1::Operation::SearchFiles,
+            ),
         ) => {
             super::active_root_dispatch::handle(
                 request_id,
@@ -155,6 +159,7 @@ pub(crate) async fn handle_request(
                     event_tx,
                     generation,
                     topology_lock,
+                    files,
                 },
             )
             .await;
