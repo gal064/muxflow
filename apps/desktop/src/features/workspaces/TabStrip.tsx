@@ -124,6 +124,8 @@ export function TabStrip(props: TabStripProps) {
   // makes it a toggle.
   const allTabsClosedAt = useRef(0);
   const tabs = useRef<HTMLDivElement>(null);
+  const activeTab = selectableTabs(props.tabs).find((tab) => tab.key === props.activeKey);
+  const activeKey = activeTab?.key;
   const revealTab = (key: string) => tabs.current
     ?.querySelector<HTMLElement>(`#${CSS.escape(workspaceTabDomId(key))}`)
     ?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -134,10 +136,13 @@ export function TabStrip(props: TabStripProps) {
   // the window while the tab representing it — and its close button — could
   // not be seen or clicked. `nearest` scrolls the minimum distance and does
   // nothing when the tab is already visible.
+  // Background host and agent updates rebuild `props.tabs`; revealing on each
+  // update would undo manual scrolling. Follow only the selected key, once its
+  // tab exists, so a selection arriving before its tab is also revealed.
   useEffect(() => {
-    if (!props.activeKey) return;
-    revealTab(props.activeKey);
-  }, [props.activeKey, props.tabs]);
+    if (!activeKey) return;
+    revealTab(activeKey);
+  }, [activeKey]);
 
   // The `…` is an affordance for tabs that cannot be seen, so it is worth its
   // place in the strip only while the strip is actually hiding one: with
@@ -201,7 +206,6 @@ export function TabStrip(props: TabStripProps) {
   const toolBulk = bulkCloseTargets(props.tabs, props.activeKey, props.canMutate);
   const shortcutIndexByKey = new Map<CombinedTab["key"], number>(selectableTabs(props.tabs).slice(0, 9)
     .map((tab, index) => [tab.key, index + 1]));
-  const activeTab = selectableTabs(props.tabs).find((tab) => tab.key === props.activeKey);
   const takesTerminals = menuBulk.takesTerminals;
   // Measured against the strip as it is now, like the bulk-close sets above: a
   // menu outlives the list it was opened over, and a stale `menu.tab` would let
