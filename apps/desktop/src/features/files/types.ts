@@ -242,12 +242,21 @@ export interface AcquireWatchOptions {
 }
 
 export interface ResolveRootOptions {
+  signal?: AbortSignal;
   /**
    * The root capability the caller already holds. The host answers an
    * unchanged root without a second authoritative discovery and without
    * broadcasting a duplicate ActiveRoot payload.
    */
   knownRootToken?: string;
+}
+
+export interface FileSearchMatch { path: string; relativePath: string; score: number }
+export interface FileSearchResults { matches: FileSearchMatch[]; complete: boolean }
+/** Quick Open does not need Explorer watches or file mutations. */
+export interface FileSearchClient {
+  resolveActiveRoot(scope: FileWorkspaceScope, options?: ResolveRootOptions): Promise<ActiveRoot>;
+  searchFiles(scope: FileWorkspaceScope, root: ActiveRoot, pane: TerminalFilePaneRoute, query: string, signal?: AbortSignal): Promise<FileSearchResults>;
 }
 
 export interface FileWorkspaceClient {

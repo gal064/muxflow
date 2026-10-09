@@ -15,7 +15,7 @@ still in the palette and can be given one there.
 | Command | macOS | Linux |
 |---|---|---|
 | Command palette | ⌘K | Ctrl+K |
-| Switch workspace | ⌘P | Ctrl+P |
+| Quick Open (files, workspaces, tabs) | ⌘P | Ctrl+P |
 | Settings | ⌘, | Ctrl+, |
 | Toggle sidebar | ⌘B | Ctrl+B |
 | Toggle right panel | ⌘L | Ctrl+L |
@@ -26,6 +26,16 @@ still in the palette and can be given one there.
 | Jump to the agent that needs you | ⌘⇧U | Ctrl+Shift+U |
 
 ## Workspaces and tabs
+
+Quick Open matches file names and paths beneath the focused terminal pane's
+working directory, tabs in the current workspace, and workspace names, paths,
+and branches across shown hosts. Enter opens a file or switches to the selected
+tab or workspace. An already-open file appears as a tab result. File contents
+are not searched. The directory and host are shown below the results.
+
+Opening Quick Open with an empty query lists tabs and workspaces immediately.
+File searches start only after typing; a limited search asks you to narrow the
+query. Workspaces and tabs remain available if file search fails.
 
 | Command | macOS | Linux |
 |---|---|---|
@@ -97,7 +107,7 @@ selecting it.
 
 | Key | Where | What it does |
 |---|---|---|
-| ↑ / ↓, Enter | Command palette, workspace switcher | Move, then run or open |
+| ↑ / ↓, Enter | Command palette, Quick Open | Move, then run or open |
 | ← / →, Home / End | Focused tab strip | Move between tabs |
 | ↑ / ↓ | Focused workspace or agent list | Move between rows |
 | ↑ / ↓, Home / End, Tab, Escape | Open menu | Move, or close the menu |

@@ -8,6 +8,7 @@ pub(super) struct ActiveRootContext<'a> {
     pub(super) event_tx: &'a mpsc::Sender<SequencerControl>,
     pub(super) generation: &'a Arc<AtomicU64>,
     pub(super) topology_lock: &'a Arc<tokio::sync::Mutex<()>>,
+    pub(super) files: &'a Arc<FileService>,
 }
 
 pub(super) async fn handle(
@@ -21,6 +22,7 @@ pub(super) async fn handle(
         event_tx,
         generation,
         topology_lock,
+        files,
     } = context;
     let operation = v1::Operation::try_from(request.operation).ok();
     let Some(file) = request.file else {
@@ -32,6 +34,19 @@ pub(super) async fn handle(
         .await;
         return;
     };
+    if operation == Some(v1::Operation::SearchFiles) {
+        let result = search_files(&file, &cancellation, generation, topology_lock, files).await;
+        let response = match result {
+            Ok(search) => file_response(&file.operation_id, |response| {
+                response.search = Some(search)
+            }),
+            Err(error) => {
+                filesystem_dispatch::file_failure_response("file_search_rejected", &error)
+            }
+        };
+        send_response(control_tx, request_id, response).await;
+        return;
+    }
     if operation == Some(v1::Operation::ResolveTerminalFile) {
         let result = resolve_terminal_file(&file, &cancellation, generation, topology_lock).await;
         match result {
@@ -102,6 +117,53 @@ pub(super) async fn handle(
             .await
         }
     }
+}
+
+async fn search_files(
+    file: &v1::FileServiceRequest,
+    cancellation: &Arc<AtomicBool>,
+    generation: &Arc<AtomicU64>,
+    topology_lock: &Arc<tokio::sync::Mutex<()>>,
+    files: &Arc<FileService>,
+) -> anyhow::Result<v1::FileSearchResults> {
+    let (snapshot, identity, known_generation) = discover(generation, topology_lock).await?;
+    if file.expected_server_identity.is_empty()
+        || file.expected_server_identity != identity
+        || file.expected_topology_generation > known_generation
+        || !snapshot
+            .panes
+            .iter()
+            .any(|pane| pane_matches_terminal_file_route(pane, file))
+    {
+        bail!("file search pane route or working directory changed");
+    }
+    let captured = file.clone();
+    let service = Arc::clone(files);
+    let search_cancellation = Arc::clone(cancellation);
+    let search = tokio::task::spawn_blocking(move || {
+        service.search_files(
+            &captured.root,
+            &captured.root_token,
+            &captured.expected_cwd,
+            &captured.search_query,
+            &search_cancellation,
+        )
+    })
+    .await
+    .context("file search task failed")??;
+    if cancellation.load(Ordering::Acquire) {
+        bail!("cancelled: file search");
+    }
+    let (fresh, fresh_identity, _) = discover(generation, topology_lock).await?;
+    if fresh_identity != identity
+        || !fresh
+            .panes
+            .iter()
+            .any(|pane| pane_matches_terminal_file_route(pane, file))
+    {
+        bail!("file search pane route or working directory changed");
+    }
+    Ok(search)
 }
 
 /// Resolves a terminal-output path on the host that owns the pane.

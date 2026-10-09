@@ -1838,6 +1838,15 @@ export function App() {
       // narrowed would mean the only way back to an unpinned workspace is to
       // turn the filter off first.
       rows={switcherRows}
+      tabs={combinedTabs}
+      activeTabKey={activeCombinedTabKey}
+      client={fileClient}
+      scope={fileScope}
+      pane={activePane ? { sessionId: activePane.sessionId, windowId: activePane.windowId, cwd: activePane.currentPath } : undefined}
+      hostLabel={currentHostLabel}
+      hostLabelFor={(id) => hostSources.get(id)?.label ?? ""}
+      onSelectTab={selectCombinedTab}
+      onOpenFile={(path) => { if (activePane) openFilePathFromPane(activePane.id, path); }}
       stateGlyphs={appState.shell.agentStateGlyphs}
     />}
     <AppDialogLayer
