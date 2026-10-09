@@ -4,7 +4,7 @@ import Constants from "expo-constants";
 import { AppState, Linking, Platform } from "react-native";
 
 import { log } from "../../session/log";
-import { MANIFEST_URL, startUpdateCheck } from "./updateCheck";
+import { LATEST_RELEASE_URL, MANIFEST_URL, startUpdateCheck } from "./updateCheck";
 
 const TIMEOUT_MS = 10_000;
 
@@ -58,5 +58,5 @@ export async function openAppUpdates(): Promise<void> {
 
 /** Desktop installs the matching helper; both update together from GitHub. */
 export function openDesktopUpdates(): Promise<void> {
-  return Linking.openURL("https://github.com/gal064/muxflow/releases/latest");
+  return Linking.openURL(LATEST_RELEASE_URL);
 }

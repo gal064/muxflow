@@ -4,11 +4,12 @@ import { createStore } from "zustand/vanilla";
 import { evaluateManifest, startUpdateCheck, UPDATE_CHECK_INTERVAL_MS, type UpdateState } from "./updateCheck";
 
 const PAGE = "https://github.com/gal064/muxflow/releases/tag/v0.2.0";
+const LATEST_PAGE = "https://github.com/gal064/muxflow/releases/latest";
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("evaluateManifest", () => {
-  it("offers a newer release with its page", () => {
-    expect(evaluateManifest("0.1.0", { version: "0.2.0", url: PAGE })).toEqual({ version: "0.2.0", url: PAGE });
+  it("links to latest even when the manifest pins a specific release", () => {
+    expect(evaluateManifest("0.1.0", { version: "0.2.0", url: PAGE })).toEqual({ version: "0.2.0", url: LATEST_PAGE });
     expect(evaluateManifest("0.1.9", { version: "0.1.10", url: PAGE })).not.toBeNull();
     expect(evaluateManifest("1.9.9", { version: "2.0.0", url: PAGE })).not.toBeNull();
   });
@@ -69,7 +70,7 @@ describe("startUpdateCheck", () => {
     foreground();
     await flush();
     expect(deps.fetchManifest).toHaveBeenCalledTimes(2);
-    expect(store.getState().update).toEqual({ version: "0.2.0", url: PAGE });
+    expect(store.getState().update).toEqual({ version: "0.2.0", url: LATEST_PAGE });
   });
 
   it("keeps the last answer when a check fails or the manifest is untrustworthy", async () => {
@@ -85,7 +86,7 @@ describe("startUpdateCheck", () => {
       foreground();
       await flush();
     }
-    expect(store.getState().update).toEqual({ version: "0.2.0", url: PAGE });
+    expect(store.getState().update).toEqual({ version: "0.2.0", url: LATEST_PAGE });
     expect(deps.log).toHaveBeenCalledTimes(2);
   });
 });

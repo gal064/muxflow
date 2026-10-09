@@ -1,13 +1,14 @@
 // Whether a newer Muxflow release has been published. There is no auto-update:
 // this reads the small manifest the release workflow attaches to every GitHub
 // release so the home app bar can say a newer version exists and link to its
-// release page. `releases/latest` never resolves to a draft or a pre-release,
+// latest release page. `releases/latest` never resolves to a draft or a pre-release,
 // so a version appears here only once it has been published. The desktop runs
 // the same check (apps/desktop/src-tauri/src/update_check.rs).
 
 import { createStore, type StoreApi } from "zustand/vanilla";
 
 export const MANIFEST_URL = "https://github.com/gal064/muxflow/releases/latest/download/latest.json";
+export const LATEST_RELEASE_URL = "https://github.com/gal064/muxflow/releases/latest";
 /** The only links the pill may open, whatever the manifest says. */
 export const RELEASE_PAGE_PREFIX = "https://github.com/gal064/muxflow/releases/";
 /** At launch, then on return to the foreground once a day has passed. */
@@ -46,7 +47,8 @@ export function evaluateManifest(runningVersion: string, manifest: unknown): Ava
   if (typeof fields.url !== "string" || !fields.url.startsWith(RELEASE_PAGE_PREFIX)) {
     throw new Error("update manifest points outside the Muxflow releases");
   }
-  return newer(published, running) ? { version: fields.version as string, url: fields.url } : null;
+  // Keep the destination current even while the last observed version is stale.
+  return newer(published, running) ? { version: fields.version as string, url: LATEST_RELEASE_URL } : null;
 }
 
 export interface UpdateState {

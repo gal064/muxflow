@@ -1308,7 +1308,7 @@ describe("application shell accessibility contracts", () => {
     />);
     expect([...html.matchAll(/<button/gu)]).toHaveLength(8);
     expect(html).toContain(">↑ Update 0.2.0</button>");
-    expect(html).toContain('title="Muxflow 0.2.0 is available. Open its release page."');
+    expect(html).toContain('title="Muxflow 0.2.0 is available. Open the latest release page."');
     expect(html.indexOf("titlebar-update")).toBeLessThan(html.indexOf("bar-button-badged"));
   });
 
