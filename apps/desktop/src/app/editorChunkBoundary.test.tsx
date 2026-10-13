@@ -14,6 +14,7 @@ import type {
   WorkspaceEvent,
 } from "../features/files/types";
 import type { AppOwnedTab } from "../features/shell/types";
+import { LIVE_MARKDOWN_LIMIT_CHARS } from "../features/files/types";
 import type { GitDiff, GitStatusSnapshot, GitWorkspaceClient } from "../features/git/types";
 
 /**
@@ -46,6 +47,13 @@ vi.mock("../features/files/FileEditor", async (importOriginal) => {
 vi.mock("../features/git/GitDiffEditor", async (importOriginal) => {
   probe.evaluated.push("diff editor module");
   return await importOriginal();
+});
+// CodeMirror needs a laid-out DOM the test renderer does not have; the module
+// still announces its evaluation, and its component is a stub.
+function LiveEditorStub(_props: { value: string; onChange(content: string): void; onReady(): void }) { return null; }
+vi.mock("../features/files/LiveMarkdownEditor", () => {
+  probe.evaluated.push("live editor module");
+  return { LiveMarkdownEditor: (props: { value: string; onChange(content: string): void; onReady(): void }) => <LiveEditorStub {...props} /> };
 });
 vi.mock("@monaco-editor/react", () => ({
   default: (props: { value: string; onChange(content: string): void }) => <EditorStub {...props} />,
@@ -229,6 +237,71 @@ describe("the editor chunk boundary", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("edits a live Markdown tab with its own editor, fetched after the read, and never Monaco", async () => {
+    const host = fileClient(textFile("# hello"));
+    const before = probe.evaluated.length;
+    const render = (viewMode: AppOwnedTab["viewMode"]) => <AppTabSurface
+      canWrite
+      client={host.client}
+      activeRoot={root}
+      onDirty={vi.fn()}
+      onDownload={vi.fn()}
+      onStatus={vi.fn()}
+      onOpenFile={vi.fn()}
+      onViewMode={vi.fn()}
+      scope={scope}
+      tab={{ ...markdownTab, viewMode }}
+    />;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(render("live")); });
+    await turnLoop(() => renderer.root.findAllByType(LiveEditorStub).length > 0, 10_000);
+    expect(probe.evaluated.slice(before), "the live editor was evaluated before the read").toEqual(["openFile", "live editor module"]);
+    expect(renderer.root.findAllByType(EditorStub), "live mode mounted Monaco").toHaveLength(0);
+    expect(JSON.stringify(renderer.toJSON()), "live mode also drew the preview").not.toContain("markdown-preview");
+    const live = renderer.root.findByType(LiveEditorStub);
+    expect(live.props.value).toBe("# hello");
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => { live.props.onChange("# hello there"); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      expect(host.writes).toEqual([{ content: "# hello there" }]);
+      // The same buffer, whichever editor shows it.
+      await act(async () => { renderer.update(render("source")); });
+      await turnLoop(() => renderer.root.findAllByType(EditorStub).length > 0, 10_000);
+      expect(renderer.root.findByType(EditorStub).props.value).toBe("# hello there");
+      expect(renderer.root.findAllByType(LiveEditorStub)).toHaveLength(0);
+      await act(async () => { renderer.unmount(); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows a live tab past the size limit as source, with live unavailable", async () => {
+    const host = fileClient(textFile(`# big\n${"x".repeat(LIVE_MARKDOWN_LIMIT_CHARS)}`));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<AppTabSurface
+        canWrite
+        client={host.client}
+        activeRoot={root}
+        onDirty={vi.fn()}
+        onDownload={vi.fn()}
+        onStatus={vi.fn()}
+        onOpenFile={vi.fn()}
+        onViewMode={vi.fn()}
+        scope={scope}
+        tab={{ ...markdownTab, viewMode: "live" }}
+      />);
+    });
+    await turnLoop(() => renderer.root.findAllByType(EditorStub).length > 0, 10_000);
+    expect(renderer.root.findAllByType(LiveEditorStub)).toHaveLength(0);
+    const live = renderer.root.findByProps({ children: "live" });
+    expect(live.props.disabled).toBe(true);
+    expect(renderer.root.findByProps({ children: "source" }).props["aria-pressed"]).toBe(true);
+    await act(async () => { renderer.unmount(); });
   });
 
   it("publishes the Markdown preview on a delay while the buffer and save state stay immediate", async () => {
