@@ -1,5 +1,5 @@
 import { HighlightStyle, Language, LanguageSupport, defineLanguageFacet, syntaxHighlighting, syntaxTree } from "@codemirror/language";
-import { EditorSelection, EditorState, RangeSet, StateEffect, StateField, type Extension, type Range } from "@codemirror/state";
+import { EditorSelection, EditorState, Facet, RangeSet, StateEffect, StateField, type Extension, type Range } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, type Command, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import type { SyntaxNode, SyntaxNodeRef } from "@lezer/common";
 import { tags } from "@lezer/highlight";
@@ -325,6 +325,9 @@ class ImageWidget extends WidgetType {
   }
 }
 
+/** Where an activated link goes; read by widgets, which are built without the options. */
+const linkHandler = Facet.define<(href: string) => void>();
+
 /** A whole table, drawn by the same sanitizer as the preview. */
 class TableWidget extends WidgetType {
   constructor(readonly source: string) { super(); }
@@ -334,10 +337,18 @@ class TableWidget extends WidgetType {
     wrap.className = "cm-live-table";
     wrap.innerHTML = renderSafeMarkdown(this.source);
     // Clicking a rendered table is asking to edit it: the caret goes to the
-    // start of the source, which reveals it.
+    // start of the source, which reveals it. A modified click on a link opens
+    // it, as everywhere else in the document; its href is already sanitized.
     wrap.addEventListener("mousedown", (event) => {
+      // A middle button would take focus away, and on Linux paste the primary selection.
+      if (event.button === 1) event.preventDefault();
       if (event.button !== 0) return;
       event.preventDefault();
+      const href = (event.target as Element | null)?.closest?.("a")?.getAttribute("href");
+      if (href && (event.metaKey || event.ctrlKey)) {
+        for (const open of view.state.facet(linkHandler)) open(href);
+        return;
+      }
       view.dispatch({ selection: { anchor: view.posAtDOM(wrap) } });
       view.focus();
     });
@@ -594,6 +605,7 @@ export function liveMarkdown(options: LiveMarkdownOptions): Extension {
     EditorView.focusChangeEffect.of((_state, focusing) => setFocused.of(focusing)),
     livePlugin,
     tableField,
+    linkHandler.of(options.onLink),
     EditorView.lineWrapping,
     EditorView.domEventHandlers({
       mousedown: (event, view) => {
