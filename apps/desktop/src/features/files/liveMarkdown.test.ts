@@ -243,6 +243,23 @@ describe("live Markdown commands", () => {
     expect(editor.contentDOM.querySelector<HTMLInputElement>(".cm-live-task")!.disabled).toBe(false);
   });
 
+  it("opens a link in a rendered table on a modified click, and only then", () => {
+    const onLink = vi.fn();
+    const doc = "| a |\n| - |\n| [x](./other.md) |\n\nend";
+    const editor = new EditorView({
+      state: EditorState.create({ doc, selection: EditorSelection.cursor(doc.length), extensions: liveMarkdown({ onLink }) }),
+      parent: document.body,
+    });
+    views.push(editor);
+    const anchor = () => editor.contentDOM.querySelector<HTMLAnchorElement>(".cm-live-table a")!;
+    anchor().dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, ctrlKey: true }));
+    expect(onLink).toHaveBeenCalledWith("./other.md");
+    expect(editor.state.selection.main.head, "a link click moved the caret into the table").toBe(doc.length);
+    anchor().dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+    expect(onLink).toHaveBeenCalledTimes(1);
+    expect(editor.state.selection.main.head).toBe(0);
+  });
+
   it("opens a link on a modified click", () => {
     const onLink = vi.fn();
     const editor = new EditorView({
