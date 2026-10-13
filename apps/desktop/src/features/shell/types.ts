@@ -3,7 +3,7 @@ import { isAgentSortMode, type AgentSortMode } from "../agents/agentsList";
 
 export type AppTabKind = "file" | "markdown" | "gitDiff";
 /** How a Markdown tab is drawn; also the shape of the persisted default. */
-export type AppTabViewMode = "source" | "preview" | "split";
+export type AppTabViewMode = "source" | "live" | "preview" | "split";
 /** The segments of the right panel; they share one 300px surface. */
 export type PanelSurface = "files" | "git" | "ports";
 
@@ -262,7 +262,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
 
 /** An unrecognised mode is the default, not a tab that renders nothing. */
 function normalizedViewMode(value: unknown): AppTabViewMode {
-  return value === "source" || value === "preview" || value === "split" ? value : defaultShellState.defaultMarkdownView;
+  return value === "source" || value === "live" || value === "preview" || value === "split" ? value : defaultShellState.defaultMarkdownView;
 }
 
 /**

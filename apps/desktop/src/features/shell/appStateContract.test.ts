@@ -67,7 +67,7 @@ describe("persisted app state contract", () => {
     expect(typed.shell.panelWidth).toBe(320);
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
-    expect(typed.shell.defaultMarkdownView).toBe("preview");
+    expect(typed.shell.defaultMarkdownView).toBe("live");
     expect(typed.workspaceDefaults.local).toEqual({ directory: "/work/projects", startupCommand: "git status" });
   });
 
@@ -170,6 +170,7 @@ describe("per-host workspace defaults", () => {
       schemaVersion: 1, appTabs: [], workspaceUi: [], shell: { defaultMarkdownView: value },
     }).shell.defaultMarkdownView;
     expect(shell("source")).toBe("source");
+    expect(shell("live")).toBe("live");
     expect(shell("preview")).toBe("preview");
     expect(shell("split")).toBe("split");
     expect(shell("reader")).toBe("split");
