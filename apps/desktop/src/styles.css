@@ -797,6 +797,37 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   color: var(--chrome-ink-strong); background: var(--accent-wash); font-size: var(--type-menu);
   pointer-events: none;
 }
+/* Pointer drags of tabs and agents: the half of a pane a drop fills, the gap
+   in the strip a tab lands in, and the workspace row it moves to. */
+.pane-drop-hint {
+  position: absolute; z-index: 9;
+  border: 2px dashed var(--accent); border-radius: 6px;
+  background: var(--accent-wash); pointer-events: none;
+}
+.pane-drop-hint.left { inset: 6px 50% 6px 6px; }
+.pane-drop-hint.right { inset: 6px 6px 6px 50%; }
+.pane-drop-hint.top { inset: 6px 6px 50% 6px; }
+.pane-drop-hint.bottom { inset: 50% 6px 6px 6px; }
+.tab.drop-before::before,
+.tab.drop-after::before {
+  content: ""; position: absolute; top: 2px; bottom: 2px; z-index: 1;
+  width: 3px; border-radius: 2px; background: var(--accent); pointer-events: none;
+}
+.tab.drop-before::before { left: 0; }
+.tab.drop-after::before { right: 0; }
+.workspace-button.drop-target:not(.active) { background: var(--accent-wash); box-shadow: inset 0 0 0 1px var(--accent); }
+.workspace-button.drop-target.active { outline: 2px solid var(--accent); outline-offset: 2px; }
+body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabbing !important; }
+.drag-ghost {
+  position: fixed; z-index: 1000; max-width: 220px; padding: 3px 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border: 1px solid var(--accent); border-radius: 4px;
+  color: var(--chrome-ink); background: var(--chrome-raised);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.35); font-size: var(--type-menu);
+  pointer-events: none; transform: translate(12px, 12px);
+}
+/* Over a target the drop would refuse: the reason shows on release. */
+.drag-ghost.refused { border-color: var(--chrome-border); opacity: 0.55; }
 .terminal-upload-progress {
   position: absolute; z-index: 8; right: 10px; bottom: 10px;
   display: grid; gap: 5px; width: min(360px, calc(100% - 20px));
