@@ -19,7 +19,7 @@ function agent(overrides: Partial<Agent> & { id: string; sessionId: string }): A
     lifecycleChangedAtMs: 1000,
     attentionSeenAtMs: 0,
     present: true,
-    route: { sessionId, sessionNameFallback: "", windowId: "@1", windowNameFallback: "", paneId: "%1", paneIndexFallback: 0 },
+    route: { sessionId, sessionNameFallback: "", windowId: "@1", windowNameFallback: "", paneId: "%1", paneIndexFallback: 0, paneTitleFallback: "" },
     ...rest,
   };
 }
@@ -51,10 +51,18 @@ describe("agentTitle (§9.3.1 line 1: the tab, the desktop's agentSessionLabel)"
   const adapters = [{ id: "codex", displayName: "Codex CLI", hookWiring: "wired" as const }];
   const windows = { "@1": { id: "@1", sessionId: "$1", index: 0, name: "⠦ Fix tests", active: false, pinned: false } };
   const routed = (overrides: Partial<Agent> = {}) =>
-    agent({ id: "a", sessionId: "$1", route: { sessionId: "$1", sessionNameFallback: "", windowId: "@1", windowNameFallback: "old name", paneId: "%1", paneIndexFallback: 3 }, ...overrides });
+    agent({ id: "a", sessionId: "$1", route: { sessionId: "$1", sessionNameFallback: "", windowId: "@1", windowNameFallback: "old name", paneId: "%1", paneIndexFallback: 3, paneTitleFallback: "" }, ...overrides });
 
   it("names the live tab with its ticker stripped, over the assigned name", () => {
     expect(agentTitle({ windows, adapters }, routed({ displayName: "Codex" }))).toBe("Fix tests");
+  });
+
+  it("names an agent by its own pane title ahead of the tab it shares", () => {
+    const split = routed({ route: { ...routed().route, paneTitleFallback: "✳ Ship release" } });
+    expect(agentTitle({ windows, adapters }, split)).toBe("Ship release");
+    // A pane title that is only a ticker frame still finds the tab.
+    const starting = routed({ route: { ...routed().route, paneTitleFallback: "⠋" } });
+    expect(agentTitle({ windows, adapters }, starting)).toBe("Fix tests");
   });
 
   it("falls back to the retained window name, then the assigned name, then the adapter", () => {

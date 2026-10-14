@@ -26,6 +26,7 @@ interface WireRoute {
   windowNameFallback: string;
   paneId: string;
   paneIndexFallback?: number;
+  paneTitleFallback: string;
   agentId: string;
   attentionGeneration: string | number;
 }
@@ -337,6 +338,7 @@ function mapRecord(scope: AgentRequestScope, value: WireRecord): AgentRecord {
     windowId: value.route.windowId,
     windowName: value.route.windowNameFallback,
     paneId: value.route.paneId,
+    paneTitle: value.route.paneTitleFallback,
     lifecycle: mapLifecycle(value.lifecycle),
     lifecycleGeneration: agentGeneration(value.stateGeneration, "agent state generation"),
     attentionGeneration,

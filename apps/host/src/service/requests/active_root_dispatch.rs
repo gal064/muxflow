@@ -444,6 +444,7 @@ mod terminal_file_tests {
             current_command: "zsh".into(),
             pane_pid: 1,
             start_command: "zsh".into(),
+            title: String::new(),
         };
         let request = v1::FileServiceRequest {
             pane_id: "%1".into(),

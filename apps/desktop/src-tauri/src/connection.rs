@@ -1403,6 +1403,7 @@ fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
                 current_command: item.current_command,
                 pane_pid: 0,
                 start_command: String::new(),
+                title: String::new(),
             })
             .collect(),
     }

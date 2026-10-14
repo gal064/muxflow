@@ -454,6 +454,7 @@ mod tests {
                 current_command: "codex".into(),
                 pane_pid: 0,
                 start_command: String::new(),
+                title: String::new(),
             }],
             ..Default::default()
         };
