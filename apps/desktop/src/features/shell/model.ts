@@ -804,6 +804,65 @@ export function reorderAppTab(
   };
 }
 
+/** Puts one document tab before or after another in the same workspace. */
+export function moveAppTabTo(
+  state: PersistedAppState,
+  currentHostProfileId: string,
+  currentServerIdentity: string | undefined,
+  session: Session,
+  tabId: string,
+  targetTabId: string,
+  side: "before" | "after",
+): PersistedAppState {
+  const tabs = appTabsForWorkspace(state, currentHostProfileId, currentServerIdentity, session);
+  const moving = tabs.find((tab) => tab.id === tabId);
+  if (!moving || tabId === targetTabId || !tabs.some((tab) => tab.id === targetTabId)) return state;
+  const reordered = tabs.filter((tab) => tab.id !== tabId);
+  reordered.splice(reordered.findIndex((tab) => tab.id === targetTabId) + (side === "after" ? 1 : 0), 0, moving);
+  const orderById = new Map(reordered.map((tab, index) => [tab.id, index]));
+  return {
+    ...state,
+    appTabs: state.appTabs.map((tab) => tab.hostProfileId === currentHostProfileId && orderById.has(tab.id)
+      ? { ...tab, order: orderById.get(tab.id)! }
+      : tab),
+  };
+}
+
+/**
+ * Moves a document tab to the end of another workspace on the same server.
+ *
+ * It arrives pinned: the destination may already have a preview tab, and a
+ * workspace has one preview slot. The source workspace forgets it as its
+ * selection, so it falls back to its terminal rather than to a tab it no
+ * longer has.
+ */
+export function moveAppTabToWorkspace(
+  state: PersistedAppState,
+  currentHostProfileId: string,
+  currentServerIdentity: string | undefined,
+  tabId: string,
+  target: Session,
+): PersistedAppState {
+  const moving = state.appTabs.find((tab) => tab.hostProfileId === currentHostProfileId
+    && tab.serverIdentity === currentServerIdentity
+    && tab.id === tabId);
+  if (!moving || moving.sessionId === target.id) return state;
+  const destination = appTabsForWorkspace(state, currentHostProfileId, currentServerIdentity, target);
+  // One tab per document in a workspace, as opening one keeps it: a second
+  // would mean two editors autosaving the same file.
+  if (destination.some((tab) => tab.kind === moving.kind && tab.resource === moving.resource)) return state;
+  const order = Math.max(-1, ...destination.map((tab) => tab.order)) + 1;
+  return {
+    ...state,
+    appTabs: state.appTabs.map((tab) => tab === moving
+      ? { ...tab, sessionId: target.id, sessionName: target.name, order, preview: undefined }
+      : tab),
+    workspaceUi: state.workspaceUi.map((item) => item.hostProfileId === currentHostProfileId && item.selectedAppTabId === tabId
+      ? { ...item, selectedAppTabId: undefined }
+      : item),
+  };
+}
+
 export function resolveAgentShellDestination(
   snapshot: TmuxSnapshot,
   item: AgentShellItem,
@@ -850,19 +909,26 @@ export function mountedTerminalPanes(
   return renderedPanes(panes.filter((pane) => pane.windowId === activeWindowId), zoomed);
 }
 
+/**
+ * `previousWindowRemains`: tmux also picks a new current window when the old
+ * one leaves the workspace (moved or closed). That is not someone switching
+ * tabs, and the document on screen stays.
+ */
 export function shouldSurfaceAuthoritativeTerminal(
   appTabSelected: boolean,
   previousSessionId: string | undefined,
   previousActiveWindowId: string | undefined,
   nextSessionId: string | undefined,
   nextActiveWindowId: string | undefined,
+  previousWindowRemains: boolean,
 ): boolean {
   return appTabSelected
     && Boolean(previousSessionId)
     && previousSessionId === nextSessionId
     && Boolean(previousActiveWindowId)
     && Boolean(nextActiveWindowId)
-    && previousActiveWindowId !== nextActiveWindowId;
+    && previousActiveWindowId !== nextActiveWindowId
+    && previousWindowRemains;
 }
 
 export function shellNavigationMode(canMutate: boolean): "authoritative" | "cached" {

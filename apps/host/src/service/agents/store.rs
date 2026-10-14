@@ -21,6 +21,11 @@ pub(super) struct StoredRoute {
     pub window_name_fallback: String,
     pub pane_id: String,
     pub pane_index_fallback: u32,
+    /// The agent pane's own title, which carries its session name even when
+    /// the window is named after another pane. Absent from state written
+    /// before it existed; the next reconcile fills it.
+    #[serde(default)]
+    pub pane_title_fallback: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -841,6 +846,7 @@ mod tests {
                     window_name_fallback: "codex".into(),
                     pane_id: "%1".into(),
                     pane_index_fallback: 0,
+                    pane_title_fallback: String::new(),
                 },
                 lifecycle: tmux_agent_protocol::v1::AgentLifecycleState::Working as i32,
                 state_generation: 1,

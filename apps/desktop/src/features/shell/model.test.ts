@@ -8,6 +8,8 @@ import {
   discardServerAppState,
   mountedAppTabIds,
   mountedTerminalPanes,
+  moveAppTabTo,
+  moveAppTabToWorkspace,
   openFileTab,
   findGitDiffTab,
   openGitDiffTab,
@@ -347,6 +349,27 @@ describe("application shell model", () => {
     const closed = closeAppTab(moved, "local", "a");
     expect(closed.appTabs.map((tab) => tab.id)).toEqual(["b"]);
     expect(closed.workspaceUi[0].selectedAppTabId).toBeUndefined();
+  });
+
+  it("drops a document tab before or after any peer, and moves one to another workspace pinned", () => {
+    const after = moveAppTabTo(tabs, "local", "server-a", sessions[1], "a", "b", "after");
+    expect(appTabsForWorkspace(after, "local", "server-a", sessions[1]).map((tab) => tab.id)).toEqual(["b", "a"]);
+    const back = moveAppTabTo(after, "local", "server-a", sessions[1], "a", "b", "before");
+    expect(appTabsForWorkspace(back, "local", "server-a", sessions[1]).map((tab) => tab.id)).toEqual(["a", "b"]);
+    expect(moveAppTabTo(tabs, "local", "server-a", sessions[1], "a", "a", "after")).toBe(tabs);
+
+    const previewed = { ...tabs, appTabs: tabs.appTabs.map((tab) => tab.id === "a" ? { ...tab, preview: true } : tab) };
+    const selected = selectAppTab(previewed, "local", "server-a", sessions[1], "a");
+    const moved = moveAppTabToWorkspace(selected, "local", "server-a", "a", sessions[0]);
+    expect(appTabsForWorkspace(moved, "local", "server-a", sessions[0])).toEqual([
+      expect.objectContaining({ id: "a", sessionId: "$2", sessionName: "two", order: 0, preview: undefined }),
+    ]);
+    expect(appTabsForWorkspace(moved, "local", "server-a", sessions[1]).map((tab) => tab.id)).toEqual(["b"]);
+    expect(moved.workspaceUi[0].selectedAppTabId).toBeUndefined();
+    expect(moveAppTabToWorkspace(tabs, "local", "server-a", "a", sessions[1])).toBe(tabs);
+    // The destination already has this file open: one tab per document.
+    const doubled = { ...tabs, appTabs: [...tabs.appTabs, { ...tabs.appTabs[1], id: "a2", sessionId: "$2", sessionName: "two" }] };
+    expect(moveAppTabToWorkspace(doubled, "local", "server-a", "a", sessions[0])).toBe(doubled);
   });
 
   it("persists separate staged and unstaged Git diff identities across root changes", () => {
@@ -695,11 +718,14 @@ describe("application shell model", () => {
   });
 
   it("surfaces a terminal only for a real authoritative focus transition", () => {
-    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$1", "@2")).toBe(true);
-    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$2", "@2")).toBe(false);
-    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$1", "@1")).toBe(false);
-    expect(shouldSurfaceAuthoritativeTerminal(false, "$1", "@1", "$1", "@2")).toBe(false);
-    expect(shouldSurfaceAuthoritativeTerminal(true, undefined, undefined, "$1", "@1")).toBe(false);
+    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$1", "@2", true)).toBe(true);
+    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$2", "@2", true)).toBe(false);
+    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$1", "@1", true)).toBe(false);
+    expect(shouldSurfaceAuthoritativeTerminal(false, "$1", "@1", "$1", "@2", true)).toBe(false);
+    expect(shouldSurfaceAuthoritativeTerminal(true, undefined, undefined, "$1", "@1", true)).toBe(false);
+    // The window behind the document moved to another workspace: tmux's new
+    // pick is not a switch, and the document stays.
+    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$1", "@2", false)).toBe(false);
   });
 
   it("keeps navigation local while writes are frozen instead of queuing a tmux mutation", () => {

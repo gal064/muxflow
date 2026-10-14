@@ -27,7 +27,7 @@ describe("agent status glyph stripping", () => {
 });
 
 function agent(overrides: Partial<SessionLabelInput>): SessionLabelInput {
-  return { windowName: "", displayName: "Agent 1", adapterId: "claude-code", ...overrides };
+  return { windowName: "", paneTitle: "", displayName: "Agent 1", adapterId: "claude-code", ...overrides };
 }
 
 describe("agentSessionLabel (the row's name: the tab, not the adapter)", () => {

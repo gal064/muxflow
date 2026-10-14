@@ -4,12 +4,12 @@ import { ConfirmationDialog } from "../../commands/ConfirmationDialog";
 import { CLICK_SLOP_PX, selectionHolds, useSanitizedMarkdown } from "../files/markdownPreview";
 import { markdownFilePath, renderSafeSvg } from "../files/markdown";
 import { useOpenFileTab } from "../files/useOpenFileTab";
-import { IMAGE_PREVIEW_LIMIT_BYTES, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
+import { IMAGE_PREVIEW_LIMIT_BYTES, LIVE_MARKDOWN_LIMIT_CHARS, type ActiveRoot, type BinaryFile, type FileWorkspaceClient, type FileWorkspaceScope } from "../files/types";
 import { DelayedLoading } from "../../ui/DelayedLoading";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { SaveState } from "../files/autosave";
 import { useVisibleSaveState } from "../files/saveStatus";
-import type { AppOwnedTab } from "./types";
+import type { AppOwnedTab, AppTabViewMode } from "./types";
 import { useEditorPaint } from "../../perf/surfacePaint";
 
 /**
@@ -20,6 +20,9 @@ import { useEditorPaint } from "../../perf/surfacePaint";
  * a Markdown preview never fetches the editor at all.
  */
 const FileEditor = lazy(() => import("../files/FileEditor").then((module) => ({ default: module.FileEditor })));
+
+/** The live Markdown editor, a chunk of its own that only the live view fetches. */
+const LiveMarkdownEditor = lazy(() => import("../files/LiveMarkdownEditor").then((module) => ({ default: module.LiveMarkdownEditor })));
 
 interface Props {
   tab: AppOwnedTab;
@@ -36,7 +39,7 @@ interface Props {
   onDirty(): void;
   onStatus(message: string): void;
   onOpenFile(path: string): void;
-  onViewMode(mode: "source" | "preview" | "split"): void;
+  onViewMode(mode: AppTabViewMode): void;
 }
 
 export function AppTabSurface(props: Props) {
@@ -73,16 +76,34 @@ export function AppTabSurface(props: Props) {
   const onEditorChange = useCallback((typed: string) => {
     if (canWrite) editFile(typed);
   }, [canWrite, editFile]);
+  const externalLink = useExternalLinkConfirmation(props.onStatus);
+  const { onOpenFile, onStatus } = props;
+  const resource = props.tab.resource;
+  const onFileLink = useCallback((href: string) => {
+    try {
+      const path = markdownFilePath(resource, href);
+      if (path) onOpenFile(path);
+      else onStatus(`Markdown link: ${href}`);
+    } catch (error) {
+      onStatus(`Could not open ${href}: ${String(error)}`);
+    }
+  }, [onOpenFile, onStatus, resource]);
+  const requestExternalLink = externalLink.request;
+  const onLiveLink = useCallback((href: string) => {
+    if (/^https?:/i.test(href)) requestExternalLink(href);
+    else onFileLink(href);
+  }, [onFileLink, requestExternalLink]);
 
   if (!root) return <EmptyTab tab={props.tab} detail="Reconnect and select a terminal pane to reopen this file." />;
   if (!props.scope && content.kind === "loading") {
     return <EmptyTab tab={props.tab} detail="Reconnect and select a terminal pane to reopen this file." />;
   }
   const download = () => props.onDownload(props.tab.resource, "file", root);
-  const toolbar = (state: SaveState | undefined) => <EditorToolbar
+  const toolbar = (state: SaveState | undefined, shown = mode, liveUnavailable = false) => <EditorToolbar
     canWrite={canWrite}
     download={download}
-    mode={mode}
+    liveUnavailable={liveUnavailable}
+    mode={shown}
     onViewMode={props.onViewMode}
     saveState={state}
     tab={props.tab}
@@ -113,6 +134,12 @@ export function AppTabSurface(props: Props) {
   }
 
   const source = view?.content ?? content.file.content;
+  // Past the limit a live tab is shown as source, and stays live on record, so
+  // it comes back as soon as the file is small enough again. Measured on the
+  // file as read, not the buffer: a paste crossing the limit must not swap
+  // editors under the user and take the undo history with the old one.
+  const liveUnavailable = content.file.content.length > LIVE_MARKDOWN_LIMIT_CHARS;
+  const shown = mode === "live" && liveUnavailable ? "source" : mode;
   // The view mode is data, not a class. As a class it was `markdown-${mode}`,
   // and in preview mode that is `markdown-preview` — the preview article's own
   // class — so every rule written for the article landed on the whole tab
@@ -123,12 +150,26 @@ export function AppTabSurface(props: Props) {
   return <section
     aria-label={props.tab.title}
     className="file-tab-surface"
-    data-view-mode={props.tab.kind === "markdown" ? mode : undefined}
+    data-view-mode={props.tab.kind === "markdown" ? shown : undefined}
     role="tabpanel"
   >
-    {toolbar(view?.state ?? "saved")}
+    {toolbar(view?.state ?? "saved", shown, liveUnavailable)}
     {view?.error && <SurfaceError className="editor-error" detail={view.error} />}
-    {editorRequested && <div className="monaco-host" ref={editor.bindHost}>
+    {editorRequested && shown === "live" && <div className="live-markdown-host" ref={editor.bindHost}>
+      <Suspense fallback={<DelayedLoading detail="Loading…" />}>
+        <LiveMarkdownEditor
+          key={modelPath(props.tab)}
+          modelPath={modelPath(props.tab)}
+          onChange={onEditorChange}
+          onLink={onLiveLink}
+          onReady={editor.onReady}
+          readOnly={!canWrite}
+          value={source}
+        />
+      </Suspense>
+    </div>}
+    {externalLink.dialog}
+    {editorRequested && shown !== "live" && <div className="monaco-host" ref={editor.bindHost}>
       <Suspense fallback={<DelayedLoading detail="Loading…" />}>
         <FileEditor
           modelPath={modelPath(props.tab)}
@@ -141,15 +182,7 @@ export function AppTabSurface(props: Props) {
         />
       </Suspense>
     </div>}
-    {props.tab.kind === "markdown" && mode !== "source" && <MarkdownPreview source={source} onStatus={props.onStatus} onFileLink={(href) => {
-      try {
-        const path = markdownFilePath(props.tab.resource, href);
-        if (path) props.onOpenFile(path);
-        else props.onStatus(`Markdown link: ${href}`);
-      } catch (error) {
-        props.onStatus(`Could not open ${href}: ${String(error)}`);
-      }
-    }} />}
+    {props.tab.kind === "markdown" && (mode === "preview" || mode === "split") && <MarkdownPreview source={source} onStatus={props.onStatus} onFileLink={onFileLink} />}
   </section>;
 }
 
@@ -160,11 +193,12 @@ export function AppTabSurface(props: Props) {
  * `saveState` undefined means the file is still being read: the chip holds its
  * place in the row without claiming a state the tab cannot know yet.
  */
-function EditorToolbar({ canWrite, download, mode, onViewMode, saveState, tab }: {
+function EditorToolbar({ canWrite, download, liveUnavailable, mode, onViewMode, saveState, tab }: {
   canWrite: boolean;
   download(): void;
-  mode: "source" | "preview" | "split";
-  onViewMode(mode: "source" | "preview" | "split"): void;
+  liveUnavailable: boolean;
+  mode: AppTabViewMode;
+  onViewMode(mode: AppTabViewMode): void;
   saveState: SaveState | undefined;
   tab: AppOwnedTab;
 }) {
@@ -175,7 +209,14 @@ function EditorToolbar({ canWrite, download, mode, onViewMode, saveState, tab }:
       {visibleSaveState === "saving" ? "Saving…" : visibleSaveState === "dirty" ? "Unsaved" : visibleSaveState === "error" ? "Save failed" : ""}
     </span>
     {tab.kind === "markdown" && <div aria-label="Markdown view" className="markdown-modes" role="group">
-      {(["source", "preview", "split"] as const).map((item) => <button aria-pressed={mode === item} key={item} onClick={() => onViewMode(item)} type="button">{item}</button>)}
+      {(["source", "live", "preview", "split"] as const).map((item) => <button
+        aria-pressed={mode === item}
+        disabled={item === "live" && liveUnavailable}
+        key={item}
+        onClick={() => onViewMode(item)}
+        title={item === "live" && liveUnavailable ? "Live view is limited to files under 1 MiB" : undefined}
+        type="button"
+      >{item}</button>)}
     </div>}
     <button onClick={download} type="button">Download…</button>
   </header>;
@@ -210,7 +251,7 @@ export function MarkdownPreview({ source, onStatus, onFileLink }: {
   // ends, at exactly the moment the drag's selection is standing in it. Holding
   // the sanitize back only helps if the wrapper is stable too.
   const inner = useMemo(() => ({ __html: html }), [html]);
-  const [externalUrl, setExternalUrl] = useState<string>();
+  const externalLink = useExternalLinkConfirmation(onStatus);
 
   // On the document, not the article: a drag that leaves the preview still ends
   // somewhere, and a gesture whose end is never seen would hold the preview
@@ -251,21 +292,27 @@ export function MarkdownPreview({ source, onStatus, onFileLink }: {
     // to compare and must not be measured against a stale press.
     if (event.detail > 0 && pressed && Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > CLICK_SLOP_PX) return;
     if (selectionHolds(article.current)) return;
-    if (/^https?:/i.test(href)) setExternalUrl(href);
+    if (/^https?:/i.test(href)) externalLink.request(href);
     else onFileLink(href);
   }} dangerouslySetInnerHTML={inner} />
-  {externalUrl && <ConfirmationDialog
+  {externalLink.dialog}</>;
+}
+
+/** An external link, opened in the browser only once the user has seen where it goes. */
+function useExternalLinkConfirmation(onStatus: (message: string) => void) {
+  const [url, setUrl] = useState<string>();
+  const dialog = url && <ConfirmationDialog
     confirmLabel="Open link"
     destructive={false}
-    detail={externalUrl}
-    onCancel={() => setExternalUrl(undefined)}
+    detail={url}
+    onCancel={() => setUrl(undefined)}
     onConfirm={() => {
-      const url = externalUrl;
-      setExternalUrl(undefined);
+      setUrl(undefined);
       void invoke("open_external_link", { url, confirmed: true }).catch((error) => onStatus(String(error)));
     }}
     title="Open external link?"
-  />}</>;
+  />;
+  return { request: setUrl, dialog };
 }
 
 function BinarySurface({ file, onDownload }: { file: BinaryFile; onDownload(): void }) {

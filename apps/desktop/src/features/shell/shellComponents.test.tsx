@@ -56,7 +56,7 @@ const pendingTab = { key: "pending:create", kind: "pending", title: "Creating" }
 
 type TabStripOverrides = Partial<Pick<
   ComponentProps<typeof TabStrip>,
-  "activeKey" | "canMutate" | "onCloseNonAgent" | "onCloseOthers" | "onSelect" | "onTogglePinned" | "platform" | "shortcuts"
+  "activeKey" | "canMutate" | "dropWorkspace" | "onCloseNonAgent" | "onCloseOthers" | "onSelect" | "onTogglePinned" | "platform" | "shortcuts"
 >>;
 
 /** One TabStrip with every handler stubbed, so a test names only what it means. */
@@ -1600,6 +1600,21 @@ describe("saved host picker", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("offers focus-follows-mouse as a Terminal preference, off by default", async () => {
+    const onShell = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(settings({ onShell, shell: defaultShellState })); });
+    const terminalTab = renderer.root.findAllByType("button").find((node) => node.props.children === "Terminal")!;
+    await act(async () => { terminalTab.props.onClick(); });
+    const label = renderer.root.findAllByType("label").find((node) =>
+      node.children.some((child) => child === "Focus pane on hover"))!;
+    const toggle = label.findByType("input");
+    expect(toggle.props.checked).toBe(false);
+    await act(async () => { toggle.props.onChange({ target: { checked: true } }); });
+    expect(onShell).toHaveBeenCalledWith({ focusFollowsMouse: true });
+    await act(async () => renderer.unmount());
+  });
+
   it("picks the mode new Markdown tabs start in without touching the ones already open", async () => {
     const onShell = vi.fn();
     let renderer!: ReturnType<typeof create>;
@@ -2064,5 +2079,128 @@ describe("pinning by Shift-click", () => {
     expect(html).toContain("<span>Working</span>");
     expect(html.indexOf("Loose blocked")).toBeLessThan(html.indexOf("Pinned working"));
     expect(html.indexOf("Pinned working")).toBeLessThan(html.indexOf("Loose working"));
+  });
+});
+
+describe("moving tabs and agents", () => {
+  const openAgentMenu = (renderer: ReturnType<typeof create>) => renderer.root.findByProps({ "data-agent-index": 0 })
+    .props.onContextMenu({ preventDefault: noop, clientX: 10, clientY: 10 });
+
+  it("offers bringing an agent here and opens the workspace choice where its menu was", async () => {
+    const bringHere = vi.fn();
+    const moveToTwo = vi.fn();
+    const agentMoves = vi.fn(() => ({ bringHere, workspaces: [{ id: "$2", name: "two", run: moveToTwo }] }));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<WorkspaceSidebar {...sidebarProps({ agentMoves })} />); });
+
+    await act(async () => openAgentMenu(renderer));
+    expect(renderer.root.findByProps({ "data-menu-item": "bring-here" }).props.disabled).toBe(false);
+    await act(async () => renderer.root.findByProps({ "data-menu-item": "bring-here" }).props.onClick());
+    expect(bringHere).toHaveBeenCalledTimes(1);
+
+    await act(async () => openAgentMenu(renderer));
+    await act(async () => renderer.root.findByProps({ "data-menu-item": "move-to-workspace" }).props.onClick());
+    expect(textOf(renderer.root.findByProps({ "data-menu-item": "$2" }))).toBe("two");
+    await act(async () => renderer.root.findByProps({ "data-menu-item": "$2" }).props.onClick());
+    expect(moveToTwo).toHaveBeenCalledTimes(1);
+    expect(renderer.root.findAllByProps({ "data-menu-item": "$2" })).toHaveLength(0);
+    await act(async () => renderer.unmount());
+  });
+
+  it("disables both moves when the agent's pane cannot go anywhere", async () => {
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<WorkspaceSidebar {...sidebarProps({ agentMoves: () => ({ workspaces: [] }) })} />);
+    });
+    await act(async () => openAgentMenu(renderer));
+    expect(renderer.root.findByProps({ "data-menu-item": "bring-here" }).props.disabled).toBe(true);
+    expect(renderer.root.findByProps({ "data-menu-item": "move-to-workspace" }).props.disabled).toBe(true);
+    await act(async () => renderer.unmount());
+  });
+
+  it("lights the whole strip, not a gap, for a pane that would become a tab there", async () => {
+    const { beginPointerDrag, setDropResolver } = await import("../dragDrop/pointerDrag");
+    const target = document.createElement("div");
+    target.dataset.dropTab = "terminal:@1";
+    target.getBoundingClientRect = () => ({ left: 0, width: 100 }) as DOMRect;
+    const stripElement = document.createElement("div");
+    stripElement.dataset.dropWorkspace = "$1";
+    stripElement.dataset.dropHost = "remote";
+    stripElement.append(target);
+    document.elementsFromPoint = vi.fn(() => [target, stripElement]);
+    const frame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => { queueMicrotask(() => callback(0)); return 1; });
+    setDropResolver(() => ({ kind: "run", run: noop }));
+    const press = { button: 0, pointerId: 8, clientX: 0, clientY: 0, currentTarget: document.createElement("div") };
+    const move = (x: number) => {
+      const event = new MouseEvent("pointermove", { clientX: x, clientY: 5, buttons: 1 });
+      Object.defineProperty(event, "pointerId", { value: 8 });
+      window.dispatchEvent(event);
+    };
+    try {
+      beginPointerDrag(press as never, { kind: "pane", hostProfileId: "remote", sessionId: "$1", windowId: "@2", paneId: "%5", label: "claude" });
+      let strip!: ReturnType<typeof create>;
+      await act(async () => {
+        strip = create(tabStripOver(mixedStrip, { dropWorkspace: { hostProfileId: "remote", sessionId: "$1" } }));
+      });
+      await act(async () => move(20));
+      const root = strip.root.findByProps({ "data-drop-workspace": "$1" });
+      expect(root.props.className).toBe("tabstrip drop-target");
+      expect(strip.root.findByProps({ "data-drop-tab": "terminal:@1" }).props.className).toBe("tab");
+      await act(async () => strip.unmount());
+    } finally {
+      const cancel = new MouseEvent("pointercancel");
+      Object.defineProperty(cancel, "pointerId", { value: 8 });
+      window.dispatchEvent(cancel);
+      setDropResolver(undefined);
+      frame.mockRestore();
+    }
+  });
+
+  it("marks the tab gap and the workspace row a drag would drop into, and only while it is allowed", async () => {
+    const { beginPointerDrag, setDropResolver } = await import("../dragDrop/pointerDrag");
+    const target = document.createElement("div");
+    target.dataset.dropTab = "terminal:@1";
+    target.getBoundingClientRect = () => ({ left: 0, width: 100 }) as DOMRect;
+    document.elementsFromPoint = vi.fn(() => [target]);
+    const frame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => { queueMicrotask(() => callback(0)); return 1; });
+    let allowed = true;
+    setDropResolver(() => allowed ? { kind: "run", run: noop } : { kind: "refuse", reason: "no" });
+    const press = { button: 0, pointerId: 7, clientX: 0, clientY: 0, currentTarget: document.createElement("button") };
+    const move = (x: number) => {
+      const event = new MouseEvent("pointermove", { clientX: x, clientY: 5, buttons: 1 });
+      Object.defineProperty(event, "pointerId", { value: 7 });
+      window.dispatchEvent(event);
+    };
+    try {
+      beginPointerDrag(press as never, { kind: "terminalTab", hostProfileId: "remote", sessionId: "$1", windowId: "@2", label: "claude" });
+      let strip!: ReturnType<typeof create>;
+      let rail!: ReturnType<typeof create>;
+      await act(async () => {
+        strip = create(tabStripOver(mixedStrip));
+        rail = create(<WorkspaceSidebar {...sidebarProps()} />);
+      });
+      const rowClass = () => rail.root.findByProps({ "data-drop-workspace": "$1" }).props.className as string;
+      await act(async () => move(20));
+      expect(strip.root.findByProps({ "data-drop-tab": "terminal:@1" }).props.className).toBe("tab drop-before");
+      expect(strip.root.findByProps({ "data-drop-tab": "terminal:@2" }).props.className).toBe("tab");
+
+      target.removeAttribute("data-drop-tab");
+      target.dataset.dropWorkspace = "$1";
+      target.dataset.dropHost = "remote";
+      await act(async () => move(30));
+      expect(rowClass()).toContain("drop-target");
+      expect(strip.root.findByProps({ "data-drop-tab": "terminal:@1" }).props.className).toBe("tab");
+      allowed = false;
+      target.dataset.dropHost = "elsewhere";
+      await act(async () => move(40));
+      expect(rowClass()).not.toContain("drop-target");
+      await act(async () => { strip.unmount(); rail.unmount(); });
+    } finally {
+      const cancel = new MouseEvent("pointercancel");
+      Object.defineProperty(cancel, "pointerId", { value: 7 });
+      window.dispatchEvent(cancel);
+      setDropResolver(undefined);
+      frame.mockRestore();
+    }
   });
 });

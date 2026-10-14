@@ -56,6 +56,7 @@ pub struct AppTabRecord {
 #[serde(rename_all = "camelCase")]
 pub enum AppTabViewMode {
     Source,
+    Live,
     Preview,
     Split,
 }
@@ -126,6 +127,8 @@ pub struct ShellPreferences {
     pub agent_state_glyphs: bool,
     #[serde(default)]
     pub compact_workspaces: bool,
+    #[serde(default)]
+    pub focus_follows_mouse: bool,
     /// The workspace list's one filter: pinned workspaces only.
     #[serde(default)]
     pub pinned_only: bool,
@@ -597,6 +600,7 @@ mod tests {
                 agents_section_ratio: Some(0.42),
                 agent_state_glyphs: true,
                 compact_workspaces: true,
+                focus_follows_mouse: true,
                 pinned_only: true,
                 terminal_screen_reader: false,
                 copy_on_select: Some(false),
@@ -767,6 +771,7 @@ mod tests {
         assert!(
             value.shell.agent_state_glyphs
                 && value.shell.compact_workspaces
+                && value.shell.focus_follows_mouse
                 && value.shell.pinned_only
                 && value.shell.terminal_screen_reader
                 && value.shell.copy_on_select == Some(true)
@@ -784,7 +789,7 @@ mod tests {
         );
         assert_eq!(
             value.shell.default_markdown_view,
-            Some(AppTabViewMode::Preview)
+            Some(AppTabViewMode::Live)
         );
         // Per host, and never merged: the local directory and the remote one
         // are two different machines' filesystems.

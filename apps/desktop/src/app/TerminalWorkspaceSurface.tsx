@@ -13,6 +13,9 @@ import type { Platform } from "../commands/registry";
 import { needsAttention } from "../features/agents/agentsList";
 import { stripAgentStatusGlyphs } from "../features/agents/agentLabels";
 import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
+import { beginPointerDrag, useDragSelector, type DragPayload } from "../features/dragDrop/pointerDrag";
+import { isTerminalLinkActivation } from "../features/terminal/terminalLinkActivation";
+import { usePaneHoverFocus } from "./paneHoverFocus";
 
 type TerminalWorkspaceSurfaceProps = {
   /** Whether the terminal layer is on screen rather than covered by a file. */
@@ -34,7 +37,11 @@ type TerminalWorkspaceSurfaceProps = {
   cleanWrappedCommands?: boolean;
   terminalApplicationClipboard?: boolean;
   terminalFontSize: number;
+  /** Focus-follows-mouse, already off while a dialog or menu is open or the app is in the background. */
+  hoverFocus?: boolean;
   platform?: Platform;
+  /** What a pane grabbed with the link modifier carries; nothing while the host cannot be changed. */
+  paneDragPayload?(pane: Pane): DragPayload | undefined;
   /** Receives the tiled surface element the tmux client size is measured from. */
   surfaceRef: (element: HTMLElement | null) => void;
   terminalTransferClient: TauriTerminalTransferClient;
@@ -56,10 +63,46 @@ type TerminalWorkspaceSurfaceProps = {
   setStatus(message: string): void;
 };
 
+/**
+ * The half of a pane a drop would fill. Subscribed per pane, selecting only
+ * its own edge, so a drag re-renders this marker and never the terminal.
+ */
+function PaneDropOverlay(props: { paneId: string }) {
+  const edge = useDragSelector((drag) => drag?.allowed && drag.target?.kind === "pane" && drag.target.paneId === props.paneId
+    ? drag.target.edge
+    : undefined);
+  return edge ? <div aria-hidden="true" className={`pane-drop-hint ${edge}`} /> : null;
+}
+
 /** Memoized terminal-only boundary: unrelated root notices/dialogs never revisit live panes. */
 export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
   const { activePane, activeWindow, grid } = props;
   const hasMultiplePanes = props.mountedPanes.length > 1;
+  const hoverHandlers = usePaneHoverFocus({
+    enabled: Boolean(props.hoverFocus) && hasMultiplePanes,
+    activePaneId: activePane?.id,
+    focus: (paneId) => props.controllers.current.get(paneId)?.focus(),
+  });
+  /**
+   * The link modifier (⌘ on macOS, Ctrl elsewhere) grabs the pane itself.
+   * Caught before the terminal sees the press, so no selection starts and a
+   * program reading the mouse gets no click; over a link the press is left
+   * alone and opens it, the way that modifier always has. The grab does not
+   * focus the pane: focus stays on the pane you were in, unless that is the
+   * pane you move.
+   */
+  const beginPaneDrag = (event: PointerEvent<HTMLElement>, pane: Pane) => {
+    if (event.button !== 0 || !isTerminalLinkActivation(event, props.platform ?? "linux")) return;
+    if (!(event.target instanceof Element)) return;
+    // The pane's own controls (dividers, the find bar, the new-output button)
+    // keep their modified clicks.
+    if (event.target.closest(".divider-handle, .xterm-cursor-pointer, .terminal-search, button")) return;
+    const payload = props.paneDragPayload?.(pane);
+    if (!payload) return;
+    event.preventDefault();
+    event.stopPropagation();
+    beginPointerDrag(event, payload);
+  };
   return <div className="terminal-window" ref={props.surfaceRef} aria-label={activeWindow ? `Terminal tab ${stripAgentStatusGlyphs(activeWindow.name)}` : "Terminal"}>
     {props.mountedPanes.map((pane) => {
       // The floating `%N · cmd` badge is gone: it overlapped the pane's own
@@ -73,8 +116,11 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
       const hasBottomSeparator = hasMultiplePanes && !zoomed && pane.top + pane.height < grid.height;
       return <div
         className={`pane-frame${pane.active ? " active" : ""}${wantsAttention ? " attention" : ""}`}
+        data-drop-pane={pane.id}
         key={pane.id}
         style={renderedPaneStyle(pane, grid, zoomed)}
+        {...hoverHandlers(pane.id)}
+        onPointerDownCapture={(event) => beginPaneDrag(event, pane)}
       >
       <TerminalPane
         visible={props.visible}
@@ -133,6 +179,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         role="separator"
         tabIndex={0}
       />}
+      <PaneDropOverlay paneId={pane.id} />
     </div>;
     })}
     {props.panes.length === 0 && <p className="quiet-empty">No tmux panes in this terminal window.</p>}

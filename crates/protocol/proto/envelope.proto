@@ -454,6 +454,12 @@ enum TmuxActionKind {
   TMUX_ACTION_KIND_ZOOM_PANE = 18;
   TMUX_ACTION_KIND_CLOSE_PANE = 19;
   TMUX_ACTION_KIND_SET_PINNED = 20;
+  // Moves window_id out of session_id into target_session_id.
+  TMUX_ACTION_KIND_MOVE_WINDOW = 21;
+  // Moves pane_id into target_pane_id's window, on pane_edge of it.
+  TMUX_ACTION_KIND_JOIN_PANE = 22;
+  // Moves pane_id out of its window into a new window in target_session_id.
+  TMUX_ACTION_KIND_BREAK_PANE = 23;
 }
 
 message TmuxAction {
@@ -479,7 +485,21 @@ message TmuxAction {
   // The pin state SET_PINNED writes for session_id, or for window_id inside it
   // when that is set.
   bool pinned = 16;
-  // NEXT FREE FIELD = 18.
+  // The pane JOIN_PANE places pane_id beside.
+  string target_pane_id = 18;
+  // The session MOVE_WINDOW and BREAK_PANE move into.
+  string target_session_id = 19;
+  // Which side of target_pane_id JOIN_PANE places pane_id on.
+  PaneEdge pane_edge = 20;
+  // NEXT FREE FIELD = 21.
+}
+
+enum PaneEdge {
+  PANE_EDGE_UNSPECIFIED = 0;
+  PANE_EDGE_LEFT = 1;
+  PANE_EDGE_RIGHT = 2;
+  PANE_EDGE_TOP = 3;
+  PANE_EDGE_BOTTOM = 4;
 }
 
 enum WindowRelativePosition {
@@ -1055,6 +1075,9 @@ message AgentRoute {
   uint64 attention_generation = 10;
   reserved 11, 12;
   reserved "nested_provenance", "reported_pane_id";
+  // The agent pane's own title, so agents sharing a window keep their own
+  // session names. Empty from a host that predates it.
+  string pane_title_fallback = 13;
 }
 
 message AgentAdapterDescriptor {

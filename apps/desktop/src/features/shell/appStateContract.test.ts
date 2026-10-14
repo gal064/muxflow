@@ -67,7 +67,7 @@ describe("persisted app state contract", () => {
     expect(typed.shell.panelWidth).toBe(320);
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
-    expect(typed.shell.defaultMarkdownView).toBe("preview");
+    expect(typed.shell.defaultMarkdownView).toBe("live");
     expect(typed.workspaceDefaults.local).toEqual({ directory: "/work/projects", startupCommand: "git status" });
   });
 
@@ -176,6 +176,7 @@ describe("per-host workspace defaults", () => {
       schemaVersion: 1, appTabs: [], workspaceUi: [], shell: { defaultMarkdownView: value },
     }).shell.defaultMarkdownView;
     expect(shell("source")).toBe("source");
+    expect(shell("live")).toBe("live");
     expect(shell("preview")).toBe("preview");
     expect(shell("split")).toBe("split");
     expect(shell("reader")).toBe("split");
@@ -245,6 +246,12 @@ describe("reading state the previous build wrote", () => {
     expect(saved({ compactWorkspaces: true }).shell.compactWorkspaces).toBe(true);
     expect(saved({ compactWorkspaces: false }).shell.compactWorkspaces).toBe(false);
     expect(saved({}).shell.compactWorkspaces).toBe(false);
+  });
+
+  it("restores focus-follows-mouse and leaves it off for saves without it", () => {
+    expect(saved({ focusFollowsMouse: true }).shell.focusFollowsMouse).toBe(true);
+    expect(saved({ focusFollowsMouse: false }).shell.focusFollowsMouse).toBe(false);
+    expect(saved({}).shell.focusFollowsMouse).toBe(false);
   });
 
   it("persists terminal copy preferences and turns them on for saves without them", () => {

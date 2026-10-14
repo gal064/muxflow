@@ -56,6 +56,8 @@ export interface AgentRecord extends AgentRoute {
   adapterId: AgentAdapterId;
   nativeSessionId: string;
   displayName: string;
+  /** The agent pane's own title, which names the agent ahead of its window. */
+  paneTitle: string;
   lifecycle: AgentLifecycle;
   lifecycleGeneration: AgentGeneration;
   attentionGeneration: AgentGeneration;

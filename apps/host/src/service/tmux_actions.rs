@@ -9,7 +9,10 @@ pub(in crate::service) use command::{
     APP_SHELL, configure_new_session, escaped_format_literal, resolved_start_directory, run,
     run_for_ids, validate_name,
 };
-use command::{configure_new_window, configure_split, run_for_id};
+use command::{
+    JoinPlacement, configure_break_pane, configure_join_pane, configure_move_window,
+    configure_new_window, configure_split, run_for_id,
+};
 
 mod command;
 
@@ -213,6 +216,37 @@ pub(super) fn execute(
         v1::TmuxActionKind::ClosePane => {
             command.args(["kill-pane", "-t", &action.pane_id]);
             run(command)?;
+            result.pane_id = action.pane_id;
+        }
+        // Window and pane ids survive every move, so the results echo them.
+        v1::TmuxActionKind::MoveWindow => {
+            configure_move_window(&mut command, &action);
+            run(command)?;
+            result.session_id = action.target_session_id;
+            result.window_id = action.window_id;
+        }
+        v1::TmuxActionKind::JoinPane => {
+            let target = before
+                .panes
+                .iter()
+                .find(|pane| pane.id == action.target_pane_id)
+                .context("target pane disappeared")?;
+            result.session_id = target.session_id.clone();
+            result.window_id = target.window_id.clone();
+            let placement = join_placement(&before, &action);
+            configure_join_pane(
+                &mut command,
+                v1::PaneEdge::try_from(action.pane_edge).unwrap_or_default(),
+                &action,
+                placement,
+            )?;
+            run(command)?;
+            result.pane_id = action.pane_id;
+        }
+        v1::TmuxActionKind::BreakPane => {
+            configure_break_pane(&mut command, &action);
+            result.window_id = run_for_id(command, '@')?;
+            result.session_id = action.target_session_id;
             result.pane_id = action.pane_id;
         }
         v1::TmuxActionKind::Unspecified => bail!("tmux action kind is required"),
@@ -505,6 +539,50 @@ fn action_postcondition(
             window(&target.window_id).is_some_and(|item| item.zoomed == action.zoomed)
         }
         v1::TmuxActionKind::ClosePane => pane(&action.pane_id).is_none(),
+        v1::TmuxActionKind::MoveWindow => {
+            fn panes_of<'a>(
+                snapshot: &'a tmux_control::TmuxSnapshot,
+                window_id: &str,
+            ) -> Vec<&'a str> {
+                let mut ids: Vec<_> = snapshot
+                    .panes
+                    .iter()
+                    .filter(|item| item.window_id == window_id)
+                    .map(|item| item.id.as_str())
+                    .collect();
+                ids.sort_unstable();
+                ids
+            }
+            window(&action.window_id)
+                .is_some_and(|item| item.session_id == action.target_session_id)
+                && panes_of(before, &action.window_id) == panes_of(after, &action.window_id)
+        }
+        v1::TmuxActionKind::JoinPane => {
+            let (Some(moved), Some(target)) = (pane(&action.pane_id), pane(&action.target_pane_id))
+            else {
+                return false;
+            };
+            moved.window_id == target.window_id
+                && moved.active == join_placement(before, action).keeps_focus
+                && match v1::PaneEdge::try_from(action.pane_edge).unwrap_or_default() {
+                    v1::PaneEdge::Left => moved.left < target.left,
+                    v1::PaneEdge::Right => moved.left > target.left,
+                    v1::PaneEdge::Top => moved.top < target.top,
+                    v1::PaneEdge::Bottom => moved.top > target.top,
+                    v1::PaneEdge::Unspecified => false,
+                }
+        }
+        v1::TmuxActionKind::BreakPane => {
+            pane(&action.pane_id).is_some_and(|moved| moved.window_id == result.window_id)
+                && window(&result.window_id)
+                    .is_some_and(|item| item.session_id == action.target_session_id)
+                && after
+                    .panes
+                    .iter()
+                    .filter(|item| item.window_id == result.window_id)
+                    .count()
+                    == 1
+        }
         v1::TmuxActionKind::Unspecified => false,
     }
 }
@@ -599,6 +677,7 @@ fn validate_targets(
             | v1::TmuxActionKind::CreateWindow
             | v1::TmuxActionKind::ReorderWindow
             | v1::TmuxActionKind::SetPinned
+            | v1::TmuxActionKind::MoveWindow
     );
     if session_required {
         validate_tmux_id(&action.session_id, '$')?;
@@ -616,6 +695,7 @@ fn validate_targets(
             | v1::TmuxActionKind::ReorderWindow
             | v1::TmuxActionKind::SelectWindow
             | v1::TmuxActionKind::CloseWindow
+            | v1::TmuxActionKind::MoveWindow
     );
     if window_required {
         validate_tmux_id(&action.window_id, '@')?;
@@ -667,6 +747,8 @@ fn validate_targets(
             | v1::TmuxActionKind::ResizePaneDown
             | v1::TmuxActionKind::ZoomPane
             | v1::TmuxActionKind::ClosePane
+            | v1::TmuxActionKind::JoinPane
+            | v1::TmuxActionKind::BreakPane
     );
     if pane_required {
         validate_tmux_id(&action.pane_id, '%')?;
@@ -674,7 +756,130 @@ fn validate_targets(
             bail!("pane no longer exists");
         }
     }
+    validate_move_targets(kind, action, snapshot)
+}
+
+/// What a move must not do: land where it already is, or empty the workspace
+/// it leaves. tmux destroys a session whose last window goes, and a drag is
+/// not consent to close a workspace, so that case is refused rather than
+/// confirmed.
+fn validate_move_targets(
+    kind: v1::TmuxActionKind,
+    action: &v1::TmuxAction,
+    snapshot: &tmux_control::TmuxSnapshot,
+) -> anyhow::Result<()> {
+    let windows_in = |session_id: &str| {
+        snapshot
+            .windows
+            .iter()
+            .filter(|item| item.session_id == session_id)
+            .count()
+    };
+    let panes_in = |window_id: &str| {
+        snapshot
+            .panes
+            .iter()
+            .filter(|item| item.window_id == window_id)
+            .count()
+    };
+    // A window linked into several sessions is listed once per session, and
+    // tmux picks which link a move takes: the counts above cannot speak for
+    // the other sessions, any of which the move could empty.
+    let refuse_linked = |window_id: &str| -> anyhow::Result<()> {
+        if snapshot
+            .windows
+            .iter()
+            .filter(|item| item.id == window_id)
+            .count()
+            > 1
+        {
+            bail!("a tab shown in more than one workspace cannot be moved");
+        }
+        Ok(())
+    };
+    let require_target_session = || -> anyhow::Result<()> {
+        validate_tmux_id(&action.target_session_id, '$')?;
+        if !snapshot
+            .sessions
+            .iter()
+            .any(|item| item.id == action.target_session_id)
+        {
+            bail!("target session no longer exists");
+        }
+        Ok(())
+    };
+    match kind {
+        v1::TmuxActionKind::MoveWindow => {
+            require_target_session()?;
+            refuse_linked(&action.window_id)?;
+            if !snapshot
+                .windows
+                .iter()
+                .any(|item| item.id == action.window_id && item.session_id == action.session_id)
+            {
+                bail!("window is not linked to the requested session");
+            }
+            if action.target_session_id == action.session_id {
+                bail!("window move target must be a different session");
+            }
+            if windows_in(&action.session_id) == 1 {
+                bail!("moving a workspace's only tab would close the workspace");
+            }
+        }
+        v1::TmuxActionKind::JoinPane => {
+            validate_tmux_id(&action.target_pane_id, '%')?;
+            let target = snapshot
+                .panes
+                .iter()
+                .find(|item| item.id == action.target_pane_id)
+                .context("target pane no longer exists")?;
+            let source = snapshot
+                .panes
+                .iter()
+                .find(|item| item.id == action.pane_id)
+                .context("pane no longer exists")?;
+            refuse_linked(&source.window_id)?;
+            if source.id == target.id {
+                bail!("a pane cannot be joined to itself");
+            }
+            if v1::PaneEdge::try_from(action.pane_edge).unwrap_or_default()
+                == v1::PaneEdge::Unspecified
+            {
+                bail!("pane join requires an explicit edge");
+            }
+            if panes_in(&source.window_id) == 1 && windows_in(&source.session_id) == 1 {
+                bail!("moving a workspace's only pane would close the workspace");
+            }
+        }
+        v1::TmuxActionKind::BreakPane => {
+            require_target_session()?;
+            let source = snapshot
+                .panes
+                .iter()
+                .find(|item| item.id == action.pane_id)
+                .context("pane no longer exists")?;
+            refuse_linked(&source.window_id)?;
+            if panes_in(&source.window_id) == 1 {
+                bail!("a window's only pane moves with its window, not by breaking it out");
+            }
+        }
+        _ => {}
+    }
     Ok(())
+}
+
+/// Read before the join: afterwards the pane has moved and tmux has picked a
+/// new active pane in the window it left.
+fn join_placement(snapshot: &tmux_control::TmuxSnapshot, action: &v1::TmuxAction) -> JoinPlacement {
+    let pane = |id: &str| snapshot.panes.iter().find(|item| item.id == id);
+    let (Some(source), Some(target)) = (pane(&action.pane_id), pane(&action.target_pane_id)) else {
+        return JoinPlacement::default();
+    };
+    let same_window = source.window_id == target.window_id;
+    JoinPlacement {
+        same_window,
+        keeps_focus: same_window && source.active,
+    }
 }
 
 fn reorder_window(
@@ -717,14 +922,27 @@ fn reorder_window(
             .collect()
     };
     if !adjacent_ids.is_empty() {
-        run(window_reorder_command(window_id, &adjacent_ids)?)?;
+        let shown = windows
+            .iter()
+            .find(|window| window.active)
+            .map(|window| format!("{session_id}:{}", window.id));
+        run(window_reorder_command(
+            window_id,
+            &adjacent_ids,
+            shown.as_deref(),
+        )?)?;
     }
     Ok(())
 }
 
+/// A swap moves which window is current: with `-d` the moved window becomes
+/// current, without it the current index does and so whichever window lands
+/// there. Reordering never changes the tab on screen, so the window that was
+/// current is selected again at the end of the same command list.
 fn window_reorder_command(
     window_id: &str,
     adjacent_ids: &[&str],
+    shown: Option<&str>,
 ) -> anyhow::Result<std::process::Command> {
     let mut command = tmux_command()?;
     if let Some((first, rest)) = adjacent_ids.split_first() {
@@ -732,6 +950,9 @@ fn window_reorder_command(
         for adjacent in rest {
             command.arg(";");
             command.args(["swap-window", "-d", "-s", window_id, "-t", adjacent]);
+        }
+        if let Some(shown) = shown {
+            command.args([";", "select-window", "-t", shown]);
         }
     }
     Ok(command)
