@@ -49,6 +49,7 @@ pub(super) fn record(value: &StoredAgent) -> v1::AgentRecord {
             window_name_fallback: value.route.window_name_fallback.clone(),
             pane_id: value.route.pane_id.clone(),
             pane_index_fallback: value.route.pane_index_fallback,
+            pane_title_fallback: value.route.pane_title_fallback.clone(),
             agent_id: value.agent_id.clone(),
             attention_generation: value.attention_generation,
         }),

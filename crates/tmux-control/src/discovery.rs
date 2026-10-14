@@ -55,6 +55,10 @@ pub struct Pane {
     pub current_command: String,
     pub pane_pid: u32,
     pub start_command: String,
+    /// What the program in the pane announced as its title. Empty while it
+    /// has announced none: tmux starts every pane titled with the hostname,
+    /// which names nothing about the pane.
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,7 +147,7 @@ where
         panes: query(
             &mut execute,
             "list-panes",
-            "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}",
+            "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}__ADE_TMUX_FIELD_9C71__#{?#{||:#{==:#{pane_title},#{host}},#{==:#{pane_title},#{host_short}}},,#{pane_title}}",
         )?
         .iter()
         .map(|line| parse_pane(line))
@@ -157,7 +161,7 @@ where
 
 const SESSION_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{session_name}__ADE_TMUX_FIELD_9C71__#{session_windows}__ADE_TMUX_FIELD_9C71__#{session_attached}";
 const WINDOW_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{window_index}__ADE_TMUX_FIELD_9C71__#{window_name}__ADE_TMUX_FIELD_9C71__#{window_active}__ADE_TMUX_FIELD_9C71__#{window_layout}__ADE_TMUX_FIELD_9C71__#{window_zoomed_flag}";
-const PANE_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}";
+const PANE_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}__ADE_TMUX_FIELD_9C71__#{?#{||:#{==:#{pane_title},#{host}},#{==:#{pane_title},#{host_short}}},,#{pane_title}}";
 
 const IDENTITY_MARKER: &str = "__ADE_ID__";
 const SESSION_MARKER: &str = "__ADE_S__";
@@ -350,7 +354,7 @@ fn parse_window(line: &str) -> Result<Window, DiscoverError> {
 }
 
 fn parse_pane(line: &str) -> Result<Pane, DiscoverError> {
-    let value = fields("pane", line, 13)?;
+    let value = fields("pane", line, 14)?;
     let pane_pid = number::<u32>("pane", line, value[11])?;
     Ok(Pane {
         session_id: value[0].into(),
@@ -366,6 +370,7 @@ fn parse_pane(line: &str) -> Result<Pane, DiscoverError> {
         current_command: value[10].into(),
         pane_pid,
         start_command: value[12].into(),
+        title: value[13].into(),
     })
 }
 
@@ -396,7 +401,7 @@ mod tests {
             "$1{SEPARATOR}@2{SEPARATOR}0{SEPARATOR}editor{SEPARATOR}1{SEPARATOR}b25d,80x24,0,0,2{SEPARATOR}0"
         );
         let pane = format!(
-            "$1{SEPARATOR}@2{SEPARATOR}%3{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp/a path{SEPARATOR}fish{SEPARATOR}123{SEPARATOR}"
+            "$1{SEPARATOR}@2{SEPARATOR}%3{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp/a path{SEPARATOR}fish{SEPARATOR}123{SEPARATOR}{SEPARATOR}✳ alpha session"
         );
         let parsed = parse_batched_discovery(
             &batched_output(&[&session], &[&window], &[&pane]),
@@ -409,6 +414,7 @@ mod tests {
         assert_eq!(parsed.snapshot.sessions[0].order, 0);
         assert_eq!(parsed.snapshot.windows[0].name, "editor");
         assert_eq!(parsed.snapshot.panes[0].current_path, "/tmp/a path");
+        assert_eq!(parsed.snapshot.panes[0].title, "✳ alpha session");
 
         // The batched argv and the per-command formats must describe the same
         // fields, or one path would parse records the other cannot produce.
@@ -455,7 +461,7 @@ mod tests {
                 "$1{SEPARATOR}@2{SEPARATOR}0{SEPARATOR}editor{SEPARATOR}1{SEPARATOR}b25d,80x24,0,0,2{SEPARATOR}0"
             ),
             _ => format!(
-                "$1{SEPARATOR}@2{SEPARATOR}%3{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp{SEPARATOR}fish{SEPARATOR}123{SEPARATOR}"
+                "$1{SEPARATOR}@2{SEPARATOR}%3{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp{SEPARATOR}fish{SEPARATOR}123{SEPARATOR}{SEPARATOR}"
             ),
         };
         let mut seen = Vec::new();
@@ -480,8 +486,9 @@ mod tests {
 
     #[test]
     fn parses_names_and_paths_without_whitespace_splitting() {
-        let pane = parse_pane("$1__ADE_TMUX_FIELD_9C71__@2__ADE_TMUX_FIELD_9C71__%3__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__1__ADE_TMUX_FIELD_9C71__80__ADE_TMUX_FIELD_9C71__24__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__/tmp/a path__ADE_TMUX_FIELD_9C71__fish__ADE_TMUX_FIELD_9C71__123__ADE_TMUX_FIELD_9C71__").unwrap();
+        let pane = parse_pane("$1__ADE_TMUX_FIELD_9C71__@2__ADE_TMUX_FIELD_9C71__%3__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__1__ADE_TMUX_FIELD_9C71__80__ADE_TMUX_FIELD_9C71__24__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__0__ADE_TMUX_FIELD_9C71__/tmp/a path__ADE_TMUX_FIELD_9C71__fish__ADE_TMUX_FIELD_9C71__123__ADE_TMUX_FIELD_9C71____ADE_TMUX_FIELD_9C71__title with spaces").unwrap();
         assert_eq!(pane.current_path, "/tmp/a path");
+        assert_eq!(pane.title, "title with spaces");
 
         let session = parse_session("$1__ADE_TMUX_FIELD_9C71__name with spaces__ADE_TMUX_FIELD_9C71__2__ADE_TMUX_FIELD_9C71__1").unwrap();
         assert_eq!(session.name, "name with spaces");
@@ -507,7 +514,7 @@ mod tests {
         let panes = (0..100)
             .map(|pane| {
                 format!(
-                    "${}{SEPARATOR}@{pane}{SEPARATOR}%{pane}{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp{SEPARATOR}bash{SEPARATOR}999999{SEPARATOR}exec bash",
+                    "${}{SEPARATOR}@{pane}{SEPARATOR}%{pane}{SEPARATOR}0{SEPARATOR}1{SEPARATOR}80{SEPARATOR}24{SEPARATOR}0{SEPARATOR}0{SEPARATOR}/tmp{SEPARATOR}bash{SEPARATOR}999999{SEPARATOR}exec bash{SEPARATOR}bash",
                     pane / 5,
                 )
             })

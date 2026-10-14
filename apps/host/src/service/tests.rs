@@ -555,6 +555,7 @@ fn a_refreshed_baseline_names_what_moved() {
         current_command: "bash".into(),
         pane_pid: 0,
         start_command: String::new(),
+        title: String::new(),
     };
     let base = tmux_control::TmuxSnapshot {
         sessions: vec![tmux_control::Session {

@@ -1041,6 +1041,9 @@ message AgentRoute {
   uint64 attention_generation = 10;
   reserved 11, 12;
   reserved "nested_provenance", "reported_pane_id";
+  // The agent pane's own title, so agents sharing a window keep their own
+  // session names. Empty from a host that predates it.
+  string pane_title_fallback = 13;
 }
 
 message AgentAdapterDescriptor {
