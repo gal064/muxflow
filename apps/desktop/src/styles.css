@@ -1079,6 +1079,136 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .port-suggestion:hover { border-color: var(--accent); }
 .port-suggestion small { color: var(--chrome-faint); font-family: var(--font-sans); font-size: var(--type-meta); }
 
+/* Automations: a panel extension (features/automations), host-scoped like Ports. */
+.automations-panel { display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+.automations-head { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 6px 12px; }
+.automations-host { flex: 1; min-width: 0; display: flex; }
+.automations-host select { flex: 1; min-width: 0; }
+.automations-host-name { flex: 1; min-width: 0; color: var(--chrome-dim); font-size: var(--type-secondary); }
+.automations-new { flex: 0 0 auto; padding: 3px 10px; border: 1px solid; border-radius: 4px; font-size: 11px; }
+.automations-banner {
+  display: grid; gap: 3px; margin: 0 12px 8px; padding: 8px 10px;
+  border: 1px solid var(--danger); border-radius: 4px; background: var(--danger-wash);
+  color: var(--chrome-ink); font-size: var(--type-secondary); overflow-wrap: anywhere;
+}
+.automations-banner strong { color: var(--danger-ink); }
+.automations-panel > .automations-banner:first-child { margin-top: 8px; }
+.automations-empty {
+  display: grid; gap: 8px; justify-items: center; padding: 24px 16px;
+  color: var(--chrome-dim); font-size: var(--type-secondary); line-height: 1.5; text-align: center;
+}
+.automations-empty strong { color: var(--chrome-ink-strong); font-size: var(--type-row); }
+.automations-empty p { margin: 0; }
+.automations-empty button { padding: 4px 10px; border: 1px solid; border-radius: 4px; font-size: 11px; }
+.automations-empty code { color: var(--chrome-faint); font-family: var(--font-mono); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.automations-list { display: grid; gap: 2px; margin: 0; padding: 0 6px 10px; list-style: none; }
+/* The main button spans the row, so its meta line runs under the actions too;
+   the actions sit over its first line, which leaves them room. */
+.automation-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; padding: 8px; border-radius: 6px; }
+.automation-row > * { grid-row: 1; }
+.automation-row:hover, .automation-row:focus-within { background: var(--chrome-hover); }
+.automation-row-main {
+  grid-column: 1 / -1; min-width: 0; display: grid; gap: 4px; padding: 0; border: 0;
+  background: transparent; color: var(--chrome-ink); text-align: left;
+}
+.automation-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--chrome-ink-strong); font-size: var(--type-row); font-weight: 600; }
+.automation-row-main > .automation-name { margin-right: 118px; }
+.automation-row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; color: var(--chrome-dim); font-size: var(--type-meta); }
+.automation-row-meta > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.automation-row-meta > .automation-row-error { white-space: normal; }
+.automation-row-agent { color: var(--chrome-faint); font-family: var(--font-mono); overflow-wrap: anywhere; }
+.automation-row-error { color: var(--danger-ink); }
+.automation-row.paused .automation-name { color: var(--chrome-dim); }
+.automation-row-actions { grid-column: 2; display: flex; align-items: center; gap: 8px; padding-top: 1px; }
+.automation-button {
+  padding: 1px 7px; border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: transparent; color: var(--chrome-dim); font-size: var(--type-meta); white-space: nowrap;
+}
+.automation-button:hover:not(:disabled) { background: var(--chrome-hover); color: var(--chrome-ink); }
+.automation-switch {
+  position: relative; flex: none; width: 26px; height: 15px; padding: 0; border: 0; border-radius: 8px;
+  background: var(--chrome-border);
+}
+.automation-switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%;
+  background: var(--chrome-dim); transition: left .15s;
+}
+.automation-switch[aria-checked="true"] { background: var(--accent); }
+.automation-switch[aria-checked="true"]::after { left: 13px; background: var(--chrome-bg); }
+.automation-switch:disabled { opacity: .45; }
+.automation-switch:focus-visible { outline: 2px solid var(--chrome-ink-strong); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .automation-switch::after { transition: none; } }
+.automation-chip {
+  flex: 0 0 auto; padding: 1px 6px; border-radius: 4px; background: var(--chrome-raised);
+  color: var(--chrome-dim); font-size: var(--type-meta); white-space: nowrap;
+}
+.automation-chip.working, .automation-chip.launched { color: var(--state-working); background: color-mix(in srgb, var(--state-working) 14%, transparent); }
+.automation-chip.done { color: var(--state-done); background: color-mix(in srgb, var(--state-done) 14%, transparent); }
+.automation-chip.needs_attention, .automation-chip.failed { color: var(--danger-ink); background: var(--danger-wash); }
+.automation-detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 8px 12px 12px; }
+.automation-detail-head { display: flex; align-items: center; gap: 8px; font-size: var(--type-secondary); }
+.automation-detail-head .automation-name { flex: 1; }
+.automation-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 10px; margin: 0; font-size: var(--type-secondary); }
+.automation-facts dt { color: var(--chrome-faint); }
+.automation-facts dd { margin: 0; color: var(--chrome-ink); overflow-wrap: anywhere; }
+.automation-facts code { font-family: var(--font-mono); font-size: var(--type-meta); }
+.automation-prompt {
+  margin: 0; padding: 8px 10px; border: 1px solid var(--chrome-hairline); border-radius: 6px; background: var(--chrome-raised);
+  color: var(--chrome-ink); font-size: var(--type-secondary); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.automation-detail > .section-label { margin: 6px 0 0; }
+.automation-detail > .quiet-empty { margin: 0; padding: 0; }
+.automation-runs { margin: 0; padding: 0; list-style: none; }
+.automation-run {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 2px 8px;
+  padding: 6px 0; border-top: 1px solid var(--chrome-hairline); font-size: var(--type-secondary);
+}
+.automation-run-number { color: var(--chrome-faint); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.automation-run-when { color: var(--chrome-ink); font-variant-numeric: tabular-nums; }
+.automation-run-open { font-size: var(--type-meta); }
+.automation-run-gone { color: var(--chrome-faint); font-size: var(--type-meta); }
+.automation-run-message {
+  grid-column: 2 / -1; overflow: hidden; color: var(--chrome-dim); font-size: var(--type-meta);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere;
+}
+.automation-editor {
+  display: grid; grid-template-rows: auto minmax(0, 1fr); width: min(620px, calc(100vw - 32px)); max-height: min(720px, 84vh);
+  border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
+  background: var(--chrome-raised); box-shadow: 0 24px 60px rgb(0 0 0 / .6);
+}
+.automation-editor > header { display: flex; align-items: baseline; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--chrome-hairline); }
+.automation-editor > header h2 { margin: 0; font-size: 16px; }
+.automation-editor-host { color: var(--chrome-faint); font-size: var(--type-secondary); }
+.automation-editor-form { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; }
+.automation-editor-form > footer { display: grid; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--chrome-hairline); }
+.automation-editor-body { display: grid; align-content: start; gap: 12px; padding: 16px; overflow-y: auto; }
+.automation-editor-body label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11.5px; }
+.automation-editor-body input, .automation-editor-body textarea {
+  width: 100%; min-height: 30px; padding: 6px; border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-size: var(--type-row);
+}
+.automation-editor-body [aria-invalid="true"] { border-color: var(--danger); }
+.automation-editor-body textarea { resize: vertical; line-height: 1.45; }
+.automation-editor-body .mono { font-family: var(--font-mono); font-size: 12px; }
+.automation-editor-body input[readonly] { border-style: dashed; background: transparent; color: var(--chrome-dim); }
+.automation-editor-body .settings-hint { margin: -6px 0 0; }
+.automation-editor-body .settings-hint strong { color: var(--chrome-ink); font-weight: 500; }
+.automation-editor-body .dialog-error strong { color: inherit; }
+.automation-editor-agent { display: grid; gap: 5px; margin: 0; padding: 0; border: 0; }
+.automation-editor-agent legend { padding: 0 0 5px; color: var(--chrome-dim); font-size: 11.5px; }
+.automation-editor-agent .segmented { gap: 0; width: fit-content; overflow: hidden; border: 1px solid var(--chrome-border); border-radius: 6px; }
+.automation-editor-agent .segment { border-right: 1px solid var(--chrome-border); border-radius: 0; padding: 5px 12px; }
+.automation-editor-agent .segment:last-child { border-right: 0; }
+.automation-editor-agent .segment.active { background: var(--accent-wash); color: var(--accent); }
+.automation-editor-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.automation-editor-preview { display: grid; gap: 4px; }
+.automation-editor-preview code {
+  padding: 6px 8px; border-radius: 4px; background: var(--chrome-bg);
+  color: var(--chrome-ink); font-family: var(--font-mono); font-size: var(--type-meta); overflow-wrap: anywhere;
+}
+.automation-editor .dialog-actions { margin: 0; }
+.automation-editor-delete { margin-right: auto; }
+
 /* ── Document surfaces ─────────────────────────────────────────────────── */
 
 /* Every document surface paints its own background. They are drawn over a

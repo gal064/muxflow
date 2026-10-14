@@ -40,6 +40,7 @@ use operations::{Bound, OperationClaim, OperationLane, OperationRegistry};
 mod writer;
 use writer::ControlWriterHandle;
 pub(crate) mod agent;
+pub(crate) mod automation;
 pub(crate) mod files;
 pub(crate) mod git;
 pub(crate) mod git_content;

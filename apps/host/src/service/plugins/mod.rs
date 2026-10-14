@@ -20,3 +20,11 @@ pub(crate) fn start() -> Vec<tokio::task::JoinHandle<()>> {
 pub(crate) fn on_agent_reply(reply: &super::voice::AgentReply) {
     automations::on_agent_reply(reply);
 }
+
+/// `OPERATION_AUTOMATION`, for the connection `connection_id`. Blocking.
+pub(crate) fn automation_request(
+    request: tmux_agent_protocol::v1::AutomationRequest,
+    connection_id: u64,
+) -> tmux_agent_protocol::v1::Response {
+    automations::handle_request(request, connection_id)
+}

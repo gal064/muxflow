@@ -104,6 +104,49 @@ impl Schedule {
         }
     }
 
+    /// The next `count` local minutes after `after_secs` that match, read
+    /// through `local`. Whole days and hours that cannot match are stepped
+    /// over, two clock reads to a day, so even a schedule that runs once in
+    /// four years costs a few thousand. A minute daylight saving time repeats
+    /// is listed once.
+    pub(super) fn next_runs(
+        &self,
+        after_secs: i64,
+        count: usize,
+        local: impl Fn(i64) -> Option<LocalMinute>,
+    ) -> Vec<LocalMinute> {
+        let mut found: Vec<LocalMinute> = Vec::new();
+        let mut minute = after_secs.div_euclid(60) + 1;
+        let end = minute + i64::from(HORIZON_YEARS) * 366 * 24 * 60;
+        while found.len() < count && minute < end {
+            let Some(at) = local(minute * 60) else {
+                break;
+            };
+            let into_day = i64::from(at.hour) * 60 + i64::from(at.minute);
+            let step = if !self.matches_day(at.month, at.day, at.weekday) {
+                // To an hour before local midnight, then to midnight, so a day
+                // daylight saving time shortens is never stepped past.
+                let to_midnight = 24 * 60 - into_day;
+                if to_midnight > 60 {
+                    to_midnight - 60
+                } else {
+                    to_midnight
+                }
+            } else if self.hours & (1 << at.hour) == 0 {
+                60 - i64::from(at.minute)
+            } else {
+                if self.minutes & (1 << at.minute) != 0
+                    && !found.iter().any(|earlier| earlier.key() == at.key())
+                {
+                    found.push(at);
+                }
+                1
+            };
+            minute += step;
+        }
+        found
+    }
+
     /// Minutes and hours always have at least one value, so a schedule fires
     /// if and only if some calendar day matches.
     fn fires_within(&self, from_year: i32, years: i32) -> bool {
@@ -245,6 +288,45 @@ mod tests {
             assert!(start_with_step.matches(&at(2026, 1, 1, 0, minute)));
         }
         assert!(!start_with_step.matches(&at(2026, 1, 1, 0, 0)));
+    }
+
+    /// A UTC clock: minute `n` of 2026-10-13 is `START + n * 60`.
+    fn utc(unix_secs: i64) -> Option<LocalMinute> {
+        const START: i64 = 1_791_849_600; // 2026-10-13T00:00Z, a Tuesday
+        let offset = unix_secs - START;
+        let days = offset.div_euclid(86_400);
+        let into = offset.rem_euclid(86_400);
+        // Good for the rest of October, which is all the test needs.
+        let day = 13 + u8::try_from(days).ok()?;
+        Some(at(
+            2026,
+            10,
+            day,
+            (into / 3600) as u8,
+            (into % 3600 / 60) as u8,
+        ))
+    }
+
+    #[test]
+    fn next_runs_step_over_days_and_hours_that_cannot_match() {
+        let start = 1_791_849_600 + 9 * 3600; // Tuesday 09:00
+        let keys = |expression: &str| -> Vec<String> {
+            schedule(expression)
+                .next_runs(start, 3, utc)
+                .iter()
+                .map(LocalMinute::key)
+                .collect()
+        };
+        assert_eq!(
+            keys("*/20 * * * *"),
+            ["2026-10-13T09:20", "2026-10-13T09:40", "2026-10-13T10:00"],
+            "the current minute is not next"
+        );
+        assert_eq!(
+            keys("30 7 * * sat,sun"),
+            ["2026-10-17T07:30", "2026-10-18T07:30", "2026-10-24T07:30"]
+        );
+        assert_eq!(keys("0 9 * * 1-5")[0], "2026-10-14T09:00");
     }
 
     #[test]

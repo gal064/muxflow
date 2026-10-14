@@ -92,25 +92,46 @@ impl State {
         }
     }
 
-    pub(super) fn tick(&mut self, env: &Env) {
-        let now_ms = (env.now_ms)();
-        let now_secs = now_ms.div_euclid(1000);
-        let this_year = (env.local)(now_secs).map_or(1970, |minute| minute.year);
-        let mut dirty = false;
+    pub(super) fn paths(&self) -> &Paths {
+        &self.paths
+    }
 
-        if self
+    pub(super) fn definitions(&self) -> &Definitions {
+        &self.definitions
+    }
+
+    pub(super) fn runs(&self, id: &str) -> &[Run] {
+        self.runs
+            .automations
+            .get(id)
+            .map_or(&[], |history| history.runs.as_slice())
+    }
+
+    /// Re-reads `automations.json` if it changed. Returns whether anything a
+    /// viewer shows changed, and saves history that did.
+    pub(super) fn reload(&mut self, this_year: i32) -> bool {
+        let reload = self
             .definitions
-            .reload_if_changed(&self.paths.definitions, this_year)
-            == Reload::Loaded
-        {
-            dirty |= self.runs.sync_definitions(&self.definitions);
-        }
+            .reload_if_changed(&self.paths.definitions, this_year);
+        let mut dirty = reload == Reload::Loaded && self.runs.sync_definitions(&self.definitions);
         if self.runs.file_error != self.definitions.file_error {
             self.runs.file_error = self.definitions.file_error.clone();
             dirty = true;
         }
+        if dirty {
+            let _ = self.runs.save(&self.paths.runs);
+        }
+        dirty || reload != Reload::Unchanged
+    }
 
-        dirty |= self.follow_runs(env, now_ms);
+    /// One tick. Returns whether anything a viewer shows changed.
+    pub(super) fn tick(&mut self, env: &Env) -> bool {
+        let now_ms = (env.now_ms)();
+        let now_secs = now_ms.div_euclid(1000);
+        let this_year = (env.local)(now_secs).map_or(1970, |minute| minute.year);
+        let changed = self.reload(this_year);
+
+        let mut dirty = self.follow_runs(env, now_ms);
 
         let mut due = Vec::new();
         for minute in self.cursor.due(now_secs) {
@@ -143,7 +164,7 @@ impl State {
                     .filter_map(|pane| pane.run_number)
                     .max()
                     .unwrap_or(0);
-                self.start_run(env, &definition, key, highest_tab, now_ms);
+                self.start_run(env, &definition, key, highest_tab, now_ms, true);
                 started.insert(definition.id.clone());
             }
             self.close_old_tabs(env, &started, now_ms);
@@ -155,6 +176,38 @@ impl State {
             let _ = self.runs.save(&self.paths.runs);
         }
         self.cursor.finish((env.now_ms)().div_euclid(1000));
+        changed || dirty
+    }
+
+    /// Starts a run of `id` now, whether or not an earlier one is still
+    /// working. Its `scheduledFor` is empty, so it never stands in for a
+    /// scheduled minute.
+    pub(super) fn run_now(&mut self, env: &Env, id: &str) -> Result<(), String> {
+        let Some(definition) = self
+            .definitions
+            .good
+            .iter()
+            .find(|definition| definition.id == id)
+            .cloned()
+        else {
+            return Err(format!("no runnable automation {id:?}"));
+        };
+        let now_ms = (env.now_ms)();
+        let highest_tab = track::observe(env.tmux)
+            .unwrap_or_default()
+            .iter()
+            .filter(|pane| pane.automation_id == id)
+            .filter_map(|pane| pane.run_number)
+            .max()
+            .unwrap_or(0);
+        self.start_run(env, &definition, String::new(), highest_tab, now_ms, false);
+        self.close_old_tabs(env, &BTreeSet::from([id.to_owned()]), now_ms);
+        self.runs.prune();
+        let _ = self.runs.save(&self.paths.runs);
+        match self.runs(id).iter().max_by_key(|run| run.number) {
+            Some(run) if run.status == Status::Failed => Err(run.error.clone()),
+            _ => Ok(()),
+        }
     }
 
     /// Updates every unfinished run from its pane, and files final messages.
@@ -238,6 +291,7 @@ impl State {
         scheduled_for: String,
         highest_tab: u32,
         now_ms: i64,
+        check_overlap: bool,
     ) {
         let number = self.runs.next_number(&definition.id).max(highest_tab + 1);
         let history = self
@@ -261,6 +315,7 @@ impl State {
         if let Some(active) = history
             .runs
             .iter()
+            .filter(|_| check_overlap)
             .filter(|run| track::is_active(run, now_ms, definition.max_runtime_minutes))
             .max_by_key(|run| run.number)
         {

@@ -1,7 +1,7 @@
 # Automations: scheduled agent runs owned by the host helper
 
-Status: phase 1 (the helper) is implemented. Phase 2 (the desktop panel and its
-wire) is planned; see [Desktop panel](#desktop-panel-phase-2-planned).
+Status: implemented. Phase 1 is the helper; phase 2 is the desktop panel and
+its wire, see [Desktop panel](#desktop-panel-phase-2).
 
 Mock: [design/automations-mock.html](design/automations-mock.html) (open locally).
 
@@ -42,6 +42,9 @@ Write `automations.json` in the helper's state directory, or ask an agent to:
   ]
 }
 ```
+
+Or turn on "Show Automations" in the desktop's Settings, Workspace tab, and use
+the Automations panel beside Files, Git and Ports.
 
 The helper notices changes within 15 seconds. Each run opens a tab named
 `Fix failing CI #<n>` in the `automation` workspace, which shows up on desktop
@@ -427,7 +430,7 @@ visibility changes: `snapshot::{load_sidecar, save_sidecar,
 server_identity_from_command}`, the `tmux_actions` command helpers, and
 `terminal::send_input_batch`.
 
-### Desktop right-panel extensions (phase 2)
+### Desktop right-panel extensions
 
 `apps/desktop/src/features/shell/panelExtensions.ts`:
 
@@ -436,30 +439,34 @@ export interface PanelExtension {
   id: string;                  // "automations"
   label: string;               // "Automations"
   settingLabel: string;        // "Show Automations"
+  settingHint: string;
   Component: ComponentType<PanelExtensionProps>;
 }
-export const PANEL_EXTENSIONS: PanelExtension[] = [automationsPanel];
+export const PANEL_EXTENSIONS: readonly PanelExtension[] = [/* automations */];
 ```
 
-A one-time refactor makes the built-in places read this list:
+`PanelExtensionProps` gives an extension the shown hosts (profile, label, live
+client id, connected), the active host, `onOpenPane` and `onMessage`.
 
-- **Saved settings.** `src-tauri/src/app_state.rs` stores the panel as
-  `enum PanelSurface { Files, Git, Ports }`, and an unknown value fails to
-  load, after which every save is refused. It becomes a string defaulting to
-  `"files"`, plus `enabled_panel_extensions`. The contract
-  (`persistedAppState.contract.json`) and its tests change with it.
-- `PanelSurface` in `types.ts` accepts extension ids. Normalization falls back
-  to `files` when the stored surface is disabled or unknown.
-- `RightPanel` and `AppRightPanel` render the enabled extensions, and
-  arrow-key cycling uses the visible list.
+The built-in places read this list:
+
+- **Saved settings.** `src-tauri/src/app_state.rs` stored the panel as
+  `enum PanelSurface { Files, Git, Ports }`, where an unknown value failed the
+  whole load. It is now a string defaulting to `"files"`, plus
+  `enabled_panel_extensions`. The contract (`persistedAppState.contract.json`)
+  and its tests changed with it.
+- `PanelSurface` in `types.ts` is a string. Normalization keeps a built-in
+  surface or an enabled extension's, and falls back to `files` otherwise.
+- `RightPanel` and `AppRightPanel` render the enabled extensions after the
+  built-ins; arrow-key cycling uses the visible list, and a surface that isn't
+  showable displays Files.
 - The Settings Workspace tab renders one checkbox per extension.
-- There are no generated `view.show*` commands, so the command registry stays
-  static.
+- There are no `view.show*` commands for extensions, so the command registry
+  stays static. Selecting an extension's tab opens the panel on it.
 
-Without this, adding a panel touches 12 places in 9 files. With it, a new panel
-is one entry in the list.
+A new panel is one entry in the list.
 
-## Desktop panel (phase 2, planned)
+## Desktop panel (phase 2)
 
 ### Wire
 
@@ -474,24 +481,37 @@ A new `crates/protocol/proto/automation.proto` in the same package
 
 Requests:
 
-- **List** returns every automation with its errors, next run time and last 20
-  runs, plus `file_error`, `generation` and `state_dir`. It also subscribes the
-  connection to automation events.
+- **List** returns every entry of `automations.json` as written, invalid ones
+  included with their error (or, while the file can't be read, the entries of
+  the last version that loaded, beside `file_error`), plus each one's next run, last 20 runs and the
+  line typed into its tabs, and `file_error`, `generation` and `state_dir`. It
+  also picks up an edit the next tick would have, and subscribes the connection
+  to automation events.
 - **Save** and **Delete** carry `base_generation`, a blake3 hash of the file's
-  contents. A mismatch fails with `stale_generation` and the UI reloads, so a
-  UI save never overwrites an agent's edit. Save validates like loading, plus
-  that `cwd` exists. The file is edited as JSON so unknown fields survive, and
-  written atomically.
+  contents (empty for no file). A mismatch fails with `stale_generation` and
+  the UI reloads, so a UI save never overwrites an agent's edit. An id the
+  file uses twice is refused (`duplicate_id`) rather than guessed. Save validates
+  like loading, plus that `cwd` exists. The file is edited as JSON so unknown
+  fields survive, written pretty-printed and atomically
+  (`snapshot::write_private_atomic`), and reloaded at once. A file that can't
+  be read as a list of automations is refused (`file_unreadable`) rather than
+  replaced, so a half-finished hand edit is never lost.
 - **RunNow** starts a run through the scheduled path, without the overlap
-  check.
+  check. Its `scheduledFor` is empty, so it never stands in for a scheduled
+  minute.
 - **PreviewSchedule** returns a schedule's error or its next three run times.
 
 `AutomationEvent { bool changed }` tells subscribed connections to List again.
 Events go only to connections that listed (`send_control_event_to`), never as a
-broadcast.
+broadcast. They follow a tick that changed something, a reload of the file,
+and every Save, Delete and RunNow. A subscriber whose queue was full when a
+tick changed something hears on the next tick; one that missed an edit's event
+lists again on the next change, and its own saves are still checked against
+the generation. One that has gone is dropped.
 
 Host plumbing: `Handler::Automation` in `operation_policy.rs` (control lane,
-detached, plus a row in the exhaustive table), one arm in `dispatcher.rs`, and
+detached, plus a row in the exhaustive table), one arm in `dispatcher.rs` that
+runs `plugins::automation_request` on a blocking thread, and
 `plugins/automations/dispatch.rs`.
 
 Compatibility:
@@ -508,10 +528,12 @@ Compatibility:
 
 - Bridge: `src-tauri/src/connection/automation.rs`, an `automation_request`
   command modeled on `connection/agent.rs`. The event goes through `bridge.rs`
-  and `event_frame.rs` (kind byte 19), is decoded in `features/terminal/api.ts`,
-  and is routed like agent events, for every host, not like git events.
-- `apps/desktop/src/features/automations/`: `AutomationsPanel.tsx`,
-  `AutomationEditor.tsx`, `AutomationRuns.tsx`, `api.ts`, `types.ts`,
+  and `event_frame.rs` (kind byte 19, no payload), is decoded in
+  `features/terminal/api.ts`, and `useAppConnectionController.ts` hands it to
+  `publishAutomationChanged` for every host, like agent events, not only the
+  active one like git events.
+- `apps/desktop/src/features/automations/`: `AutomationsPanel.tsx` (list,
+  detail and history), `AutomationEditor.tsx`, `api.ts`, `types.ts`,
   `cronText.ts`, plus tests.
 - The panel is host-scoped, using each `HostLink`'s client, the local host
   included. Only the host chooser is copied from Ports, which talks over SSH
@@ -526,7 +548,11 @@ Compatibility:
   and final message, plus "Open tab" while the window exists. Open tab follows
   the agent row's path (`selectOnHost` and `resolveTerminalDestination`).
 - Mock 4, edge states: empty (shows the file path), the file can't be read
-  (banner with the error), host disconnected (the reboot note).
+  (banner with the error over the last version that loaded, which is what
+  still runs), host disconnected (the reboot note). One change from the mock:
+  while the file can't be read, the list is read-only and saving is refused
+  instead of replacing the file, which would throw away every other automation
+  in it. The banner says to fix the file on the host. Run now still works.
 - Hidden unless "Show Automations" is checked in Settings, Workspace tab.
 
 ### Mobile
@@ -542,14 +568,16 @@ If the feature isn't used:
    (`APP_SHELL`, `resolved_start_directory` and the others in
    `tmux_actions.rs`, `send_input_batch` in `terminal.rs`), or clippy reports
    them unused.
-2. Delete `apps/desktop/src/features/automations/` and its entry in
-   `PANEL_EXTENSIONS`.
-3. Delete `crates/protocol/proto/automation.proto`. In `envelope.proto`, remove
-   the import and the five additions, and reserve their numbers. Remove the
-   `operation_policy` entry and the `dispatcher` arm.
+2. Delete `apps/desktop/src/features/automations/`, its entry in
+   `PANEL_EXTENSIONS`, and the `.automation*` rules in `styles.css`.
+3. Delete `crates/protocol/proto/automation.proto` and its line in
+   `crates/protocol/build.rs`. In `envelope.proto`, remove the import and the
+   five additions, and reserve their numbers. Remove the `operation_policy`
+   entry and the `dispatcher` arm.
 4. Delete `src-tauri/src/connection/automation.rs`, its `generate_handler!`
-   entry, the event mapping in `bridge.rs` and `event_frame.rs`, and the
-   decode in `features/terminal/api.ts`.
+   entry, the event mapping in `bridge.rs` and `event_frame.rs`, the decode in
+   `features/terminal/api.ts` and its test, and the `automationChanged`
+   branch in `useAppConnectionController.ts`.
 5. Regenerate the mobile protocol types.
 6. Delete this file, `docs/design/automations-mock.html`, and their links.
 
@@ -587,9 +615,12 @@ into a fresh directory in a scratch tmux session through bracketed paste:
   and tab cleanup stop waiting for them after `maxRuntimeMinutes`.
 - **Notifications:** every finished agent run raises the usual "completed"
   alert on desktop and mobile, like any other agent.
+- **Panel requests during launches:** a launch holds the scheduler while it
+  waits, up to 10 seconds, for the new tab's shell to draw. A shell that never
+  draws a prompt delays panel requests by that long per run starting.
 - **Helper upgrades:** the daemon restarts when a different desktop build
   connects. A minute that came due during the restart is skipped.
-- **Phase 2, saved settings:** an older desktop build can't read a saved
-  extension panel. Builds ship in lockstep, but a developer running
-  `pnpm tauri dev` beside an installed older build should back up the app
-  state first.
+- **Saved settings across builds:** a desktop build from before the
+  panel-extension change can't read a saved extension panel. Builds ship in
+  lockstep, but a developer running `pnpm tauri dev` beside an installed older
+  build should back up the app state first.

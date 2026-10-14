@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { Fragment, useEffect, useId, useState } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { HostProfile } from "../../app/types";
@@ -6,6 +6,7 @@ import type { NotificationPermissionStatus } from "../agents/notifications";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
 import { hostLetter } from "./hostProfiles";
+import { PANEL_EXTENSIONS } from "./panelExtensions";
 import {
   clampedTerminalFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN,
   type AppTabViewMode, type ShellState, type WorkspaceDefaults,
@@ -247,6 +248,21 @@ export function SettingsDialog(props: SettingsDialogProps) {
             Compact workspace list
           </label>
           <p className="settings-hint">Hides individual agent lines under each workspace while keeping its activity, unread count, and connection status visible.</p>
+          {PANEL_EXTENSIONS.map((extension) => <Fragment key={extension.id}>
+            <label className="settings-check">
+              <input
+                checked={props.shell.enabledPanelExtensions.includes(extension.id)}
+                onChange={(event) => props.onShell({
+                  enabledPanelExtensions: event.target.checked
+                    ? [...props.shell.enabledPanelExtensions, extension.id]
+                    : props.shell.enabledPanelExtensions.filter((id) => id !== extension.id),
+                })}
+                type="checkbox"
+              />
+              {extension.settingLabel}
+            </label>
+            <p className="settings-hint">{extension.settingHint}</p>
+          </Fragment>)}
           <label>Default Markdown view
             <select
               aria-label="Default Markdown view"
