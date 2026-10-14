@@ -171,9 +171,12 @@ pub(super) struct FallbackShard {
 
 /// Runs at most one bounded shard for one target and folds the result back into
 /// its backoff schedule.
+///
+/// A target narrowed to `only` is one stat of that leaf, never a directory scan.
 pub(super) fn advance_target(
     target: &Arc<Mutex<FallbackTarget>>,
     stable_target: &Path,
+    only: Option<&OsStr>,
     now: Instant,
 ) -> anyhow::Result<FallbackTurn> {
     // The schedule lock is taken twice, briefly, and never across the scan.
@@ -188,7 +191,10 @@ pub(super) fn advance_target(
             state.publish_owed,
         )
     };
-    let shard = scan_fallback_shard(stable_target, &scan, restart)?;
+    let shard = match only {
+        Some(leaf) => leaf_shard(stable_target, leaf, &scan)?,
+        None => scan_fallback_shard(stable_target, &scan, restart)?,
+    };
     let mut state = target.lock().unwrap();
     if !shard.completed {
         state.next_scan = now;
@@ -233,6 +239,22 @@ pub(super) fn record_native_retry(target: &Arc<Mutex<FallbackTarget>>, restored:
     }
 }
 
+fn leaf_shard(
+    stable_target: &Path,
+    leaf: &OsStr,
+    scan: &Mutex<FallbackScan>,
+) -> anyhow::Result<FallbackShard> {
+    let fingerprint = leaf_fingerprint(stable_target, leaf)?;
+    let mut scan = scan.lock().unwrap();
+    let changed = fingerprint != scan.last_completed;
+    scan.last_completed = fingerprint;
+    Ok(FallbackShard {
+        processed: 1,
+        completed: true,
+        changed,
+    })
+}
+
 fn scan_fallback_shard(
     stable_target: &Path,
     scan: &Mutex<FallbackScan>,
@@ -249,12 +271,15 @@ fn scan_fallback_shard(
 
 pub(super) async fn advance_target_async(
     stable_target: PathBuf,
+    only: Option<OsString>,
     target: Arc<Mutex<FallbackTarget>>,
     now: Instant,
 ) -> anyhow::Result<FallbackTurn> {
-    tokio::task::spawn_blocking(move || advance_target(&target, &stable_target, now))
-        .await
-        .context("fallback filesystem scan worker stopped")?
+    tokio::task::spawn_blocking(move || {
+        advance_target(&target, &stable_target, only.as_deref(), now)
+    })
+    .await
+    .context("fallback filesystem scan worker stopped")?
 }
 
 pub(super) fn scan_fallback_shard_with_limits(

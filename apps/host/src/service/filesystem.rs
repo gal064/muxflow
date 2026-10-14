@@ -40,7 +40,7 @@ pub(crate) use terminal_upload::UploadCommitFailure;
 mod watch_fallback;
 mod watch_service;
 use failure::{cancelled, confirmation_required, stale_generation, stale_page_token};
-use listing::{NEVER_CANCELLED, resolve_watch_directory};
+use listing::{NEVER_CANCELLED, is_regular_leaf, resolve_watch_directory, single_file_snapshot};
 use listing_page::DirectoryPageCache;
 use mutations::mutation_metadata;
 use path_policy::{AnchoredMetadata, AnchoredPath, RootCapability, descriptor_path};
@@ -405,7 +405,14 @@ fn metadata_generation(metadata: &Metadata) -> u64 {
     value
 }
 
-fn watch_fingerprint(path: &Path) -> anyhow::Result<u64> {
+/// The polling fallback's change detector for one watch target.
+///
+/// A watch narrowed to `only` fingerprints that leaf alone: its siblings are
+/// neither its business nor something it may enumerate.
+fn watch_fingerprint(path: &Path, only: Option<&OsStr>) -> anyhow::Result<u64> {
+    if let Some(leaf) = only {
+        return leaf_fingerprint(path, leaf);
+    }
     let metadata = fs::metadata(path)?;
     let mut value = metadata_generation(&metadata);
     // Fold every entry into one scalar. Memory remains bounded while entries
@@ -426,6 +433,16 @@ fn watch_fingerprint(path: &Path) -> anyhow::Result<u64> {
         }
     }
     Ok(value)
+}
+
+/// One leaf's identity, or zero while it is missing: a single stat, never a
+/// directory read.
+fn leaf_fingerprint(directory: &Path, leaf: &OsStr) -> anyhow::Result<u64> {
+    match fs::symlink_metadata(directory.join(leaf)) {
+        Ok(metadata) => Ok(metadata_generation(&metadata)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// One entry's contribution to a directory's change fingerprint, or `None` for

@@ -201,7 +201,7 @@ describe("AppTabSurface", () => {
     await act(async () => { surface.renderer.unmount(); });
   });
 
-  it("edits and repeatedly saves a terminal single-file capability without watching its parent", async () => {
+  it("edits and repeatedly saves a terminal single-file capability, watching only its own file", async () => {
     vi.useFakeTimers();
     const outsideTab: AppOwnedTab = {
       ...tab,
@@ -213,10 +213,11 @@ describe("AppTabSurface", () => {
     const surface = await mount({ bootstrap: listing([]) }, { tab: outsideTab });
 
     expect(surface.opens).toEqual(["g1"]);
+    expect(surface.client.acquireDirectoryWatch).toHaveBeenCalledTimes(1);
     expect(
-      surface.client.acquireDirectoryWatch,
-      "the exact-file token enumerated its parent through a watch bootstrap",
-    ).not.toHaveBeenCalled();
+      vi.mocked(surface.client.acquireDirectoryWatch).mock.calls[0][2],
+      "the exact-file token asked to watch its parent, which the host refuses",
+    ).toBe(outsideTab.resource);
     const editor = surface.renderer.root.findByType(EditorStub);
     expect(editor.props.options?.readOnly).toBe(false);
 
@@ -228,6 +229,39 @@ describe("AppTabSurface", () => {
 
     await act(async () => { surface.renderer.unmount(); });
     vi.useRealTimers();
+  });
+
+  it("reloads a terminal single-file tab when its file changes on disk", async () => {
+    const outsideTab: AppOwnedTab = {
+      ...tab,
+      resource: "/tmp/notes/prompt.md",
+      title: "prompt.md",
+      rootPath: "/tmp/notes",
+      rootToken: `file-v2:${"b".repeat(64)}`,
+    };
+    const surface = await mount(
+      { bootstrap: listing([entry(outsideTab.resource, "g1")], { rootToken: outsideTab.rootToken, directory: "/tmp/notes" }), generations: ["g1", "g2", "g3"] },
+      { tab: outsideTab },
+    );
+    expect(surface.opens).toEqual(["g1"]);
+
+    await act(async () => {
+      surface.publish({ kind: "fileChanged", rootToken: outsideTab.rootToken!, path: outsideTab.resource, generation: "g2" });
+      await Promise.resolve();
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(surface.opens, "a precise change to the linked file left the tab stale").toEqual(["g1", "g2"]);
+
+    await act(async () => {
+      surface.publish({
+        kind: "directorySnapshot", rootToken: outsideTab.rootToken!,
+        listing: listing([entry(outsideTab.resource, "g3")], { rootToken: outsideTab.rootToken, directory: "/tmp/notes" }),
+      });
+      await Promise.resolve();
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(surface.opens, "a rescan of the linked file left the tab stale").toEqual(["g1", "g2", "g3"]);
+    await act(async () => { surface.renderer.unmount(); });
   });
 
   it("never re-opens the file because a watch it merely joined disagrees", async () => {

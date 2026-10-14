@@ -14,6 +14,22 @@ pub(super) struct Watch {
     /// This exact target's fallback state. Only a target the native watcher
     /// refused ever polls; every healthy watch stays idle.
     pub(super) fallback: Arc<Mutex<FallbackTarget>>,
+    /// The one entry a single-file capability's watch is narrowed to.
+    ///
+    /// Such a capability may never enumerate its parent or learn about a
+    /// sibling, so every output of this watch — the bootstrap, precise events,
+    /// rescans and the polling fallback — is about this leaf alone, and none of
+    /// them lists the directory.
+    pub(super) only: Option<OsString>,
+}
+
+impl Watch {
+    /// Whether a changed child of the target is this watch's to report.
+    pub(super) fn admits(&self, path: &Path) -> bool {
+        self.only
+            .as_deref()
+            .is_none_or(|leaf| path.file_name() == Some(leaf))
+    }
 }
 
 impl FileService {
@@ -148,6 +164,16 @@ impl FileService {
                     let Some(children) = by_parent.get(&watch.target) else {
                         continue;
                     };
+                    // Narrowed before the batch cap: churn beside a single-file
+                    // watch's leaf must cost neither a listing nor a stat.
+                    let children: Vec<PathBuf> = children
+                        .iter()
+                        .filter(|path| watch.admits(path))
+                        .cloned()
+                        .collect();
+                    if children.is_empty() {
+                        continue;
+                    }
                     if children.len() > MAX_PRECISE_EVENTS_PER_BATCH {
                         // One authoritative listing instead of hundreds of
                         // precise events. A build or a checkout touching a
@@ -180,7 +206,6 @@ impl FileService {
                     // while the events a client sees stay ordered.
                     let watch = watch.clone();
                     let watch_id = watch_id.clone();
-                    let children = children.clone();
                     mapping.push(tokio::task::spawn_blocking(move || {
                         precise_file_events(&watch_id, &watch, &children)
                     }));
@@ -251,6 +276,31 @@ impl FileService {
             })
     }
 
+    /// The authoritative contents of a watch: the bootstrap and every rescan.
+    ///
+    /// A single-file watch never lists its directory. Its snapshot is the
+    /// parent with the one leaf, or with nothing when the leaf is gone.
+    pub(super) fn watch_snapshot(
+        &self,
+        watch: &Watch,
+        watch_id: &str,
+        generation: u64,
+        cancellation: &AtomicBool,
+    ) -> anyhow::Result<v1::DirectorySnapshot> {
+        match &watch.only {
+            Some(leaf) => single_file_snapshot(&watch.root, leaf, watch_id, generation),
+            None => self.list_directory_snapshot(
+                &watch.root,
+                &watch.path,
+                watch_id,
+                generation,
+                "",
+                0,
+                cancellation,
+            ),
+        }
+    }
+
     /// Re-lists a watched directory and publishes it as an authoritative
     /// snapshot the desktop replaces its cached listing from.
     ///
@@ -269,23 +319,12 @@ impl FileService {
         overflowed: &Arc<AtomicBool>,
         recovery: bool,
     ) -> bool {
-        let root = Arc::clone(&watch.root);
-        let path = watch.path.clone();
         let listing_id = watch_id.to_owned();
         let generation = self.next_generation();
         let listed = tokio::task::spawn_blocking({
             let service = Arc::clone(self);
-            move || {
-                service.list_directory_snapshot(
-                    &root,
-                    &path,
-                    &listing_id,
-                    generation,
-                    "",
-                    0,
-                    &NEVER_CANCELLED,
-                )
-            }
+            let watch = watch.clone();
+            move || service.watch_snapshot(&watch, &listing_id, generation, &NEVER_CANCELLED)
         })
         .await;
         let Ok(Ok(mut snapshot)) = listed else {
@@ -391,8 +430,13 @@ impl FileService {
                         continue;
                     }
                     let stable_target = descriptor_path(watch.target_directory.as_raw_fd());
-                    let turn =
-                        advance_target_async(stable_target, Arc::clone(&watch.fallback), now).await;
+                    let turn = advance_target_async(
+                        stable_target,
+                        watch.only.clone(),
+                        Arc::clone(&watch.fallback),
+                        now,
+                    )
+                    .await;
                     if turn
                         .as_ref()
                         .is_ok_and(|turn| *turn == FallbackTurn::Changed)
@@ -464,8 +508,25 @@ impl FileService {
         cancellation: &AtomicBool,
     ) -> anyhow::Result<v1::DirectorySnapshot> {
         validate_token("watch ID", watch_id)?;
-        let root = Arc::new(RootCapability::validate(root, root_token)?);
-        let (target, target_directory) = resolve_watch_directory(&root, path)?;
+        let root = Arc::new(RootCapability::validate_read(root, root_token)?);
+        let (target, target_directory, only) = if root.is_single_file() {
+            // A single-file capability names its file, not a directory: the
+            // digest check in `resolve_existing` is what proves the request is
+            // for the bound leaf. Its parent is the capability's own root.
+            let (logical, _) = root.resolve_existing(path)?;
+            let leaf = logical
+                .file_name()
+                .context("single-file watch target has no file name")?
+                .to_owned();
+            (
+                root.logical_root().to_owned(),
+                root.open_root_directory()?,
+                Some(leaf),
+            )
+        } else {
+            let (target, directory) = resolve_watch_directory(&root, path)?;
+            (target, directory, None)
+        };
         let path_value = target.to_string_lossy().into_owned();
         let stable_target = descriptor_path(target_directory.as_raw_fd());
         let mut watches = self.watches.lock().unwrap();
@@ -488,19 +549,18 @@ impl FileService {
         let fallback = Arc::new(Mutex::new(if native {
             FallbackTarget::native(0)
         } else {
-            FallbackTarget::polling(watch_fingerprint(&stable_target)?)
+            FallbackTarget::polling(watch_fingerprint(&stable_target, only.as_deref())?)
         }));
-        let previous = watches.insert(
-            watch_id.to_owned(),
-            Watch {
-                root: Arc::clone(&root),
-                root_token: root.token().to_owned(),
-                path: path_value,
-                target: target.clone(),
-                target_directory: Arc::new(target_directory),
-                fallback,
-            },
-        );
+        let watch = Watch {
+            root: Arc::clone(&root),
+            root_token: root.token().to_owned(),
+            path: path_value,
+            target: target.clone(),
+            target_directory: Arc::new(target_directory),
+            fallback,
+            only,
+        };
+        let previous = watches.insert(watch_id.to_owned(), watch.clone());
         // Still under the registry lock: a target this ID no longer holds loses
         // its native registration only if no other watch covers it, and that
         // decision cannot be raced by a concurrent registration.
@@ -517,15 +577,7 @@ impl FileService {
         if !native {
             self.fallback_signal.notify_one();
         }
-        match self.list_directory_snapshot(
-            &root,
-            path,
-            watch_id,
-            self.next_generation(),
-            "",
-            0,
-            cancellation,
-        ) {
+        match self.watch_snapshot(&watch, watch_id, self.next_generation(), cancellation) {
             Ok(snapshot) => Ok(snapshot),
             Err(error) => {
                 let _ = self.unwatch_directory(watch_id);
@@ -634,6 +686,9 @@ pub(super) fn precise_file_events(
         // become a `FileChanged` the desktop answers with a full re-list of the
         // directory — for an entry the re-list then filters out.
         .filter(|path| !path.file_name().is_some_and(is_always_hidden))
+        // Precise events are broadcast to every connection, so a single-file
+        // watch's siblings must never reach one.
+        .filter(|path| watch.admits(path))
     {
         let Ok(relative) = path.strip_prefix(root) else {
             continue;
@@ -647,9 +702,9 @@ pub(super) fn precise_file_events(
     }
     affected
         .into_iter()
-        .map(|(relative, deleted)| {
+        .map(|(relative, mut deleted)| {
             let path = root.join(&relative).to_string_lossy().into_owned();
-            let metadata = if deleted {
+            let mut metadata = if deleted {
                 v1::FileMetadata {
                     path: path.clone(),
                     ..Default::default()
@@ -665,6 +720,13 @@ pub(super) fn precise_file_events(
                     ..Default::default()
                 })
             };
+            if watch.only.is_some() && !deleted && !is_regular_leaf(&metadata) {
+                deleted = true;
+                metadata = v1::FileMetadata {
+                    path: path.clone(),
+                    ..Default::default()
+                };
+            }
             v1::HostEvent {
                 kind: v1::EventKind::FileChanged.into(),
                 scope: path,
