@@ -147,6 +147,9 @@ fn a_stale_generation_refuses_every_action_but_a_selection() {
         v1::TmuxActionKind::ResizePaneLeft,
         v1::TmuxActionKind::ZoomPane,
         v1::TmuxActionKind::SetPinned,
+        v1::TmuxActionKind::MoveWindow,
+        v1::TmuxActionKind::JoinPane,
+        v1::TmuxActionKind::BreakPane,
     ] {
         assert_eq!(
             stale(kind),
@@ -749,6 +752,266 @@ fn every_action_has_an_identity_relative_authoritative_postcondition() {
         Default::default(),
         after,
     );
+}
+
+/// `$1` holds `@1` (`%1`, `%3` side by side) and `@2` (`%2`); `$2` holds `@3`
+/// (`%4`) and nothing else, so it is the workspace a move must not empty.
+fn move_topology() -> tmux_control::TmuxSnapshot {
+    let mut snapshot = topology();
+    let mut beside = pane("%3", "@1", false);
+    beside.left = 41;
+    snapshot.panes.push(beside);
+    let mut lone_window = window("@3", 0, true);
+    lone_window.session_id = "$2".into();
+    snapshot.windows.push(lone_window);
+    let mut lone_pane = pane("%4", "@3", true);
+    lone_pane.session_id = "$2".into();
+    snapshot.panes.push(lone_pane);
+    snapshot
+}
+
+fn move_action(kind: v1::TmuxActionKind) -> v1::TmuxAction {
+    v1::TmuxAction {
+        kind: kind.into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn moves_refuse_to_land_in_place_or_empty_the_workspace_they_leave() {
+    let snapshot = move_topology();
+    let refusal = |kind, action: v1::TmuxAction| {
+        validate_targets(kind, &action, &snapshot)
+            .unwrap_err()
+            .to_string()
+    };
+
+    let move_window = |session: &str, window: &str, target: &str| v1::TmuxAction {
+        session_id: session.into(),
+        window_id: window.into(),
+        target_session_id: target.into(),
+        ..move_action(v1::TmuxActionKind::MoveWindow)
+    };
+    validate_targets(
+        v1::TmuxActionKind::MoveWindow,
+        &move_window("$1", "@2", "$2"),
+        &snapshot,
+    )
+    .unwrap();
+    assert!(
+        refusal(
+            v1::TmuxActionKind::MoveWindow,
+            move_window("$1", "@2", "$1")
+        )
+        .contains("different session")
+    );
+    assert!(
+        refusal(
+            v1::TmuxActionKind::MoveWindow,
+            move_window("$2", "@3", "$1")
+        )
+        .contains("would close the workspace")
+    );
+    assert!(
+        refusal(
+            v1::TmuxActionKind::MoveWindow,
+            move_window("$1", "@3", "$2")
+        )
+        .contains("not linked")
+    );
+    assert!(
+        refusal(
+            v1::TmuxActionKind::MoveWindow,
+            move_window("$1", "@2", "$9")
+        )
+        .contains("target session no longer exists")
+    );
+
+    let join = |source: &str, target: &str, edge: v1::PaneEdge| v1::TmuxAction {
+        pane_id: source.into(),
+        target_pane_id: target.into(),
+        pane_edge: edge.into(),
+        ..move_action(v1::TmuxActionKind::JoinPane)
+    };
+    validate_targets(
+        v1::TmuxActionKind::JoinPane,
+        &join("%2", "%4", v1::PaneEdge::Left),
+        &snapshot,
+    )
+    .unwrap();
+    assert!(
+        refusal(
+            v1::TmuxActionKind::JoinPane,
+            join("%3", "%1", v1::PaneEdge::Left)
+        )
+        .contains("different window")
+    );
+    assert!(
+        refusal(
+            v1::TmuxActionKind::JoinPane,
+            join("%2", "%4", v1::PaneEdge::Unspecified)
+        )
+        .contains("explicit edge")
+    );
+    assert!(
+        refusal(
+            v1::TmuxActionKind::JoinPane,
+            join("%4", "%1", v1::PaneEdge::Right)
+        )
+        .contains("would close the workspace")
+    );
+    assert!(
+        refusal(
+            v1::TmuxActionKind::JoinPane,
+            join("%2", "%9", v1::PaneEdge::Right)
+        )
+        .contains("target pane no longer exists")
+    );
+
+    let break_out = |source: &str, target: &str| v1::TmuxAction {
+        pane_id: source.into(),
+        target_session_id: target.into(),
+        ..move_action(v1::TmuxActionKind::BreakPane)
+    };
+    // Breaking out into the pane's own workspace is a new tab there.
+    validate_targets(
+        v1::TmuxActionKind::BreakPane,
+        &break_out("%3", "$1"),
+        &snapshot,
+    )
+    .unwrap();
+    validate_targets(
+        v1::TmuxActionKind::BreakPane,
+        &break_out("%3", "$2"),
+        &snapshot,
+    )
+    .unwrap();
+    assert!(refusal(v1::TmuxActionKind::BreakPane, break_out("%2", "$2")).contains("only pane"));
+
+    // `@2` also linked as the only window of `$3`: any move of it could empty
+    // `$3`, whichever session the counts were read from.
+    let mut linked = snapshot.clone();
+    linked.sessions.push(session("$3", "three", 2));
+    let mut link = window("@2", 0, true);
+    link.session_id = "$3".into();
+    linked.windows.push(link);
+    let mut linked_pane = pane("%2", "@2", true);
+    linked_pane.session_id = "$3".into();
+    linked.panes.push(linked_pane);
+    for (kind, action) in [
+        (
+            v1::TmuxActionKind::MoveWindow,
+            move_window("$1", "@2", "$2"),
+        ),
+        (
+            v1::TmuxActionKind::JoinPane,
+            join("%2", "%4", v1::PaneEdge::Left),
+        ),
+        (v1::TmuxActionKind::BreakPane, break_out("%2", "$2")),
+    ] {
+        assert!(
+            validate_targets(kind, &action, &linked)
+                .unwrap_err()
+                .to_string()
+                .contains("more than one workspace"),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn moves_are_judged_on_where_the_window_or_pane_landed() {
+    let before = move_topology();
+    let judge = |kind, action: &v1::TmuxAction, result: &v1::TmuxActionResult, after| {
+        action_postcondition(kind, action, result, &before, after)
+    };
+
+    let moved = v1::TmuxAction {
+        session_id: "$1".into(),
+        window_id: "@2".into(),
+        target_session_id: "$2".into(),
+        ..move_action(v1::TmuxActionKind::MoveWindow)
+    };
+    let mut after = before.clone();
+    after.windows[1].session_id = "$2".into();
+    after.panes[1].session_id = "$2".into();
+    let result = v1::TmuxActionResult::default();
+    assert!(judge(
+        v1::TmuxActionKind::MoveWindow,
+        &moved,
+        &result,
+        &after
+    ));
+    assert!(!judge(
+        v1::TmuxActionKind::MoveWindow,
+        &moved,
+        &result,
+        &before
+    ));
+
+    // `%2` joins `@3` on `%4`'s left; every edge reads back as a side.
+    let join = |edge: v1::PaneEdge| v1::TmuxAction {
+        pane_id: "%2".into(),
+        target_pane_id: "%4".into(),
+        pane_edge: edge.into(),
+        ..move_action(v1::TmuxActionKind::JoinPane)
+    };
+    let mut after = before.clone();
+    after.windows.retain(|item| item.id != "@2");
+    let joined = after.panes.iter_mut().find(|item| item.id == "%2").unwrap();
+    joined.window_id = "@3".into();
+    joined.session_id = "$2".into();
+    let target = after.panes.iter_mut().find(|item| item.id == "%4").unwrap();
+    target.left = 41;
+    target.active = false;
+    assert!(judge(
+        v1::TmuxActionKind::JoinPane,
+        &join(v1::PaneEdge::Left),
+        &result,
+        &after
+    ));
+    assert!(!judge(
+        v1::TmuxActionKind::JoinPane,
+        &join(v1::PaneEdge::Right),
+        &result,
+        &after
+    ));
+    assert!(!judge(
+        v1::TmuxActionKind::JoinPane,
+        &join(v1::PaneEdge::Left),
+        &result,
+        &before
+    ));
+
+    // `%3` leaves `@1` for a new `@4` in `$2`, alone.
+    let broken = v1::TmuxAction {
+        pane_id: "%3".into(),
+        target_session_id: "$2".into(),
+        ..move_action(v1::TmuxActionKind::BreakPane)
+    };
+    let created = v1::TmuxActionResult {
+        window_id: "@4".into(),
+        ..Default::default()
+    };
+    let mut after = before.clone();
+    let mut new_window = window("@4", 1, false);
+    new_window.session_id = "$2".into();
+    after.windows.push(new_window);
+    let moved_pane = after.panes.iter_mut().find(|item| item.id == "%3").unwrap();
+    moved_pane.window_id = "@4".into();
+    moved_pane.session_id = "$2".into();
+    assert!(judge(
+        v1::TmuxActionKind::BreakPane,
+        &broken,
+        &created,
+        &after
+    ));
+    assert!(!judge(
+        v1::TmuxActionKind::BreakPane,
+        &broken,
+        &created,
+        &before
+    ));
 }
 
 #[test]

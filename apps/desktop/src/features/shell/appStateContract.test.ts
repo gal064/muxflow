@@ -241,6 +241,12 @@ describe("reading state the previous build wrote", () => {
     expect(saved({}).shell.compactWorkspaces).toBe(false);
   });
 
+  it("restores focus-follows-mouse and leaves it off for saves without it", () => {
+    expect(saved({ focusFollowsMouse: true }).shell.focusFollowsMouse).toBe(true);
+    expect(saved({ focusFollowsMouse: false }).shell.focusFollowsMouse).toBe(false);
+    expect(saved({}).shell.focusFollowsMouse).toBe(false);
+  });
+
   it("persists terminal copy preferences and turns them on for saves without them", () => {
     expect(saved({ copyOnSelect: true }).shell.copyOnSelect).toBe(true);
     expect(saved({ copyOnSelect: false }).shell.copyOnSelect).toBe(false);

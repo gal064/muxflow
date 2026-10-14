@@ -9,7 +9,11 @@ export type TmuxActionKind =
   | "splitPaneRight" | "splitPaneDown" | "focusPane"
   | "resizePaneLeft" | "resizePaneRight" | "resizePaneUp" | "resizePaneDown"
   | "zoomPane" | "closePane"
-  | "setPinned";
+  | "setPinned"
+  | "moveWindow" | "joinPane" | "breakPane";
+
+/** The side of `targetPaneId` a `joinPane` places its pane on. */
+export type PaneEdge = "left" | "right" | "top" | "bottom";
 
 export interface TmuxAction {
   kind: TmuxActionKind;
@@ -40,6 +44,11 @@ export interface TmuxAction {
    * half-succeeds is worse than one that is refused.
    */
   directory?: string;
+  /** The pane `joinPane` places `paneId` beside. */
+  targetPaneId?: string;
+  /** The workspace `moveWindow` and `breakPane` move into. */
+  targetSessionId?: string;
+  paneEdge?: PaneEdge;
 }
 
 export interface AuthoritativePrecondition {
@@ -109,6 +118,9 @@ interface WireTmuxAction {
   expected_generation: number;
   confirmed: boolean;
   directory: string;
+  target_pane_id: string;
+  target_session_id: string;
+  pane_edge: PaneEdge | "unspecified";
 }
 
 export function toWireTmuxAction(
@@ -121,6 +133,12 @@ export function toWireTmuxAction(
     || (action.relativePosition !== "before" && action.relativePosition !== "after")
   )) {
     throw new Error("window reorder requires a distinct target window ID and before/after position");
+  }
+  if (action.kind === "joinPane" && (!action.paneId || !action.targetPaneId || action.paneId === action.targetPaneId || !action.paneEdge)) {
+    throw new Error("pane join requires a distinct target pane ID and an edge");
+  }
+  if ((action.kind === "moveWindow" || action.kind === "breakPane") && !action.targetSessionId) {
+    throw new Error("a move requires a target workspace");
   }
   return {
     kind: action.kind,
@@ -139,6 +157,9 @@ export function toWireTmuxAction(
     expected_generation: precondition.generation,
     confirmed: action.confirmed ?? false,
     directory: action.directory ?? "",
+    target_pane_id: action.targetPaneId ?? "",
+    target_session_id: action.targetSessionId ?? "",
+    pane_edge: action.paneEdge ?? "unspecified",
   };
 }
 

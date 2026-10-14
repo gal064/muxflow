@@ -95,6 +95,8 @@ export interface ShellState {
   agentStateGlyphs: boolean;
   /** Hides per-agent activity lines from workspace rows. */
   compactWorkspaces: boolean;
+  /** Focuses a terminal pane when the pointer rests on it, without a click. */
+  focusFollowsMouse: boolean;
   /**
    * The workspace list's one filter: only pinned workspaces are listed, and
    * the agents section shows only their agents.
@@ -184,6 +186,7 @@ export const defaultShellState: ShellState = {
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
   compactWorkspaces: false,
+  focusFollowsMouse: false,
   pinnedOnly: false,
   terminalScreenReader: false,
   copyOnSelect: true,
@@ -235,6 +238,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
       compactWorkspaces: Boolean(shell?.compactWorkspaces),
+      focusFollowsMouse: Boolean(shell?.focusFollowsMouse),
       pinnedOnly: Boolean(shell?.pinnedOnly),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
       copyOnSelect: typeof shell?.copyOnSelect === "boolean"
