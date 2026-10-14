@@ -718,11 +718,14 @@ describe("application shell model", () => {
   });
 
   it("surfaces a terminal only for a real authoritative focus transition", () => {
-    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$1", "@2")).toBe(true);
-    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$2", "@2")).toBe(false);
-    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$1", "@1")).toBe(false);
-    expect(shouldSurfaceAuthoritativeTerminal(false, "$1", "@1", "$1", "@2")).toBe(false);
-    expect(shouldSurfaceAuthoritativeTerminal(true, undefined, undefined, "$1", "@1")).toBe(false);
+    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$1", "@2", true)).toBe(true);
+    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$2", "@2", true)).toBe(false);
+    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$1", "@1", true)).toBe(false);
+    expect(shouldSurfaceAuthoritativeTerminal(false, "$1", "@1", "$1", "@2", true)).toBe(false);
+    expect(shouldSurfaceAuthoritativeTerminal(true, undefined, undefined, "$1", "@1", true)).toBe(false);
+    // The window behind the document moved to another workspace: tmux's new
+    // pick is not a switch, and the document stays.
+    expect(shouldSurfaceAuthoritativeTerminal(true, "$1", "@1", "$1", "@2", false)).toBe(false);
   });
 
   it("keeps navigation local while writes are frozen instead of queuing a tmux mutation", () => {

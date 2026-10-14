@@ -92,13 +92,34 @@ On Omarchy, the system-wide Super+C and Super+V also copy and paste in Muxflow.
 | Double-click | Preview document tab | Keep it open as a regular tab |
 | Middle-click | Tab | Close it |
 | Right-click | Workspace, tab, agent, file or change | Open its menu (the Menu key or Shift+F10 does the same from the keyboard) |
-| ⌘-click / Ctrl-click | Link in the terminal | Open it |
+| ⌘-click / Ctrl-click | Link in the terminal | Open it (anywhere else in the pane, the same press grabs the pane; see below) |
 | Right-click | Terminal | Select the word under the pointer |
 | Shift-drag | Terminal | Select text even when the program running there uses the mouse (Option-drag works too on macOS) |
 | Drag | Title bar | Move the window (Linux, and the empty part of the bar on macOS) |
+| Drag | Tab | Reorder the tabs. Drop it on a workspace in the sidebar to move it there. A terminal tab with a single pane can also be dropped on the edge of a pane to become a split beside it. |
+| Drag | Agent in the sidebar | Drop it on the edge of a pane to split it in beside that pane, on the tab strip to give it a tab of its own, or on a workspace to move it there |
+| ⌘-drag / Ctrl-drag | Terminal pane | Drop it on the edge of another pane to move it there (within the same tab, this rearranges the panes: side by side, stacked, or reordered), on the tab strip to make it a tab of its own, or on a workspace to move it there |
+| Escape | While dragging | Cancel the drag |
 
 To show only pinned workspaces, run **Show pinned workspaces only** from the
 command palette.
+
+Moving a tab, agent or pane keeps you where you are: the workspace, tab and
+pane on screen stay on screen. When the thing you move is the pane you're
+looking at, the view goes with it to its new tab or workspace. A move that
+would leave a workspace with nothing in it is refused, since that would close
+the workspace.
+
+On Linux the Ctrl-press that grabs a pane is not passed to the terminal, so a
+program that reads the mouse (vim's Ctrl-click, for one) no longer sees a
+Ctrl-click there. On a link it still opens the link.
+
+An agent's menu (right-click it in the sidebar) also has **Bring here as
+split**, which places the agent's pane beside the pane you're in (for an agent
+in another tab), and **Move to workspace…**.
+
+**Focus pane on hover** in Settings focuses a split pane when the pointer rests
+on it, without a click.
 
 **Copy on select** in Settings copies terminal text as soon as you finish
 selecting it.

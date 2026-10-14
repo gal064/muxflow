@@ -909,19 +909,26 @@ export function mountedTerminalPanes(
   return renderedPanes(panes.filter((pane) => pane.windowId === activeWindowId), zoomed);
 }
 
+/**
+ * `previousWindowRemains`: tmux also picks a new current window when the old
+ * one leaves the workspace (moved or closed). That is not someone switching
+ * tabs, and the document on screen stays.
+ */
 export function shouldSurfaceAuthoritativeTerminal(
   appTabSelected: boolean,
   previousSessionId: string | undefined,
   previousActiveWindowId: string | undefined,
   nextSessionId: string | undefined,
   nextActiveWindowId: string | undefined,
+  previousWindowRemains: boolean,
 ): boolean {
   return appTabSelected
     && Boolean(previousSessionId)
     && previousSessionId === nextSessionId
     && Boolean(previousActiveWindowId)
     && Boolean(nextActiveWindowId)
-    && previousActiveWindowId !== nextActiveWindowId;
+    && previousActiveWindowId !== nextActiveWindowId
+    && previousWindowRemains;
 }
 
 export function shellNavigationMode(canMutate: boolean): "authoritative" | "cached" {

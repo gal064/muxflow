@@ -317,7 +317,9 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         onFocus={() => setFocusedAgentTarget({ id: row.agent.id, scope })}
         onPointerDown={(event) => {
           setFocusedAgentTarget({ id: row.agent.id, scope });
-          beginPointerDrag(event, props.agentDragPayload?.(row));
+          // The ghost reads as the row does, by its session's name.
+          const payload = props.agentDragPayload?.(row);
+          beginPointerDrag(event, payload && { ...payload, label: sessionLabel });
         }}
         onKeyDown={(event) => {
           if (isContextMenuKey(event)) {

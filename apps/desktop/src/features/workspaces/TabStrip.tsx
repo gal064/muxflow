@@ -56,6 +56,8 @@ interface TabStripProps {
   onNewTerminal(): void;
   /** What dragging this tab carries; absent where the host cannot be changed. */
   dragPayload?(tab: SelectableTab): DragPayload | undefined;
+  /** The workspace this strip shows, where a pane dropped on it becomes a tab. */
+  dropWorkspace?: { hostProfileId: string; sessionId: string };
 }
 
 /**
@@ -233,11 +235,24 @@ export function TabStrip(props: TabStripProps) {
 
   // `key|side` of the gap a drag would drop into, so only a change of gap
   // re-renders the strip.
-  const dropMarker = useDragSelector((drag) => drag?.allowed && drag.target?.kind === "tab"
+  const dropMarker = useDragSelector((drag) => drag?.allowed && drag.payload.kind !== "pane" && drag.target?.kind === "tab"
     ? `${drag.target.tabKey}|${drag.target.side}`
     : undefined);
+  // A pane lands at the end of the strip, not in a gap, so the whole strip
+  // lights up instead.
+  const dropWorkspace = props.dropWorkspace;
+  const paneDrop = useDragSelector((drag) => {
+    if (!drag?.allowed || drag.payload.kind !== "pane" || !dropWorkspace) return false;
+    const target = drag.target;
+    const workspace = target?.kind === "tab" ? target.workspace : target?.kind === "workspace" ? target : undefined;
+    return workspace?.sessionId === dropWorkspace.sessionId && workspace.hostProfileId === dropWorkspace.hostProfileId;
+  });
 
-  return <div className="tabstrip">
+  return <div
+    className={paneDrop ? "tabstrip drop-target" : "tabstrip"}
+    data-drop-host={dropWorkspace?.hostProfileId}
+    data-drop-workspace={dropWorkspace?.sessionId}
+  >
     <div aria-label="Terminal tabs and documents" className="tabstrip-tabs" ref={tabs} role="tablist">
       {props.tabs.map((tab, index) => {
         const shortcutIndex = shortcutIndexByKey.get(tab.key);

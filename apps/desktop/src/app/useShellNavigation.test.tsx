@@ -399,6 +399,23 @@ describe("shell navigation hook cross-kind ownership", () => {
     await act(async () => renderer.unmount());
   });
 
+  it("selects a window that just moved here, though the last snapshot still lists it current where it was", async () => {
+    const performAction = vi.fn<ShellNavigationOptions["performAction"]>(async (action) => ({
+      topologyGeneration: action.kind === "selectSession" ? 2 : action.kind === "selectWindow" ? 3 : 4,
+    }));
+    const harness = mountNavigation({ performAction });
+    const renderer = await harness.renderer();
+    // `@0` moved from `$1`, where it was current, to `$2`; the snapshot has not caught up.
+    await act(async () => {
+      await harness.navigation.selectPane({
+        id: "%1", sessionId: "$2", windowId: "@0", index: 0, active: true,
+        width: 80, height: 24, left: 0, top: 0, currentPath: "/tmp", currentCommand: "zsh",
+      }, { kind: "silent" });
+    });
+    expect(performAction.mock.calls.map(([action]) => action.kind)).toEqual(["selectSession", "selectWindow", "focusPane"]);
+    await act(async () => renderer.unmount());
+  });
+
   it("uses only a session handoff before an active-window pane queued from another workspace", async () => {
     const first = deferred<TmuxActionResult | undefined>();
     const actions: string[] = [];
