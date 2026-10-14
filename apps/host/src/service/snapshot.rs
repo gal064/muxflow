@@ -442,7 +442,7 @@ fn pins_path() -> std::path::PathBuf {
     crate::paths::state_dir().join("pins.json")
 }
 
-fn load_sidecar<T: Default + serde::de::DeserializeOwned>(
+pub(super) fn load_sidecar<T: Default + serde::de::DeserializeOwned>(
     path: &std::path::Path,
     label: &str,
 ) -> anyhow::Result<T> {
@@ -455,7 +455,7 @@ fn load_sidecar<T: Default + serde::de::DeserializeOwned>(
     }
 }
 
-fn save_sidecar<T: serde::Serialize>(
+pub(super) fn save_sidecar<T: serde::Serialize>(
     path: &std::path::Path,
     label: &str,
     state: &T,
@@ -505,7 +505,7 @@ pub(crate) fn inherited_server_identity() -> Option<String> {
     (identity != "tmux:none").then_some(identity)
 }
 
-fn server_identity_from_command(mut command: Command) -> String {
+pub(super) fn server_identity_from_command(mut command: Command) -> String {
     let output = command
         .args(["display-message", "-p", "#{socket_path}"])
         .output();
