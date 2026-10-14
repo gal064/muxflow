@@ -461,16 +461,20 @@ export function useOpenFileTab(params: OpenFileTabParams): OpenFileTab {
   };
 
   useEffect(() => {
-    if (!scope || !root || isTerminalSingleFileRoot(root)) return;
+    if (!scope || !root) return;
     let disposed = false;
     let release: (() => void) | undefined;
-    // The bootstrap *is* a full directory listing, so a tab closed while it is
-    // in flight must stop it rather than pay for it and throw it away. Only
-    // this subscriber is abandoned: the watch itself survives for whoever else
-    // holds it.
+    // The bootstrap is the directory's listing (one stat of the file for a
+    // single-file token), so a tab closed while it is in flight must stop it
+    // rather than pay for it and throw it away. Only this subscriber is
+    // abandoned: the watch itself survives for whoever else holds it.
     const abandon = new AbortController();
     reconciliation.current = { kind: "pending" };
-    void client.acquireDirectoryWatch(scope, root, parentPath(resource), {
+    // A terminal single-file capability names its file rather than the
+    // parent: the host proves the request is for the bound leaf by its digest,
+    // and narrows the watch on the parent to that one entry.
+    const watched = isTerminalSingleFileRoot(root) ? resource : parentPath(resource);
+    void client.acquireDirectoryWatch(scope, root, watched, {
       signal: abandon.signal,
     }).then((next) => {
       if (disposed) next.release();
