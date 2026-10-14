@@ -300,7 +300,7 @@ fn queue_input_marker(line: &mut String, input_id: u64, pane_id: &str) {
 /// a `Paste` adds `-p`, so tmux brackets the bytes iff the pane's application
 /// asked for bracketed paste. Either way `paste-buffer`'s default LF→CR
 /// replacement applies, as it did for every batch before there were pastes.
-fn send_input_batch(
+pub(in crate::service) fn send_input_batch(
     tmux: &dyn Fn() -> anyhow::Result<Command>,
     pane_id: &str,
     data: &[u8],

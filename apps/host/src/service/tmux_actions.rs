@@ -5,10 +5,11 @@ use super::snapshot::{
     discover_consistent, reorder_session, server_identity, set_pinned, tmux_command,
 };
 use super::terminal::validate_tmux_id;
-use command::{
-    configure_new_session, configure_new_window, configure_split, escaped_format_literal, run,
-    run_for_id, run_for_ids, validate_name,
+pub(in crate::service) use command::{
+    APP_SHELL, configure_new_session, escaped_format_literal, resolved_start_directory, run,
+    run_for_ids, validate_name,
 };
+use command::{configure_new_window, configure_split, run_for_id};
 
 mod command;
 

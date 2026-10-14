@@ -106,6 +106,9 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
             .await;
         }
     });
+    // Optional features with daemon-lifetime work of their own, such as
+    // automations; like the hook timer, they run with no client connected.
+    let plugin_tasks = service::plugins::start();
 
     let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
     loop {
@@ -133,6 +136,9 @@ pub async fn run(socket_path: PathBuf) -> anyhow::Result<()> {
         }
     }
     hook_retry.abort();
+    for task in plugin_tasks {
+        task.abort();
+    }
     drop(listener);
     // A hot voice sidecar holds ~1 GB; kill it here rather than let
     // `kill_on_drop` race the runtime's teardown.

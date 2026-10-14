@@ -108,8 +108,8 @@ pub(crate) struct AgentRuntime {
     /// One exact-turn transcript descriptor per active Codex child. Paths and
     /// transcript contents never enter persisted state.
     codex_child_monitors: Mutex<BTreeMap<(String, String), CodexChildMonitor>>,
-    /// Where a `Stop` hands the agent's final message. Voice mode in
-    /// production; a recorder in tests, so no test needs the voice service.
+    /// Where a `Stop` hands the agent's final message: the host plugins, then
+    /// voice mode, in production; a recorder in tests, so no test needs either.
     reply_sink: ReplySink,
 }
 
@@ -127,7 +127,13 @@ impl AgentRuntime {
     }
 
     fn load(state_path: PathBuf) -> Self {
-        Self::load_with_sink(state_path, Box::new(super::voice::on_agent_reply))
+        Self::load_with_sink(
+            state_path,
+            Box::new(|reply| {
+                super::plugins::on_agent_reply(&reply);
+                super::voice::on_agent_reply(reply);
+            }),
+        )
     }
 
     fn load_with_sink(state_path: PathBuf, reply_sink: ReplySink) -> Self {
