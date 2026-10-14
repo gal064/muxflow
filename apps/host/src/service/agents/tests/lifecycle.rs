@@ -1581,6 +1581,189 @@ fn an_active_subagent_never_hides_a_real_permission_block() {
     assert_eq!(resumed.lifecycle, v1::AgentLifecycleState::Working as i32);
 }
 
+/// Claude Code fires a subagent's tool hooks under the parent's session. While
+/// the parent waits on its own question, that activity must not read as the
+/// parent working again; only the parent's own next event answers it.
+#[test]
+fn subagent_activity_never_answers_the_parents_question() {
+    let runtime = runtime("subagent-during-question");
+    let topology = topology("claude");
+    claude_hook(
+        &runtime,
+        &topology,
+        "prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    claude_hook(
+        &runtime,
+        &topology,
+        "question",
+        serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion"}),
+    );
+    let blocked = claude_hook(
+        &runtime,
+        &topology,
+        "question-permission",
+        serde_json::json!({"hook_event_name": "PermissionRequest"}),
+    );
+    assert!(blocked.notify);
+    let blocked = blocked.agent.unwrap();
+    assert_eq!(blocked.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+
+    for (id, event_name) in [
+        ("subagent-pre", "PreToolUse"),
+        ("subagent-post", "PostToolUse"),
+        ("subagent-stop", "SubagentStop"),
+    ] {
+        let event = claude_hook(
+            &runtime,
+            &topology,
+            id,
+            serde_json::json!({"hook_event_name": event_name, "from_subagent": true}),
+        );
+        assert!(!event.notify, "{event_name} must not earn attention again");
+        let agent = event.agent.unwrap();
+        assert_eq!(
+            agent.lifecycle,
+            v1::AgentLifecycleState::Blocked as i32,
+            "{event_name} from a subagent must not answer the parent's question"
+        );
+        assert_eq!(agent.attention_generation, blocked.attention_generation);
+    }
+
+    let answered = claude_hook(
+        &runtime,
+        &topology,
+        "answered",
+        serde_json::json!({"hook_event_name": "PostToolUse"}),
+    )
+    .agent
+    .unwrap();
+    assert_eq!(answered.lifecycle, v1::AgentLifecycleState::Working as i32);
+}
+
+/// The other half: a block the subagent raised itself is resolved by that
+/// subagent's next event, or approving its prompt would leave the row blocked
+/// until the whole subagent finished.
+#[test]
+fn a_subagents_own_permission_block_resolves_with_its_next_event() {
+    let runtime = runtime("subagent-own-permission");
+    let topology = topology("claude");
+    claude_hook(
+        &runtime,
+        &topology,
+        "prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    let blocked = claude_hook(
+        &runtime,
+        &topology,
+        "subagent-permission",
+        serde_json::json!({"hook_event_name": "PermissionRequest", "from_subagent": true}),
+    )
+    .agent
+    .unwrap();
+    assert_eq!(blocked.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+    // Claude's notification for the same dialog carries no subagent identity.
+    claude_hook(
+        &runtime,
+        &topology,
+        "permission-notification",
+        serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt"
+        }),
+    );
+
+    let resumed = claude_hook(
+        &runtime,
+        &topology,
+        "subagent-approved",
+        serde_json::json!({"hook_event_name": "PostToolUse", "from_subagent": true}),
+    )
+    .agent
+    .unwrap();
+    assert_eq!(resumed.lifecycle, v1::AgentLifecycleState::Working as i32);
+}
+
+/// A parent that ends its turn with background subagents still running keeps
+/// the subagent's block, but must not take it over.
+#[test]
+fn a_parent_stop_does_not_claim_a_subagents_permission_block() {
+    let runtime = runtime("parent-stop-during-subagent-permission");
+    let topology = topology("claude");
+    claude_hook(
+        &runtime,
+        &topology,
+        "prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    claude_hook(
+        &runtime,
+        &topology,
+        "subagent-permission",
+        serde_json::json!({"hook_event_name": "PermissionRequest", "from_subagent": true}),
+    );
+    let kept = claude_hook(
+        &runtime,
+        &topology,
+        "parent-stop",
+        serde_json::json!({"hook_event_name": "Stop", "has_running_subagent": true}),
+    )
+    .agent
+    .unwrap();
+    assert_eq!(kept.lifecycle, v1::AgentLifecycleState::Blocked as i32);
+
+    let resumed = claude_hook(
+        &runtime,
+        &topology,
+        "subagent-approved",
+        serde_json::json!({"hook_event_name": "PostToolUse", "from_subagent": true}),
+    )
+    .agent
+    .unwrap();
+    assert_eq!(resumed.lifecycle, v1::AgentLifecycleState::Working as i32);
+}
+
+#[test]
+fn a_parents_question_survives_a_daemon_restart() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("claude-question-restart-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let topology = topology("claude");
+    {
+        let runtime = AgentRuntime::isolated(path.clone());
+        claude_hook(
+            &runtime,
+            &topology,
+            "prompt",
+            serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+        );
+        claude_hook(
+            &runtime,
+            &topology,
+            "question-permission",
+            serde_json::json!({"hook_event_name": "PermissionRequest"}),
+        );
+    }
+
+    let restarted = AgentRuntime::isolated(path);
+    let still_blocked = claude_hook(
+        &restarted,
+        &topology,
+        "subagent-post",
+        serde_json::json!({"hook_event_name": "PostToolUse", "from_subagent": true}),
+    )
+    .agent
+    .unwrap();
+    assert_eq!(
+        still_blocked.lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+}
+
 #[test]
 fn the_active_subagent_idle_guard_survives_a_daemon_restart() {
     let path = std::env::current_dir()
