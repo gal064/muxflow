@@ -76,6 +76,12 @@ describe("live Markdown rendering", () => {
     expect(ranges(doc, doc.length)).toContainEqual({ kind: "mark", from: 5, to: 13, className: "cm-live-link" });
   });
 
+  it("leaves a bracketed word without a destination as text, keeping its emphasis", () => {
+    const doc = "Marks: **[beta]** means it.";
+    expect(ranges(doc).some((range) => range.kind === "mark" && range.className === "cm-live-link")).toBe(false);
+    expect(hidden(doc)).toEqual(["**", "**"]);
+  });
+
   it("renders only embedded raster images, as the preview does", () => {
     const embedded = "![dot](data:image/png;base64,AAAA)\n\nx";
     expect(ranges(embedded, embedded.length)).toContainEqual({ kind: "image", from: 0, to: 34, src: "data:image/png;base64,AAAA", alt: "dot" });

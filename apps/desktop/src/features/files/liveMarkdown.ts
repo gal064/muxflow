@@ -167,6 +167,10 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
           break;
         case "Link":
         case "Image":
+          // `[text]` with no destination is a reference to a definition
+          // elsewhere; the preview draws it as a link only when one exists,
+          // and as plain text otherwise. It stays text here.
+          if (!node.node.getChild("URL")) break;
           liveLink(node.node, doc, active, out);
           return false;
         case "Autolink":
