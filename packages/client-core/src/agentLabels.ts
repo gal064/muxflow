@@ -1,5 +1,7 @@
 export interface AgentLabelInput {
   windowName: string;
+  /** The agent pane's own title; empty from a host that predates it. */
+  paneTitle: string;
   displayName: string;
   adapterId: string;
 }
@@ -10,7 +12,7 @@ export interface AgentLabelAdapter {
 }
 
 const UUID_LIKE = /^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{24,})$/i;
-const GENERIC_TAB_NAME = /^(?:agent|codex|claude(?:-code)?)$/i;
+const GENERIC_TAB_NAME = /^(?:agent|codex|claude(?:[- ]code)?)$/i;
 /* Claude Code and Codex prefix their tmux window titles with a status marker —
    Claude's asterisk frames (· ✢ ✳ ✶ ✻ ✽), Codex's braille spinner frames
    (U+2800–U+28FF), quarter circles (◐ ◓ ◑ ◒), and check/cross marks on
@@ -38,10 +40,15 @@ export function stripAgentStatusGlyphs(title: string): string {
   return withoutStatusGlyphs(title) || title.trim();
 }
 
-/** The live tmux tab name, unless it is only a generic or machine identifier. */
+/** The agent pane's own title, then the live tmux tab name, unless either is
+    only a generic or machine identifier. The pane comes first because a window
+    is named after one pane: agents sharing a split, or a pane moved into a tab
+    of its own, would otherwise all read the same name or the generic one. */
 export function agentSessionLabel(agent: AgentLabelInput, adapters: readonly AgentLabelAdapter[]): string {
-  const tabName = withoutStatusGlyphs(agent.windowName);
-  if (tabName && !UUID_LIKE.test(tabName) && !GENERIC_TAB_NAME.test(tabName)) return tabName;
+  for (const title of [agent.paneTitle, agent.windowName]) {
+    const name = withoutStatusGlyphs(title);
+    if (name && !UUID_LIKE.test(name) && !GENERIC_TAB_NAME.test(name)) return name;
+  }
   const assignedName = agent.displayName.trim();
   if (assignedName && !UUID_LIKE.test(assignedName)) return assignedName;
   return adapters.find((adapter) => adapter.id === agent.adapterId)?.displayName

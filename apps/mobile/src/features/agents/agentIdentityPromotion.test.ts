@@ -19,7 +19,7 @@ function agent(id: string, adapterId = "codex", paneId = "%7", nativeSessionId =
     lifecycleChangedAtMs: 2,
     attentionSeenAtMs: 0,
     present: true,
-    route: { sessionId: "$1", sessionNameFallback: "", windowId: "@1", windowNameFallback: "", paneId, paneIndexFallback: 0 },
+    route: { sessionId: "$1", sessionNameFallback: "", windowId: "@1", windowNameFallback: "", paneId, paneIndexFallback: 0, paneTitleFallback: "" },
   };
 }
 

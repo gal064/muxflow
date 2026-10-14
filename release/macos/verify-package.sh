@@ -66,7 +66,7 @@ case "$expect" in
       [[ "$details" == *'Timestamp='* ]] || { echo "no secure timestamp: $binary" >&2; exit 65; }
     done
     spctl --assess --type execute "$app" >/dev/null 2>&1 || { echo 'Gatekeeper rejects the app' >&2; exit 65; }
-    xcrun stapler validate "$app" >/dev/null || { echo 'no stapled notarization ticket' >&2; exit 65; }
+    "$(dirname "$0")/stapler.sh" validate "$app" || { echo 'no stapled notarization ticket' >&2; exit 65; }
     signature=developer-id
     notarization=stapled
     ;;

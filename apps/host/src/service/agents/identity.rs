@@ -142,6 +142,7 @@ fn route_to_pane(
             .unwrap_or_default(),
         pane_id: pane.id.clone(),
         pane_index_fallback: pane.index,
+        pane_title_fallback: pane.title.clone(),
     })
 }
 
@@ -155,6 +156,7 @@ fn unmapped_route(identity: &str) -> StoredRoute {
         window_name_fallback: String::new(),
         pane_id: String::new(),
         pane_index_fallback: 0,
+        pane_title_fallback: String::new(),
     }
 }
 

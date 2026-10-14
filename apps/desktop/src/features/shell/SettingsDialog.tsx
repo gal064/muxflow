@@ -270,6 +270,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               value={props.shell.defaultMarkdownView}
             >
               <option value="source">Source</option>
+              <option value="live">Live</option>
               <option value="preview">Preview</option>
               <option value="split">Split</option>
             </select>
@@ -327,6 +328,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
             Allow terminal apps to copy
           </label>
           <p className="settings-hint">Allows terminal programs to replace the system clipboard using OSC 52.</p>
+          <label className="settings-check">
+            <input checked={props.shell.focusFollowsMouse} onChange={(event) => props.onShell({ focusFollowsMouse: event.target.checked })} type="checkbox" />
+            Focus pane on hover
+          </label>
+          <p className="settings-hint">Moves keyboard focus to a split pane when the pointer rests on it.</p>
         </>}
 
         {tab === "sounds" && <>

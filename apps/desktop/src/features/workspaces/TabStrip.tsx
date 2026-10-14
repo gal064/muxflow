@@ -8,6 +8,7 @@ import { bulkCloseTargets, selectableTabs, type CombinedTab, type SelectableTab 
 import type { HostScopeToken } from "../shell/hostScope";
 import { commandRegistry, shortcutFor, type Platform, type ShortcutOverrides } from "../../commands/registry";
 import { shortcutGlyphs, shortcutSpoken } from "../../commands/shortcutGlyphs";
+import { beginPointerDrag, useDragSelector, type DragPayload } from "../dragDrop/pointerDrag";
 
 /** A tab that exists on the host, and so has something to act on. */
 type AppTab = Extract<CombinedTab, { kind: "app" }>;
@@ -53,6 +54,10 @@ interface TabStripProps {
    */
   onTogglePinned(tab: Extract<CombinedTab, { kind: "terminal" }>): void;
   onNewTerminal(): void;
+  /** What dragging this tab carries; absent where the host cannot be changed. */
+  dragPayload?(tab: SelectableTab): DragPayload | undefined;
+  /** The workspace this strip shows, where a pane dropped on it becomes a tab. */
+  dropWorkspace?: { hostProfileId: string; sessionId: string };
 }
 
 /**
@@ -228,7 +233,26 @@ export function TabStrip(props: TabStripProps) {
     return `${tab.title}${kind}${state}`;
   };
 
-  return <div className="tabstrip">
+  // `key|side` of the gap a drag would drop into, so only a change of gap
+  // re-renders the strip.
+  const dropMarker = useDragSelector((drag) => drag?.allowed && drag.payload.kind !== "pane" && drag.target?.kind === "tab"
+    ? `${drag.target.tabKey}|${drag.target.side}`
+    : undefined);
+  // A pane lands at the end of the strip, not in a gap, so the whole strip
+  // lights up instead.
+  const dropWorkspace = props.dropWorkspace;
+  const paneDrop = useDragSelector((drag) => {
+    if (!drag?.allowed || drag.payload.kind !== "pane" || !dropWorkspace) return false;
+    const target = drag.target;
+    const workspace = target?.kind === "tab" ? target.workspace : target?.kind === "workspace" ? target : undefined;
+    return workspace?.sessionId === dropWorkspace.sessionId && workspace.hostProfileId === dropWorkspace.hostProfileId;
+  });
+
+  return <div
+    className={paneDrop ? "tabstrip drop-target" : "tabstrip"}
+    data-drop-host={dropWorkspace?.hostProfileId}
+    data-drop-workspace={dropWorkspace?.sessionId}
+  >
     <div aria-label="Terminal tabs and documents" className="tabstrip-tabs" ref={tabs} role="tablist">
       {props.tabs.map((tab, index) => {
         const shortcutIndex = shortcutIndexByKey.get(tab.key);
@@ -255,7 +279,8 @@ export function TabStrip(props: TabStripProps) {
         // `role="presentation"`: a generic element between a tablist and its
         // tabs breaks ownership, and assistive technology then cannot say
         // "tab 3 of 5".
-        return <div className={active ? "tab active" : "tab"} key={tab.key} role="presentation">
+        const dropClass = dropMarker === `${tab.key}|before` ? " drop-before" : dropMarker === `${tab.key}|after` ? " drop-after" : "";
+        return <div className={`${active ? "tab active" : "tab"}${dropClass}`} data-drop-tab={tab.key} key={tab.key} role="presentation">
           <button
             // Only the selected tab's panel exists in the DOM, so only the
             // selected tab may claim to control one.
@@ -301,6 +326,7 @@ export function TabStrip(props: TabStripProps) {
               else if (props.canMutate) props.onRenameTerminal(tab, props.commandScope);
             }}
             onKeyDown={(event) => onTabKeyDown(event, tab, index)}
+            onPointerDown={props.dragPayload ? (event) => beginPointerDrag(event, props.dragPayload?.(tab)) : undefined}
             role="tab"
             // With nothing selected — a window closed by another client, briefly —
             // a roving tabindex of all -1 makes the whole strip unreachable.

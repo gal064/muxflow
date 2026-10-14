@@ -61,6 +61,7 @@
     "agentsSectionRatio": 0.42,
     "agentStateGlyphs": true,
     "compactWorkspaces": true,
+    "focusFollowsMouse": true,
     "pinnedOnly": true,
     "terminalScreenReader": true,
     "copyOnSelect": true,
@@ -68,7 +69,7 @@
     "terminalApplicationClipboard": true,
     "terminalFontSize": 17,
     "newWorkspaceHostProfileId": "ssh-remote-linux",
-    "defaultMarkdownView": "preview",
+    "defaultMarkdownView": "live",
     "windowGeometry": {
       "x": 20,
       "y": 30,

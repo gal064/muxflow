@@ -642,6 +642,7 @@ fn terminal_scope_uses_authoritative_snapshot_for_initial_and_stale_requests() {
                 current_command: "bash".into(),
                 pane_pid: 0,
                 start_command: String::new(),
+                title: String::new(),
             })
             .collect(),
     };

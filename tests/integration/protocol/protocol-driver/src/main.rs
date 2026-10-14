@@ -661,6 +661,81 @@ fn run_matrix(transport: Transport, primary_name: &str, ordinary_client: &str) -
     let layout_snapshot = client.snapshot()?;
     assert_layout_matches(&transport, &layout_snapshot, &original_window.id)?;
 
+    // Protocol-originated moves between workspaces and splits, on real tmux:
+    // a tab to another workspace, a split out into a tab of its own there,
+    // and that pane joined back in as a split beside the moved tab's pane.
+    let mut move_window = action(v1::TmuxActionKind::MoveWindow);
+    move_window.session_id = primary.id.clone();
+    move_window.window_id = created_window.clone();
+    move_window.target_session_id = created_session.clone();
+    client.action(move_window)?;
+    let moved = client.snapshot()?;
+    ensure!(
+        window(&moved, &created_window)?.session_id == created_session,
+        "protocol window move did not land in the target session"
+    );
+    let created_window_pane = moved
+        .panes
+        .iter()
+        .find(|item| item.window_id == created_window)
+        .context("moved window lost its pane")?
+        .id
+        .clone();
+    let mut break_pane = action(v1::TmuxActionKind::BreakPane);
+    break_pane.pane_id = right_pane.clone();
+    break_pane.target_session_id = created_session.clone();
+    let broken_window = client.action(break_pane)?.window_id;
+    let broken = client.snapshot()?;
+    ensure!(
+        pane(&broken, &right_pane)?.window_id == broken_window
+            && window(&broken, &broken_window)?.session_id == created_session,
+        "protocol pane break did not make a window of its own in the target session"
+    );
+    let mut join_pane = action(v1::TmuxActionKind::JoinPane);
+    join_pane.pane_id = right_pane.clone();
+    join_pane.target_pane_id = created_window_pane.clone();
+    join_pane.pane_edge = v1::PaneEdge::Left.into();
+    client.action(join_pane)?;
+    let joined = client.snapshot()?;
+    let joined_pane = pane(&joined, &right_pane)?;
+    ensure!(
+        joined_pane.window_id == created_window
+            && joined_pane.left < pane(&joined, &created_window_pane)?.left
+            && window(&joined, &broken_window).is_err(),
+        "protocol pane join did not place the pane left of its target"
+    );
+    ensure!(
+        pane(&joined, &created_window_pane)?.active && !joined_pane.active,
+        "protocol pane join took focus from the pane it joined"
+    );
+    // Rearranged inside that window: side by side becomes stacked, and the
+    // active pane moved to the other side keeps focus there, evenly split.
+    let mut stack = action(v1::TmuxActionKind::JoinPane);
+    stack.pane_id = right_pane.clone();
+    stack.target_pane_id = created_window_pane.clone();
+    stack.pane_edge = v1::PaneEdge::Bottom.into();
+    client.action(stack)?;
+    let stacked = client.snapshot()?;
+    ensure!(
+        pane(&stacked, &right_pane)?.top > pane(&stacked, &created_window_pane)?.top
+            && pane(&stacked, &created_window_pane)?.active,
+        "protocol pane rearrange did not stack the pane below its target"
+    );
+    let mut flip = action(v1::TmuxActionKind::JoinPane);
+    flip.pane_id = created_window_pane.clone();
+    flip.target_pane_id = right_pane.clone();
+    flip.pane_edge = v1::PaneEdge::Right.into();
+    client.action(flip)?;
+    let flipped = client.snapshot()?;
+    let (moved, stayed) = (
+        pane(&flipped, &created_window_pane)?,
+        pane(&flipped, &right_pane)?,
+    );
+    ensure!(
+        moved.left > stayed.left && moved.active && moved.width.abs_diff(stayed.width) <= 1,
+        "protocol pane rearrange of the active pane did not keep focus on an even split"
+    );
+
     // Every destructive type is rejected without confirmation and leaves its target alive.
     let mut close_pane = action(v1::TmuxActionKind::ClosePane);
     close_pane.pane_id = right_pane.clone();

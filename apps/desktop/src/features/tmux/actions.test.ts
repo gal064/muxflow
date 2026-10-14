@@ -97,4 +97,20 @@ describe("tmux action boundary", () => {
       kind: "reorderWindow", sessionId: "$1", windowId: "@5", targetWindowId: "@5", relativePosition: "after",
     }, precondition)).toThrow("distinct target");
   });
+
+  it("carries a move's destination and refuses one without it", () => {
+    const precondition = { serverIdentity: "tmux:one", generation: 42 };
+    expect(toWireTmuxAction({
+      kind: "joinPane", paneId: "%7", targetPaneId: "%1", paneEdge: "left",
+    }, precondition)).toMatchObject({ kind: "joinPane", pane_id: "%7", target_pane_id: "%1", pane_edge: "left" });
+    expect(toWireTmuxAction({
+      kind: "moveWindow", sessionId: "$1", windowId: "@4", targetSessionId: "$2",
+    }, precondition)).toMatchObject({ window_id: "@4", target_session_id: "$2", pane_edge: "unspecified" });
+    expect(() => toWireTmuxAction({ kind: "joinPane", paneId: "%7", targetPaneId: "%7", paneEdge: "left" }, precondition))
+      .toThrow("distinct target pane");
+    expect(() => toWireTmuxAction({ kind: "joinPane", paneId: "%7", targetPaneId: "%1" }, precondition))
+      .toThrow("an edge");
+    expect(() => toWireTmuxAction({ kind: "breakPane", paneId: "%7" }, precondition))
+      .toThrow("target workspace");
+  });
 });

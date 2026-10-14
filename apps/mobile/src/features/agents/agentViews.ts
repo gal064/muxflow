@@ -24,17 +24,20 @@ export function agentStateLabel(agent: Agent): string {
 }
 
 /**
- * The row's name (§9.3.1): the tmux tab, the desktop's `agentSessionLabel` —
- * status glyphs stripped, a generic or UUID-like name passed over for the
- * assigned name, then the adapter's. The adapter itself is the icon's job.
- * An agent with neither a window nor a name (gone, its window closed, or a
- * title that is only a ticker frame) says "{adapter} in pane {index}" so the
- * row still points somewhere.
+ * The row's name (§9.3.1): the agent pane's own title, then the tmux tab — the
+ * desktop's `agentSessionLabel`, status glyphs stripped, a generic or UUID-like
+ * name passed over for the assigned name, then the adapter's. The adapter
+ * itself is the icon's job. An agent with no title and no name (gone, its
+ * window closed, or a title that is only a ticker frame) says
+ * "{adapter} in pane {index}" so the row still points somewhere.
  */
 export function agentTitle(state: Pick<SessionState, "windows" | "adapters">, agent: Agent): string {
   const windowName = state.windows[agent.route.windowId]?.name ?? agent.route.windowNameFallback;
-  if (!withoutStatusGlyphs(windowName) && !agent.displayName.trim()) return `${adapterDisplayName(state, agent)} in pane ${agent.route.paneIndexFallback}`;
-  return agentSessionLabel({ windowName, displayName: agent.displayName, adapterId: agent.adapterId }, state.adapters);
+  const paneTitle = agent.route.paneTitleFallback;
+  if (!withoutStatusGlyphs(paneTitle) && !withoutStatusGlyphs(windowName) && !agent.displayName.trim()) {
+    return `${adapterDisplayName(state, agent)} in pane ${agent.route.paneIndexFallback}`;
+  }
+  return agentSessionLabel({ windowName, paneTitle, displayName: agent.displayName, adapterId: agent.adapterId }, state.adapters);
 }
 
 /**

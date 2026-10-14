@@ -5,6 +5,11 @@ import type { ComponentProps } from "react";
 import stylesCss from "../styles.css?raw";
 import type { Pane } from "./types";
 
+const drag = vi.hoisted(() => ({ begin: vi.fn() }));
+vi.mock("../features/dragDrop/pointerDrag", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../features/dragDrop/pointerDrag")>(),
+  beginPointerDrag: drag.begin,
+}));
 const terminal = vi.hoisted(() => ({ renders: 0, props: undefined as Record<string, unknown> | undefined }));
 vi.mock("../features/terminal/TerminalPane", () => ({
   TerminalPane: (props: Record<string, unknown>) => { terminal.renders += 1; terminal.props = props; return <div>terminal</div>; },
@@ -42,6 +47,65 @@ const surfaceProps = (windowName: string) => ({
 }) as unknown as ComponentProps<typeof TerminalWorkspaceSurface>;
 
 describe("TerminalWorkspaceSurface", () => {
+  it("grabs a pane on a link-modifier press, but leaves links, dividers and plain presses to the terminal", async () => {
+    const payload = { kind: "pane", hostProfileId: "local", sessionId: "$1", windowId: "@1", paneId: "%1", label: "shell" };
+    const focus = vi.fn();
+    const props = {
+      ...surfaceProps("shell"),
+      controllers: { current: new Map([["%1", { focus }]]) },
+      paneDragPayload: vi.fn(() => payload),
+      platform: "linux",
+    } as unknown as ComponentProps<typeof TerminalWorkspaceSurface>;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<TerminalWorkspaceSurface {...props} />); });
+    const press = (modifiers: { ctrlKey?: boolean; metaKey?: boolean }, target: Element = document.createElement("canvas")) => {
+      const event = { button: 0, ctrlKey: false, metaKey: false, ...modifiers, target, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+      renderer.root.findByProps({ "data-drop-pane": "%1" }).props.onPointerDownCapture(event);
+      return event;
+    };
+    drag.begin.mockClear();
+
+    const grabbed = press({ ctrlKey: true });
+    expect(drag.begin).toHaveBeenCalledWith(grabbed, payload);
+    expect(grabbed.preventDefault).toHaveBeenCalled();
+    expect(grabbed.stopPropagation).toHaveBeenCalled();
+    // The grab moves the pane, not focus.
+    expect(focus).not.toHaveBeenCalled();
+
+    drag.begin.mockClear();
+    const link = document.createElement("div");
+    link.className = "xterm-screen xterm-cursor-pointer";
+    const cell = document.createElement("canvas");
+    link.append(cell);
+    const divider = document.createElement("div");
+    divider.className = "divider-handle horizontal";
+    const findBar = document.createElement("form");
+    findBar.className = "terminal-search";
+    const findField = document.createElement("input");
+    findBar.append(findField);
+    for (const event of [
+      press({}), press({ metaKey: true }), press({ ctrlKey: true }, cell), press({ ctrlKey: true }, divider),
+      press({ ctrlKey: true }, findField), press({ ctrlKey: true }, document.createElement("button")),
+    ]) {
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    }
+    expect(drag.begin).not.toHaveBeenCalled();
+
+    // macOS grabs with ⌘, since Ctrl-click there is a right-click.
+    await act(async () => renderer.update(<TerminalWorkspaceSurface {...props} platform="mac" />));
+    press({ ctrlKey: true });
+    expect(drag.begin).not.toHaveBeenCalled();
+    press({ metaKey: true });
+    expect(drag.begin).toHaveBeenCalledTimes(1);
+
+    // Nothing to carry while the host cannot be changed.
+    drag.begin.mockClear();
+    await act(async () => renderer.update(<TerminalWorkspaceSurface {...props} paneDragPayload={() => undefined} />));
+    expect(press({ ctrlKey: true }).preventDefault).not.toHaveBeenCalled();
+    expect(drag.begin).not.toHaveBeenCalled();
+    await act(async () => renderer.unmount());
+  });
+
   it("forwards deliberate key and pointer activity with the pane identity", async () => {
     const props = surfaceProps("shell");
     let renderer!: ReturnType<typeof create>;

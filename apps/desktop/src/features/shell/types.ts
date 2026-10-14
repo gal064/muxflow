@@ -3,7 +3,7 @@ import { isAgentSortMode, type AgentSortMode } from "../agents/agentsList";
 
 export type AppTabKind = "file" | "markdown" | "gitDiff";
 /** How a Markdown tab is drawn; also the shape of the persisted default. */
-export type AppTabViewMode = "source" | "preview" | "split";
+export type AppTabViewMode = "source" | "live" | "preview" | "split";
 /** The right panel's own segments; they share one 300px surface. */
 export const BUILT_IN_PANEL_SURFACES = ["files", "git", "ports"] as const;
 /**
@@ -102,6 +102,8 @@ export interface ShellState {
   agentStateGlyphs: boolean;
   /** Hides per-agent activity lines from workspace rows. */
   compactWorkspaces: boolean;
+  /** Focuses a terminal pane when the pointer rests on it, without a click. */
+  focusFollowsMouse: boolean;
   /**
    * The workspace list's one filter: only pinned workspaces are listed, and
    * the agents section shows only their agents.
@@ -192,6 +194,7 @@ export const defaultShellState: ShellState = {
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
   compactWorkspaces: false,
+  focusFollowsMouse: false,
   pinnedOnly: false,
   terminalScreenReader: false,
   copyOnSelect: true,
@@ -252,6 +255,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
       compactWorkspaces: Boolean(shell?.compactWorkspaces),
+      focusFollowsMouse: Boolean(shell?.focusFollowsMouse),
       pinnedOnly: Boolean(shell?.pinnedOnly),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
       copyOnSelect: typeof shell?.copyOnSelect === "boolean"
@@ -279,7 +283,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
 
 /** An unrecognised mode is the default, not a tab that renders nothing. */
 function normalizedViewMode(value: unknown): AppTabViewMode {
-  return value === "source" || value === "preview" || value === "split" ? value : defaultShellState.defaultMarkdownView;
+  return value === "source" || value === "live" || value === "preview" || value === "split" ? value : defaultShellState.defaultMarkdownView;
 }
 
 /**

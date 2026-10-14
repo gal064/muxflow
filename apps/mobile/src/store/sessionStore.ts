@@ -68,6 +68,8 @@ export interface AgentRoute {
   windowNameFallback: string;
   paneId: string;
   paneIndexFallback: number;
+  /** The agent pane's own title; empty from a host that predates it. */
+  paneTitleFallback: string;
 }
 
 export interface Agent {
@@ -319,6 +321,7 @@ export function agentFromProto(record: ProtoAgentRecord): Agent {
       windowNameFallback: route?.windowNameFallback ?? "",
       paneId: route?.paneId ?? "",
       paneIndexFallback: route?.paneIndexFallback ?? 0,
+      paneTitleFallback: route?.paneTitleFallback ?? "",
     },
   };
 }

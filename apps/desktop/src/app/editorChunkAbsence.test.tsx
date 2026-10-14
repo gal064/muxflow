@@ -38,6 +38,10 @@ vi.mock("../features/git/GitDiffEditor", async (importOriginal) => {
   probe.editorEvaluated = true;
   return await importOriginal();
 });
+vi.mock("../features/files/LiveMarkdownEditor", async (importOriginal) => {
+  probe.editorEvaluated = true;
+  return await importOriginal();
+});
 vi.mock("@monaco-editor/react", () => {
   probe.editorEvaluated = true;
   return { default: () => null, DiffEditor: () => null };
@@ -144,6 +148,7 @@ describe("content that never reaches an editor", () => {
     const rendered = JSON.stringify(mounted.toJSON());
     expect(rendered).toContain("markdown-preview");
     expect(rendered, "the preview-only path still rendered an editor host").not.toContain("monaco-host");
+    expect(rendered, "the preview-only path still rendered a live editor host").not.toContain("live-markdown-host");
   });
 
   it("explains a disconnected tab without fetching the editor", async () => {

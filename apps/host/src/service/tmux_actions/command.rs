@@ -180,6 +180,89 @@ pub(super) fn configure_split(
     Ok(())
 }
 
+/// `-d` keeps the destination workspace on whatever tab it was showing: the
+/// tab arrives there, it does not drag the other workspace's view along.
+/// The empty index after `:` lets tmux append at the next free index.
+pub(super) fn configure_move_window(command: &mut std::process::Command, action: &v1::TmuxAction) {
+    command.args([
+        "move-window",
+        "-d",
+        "-s",
+        &action.window_id,
+        "-t",
+        &format!("{}:", action.target_session_id),
+    ]);
+}
+
+/// A join never moves focus. `-d` leaves the destination's active pane, and
+/// its session's current window, where they were; without it tmux would also
+/// select the window. When the pane being moved *is* that active pane,
+/// rearranged inside its own window, it is selected again where it lands.
+///
+/// Within one window `-l 50%` is measured before the pane leaves, so the
+/// split comes out lopsided; `select-layout -E` evens the moved pane with the
+/// panes in its own row or column.
+pub(super) fn configure_join_pane(
+    command: &mut std::process::Command,
+    edge: v1::PaneEdge,
+    action: &v1::TmuxAction,
+    placement: JoinPlacement,
+) -> anyhow::Result<()> {
+    let (orientation, before) = match edge {
+        v1::PaneEdge::Left => ("-h", true),
+        v1::PaneEdge::Right => ("-h", false),
+        v1::PaneEdge::Top => ("-v", true),
+        v1::PaneEdge::Bottom => ("-v", false),
+        v1::PaneEdge::Unspecified => bail!("pane join requires an explicit edge"),
+    };
+    command.args(["join-pane", orientation]);
+    if before {
+        command.arg("-b");
+    }
+    command.args([
+        "-d",
+        "-l",
+        "50%",
+        "-s",
+        &action.pane_id,
+        "-t",
+        &action.target_pane_id,
+    ]);
+    if placement.same_window {
+        command.args([";", "select-layout", "-E", "-t", &action.pane_id]);
+    }
+    if placement.keeps_focus {
+        command.args([";", "select-pane", "-t", &action.pane_id]);
+    }
+    Ok(())
+}
+
+/// Where a join's pane comes from, relative to where it lands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct JoinPlacement {
+    /// Rearranged inside the window it already sits in.
+    pub same_window: bool,
+    /// It is that window's active pane, so focus goes with it.
+    pub keeps_focus: bool,
+}
+
+/// Never run for a window's only pane: tmux moves such a window rather than
+/// breaking it, which is MOVE_WINDOW's job. `validate_targets` refuses that
+/// case, and the desktop sends MOVE_WINDOW for it instead.
+pub(super) fn configure_break_pane(command: &mut std::process::Command, action: &v1::TmuxAction) {
+    command.args([
+        "break-pane",
+        "-d",
+        "-P",
+        "-F",
+        "#{window_id}",
+        "-s",
+        &action.pane_id,
+        "-t",
+        &format!("{}:", action.target_session_id),
+    ]);
+}
+
 pub(in crate::service) fn validate_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control) {
         bail!("tmux name must be 1 to {MAX_NAME_BYTES} bytes without control characters");
@@ -281,6 +364,130 @@ mod tests {
                 "-t",
                 "%1",
                 APP_SHELL,
+            ]
+        );
+    }
+
+    fn args_of(command: &std::process::Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn move_window_appends_to_the_target_session_without_selecting_it() {
+        let action = v1::TmuxAction {
+            window_id: "@4".into(),
+            target_session_id: "$2".into(),
+            ..Default::default()
+        };
+        let mut command = std::process::Command::new("tmux");
+        configure_move_window(&mut command, &action);
+        assert_eq!(
+            args_of(&command),
+            ["move-window", "-d", "-s", "@4", "-t", "$2:"]
+        );
+    }
+
+    #[test]
+    fn join_pane_maps_each_edge_to_orientation_and_side() {
+        let action = v1::TmuxAction {
+            pane_id: "%7".into(),
+            target_pane_id: "%1".into(),
+            ..Default::default()
+        };
+        for (edge, expected) in [
+            (v1::PaneEdge::Left, vec!["join-pane", "-h", "-b"]),
+            (v1::PaneEdge::Right, vec!["join-pane", "-h"]),
+            (v1::PaneEdge::Top, vec!["join-pane", "-v", "-b"]),
+            (v1::PaneEdge::Bottom, vec!["join-pane", "-v"]),
+        ] {
+            let mut command = std::process::Command::new("tmux");
+            configure_join_pane(&mut command, edge, &action, JoinPlacement::default()).unwrap();
+            let mut expected = expected;
+            expected.extend(["-d", "-l", "50%", "-s", "%7", "-t", "%1"]);
+            assert_eq!(args_of(&command), expected, "{edge:?}");
+        }
+        let mut command = std::process::Command::new("tmux");
+        assert!(
+            configure_join_pane(
+                &mut command,
+                v1::PaneEdge::Unspecified,
+                &action,
+                JoinPlacement::default()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn join_pane_rearranging_its_own_window_evens_it_and_keeps_focus_only_if_it_had_it() {
+        let action = v1::TmuxAction {
+            pane_id: "%7".into(),
+            target_pane_id: "%1".into(),
+            ..Default::default()
+        };
+        let args = |placement| {
+            let mut command = std::process::Command::new("tmux");
+            configure_join_pane(&mut command, v1::PaneEdge::Bottom, &action, placement).unwrap();
+            args_of(&command)
+        };
+        assert_eq!(
+            args(JoinPlacement {
+                same_window: true,
+                keeps_focus: true
+            }),
+            [
+                "join-pane",
+                "-v",
+                "-d",
+                "-l",
+                "50%",
+                "-s",
+                "%7",
+                "-t",
+                "%1",
+                ";",
+                "select-layout",
+                "-E",
+                "-t",
+                "%7",
+                ";",
+                "select-pane",
+                "-t",
+                "%7"
+            ]
+        );
+        let unfocused = args(JoinPlacement {
+            same_window: true,
+            keeps_focus: false,
+        });
+        assert_eq!(unfocused[..3], ["join-pane", "-v", "-d"]);
+        assert!(!unfocused.iter().any(|arg| arg == "select-pane"));
+    }
+
+    #[test]
+    fn break_pane_prints_the_new_window_in_the_target_session() {
+        let action = v1::TmuxAction {
+            pane_id: "%7".into(),
+            target_session_id: "$2".into(),
+            ..Default::default()
+        };
+        let mut command = std::process::Command::new("tmux");
+        configure_break_pane(&mut command, &action);
+        assert_eq!(
+            args_of(&command),
+            [
+                "break-pane",
+                "-d",
+                "-P",
+                "-F",
+                "#{window_id}",
+                "-s",
+                "%7",
+                "-t",
+                "$2:"
             ]
         );
     }

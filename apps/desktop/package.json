@@ -1,6 +1,6 @@
 {
   "name": "@muxflow/desktop",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,8 +12,18 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@muxflow/terminal-interactions": "workspace:*",
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/language": "6.12.4",
+    "@codemirror/search": "6.7.2",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.13",
+    "@lezer/common": "1.5.3",
+    "@lezer/highlight": "1.2.4",
+    "@lezer/markdown": "1.7.2",
     "@monaco-editor/react": "4.7.0",
+    "@muxflow/client-core": "workspace:*",
+    "@muxflow/markdown": "workspace:*",
+    "@muxflow/terminal-interactions": "workspace:*",
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.2",
     "@xterm/addon-fit": "0.11.0",
@@ -25,13 +35,11 @@
     "marked": "18.0.9",
     "monaco-editor": "0.56.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "@muxflow/client-core": "workspace:*",
-    "@muxflow/markdown": "workspace:*"
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@types/node": "26.3.0",
     "@tauri-apps/cli": "2.11.4",
+    "@types/node": "26.3.0",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@types/react-test-renderer": "19.1.0",
