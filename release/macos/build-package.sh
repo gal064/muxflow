@@ -150,7 +150,7 @@ else
   ditto -c -k --keepParent "$app" "$app_zip"
   notarize "$app_zip"
   rm -f "$app_zip"
-  xcrun stapler staple "$app"
+  "$repo/release/macos/stapler.sh" staple "$app"
 fi
 "$repo/release/macos/verify-package.sh" "$app"
 
@@ -163,8 +163,8 @@ uvx --from dmgbuild==1.6.7 dmgbuild -s "$repo/release/macos/dmg-settings.py" -D 
 if [[ "$identity" != - ]]; then
   codesign --force --timestamp --sign "$identity" "$dmg"
   notarize "$dmg"
-  xcrun stapler staple "$dmg"
-  xcrun stapler validate "$dmg"
+  "$repo/release/macos/stapler.sh" staple "$dmg"
+  "$repo/release/macos/stapler.sh" validate "$dmg"
 fi
 
 cleanup
