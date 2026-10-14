@@ -170,7 +170,10 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
           // `[text]` with no destination is a reference to a definition
           // elsewhere; the preview draws it as a link only when one exists,
           // and as plain text otherwise. It stays text here.
-          if (!node.node.getChild("URL")) break;
+          if (!node.node.getChild("URL")) {
+            for (const mark of node.node.getChildren("LinkMark")) out.push({ kind: "mark", from: mark.from, to: mark.to, className: "cm-live-plain" });
+            break;
+          }
           liveLink(node.node, doc, active, out);
           return false;
         case "Autolink":
@@ -478,67 +481,134 @@ function tableDecoration(table: { from: number; to: number; source: string }, re
   return Decoration.replace({ widget: new TableWidget(table.source, readOnly), block: true }).range(table.from, table.to);
 }
 
+/** What a finder draws for one block: its decorations, and the stretch they belong to. */
+interface Drawn { from: number; to: number; decorations: Range<Decoration>[] }
+
 /**
- * Redraws the tables in each stretch, leaving the rest of the set as it was.
+ * Redraws the blocks in each stretch, leaving the rest of the set as it was.
  *
  * Each stretch is widened to whole lines and one character either side, so a
- * line typed directly above or below a table still reaches it, and then to the
- * full extent of every table found, so a table is always replaced whole.
+ * line typed directly above or below a block still reaches it, and then to the
+ * full extent of every block found, so a block is always redrawn whole.
  */
-function refreshTables(value: DecorationSet, state: EditorState, stretches: ReadonlyArray<readonly [number, number]>): DecorationSet {
+function refreshStretches(value: DecorationSet, state: EditorState, stretches: ReadonlyArray<readonly [number, number]>, find: (state: EditorState, from: number, to: number) => Drawn[]): DecorationSet {
   const doc = state.doc;
   for (const [start, end] of stretches) {
     const from = Math.max(0, doc.lineAt(Math.min(start, doc.length)).from - 1);
     const to = Math.min(doc.length, doc.lineAt(Math.min(end, doc.length)).to + 1);
-    const found = tableRanges(state, from, to);
+    const found = find(state, from, to);
     let filterFrom = from;
     let filterTo = to;
-    for (const table of found) {
-      filterFrom = Math.min(filterFrom, table.from);
-      filterTo = Math.max(filterTo, table.to);
+    for (const block of found) {
+      filterFrom = Math.min(filterFrom, block.from);
+      filterTo = Math.max(filterTo, block.to);
     }
-    value = value.update({ filterFrom, filterTo, filter: () => false, add: found.map((table) => tableDecoration(table, state.readOnly)), sort: true });
+    value = value.update({ filterFrom, filterTo, filter: () => false, add: found.flatMap((block) => block.decorations), sort: true });
   }
   return value;
 }
 
 /**
- * Every table, drawn whole and edited in place.
+ * Decorations for whole blocks, which may span lines and so cannot come from
+ * the view plugin.
  *
  * Kept up to date by stretch rather than rebuilt. A full rebuild walks the
- * block structure of the entire document and makes a widget per table, on
- * every keystroke; on a 2 MB file that was most of the cost of typing a
- * character. A table's face changes with an edit near it, the parser reaching
- * it, or the document's writability.
+ * block structure of the entire document on every keystroke; on a 2 MB file
+ * that was most of the cost of typing a character. A block's face changes with
+ * an edit near it, the parser reaching it, or the document's writability.
  */
-const tableField = StateField.define<DecorationSet>({
-  create: (state) => RangeSet.of(tableRanges(state).map((table) => tableDecoration(table, state.readOnly))),
-  update: (value, transaction) => {
-    const before = transaction.startState;
-    const after = transaction.state;
-    if (before.readOnly !== after.readOnly) return RangeSet.of(tableRanges(after).map((table) => tableDecoration(table, after.readOnly)));
-    const stretches: Array<readonly [number, number]> = [];
-    if (transaction.docChanged) {
-      value = value.map(transaction.changes);
-      let first = after.doc.length;
-      transaction.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
-        stretches.push([fromB, toB]);
-        first = Math.min(first, fromB);
-      });
-      // A fence or an HTML block opening or closing can swallow, or release,
-      // every table after it: those are redrawn up to where the parser has reached.
-      if (mayReflowBlocks(transaction)) stretches.push([first, Math.max(first, Math.min(syntaxTree(after).length, after.doc.length))]);
-    }
-    const treeBefore = syntaxTree(before);
-    const treeAfter = syntaxTree(after);
-    // The parser working through the document in the background: the newly
-    // parsed stretch may hold tables nobody has drawn yet.
-    if (!transaction.docChanged && treeBefore !== treeAfter) {
-      stretches.push([Math.min(treeBefore.length, treeAfter.length), treeAfter.length]);
-    }
-    return stretches.length ? refreshTables(value, after, stretches) : value;
-  },
-  provide: (field) => EditorView.decorations.from(field),
+function drawnBlocks(find: (state: EditorState, from: number, to: number) => Drawn[]) {
+  const all = (state: EditorState) => RangeSet.of(find(state, 0, state.doc.length).flatMap((block) => block.decorations), true);
+  return StateField.define<DecorationSet>({
+    create: all,
+    update: (value, transaction) => {
+      const before = transaction.startState;
+      const after = transaction.state;
+      if (before.readOnly !== after.readOnly) return all(after);
+      const stretches: Array<readonly [number, number]> = [];
+      if (transaction.docChanged) {
+        value = value.map(transaction.changes);
+        let first = after.doc.length;
+        transaction.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
+          stretches.push([fromB, toB]);
+          first = Math.min(first, fromB);
+        });
+        // A fence or an HTML block opening or closing can swallow, or release,
+        // every block after it: those are redrawn up to where the parser has reached.
+        if (mayReflowBlocks(transaction)) stretches.push([first, Math.max(first, Math.min(syntaxTree(after).length, after.doc.length))]);
+      }
+      const treeBefore = syntaxTree(before);
+      const treeAfter = syntaxTree(after);
+      // The parser working through the document in the background: the newly
+      // parsed stretch may hold blocks nobody has drawn yet.
+      if (!transaction.docChanged && treeBefore !== treeAfter) {
+        stretches.push([Math.min(treeBefore.length, treeAfter.length), treeAfter.length]);
+      }
+      return stretches.length ? refreshStretches(value, after, stretches, find) : value;
+    },
+    provide: (field) => EditorView.decorations.from(field),
+  });
+}
+
+/** Every table, drawn whole and edited in place. */
+const tableField = drawnBlocks((state, from, to) => tableRanges(state, from, to)
+  .map((table) => ({ from: table.from, to: table.to, decorations: [tableDecoration(table, state.readOnly)] })));
+
+class SpaceWidget extends WidgetType {
+  eq() { return true; }
+  toDOM() {
+    const span = document.createElement("span");
+    span.textContent = " ";
+    return span;
+  }
+}
+
+const softBreak = Decoration.replace({ widget: new SpaceWidget() });
+
+/**
+ * The line breaks inside the paragraphs overlapping `[from, to]`, each with
+ * the next line's indentation: a soft break, which Markdown reads as a space.
+ * A break after two spaces or a backslash is a hard one and stays.
+ */
+export function softBreaks(state: EditorState, from = 0, to = state.doc.length): Array<{ from: number; to: number }> {
+  const doc = state.doc;
+  const out: Array<{ from: number; to: number }> = [];
+  syntaxTree(state).iterate({
+    from,
+    to,
+    enter: (node) => {
+      if (node.name !== "Paragraph") return TABLE_CONTAINERS.has(node.name);
+      for (let line = doc.lineAt(node.from); line.to < node.to; line = doc.line(line.number + 1)) {
+        if (/(?: {2}|\\)$/.test(line.text)) continue;
+        const next = doc.line(line.number + 1);
+        const indent = /^[ \t]*/.exec(next.text)![0].length;
+        out.push({ from: line.to, to: next.from + indent });
+      }
+      return false;
+    },
+  });
+  return out;
+}
+
+/**
+ * A paragraph's lines drawn as one flowing paragraph, as the preview draws
+ * them: a hard-wrapped file fills the width instead of stopping where the
+ * file's lines end. The breaks stay in the file; each is kept whole, so
+ * Backspace after one joins the lines in the source too.
+ */
+const softBreakField = drawnBlocks((state, from, to) => {
+  const drawn: Drawn[] = [];
+  syntaxTree(state).iterate({
+    from,
+    to,
+    enter: (node) => {
+      if (node.name !== "Paragraph") return TABLE_CONTAINERS.has(node.name);
+      const breaks = softBreaks(state, node.from, node.to);
+      if (breaks.length) drawn.push({ from: node.from, to: node.to, decorations: breaks.map((range) => softBreak.range(range.from, range.to)) });
+      return false;
+    },
+  });
+  return drawn;
 });
 
 /** The table drawn on the line after (`forward`) or before the caret's, if the caret is about to cross it. */
@@ -594,7 +664,6 @@ const liveHighlight = HighlightStyle.define([
   { tag: tags.strong, fontWeight: "650" },
   { tag: tags.strikethrough, textDecoration: "line-through" },
   { tag: tags.heading, fontWeight: "650", color: "var(--chrome-ink-strong)" },
-  { tag: tags.link, color: "var(--accent)" },
   { tag: tags.url, color: "var(--chrome-dim)" },
   { tag: tags.monospace, fontFamily: "var(--font-mono)" },
   { tag: tags.quote, color: "var(--chrome-dim)" },
@@ -705,6 +774,8 @@ export function liveMarkdown(options: LiveMarkdownOptions): Extension {
     EditorView.atomicRanges.of((view) => view.plugin(livePlugin)?.atomic ?? RangeSet.empty),
     caretOutOfMarkup,
     tableField,
+    softBreakField,
+    EditorView.atomicRanges.of((view) => view.state.field(softBreakField)),
     liveKeys,
     linkHandler.of(options.onLink),
     EditorView.lineWrapping,

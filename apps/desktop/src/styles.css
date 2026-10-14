@@ -1217,6 +1217,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .live-markdown .cm-live-link { color: var(--accent); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); text-underline-offset: 2px; }
 /* A bare or angle-bracket URL is styled as a URL by the highlighter too; inside a link it reads as one. */
 .live-markdown .cm-live-link span { color: inherit; }
+/* Brackets with no link destination are text, as in the preview. */
+.live-markdown :is(.cm-live-plain, .cm-live-plain *) { color: var(--chrome-ink); }
 .live-markdown .cm-live-image-alt { color: var(--chrome-dim); font-style: italic; }
 .live-markdown .cm-live-strike { color: var(--chrome-dim); }
 .live-markdown .cm-live-bullet { display: inline-block; min-width: 1em; color: var(--chrome-dim); }

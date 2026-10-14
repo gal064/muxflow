@@ -4,7 +4,7 @@ import { Compartment, EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deleteCharBackward } from "@codemirror/commands";
-import { blockMarkupEnd, breakBeforeHeading, continueMarkup, linkAt, linkTarget, liveMarkdown, liveRanges, setFocused, tableRanges, toggleInline, type LiveRange } from "./liveMarkdown";
+import { blockMarkupEnd, breakBeforeHeading, continueMarkup, linkAt, linkTarget, liveMarkdown, liveRanges, setFocused, softBreaks, tableRanges, toggleInline, type LiveRange } from "./liveMarkdown";
 
 function state(doc: string, cursor?: number, focused = cursor !== undefined) {
   const created = EditorState.create({
@@ -120,6 +120,17 @@ describe("live Markdown rendering", () => {
   it("renders an indented table, as the preview does", () => {
     const doc = "x\n\n  a | b\n  --|--\n  1 | 2";
     expect(tableRanges(state(doc)).map((table) => table.from)).toEqual([3]);
+  });
+
+  it("finds the soft line breaks a paragraph flows across, and only those", () => {
+    const joined = (doc: string) => softBreaks(state(doc)).map((range) => JSON.stringify(doc.slice(range.from, range.to)));
+    expect(joined("one\ntwo\nthree\n\nnext\npara")).toEqual(['"\\n"', '"\\n"', '"\\n"']);
+    // A list item's continuation takes its indentation with the break.
+    expect(joined("- item that\n  wraps")).toEqual(['"\\n  "']);
+    // Hard breaks, separate blocks and code stay as they are.
+    expect(joined("hard  \nbreak\\\nhere")).toEqual([]);
+    expect(joined("# Title\ntext\n```\ncode\nmore\n```")).toEqual([]);
+    expect(joined("> quoted\n> on two")).toEqual(['"\\n"']);
   });
 
   it("finds where a line's text starts after its hidden markup", () => {
@@ -318,6 +329,15 @@ describe("live Markdown commands", () => {
     expect(editor.state.selection.main.head, "a link click moved the caret into the table").toBe(doc.length);
     anchor().dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
     expect(onLink).toHaveBeenCalledTimes(1);
+  });
+
+  it("draws a hard-wrapped paragraph as one line, and Backspace across the break joins it in the file", () => {
+    const doc = "one two\nthree four\n\nnext";
+    const editor = view(doc, 8);
+    const lines = [...editor.contentDOM.querySelectorAll(".cm-line")].map((line) => line.textContent);
+    expect(lines).toEqual(["one two three four", "", "next"]);
+    deleteCharBackward(editor);
+    expect(editor.state.doc.toString()).toBe("one twothree four\n\nnext");
   });
 
   it("deletes a block marker whole with Backspace, and keeps the caret off it", () => {
