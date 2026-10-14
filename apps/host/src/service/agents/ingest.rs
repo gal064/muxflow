@@ -777,6 +777,15 @@ impl AgentRuntime {
         let previous_claude_has_running_subagent = previous
             .as_ref()
             .is_some_and(|record| record.claude_has_running_subagent);
+        let previous_claude_parent_blocked = previous_lifecycle == v1::AgentLifecycleState::Blocked
+            && previous
+                .as_ref()
+                .is_some_and(|record| record.claude_parent_blocked);
+        let claude_subagent_event = adapter.id() == "claude-code"
+            && payload
+                .get(adapters::CLAUDE_SUBAGENT_EVENT_FIELD)
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
         let previous_hook_terminal = previous.as_ref().is_some_and(|record| record.hook_terminal);
         let previous_codex_parent_stopped = previous
             .as_ref()
@@ -1079,7 +1088,10 @@ impl AgentRuntime {
                 || codex_parent_stop_during_subagents
                 || adapter.id() == "claude-code"
                     && parsed.event_name == "Stop"
-                    && parsed.lifecycle == v1::AgentLifecycleState::Working);
+                    && parsed.lifecycle == v1::AgentLifecycleState::Working
+                // A subagent's tool activity is not the parent answering
+                // its own question or permission prompt.
+                || claude_subagent_event && previous_claude_parent_blocked);
         let codex_resolved_block_after_children = adapter.id() == "codex"
             && previous_lifecycle == v1::AgentLifecycleState::Blocked
             && previous_codex_parent_stopped
@@ -1270,6 +1282,16 @@ impl AgentRuntime {
         } else {
             previous_claude_has_running_subagent
         };
+        // Only a parent event that raises the block itself claims it. One that
+        // merely keeps a block (a `Stop` with live subagents) or cannot be
+        // attributed (`Notification` never carries the subagent's identity)
+        // keeps the block's existing owner.
+        let claude_parent_blocked = adapter.id() == "claude-code"
+            && lifecycle == v1::AgentLifecycleState::Blocked
+            && (previous_claude_parent_blocked
+                || !claude_subagent_event
+                    && parsed.lifecycle == v1::AgentLifecycleState::Blocked
+                    && parsed.event_name != "Notification");
         let mut codex_parent_stopped_for_subagents = if adapter.id() != "codex" {
             false
         } else if codex_ignored_lifecycle_event {
@@ -1383,6 +1405,7 @@ impl AgentRuntime {
             codex_latest_subagent_turns,
             codex_terminal_subagent_turns,
             claude_has_running_subagent,
+            claude_parent_blocked,
             codex_running_subagents,
             codex_subagent_capacity_exceeded,
             codex_parent_stopped_for_subagents,

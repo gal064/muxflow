@@ -119,6 +119,11 @@ pub(super) struct StoredAgent {
     /// notification cannot turn that live work into a false blocked state.
     #[serde(default)]
     pub claude_has_running_subagent: bool,
+    /// Claude's parent raised the current block itself (a question or its own
+    /// permission prompt). Its subagents keep firing tool hooks while it waits,
+    /// so only the parent's own next event may resolve the block.
+    #[serde(default)]
+    pub claude_parent_blocked: bool,
     /// Codex has no aggregate child count on its parent `Stop`, so each stable
     /// child ID is retained with its exact active turn across daemon restarts.
     /// The turn prevents a late terminal hook from clearing a resumed child.
@@ -859,6 +864,7 @@ mod tests {
                 codex_latest_subagent_turns: VecDeque::new(),
                 codex_terminal_subagent_turns: VecDeque::new(),
                 claude_has_running_subagent: false,
+                claude_parent_blocked: false,
                 codex_running_subagents: BTreeMap::new(),
                 codex_subagent_capacity_exceeded: false,
                 codex_parent_stopped_for_subagents: false,

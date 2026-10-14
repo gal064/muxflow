@@ -1023,6 +1023,14 @@ fn build_event_from_payload(
             agent_id.clone().into(),
         );
     }
+    if adapter == v1::AgentAdapterKind::ClaudeCode
+        && payload.agent_id.as_ref().is_some_and(|id| !id.is_empty())
+    {
+        normalized.insert(
+            crate::service::agents::adapters::CLAUDE_SUBAGENT_EVENT_FIELD.into(),
+            true.into(),
+        );
+    }
     if claude_stop {
         normalized.insert(
             crate::service::agents::adapters::CLAUDE_HAS_RUNNING_SUBAGENT_FIELD.into(),
@@ -1722,6 +1730,44 @@ mod tests {
         let serialized = payload.to_string();
         assert!(!serialized.contains("private-role"));
         assert!(!serialized.contains("private command"));
+    }
+
+    #[test]
+    fn claude_subagent_activity_is_marked_without_its_id_or_private_payload() {
+        let event = build_event(
+            v1::AgentAdapterKind::ClaudeCode,
+            br#"{"hook_event_name":"PreToolUse","session_id":"session-1","agent_id":"agent-1","agent_type":"private-role","tool_name":"Bash","tool_input":{"command":"private command"}}"#.to_vec(),
+            "%12",
+            "tmux:server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&event.payload_json).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "session-1",
+                "from_subagent": true,
+            })
+        );
+        let serialized = payload.to_string();
+        for private in ["agent-1", "private-role", "private command"] {
+            assert!(!serialized.contains(private));
+        }
+
+        let parent = build_event(
+            v1::AgentAdapterKind::ClaudeCode,
+            br#"{"hook_event_name":"PreToolUse","session_id":"session-1","tool_name":"AskUserQuestion"}"#.to_vec(),
+            "%12",
+            "tmux:server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        let parent: serde_json::Value = serde_json::from_slice(&parent.payload_json).unwrap();
+        assert!(parent.get("from_subagent").is_none());
     }
 
     #[test]

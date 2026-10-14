@@ -15,6 +15,10 @@ pub(crate) const CODEX_CHILD_TRANSITIONS_FIELD: &str = "child_transitions";
 pub(crate) const CODEX_SUBAGENT_ID_FIELD: &str = "agent_id";
 pub(crate) const MAX_CODEX_SUBAGENT_ID_BYTES: usize = 1024;
 pub(crate) const CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: &str = "has_running_subagent";
+/// Claude Code fires a subagent's tool hooks under its parent's session. The
+/// hook CLI reduces the subagent's ID to this boolean so ingest can tell that
+/// activity from the parent's own.
+pub(crate) const CLAUDE_SUBAGENT_EVENT_FIELD: &str = "from_subagent";
 /// The agent's final message, forwarded on `Stop` by both adapters for voice
 /// mode (docs/mobile/voice-mode-plan.md §4.5). Consumed by ingest and handed
 /// to the voice service; never stored in `AgentRecord` or `agents.json`.
