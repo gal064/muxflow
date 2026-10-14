@@ -1,10 +1,10 @@
 import { HighlightStyle, Language, LanguageSupport, defineLanguageFacet, syntaxHighlighting, syntaxTree } from "@codemirror/language";
-import { EditorSelection, EditorState, Facet, RangeSet, StateEffect, StateField, type Extension, type Range } from "@codemirror/state";
-import { Decoration, EditorView, ViewPlugin, WidgetType, type Command, type DecorationSet, type ViewUpdate } from "@codemirror/view";
+import { EditorSelection, EditorState, Prec, RangeSet, StateEffect, StateField, type Extension, type Range, type Text, type Transaction } from "@codemirror/state";
+import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type Command, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import type { SyntaxNode, SyntaxNodeRef } from "@lezer/common";
 import { tags } from "@lezer/highlight";
 import { GFM, parser } from "@lezer/markdown";
-import { renderSafeMarkdown } from "./markdown";
+import { TableWidget, enterTable, linkHandler } from "./liveTable";
 
 /**
  * Markdown edited in place: the text is the document, and the syntax is drawn
@@ -42,19 +42,14 @@ const editorFocused = StateField.define<boolean>({
 });
 
 /**
- * The line spans the selection touches. A construct on one of these lines shows
- * its source; everywhere else it is rendered.
- *
- * Per line rather than per element: an element that reveals its markers as the
- * caret crosses into it shifts the text under the caret mid-word, while a line
- * changes shape once, when the caret arrives.
+ * The selection, while the editor has focus. An inline element the selection
+ * touches — bold, a link, inline code — shows its markers; everything else
+ * stays rendered, as in Typora. Block markers (headings, quotes, bullets,
+ * tasks, rules) are never shown: they are kept whole instead, by `blockMarks`.
  */
-export function activeLines(state: EditorState): ReadonlyArray<{ from: number; to: number }> {
+function activeRanges(state: EditorState): ReadonlyArray<{ from: number; to: number }> {
   if (!state.field(editorFocused, false)) return [];
-  return state.selection.ranges.map((range) => ({
-    from: state.doc.lineAt(range.from).from,
-    to: state.doc.lineAt(range.to).to,
-  }));
+  return state.selection.ranges;
 }
 
 function touches(active: ReadonlyArray<{ from: number; to: number }>, from: number, to: number): boolean {
@@ -69,7 +64,9 @@ export type LiveRange =
   | { kind: "bullet"; from: number; to: number }
   | { kind: "task"; from: number; to: number; checked: boolean }
   | { kind: "rule"; from: number; to: number }
-  | { kind: "image"; from: number; to: number; src: string; alt: string };
+  | { kind: "image"; from: number; to: number; src: string; alt: string }
+  /** A block marker and its space, kept whole: the caret never stops inside it, and Backspace takes it at once. */
+  | { kind: "atomic"; from: number; to: number };
 
 const HEADING = /^(?:ATX|Setext)Heading([1-6])$/;
 
@@ -80,7 +77,7 @@ const HEADING = /^(?:ATX|Setext)Heading([1-6])$/;
  * its shape as the caret moves; only markers come and go.
  */
 export function liveRanges(state: EditorState, from: number, to: number): LiveRange[] {
-  const active = activeLines(state);
+  const active = activeRanges(state);
   const doc = state.doc;
   const out: LiveRange[] = [];
   // Clamped to the range: a long block that merely overlaps it is styled one
@@ -92,12 +89,18 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
       pos = line.to + 1;
     }
   };
-  const hideUnless = (node: { from: number; to: number }, extend = 0) => {
-    if (!touches(active, node.from, node.to)) out.push({ kind: "hide", from: node.from, to: Math.min(node.to + extend, doc.length) });
+  /** Hides `node` unless the selection touches `element`, the construct it marks. */
+  const hideUnless = (node: { from: number; to: number }, element: { from: number; to: number } = node) => {
+    if (!touches(active, element.from, element.to)) out.push({ kind: "hide", from: node.from, to: node.to });
   };
   // A marker followed by its separating space hides with it, or the text would
   // keep a ragged indent where the marker was.
   const spaceAfter = (pos: number) => (doc.sliceString(pos, pos + 1) === " " ? 1 : 0);
+  const blockMark = (markFrom: number, markTo: number, hide: boolean) => {
+    const end = Math.min(markTo + spaceAfter(markTo), doc.length);
+    if (hide) out.push({ kind: "hide", from: markFrom, to: end });
+    out.push({ kind: "atomic", from: markFrom, to: end });
+  };
 
   syntaxTree(state).iterate({
     from,
@@ -115,18 +118,19 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
         case "HeaderMark": {
           const parent = node.node.parent;
           if (parent?.name.startsWith("Setext")) {
-            hideUnless({ from: node.from, to: node.to });
+            // The underline is a line of its own, shown while the heading is being edited.
+            hideUnless(node, parent);
             break;
           }
           // An opening mark takes its space with it; a closing one, the space before it.
           const closing = node.from > doc.lineAt(node.from).from && doc.sliceString(node.from - 1, node.from) === " ";
-          if (closing) hideUnless({ from: node.from - 1, to: node.to });
-          else hideUnless(node, spaceAfter(node.to));
+          if (closing) out.push({ kind: "hide", from: node.from - 1, to: node.to });
+          else blockMark(node.from, node.to, true);
           break;
         }
         case "EmphasisMark":
         case "StrikethroughMark":
-          hideUnless(node);
+          hideUnless(node, node.node.parent ?? node);
           break;
         case "Strikethrough":
           out.push({ kind: "mark", from: node.from, to: node.to, className: "cm-live-strike" });
@@ -135,7 +139,7 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
           out.push({ kind: "mark", from: node.from, to: node.to, className: "cm-live-inline-code" });
           break;
         case "CodeMark":
-          if (node.node.parent?.name === "InlineCode") hideUnless(node);
+          if (node.node.parent?.name === "InlineCode") hideUnless(node, node.node.parent);
           break;
         case "Escape":
           hideUnless({ from: node.from, to: node.from + 1 });
@@ -148,18 +152,18 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
           lineClass(node.from, node.to, "cm-live-quote");
           break;
         case "QuoteMark":
-          hideUnless(node, spaceAfter(node.to));
+          blockMark(node.from, node.to, true);
           break;
         case "ListMark":
-          liveListMark(node, doc, active, out);
+          liveListMark(node, out, blockMark);
           break;
         case "TaskMarker":
-          if (!touches(active, node.from, node.to)) {
-            out.push({ kind: "task", from: node.from, to: node.to, checked: /x/i.test(doc.sliceString(node.from, node.to)) });
-          }
+          out.push({ kind: "task", from: node.from, to: node.to, checked: /x/i.test(doc.sliceString(node.from, node.to)) });
+          blockMark(node.from, node.to, false);
           break;
         case "HorizontalRule":
-          if (!touches(active, node.from, node.to)) out.push({ kind: "rule", from: node.from, to: node.to });
+          out.push({ kind: "rule", from: node.from, to: node.to });
+          out.push({ kind: "atomic", from: node.from, to: node.to });
           break;
         case "Link":
         case "Image":
@@ -184,7 +188,7 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
   // CodeMirror throws on a plugin replacement that spans a line break — out of
   // the view's constructor, which takes the whole app down — so those stay
   // source.
-  return out.filter((range) => range.kind === "line" || range.kind === "mark" || doc.lineAt(range.from).to >= range.to);
+  return out.filter((range) => range.kind === "line" || range.kind === "mark" || range.kind === "atomic" || doc.lineAt(range.from).to >= range.to);
 }
 
 type Doc = EditorState["doc"];
@@ -208,14 +212,14 @@ function liveCodeBlock(node: SyntaxNodeRef, doc: Doc, active: Active, out: LiveR
   } while (cursor.nextSibling());
 }
 
-function liveListMark(node: SyntaxNodeRef, doc: Doc, active: Active, out: LiveRange[]) {
+function liveListMark(node: SyntaxNodeRef, out: LiveRange[], blockMark: (from: number, to: number, hide: boolean) => void) {
   const item = node.node.parent;
+  // Ordered numbers stay text: they are what the reader sees in the preview too.
   if (item?.parent?.name !== "BulletList") return;
-  if (touches(active, node.from, node.to)) return;
-  const end = Math.min(node.to + (doc.sliceString(node.to, node.to + 1) === " " ? 1 : 0), doc.length);
   // A task item is drawn as its checkbox alone.
-  if (item.getChild("Task")) out.push({ kind: "hide", from: node.from, to: end });
-  else out.push({ kind: "bullet", from: node.from, to: node.to });
+  const task = !!item.getChild("Task");
+  if (!task) out.push({ kind: "bullet", from: node.from, to: node.to });
+  blockMark(node.from, node.to, task);
 }
 
 function liveLink(node: SyntaxNode, doc: Doc, active: Active, out: LiveRange[]) {
@@ -325,47 +329,12 @@ class ImageWidget extends WidgetType {
   }
 }
 
-/** Where an activated link goes; read by widgets, which are built without the options. */
-const linkHandler = Facet.define<(href: string) => void>();
-
-/** A whole table, drawn by the same sanitizer as the preview. */
-class TableWidget extends WidgetType {
-  constructor(readonly source: string) { super(); }
-  eq(other: TableWidget) { return other.source === this.source; }
-  toDOM(view: EditorView) {
-    const wrap = document.createElement("div");
-    wrap.className = "cm-live-table";
-    wrap.innerHTML = renderSafeMarkdown(this.source);
-    // Clicking a rendered table is asking to edit it: the caret goes to the
-    // start of the source, which reveals it. A modified click on a link opens
-    // it, as everywhere else in the document; its href is already sanitized.
-    wrap.addEventListener("mousedown", (event) => {
-      // A middle button would take focus away, and on Linux paste the primary selection.
-      if (event.button === 1) event.preventDefault();
-      if (event.button !== 0) return;
-      event.preventDefault();
-      const href = (event.target as Element | null)?.closest?.("a")?.getAttribute("href");
-      if (href && (event.metaKey || event.ctrlKey)) {
-        for (const open of view.state.facet(linkHandler)) open(href);
-        return;
-      }
-      view.dispatch({ selection: { anchor: view.posAtDOM(wrap) } });
-      view.focus();
-    });
-    // A link in a rendered cell must not activate: a relative href navigates
-    // the whole webview off the app, the same hazard the preview guards.
-    wrap.addEventListener("click", (event) => event.preventDefault());
-    wrap.addEventListener("auxclick", (event) => event.preventDefault());
-    return wrap;
-  }
-  ignoreEvent() { return true; }
-}
-
 const bullet = Decoration.replace({ widget: new BulletWidget() });
 const rule = Decoration.replace({ widget: new RuleWidget() });
 const hidden = Decoration.replace({});
+const atomic = Decoration.mark({});
 
-function toDecoration(range: LiveRange, readOnly: boolean): Range<Decoration> {
+function toDecoration(range: Exclude<LiveRange, { kind: "atomic" }>, readOnly: boolean): Range<Decoration> {
   switch (range.kind) {
     case "hide": return hidden.range(range.from, range.to);
     case "line": return Decoration.line({ class: range.className }).range(range.from);
@@ -377,36 +346,91 @@ function toDecoration(range: LiveRange, readOnly: boolean): Range<Decoration> {
   }
 }
 
-function buildDecorations(view: EditorView): DecorationSet {
+function buildDecorations(view: EditorView): { decorations: DecorationSet; atomic: RangeSet<Decoration> } {
   const ranges: Range<Decoration>[] = [];
+  const atomics: Range<Decoration>[] = [];
   for (const visible of view.visibleRanges) {
     for (const range of liveRanges(view.state, visible.from, visible.to)) {
-      if (range.kind === "hide" && range.from === range.to) continue;
-      ranges.push(toDecoration(range, view.state.readOnly));
+      if ((range.kind === "hide" || range.kind === "atomic") && range.from === range.to) continue;
+      if (range.kind === "atomic") atomics.push(atomic.range(range.from, range.to));
+      else ranges.push(toDecoration(range, view.state.readOnly));
     }
   }
-  return Decoration.set(ranges, true);
+  return { decorations: Decoration.set(ranges, true), atomic: Decoration.set(atomics, true) };
 }
 
 const livePlugin = ViewPlugin.fromClass(class {
   decorations: DecorationSet;
-  constructor(view: EditorView) { this.decorations = buildDecorations(view); }
+  atomic: RangeSet<Decoration>;
+  constructor(view: EditorView) { ({ decorations: this.decorations, atomic: this.atomic } = buildDecorations(view)); }
   update(update: ViewUpdate) {
     if (update.docChanged || update.viewportChanged || update.selectionSet
       || update.startState.readOnly !== update.state.readOnly
       || update.startState.field(editorFocused) !== update.state.field(editorFocused)
       || syntaxTree(update.startState) !== syntaxTree(update.state)) {
-      this.decorations = buildDecorations(update.view);
+      ({ decorations: this.decorations, atomic: this.atomic } = buildDecorations(update.view));
     }
   }
 }, { decorations: (plugin) => plugin.decorations });
 
+const BLOCK_MARKS = new Set(["HeaderMark", "QuoteMark", "ListMark", "TaskMarker"]);
+
+/**
+ * Where the text of `line` starts, after its hidden block markers: `# `, `> `,
+ * `- `, `- [ ] ` and any indentation before them. A caret before that point
+ * would sit on markup the user cannot see, and typing there would break it.
+ */
+export function blockMarkupEnd(state: EditorState, line: { from: number; to: number }): number {
+  const doc = state.doc;
+  let end = line.from;
+  syntaxTree(state).iterate({
+    from: line.from,
+    to: line.to,
+    enter: (node) => {
+      if (node.from > line.to || node.from < end) return node.from > line.to ? false : undefined;
+      if (!BLOCK_MARKS.has(node.name)) return undefined;
+      if (doc.sliceString(end, node.from).trim()) return false;
+      if (node.name === "HeaderMark" && node.node.parent?.name.startsWith("Setext")) return undefined;
+      // Ordered numbers are shown, and so editable.
+      if (node.name === "ListMark" && node.node.parent?.parent?.name !== "BulletList") return undefined;
+      end = Math.min(node.to + (doc.sliceString(node.to, node.to + 1) === " " ? 1 : 0), line.to);
+      return undefined;
+    },
+  });
+  return end;
+}
+
+/** Keeps an empty caret out of hidden block markup: a click, Home or a vertical move lands at the line's text. */
+const caretOutOfMarkup = EditorState.transactionFilter.of((transaction) => {
+  if (!transaction.selection) return transaction;
+  const state = transaction.state;
+  let moved = false;
+  const ranges = transaction.selection.ranges.map((range) => {
+    if (!range.empty) return range;
+    const end = blockMarkupEnd(state, state.doc.lineAt(range.head));
+    if (range.head >= end) return range;
+    moved = true;
+    return EditorSelection.cursor(end);
+  });
+  if (!moved) return transaction;
+  return [transaction, { selection: EditorSelection.create(ranges, transaction.selection.mainIndex), sequential: true }];
+});
+
+/** Left from the start of a line's text goes on to the end of the line above, past the hidden markup. */
+const leftOverMarkup: Command = (view) => {
+  const range = view.state.selection.main;
+  if (view.state.selection.ranges.length > 1 || !range.empty) return false;
+  const line = view.state.doc.lineAt(range.head);
+  if (line.from === 0 || range.head === line.from || range.head !== blockMarkupEnd(view.state, line)) return false;
+  view.dispatch({ selection: { anchor: line.from - 1 }, scrollIntoView: true, userEvent: "select" });
+  return true;
+};
+
 /** The block containers a table can sit inside. Everything else is skipped whole. */
 const TABLE_CONTAINERS = new Set(["Document", "Blockquote", "BulletList", "OrderedList", "ListItem"]);
 
-/** The inactive tables overlapping `[from, to]`, each as its whole source. */
+/** The tables overlapping `[from, to]`, each as its whole source. */
 export function tableRanges(state: EditorState, from = 0, to = state.doc.length): Array<{ from: number; to: number; source: string }> {
-  const active = activeLines(state);
   const out: Array<{ from: number; to: number; source: string }> = [];
   syntaxTree(state).iterate({
     from,
@@ -416,8 +440,8 @@ export function tableRanges(state: EditorState, from = 0, to = state.doc.length)
         const start = state.doc.lineAt(node.from).from;
         const end = state.doc.lineAt(node.to).to;
         // A table inside a quote or a list would take the markers on its lines
-        // with it, so only one that starts its line is drawn whole.
-        if (start === node.from && !touches(active, start, end)) out.push({ from: start, to: end, source: state.doc.sliceString(start, end) });
+        // with it, so only one that starts its line, after any indentation, is drawn whole.
+        if (!state.doc.sliceString(start, node.from).trim()) out.push({ from: start, to: end, source: state.doc.sliceString(start, end) });
         return false;
       }
       return TABLE_CONTAINERS.has(node.name);
@@ -426,8 +450,28 @@ export function tableRanges(state: EditorState, from = 0, to = state.doc.length)
   return out;
 }
 
-function tableDecoration(table: { from: number; to: number; source: string }): Range<Decoration> {
-  return Decoration.replace({ widget: new TableWidget(table.source), block: true }).range(table.from, table.to);
+/**
+ * Whether an edit can change how far-off lines parse: only a code fence or an
+ * HTML block opening or closing can swallow, or release, everything after it.
+ * Redrawing to the end of the document on every keystroke instead cost
+ * milliseconds per character on a large file.
+ */
+function mayReflowBlocks(transaction: Transaction): boolean {
+  let found = false;
+  const marks = (doc: Text, from: number, to: number) => doc.sliceString(doc.lineAt(from).from, doc.lineAt(to).to).match(REFLOW)?.join("\n") ?? "";
+  // Compared, not just tested: typing a fence's language name or inside an
+  // HTML line keeps the same openers and closers, and changes nothing far off.
+  transaction.changes.iterChangedRanges((fromA, toA, fromB, toB) => {
+    found ||= marks(transaction.startState.doc, fromA, toA) !== marks(transaction.state.doc, fromB, toB);
+  });
+  return found;
+}
+
+/** Fence and HTML block openers at the start of a line, and the HTML block closers that end one anywhere on it. */
+const REFLOW = /^ {0,3}(?:`{3,}|~{3,}|<[!?/]?[\w-]*)|-->|\?>|\]\]>|<\/(?:script|pre|style|textarea)>/gim;
+
+function tableDecoration(table: { from: number; to: number; source: string }, readOnly: boolean): Range<Decoration> {
+  return Decoration.replace({ widget: new TableWidget(table.source, readOnly), block: true }).range(table.from, table.to);
 }
 
 /**
@@ -449,35 +493,37 @@ function refreshTables(value: DecorationSet, state: EditorState, stretches: Read
       filterFrom = Math.min(filterFrom, table.from);
       filterTo = Math.max(filterTo, table.to);
     }
-    value = value.update({ filterFrom, filterTo, filter: () => false, add: found.map(tableDecoration), sort: true });
+    value = value.update({ filterFrom, filterTo, filter: () => false, add: found.map((table) => tableDecoration(table, state.readOnly)), sort: true });
   }
   return value;
 }
 
 /**
- * Every inactive table, drawn whole.
+ * Every table, drawn whole and edited in place.
  *
  * Kept up to date by stretch rather than rebuilt. A full rebuild walks the
  * block structure of the entire document and makes a widget per table, on
- * every keystroke and every caret move; on a 2 MB file that was most of the
- * cost of typing a character. Only three things can change a table's face:
- * an edit near it, the caret arriving or leaving, and the parser reaching it.
+ * every keystroke; on a 2 MB file that was most of the cost of typing a
+ * character. A table's face changes with an edit near it, the parser reaching
+ * it, or the document's writability.
  */
 const tableField = StateField.define<DecorationSet>({
-  create: (state) => RangeSet.of(tableRanges(state).map(tableDecoration)),
+  create: (state) => RangeSet.of(tableRanges(state).map((table) => tableDecoration(table, state.readOnly))),
   update: (value, transaction) => {
     const before = transaction.startState;
     const after = transaction.state;
+    if (before.readOnly !== after.readOnly) return RangeSet.of(tableRanges(after).map((table) => tableDecoration(table, after.readOnly)));
     const stretches: Array<readonly [number, number]> = [];
     if (transaction.docChanged) {
       value = value.map(transaction.changes);
-      transaction.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => { stretches.push([fromB, toB]); });
-    }
-    if (transaction.docChanged || transaction.selection || before.field(editorFocused) !== after.field(editorFocused)) {
-      for (const line of activeLines(before)) {
-        stretches.push([transaction.changes.mapPos(line.from), transaction.changes.mapPos(line.to)]);
-      }
-      for (const line of activeLines(after)) stretches.push([line.from, line.to]);
+      let first = after.doc.length;
+      transaction.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
+        stretches.push([fromB, toB]);
+        first = Math.min(first, fromB);
+      });
+      // A fence or an HTML block opening or closing can swallow, or release,
+      // every table after it: those are redrawn up to where the parser has reached.
+      if (mayReflowBlocks(transaction)) stretches.push([first, Math.max(first, Math.min(syntaxTree(after).length, after.doc.length))]);
     }
     const treeBefore = syntaxTree(before);
     const treeAfter = syntaxTree(after);
@@ -490,6 +536,54 @@ const tableField = StateField.define<DecorationSet>({
   },
   provide: (field) => EditorView.decorations.from(field),
 });
+
+/** The table drawn on the line after (`forward`) or before the caret's, if the caret is about to cross it. */
+function tableNext(view: EditorView, forward: boolean, vertical: boolean): number | undefined {
+  const range = view.state.selection.main;
+  if (!range.empty || view.state.readOnly) return undefined;
+  const line = view.state.doc.lineAt(range.head);
+  const target = forward ? line.to + 1 : line.from - 1;
+  if (target < 0 || target > view.state.doc.length) return undefined;
+  if (vertical) {
+    // Only from the line's last (or first) visual row: a wrapped paragraph moves within itself first.
+    const moved = view.moveVertically(range, forward);
+    if (forward ? moved.head <= line.to : moved.head >= line.from) return undefined;
+  } else if (range.head !== (forward ? line.to : line.from)) return undefined;
+  let found: number | undefined;
+  view.state.field(tableField).between(target, target, (from, to) => {
+    if (forward ? from === target : to === target) found = from;
+  });
+  return found;
+}
+
+function intoTable(forward: boolean, vertical: boolean): Command {
+  return (view) => {
+    const at = tableNext(view, forward, vertical);
+    return at !== undefined && enterTable(view, at, forward);
+  };
+}
+
+/**
+ * Enter at the start of a heading's text opens a line above it, as in Typora,
+ * rather than splitting the hidden `#` from its text.
+ */
+export const breakBeforeHeading: Command = (view) => {
+  const { state } = view;
+  const range = state.selection.main;
+  if (state.selection.ranges.length > 1 || !range.empty || state.readOnly) return false;
+  const line = state.doc.lineAt(range.head);
+  if (range.head === line.from || range.head !== blockMarkupEnd(state, line) || !/^ATXHeading/.test(syntaxTree(state).resolveInner(line.from, 1).parent?.name ?? "")) return false;
+  view.dispatch({ changes: { from: line.from, insert: state.lineBreak }, selection: { anchor: range.head + state.lineBreak.length }, scrollIntoView: true, userEvent: "input" });
+  return true;
+};
+
+const liveKeys = Prec.high(keymap.of([
+  { key: "Enter", run: breakBeforeHeading },
+  { key: "ArrowDown", run: intoTable(true, true) },
+  { key: "ArrowUp", run: intoTable(false, true) },
+  { key: "ArrowRight", run: intoTable(true, false) },
+  { key: "ArrowLeft", run: (view) => intoTable(false, false)(view) || leftOverMarkup(view) },
+]));
 
 const liveHighlight = HighlightStyle.define([
   { tag: tags.emphasis, fontStyle: "italic" },
@@ -604,7 +698,10 @@ export function liveMarkdown(options: LiveMarkdownOptions): Extension {
     editorFocused,
     EditorView.focusChangeEffect.of((_state, focusing) => setFocused.of(focusing)),
     livePlugin,
+    EditorView.atomicRanges.of((view) => view.plugin(livePlugin)?.atomic ?? RangeSet.empty),
+    caretOutOfMarkup,
     tableField,
+    liveKeys,
     linkHandler.of(options.onLink),
     EditorView.lineWrapping,
     EditorView.domEventHandlers({

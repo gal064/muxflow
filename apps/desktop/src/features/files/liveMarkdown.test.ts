@@ -3,7 +3,8 @@
 import { Compartment, EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { continueMarkup, linkAt, linkTarget, liveMarkdown, liveRanges, setFocused, tableRanges, toggleInline, type LiveRange } from "./liveMarkdown";
+import { deleteCharBackward } from "@codemirror/commands";
+import { blockMarkupEnd, breakBeforeHeading, continueMarkup, linkAt, linkTarget, liveMarkdown, liveRanges, setFocused, tableRanges, toggleInline, type LiveRange } from "./liveMarkdown";
 
 function state(doc: string, cursor?: number, focused = cursor !== undefined) {
   const created = EditorState.create({
@@ -39,16 +40,27 @@ function view(doc: string, cursor: number | { anchor: number; head: number }) {
 }
 
 describe("live Markdown rendering", () => {
-  it("hides heading, emphasis and code markers on lines the caret is not on", () => {
+  it("hides heading, emphasis and code markers away from the caret", () => {
     const doc = "# Title\n\nSome **bold** and *it* and `code`.\n";
     expect(hidden(doc)).toEqual(["# ", "**", "**", "*", "*", "`", "`"]);
     expect(ranges(doc)).toContainEqual({ kind: "line", from: 0, className: "cm-live-h1" });
   });
 
-  it("shows the source of the line the caret is on, and only that line", () => {
-    const doc = "# Title\n\nSome **bold** text.\n";
-    expect(hidden(doc, 12)).toEqual(["# "]);
-    expect(hidden(doc, 2)).toEqual(["**", "**"]);
+  it("shows the markers of the inline element the caret is in, and only that element", () => {
+    const doc = "# Title\n\nSome **bold** and `code`.\n";
+    expect(hidden(doc, 11)).toEqual(["# ", "**", "**", "`", "`"]);
+    expect(hidden(doc, 17)).toEqual(["# ", "`", "`"]);
+    // At the edge counts as in it: the caret just after `**` is where typing continues the bold.
+    expect(hidden(doc, 22)).toEqual(["# ", "`", "`"]);
+    expect(hidden(doc, 23)).toEqual(["# ", "**", "**", "`", "`"]);
+    expect(hidden(doc, 30)).toEqual(["# ", "**", "**"]);
+  });
+
+  it("never shows block markers, and keeps each one whole for the caret", () => {
+    const doc = "## Title\n\n> - [ ] task\n\n---\n";
+    for (const cursor of [5, 18, doc.length - 2]) expect(hidden(doc, cursor)).toEqual(["## ", "> ", "- "]);
+    const atomic = ranges(doc, 5).filter((range) => range.kind === "atomic").map((range) => doc.slice(range.from, range.to));
+    expect(atomic).toEqual(["## ", "> ", "- ", "[ ] ", "---"]);
   });
 
   it("renders everything while the editor does not have focus", () => {
@@ -93,10 +105,25 @@ describe("live Markdown rendering", () => {
     expect(hidden("> quoted \\*text\\*\n")).toEqual(["> ", "\\", "\\"]);
   });
 
-  it("renders a table whole unless the caret is in it", () => {
+  it("renders a table whole wherever the caret is", () => {
     const doc = "| a | b |\n| - | - |\n| 1 | 2 |\n\nafter";
     expect(tableRanges(state(doc, doc.length))).toEqual([{ from: 0, to: 29, source: doc.slice(0, 29) }]);
-    expect(tableRanges(state(doc, 12))).toEqual([]);
+    expect(tableRanges(state(doc, 12))).toEqual([{ from: 0, to: 29, source: doc.slice(0, 29) }]);
+  });
+
+  it("renders an indented table, as the preview does", () => {
+    const doc = "x\n\n  a | b\n  --|--\n  1 | 2";
+    expect(tableRanges(state(doc)).map((table) => table.from)).toEqual([3]);
+  });
+
+  it("finds where a line's text starts after its hidden markup", () => {
+    const at = (doc: string, line = 1) => { const current = state(doc); return blockMarkupEnd(current, current.doc.line(line)) - current.doc.line(line).from; };
+    expect(at("## Title")).toBe(3);
+    expect(at("> - [x] done")).toBe(8);
+    expect(at("- a\n  - nested", 2)).toBe(4);
+    expect(at("1. first")).toBe(0);
+    expect(at("plain")).toBe(0);
+    expect(at("Title\n===", 1)).toBe(0);
   });
 
   it("finds the target of a link, an autolink and a bare URL", () => {
@@ -175,11 +202,10 @@ describe("live Markdown commands", () => {
     expect(editor.state.doc.toString()).toBe("- [x] open\n\nelsewhere");
   });
 
-  it("keeps rendered tables current through edits and caret moves, a stretch at a time", () => {
+  it("keeps rendered tables current through edits, a stretch at a time", () => {
     const table = "| a | b |\n| - | - |\n| 1 | 2 |";
     const doc = `${table}\n\nmiddle\n\n${table}\n\nend`;
     const editor = view(doc, doc.length);
-    // jsdom never focuses the editor, and only a focused editor reveals source.
     editor.dispatch({ effects: setFocused.of(true) });
     const drawn = () => [...editor.contentDOM.querySelectorAll(".cm-live-table")].map((node) => node.textContent?.replace(/\s+/g, " ").trim());
     expect(drawn()).toEqual(["a b 1 2", "a b 1 2"]);
@@ -189,16 +215,45 @@ describe("live Markdown commands", () => {
     editor.dispatch({ changes: { from: row, insert: "\n| 3 | 4 |" }, selection: { anchor: doc.length + 10 } });
     expect(drawn()).toEqual(["a b 1 2 3 4", "a b 1 2"]);
 
-    // The caret arriving shows the source; leaving draws it again.
+    // The caret on a table's line leaves it drawn.
     editor.dispatch({ selection: { anchor: 2 } });
-    expect(drawn()).toEqual(["a b 1 2"]);
-    editor.dispatch({ selection: { anchor: editor.state.doc.length } });
     expect(drawn()).toEqual(["a b 1 2 3 4", "a b 1 2"]);
 
     // Breaking the delimiter row makes it text, not a stale table.
     const delimiter = editor.state.doc.toString().indexOf("| - |");
     editor.dispatch({ changes: { from: delimiter, to: delimiter + 1, insert: "x" } });
     expect(drawn()).toEqual(["a b 1 2"]);
+  });
+
+  it("stops drawing a table that a fence opened far above it swallows", () => {
+    const doc = `intro\n\n${"filler line\n\n".repeat(3)}| a |\n| - |\n| 1 |\n\nend`;
+    const editor = view(doc, 0);
+    const drawn = () => editor.contentDOM.querySelectorAll(".cm-live-table").length;
+    expect(drawn()).toBe(1);
+    editor.dispatch({ changes: { from: 0, insert: "```\n" } });
+    expect(drawn()).toBe(0);
+    // Closing the fence gives the table back.
+    editor.dispatch({ changes: { from: 4, insert: "code\n``\n" } });
+    editor.dispatch({ changes: { from: 11, insert: "`" } });
+    expect(editor.state.doc.toString().startsWith("```\ncode\n```\n")).toBe(true);
+    expect(drawn()).toBe(1);
+  });
+
+  it("draws a table an HTML comment closed mid-line releases", () => {
+    const doc = "<!--\nstart\n\nmore\n\n| a |\n| - |\n| 1 |\n\nend";
+    const editor = view(doc, 0);
+    const drawn = () => editor.contentDOM.querySelectorAll(".cm-live-table").length;
+    expect(drawn()).toBe(0);
+    editor.dispatch({ changes: { from: 10, insert: " -->" } });
+    expect(drawn()).toBe(1);
+  });
+
+  it("opens a line above a heading from the start of its text", () => {
+    const editor = view("# Title\nbody", 2);
+    expect(breakBeforeHeading(editor)).toBe(true);
+    expect(editor.state.doc.toString()).toBe("\n# Title\nbody");
+    expect(editor.state.selection.main.head).toBe(3);
+    expect(breakBeforeHeading(view("# Title", 4))).toBe(false);
   });
 
   it("never lets a link inside a rendered table navigate", () => {
@@ -257,7 +312,19 @@ describe("live Markdown commands", () => {
     expect(editor.state.selection.main.head, "a link click moved the caret into the table").toBe(doc.length);
     anchor().dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
     expect(onLink).toHaveBeenCalledTimes(1);
-    expect(editor.state.selection.main.head).toBe(0);
+  });
+
+  it("deletes a block marker whole with Backspace, and keeps the caret off it", () => {
+    const editor = view("## Title\n- [ ] task", 3);
+    editor.dispatch({ selection: { anchor: 0 } });
+    expect(editor.state.selection.main.head, "a caret placed on hidden markup moves to the text").toBe(3);
+    deleteCharBackward(editor);
+    expect(editor.state.doc.toString()).toBe("Title\n- [ ] task");
+    editor.dispatch({ selection: { anchor: editor.state.doc.length - 4 } });
+    deleteCharBackward(editor);
+    expect(editor.state.doc.toString()).toBe("Title\n- task");
+    deleteCharBackward(editor);
+    expect(editor.state.doc.toString()).toBe("Title\ntask");
   });
 
   it("opens a link on a modified click", () => {
