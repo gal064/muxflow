@@ -22,7 +22,7 @@ const context: DropContext = {
 };
 
 const terminalTab = (windowId: string, sessionId = "$1"): DragPayload => ({ kind: "terminalTab", hostProfileId: "local", sessionId, windowId, label: windowId });
-const agent = (paneId: string): DragPayload => ({ kind: "agent", hostProfileId: "local", sessionId: "", windowId: "", paneId, label: paneId });
+const agent = (paneId: string): DragPayload => ({ kind: "pane", hostProfileId: "local", sessionId: "", windowId: "", paneId, label: paneId });
 const appTab: DragPayload = { kind: "appTab", hostProfileId: "local", sessionId: "$1", tabId: "readme", label: "README.md" };
 
 describe("planDrop", () => {
@@ -80,9 +80,40 @@ describe("planDrop", () => {
       kind: "action",
       action: { kind: "joinPane", paneId: "%2", targetPaneId: "%3", paneEdge: "bottom" },
     });
-    expect(planDrop(agent("%2"), { kind: "pane", paneId: "%1", edge: "left" }, context)).toBeUndefined();
     expect(planDrop(agent("%4"), { kind: "pane", paneId: "%1", edge: "left" }, context)).toEqual({ kind: "refuse", reason: CLOSES_WORKSPACE });
     expect(planDrop(agent("%9"), { kind: "pane", paneId: "%1", edge: "left" }, context)).toBeUndefined();
+  });
+
+  it("rearranges a pane inside its own window, but never onto itself", () => {
+    expect(planDrop(agent("%2"), { kind: "pane", paneId: "%1", edge: "left" }, context)).toEqual({
+      kind: "action",
+      action: { kind: "joinPane", paneId: "%2", targetPaneId: "%1", paneEdge: "left" },
+    });
+    expect(planDrop(agent("%2"), { kind: "pane", paneId: "%2", edge: "left" }, context)).toBeUndefined();
+  });
+
+  it("makes a pane dropped on the tab strip a tab of the strip's workspace", () => {
+    const strip = (tabKey: string, sessionId: string) => ({
+      kind: "tab" as const, tabKey, side: "after" as const, workspace: { hostProfileId: "local", sessionId },
+    });
+    // Sharing a window: broken out into a tab of its own.
+    expect(planDrop(agent("%2"), strip("terminal:@2", "$1"), context)).toEqual({
+      kind: "action",
+      action: { kind: "breakPane", paneId: "%2", targetSessionId: "$1" },
+    });
+    // Already a tab of this workspace: nothing to do.
+    expect(planDrop(agent("%3"), strip("terminal:@1", "$1"), context)).toBeUndefined();
+    // A tab of another workspace: that tab moves here.
+    expect(planDrop(agent("%3"), strip("terminal:@3", "$2"), context)).toEqual({
+      kind: "action",
+      action: { kind: "moveWindow", sessionId: "$1", windowId: "@2", targetSessionId: "$2" },
+    });
+    expect(planDrop(agent("%4"), strip("terminal:@1", "$1"), context)).toEqual({ kind: "refuse", reason: CLOSES_WORKSPACE });
+    // A tab dropped on a tab is still a reorder, whatever strip it is in.
+    expect(planDrop(terminalTab("@2"), strip("terminal:@1", "$1"), context)).toEqual({
+      kind: "action",
+      action: { kind: "reorderWindow", sessionId: "$1", windowId: "@2", targetWindowId: "@1", relativePosition: "after" },
+    });
   });
 
   it("moves an agent alone in its window as that window, and breaks out one that shares", () => {

@@ -797,8 +797,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   color: var(--chrome-ink-strong); background: var(--accent-wash); font-size: var(--type-menu);
   pointer-events: none;
 }
-/* Pointer drags of tabs and agents: the half of a pane a drop fills, the gap
-   in the strip a tab lands in, and the workspace row it moves to. */
+/* Pointer drags of tabs and panes: the half of a pane a drop fills, the gap
+   in the strip a tab lands in, the strip a pane becomes a tab of, and the
+   workspace row either moves to. */
 .pane-drop-hint {
   position: absolute; z-index: 9;
   border: 2px dashed var(--accent); border-radius: 6px;
@@ -815,6 +816,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .tab.drop-before::before { left: 0; }
 .tab.drop-after::before { right: 0; }
+.tabstrip.drop-target { background: var(--accent-wash); box-shadow: inset 0 0 0 1px var(--accent); }
 .workspace-button.drop-target:not(.active) { background: var(--accent-wash); box-shadow: inset 0 0 0 1px var(--accent); }
 .workspace-button.drop-target.active { outline: 2px solid var(--accent); outline-offset: 2px; }
 body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabbing !important; }

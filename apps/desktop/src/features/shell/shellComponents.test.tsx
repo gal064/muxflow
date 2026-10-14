@@ -56,7 +56,7 @@ const pendingTab = { key: "pending:create", kind: "pending", title: "Creating" }
 
 type TabStripOverrides = Partial<Pick<
   ComponentProps<typeof TabStrip>,
-  "activeKey" | "canMutate" | "onCloseNonAgent" | "onCloseOthers" | "onSelect" | "onTogglePinned" | "platform" | "shortcuts"
+  "activeKey" | "canMutate" | "dropWorkspace" | "onCloseNonAgent" | "onCloseOthers" | "onSelect" | "onTogglePinned" | "platform" | "shortcuts"
 >>;
 
 /** One TabStrip with every handler stubbed, so a test names only what it means. */
@@ -2088,6 +2088,44 @@ describe("moving tabs and agents", () => {
     expect(renderer.root.findByProps({ "data-menu-item": "bring-here" }).props.disabled).toBe(true);
     expect(renderer.root.findByProps({ "data-menu-item": "move-to-workspace" }).props.disabled).toBe(true);
     await act(async () => renderer.unmount());
+  });
+
+  it("lights the whole strip, not a gap, for a pane that would become a tab there", async () => {
+    const { beginPointerDrag, setDropResolver } = await import("../dragDrop/pointerDrag");
+    const target = document.createElement("div");
+    target.dataset.dropTab = "terminal:@1";
+    target.getBoundingClientRect = () => ({ left: 0, width: 100 }) as DOMRect;
+    const stripElement = document.createElement("div");
+    stripElement.dataset.dropWorkspace = "$1";
+    stripElement.dataset.dropHost = "remote";
+    stripElement.append(target);
+    document.elementsFromPoint = vi.fn(() => [target, stripElement]);
+    const frame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => { queueMicrotask(() => callback(0)); return 1; });
+    setDropResolver(() => ({ kind: "run", run: noop }));
+    const press = { button: 0, pointerId: 8, clientX: 0, clientY: 0, currentTarget: document.createElement("div") };
+    const move = (x: number) => {
+      const event = new MouseEvent("pointermove", { clientX: x, clientY: 5, buttons: 1 });
+      Object.defineProperty(event, "pointerId", { value: 8 });
+      window.dispatchEvent(event);
+    };
+    try {
+      beginPointerDrag(press as never, { kind: "pane", hostProfileId: "remote", sessionId: "$1", windowId: "@2", paneId: "%5", label: "claude" });
+      let strip!: ReturnType<typeof create>;
+      await act(async () => {
+        strip = create(tabStripOver(mixedStrip, { dropWorkspace: { hostProfileId: "remote", sessionId: "$1" } }));
+      });
+      await act(async () => move(20));
+      const root = strip.root.findByProps({ "data-drop-workspace": "$1" });
+      expect(root.props.className).toBe("tabstrip drop-target");
+      expect(strip.root.findByProps({ "data-drop-tab": "terminal:@1" }).props.className).toBe("tab");
+      await act(async () => strip.unmount());
+    } finally {
+      const cancel = new MouseEvent("pointercancel");
+      Object.defineProperty(cancel, "pointerId", { value: 8 });
+      window.dispatchEvent(cancel);
+      setDropResolver(undefined);
+      frame.mockRestore();
+    }
   });
 
   it("marks the tab gap and the workspace row a drag would drop into, and only while it is allowed", async () => {

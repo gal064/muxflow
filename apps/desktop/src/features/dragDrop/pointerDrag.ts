@@ -2,8 +2,9 @@ import { useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "re
 import type { PaneEdge } from "../tmux/actions";
 
 /**
- * One pointer drag of a tab or an agent onto a tab, a workspace row, or a
- * pane edge.
+ * One pointer drag of a tab or a pane (an agent row, or a pane grabbed with
+ * the link modifier) onto a tab, the tab strip, a workspace row, or a pane
+ * edge.
  *
  * Pointer capture rather than HTML5 drag and drop: Tauri's native drag/drop
  * routing intercepts HTML5 drops (see `nativeDragDropCoordinator`), and a
@@ -19,10 +20,11 @@ import type { PaneEdge } from "../tmux/actions";
 export type DragPayload =
   | { kind: "terminalTab"; hostProfileId: string; sessionId: string; windowId: string; label: string }
   | { kind: "appTab"; hostProfileId: string; sessionId: string; tabId: string; label: string }
-  | { kind: "agent"; hostProfileId: string; sessionId: string; windowId: string; paneId: string; label: string };
+  | { kind: "pane"; hostProfileId: string; sessionId: string; windowId: string; paneId: string; label: string };
 
 export type DropTarget =
-  | { kind: "tab"; tabKey: string; side: "before" | "after" }
+  /** `workspace` is the strip's own, for a pane dropped on a tab: it becomes a tab of that workspace. */
+  | { kind: "tab"; tabKey: string; side: "before" | "after"; workspace?: { hostProfileId: string; sessionId: string } }
   | { kind: "workspace"; hostProfileId: string; sessionId: string }
   | { kind: "pane"; paneId: string; edge: PaneEdge };
 
@@ -95,17 +97,28 @@ export function paneEdgeAt(rect: Pick<DOMRect, "left" | "top" | "width" | "heigh
   return distance <= PANE_EDGE_ZONE ? edge : undefined;
 }
 
+function workspaceOf(element: Element): { hostProfileId: string; sessionId: string } | undefined {
+  const workspace = element.closest<HTMLElement>("[data-drop-workspace]");
+  return workspace?.dataset.dropWorkspace && workspace.dataset.dropHost
+    ? { hostProfileId: workspace.dataset.dropHost, sessionId: workspace.dataset.dropWorkspace }
+    : undefined;
+}
+
 export function dropTargetAt(x: number, y: number): DropTarget | undefined {
   for (const element of document.elementsFromPoint(x, y)) {
     const tab = element.closest<HTMLElement>("[data-drop-tab]");
     if (tab?.dataset.dropTab) {
       const rect = tab.getBoundingClientRect();
-      return { kind: "tab", tabKey: tab.dataset.dropTab, side: x < rect.left + rect.width / 2 ? "before" : "after" };
+      const workspace = workspaceOf(tab);
+      return {
+        kind: "tab",
+        tabKey: tab.dataset.dropTab,
+        side: x < rect.left + rect.width / 2 ? "before" : "after",
+        ...(workspace ? { workspace } : {}),
+      };
     }
-    const workspace = element.closest<HTMLElement>("[data-drop-workspace]");
-    if (workspace?.dataset.dropWorkspace && workspace.dataset.dropHost) {
-      return { kind: "workspace", hostProfileId: workspace.dataset.dropHost, sessionId: workspace.dataset.dropWorkspace };
-    }
+    const workspace = workspaceOf(element);
+    if (workspace) return { kind: "workspace", ...workspace };
     const pane = element.closest<HTMLElement>("[data-drop-pane]");
     if (pane?.dataset.dropPane) {
       const edge = paneEdgeAt(pane.getBoundingClientRect(), x, y);
@@ -127,6 +140,8 @@ function sameTarget(left: DropTarget | undefined, right: DropTarget | undefined)
 export function beginPointerDrag(event: ReactPointerEvent<HTMLElement>, payload: DragPayload | undefined): void {
   if (!payload || event.button !== 0 || state) return;
   const source = event.currentTarget;
+  // Read before the press's own default moves focus onto the source.
+  const focusedAtPress = document.activeElement;
   const pointerId = event.pointerId;
   const startX = event.clientX;
   const startY = event.clientY;
@@ -171,6 +186,7 @@ export function beginPointerDrag(event: ReactPointerEvent<HTMLElement>, payload:
     if (source.hasPointerCapture?.(pointerId)) source.releasePointerCapture(pointerId);
     delete document.body.dataset.pointerDrag;
     if (started) {
+      restoreFocus(source, focusedAtPress);
       if (buttonStillHeld) suppressClickAfterRelease(pointerId);
       else suppressNextClick();
       lastEndedAt = performance.now();
@@ -206,6 +222,20 @@ export function beginPointerDrag(event: ReactPointerEvent<HTMLElement>, payload:
   // capture to the document, and a drag left armed would turn the next
   // ordinary click into a drop.
   window.addEventListener("lostpointercapture", cancel);
+}
+
+/**
+ * A drag is not a visit: the press focused the row or tab it started on, and
+ * left there the next Space or Enter would activate it — jumping to the agent
+ * just dragged away — and typing would not reach the terminal. Focus goes
+ * back where it was, or off the source when that was nowhere.
+ */
+function restoreFocus(source: HTMLElement, focusedAtPress: Element | null): void {
+  if (focusedAtPress instanceof HTMLElement && focusedAtPress !== document.body && focusedAtPress.isConnected) {
+    focusedAtPress.focus({ preventScroll: true });
+  } else if (document.activeElement instanceof HTMLElement && source.contains(document.activeElement)) {
+    document.activeElement.blur();
+  }
 }
 
 /**

@@ -55,7 +55,9 @@ export function shellTransitionPlan(
   const changesSession = previous.sessionId !== target.sessionId;
   return {
     selectSession: changesSession,
-    selectWindow: Boolean(target.windowId) && previous.windowId !== target.windowId
+    // The same window id in another session is a window that moved there,
+    // and whether it is current is the destination session's to say.
+    selectWindow: Boolean(target.windowId) && (changesSession || previous.windowId !== target.windowId)
       && !((changesSession || previous.windowId === undefined) && targetWindowAlreadyActive),
   };
 }

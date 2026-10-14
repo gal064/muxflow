@@ -824,7 +824,10 @@ export function App() {
       ? shellNavigation.observeAuthoritativeWindow(activeSession.id, authoritative, hostState.generation)
       : false;
     if (!preserveAppTab
-      && shouldSurfaceAuthoritativeTerminal(Boolean(selectedAppTab), activeSession?.id, previous, activeSession?.id, authoritative)
+      && shouldSurfaceAuthoritativeTerminal(
+        Boolean(selectedAppTab), activeSession?.id, previous, activeSession?.id, authoritative,
+        windows.some((window) => window.id === previous),
+      )
       && activeSession) {
       setAppState((current) => selectAppTab(current, currentHostProfileId, hostState.serverIdentity!, activeSession, undefined));
     }
@@ -1018,6 +1021,8 @@ export function App() {
     terminalOnScreen: !selectedAppTab,
     appTabs: appState.appTabs,
     performAction,
+    selectPane: (pane) => void shellNavigation.selectPane(pane, { kind: "silent" }),
+    focusTerminal: (paneId) => controllers.current.get(paneId)?.focus(),
     setAppState,
     setStatus,
   });
@@ -1598,6 +1603,7 @@ export function App() {
           onRenameTerminal={(tab, scope) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id, scope })}
           onSelect={selectCombinedTab}
           dragPayload={paneMoves.tabDragPayload}
+          dropWorkspace={hostState.canMutate && activeSession ? { hostProfileId: currentHostProfileId, sessionId: activeSession.id } : undefined}
           platform={platform}
           shortcuts={shortcuts}
           stateGlyphs={appState.shell.agentStateGlyphs}
@@ -1633,6 +1639,7 @@ export function App() {
                 pane the other's. */}
             <TerminalWorkspaceSurface
               visible={!selectedAppTab}
+              paneDragPayload={paneMoves.paneDragPayload}
               key={currentHostProfileId}
               activePane={activePane}
               activeWindow={activeWindow}
