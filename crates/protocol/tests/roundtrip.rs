@@ -28,6 +28,10 @@ fn assigned_operation_and_enum_numbers_do_not_move() {
         assert_eq!(operation as i32, number);
     }
     assert_eq!(v1::TmuxActionKind::SetPinned as i32, 20);
+    assert_eq!(v1::TmuxActionKind::MoveWindow as i32, 21);
+    assert_eq!(v1::TmuxActionKind::JoinPane as i32, 22);
+    assert_eq!(v1::TmuxActionKind::BreakPane as i32, 23);
+    assert_eq!(v1::PaneEdge::Bottom as i32, 4);
     assert_eq!(v1::EventKind::TerminalHistory as i32, 19);
     assert_eq!(v1::EventKind::VoiceProvision as i32, 20);
     assert_eq!(v1::EventKind::VoiceReply as i32, 21);

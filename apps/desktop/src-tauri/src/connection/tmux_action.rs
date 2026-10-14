@@ -28,6 +28,9 @@ pub enum TmuxActionKindWire {
     ZoomPane,
     ClosePane,
     SetPinned,
+    MoveWindow,
+    JoinPane,
+    BreakPane,
 }
 
 impl From<TmuxActionKindWire> for v1::TmuxActionKind {
@@ -53,6 +56,9 @@ impl From<TmuxActionKindWire> for v1::TmuxActionKind {
             TmuxActionKindWire::ZoomPane => Self::ZoomPane,
             TmuxActionKindWire::ClosePane => Self::ClosePane,
             TmuxActionKindWire::SetPinned => Self::SetPinned,
+            TmuxActionKindWire::MoveWindow => Self::MoveWindow,
+            TmuxActionKindWire::JoinPane => Self::JoinPane,
+            TmuxActionKindWire::BreakPane => Self::BreakPane,
         }
     }
 }
@@ -72,6 +78,29 @@ impl From<WindowRelativePositionWire> for v1::WindowRelativePosition {
             WindowRelativePositionWire::Unspecified => Self::Unspecified,
             WindowRelativePositionWire::Before => Self::Before,
             WindowRelativePositionWire::After => Self::After,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PaneEdgeWire {
+    #[default]
+    Unspecified,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl From<PaneEdgeWire> for v1::PaneEdge {
+    fn from(value: PaneEdgeWire) -> Self {
+        match value {
+            PaneEdgeWire::Unspecified => Self::Unspecified,
+            PaneEdgeWire::Left => Self::Left,
+            PaneEdgeWire::Right => Self::Right,
+            PaneEdgeWire::Top => Self::Top,
+            PaneEdgeWire::Bottom => Self::Bottom,
         }
     }
 }
@@ -113,6 +142,14 @@ pub struct TmuxActionWire {
     /// means "wherever tmux would have started it".
     #[serde(default)]
     directory: String,
+    /// The pane `joinPane` places `pane_id` beside.
+    #[serde(default)]
+    target_pane_id: String,
+    /// The session `moveWindow` and `breakPane` move into.
+    #[serde(default)]
+    target_session_id: String,
+    #[serde(default)]
+    pane_edge: PaneEdgeWire,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,6 +199,9 @@ pub async fn tmux_action(
             target_window_id: action.target_window_id,
             relative_position: v1::WindowRelativePosition::from(action.relative_position).into(),
             directory: action.directory,
+            target_pane_id: action.target_pane_id,
+            target_session_id: action.target_session_id,
+            pane_edge: v1::PaneEdge::from(action.pane_edge).into(),
         }),
         ..Default::default()
     };
@@ -232,5 +272,32 @@ mod tests {
         );
         assert_eq!(pin.window_id, "@5");
         assert!(pin.pinned);
+
+        let join: TmuxActionWire = serde_json::from_value(serde_json::json!({
+            "kind": "joinPane",
+            "pane_id": "%7",
+            "target_pane_id": "%1",
+            "pane_edge": "left"
+        }))
+        .unwrap();
+        assert_eq!(
+            v1::TmuxActionKind::from(join.kind),
+            v1::TmuxActionKind::JoinPane
+        );
+        assert_eq!(join.target_pane_id, "%1");
+        assert_eq!(v1::PaneEdge::from(join.pane_edge), v1::PaneEdge::Left);
+
+        for (kind, expected) in [
+            ("moveWindow", v1::TmuxActionKind::MoveWindow),
+            ("breakPane", v1::TmuxActionKind::BreakPane),
+        ] {
+            let moved: TmuxActionWire = serde_json::from_value(serde_json::json!({
+                "kind": kind,
+                "target_session_id": "$2"
+            }))
+            .unwrap();
+            assert_eq!(v1::TmuxActionKind::from(moved.kind), expected);
+            assert_eq!(moved.target_session_id, "$2");
+        }
     }
 }

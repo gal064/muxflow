@@ -13,6 +13,8 @@ import type { Platform } from "../commands/registry";
 import { needsAttention } from "../features/agents/agentsList";
 import { stripAgentStatusGlyphs } from "../features/agents/agentLabels";
 import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
+import { useDragSelector } from "../features/dragDrop/pointerDrag";
+import { usePaneHoverFocus } from "./paneHoverFocus";
 
 type TerminalWorkspaceSurfaceProps = {
   /** Whether the terminal layer is on screen rather than covered by a file. */
@@ -34,6 +36,8 @@ type TerminalWorkspaceSurfaceProps = {
   cleanWrappedCommands?: boolean;
   terminalApplicationClipboard?: boolean;
   terminalFontSize: number;
+  /** Focus-follows-mouse, already off while a dialog or menu is open or the app is in the background. */
+  hoverFocus?: boolean;
   platform?: Platform;
   /** Receives the tiled surface element the tmux client size is measured from. */
   surfaceRef: (element: HTMLElement | null) => void;
@@ -56,10 +60,26 @@ type TerminalWorkspaceSurfaceProps = {
   setStatus(message: string): void;
 };
 
+/**
+ * The half of a pane a drop would fill. Subscribed per pane, selecting only
+ * its own edge, so a drag re-renders this marker and never the terminal.
+ */
+function PaneDropOverlay(props: { paneId: string }) {
+  const edge = useDragSelector((drag) => drag?.allowed && drag.target?.kind === "pane" && drag.target.paneId === props.paneId
+    ? drag.target.edge
+    : undefined);
+  return edge ? <div aria-hidden="true" className={`pane-drop-hint ${edge}`} /> : null;
+}
+
 /** Memoized terminal-only boundary: unrelated root notices/dialogs never revisit live panes. */
 export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(props: TerminalWorkspaceSurfaceProps) {
   const { activePane, activeWindow, grid } = props;
   const hasMultiplePanes = props.mountedPanes.length > 1;
+  const hoverHandlers = usePaneHoverFocus({
+    enabled: Boolean(props.hoverFocus) && hasMultiplePanes,
+    activePaneId: activePane?.id,
+    focus: (paneId) => props.controllers.current.get(paneId)?.focus(),
+  });
   return <div className="terminal-window" ref={props.surfaceRef} aria-label={activeWindow ? `Terminal tab ${stripAgentStatusGlyphs(activeWindow.name)}` : "Terminal"}>
     {props.mountedPanes.map((pane) => {
       // The floating `%N · cmd` badge is gone: it overlapped the pane's own
@@ -73,8 +93,10 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
       const hasBottomSeparator = hasMultiplePanes && !zoomed && pane.top + pane.height < grid.height;
       return <div
         className={`pane-frame${pane.active ? " active" : ""}${wantsAttention ? " attention" : ""}`}
+        data-drop-pane={pane.id}
         key={pane.id}
         style={renderedPaneStyle(pane, grid, zoomed)}
+        {...hoverHandlers(pane.id)}
       >
       <TerminalPane
         visible={props.visible}
@@ -133,6 +155,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
         role="separator"
         tabIndex={0}
       />}
+      <PaneDropOverlay paneId={pane.id} />
     </div>;
     })}
     {props.panes.length === 0 && <p className="quiet-empty">No tmux panes in this terminal window.</p>}
