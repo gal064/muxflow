@@ -1264,14 +1264,28 @@ fn failed_membership_registration_rolls_back_speculative_resources() {
     assert!(resources.get("%2").is_none());
 
     register_mounted_panes(&mut resources, &["%3".into()], true, 3);
-    remove_unmounted_pane_resources(
-        &mut resources,
-        &HashSet::from(["%1".into()]),
-        &HashSet::from(["%3".into()]),
-    );
+    let released = HashSet::from(["%1".to_owned()]);
+    remove_released_pane_resources(&mut resources, released.iter(), &HashSet::new());
     assert!(resources.get("%1").is_none());
     assert!(resources.get("%2").is_none());
     assert!(resources.get("%3").is_some());
+}
+
+/// A pane moved to another workspace leaves the old one's attachment while
+/// the new one's already mounts it: the old one letting go must not take the
+/// screen material the new one is drawing from.
+#[test]
+fn a_released_pane_keeps_its_resources_while_another_session_mounts_it() {
+    let mut resources = PaneResourceStore::with_total_limit(32, 1024, 4096);
+    register_mounted_panes(&mut resources, &["%1".into(), "%2".into()], true, 1);
+    let released = HashSet::from(["%1".to_owned(), "%2".to_owned()]);
+    remove_released_pane_resources(
+        &mut resources,
+        released.iter(),
+        &HashSet::from(["%2".to_owned()]),
+    );
+    assert!(resources.get("%1").is_none());
+    assert!(resources.get("%2").is_some());
 }
 
 #[test]

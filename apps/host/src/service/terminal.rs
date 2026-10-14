@@ -169,6 +169,7 @@ impl TerminalAttachment {
         &mut self,
         pane_ids: &HashSet<String>,
         resources: &mut PaneResourceStore,
+        mounted_elsewhere: &HashSet<String>,
     ) -> anyhow::Result<()> {
         let update = {
             let mut stdin = self.stdin.lock().unwrap();
@@ -192,9 +193,7 @@ impl TerminalAttachment {
                 return Err(error.context("terminal membership update stopped the attachment"));
             }
         };
-        for pane_id in removed {
-            resources.remove(&pane_id);
-        }
+        remove_released_pane_resources(resources, removed.iter(), mounted_elsewhere);
         Ok(())
     }
 
@@ -592,13 +591,18 @@ impl TerminalClients {
         // store's lock released, for the same reason the store records instead
         // of emitting.
         report_pane_degradations(&self.resources, &event_tx, &overflowed);
+        let mounted_elsewhere = self.panes_mounted_elsewhere(session_id);
         if committed.is_some() {
             self.ensure_input_client(session_id, &event_tx, &overflowed)?;
             let update = self
                 .clients
                 .get_mut(session_id)
                 .expect("committed attachment disappeared under exclusive access")
-                .update_panes(&desired, &mut self.resources.lock().unwrap());
+                .update_panes(
+                    &desired,
+                    &mut self.resources.lock().unwrap(),
+                    &mounted_elsewhere,
+                );
             if let Err(error) = update {
                 remove_pane_resources(
                     &mut self.resources.lock().unwrap(),
@@ -647,7 +651,11 @@ impl TerminalClients {
             // is rejected after stop; it cannot outlive the cleanup.
             let mut resources = self.resources.lock().unwrap();
             old.stop();
-            remove_unmounted_pane_resources(&mut resources, &old.pane_ids, &desired);
+            remove_released_pane_resources(
+                &mut resources,
+                old.pane_ids.difference(&desired),
+                &mounted_elsewhere,
+            );
         }
         self.clients.insert(session_id.to_owned(), attachment);
         if make_visible {
@@ -1191,6 +1199,20 @@ impl TerminalClients {
         Ok(())
     }
 
+    /// Panes another session's live attachment mounts. A pane moved between
+    /// workspaces is in both attachments until the one it left re-attaches,
+    /// and the resource store is shared by pane id, so letting go of it there
+    /// must not take its screen material from the workspace it moved to.
+    fn panes_mounted_elsewhere(&self, session_id: &str) -> HashSet<String> {
+        self.clients
+            .iter()
+            .filter(|(id, client)| {
+                id.as_str() != session_id && !client.stopped.load(Ordering::Acquire)
+            })
+            .flat_map(|(_, client)| client.pane_ids.iter().cloned())
+            .collect()
+    }
+
     pub(super) fn reconcile(&mut self, snapshot: &tmux_control::TmuxSnapshot) {
         // Replaced wholesale from the same snapshot that decides which
         // attachments survive, so the gate can never answer from a count
@@ -1299,12 +1321,19 @@ fn remove_pane_resources<'a>(
     }
 }
 
-fn remove_unmounted_pane_resources(
+/// Drops the resources of panes an attachment let go of, except the ones
+/// another session's attachment still mounts.
+fn remove_released_pane_resources<'a>(
     resources: &mut PaneResourceStore,
-    previous: &HashSet<String>,
-    desired: &HashSet<String>,
+    released: impl IntoIterator<Item = &'a String>,
+    mounted_elsewhere: &HashSet<String>,
 ) {
-    remove_pane_resources(resources, previous.difference(desired));
+    remove_pane_resources(
+        resources,
+        released
+            .into_iter()
+            .filter(|pane_id| !mounted_elsewhere.contains(*pane_id)),
+    );
 }
 
 /// Queues a screen capture for one pane.

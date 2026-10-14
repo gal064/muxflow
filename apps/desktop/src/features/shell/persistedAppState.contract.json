@@ -60,6 +60,7 @@
     "agentsSectionRatio": 0.42,
     "agentStateGlyphs": true,
     "compactWorkspaces": true,
+    "focusFollowsMouse": true,
     "pinnedOnly": true,
     "terminalScreenReader": true,
     "copyOnSelect": true,

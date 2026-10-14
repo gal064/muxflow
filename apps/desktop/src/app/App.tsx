@@ -115,6 +115,8 @@ import { useBulkTabClose } from "./useBulkTabClose";
 import { useTerminalFileOpen } from "./useTerminalFileOpen";
 import { usePortForwards } from "../features/ports/usePortForwards";
 import type { PortsHost } from "../features/ports/PortsPanel";
+import { usePaneMoves } from "./usePaneMoves";
+import { DragGhost } from "../features/dragDrop/DragGhost";
 
 const AppTabSurface = lazy(() => import("../features/shell/AppTabSurface").then((module) => ({ default: module.AppTabSurface })));
 const GitDiffSurface = lazy(() => import("../features/git/GitDiffSurface").then((module) => ({ default: module.GitDiffSurface })));
@@ -1006,6 +1008,19 @@ export function App() {
     }
   }, [activeSession, activeWindowId, agentRuntime.acknowledgePane, hostState.serverIdentity, selectWindow, shellNavigation, snapshot.panes]);
 
+  const paneMoves = usePaneMoves({
+    hostProfileId: currentHostProfileId,
+    serverIdentity: hostState.serverIdentity,
+    canMutate: hostState.canMutate,
+    snapshot,
+    activeSession,
+    activePane,
+    terminalOnScreen: !selectedAppTab,
+    appTabs: appState.appTabs,
+    performAction,
+    setAppState,
+    setStatus,
+  });
   // From the list the row comes with its host's scope; the bell jump has
   // none, and asks for whichever agent is loudest on whichever host.
   const selectAgentRow = useCallback((row: AgentListRow, scope?: HostScopeToken) => {
@@ -1544,6 +1559,8 @@ export function App() {
         pinnedOnly={appState.shell.pinnedOnly}
         rows={sidebarRows}
         stateGlyphs={appState.shell.agentStateGlyphs}
+        agentDragPayload={paneMoves.agentDragPayload}
+        agentMoves={paneMoves.agentMoves}
       />}
       <section className="workspace" aria-label={activeSession ? `Workspace ${activeSession.name}` : "Workspace"}>
         <TabStrip
@@ -1580,6 +1597,7 @@ export function App() {
           onTogglePinned={(tab) => toggleTabPin(tab, currentHostScope)}
           onRenameTerminal={(tab, scope) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id, scope })}
           onSelect={selectCombinedTab}
+          dragPayload={paneMoves.tabDragPayload}
           platform={platform}
           shortcuts={shortcuts}
           stateGlyphs={appState.shell.agentStateGlyphs}
@@ -1626,6 +1644,7 @@ export function App() {
               cleanWrappedCommands={appState.shell.cleanWrappedCommands}
               terminalApplicationClipboard={appState.shell.terminalApplicationClipboard}
               terminalFontSize={appState.shell.terminalFontSize}
+              hoverFocus={appState.shell.focusFollowsMouse && appFocused && !modalOpen}
               controllers={controllers}
               focusPane={focusTerminalPane}
               onMeasurements={onMeasurements}
@@ -1754,6 +1773,7 @@ export function App() {
       />}
     </div>
 
+    <DragGhost />
     <AppNoticeLayer
       agentDialog={agentWorkflow.dialog}
       agentSetupDialog={agentHostSetup.dialog}
