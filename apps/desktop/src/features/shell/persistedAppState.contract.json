@@ -67,7 +67,7 @@
     "terminalApplicationClipboard": true,
     "terminalFontSize": 17,
     "newWorkspaceHostProfileId": "ssh-remote-linux",
-    "defaultMarkdownView": "preview",
+    "defaultMarkdownView": "live",
     "windowGeometry": {
       "x": 20,
       "y": 30,

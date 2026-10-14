@@ -2,6 +2,13 @@ import type { TransferCleanupStatus, TransferFailureKind, TransferOutcome, Trans
 
 export const TEXT_FILE_LIMIT_BYTES = 10 * 1024 * 1024;
 export const IMAGE_PREVIEW_LIMIT_BYTES = 25 * 1024 * 1024;
+/**
+ * The largest buffer the live Markdown view takes. Its parser re-walks the
+ * document's block structure up to the viewport on every keystroke: a few
+ * milliseconds at half a megabyte, a full frame by two. Larger files are
+ * edited as source.
+ */
+export const LIVE_MARKDOWN_LIMIT_CHARS = 1024 * 1024;
 
 export interface FileWorkspaceScope {
   clientId: string;

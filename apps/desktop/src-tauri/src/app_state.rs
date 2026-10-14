@@ -56,6 +56,7 @@ pub struct AppTabRecord {
 #[serde(rename_all = "camelCase")]
 pub enum AppTabViewMode {
     Source,
+    Live,
     Preview,
     Split,
 }
@@ -775,7 +776,7 @@ mod tests {
         );
         assert_eq!(
             value.shell.default_markdown_view,
-            Some(AppTabViewMode::Preview)
+            Some(AppTabViewMode::Live)
         );
         // Per host, and never merged: the local directory and the remote one
         // are two different machines' filesystems.
