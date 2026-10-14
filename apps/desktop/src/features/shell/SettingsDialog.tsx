@@ -254,6 +254,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               value={props.shell.defaultMarkdownView}
             >
               <option value="source">Source</option>
+              <option value="live">Live</option>
               <option value="preview">Preview</option>
               <option value="split">Split</option>
             </select>
