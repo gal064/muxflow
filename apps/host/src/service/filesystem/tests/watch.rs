@@ -21,6 +21,7 @@ fn native_watch_routing_is_independent_of_directory_entry_count() {
         target: logical_root.join("huge"),
         target_directory: Arc::new(target_directory),
         fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
+        only: None,
     };
     // Routing is one grouping of the whole dirty batch, so a directory with a
     // quarter of a million entries costs the same lookup as an empty one.
@@ -39,7 +40,7 @@ fn native_watch_routing_is_independent_of_directory_entry_count() {
 fn fallback_watch_registration_and_fingerprint_cover_all_change_shapes() {
     let (root, service) = fixture();
     fs::write(root.join("file"), "one").unwrap();
-    let initial = watch_fingerprint(&root).unwrap();
+    let initial = watch_fingerprint(&root, None).unwrap();
     let snapshot = service
         .watch_directory(root.to_str().unwrap(), "", "fallback")
         .unwrap();
@@ -59,13 +60,13 @@ fn fallback_watch_registration_and_fingerprint_cover_all_change_shapes() {
             .is_native()
     );
     fs::write(root.join("file"), "longer").unwrap();
-    let edited = watch_fingerprint(&root).unwrap();
+    let edited = watch_fingerprint(&root, None).unwrap();
     assert_ne!(initial, edited);
     fs::write(root.join("created"), "x").unwrap();
-    let created = watch_fingerprint(&root).unwrap();
+    let created = watch_fingerprint(&root, None).unwrap();
     assert_ne!(edited, created);
     fs::remove_file(root.join("created")).unwrap();
-    assert_ne!(created, watch_fingerprint(&root).unwrap());
+    assert_ne!(created, watch_fingerprint(&root, None).unwrap());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -76,10 +77,10 @@ fn fallback_fingerprint_covers_in_place_edits_beyond_4096_entries() {
     for index in 0..=4096 {
         fs::write(root.join(format!("entry-{index:04}")), b"a").unwrap();
     }
-    let before = watch_fingerprint(&root).unwrap();
+    let before = watch_fingerprint(&root, None).unwrap();
     let scan = Mutex::new(FallbackScan::new(before));
     fs::write(root.join("entry-4096"), b"changed beyond old bound").unwrap();
-    assert_ne!(before, watch_fingerprint(&root).unwrap());
+    assert_ne!(before, watch_fingerprint(&root, None).unwrap());
     let mut shards = 0;
     loop {
         let shard =
@@ -123,7 +124,7 @@ async fn fallback_filesystem_scan_never_blocks_the_async_control_worker() {
     let root = std::env::temp_dir().join(format!("ade-fallback-latency-{}", Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
     let scan = Arc::new(Mutex::new(FallbackTarget::polling(
-        watch_fingerprint(&root).unwrap(),
+        watch_fingerprint(&root, None).unwrap(),
     )));
     let held_scan = Arc::clone(&scan);
     let ready = Arc::new(std::sync::Barrier::new(2));
@@ -137,6 +138,7 @@ async fn fallback_filesystem_scan_never_blocks_the_async_control_worker() {
 
     let scan_task = tokio::spawn(super::watch_fallback::advance_target_async(
         root.clone(),
+        None,
         scan,
         Instant::now(),
     ));
@@ -168,7 +170,7 @@ async fn the_async_poller_never_waits_on_a_scan_in_progress() {
     let root = std::env::temp_dir().join(format!("ade-fallback-locks-{}", Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
     let target = Arc::new(Mutex::new(FallbackTarget::polling(
-        watch_fingerprint(&root).unwrap(),
+        watch_fingerprint(&root, None).unwrap(),
     )));
     let scan = target.lock().unwrap().scan_lock();
     let ready = Arc::new(std::sync::Barrier::new(2));
@@ -209,19 +211,19 @@ fn the_polling_fallback_is_per_target_backed_off_and_silent_while_unchanged() {
     fs::create_dir(&root).unwrap();
     fs::write(root.join("file"), "one").unwrap();
     let target = Arc::new(Mutex::new(FallbackTarget::polling(
-        watch_fingerprint(&root).unwrap(),
+        watch_fingerprint(&root, None).unwrap(),
     )));
     let mut now = Instant::now();
 
     // The first completed scan matches the registration fingerprint: nothing
     // changed, so nothing is published and the next scan is deferred.
-    let mut turn = advance_target(&target, &root, now).unwrap();
+    let mut turn = advance_target(&target, &root, None, now).unwrap();
     while turn == FallbackTurn::Scanning {
-        turn = advance_target(&target, &root, now).unwrap();
+        turn = advance_target(&target, &root, None, now).unwrap();
     }
     assert_eq!(turn, FallbackTurn::Unchanged);
     assert_eq!(
-        advance_target(&target, &root, now).unwrap(),
+        advance_target(&target, &root, None, now).unwrap(),
         FallbackTurn::Idle,
         "an unchanged target must back off rather than rescan immediately"
     );
@@ -229,16 +231,16 @@ fn the_polling_fallback_is_per_target_backed_off_and_silent_while_unchanged() {
     // A real change is reported once the backoff elapses.
     fs::write(root.join("file"), "changed").unwrap();
     now += Duration::from_secs(10);
-    let mut turn = advance_target(&target, &root, now).unwrap();
+    let mut turn = advance_target(&target, &root, None, now).unwrap();
     while turn == FallbackTurn::Scanning {
-        turn = advance_target(&target, &root, now).unwrap();
+        turn = advance_target(&target, &root, None, now).unwrap();
     }
     assert_eq!(turn, FallbackTurn::Changed);
 
     // A healthy native target is never scanned at all.
     let native = Arc::new(Mutex::new(FallbackTarget::native(0)));
     assert_eq!(
-        advance_target(&native, &root, now).unwrap(),
+        advance_target(&native, &root, None, now).unwrap(),
         FallbackTurn::Idle
     );
     fs::remove_dir_all(root).unwrap();
@@ -265,6 +267,7 @@ fn deleted_file_events_use_absolute_root_and_nested_logical_paths() {
         target: logical_root.clone(),
         target_directory: Arc::new(root_directory),
         fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
+        only: None,
     };
     let nested_watch = Watch {
         root_token: root.token().to_owned(),
@@ -273,6 +276,7 @@ fn deleted_file_events_use_absolute_root_and_nested_logical_paths() {
         target: logical_root.join("nested"),
         target_directory: Arc::new(nested_directory),
         fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
+        only: None,
     };
     let root_removed = root_path.join("removed");
     let nested_removed = root_path.join("nested/removed");
@@ -556,6 +560,7 @@ fn an_event_about_the_watched_directory_itself_is_never_a_row_inside_it() {
         target: logical_root.clone(),
         target_directory: Arc::new(directory),
         fallback: Arc::new(Mutex::new(FallbackTarget::native(0))),
+        only: None,
     };
 
     // Never routed to itself, and never an entry inside itself even if it were.

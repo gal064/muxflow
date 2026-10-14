@@ -115,11 +115,18 @@ pub(super) async fn handle(
             .await;
         }
         v1::Operation::ListDirectory | v1::Operation::WatchDirectory => {
-            let Some(file) = require_rooted_file(&request, request_id, control_tx).await else {
+            let watch = operation == v1::Operation::WatchDirectory;
+            // A terminal-link single-file token may watch its own file, which
+            // the watch narrows to that one entry; it may never list.
+            let admitted = if watch {
+                require_readable_file(&request, request_id, control_tx).await
+            } else {
+                require_rooted_file(&request, request_id, control_tx).await
+            };
+            let Some(file) = admitted else {
                 return;
             };
             let service = Arc::clone(files);
-            let watch = operation == v1::Operation::WatchDirectory;
             let root = file.root.clone();
             let root_token = file.root_token.clone();
             let path = file.path.clone();
@@ -568,9 +575,9 @@ pub(super) async fn require_rooted_file(
     Some(file)
 }
 
-/// The same payload, admitted for a content read. Terminal-link single-file
-/// tokens enter here; directory and mutation handlers continue through
-/// `require_rooted_file` and reject them.
+/// The same payload, admitted for a content read or a watch. Terminal-link
+/// single-file tokens enter here; listing and mutation handlers continue
+/// through `require_rooted_file` and reject them.
 pub(super) async fn require_readable_file(
     request: &v1::Request,
     request_id: u64,
@@ -596,7 +603,7 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex};
 
     #[tokio::test]
-    async fn single_file_tokens_enter_read_and_exact_file_write_admission_only() {
+    async fn single_file_tokens_enter_read_watch_and_exact_file_write_admission_only() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("prompt.md");
         fs::write(&file, "prompt").unwrap();

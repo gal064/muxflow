@@ -8,6 +8,7 @@ use super::*;
 mod listing;
 mod mutations;
 mod open;
+mod single_file_watch;
 mod transfers;
 mod watch;
 

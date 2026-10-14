@@ -38,12 +38,13 @@ export interface ActiveRoot {
  * Host-issued capability for one terminal-linked file outside the pane root.
  *
  * It deliberately looks unlike an ordinary root token so a persisted file tab
- * can recover its no-directory-watch behavior after reconnecting, without
- * storing a second piece of capability metadata that could drift from the
- * token which actually enforces it.
+ * can recover its narrowed watch after reconnecting, without storing a second
+ * piece of capability metadata that could drift from the token which actually
+ * enforces it.
  *
- * The token may save the exact linked file but cannot enumerate its parent or
- * access a sibling.
+ * The token may save and watch the exact linked file but cannot enumerate its
+ * parent or access a sibling: its watch names the file, and the host narrows
+ * every listing and change event of that watch to it.
  */
 export const TERMINAL_SINGLE_FILE_TOKEN_PREFIX = "file-v2:";
 
