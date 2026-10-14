@@ -39,6 +39,7 @@ fn pane(id: &str, window_id: &str, active: bool) -> tmux_control::Pane {
         current_command: "bash".into(),
         pane_pid: 0,
         start_command: String::new(),
+        title: String::new(),
     }
 }
 

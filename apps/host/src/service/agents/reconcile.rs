@@ -186,9 +186,10 @@ pub(super) fn topology(
 }
 
 /// Agent route fallbacks follow the same title semantics as topology
-/// publication. Persisting every animation glyph would make agent generation
-/// churn even after the topology generation stopped doing so; every routing
-/// identity and non-title fallback remains exact.
+/// publication, and the pane title the same as the window name. Persisting
+/// every animation glyph would make agent generation churn even after the
+/// topology generation stopped doing so; every routing identity and non-title
+/// fallback remains exact.
 fn same_route_for_reconciliation(previous: &StoredRoute, current: &StoredRoute) -> bool {
     previous.host_profile_id == current.host_profile_id
         && previous.server_identity == current.server_identity
@@ -201,4 +202,8 @@ fn same_route_for_reconciliation(previous: &StoredRoute, current: &StoredRoute) 
         )
         && previous.pane_id == current.pane_id
         && previous.pane_index_fallback == current.pane_index_fallback
+        && super::super::topology::equivalent_agent_title(
+            &previous.pane_title_fallback,
+            &current.pane_title_fallback,
+        )
 }

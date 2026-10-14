@@ -16,7 +16,7 @@ function agent(overrides: Partial<Agent> & { id: string }): Agent {
     lifecycleChangedAtMs: 1000,
     attentionSeenAtMs: 0,
     present: true,
-    route: { sessionId: "$1", sessionNameFallback: "fallback-ws", windowId: "@1", windowNameFallback: "fallback-win", paneId: "%1", paneIndexFallback: 0 },
+    route: { sessionId: "$1", sessionNameFallback: "fallback-ws", windowId: "@1", windowNameFallback: "fallback-win", paneId: "%1", paneIndexFallback: 0, paneTitleFallback: "" },
     ...overrides,
   };
 }
@@ -94,7 +94,7 @@ describe("workspace and window names", () => {
   it("prefers live topology names, stripped of status glyphs, over route fallbacks", () => {
     expect(agentWorkspaceName(state, agent({ id: "a" }))).toBe("dev-app");
     expect(agentWindowName(state, agent({ id: "a" }))).toBe("Fix tests");
-    const unrouted = agent({ id: "b", route: { sessionId: "$9", sessionNameFallback: "old-ws", windowId: "@9", windowNameFallback: "⠋ old-win", paneId: "", paneIndexFallback: 0 } });
+    const unrouted = agent({ id: "b", route: { sessionId: "$9", sessionNameFallback: "old-ws", windowId: "@9", windowNameFallback: "⠋ old-win", paneId: "", paneIndexFallback: 0, paneTitleFallback: "" } });
     expect(agentWorkspaceName(state, unrouted)).toBe("old-ws");
     expect(agentWindowName(state, unrouted)).toBe("old-win");
   });
@@ -110,7 +110,7 @@ describe("pinned block (host-owned pins, desktop sidebar rule)", () => {
     "@2": { id: "@2", sessionId: "$1", index: 1, name: "w2", active: false, pinned: true },
     "@3": { id: "@3", sessionId: "$2", index: 0, name: "w3", active: true, pinned: false },
   };
-  const route = (sessionId: string, windowId: string) => ({ sessionId, sessionNameFallback: "", windowId, windowNameFallback: "", paneId: "%1", paneIndexFallback: 0 });
+  const route = (sessionId: string, windowId: string) => ({ sessionId, sessionNameFallback: "", windowId, windowNameFallback: "", paneId: "%1", paneIndexFallback: 0, paneTitleFallback: "" });
 
   it("an agent is pinned when its workspace or its tab is", () => {
     expect(agentPinned({ sessions, windows }, agent({ id: "plain", route: route("$1", "@1") }))).toBe(false);

@@ -32,7 +32,7 @@ function agent(overrides: AgentOverrides & { id: string }): Agent {
     lifecycleChangedAtMs: NOW - 10_000,
     attentionSeenAtMs: 0,
     present: true,
-    route: { sessionId, sessionNameFallback: `fallback-${sessionId}`, windowId, windowNameFallback: `fallback-${windowId}`, paneId: "%1", paneIndexFallback: 0 },
+    route: { sessionId, sessionNameFallback: `fallback-${sessionId}`, windowId, windowNameFallback: `fallback-${windowId}`, paneId: "%1", paneIndexFallback: 0, paneTitleFallback: "" },
     ...rest,
   };
 }
