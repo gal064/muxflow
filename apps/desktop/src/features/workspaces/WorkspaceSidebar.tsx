@@ -17,6 +17,17 @@ import { sameHostConnection, type HostScopeToken } from "../shell/hostScope";
 import type { MergedWorkspaceRow } from "./mergedWorkspaceRows";
 import { activityWord, type WorkspaceRowModel } from "./workspaceRows";
 import { useTransientDrag } from "./transientDrag";
+import { beginPointerDrag, useDragSelector, type DragPayload } from "../dragDrop/pointerDrag";
+
+/**
+ * Where an agent's pane can be moved from its row's menu. Decided by the same
+ * rules a drag is, so the menu never offers a move the drag would refuse.
+ */
+export interface AgentMoves {
+  /** Joins the agent's pane beside the pane on screen. */
+  bringHere?: () => void;
+  workspaces: readonly { id: string; name: string; run(): void }[];
+}
 
 export type WorkspaceCommandId = Extract<CommandId, "session.rename" | "session.moveLeft" | "session.moveRight" | "session.close">;
 
@@ -93,6 +104,9 @@ interface WorkspaceSidebarProps {
   hookNotice?: string;
   /** Present when the notice is something the user can act on. */
   onSetUpHost?(): void;
+  /** What dragging this agent's row carries; absent when its pane cannot be moved. */
+  agentDragPayload?(row: AgentListRow): DragPayload | undefined;
+  agentMoves?(row: AgentListRow): AgentMoves | undefined;
 }
 
 /**
@@ -115,6 +129,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   const [agentMenu, setAgentMenu] = useState<{ row?: AgentListRow; anchor: ContextMenuAnchor; scope: HostScopeToken }>();
   const [focusedAgentTarget, setFocusedAgentTarget] = useState<{ id: string; scope: HostScopeToken }>();
   const [hostMenu, setHostMenu] = useState<ContextMenuAnchor>();
+  const [moveMenu, setMoveMenu] = useState<{ anchor: ContextMenuAnchor; agentName: string; moves: AgentMoves; scope: HostScopeToken }>();
+  // The row a drag would drop into, by `MergedWorkspaceRow.key`.
+  const workspaceDrop = useDragSelector((drag) => drag?.allowed && drag.target?.kind === "workspace"
+    ? `${drag.target.hostProfileId}\0${drag.target.sessionId}`
+    : undefined);
   const container = useRef<HTMLElement>(null);
   const [displayedAgentsRatio, startAgentsRatioDrag] = useTransientDrag(props.agentsRatio, props.onAgentsRatio);
   const [displayedWidth, startWidthDrag] = useTransientDrag(props.width, props.onWidth);
@@ -234,6 +253,25 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     ordered[Math.max(0, Math.min(ordered.length - 1, here + delta))]?.focus();
   };
 
+  /**
+   * Bringing an agent here and sending it elsewhere. Both are moves of its
+   * pane on the host on screen, so they are offered only for its agents, like
+   * a resume; the workspace choice opens as a second menu where this one was.
+   */
+  const agentMoveItems = (row: AgentListRow, anchor: ContextMenuAnchor) => {
+    const moves = canResume(row) && row.routable ? props.agentMoves?.(row) : undefined;
+    return [
+      "separator" as const,
+      { id: "bring-here", label: "Bring here as split", disabled: !moves?.bringHere, run: () => moves?.bringHere?.() },
+      {
+        id: "move-to-workspace",
+        label: "Move to workspace…",
+        disabled: !moves || moves.workspaces.length === 0,
+        run: () => { if (moves) setMoveMenu({ anchor, agentName: row.agent.displayName, moves, scope: agentHost(row).scope }); },
+      },
+    ];
+  };
+
   const startSectionDrag = (event: PointerEvent<HTMLElement>) => {
     const bounds = container.current?.getBoundingClientRect();
     if (!bounds || bounds.height <= 0) return;
@@ -277,7 +315,10 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           setAgentMenu({ row, anchor: { x: event.clientX, y: event.clientY }, scope });
         }}
         onFocus={() => setFocusedAgentTarget({ id: row.agent.id, scope })}
-        onPointerDown={() => setFocusedAgentTarget({ id: row.agent.id, scope })}
+        onPointerDown={(event) => {
+          setFocusedAgentTarget({ id: row.agent.id, scope });
+          beginPointerDrag(event, props.agentDragPayload?.(row));
+        }}
         onKeyDown={(event) => {
           if (isContextMenuKey(event)) {
             event.preventDefault();
@@ -324,7 +365,10 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         // Dimmed while its host's link is down: the row is the last thing the
         // host said, and a mutation asked of it will be refused.
         rowOffline(row) ? "offline" : undefined,
+        workspaceDrop === row.key ? "drop-target" : undefined,
       ].filter(Boolean).join(" ")}
+      data-drop-host={row.hostProfileId}
+      data-drop-workspace={row.session.id}
       data-workspace-index={index}
       // Shift-click pins rather than selects, as it does in the tab
       // strip. Pinning a workspace must not navigate to it: the row
@@ -710,6 +754,16 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       tabIndex={0}
     />
 
+    {/* The choices name tmux ids planned on one connection: a reconnect or a
+        restarted server while it is open takes them away, as it does the
+        agent menu's. */}
+    {moveMenu && sameHostConnection(moveMenu.scope, activeHost.scope) && <ContextMenu
+      anchor={moveMenu.anchor}
+      items={moveMenu.moves.workspaces.map((workspace) => ({ id: workspace.id, label: workspace.name, run: workspace.run }))}
+      label={`Move ${moveMenu.agentName} to workspace`}
+      onClose={() => setMoveMenu(undefined)}
+    />}
+
     {agentMenu && sameHostConnection(agentMenu.scope, (agentMenu.row ? agentHost(agentMenu.row) : activeHost).scope) && <ContextMenu
       anchor={agentMenu.anchor}
       items={agentMenu.row
@@ -717,6 +771,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           { id: "focus", label: "Focus this agent's pane", disabled: !agentMenu.row.routable, run: () => props.onSelectAgent(agentMenu.row!, agentMenu.scope) },
           { id: "pin", label: agentMenu.row.location.tabPinned ? "Unpin tab" : "Pin tab", run: () => props.onTogglePinnedAgentTab(agentMenu.row!, agentMenu.scope) },
           { id: "rename", label: "Rename agent…", disabled: !agentHost(agentMenu.row).canMutate, run: () => props.onRenameAgent(agentMenu.row!.agent, agentMenu.scope) },
+          ...agentMoveItems(agentMenu.row, agentMenu.anchor),
           ...resumePlacements(props.adapters, agentMenu.row.agent).map((placement) => ({
             id: `resume-${placement}`,
             label: agentHost(agentMenu.row!).active ? `Resume in new ${placement}` : `Resume in new ${placement} (open ${agentHost(agentMenu.row!).label} first)`,
