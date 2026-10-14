@@ -1229,6 +1229,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .live-markdown .cm-live-table { padding: 2px 0; cursor: text; }
 .live-markdown .cm-live-table table { margin: 0; }
 .live-markdown .cm-live-table a { color: var(--accent); }
+/* A cell being typed into: the table keeps its face, the cell says where the caret is. */
+.live-markdown .cm-live-table :is(td, th)[contenteditable] { outline: none; }
+.live-markdown .cm-live-table :is(td, th)[contenteditable]:focus { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent); }
 .live-markdown .cm-editor .cm-panels { border-color: var(--chrome-hairline); background: var(--chrome-raised); color: var(--chrome-ink); font-family: var(--font-sans); }
 .live-markdown .cm-editor .cm-panel.cm-search { padding: 6px 28px 6px 8px; font-size: var(--type-meta); }
 .live-markdown .cm-editor .cm-panel.cm-search label { color: var(--chrome-dim); font-size: var(--type-meta); }
