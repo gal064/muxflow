@@ -88,6 +88,7 @@ fn topology(command: &str) -> tmux_control::TmuxSnapshot {
             current_command: command.into(),
             pane_pid: 0,
             start_command: String::new(),
+            title: String::new(),
         }],
     }
 }
@@ -266,6 +267,43 @@ fn title_animation_does_not_churn_routes_but_process_changes_still_reconcile() {
     );
     assert_eq!(runtime.retire_departed_from(&departed, "server-a").len(), 1);
     assert!(runtime.snapshot_for("server-a").agents.is_empty());
+}
+
+#[test]
+fn agents_sharing_a_window_carry_their_own_pane_titles_without_frame_churn() {
+    let runtime = runtime("pane-title-reconciliation");
+    let mut split = two_pane_topology();
+    split.windows[0].name = "✳ Fix tests".into();
+    split.panes[0].title = "✳ Fix tests".into();
+    split.panes[1].title = "✳ Ship release".into();
+    assert!(runtime.reconcile_topology(&split, "server-a").unwrap());
+    let pane_title = |snapshot: &v1::AgentSnapshot, pane_id: &str| {
+        snapshot
+            .agents
+            .iter()
+            .filter_map(|agent| agent.route.as_ref())
+            .find(|route| route.pane_id == pane_id)
+            .map(|route| route.pane_title_fallback.clone())
+            .unwrap()
+    };
+    let initial = runtime.snapshot_for("server-a");
+    assert_eq!(pane_title(&initial, "%7"), "✳ Fix tests");
+    assert_eq!(pane_title(&initial, "%8"), "✳ Ship release");
+
+    let mut animated = split.clone();
+    animated.panes[1].title = "⠋ Ship release".into();
+    assert!(!runtime.reconcile_topology(&animated, "server-a").unwrap());
+    assert_eq!(
+        runtime.snapshot_for("server-a").generation,
+        initial.generation
+    );
+
+    let mut retitled = animated;
+    retitled.panes[1].title = "✳ Cut release".into();
+    assert!(runtime.reconcile_topology(&retitled, "server-a").unwrap());
+    let after = runtime.snapshot_for("server-a");
+    assert!(after.generation > initial.generation);
+    assert_eq!(pane_title(&after, "%8"), "✳ Cut release");
 }
 
 #[test]

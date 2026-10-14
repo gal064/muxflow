@@ -64,7 +64,7 @@ const wireAgent = (lifecycle: "working" | "blocked", attentionGeneration: number
   agentId: "agent-qa", adapter: "codex", adapterId: "codex", nativeSessionId: "native-qa", displayName: "Codex on qa",
   route: {
     hostProfileId: "remote-a", serverIdentity: "srv-qa", sessionId: "$2", sessionNameFallback: "work",
-    windowId: "@1", windowNameFallback: "work", paneId: "%1", agentId: "agent-qa", attentionGeneration,
+    windowId: "@1", windowNameFallback: "work", paneId: "%1", paneTitleFallback: "", agentId: "agent-qa", attentionGeneration,
   },
   lifecycle, stateGeneration: 1, attentionGeneration, ...(lifecycle === "blocked" ? { attentionKind: "blocked" } : {}),
   seenGeneration: 0, updatedAtUnixMillis: 100, lifecycleChangedAtUnixMillis: 100, attentionSeenAtUnixMillis: 0,

@@ -48,6 +48,27 @@ describe("agent status glyph stripping", () => {
       .toBe("Nightly triage");
   });
 
+  it("labels an agent by its own pane title ahead of the tab it shares", () => {
+    // Two agents in one split: the window is named after the first pane, but
+    // each agent keeps the session name its own pane announces.
+    expect(agentSessionLabel(agent({ windowName: "✳ Plan rollout", paneTitle: "✳ Ship release" }), []))
+      .toBe("Ship release");
+    // A pane moved into a tab of its own keeps tmux's generic window name
+    // until its title next changes; the pane title still names it.
+    expect(agentSessionLabel(agent({ windowName: "claude", paneTitle: "⠋ Ship release" }), []))
+      .toBe("Ship release");
+    // A pane title that names nothing yet falls back to the tab, as before.
+    for (const paneTitle of ["", "⠋", "✳ Claude Code", "codex"]) {
+      expect(agentSessionLabel(agent({ windowName: "✳ Plan rollout", paneTitle }), []), paneTitle)
+        .toBe("Plan rollout");
+    }
+  });
+
+  it("treats Claude's own pre-topic title as generic", () => {
+    expect(agentSessionLabel(agent({ windowName: "✳ Claude Code", displayName: "Nightly triage" }), []))
+      .toBe("Nightly triage");
+  });
+
   it("falls through a title that is only a ticker frame", () => {
     // A starting agent's title is the spinner frame alone. A tab has nothing
     // better to show and keeps it; a sidebar row has the assigned name.

@@ -17,13 +17,25 @@ use super::{SequencerControl, emit_event, reconcile_terminal_clients_if_open};
 ///
 /// Agent CLIs animate a recognized status marker at the start of the tmux
 /// window title. Those frames remain visible to discovery, but changing only
-/// the marker does not change the topology consumers act on.
+/// the marker does not change the topology consumers act on. A pane title is
+/// not published at all: it only names the agent in that pane, and agent
+/// reconciliation compares it on its own.
 fn same_publishable_topology(
     previous: &tmux_control::TmuxSnapshot,
     current: &tmux_control::TmuxSnapshot,
 ) -> bool {
     previous.sessions == current.sessions
-        && previous.panes == current.panes
+        && previous.panes.len() == current.panes.len()
+        && previous
+            .panes
+            .iter()
+            .zip(&current.panes)
+            .all(|(previous, current)| {
+                tmux_control::Pane {
+                    title: current.title.clone(),
+                    ..previous.clone()
+                } == *current
+            })
         && previous.windows.len() == current.windows.len()
         && previous
             .windows
@@ -704,6 +716,7 @@ mod tests {
                 current_command: "bash".into(),
                 pane_pid: 42,
                 start_command: "bash".into(),
+                title: String::new(),
             }],
         }
     }
@@ -768,6 +781,17 @@ mod tests {
         assert!(equivalent_agent_title("✳", "[ . ]"));
         assert!(!equivalent_agent_title("Fix tests", "✳ Fix tests"));
         assert!(!equivalent_agent_title("✳ Fix tests", "⠋ Ship tests"));
+    }
+
+    #[test]
+    fn a_pane_title_change_alone_is_not_a_publishable_topology_change() {
+        let previous = titled_server("Fix tests");
+        let mut current = previous.clone();
+        current.panes[0].title = "✳ Ship tests".into();
+        assert!(same_publishable_topology(&previous, &current));
+
+        current.panes[0].current_command = "claude".into();
+        assert!(!same_publishable_topology(&previous, &current));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

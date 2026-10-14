@@ -247,6 +247,7 @@ fn record_json(value: &v1::AgentRecord, host_profile_id: &str) -> Value {
             "windowNameFallback": route.window_name_fallback,
             "paneId": route.pane_id,
             "paneIndexFallback": route.pane_index_fallback,
+            "paneTitleFallback": route.pane_title_fallback,
             "agentId": route.agent_id,
             "attentionGeneration": route.attention_generation.to_string(),
         })),
@@ -326,6 +327,7 @@ mod tests {
             attention_seen_at_unix_millis: 1_786_000_000_100,
             route: Some(v1::AgentRoute {
                 agent_id: "codex:1".into(),
+                pane_title_fallback: "✳ Ship release".into(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -336,6 +338,7 @@ mod tests {
         assert_eq!(json["lifecycleChangedAtUnixMillis"], "1786000000000");
         assert_eq!(json["attentionSeenAtUnixMillis"], "1786000000100");
         assert_eq!(json["route"]["hostProfileId"], "profile-1");
+        assert_eq!(json["route"]["paneTitleFallback"], "✳ Ship release");
         let sideband = with_connection_epoch(json, (1_u64 << 53) + 3);
         assert_eq!(sideband["connectionEpoch"], ((1_u64 << 53) + 3).to_string());
     }
