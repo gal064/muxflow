@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import {
-  beginPointerDrag, currentDragState, paneEdgeAt, pointerDragActive, setDropResolver, type DragPayload,
+  beginPointerDrag, currentDragState, dropTargetAt, paneEdgeAt, pointerDragActive, setDropResolver, type DragPayload,
 } from "./pointerDrag";
 
 const payload: DragPayload = { kind: "terminalTab", hostProfileId: "local", sessionId: "$1", windowId: "@2", label: "two" };
@@ -42,6 +42,49 @@ describe("paneEdgeAt", () => {
     expect(paneEdgeAt(rect, 50, 4)).toBe("top");
     expect(paneEdgeAt(rect, 50, 90)).toBe("bottom");
     expect(paneEdgeAt(rect, 50, 50)).toBeUndefined();
+  });
+});
+
+describe("focus after a drag", () => {
+  it("goes back to where it was before the press, not the row the drag started on", () => {
+    const { source, press } = setup();
+    const terminal = document.createElement("textarea");
+    document.body.append(terminal);
+    terminal.focus();
+    setDropResolver(() => ({ kind: "run", run: () => undefined }));
+    beginPointerDrag(press, payload);
+    source.focus(); // the press's own default
+    window.dispatchEvent(pointer("pointermove", 30, 30));
+    window.dispatchEvent(pointer("pointerup", 30, 30));
+    expect(document.activeElement).toBe(terminal);
+  });
+
+  it("leaves a plain click's focus alone", () => {
+    const { source, press } = setup();
+    beginPointerDrag(press, payload);
+    source.focus();
+    window.dispatchEvent(pointer("pointerup", 10, 10));
+    expect(document.activeElement).toBe(source);
+  });
+});
+
+describe("dropTargetAt", () => {
+  it("reads a tab inside the strip as that tab, carrying the strip's workspace", () => {
+    const strip = document.createElement("div");
+    strip.dataset.dropWorkspace = "$1";
+    strip.dataset.dropHost = "local";
+    const tab = document.createElement("div");
+    tab.dataset.dropTab = "terminal:@2";
+    tab.getBoundingClientRect = () => ({ left: 0, width: 100 }) as DOMRect;
+    strip.append(tab);
+    document.body.append(strip);
+    document.elementsFromPoint = vi.fn(() => [tab, strip]);
+    expect(dropTargetAt(80, 5)).toEqual({
+      kind: "tab", tabKey: "terminal:@2", side: "after", workspace: { hostProfileId: "local", sessionId: "$1" },
+    });
+    // The strip's empty end is the workspace itself.
+    document.elementsFromPoint = vi.fn(() => [strip]);
+    expect(dropTargetAt(300, 5)).toEqual({ kind: "workspace", hostProfileId: "local", sessionId: "$1" });
   });
 });
 

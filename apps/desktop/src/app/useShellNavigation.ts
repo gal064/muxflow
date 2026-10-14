@@ -204,8 +204,11 @@ export function useShellNavigation(options: ShellNavigationOptions) {
     const target = destinationLocation(destination);
     const from = origin ?? { sessionId: activeSessionIdRef.current, windowId: activeWindowIdRef.current };
     const targetSessionAlreadyActive = target.sessionId === from.sessionId;
+    // Current within the destination workspace: a window that just moved
+    // there from another workspace is still listed, current, under the old
+    // one until the next snapshot, and is not current where it landed.
     const targetWindowAlreadyActive = Boolean(target.windowId)
-      && windowsRef.current.some((item) => item.id === target.windowId && item.active);
+      && windowsRef.current.some((item) => item.id === target.windowId && item.sessionId === target.sessionId && item.active);
     const currentLocation: NavigationOutcome | undefined = !predecessor && from.sessionId
       ? {
         kind: "partial",

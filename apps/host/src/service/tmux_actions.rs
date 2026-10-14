@@ -6,9 +6,9 @@ use super::snapshot::{
 };
 use super::terminal::validate_tmux_id;
 use command::{
-    configure_break_pane, configure_join_pane, configure_move_window, configure_new_session,
-    configure_new_window, configure_split, escaped_format_literal, run, run_for_id, run_for_ids,
-    validate_name,
+    JoinPlacement, configure_break_pane, configure_join_pane, configure_move_window,
+    configure_new_session, configure_new_window, configure_split, escaped_format_literal, run,
+    run_for_id, run_for_ids, validate_name,
 };
 
 mod command;
@@ -230,10 +230,12 @@ pub(super) fn execute(
                 .context("target pane disappeared")?;
             result.session_id = target.session_id.clone();
             result.window_id = target.window_id.clone();
+            let placement = join_placement(&before, &action);
             configure_join_pane(
                 &mut command,
                 v1::PaneEdge::try_from(action.pane_edge).unwrap_or_default(),
                 &action,
+                placement,
             )?;
             run(command)?;
             result.pane_id = action.pane_id;
@@ -558,7 +560,7 @@ fn action_postcondition(
                 return false;
             };
             moved.window_id == target.window_id
-                && moved.active
+                && moved.active == join_placement(before, action).keeps_focus
                 && match v1::PaneEdge::try_from(action.pane_edge).unwrap_or_default() {
                     v1::PaneEdge::Left => moved.left < target.left,
                     v1::PaneEdge::Right => moved.left > target.left,
@@ -834,8 +836,8 @@ fn validate_move_targets(
                 .find(|item| item.id == action.pane_id)
                 .context("pane no longer exists")?;
             refuse_linked(&source.window_id)?;
-            if source.window_id == target.window_id {
-                bail!("pane join target must be in a different window");
+            if source.id == target.id {
+                bail!("a pane cannot be joined to itself");
             }
             if v1::PaneEdge::try_from(action.pane_edge).unwrap_or_default()
                 == v1::PaneEdge::Unspecified
@@ -861,6 +863,20 @@ fn validate_move_targets(
         _ => {}
     }
     Ok(())
+}
+
+/// Read before the join: afterwards the pane has moved and tmux has picked a
+/// new active pane in the window it left.
+fn join_placement(snapshot: &tmux_control::TmuxSnapshot, action: &v1::TmuxAction) -> JoinPlacement {
+    let pane = |id: &str| snapshot.panes.iter().find(|item| item.id == id);
+    let (Some(source), Some(target)) = (pane(&action.pane_id), pane(&action.target_pane_id)) else {
+        return JoinPlacement::default();
+    };
+    let same_window = source.window_id == target.window_id;
+    JoinPlacement {
+        same_window,
+        keeps_focus: same_window && source.active,
+    }
 }
 
 fn reorder_window(
@@ -903,14 +919,27 @@ fn reorder_window(
             .collect()
     };
     if !adjacent_ids.is_empty() {
-        run(window_reorder_command(window_id, &adjacent_ids)?)?;
+        let shown = windows
+            .iter()
+            .find(|window| window.active)
+            .map(|window| format!("{session_id}:{}", window.id));
+        run(window_reorder_command(
+            window_id,
+            &adjacent_ids,
+            shown.as_deref(),
+        )?)?;
     }
     Ok(())
 }
 
+/// A swap moves which window is current: with `-d` the moved window becomes
+/// current, without it the current index does and so whichever window lands
+/// there. Reordering never changes the tab on screen, so the window that was
+/// current is selected again at the end of the same command list.
 fn window_reorder_command(
     window_id: &str,
     adjacent_ids: &[&str],
+    shown: Option<&str>,
 ) -> anyhow::Result<std::process::Command> {
     let mut command = tmux_command()?;
     if let Some((first, rest)) = adjacent_ids.split_first() {
@@ -918,6 +947,9 @@ fn window_reorder_command(
         for adjacent in rest {
             command.arg(";");
             command.args(["swap-window", "-d", "-s", window_id, "-t", adjacent]);
+        }
+        if let Some(shown) = shown {
+            command.args([";", "select-window", "-t", shown]);
         }
     }
     Ok(command)
