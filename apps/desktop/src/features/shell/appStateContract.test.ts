@@ -95,6 +95,12 @@ describe("persisted app state contract", () => {
     expect(surface("ports")).toBe("ports");
     expect(surface("agents")).toBe("files");
     expect(surface(undefined)).toBe("files");
+    // An extension's surface needs the extension turned on.
+    expect(surface("automations")).toBe("files");
+    expect(normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [],
+      shell: { panelSurface: "automations", enabledPanelExtensions: ["automations", 3, "automations"] },
+    }).shell).toMatchObject({ panelSurface: "automations", enabledPanelExtensions: ["automations"] });
   });
 
   it("ignores the pin records left behind by the build that kept pins in app state", () => {

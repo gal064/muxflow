@@ -51,7 +51,8 @@
     }
   ],
   "shell": {
-    "panelSurface": "ports",
+    "panelSurface": "automations",
+    "enabledPanelExtensions": ["automations"],
     "sidebarCollapsed": true,
     "sidebarWidth": 260,
     "panelOpen": true,

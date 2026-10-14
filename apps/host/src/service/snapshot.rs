@@ -460,6 +460,16 @@ pub(super) fn save_sidecar<T: serde::Serialize>(
     label: &str,
     state: &T,
 ) -> anyhow::Result<()> {
+    write_private_atomic(path, label, &serde_json::to_vec(state)?)
+}
+
+/// Replaces `path` with `bytes`, privately and atomically: a 0600 temporary
+/// beside it, synced, renamed over it, and the directory synced.
+pub(super) fn write_private_atomic(
+    path: &std::path::Path,
+    label: &str,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("{label} path has no parent"))?;
@@ -476,7 +486,7 @@ pub(super) fn save_sidecar<T: serde::Serialize>(
             .mode(0o600)
             .open(&temporary)
             .with_context(|| format!("create private {label} state"))?;
-        file.write_all(&serde_json::to_vec(state)?)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
         fs::rename(&temporary, path)

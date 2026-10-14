@@ -84,14 +84,17 @@ pub(super) fn launch(
         Some(ids) => ids,
         None => {
             let mut command = tmux()?;
+            // After the last tab, not in the first gap a closed run left, so
+            // the tabs stay in run order.
             command.args([
                 "new-window",
                 "-d",
+                "-a",
                 "-P",
                 "-F",
                 "#{window_id} #{pane_id}",
                 "-t",
-                &format!("{session_id}:"),
+                &format!("{session_id}:{{end}}"),
                 "-c",
                 &escaped_format_literal(&cwd),
                 APP_SHELL,

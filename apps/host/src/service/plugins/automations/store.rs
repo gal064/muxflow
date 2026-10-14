@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::cron::{self, Schedule};
 
-const DEFINITIONS_VERSION: u64 = 1;
+pub(super) const DEFINITIONS_VERSION: u64 = 1;
 const RUNS_VERSION: u32 = 1;
 const RUNS_KEPT: usize = 100;
 pub(super) const LAST_MESSAGE_MAX_BYTES: usize = 4096;
@@ -100,6 +100,9 @@ pub(super) struct Definitions {
     /// Per-automation errors, keyed by id (or `#<index>` when there is none).
     pub invalid: BTreeMap<String, String>,
     pub file_error: String,
+    /// The entries of the last file that loaded, as written, for a viewer to
+    /// show while the file on disk cannot be read.
+    pub entries: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,7 +130,13 @@ impl Definitions {
             Ok(metadata) => Some(stamp(&metadata)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
-                self.file_error = format!("cannot read automations.json: {error}");
+                let error = format!("cannot read automations.json: {error}");
+                // Forget the stamp, so the file is read again once it can be.
+                self.stamp = None;
+                if self.file_error == error {
+                    return Reload::Unchanged;
+                }
+                self.file_error = error;
                 return Reload::Unreadable;
             }
         };
@@ -139,15 +148,17 @@ impl Definitions {
             self.good.clear();
             self.invalid.clear();
             self.file_error.clear();
+            self.entries.clear();
             return Reload::Loaded;
         }
         match std::fs::read(path)
             .map_err(|error| format!("cannot read automations.json: {error}"))
             .and_then(|bytes| parse_file(&bytes, this_year))
         {
-            Ok((good, invalid)) => {
+            Ok((good, invalid, entries)) => {
                 self.good = good;
                 self.invalid = invalid;
+                self.entries = entries;
                 self.file_error.clear();
                 Reload::Loaded
             }
@@ -178,7 +189,11 @@ fn stamp(metadata: &std::fs::Metadata) -> Stamp {
     }
 }
 
-type Parsed = (Vec<Definition>, BTreeMap<String, String>);
+type Parsed = (
+    Vec<Definition>,
+    BTreeMap<String, String>,
+    Vec<serde_json::Value>,
+);
 
 /// The whole file, or why none of it can be trusted. Problems confined to one
 /// automation leave the others running.
@@ -217,10 +232,10 @@ fn parse_file(bytes: &[u8], this_year: i32) -> Result<Parsed, String> {
     }
     // A duplicate makes both ambiguous; neither runs.
     good.retain(|definition| !invalid.contains_key(&definition.id));
-    Ok((good, invalid))
+    Ok((good, invalid, entries.to_vec()))
 }
 
-fn definition(entry: &serde_json::Value, this_year: i32) -> Result<Definition, String> {
+pub(super) fn definition(entry: &serde_json::Value, this_year: i32) -> Result<Definition, String> {
     let raw: RawDefinition =
         serde_json::from_value(entry.clone()).map_err(|error| error.to_string())?;
     if raw.id.is_empty()
@@ -529,10 +544,34 @@ mod tests {
         );
         assert!(definitions.file_error.contains("version"));
         assert_eq!(definitions.good.len(), 1);
+        assert_eq!(
+            definitions.entries.len(),
+            1,
+            "a viewer still sees what runs"
+        );
 
         std::fs::remove_file(&path).unwrap();
         assert_eq!(definitions.reload_if_changed(&path, YEAR), Reload::Loaded);
         assert!(definitions.good.is_empty() && definitions.file_error.is_empty());
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_looked_at_is_one_change_not_one_per_look() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("state");
+        std::fs::write(&blocker, b"").unwrap();
+        // A directory that is a file: every stat fails with ENOTDIR.
+        let path = blocker.join("automations.json");
+        let mut definitions = Definitions::default();
+        assert_eq!(
+            definitions.reload_if_changed(&path, YEAR),
+            Reload::Unreadable
+        );
+        assert_eq!(
+            definitions.reload_if_changed(&path, YEAR),
+            Reload::Unchanged
+        );
+        assert!(!definitions.file_error.is_empty());
     }
 
     #[test]

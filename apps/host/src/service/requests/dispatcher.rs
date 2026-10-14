@@ -142,6 +142,23 @@ pub(crate) async fn handle_request(
             return;
         }
 
+        (Handler::Automation, Some(_)) => {
+            let response = match request.automation {
+                None => response_error(
+                    "invalid_automation",
+                    "an automation operation needs an automation payload",
+                ),
+                Some(automation) => tokio::task::spawn_blocking(move || {
+                    crate::service::plugins::automation_request(automation, connection_id)
+                })
+                .await
+                .unwrap_or_else(|_| response_error("internal", "automation request failed")),
+            };
+            send_response(control_tx, request_id, response).await;
+            pending.lock().unwrap().remove(&request_id);
+            return;
+        }
+
         (
             Handler::ActiveRoot,
             Some(

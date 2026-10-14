@@ -10,6 +10,7 @@ import { GitSidebar } from "../features/git/GitSidebar";
 import type { PortForward } from "../features/ports/api";
 import { PortsPanel, type PortsHost } from "../features/ports/PortsPanel";
 import { RightPanel } from "../features/shell/RightPanel";
+import { PANEL_EXTENSIONS, type PanelExtensionProps } from "../features/shell/panelExtensions";
 import type { ShellState } from "../features/shell/types";
 
 interface AppRightPanelProps {
@@ -30,6 +31,9 @@ interface AppRightPanelProps {
   /** The cap the caller applies — half the window. */
   maxWidth: number;
   onWidth: (width: number) => void;
+  /** What every enabled panel extension is given. */
+  extensionProps: PanelExtensionProps;
+  enabledExtensions: readonly string[];
   portForwards: readonly PortForward[];
   portHosts: readonly PortsHost[];
   workspaceFiles: ReturnType<typeof useWorkspaceFiles>;
@@ -72,6 +76,9 @@ export function AppRightPanel(props: AppRightPanelProps) {
       root={props.workspaceFiles.root}
       scope={props.fileScope}
     />}
+    extensions={PANEL_EXTENSIONS
+      .filter((extension) => props.enabledExtensions.includes(extension.id))
+      .map(({ id, label, Component }) => ({ id, label, body: <Component {...props.extensionProps} /> }))}
     maxWidth={props.maxWidth}
     onSurface={props.onSurface}
     onWidth={props.onWidth}
