@@ -15,8 +15,8 @@ export interface DropContext {
 
 export type DropPlan =
   /**
-   * A join needs no follow-up focus: tmux makes the joined pane its window's
-   * active pane, and the shell follows tmux's active pane.
+   * A join needs no follow-up focus: the host leaves the window's active pane
+   * alone, unless the pane it moves is that active pane, which keeps it.
    */
   | { kind: "action"; action: TmuxAction }
   | { kind: "moveAppTab"; tabId: string; targetTabId: string; side: "before" | "after" }
@@ -37,8 +37,13 @@ export const ALREADY_OPEN = "That file is already open in the workspace.";
  * workspace it leaves is refused here so the drag never draws a marker for it,
  * and refused again on the host, which is where the guard actually holds.
  */
-export function planDrop(payload: DragPayload, target: DropTarget, context: DropContext): DropPlan | undefined {
+export function planDrop(payload: DragPayload, dropped: DropTarget, context: DropContext): DropPlan | undefined {
   if (payload.hostProfileId !== context.hostProfileId) return { kind: "refuse", reason: SAME_HOST_ONLY };
+  // A pane dropped on a tab is dropped on the strip: it becomes a tab of the
+  // strip's workspace, appended, the same move as dropping it on that row.
+  const target: DropTarget = payload.kind === "pane" && dropped.kind === "tab" && dropped.workspace
+    ? { kind: "workspace", ...dropped.workspace }
+    : dropped;
   if (target.kind === "workspace" && target.hostProfileId !== context.hostProfileId) return { kind: "refuse", reason: SAME_HOST_ONLY };
   const windowsIn = (sessionId: string) => context.windows.filter((window) => window.sessionId === sessionId).length;
   const panesIn = (windowId: string) => context.panes.filter((pane) => pane.windowId === windowId);
@@ -91,15 +96,16 @@ export function planDrop(payload: DragPayload, target: DropTarget, context: Drop
       }
       return targetPane ? { kind: "refuse", reason: NO_DOCUMENT_SPLITS } : undefined;
     }
-    case "agent": {
+    case "pane": {
       // The record can trail the topology; where the pane is *now* decides.
       const pane = context.panes.find((item) => item.id === payload.paneId);
       if (!pane) return undefined;
       const alone = panesIn(pane.windowId).length === 1;
       const emptiesWorkspace = alone && windowsIn(pane.sessionId) === 1;
       if (target.kind === "pane") {
-        if (!targetPane || targetPane.windowId === pane.windowId) return undefined;
-        if (emptiesWorkspace) return { kind: "refuse", reason: CLOSES_WORKSPACE };
+        if (!targetPane || targetPane.id === pane.id) return undefined;
+        // Inside its own window a join rearranges the panes and empties nothing.
+        if (targetPane.windowId !== pane.windowId && emptiesWorkspace) return { kind: "refuse", reason: CLOSES_WORKSPACE };
         return joinPlan(pane.id, targetPane.id, target);
       }
       if (target.kind === "workspace") {

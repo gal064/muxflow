@@ -487,14 +487,20 @@ fn external_interleave_fails_reorder_postcondition() {
         "@3",
         v1::WindowRelativePosition::Before,
     ));
-    let command = window_reorder_command("@2", &["@3", "@4"]).unwrap();
+    let command = window_reorder_command("@2", &["@3", "@4"], Some("$1:@1")).unwrap();
     let arguments: Vec<_> = command
         .get_args()
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect();
     assert_eq!(
         arguments.iter().filter(|argument| *argument == ";").count(),
-        1
+        2
+    );
+    // The swaps move which window is current; the tab on screen is
+    // selected again at the end.
+    assert_eq!(
+        arguments[arguments.len() - 3..],
+        ["select-window", "-t", "$1:@1"]
     );
     assert_eq!(
         arguments
@@ -840,12 +846,20 @@ fn moves_refuse_to_land_in_place_or_empty_the_workspace_they_leave() {
         &snapshot,
     )
     .unwrap();
+    // Inside one window a join rearranges it; only joining a pane to itself
+    // is refused.
+    validate_targets(
+        v1::TmuxActionKind::JoinPane,
+        &join("%3", "%1", v1::PaneEdge::Left),
+        &snapshot,
+    )
+    .unwrap();
     assert!(
         refusal(
             v1::TmuxActionKind::JoinPane,
-            join("%3", "%1", v1::PaneEdge::Left)
+            join("%3", "%3", v1::PaneEdge::Left)
         )
-        .contains("different window")
+        .contains("to itself")
     );
     assert!(
         refusal(
@@ -962,9 +976,9 @@ fn moves_are_judged_on_where_the_window_or_pane_landed() {
     let joined = after.panes.iter_mut().find(|item| item.id == "%2").unwrap();
     joined.window_id = "@3".into();
     joined.session_id = "$2".into();
+    joined.active = false;
     let target = after.panes.iter_mut().find(|item| item.id == "%4").unwrap();
     target.left = 41;
-    target.active = false;
     assert!(judge(
         v1::TmuxActionKind::JoinPane,
         &join(v1::PaneEdge::Left),
@@ -982,6 +996,53 @@ fn moves_are_judged_on_where_the_window_or_pane_landed() {
         &join(v1::PaneEdge::Left),
         &result,
         &before
+    ));
+    // Joining from elsewhere never takes focus from the pane you were in.
+    let mut stole_focus = after.clone();
+    for item in &mut stole_focus.panes {
+        if item.id == "%2" || item.id == "%4" {
+            item.active = item.id == "%2";
+        }
+    }
+    assert!(!judge(
+        v1::TmuxActionKind::JoinPane,
+        &join(v1::PaneEdge::Left),
+        &result,
+        &stole_focus
+    ));
+
+    // Rearranged inside `@1`: the active `%1` moves below `%3` and keeps focus.
+    let rearrange = v1::TmuxAction {
+        pane_id: "%1".into(),
+        target_pane_id: "%3".into(),
+        pane_edge: v1::PaneEdge::Bottom.into(),
+        ..move_action(v1::TmuxActionKind::JoinPane)
+    };
+    let mut after = before.clone();
+    for item in &mut after.panes {
+        match item.id.as_str() {
+            "%1" => (item.left, item.top) = (0, 21),
+            "%3" => (item.left, item.top) = (0, 0),
+            _ => {}
+        }
+    }
+    assert!(judge(
+        v1::TmuxActionKind::JoinPane,
+        &rearrange,
+        &result,
+        &after
+    ));
+    let mut lost_focus = after.clone();
+    for item in &mut lost_focus.panes {
+        if item.window_id == "@1" {
+            item.active = item.id == "%3";
+        }
+    }
+    assert!(!judge(
+        v1::TmuxActionKind::JoinPane,
+        &rearrange,
+        &result,
+        &lost_focus
     ));
 
     // `%3` leaves `@1` for a new `@4` in `$2`, alone.
