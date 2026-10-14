@@ -167,10 +167,10 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
           break;
         case "Link":
         case "Image":
-          // `[text]` with no destination is a reference to a definition
-          // elsewhere; the preview draws it as a link only when one exists,
-          // and as plain text otherwise. It stays text here.
-          if (!node.node.getChild("URL")) {
+          // `[text]` alone is a reference to a definition elsewhere; the
+          // preview draws it as a link only when one exists, and as plain text
+          // otherwise. It stays text here. `[text][ref]` is drawn as a link.
+          if (!node.node.getChild("URL") && !node.node.getChild("LinkLabel")) {
             for (const mark of node.node.getChildren("LinkMark")) out.push({ kind: "mark", from: mark.from, to: mark.to, className: "cm-live-plain" });
             break;
           }
@@ -570,6 +570,8 @@ const softBreak = Decoration.replace({ widget: new SpaceWidget() });
  * the next line's indentation: a soft break, which Markdown reads as a space.
  * A break after two spaces or a backslash is a hard one and stays.
  */
+const MAX_JOINED_LINES = 300;
+
 export function softBreaks(state: EditorState, from = 0, to = state.doc.length): Array<{ from: number; to: number }> {
   const doc = state.doc;
   const out: Array<{ from: number; to: number }> = [];
@@ -578,11 +580,16 @@ export function softBreaks(state: EditorState, from = 0, to = state.doc.length):
     to,
     enter: (node) => {
       if (node.name !== "Paragraph") return TABLE_CONTAINERS.has(node.name);
+      // A paragraph of hundreds of lines drawn as one line would defeat the
+      // editor drawing only what is on screen; it keeps its lines.
+      if (doc.lineAt(node.to).number - doc.lineAt(node.from).number > MAX_JOINED_LINES) return false;
       for (let line = doc.lineAt(node.from); line.to < node.to; line = doc.line(line.number + 1)) {
-        if (/(?: {2}|\\)$/.test(line.text)) continue;
+        // Two trailing spaces, or an odd run of backslashes, make a hard break.
+        const spaces = /[ ]*$/.exec(line.text)![0].length;
+        if (spaces >= 2 || /\\*$/.exec(line.text)![0].length % 2) continue;
         const next = doc.line(line.number + 1);
         const indent = /^[ \t]*/.exec(next.text)![0].length;
-        out.push({ from: line.to, to: next.from + indent });
+        out.push({ from: line.to - spaces, to: next.from + indent });
       }
       return false;
     },
@@ -602,7 +609,13 @@ const softBreakField = drawnBlocks((state, from, to) => {
     from,
     to,
     enter: (node) => {
-      if (node.name !== "Paragraph") return TABLE_CONTAINERS.has(node.name);
+      if (TABLE_CONTAINERS.has(node.name)) return true;
+      // Any other block claims its extent too, so a paragraph that an edit
+      // below turned into a table or a heading loses its joins.
+      if (node.name !== "Paragraph") {
+        drawn.push({ from: node.from, to: node.to, decorations: [] });
+        return false;
+      }
       const breaks = softBreaks(state, node.from, node.to);
       if (breaks.length) drawn.push({ from: node.from, to: node.to, decorations: breaks.map((range) => softBreak.range(range.from, range.to)) });
       return false;
@@ -616,14 +629,19 @@ function tableNext(view: EditorView, forward: boolean, vertical: boolean): numbe
   const range = view.state.selection.main;
   if (!range.empty || view.state.readOnly) return undefined;
   const line = view.state.doc.lineAt(range.head);
+  let found: number | undefined;
+  if (vertical) {
+    // Where the move would land, not the source line: a paragraph's lines are
+    // drawn as one, and a wrapped one moves within itself first.
+    const moved = view.moveVertically(range, forward).head;
+    view.state.field(tableField).between(Math.min(range.head, moved), Math.max(range.head, moved), (from, to) => {
+      if (forward ? from > range.head && from <= moved && found === undefined : to < range.head && to >= moved) found = from;
+    });
+    return found;
+  }
   const target = forward ? line.to + 1 : line.from - 1;
   if (target < 0 || target > view.state.doc.length) return undefined;
-  if (vertical) {
-    // Only from the line's last (or first) visual row: a wrapped paragraph moves within itself first.
-    const moved = view.moveVertically(range, forward);
-    if (forward ? moved.head <= line.to : moved.head >= line.from) return undefined;
-  } else if (range.head !== (forward ? line.to : line.from)) return undefined;
-  let found: number | undefined;
+  if (range.head !== (forward ? line.to : line.from)) return undefined;
   view.state.field(tableField).between(target, target, (from, to) => {
     if (forward ? from === target : to === target) found = from;
   });
@@ -684,9 +702,24 @@ function inCode(state: EditorState, pos: number): boolean {
   return false;
 }
 
+function enclosing(state: EditorState, pos: number, name: string): SyntaxNode | undefined {
+  for (let node: SyntaxNode | null = syntaxTree(state).resolveInner(pos, -1); node; node = node.parent) {
+    if (node.name === name) return node;
+  }
+  return undefined;
+}
+
+function nextItem(item: RegExpExecArray): string {
+  const number = item[3] ? `${Number(item[3]) + 1}${item[4]}` : item[2];
+  return `${item[1]}${number}${item[5]}${item[6] ? "[ ] " : ""}`;
+}
+
 /**
- * Enter at the end of a list item starts the next item; Enter on an empty item
- * ends the list. Blockquotes continue the same way.
+ * Enter starts the next block, as in Typora: the next item in a list, a new
+ * paragraph in a quote or in the text. A single line break would only be
+ * drawn as a space — a paragraph's lines flow together — so the line typed
+ * after it would join the paragraph above. Enter on an empty item ends the
+ * list.
  */
 export const continueMarkup: Command = (view) => {
   const { state } = view;
@@ -694,25 +727,32 @@ export const continueMarkup: Command = (view) => {
   if (state.selection.ranges.length > 1 || !range.empty || state.readOnly) return false;
   const line = state.doc.lineAt(range.head);
   if (inCode(state, range.head)) return false;
+  const br = state.lineBreak;
+  const insert = (text: string) => view.dispatch(state.update(state.replaceSelection(text), { scrollIntoView: true, userEvent: "input" }));
   // The parser's word, not the pattern's: `* * *` matches but is a rule.
   const candidate = LIST_ITEM.exec(line.text);
   const item = candidate && syntaxTree(state).resolveInner(line.from + candidate[1].length, 1).name === "ListMark" ? candidate : undefined;
   const quote = item ? undefined : QUOTE_ONLY.exec(line.text);
   const marker = item ?? quote;
-  if (!marker || range.head < line.from + marker[0].length) return false;
-  const rest = line.text.slice(marker[0].length);
-  if (!rest.trim() && range.head === line.to) {
-    // An empty item: the user is done with the list.
-    const prefix = item ? item[1] : "";
-    view.dispatch({ changes: { from: line.from, to: line.to, insert: prefix }, selection: { anchor: line.from + prefix.length }, userEvent: "input" });
+  if (marker) {
+    if (range.head < line.from + marker[0].length) return false;
+    if (!line.text.slice(marker[0].length).trim() && range.head === line.to) {
+      // An empty item: the user is done with the list.
+      const prefix = item ? item[1] : "";
+      view.dispatch({ changes: { from: line.from, to: line.to, insert: prefix }, selection: { anchor: line.from + prefix.length }, userEvent: "input" });
+      return true;
+    }
+    if (item) insert(`${br}${nextItem(item)}`);
+    // A blank quote line between, or the new line would continue the paragraph.
+    else insert(`${br}${marker[0].trimEnd()}${br}${marker[0]}`);
     return true;
   }
-  let next = marker[0];
-  if (item) {
-    const number = item[3] ? `${Number(item[3]) + 1}${item[4]}` : item[2];
-    next = `${item[1]}${number}${item[5]}${item[6] ? "[ ] " : ""}`;
-  }
-  view.dispatch(state.update(state.replaceSelection(`${state.lineBreak}${next}`), { scrollIntoView: true, userEvent: "input" }));
+  const paragraph = enclosing(state, range.head, "Paragraph");
+  if (!paragraph) return false;
+  // A wrapped item's later line: the next item takes the marker of the item's first line.
+  const listItem = paragraph.parent?.name === "ListItem" ? paragraph.parent : undefined;
+  const first = listItem && LIST_ITEM.exec(state.doc.lineAt(listItem.from).text);
+  insert(first ? `${br}${nextItem(first)}` : `${br}${br}`);
   return true;
 };
 

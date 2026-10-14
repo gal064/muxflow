@@ -76,6 +76,11 @@ describe("live Markdown rendering", () => {
     expect(ranges(doc, doc.length)).toContainEqual({ kind: "mark", from: 5, to: 13, className: "cm-live-link" });
   });
 
+  it("draws a full reference link as a link", () => {
+    const doc = "See [the docs][ref].\n\n[ref]: ./a.md";
+    expect(ranges(doc)).toContainEqual({ kind: "mark", from: 5, to: 13, className: "cm-live-link" });
+  });
+
   it("leaves a bracketed word without a destination as text, keeping its emphasis", () => {
     const doc = "Marks: **[beta]** means it.";
     expect(ranges(doc).some((range) => range.kind === "mark" && range.className === "cm-live-link")).toBe(false);
@@ -131,6 +136,17 @@ describe("live Markdown rendering", () => {
     expect(joined("hard  \nbreak\\\nhere")).toEqual([]);
     expect(joined("# Title\ntext\n```\ncode\nmore\n```")).toEqual([]);
     expect(joined("> quoted\n> on two")).toEqual(['"\\n"']);
+    // A single trailing space goes with the break; an escaped backslash is text, not a hard break.
+    expect(joined("one \ntwo")).toEqual(['" \\n"']);
+    expect(joined("one \\\\\ntwo")).toEqual(['"\\n"']);
+  });
+
+  it("drops the joins of a paragraph that an edit below turns into a table", () => {
+    const editor = view("x\ny\na | b\n\nend", 0);
+    const at = "x\ny\na | b".length;
+    editor.dispatch({ changes: { from: at, insert: "\n-|-" } });
+    expect(editor.contentDOM.querySelectorAll(".cm-live-table").length).toBe(1);
+    expect([...editor.contentDOM.querySelectorAll(".cm-line")][0].textContent).toBe("x y");
   });
 
   it("finds where a line's text starts after its hidden markup", () => {
@@ -183,9 +199,21 @@ describe("live Markdown commands", () => {
     expect(empty.state.doc.toString()).toBe("- one\n");
   });
 
-  it("leaves Enter alone inside code and outside lists", () => {
+  it("leaves Enter alone inside code and outside text", () => {
     expect(continueMarkup(view("```\n- not a list\n```", 16))).toBe(false);
-    expect(continueMarkup(view("plain", 5))).toBe(false);
+    expect(continueMarkup(view("# Title", 7))).toBe(false);
+  });
+
+  it("starts a new paragraph, quote paragraph or item, so the next line does not join the one above", () => {
+    const plain = view("Hello", 5);
+    continueMarkup(plain);
+    expect(plain.state.doc.toString()).toBe("Hello\n\n");
+    const quote = view("> quoted", 8);
+    continueMarkup(quote);
+    expect(quote.state.doc.toString()).toBe("> quoted\n>\n> ");
+    const wrapped = view("- item that\n  wraps", 19);
+    continueMarkup(wrapped);
+    expect(wrapped.state.doc.toString()).toBe("- item that\n  wraps\n- ");
   });
 
   it("wraps and unwraps bold", () => {
