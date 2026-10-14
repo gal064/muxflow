@@ -185,6 +185,51 @@ fn snapshot(
     }
 }
 
+/// The parent of a single-file capability, showing only its bound leaf.
+///
+/// One stat, never a `read_dir`: the capability does not authorize learning
+/// what else the directory holds. A missing leaf is an empty listing, which the
+/// desktop reads as no opinion rather than as a deletion.
+pub(super) fn single_file_snapshot(
+    root: &RootCapability,
+    leaf: &OsStr,
+    watch_id: &str,
+    generation: u64,
+) -> anyhow::Result<v1::DirectorySnapshot> {
+    let stable_root = root.stable_root();
+    let anchored = stable_root.join(leaf);
+    let entries = match fs::symlink_metadata(&anchored) {
+        Ok(_) => {
+            let metadata =
+                metadata_for_anchored(&stable_root, &anchored, &root.logical_root().join(leaf))?;
+            if is_regular_leaf(&metadata) {
+                vec![metadata]
+            } else {
+                Vec::new()
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(snapshot(
+        root,
+        root.logical_root(),
+        watch_id,
+        generation,
+        entries,
+        None,
+    ))
+}
+
+/// Whether a single-file capability's leaf may be described at all.
+///
+/// The capability authorizes one regular file. Whatever replaces it — a
+/// symlink, whose target text and followed metadata would name a sibling, or a
+/// directory — is reported as absent, never described.
+pub(super) fn is_regular_leaf(metadata: &v1::FileMetadata) -> bool {
+    metadata.kind == v1::FileKind::File as i32 && !metadata.symlink
+}
+
 fn open_listable_directory(root: &RootCapability, path: &str) -> anyhow::Result<(PathBuf, File)> {
     let (logical_target, _) = root.resolve_new(path)?;
     let directory = if logical_target == root.logical_root() {
