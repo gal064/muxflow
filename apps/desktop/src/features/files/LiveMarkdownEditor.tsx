@@ -1,7 +1,7 @@
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
 import { Annotation, Compartment, EditorSelection, EditorState, Prec, Transaction } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import { EditorView, drawSelection, keymap } from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { continueMarkup, liveMarkdown, toggleInline } from "./liveMarkdown";
 
@@ -94,6 +94,9 @@ export function LiveMarkdownEditor(props: LiveMarkdownEditorProps) {
         extensions: [
           liveMarkdown({ onLink: (href) => latest.current.onLink(href) }),
           history(),
+          // Draw from CodeMirror's document positions, including widget edges
+          // where WebKit's native caret can disappear or sit inside a marker.
+          drawSelection(),
           search({ top: true }),
           highlightSelectionMatches(),
           readOnly.current.of(editable(initial.readOnly)),
