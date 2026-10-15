@@ -57,6 +57,7 @@ function touches(active: ReadonlyArray<{ from: number; to: number }>, from: numb
 /** One drawn change to the source, described without the view so it can be tested. */
 export type LiveRange =
   | { kind: "hide"; from: number; to: number }
+  | { kind: "marker-space"; from: number; to: number }
   | { kind: "line"; from: number; className: string; style?: string }
   | { kind: "mark"; from: number; to: number; className: string }
   | { kind: "bullet"; from: number; to: number }
@@ -238,6 +239,10 @@ function liveListLayout(node: SyntaxNodeRef, state: EditorState, out: LiveRange[
   if (item.parent?.name === "OrderedList") {
     const spaces = /^[ \t]*/.exec(state.doc.sliceString(node.to, line.to))![0].length;
     out.push({ kind: "mark", from: node.from, to: node.to + spaces, className: "cm-live-list-marker" });
+    if (spaces) {
+      out.push({ kind: "marker-space", from: node.to, to: node.to + spaces });
+      out.push({ kind: "atomic", from: node.to, to: node.to + spaces });
+    }
   }
 }
 
@@ -349,6 +354,17 @@ function isWebKitGtk(): boolean {
     && !/Chrome\//.test(navigator.userAgent);
 }
 
+/** The flexible part of an ordered marker; its end is the text's caret position. */
+class MarkerSpaceWidget extends WidgetType {
+  eq() { return true; }
+  toDOM() {
+    const space = document.createElement("span");
+    space.className = "cm-live-marker-space";
+    space.setAttribute("aria-hidden", "true");
+    return space;
+  }
+}
+
 class BulletWidget extends WidgetType {
   eq() { return true; }
   toDOM() {
@@ -439,6 +455,7 @@ class ImageWidget extends WidgetType {
   }
 }
 
+const markerSpace = Decoration.replace({ widget: new MarkerSpaceWidget() });
 const bullet = Decoration.replace({ widget: new BulletWidget() });
 const rule = Decoration.replace({ widget: new RuleWidget() });
 const hidden = Decoration.replace({});
@@ -446,9 +463,10 @@ const atomic = Decoration.mark({});
 
 function toDecoration(range: Exclude<LiveRange, { kind: "atomic" }>, readOnly: boolean): Range<Decoration> {
   switch (range.kind) {
+    case "marker-space": return markerSpace.range(range.from, range.to);
     case "hide": return hidden.range(range.from, range.to);
     case "line": return Decoration.line({ class: range.className, attributes: range.style ? { style: range.style } : undefined }).range(range.from);
-    case "mark": return Decoration.mark({ class: range.className }).range(range.from, range.to);
+    case "mark": return Decoration.mark({ class: range.className, inclusiveEnd: range.className === "cm-live-list-marker" }).range(range.from, range.to);
     case "bullet": return bullet.range(range.from, range.to);
     case "rule": return rule.range(range.from, range.to);
     case "task": return Decoration.replace({ widget: new TaskWidget(range.checked, readOnly) }).range(range.from, range.to);
@@ -842,6 +860,83 @@ function enclosingQuotes(item: SyntaxNode): number {
   return depth;
 }
 
+/**
+ * Renumber only the ordered lists affected by a structural move. Existing
+ * lists keep their starting number; a newly nested list starts at one.
+ */
+function movedListNumbers(move: Transaction, moved: readonly SyntaxNode[]): ChangeSpec[] {
+  const before = move.startState;
+  const after = move.state;
+  const movedStarts = new Set(moved.map((item) => item.from));
+  const lists = new Map<number, SyntaxNode>();
+  const movedItem = (item: SyntaxNode) => {
+    const mark = item.getChild("ListMark")!;
+    return enclosing(after, move.changes.mapPos(mark.from, 1) + 1, "ListItem");
+  };
+  const include = (item: SyntaxNode | undefined) => {
+    if (item?.parent?.name === "OrderedList") lists.set(item.parent.from, item.parent);
+  };
+  const sources = new Map<number, SyntaxNode>();
+  for (const item of moved) {
+    include(movedItem(item));
+    sources.set(item.parent!.from, item.parent!);
+  }
+  // Removing items can split the old list into several lists.
+  for (const source of sources.values()) {
+    for (const sibling of source.getChildren("ListItem")) {
+      if (!movedStarts.has(sibling.from)) include(movedItem(sibling));
+    }
+  }
+  const inverse = move.changes.invertedDesc;
+  const changes: ChangeSpec[] = [];
+  const indents = new Map<number, { to: number; columns: number; delta: number }>();
+  for (const list of lists.values()) {
+    const children = list.getChildren("ListItem");
+    let number = 1;
+    // A surviving item identifies the existing list's original start, even
+    // when the first item was moved away or a group was inserted before it.
+    for (const child of children) {
+      const mark = child.getChild("ListMark")!;
+      const original = enclosing(before, inverse.mapPos(mark.from, 1) + 1, "ListItem");
+      if (!original || movedStarts.has(original.from) || original.parent?.name !== "OrderedList") continue;
+      const first = original.parent.getChild("ListItem")!.getChild("ListMark")!;
+      number = Number.parseInt(before.doc.sliceString(first.from, first.to), 10);
+      break;
+    }
+    for (const child of children) {
+      const mark = child.getChild("ListMark")!;
+      const old = after.doc.sliceString(mark.from, mark.to - 1);
+      const next = String(number++);
+      if (old === next) continue;
+      changes.push({ from: mark.from, to: mark.to - 1, insert: next });
+      const delta = next.length - old.length;
+      if (!delta) continue;
+      // Keep wrapped paragraphs, child lists and fenced blocks at the item's
+      // content column when a marker crosses a digit boundary.
+      const quoteDepth = enclosingQuotes(child);
+      const first = after.doc.lineAt(child.from);
+      const prefix = indentation(first.text, quoteDepth).from;
+      const contentColumn = countColumn(after.doc.sliceString(first.from + prefix, mark.to), after.tabSize) + 1;
+      for (let lineNumber = first.number + 1; lineNumber <= after.doc.lineAt(child.to).number; lineNumber += 1) {
+        const line = after.doc.line(lineNumber);
+        if (!line.text.trim()) continue;
+        const indent = indentation(line.text, quoteDepth);
+        const columns = countColumn(line.text.slice(0, indent.from) + indent.text, after.tabSize)
+          - countColumn(line.text.slice(0, indent.from), after.tabSize);
+        if (columns < contentColumn) continue; // Lazy continuation needs no indentation.
+        const from = line.from + indent.from;
+        const existing = indents.get(from);
+        if (existing) existing.delta += delta;
+        else indents.set(from, { to: from + indent.text.length, columns, delta });
+      }
+    }
+  }
+  for (const [from, indent] of indents) {
+    changes.push({ from, to: indent.to, insert: " ".repeat(Math.max(0, indent.columns + indent.delta)) });
+  }
+  return changes;
+}
+
 /** Move whole list items, including continuation lines and descendants, in one edit. */
 export function changeListIndent(view: EditorView, direction: 1 | -1): boolean {
   const { state } = view;
@@ -876,6 +971,7 @@ export function changeListIndent(view: EditorView, direction: 1 | -1): boolean {
   };
   const column = (item: SyntaxNode) => indentColumn(state.doc.lineAt(item.from).text, enclosingQuotes(item));
   const changes: ChangeSpec[] = [];
+  const moved: SyntaxNode[] = [];
   // Adjacent selected siblings move together beneath the sibling before the group.
   let group: { list: number; end: number; delta: number } | undefined;
   for (const item of roots) {
@@ -901,6 +997,7 @@ export function changeListIndent(view: EditorView, direction: 1 | -1): boolean {
     }
     group = { list: item.parent!.from, end: item.from, delta };
     if (!delta) continue;
+    moved.push(item);
     const quoteDepth = enclosingQuotes(item);
     const last = state.doc.lineAt(item.to).number;
     for (let number = state.doc.lineAt(item.from).number; number <= last; number += 1) {
@@ -913,7 +1010,11 @@ export function changeListIndent(view: EditorView, direction: 1 | -1): boolean {
   }
   if (changes.length) {
     const changeSet = state.changes(changes);
-    view.dispatch({ changes: changeSet, selection: state.selection.map(changeSet), scrollIntoView: true, userEvent: direction === 1 ? "input.indent" : "delete.dedent" });
+    const spec = { changes: changeSet, selection: state.selection.map(changeSet), scrollIntoView: true, userEvent: direction === 1 ? "input.indent" : "delete.dedent" };
+    const move = state.update(spec);
+    const numbers = movedListNumbers(move, moved);
+    // One transaction keeps the caret, autosave and undo together with the move.
+    view.dispatch(numbers.length ? state.update(spec, { changes: numbers, sequential: true }) : move);
   }
   return true;
 }
