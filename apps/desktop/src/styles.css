@@ -1253,7 +1253,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 }
 /* Text, code blocks, quote bars and tables share one left edge, as in the preview. */
 .live-markdown .cm-editor .cm-line { padding: 0; }
-.live-markdown .cm-line:is(.cm-live-h1, .cm-live-h2, .cm-live-h3, .cm-live-h4, .cm-live-h5, .cm-live-h6) { letter-spacing: -.02em; }
+.live-markdown .cm-line:is(.cm-live-h1, .cm-live-h2, .cm-live-h3, .cm-live-h4, .cm-live-h5, .cm-live-h6) { font-weight: 650; letter-spacing: -.02em; color: var(--chrome-ink-strong); }
 .live-markdown .cm-line.cm-live-h1 { font-size: 2em; line-height: 1.25; padding-top: .5em; padding-bottom: .2em; }
 .live-markdown .cm-line.cm-live-h2 { font-size: 1.55em; line-height: 1.3; padding-top: .6em; padding-bottom: .2em; }
 .live-markdown .cm-line.cm-live-h3 { font-size: 1.25em; line-height: 1.4; padding-top: .5em; padding-bottom: .15em; }
