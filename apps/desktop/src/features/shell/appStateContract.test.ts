@@ -177,6 +177,16 @@ describe("per-host workspace defaults", () => {
     expect(shell(undefined)).toBe("split");
   });
 
+  it("restores the theme and follows the OS for saves from before it", () => {
+    const shell = (value: Record<string, unknown>) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: value,
+    }).shell;
+    expect(shell({ theme: "light" }).theme).toBe("light");
+    expect(shell({ theme: "dark" }).theme).toBe("dark");
+    expect(shell({ theme: "sepia" }).theme).toBe("system");
+    expect(shell({}).theme).toBe("system");
+  });
+
   it("retains the last host chosen for workspace creation without inventing one for old saves", () => {
     const selected = (value: unknown) => normalizePersistedAppState({
       schemaVersion: 1, appTabs: [], workspaceUi: [], shell: { newWorkspaceHostProfileId: value },

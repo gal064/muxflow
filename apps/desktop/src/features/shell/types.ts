@@ -1,5 +1,6 @@
 import type { ConnectionSpec } from "../../app/types";
 import { isAgentSortMode, type AgentSortMode } from "../agents/agentsList";
+import { isThemePreference, type ThemePreference } from "../../ui/appearance";
 
 export type AppTabKind = "file" | "markdown" | "gitDiff";
 /** How a Markdown tab is drawn; also the shape of the persisted default. */
@@ -122,6 +123,8 @@ export interface ShellState {
   terminalApplicationClipboard: boolean;
   /** Terminal text size in integer CSS pixels. */
   terminalFontSize: number;
+  /** Light, dark, or whichever the OS is using. */
+  theme: ThemePreference;
   /** The host most recently picked in the New workspace dialog. */
   newWorkspaceHostProfileId?: string;
   /**
@@ -193,6 +196,7 @@ export const defaultShellState: ShellState = {
   cleanWrappedCommands: true,
   terminalApplicationClipboard: true,
   terminalFontSize: 13,
+  theme: "system",
   newWorkspaceHostProfileId: undefined,
   defaultMarkdownView: "split",
 };
@@ -251,6 +255,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
         ? shell.terminalApplicationClipboard
         : defaultShellState.terminalApplicationClipboard,
       terminalFontSize: clampedTerminalFontSize(shell?.terminalFontSize),
+      theme: isThemePreference(shell?.theme) ? shell.theme : defaultShellState.theme,
       newWorkspaceHostProfileId: typeof shell?.newWorkspaceHostProfileId === "string" && shell.newWorkspaceHostProfileId.trim()
         ? shell.newWorkspaceHostProfileId
         : undefined,

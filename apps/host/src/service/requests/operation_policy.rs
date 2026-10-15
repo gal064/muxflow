@@ -92,7 +92,8 @@ impl OperationPolicy {
             | v1::Operation::YieldTerminalSizing
             | v1::Operation::SetTerminalVisibility
             | v1::Operation::RequestTerminalSeed
-            | v1::Operation::SelectTerminalSession => {
+            | v1::Operation::SelectTerminalSession
+            | v1::Operation::SetTerminalColors => {
                 (Lane::Control, Scheduling::Inline, Handler::Terminal)
             }
             v1::Operation::TmuxAction => (Lane::Control, Scheduling::Inline, Handler::TmuxAction),
@@ -298,6 +299,7 @@ mod tests {
             (ReconcileTerminalUpload, B, I, FH),
             (AgentHostNaming, C, I, AH),
             (SelectTerminalSession, C, I, TH),
+            (SetTerminalColors, C, I, TH),
             (VoiceStatus, C, I, VH),
             (VoiceProvision, C, Dd, VH),
             (VoiceTranscribe, C, Dd, VH),

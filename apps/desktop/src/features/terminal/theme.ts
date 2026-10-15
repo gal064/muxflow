@@ -45,6 +45,7 @@ export const CHROME_FALLBACKS = {
   "--chrome-ink": colors.chromeInk,
   "--chrome-dim": colors.chromeDim,
   "--chrome-faint": colors.chromeFaint,
+  "--danger": colors.danger,
   "--font-mono": '"JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace',
   "--term-font-size": "13px",
 } as const;
