@@ -105,11 +105,11 @@ export const lightColors = {
   shadow: "#18181b40",
 } as const satisfies Record<keyof typeof colors, string>;
 
-// VS Code's light terminal colours, which T3 Code uses too: red, green, blue
-// and magenta read at 5:1 or better, yellow and cyan at about 3:1 as they do in
-// VS Code. Its bright green, yellow and white are near-invisible on a light
-// background (about 2:1), and CLIs print emphasis in them, so those three are
-// darkened here; white (7) is a grey for the same reason.
+// VS Code's light terminal colours, which T3 Code uses too, with every text
+// colour at 4.5:1 or better on the background. VS Code leaves yellow and cyan
+// near 3:1, and shell prompts are commonly drawn in cyan, so both are darkened
+// here, as are the bright green, yellow and white CLIs print emphasis in;
+// white (7) is a grey for the same reason.
 export const lightTerminalTheme = {
   background: "#fcfcfc",
   foreground: "#1c2129",
@@ -120,19 +120,19 @@ export const lightTerminalTheme = {
   black: "#000000",
   red: "#cd3131",
   green: "#107c10",
-  yellow: "#949800",
+  yellow: "#8f6a00",
   blue: "#0451a5",
   magenta: "#bc05bc",
-  cyan: "#0598bc",
+  cyan: "#0e7490",
   white: "#555555",
   brightBlack: "#666666",
   brightRed: "#cd3131",
-  brightGreen: "#0e8a0e",
-  brightYellow: "#7d8000",
+  brightGreen: "#0a7a0a",
+  brightYellow: "#7a6400",
   brightBlue: "#0451a5",
   brightMagenta: "#bc05bc",
-  brightCyan: "#0598bc",
-  brightWhite: "#767676",
+  brightCyan: "#0e7490",
+  brightWhite: "#6e6e6e",
 } as const satisfies Record<keyof typeof terminalTheme, string>;
 
 export const lightStateColors = {
