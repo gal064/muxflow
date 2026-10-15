@@ -75,6 +75,25 @@ describe("planDrop", () => {
     expect(planDrop(appTab, { kind: "pane", paneId: "%1", edge: "left" }, context)).toEqual({ kind: "refuse", reason: NO_DOCUMENT_SPLITS });
   });
 
+  it("docks a document at a workspace edge, and a drop back on its strip undocks it", () => {
+    expect(planDrop(appTab, { kind: "dock", side: "right" }, context)).toEqual({ kind: "dockAppTab", tabId: "readme", side: "right" });
+    const docked = { ...context, dock: { tabId: "readme", side: "right" as const } };
+    // Its own edge changes nothing; the other edge moves it there.
+    expect(planDrop(appTab, { kind: "dock", side: "right" }, docked)).toBeUndefined();
+    expect(planDrop(appTab, { kind: "dock", side: "left" }, docked)).toEqual({ kind: "dockAppTab", tabId: "readme", side: "left" });
+    // Anywhere on its own strip undocks, at the gap when the gap is beside a document.
+    expect(planDrop(appTab, { kind: "tab", tabKey: "app:notes", side: "before" }, docked))
+      .toEqual({ kind: "undockAppTab", tabId: "readme", place: { targetTabId: "notes", side: "before" } });
+    expect(planDrop(appTab, { kind: "tab", tabKey: "terminal:@1", side: "after" }, docked)).toEqual({ kind: "undockAppTab", tabId: "readme" });
+    expect(planDrop(appTab, { kind: "workspace", hostProfileId: "local", sessionId: "$1" }, docked)).toEqual({ kind: "undockAppTab", tabId: "readme" });
+    // Another workspace is still a move, which forgets the dock on the way.
+    expect(planDrop(appTab, { kind: "workspace", hostProfileId: "local", sessionId: "$2" }, docked))
+      .toEqual({ kind: "moveAppTabToWorkspace", tabId: "readme", session: context.sessions[1] });
+    // Terminal tabs and agents do not dock.
+    expect(planDrop(terminalTab("@2"), { kind: "dock", side: "left" }, context)).toBeUndefined();
+    expect(planDrop(agent("%2"), { kind: "dock", side: "left" }, context)).toBeUndefined();
+  });
+
   it("joins an agent's pane beside another window's pane, judged by where the pane is now", () => {
     expect(planDrop(agent("%2"), { kind: "pane", paneId: "%3", edge: "bottom" }, context)).toEqual({
       kind: "action",

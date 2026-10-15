@@ -39,6 +39,17 @@
       "gitTarget": "unstaged",
       "gitStatusGeneration": "7",
       "gitSourceGeneration": "source-7"
+    },
+    {
+      "id": "tab-2",
+      "hostProfileId": "local",
+      "serverIdentity": "server-a",
+      "sessionId": "$1",
+      "sessionName": "project",
+      "kind": "file",
+      "resource": "/work/src/main.rs",
+      "title": "main.rs",
+      "order": 1
     }
   ],
   "workspaceUi": [
@@ -47,7 +58,9 @@
       "serverIdentity": "server-a",
       "sessionId": "$1",
       "sessionName": "project",
-      "selectedAppTabId": "tab-1"
+      "selectedAppTabId": "tab-1",
+      "dockedAppTabId": "tab-2",
+      "dockSide": "right"
     }
   ],
   "shell": {
@@ -56,6 +69,7 @@
     "sidebarWidth": 260,
     "panelOpen": true,
     "panelWidth": 320,
+    "dockFraction": 0.35,
     "agentSort": "status",
     "agentsSectionRatio": 0.42,
     "agentStateGlyphs": true,

@@ -86,6 +86,20 @@ describe("dropTargetAt", () => {
     document.elementsFromPoint = vi.fn(() => [strip]);
     expect(dropTargetAt(300, 5)).toEqual({ kind: "workspace", hostProfileId: "local", sessionId: "$1" });
   });
+
+  it("reads a dock zone over the edge pane under it", () => {
+    const pane = document.createElement("div");
+    pane.dataset.dropPane = "%1";
+    pane.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 100 }) as DOMRect;
+    const zone = document.createElement("div");
+    zone.dataset.dropDock = "left";
+    document.body.append(pane, zone);
+    document.elementsFromPoint = vi.fn(() => [zone, pane]);
+    expect(dropTargetAt(5, 50)).toEqual({ kind: "dock", side: "left" });
+    // Without the zone (no drag that can dock), the same point is the pane's edge.
+    document.elementsFromPoint = vi.fn(() => [pane]);
+    expect(dropTargetAt(5, 50)).toEqual({ kind: "pane", paneId: "%1", edge: "left" });
+  });
 });
 
 describe("beginPointerDrag", () => {

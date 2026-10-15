@@ -55,8 +55,10 @@ import {
   type AppOwnedTab, type HostSetupDecision, type ShellState, type WorkspaceDefaults,
 } from "../features/shell/types";
 import {
+  appTabsForWorkspace,
   combineWorkspaceTabs,
   closeAppTab,
+  dockAppTab,
   findGitDiffTab,
   mountedAppTabIds,
   mountedTerminalPanes,
@@ -69,6 +71,7 @@ import {
   setMarkdownViewMode,
   setWorkspaceDefaults,
   shouldSurfaceAuthoritativeTerminal,
+  undockAppTab,
   tabsToCloseOthers,
   tabsToCloseNonAgent,
   tabsToCloseRight,
@@ -104,6 +107,7 @@ import { windowCellSize } from "../features/terminal/clientSize";
 import { useWorkspaceDomainController } from "./useWorkspaceDomainController";
 import { AppDialogLayer } from "./AppDialogLayer";
 import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
+import { DockDropZones, DockResizeHandle, dockHoldsFocus, focusDockedDocument } from "./WorkspaceDock";
 import { useAppAgentController } from "./useAppAgentController";
 import { useAppShellChrome } from "./useAppShellChrome";
 import { useAppHostSettingsActions } from "./useAppHostSettingsActions";
@@ -346,7 +350,7 @@ export function App() {
   });
 
   const {
-    activePane, activeSession, activeWindow, fileScope, panes, selectedAppTab,
+    activePane, activeSession, activeWindow, dockedAppTab, dockSide, fileScope, panes, selectedAppTab,
     terminalTransferScope, workspaceAppTabs, workspaceFiles, workspaceGit,
   } = useWorkspaceDomainController({
     activeSessionId, activeWindowId, appState, clientId, connected: hostState.phase === "connected", connection,
@@ -388,7 +392,11 @@ export function App() {
   // In tab-strip order, never selection order: React reconciles the layers by
   // key, and a list that reordered on every selection would move the DOM of
   // surfaces that did not change.
-  const mountedAppTabs = workspaceAppTabs.filter((tab) => retainedAppTabIds.includes(tab.id));
+  // The docked document is on screen whatever was selected last, so it is
+  // mounted outside the recently-selected budget rather than competing for it.
+  const mountedAppTabs = workspaceAppTabs.filter((tab) => retainedAppTabIds.includes(tab.id) || tab.id === dockedAppTab?.id);
+  const workspaceContentRef = useRef<HTMLDivElement>(null);
+  const yieldTerminalFocus = useCallback(() => dockHoldsFocus(workspaceContentRef.current), []);
   /** Where the files controller and the git controller meet; the rule itself is `ignoredPathsFromStatus`. */
   const ignoredPaths = useMemo(() => ignoredPathsFromStatus(workspaceGit.status), [workspaceGit.status]);
 
@@ -836,10 +844,17 @@ export function App() {
     selectedAppTab, shellNavigation.observeAuthoritativeWindow, windows]);
 
   const focusDirection = useCallback((direction: PaneDirection) => {
+    // A docked document is one more column past the edge panes: stepping off
+    // the edge toward it goes in, and stepping back the other way comes out.
+    if (dockSide && dockHoldsFocus(workspaceContentRef.current)) {
+      if (direction !== dockSide && activePane) controllers.current.get(activePane.id)?.focus();
+      return;
+    }
     if (!activePane) return;
     const target = adjacentPane(panes, activePane, direction);
     if (target) void shellNavigation.selectPane(target, { kind: "silent" });
-  }, [activePane, panes, shellNavigation]);
+    else if (direction === dockSide) focusDockedDocument(workspaceContentRef.current);
+  }, [activePane, dockSide, panes, shellNavigation]);
 
   const selectSession = useCallback((sessionId: string) => {
     shellNavigation.selectSession(sessionId);
@@ -1006,10 +1021,12 @@ export function App() {
     // message that used to be written here reached nobody either way — the
     // notice is the channel's only reader and it has classified "Opened …" as
     // routine since it was written.
+    // The docked document is already on screen; choosing it goes to it.
+    else if (tab.id === dockedAppTab?.id) focusDockedDocument(workspaceContentRef.current);
     else if (activeSession && hostState.serverIdentity) {
       shellNavigation.selectAppTab(activeSession.id, activeWindowId, tab.id);
     }
-  }, [activeSession, activeWindowId, agentRuntime.acknowledgePane, hostState.serverIdentity, selectWindow, shellNavigation, snapshot.panes]);
+  }, [activeSession, activeWindowId, agentRuntime.acknowledgePane, dockedAppTab?.id, hostState.serverIdentity, selectWindow, shellNavigation, snapshot.panes]);
 
   const paneMoves = usePaneMoves({
     hostProfileId: currentHostProfileId,
@@ -1020,6 +1037,7 @@ export function App() {
     activePane,
     terminalOnScreen: !selectedAppTab,
     appTabs: appState.appTabs,
+    dock: dockedAppTab && dockSide ? { tabId: dockedAppTab.id, side: dockSide } : undefined,
     performAction,
     selectPane: (pane) => void shellNavigation.selectPane(pane, { kind: "silent" }),
     focusTerminal: (paneId) => controllers.current.get(paneId)?.focus(),
@@ -1089,7 +1107,8 @@ export function App() {
     // neighbours are about to go too, and the terminal is where it ends up.
     if (mode === "single" && selectedAppTabRef.current?.id === tab.id && sameHostConnection(scope, hostScopeRef.current)) {
       if (focusNavigation.navigateBackFromClosing(tab.id)) return commit();
-      const neighbours = workspaceAppTabs.filter((item) => item.id !== tab.id);
+      // The docked document is already on screen beside the terminal.
+      const neighbours = workspaceAppTabs.filter((item) => item.id !== tab.id && item.id !== dockedAppTab?.id);
       const neighbour = neighbours.filter((item) => item.order < tab.order).at(-1) ?? neighbours[0];
       if (neighbour) {
         shellNavigation.selectAppTab(tab.sessionId, activeWindowId, neighbour.id);
@@ -1224,12 +1243,25 @@ export function App() {
       selectAgentRow(target);
     },
     performAction, requestHostProfileDelete: setHostDeleteConfirmation, requestNewWorkspace, rowCommands, selectedAppTab,
+    dockedAppTab, dockHoldsFocus: yieldTerminalFocus,
+    toggleDock: () => {
+      if (!activeSession || !hostState.serverIdentity) return;
+      const session = activeSession;
+      const serverIdentity = hostState.serverIdentity;
+      const selectedId = selectedAppTab?.id;
+      setAppState((current) => selectedId
+        ? dockAppTab(current, currentHostProfileId, serverIdentity, session, selectedId, dockSide ?? "right")
+        : undockAppTab(current, currentHostProfileId, serverIdentity, session));
+    },
     createWindow: (sessionId) => {
       shellNavigation.createWindow(sessionId);
     },
     selectRelativeTab: (direction) => {
-      const index = combinedTabs.findIndex((tab) => tab.key === activeCombinedTabKey);
-      const next = combinedTabs[(index < 0 ? 0 : index + direction + combinedTabs.length) % Math.max(1, combinedTabs.length)];
+      // The docked document is never the active tab, so stepping onto it
+      // would leave the next step starting from the same place.
+      const cycle = combinedTabs.filter((tab) => tab.kind !== "app" || tab.id !== dockedAppTab?.id);
+      const index = cycle.findIndex((tab) => tab.key === activeCombinedTabKey);
+      const next = cycle[(index < 0 ? 0 : index + direction + cycle.length) % Math.max(1, cycle.length)];
       if (next) selectCombinedTab(next);
     },
     selectTabByIndex: (index) => {
@@ -1403,7 +1435,7 @@ export function App() {
     void closeTabSet(tabs, scope, protectAgents).finally(() => { bulkCloseInFlight.current = false; });
   };
 
-  const openExplorerEntry = (entry: FileEntry, options: { preview: boolean }) => {
+  const openExplorerEntry = (entry: FileEntry, { dock, ...options }: { preview: boolean; dock?: boolean }) => {
     if (!activeSession || !hostState.serverIdentity || !workspaceFiles.root || entry.kind === "directory"
       || (entry.kind === "symlink" && entry.targetKind !== "file")) return;
     const kind = /\.md(?:own)?$/i.test(entry.name) ? "markdown" as const : "file" as const;
@@ -1411,10 +1443,16 @@ export function App() {
     const serverIdentity = hostState.serverIdentity;
     const root = workspaceFiles.root;
     shellNavigation.selectLocalAppTab(session.id, activeWindowId, `file:${root.token}:${entry.path}`, () => {
-      setAppState((current) => openFileTab(
-        current, currentHostProfileId, serverIdentity, session, entry.path, kind, root,
-        { ...options, viewMode: current.shell.defaultMarkdownView },
-      ));
+      setAppState((current) => {
+        const opened = openFileTab(
+          current, currentHostProfileId, serverIdentity, session, entry.path, kind, root,
+          { ...options, viewMode: current.shell.defaultMarkdownView },
+        );
+        if (!dock) return opened;
+        const tab = appTabsForWorkspace(opened, currentHostProfileId, serverIdentity, session)
+          .find((item) => item.resource === entry.path && item.kind !== "gitDiff");
+        return tab ? dockAppTab(opened, currentHostProfileId, serverIdentity, session, tab.id, dockSide ?? "right") : opened;
+      });
     });
   };
 
@@ -1570,6 +1608,15 @@ export function App() {
       <section className="workspace" aria-label={activeSession ? `Workspace ${activeSession.name}` : "Workspace"}>
         <TabStrip
           activeKey={activeCombinedTabKey}
+          dockedKey={dockedAppTab ? `app:${dockedAppTab.id}` : undefined}
+          onDock={(tab, dock) => {
+            if (!activeSession || !hostState.serverIdentity) return;
+            const session = activeSession;
+            const serverIdentity = hostState.serverIdentity;
+            setAppState((current) => dock
+              ? dockAppTab(current, currentHostProfileId, serverIdentity, session, tab.id, dockSide ?? "right")
+              : undockAppTab(current, currentHostProfileId, serverIdentity, session));
+          }}
           activePaneId={activePane?.id}
           activeTerminalPaneCount={panes.length}
           canMutate={hostState.canMutate && Boolean(activeSession)}
@@ -1613,7 +1660,9 @@ export function App() {
           aria-label={activeCombinedTabKey ? undefined : "Workspace content"}
           aria-labelledby={activeCombinedTabKey ? workspaceTabDomId(activeCombinedTabKey) : undefined}
           className="workspace-content"
+          data-dock-side={dockSide}
           id={activeCombinedTabKey ? workspaceTabPanelDomId(activeCombinedTabKey) : undefined}
+          ref={workspaceContentRef}
           role="tabpanel"
           tabIndex={0}
         >
@@ -1644,6 +1693,7 @@ export function App() {
               activePane={activePane}
               activeWindow={activeWindow}
               appFocused={appFocused}
+              yieldFocus={yieldTerminalFocus}
               beginDividerDrag={beginDividerDrag}
               cacheScope={currentHostProfileId}
               clientId={clientId}
@@ -1688,13 +1738,23 @@ export function App() {
             can be dirty, and a dirty tab that stopped saving itself because it
             was not on screen would be the worse bargain.
           */}
-          {mountedAppTabs.map((tab) => <div
-            className={tab.id === selectedAppTab?.id ? "app-tab-layer" : "app-tab-layer app-tab-layer-covered"}
-            inert={tab.id === selectedAppTab?.id ? undefined : true}
+          {/*
+            The docked document is one of these layers too, moved into its own
+            column by class rather than rendered somewhere else: docking and
+            undocking keep the same key, so the editor, its buffer and its
+            watch survive the move instead of being rebuilt.
+          */}
+          {mountedAppTabs.map((tab) => {
+            const docked = tab.id === dockedAppTab?.id;
+            const onScreen = docked || tab.id === selectedAppTab?.id;
+            return <div
+            className={docked ? "app-tab-layer docked" : onScreen ? "app-tab-layer" : "app-tab-layer app-tab-layer-covered"}
+            data-docked-tab={docked ? tab.id : undefined}
+            inert={onScreen ? undefined : true}
             key={appTabLayerKey(tab)}
           >
             <Suspense fallback={<AppTabFrame tab={tab} />}>{tab.kind === "gitDiff" ? <GitDiffSurface
-              visible={tab.id === selectedAppTab?.id}
+              visible={onScreen}
               activeRoot={workspaceFiles.root}
               canWrite={hostState.canMutate}
               repositories={gitRepositories}
@@ -1720,7 +1780,27 @@ export function App() {
               scope={fileScope}
               tab={tab}
             />}</Suspense>
-          </div>)}
+          </div>;
+          })}
+          {dockedAppTab && dockSide && <DockResizeHandle
+            content={workspaceContentRef}
+            fraction={appState.shell.dockFraction}
+            onFraction={(dockFraction) => updateShell({ dockFraction })}
+            side={dockSide}
+          />}
+          <DockDropZones
+            content={workspaceContentRef}
+            fraction={appState.shell.dockFraction}
+            onDockPath={(path, side) => {
+              if (!fileScope) {
+                setStatus("Reconnect before opening a file beside the terminal.");
+                return;
+              }
+              void openTerminalFilePath(fileScope.paneId, path, side);
+            }}
+            onError={setStatus}
+            scope={hostState.serverIdentity ? { hostProfileId: currentHostProfileId, serverIdentity: hostState.serverIdentity } : undefined}
+          />
         </div>
       </section>
       {panelOpen && <AppRightPanel

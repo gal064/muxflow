@@ -22,7 +22,7 @@ interface AppRightPanelProps {
   onGitDiff: (entry: GitStatusEntry, target: GitDiffTarget, options: { preview: boolean }) => void;
   onMessage: (message: string) => void;
   onMutate: (mutation: FileMutation) => Promise<void>;
-  onOpenFile: (entry: FileEntry, options: { preview: boolean }) => void;
+  onOpenFile: (entry: FileEntry, options: { preview: boolean; dock?: boolean }) => void;
   onSurface: (surface: ShellState["panelSurface"]) => void;
   surface: ShellState["panelSurface"];
   /** Current panel width in CSS pixels, already clamped against the window. */

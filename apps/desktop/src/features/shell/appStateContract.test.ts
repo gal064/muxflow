@@ -44,6 +44,7 @@ describe("persisted app state contract", () => {
     };
     const workspace: Required<WorkspaceUiRecord> = {
       hostProfileId: "", serverIdentity: "", sessionId: "", sessionName: "", selectedAppTabId: "",
+      dockedAppTabId: "", dockSide: "left",
     };
     // The per-host workspace defaults cross the same boundary, and both of its
     // fields are optional — exactly the shape that stops being saved without
@@ -65,6 +66,8 @@ describe("persisted app state contract", () => {
     expect(typed.shell.agentSort).toBe("status");
     expect(typed.shell.sidebarWidth).toBe(260);
     expect(typed.shell.panelWidth).toBe(320);
+    expect(typed.shell.dockFraction).toBe(0.35);
+    expect(typed.workspaceUi[0]).toMatchObject({ dockedAppTabId: "tab-2", dockSide: "right" });
     expect(typed.appTabs[0].kind).toBe("gitDiff");
     expect(typed.commands.shortcutOverrides["window.new"]).toBe("Ctrl+T");
     expect(typed.shell.defaultMarkdownView).toBe("live");

@@ -14,14 +14,22 @@ interface NativeDragDropTarget {
   fail(reason: unknown): void;
 }
 
-const targets = new Set<NativeDragDropTarget>();
+/** Registration order, which decides between targets of equal priority. */
+const targets = new Map<NativeDragDropTarget, number>();
 let listenerGeneration = 0;
 let listening = false;
 let releaseListener: (() => void) | undefined;
 
-/** Registers one pane with the WebView's single native drag/drop listener. */
-export function registerNativeDragDropTarget(target: NativeDragDropTarget): () => void {
-  targets.add(target);
+/**
+ * Registers one drop target with the WebView's single native drag/drop listener.
+ *
+ * `priority` decides between targets that both own a point: the dock zones
+ * overlap the edge panes, and must win there. The DOM lane gets that from the
+ * zones being drawn on top; the native lane has no DOM to ask once the drag
+ * has ended, which on macOS is before its drop arrives.
+ */
+export function registerNativeDragDropTarget(target: NativeDragDropTarget, priority = 0): () => void {
+  targets.set(target, priority);
   ensureListener();
   return () => {
     targets.delete(target);
@@ -46,7 +54,7 @@ function ensureListener(): void {
     if (generation !== listenerGeneration) return;
     listening = false;
     cancelNativeInternalPathDrag();
-    for (const target of targets) target.fail(reason);
+    for (const target of targets.keys()) target.fail(reason);
   });
 }
 
@@ -63,18 +71,28 @@ function routeNativeDragDrop(payload: DragDropEvent): void {
     // The pointer left the window; the DOM drag it belongs to has not ended.
     // Only the claim goes, so a drag out and back in still drops.
     releaseNativeInternalPathDrag();
-    for (const target of targets) target.setDragging(false);
+    for (const target of targets.keys()) target.setDragging(false);
     return;
   }
 
-  const owner = [...targets].find((target) => target.owns(payload.position));
-  if (payload.type === "enter" && payload.paths.length === 0) claimNativeInternalPathDrag();
+  // Decided before the owner is: a target that only takes our own drags (the
+  // dock zones) asks whether one is in flight. A drag that enters carrying
+  // paths comes from outside, so whatever internal gesture was still owed a
+  // native drop is over.
+  if (payload.type === "enter") {
+    if (payload.paths.length === 0) claimNativeInternalPathDrag();
+    else cancelNativeInternalPathDrag();
+  }
+  const owner = [...targets]
+    .sort(([, left], [, right]) => right - left)
+    .map(([target]) => target)
+    .find((target) => target.owns(payload.position));
   if (payload.type !== "drop") {
-    for (const target of targets) target.setDragging(target === owner);
+    for (const target of targets.keys()) target.setDragging(target === owner);
     return;
   }
 
-  for (const target of targets) target.setDragging(false);
+  for (const target of targets.keys()) target.setDragging(false);
   if (!owner) {
     // The point is outside every registered pane — the sidebar, the tab strip,
     // a dialog. Nothing here can accept it, and the gesture is over, so the

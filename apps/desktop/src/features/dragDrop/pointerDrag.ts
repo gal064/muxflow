@@ -1,5 +1,6 @@
 import { useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import type { PaneEdge } from "../tmux/actions";
+import type { DockSide } from "../shell/types";
 
 /**
  * One pointer drag of a tab or a pane (an agent row, or a pane grabbed with
@@ -26,7 +27,9 @@ export type DropTarget =
   /** `workspace` is the strip's own, for a pane dropped on a tab: it becomes a tab of that workspace. */
   | { kind: "tab"; tabKey: string; side: "before" | "after"; workspace?: { hostProfileId: string; sessionId: string } }
   | { kind: "workspace"; hostProfileId: string; sessionId: string }
-  | { kind: "pane"; paneId: string; edge: PaneEdge };
+  | { kind: "pane"; paneId: string; edge: PaneEdge }
+  /** An edge of the workspace, where a document docks beside the terminal. */
+  | { kind: "dock"; side: DockSide };
 
 /** What a drop on a target would do; `run` is only called on release. */
 export type DropOutcome = { kind: "run"; run(): void } | { kind: "refuse"; reason: string };
@@ -106,6 +109,10 @@ function workspaceOf(element: Element): { hostProfileId: string; sessionId: stri
 
 export function dropTargetAt(x: number, y: number): DropTarget | undefined {
   for (const element of document.elementsFromPoint(x, y)) {
+    // Drawn over the panes, and only during a drag that can dock, so a dock
+    // zone wins over the pane edge under it.
+    const dock = element.closest<HTMLElement>("[data-drop-dock]")?.dataset.dropDock;
+    if (dock === "left" || dock === "right") return { kind: "dock", side: dock };
     const tab = element.closest<HTMLElement>("[data-drop-tab]");
     if (tab?.dataset.dropTab) {
       const rect = tab.getBoundingClientRect();
