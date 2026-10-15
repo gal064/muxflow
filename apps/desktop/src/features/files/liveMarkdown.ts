@@ -1,5 +1,5 @@
 import { HighlightStyle, Language, LanguageSupport, defineLanguageFacet, syntaxHighlighting, syntaxTree } from "@codemirror/language";
-import { EditorSelection, EditorState, Prec, RangeSet, StateEffect, StateField, type Extension, type Range, type Text, type Transaction } from "@codemirror/state";
+import { EditorSelection, EditorState, Prec, RangeSet, StateEffect, StateField, countColumn, type ChangeSpec, type Extension, type Range, type Text, type Transaction } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type Command, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import type { SyntaxNode, SyntaxNodeRef } from "@lezer/common";
 import { tags } from "@lezer/highlight";
@@ -44,8 +44,8 @@ const editorFocused = StateField.define<boolean>({
 /**
  * The selection, while the editor has focus. An inline element the selection
  * touches — bold, a link, inline code — shows its markers; everything else
- * stays rendered, as in Typora. Block markers (headings, quotes, bullets,
- * tasks, rules) are never shown: they are kept whole instead, by `blockMarks`.
+ * stays rendered, as in Typora. Headings reveal their markers too; other
+ * block markers stay rendered and are kept whole for the caret.
  */
 function activeRanges(state: EditorState): ReadonlyArray<{ from: number; to: number }> {
   if (!state.field(editorFocused, false)) return [];
@@ -59,7 +59,7 @@ function touches(active: ReadonlyArray<{ from: number; to: number }>, from: numb
 /** One drawn change to the source, described without the view so it can be tested. */
 export type LiveRange =
   | { kind: "hide"; from: number; to: number }
-  | { kind: "line"; from: number; className: string }
+  | { kind: "line"; from: number; className: string; style?: string }
   | { kind: "mark"; from: number; to: number; className: string }
   | { kind: "bullet"; from: number; to: number }
   | { kind: "task"; from: number; to: number; checked: boolean }
@@ -122,6 +122,7 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
             hideUnless(node, parent);
             break;
           }
+          if (parent && touches(active, parent.from, parent.to)) break;
           // An opening mark takes its space with it; a closing one, the space before it.
           const closing = node.from > doc.lineAt(node.from).from && doc.sliceString(node.from - 1, node.from) === " ";
           if (closing) out.push({ kind: "hide", from: node.from - 1, to: node.to });
@@ -155,12 +156,19 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
           blockMark(node.from, node.to, true);
           break;
         case "ListMark":
-          liveListMark(node, out, blockMark);
+          liveListLayout(node, state, out);
+          liveListMark(node, doc, out, blockMark);
           break;
-        case "TaskMarker":
-          out.push({ kind: "task", from: node.from, to: node.to, checked: /x/i.test(doc.sliceString(node.from, node.to)) });
-          blockMark(node.from, node.to, false);
+        case "Paragraph":
+        case "Task":
+          liveListParagraph(node, state, out, from, to);
           break;
+        case "TaskMarker": {
+          const end = node.to + /^[ \t]*/.exec(doc.sliceString(node.to, doc.lineAt(node.to).to))![0].length;
+          out.push({ kind: "task", from: node.from, to: end, checked: /x/i.test(doc.sliceString(node.from, node.to)) });
+          out.push({ kind: "atomic", from: node.from, to: end });
+          break;
+        }
         case "HorizontalRule":
           out.push({ kind: "rule", from: node.from, to: node.to });
           out.push({ kind: "atomic", from: node.from, to: node.to });
@@ -219,14 +227,67 @@ function liveCodeBlock(node: SyntaxNodeRef, doc: Doc, active: Active, out: LiveR
   } while (cursor.nextSibling());
 }
 
-function liveListMark(node: SyntaxNodeRef, out: LiveRange[], blockMark: (from: number, to: number, hide: boolean) => void) {
+/** Source indentation is structural; the rendered list uses a fixed step per level. */
+function liveListLayout(node: SyntaxNodeRef, state: EditorState, out: LiveRange[]) {
+  const item = node.node.parent;
+  if (!item) return;
+  const line = state.doc.lineAt(node.from);
+  liveListLine(item, state, line, node.from, false, out);
+  if (item.parent?.name === "OrderedList") {
+    const spaces = /^[ \t]*/.exec(state.doc.sliceString(node.to, line.to))![0].length;
+    out.push({ kind: "mark", from: node.from, to: node.to + spaces, className: "cm-live-list-marker" });
+  }
+}
+
+function liveListLine(item: SyntaxNode, state: EditorState, line: { from: number; text: string }, contentFrom: number, continuation: boolean, out: LiveRange[]) {
+  let depth = 0;
+  for (let parent = item.parent?.parent; parent; parent = parent.parent) {
+    if (parent.name === "ListItem") depth += 1;
+  }
+  const start = line.from + indentation(line.text).from;
+  if (start < contentFrom) {
+    out.push({ kind: "hide", from: start, to: contentFrom });
+    out.push({ kind: "atomic", from: start, to: contentFrom });
+  }
+  const marker = item.getChild("ListMark")!;
+  const width = item.parent?.name === "OrderedList" ? `max(1.5em, ${marker.to - marker.from + 1}ch)` : "1.5em";
+  out.push({ kind: "line", from: line.from, className: `cm-live-list${continuation ? " cm-live-list-continuation" : ""}`, style: `--cm-list-depth: ${depth}; --cm-list-marker: ${width}` });
+}
+
+/** Hard breaks and later paragraphs get the same content column as the item's text. */
+function liveListParagraph(node: SyntaxNodeRef, state: EditorState, out: LiveRange[], from: number, to: number) {
+  let item = node.node.parent;
+  while (item && item.name !== "ListItem") item = item.parent;
+  if (!item) return;
+  const doc = state.doc;
+  const markerLine = doc.lineAt(item.from).number;
+  const first = doc.lineAt(node.from).number;
+  const joined = node.name === "Paragraph" && doc.lineAt(node.to).number - first <= MAX_JOINED_LINES;
+  const last = doc.lineAt(Math.min(node.to, to)).number;
+  for (let number = doc.lineAt(Math.max(node.from, from)).number; number <= last; number += 1) {
+    if (number === markerLine) continue;
+    if (number > first && joined) {
+      const previous = doc.line(number - 1).text;
+      if (!/ {2}$/.test(previous) && !(/\\*$/.exec(previous)![0].length % 2)) continue;
+    }
+    const line = doc.line(number);
+    const indent = indentation(line.text);
+    liveListLine(item, state, line, line.from + indent.from + indent.text.length, true, out);
+  }
+}
+
+function liveListMark(node: SyntaxNodeRef, doc: Doc, out: LiveRange[], blockMark: (from: number, to: number, hide: boolean) => void) {
   const item = node.node.parent;
   // Ordered numbers stay text: they are what the reader sees in the preview too.
   if (item?.parent?.name !== "BulletList") return;
   // A task item is drawn as its checkbox alone.
   const task = !!item.getChild("Task");
-  if (!task) out.push({ kind: "bullet", from: node.from, to: node.to });
-  blockMark(node.from, node.to, task);
+  if (task) blockMark(node.from, node.to, true);
+  else {
+    const end = node.to + /^[ \t]*/.exec(doc.sliceString(node.to, doc.lineAt(node.to).to))![0].length;
+    out.push({ kind: "bullet", from: node.from, to: end });
+    out.push({ kind: "atomic", from: node.from, to: end });
+  }
 }
 
 function liveLink(node: SyntaxNode, doc: Doc, active: Active, out: LiveRange[]) {
@@ -284,7 +345,7 @@ class BulletWidget extends WidgetType {
   eq() { return true; }
   toDOM() {
     const span = document.createElement("span");
-    span.className = "cm-live-bullet";
+    span.className = "cm-live-bullet cm-live-list-marker";
     span.textContent = "•";
     return span;
   }
@@ -344,7 +405,7 @@ const atomic = Decoration.mark({});
 function toDecoration(range: Exclude<LiveRange, { kind: "atomic" }>, readOnly: boolean): Range<Decoration> {
   switch (range.kind) {
     case "hide": return hidden.range(range.from, range.to);
-    case "line": return Decoration.line({ class: range.className }).range(range.from);
+    case "line": return Decoration.line({ class: range.className, attributes: range.style ? { style: range.style } : undefined }).range(range.from);
     case "mark": return Decoration.mark({ class: range.className }).range(range.from, range.to);
     case "bullet": return bullet.range(range.from, range.to);
     case "rule": return rule.range(range.from, range.to);
@@ -387,7 +448,7 @@ const BLOCK_MARKS = new Set(["HeaderMark", "QuoteMark", "ListMark", "TaskMarker"
  * `- `, `- [ ] ` and any indentation before them. A caret before that point
  * would sit on markup the user cannot see, and typing there would break it.
  */
-export function blockMarkupEnd(state: EditorState, line: { from: number; to: number }): number {
+export function blockMarkupEnd(state: EditorState, line: { from: number; to: number }, hiddenOnly = false): number {
   const doc = state.doc;
   let end = line.from;
   syntaxTree(state).iterate({
@@ -398,9 +459,17 @@ export function blockMarkupEnd(state: EditorState, line: { from: number; to: num
       if (!BLOCK_MARKS.has(node.name)) return undefined;
       if (doc.sliceString(end, node.from).trim()) return false;
       if (node.name === "HeaderMark" && node.node.parent?.name.startsWith("Setext")) return undefined;
+      if (hiddenOnly && node.name === "HeaderMark" && node.node.parent
+        && touches(activeRanges(state), node.node.parent.from, node.node.parent.to)) return undefined;
       // Ordered numbers are shown, and so editable.
-      if (node.name === "ListMark" && node.node.parent?.parent?.name !== "BulletList") return undefined;
-      end = Math.min(node.to + (doc.sliceString(node.to, node.to + 1) === " " ? 1 : 0), line.to);
+      if (node.name === "ListMark" && node.node.parent?.parent?.name !== "BulletList") {
+        if (hiddenOnly) end = node.from;
+        return undefined;
+      }
+      const spaces = node.name === "ListMark" || node.name === "TaskMarker"
+        ? /^[ \t]*/.exec(doc.sliceString(node.to, line.to))![0].length
+        : (doc.sliceString(node.to, node.to + 1) === " " ? 1 : 0);
+      end = Math.min(node.to + spaces, line.to);
       return undefined;
     },
   });
@@ -414,7 +483,7 @@ const caretOutOfMarkup = EditorState.transactionFilter.of((transaction) => {
   let moved = false;
   const ranges = transaction.selection.ranges.map((range) => {
     if (!range.empty) return range;
-    const end = blockMarkupEnd(state, state.doc.lineAt(range.head));
+    const end = blockMarkupEnd(state, state.doc.lineAt(range.head), true);
     if (range.head >= end) return range;
     moved = true;
     return EditorSelection.cursor(end);
@@ -428,7 +497,7 @@ const leftOverMarkup: Command = (view) => {
   const range = view.state.selection.main;
   if (view.state.selection.ranges.length > 1 || !range.empty) return false;
   const line = view.state.doc.lineAt(range.head);
-  if (line.from === 0 || range.head === line.from || range.head !== blockMarkupEnd(view.state, line)) return false;
+  if (line.from === 0 || range.head === line.from || range.head !== blockMarkupEnd(view.state, line, true)) return false;
   view.dispatch({ selection: { anchor: line.from - 1 }, scrollIntoView: true, userEvent: "select" });
   return true;
 };
@@ -671,6 +740,9 @@ export const breakBeforeHeading: Command = (view) => {
 
 const liveKeys = Prec.high(keymap.of([
   { key: "Enter", run: breakBeforeHeading },
+  { key: "Tab", run: (view) => changeListIndent(view, 1), shift: (view) => changeListIndent(view, -1) },
+  { key: "Mod-]", run: (view) => changeListIndent(view, 1) },
+  { key: "Mod-[", run: (view) => changeListIndent(view, -1) },
   { key: "ArrowDown", run: intoTable(true, true) },
   { key: "ArrowUp", run: intoTable(false, true) },
   { key: "ArrowRight", run: intoTable(true, false) },
@@ -695,9 +767,9 @@ const liveHighlight = HighlightStyle.define([
 const LIST_ITEM = /^(\s*(?:>\s?)*\s*)([-*+]|(\d+)([.)]))(\s+)(\[[ xX]\]\s+)?/;
 const QUOTE_ONLY = /^(\s*>\s?)+/;
 
-function inCode(state: EditorState, pos: number): boolean {
+function inCode(state: EditorState, pos: number, includeInline = true): boolean {
   for (let node: SyntaxNode | null = syntaxTree(state).resolveInner(pos, -1); node; node = node.parent) {
-    if (node.name === "FencedCode" || node.name === "CodeBlock" || node.name === "InlineCode") return true;
+    if (node.name === "FencedCode" || node.name === "CodeBlock" || (includeInline && node.name === "InlineCode")) return true;
   }
   return false;
 }
@@ -707,6 +779,101 @@ function enclosing(state: EditorState, pos: number, name: string): SyntaxNode | 
     if (node.name === name) return node;
   }
   return undefined;
+}
+
+/** The indentation inside any explicit quote prefix, keeping the quote itself intact. */
+function indentation(text: string, quoteDepth = Infinity): { from: number; text: string } {
+  let from = 0;
+  for (let depth = 0; depth < quoteDepth; depth += 1) {
+    const quote = /^[ \t]*>[ \t]?/.exec(text.slice(from));
+    if (!quote) break;
+    from += quote[0].length;
+  }
+  return { from, text: /^[ \t]*/.exec(text.slice(from))![0] };
+}
+
+function enclosingQuotes(item: SyntaxNode): number {
+  let depth = 0;
+  for (let parent = item.parent; parent; parent = parent.parent) {
+    if (parent.name === "Blockquote") depth += 1;
+  }
+  return depth;
+}
+
+/** Move whole list items, including continuation lines and descendants, in one edit. */
+export function changeListIndent(view: EditorView, direction: 1 | -1): boolean {
+  const { state } = view;
+  if (state.readOnly) return false;
+  const items = new Map<number, SyntaxNode>();
+  for (const range of state.selection.ranges) {
+    if (range.empty && inCode(state, range.head, false)) return false;
+    const last = state.doc.lineAt(range.to > range.from ? range.to - 1 : range.to).number;
+    for (let number = state.doc.lineAt(range.from).number; number <= last; number += 1) {
+      const line = state.doc.line(number);
+      if (!line.text.trim()) continue;
+      const indent = indentation(line.text);
+      const pos = Math.max(line.from + indent.from + indent.text.length, Math.min(range.from, line.to));
+      let item: SyntaxNode | undefined;
+      for (let node: SyntaxNode | null = syntaxTree(state).resolveInner(pos, pos === line.to ? -1 : 1); node; node = node.parent) {
+        if (node.name === "ListItem") { item = node; break; }
+      }
+      if (!item) return false;
+      items.set(item.from, item);
+    }
+  }
+  if (!items.size) return false;
+  const selected = [...items.values()].sort((a, b) => a.from - b.from);
+  const roots: SyntaxNode[] = [];
+  for (const item of selected) {
+    if (!roots.length || roots[roots.length - 1].to < item.to) roots.push(item);
+  }
+  const indentColumn = (text: string, quoteDepth: number) => {
+    const indent = indentation(text, quoteDepth);
+    const prefix = text.slice(0, indent.from);
+    return countColumn(prefix + indent.text, state.tabSize) - countColumn(prefix, state.tabSize);
+  };
+  const column = (item: SyntaxNode) => indentColumn(state.doc.lineAt(item.from).text, enclosingQuotes(item));
+  const changes: ChangeSpec[] = [];
+  // Adjacent selected siblings move together beneath the sibling before the group.
+  let group: { list: number; end: number; delta: number } | undefined;
+  for (const item of roots) {
+    let previous = item.prevSibling;
+    // Explicit quote marks may sit between siblings in the syntax tree.
+    while (previous && previous.name !== "ListItem") previous = previous.prevSibling;
+    let delta = 0;
+    if (group && group.list === item.parent?.from && previous?.from === group.end) delta = group.delta;
+    else if (direction === 1) {
+      if (previous?.name === "ListItem") {
+        const marker = previous.getChild("ListMark")!;
+        const line = state.doc.lineAt(previous.from);
+        const gap = /^[ \t]*/.exec(state.doc.sliceString(marker.to, line.to))![0];
+        const width = marker.to - marker.from;
+        const prefix = state.doc.sliceString(line.from, marker.to);
+        const padding = countColumn(prefix + gap, state.tabSize) - countColumn(prefix, state.tabSize);
+        // Five or more spaces start code inside the item after one separator.
+        delta = column(previous) + width + (padding > 4 ? 1 : Math.max(1, padding)) - column(item);
+      }
+    } else {
+      const parent = item.parent?.parent;
+      if (parent?.name === "ListItem") delta = column(parent) - column(item);
+    }
+    group = { list: item.parent!.from, end: item.from, delta };
+    if (!delta) continue;
+    const quoteDepth = enclosingQuotes(item);
+    const last = state.doc.lineAt(item.to).number;
+    for (let number = state.doc.lineAt(item.from).number; number <= last; number += 1) {
+      const line = state.doc.line(number);
+      if (!line.text.trim()) continue;
+      const indent = indentation(line.text, quoteDepth);
+      const from = line.from + indent.from;
+      changes.push({ from, to: from + indent.text.length, insert: " ".repeat(Math.max(0, indentColumn(line.text, quoteDepth) + delta)) });
+    }
+  }
+  if (changes.length) {
+    const changeSet = state.changes(changes);
+    view.dispatch({ changes: changeSet, selection: state.selection.map(changeSet), scrollIntoView: true, userEvent: direction === 1 ? "input.indent" : "delete.dedent" });
+  }
+  return true;
 }
 
 function nextItem(item: RegExpExecArray): string {
