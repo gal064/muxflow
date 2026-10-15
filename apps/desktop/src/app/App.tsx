@@ -8,6 +8,7 @@ import { ConfirmationDialog } from "../commands/ConfirmationDialog";
 import type { PendingTmuxConfirmation } from "../commands/destructiveConfirmation";
 import {
   currentPlatform,
+  isDocumentEditorTarget,
   shortcutDisposition,
   type ShortcutOverrides,
 } from "../commands/registry";
@@ -1322,8 +1323,8 @@ export function App() {
 
   const [journalCopyChord] = useState(() => createCopyChordJournal());
   useEffect(() => {
-    const handleKey = (event: KeyboardEvent) => {
-      const disposition = shortcutDisposition(event, platform, shortcuts, modalOpen, commandContext);
+    const handleKey = (event: KeyboardEvent, editorFallback = false) => {
+      const disposition = shortcutDisposition(event, platform, shortcuts, modalOpen, commandContext, editorFallback);
       if (platform === "linux") journalCopyChord(disposition, activePane?.id);
       // A yielded chord is the terminal's: Linux Ctrl+C with nothing to copy
       // must reach the shell as its interrupt.
@@ -1334,8 +1335,16 @@ export function App() {
       event.stopPropagation();
       if (disposition.kind === "run") void runCommand(disposition.commandId);
     };
-    window.addEventListener("keydown", handleKey, true);
-    return () => window.removeEventListener("keydown", handleKey, true);
+    const captureKey = (event: KeyboardEvent) => handleKey(event);
+    const unhandledEditorKey = (event: KeyboardEvent) => {
+      if (isDocumentEditorTarget(event.target) && !event.defaultPrevented) handleKey(event, true);
+    };
+    window.addEventListener("keydown", captureKey, true);
+    window.addEventListener("keydown", unhandledEditorKey);
+    return () => {
+      window.removeEventListener("keydown", captureKey, true);
+      window.removeEventListener("keydown", unhandledEditorKey);
+    };
   }, [activePane?.id, commandContext, journalCopyChord, modalOpen, platform, runCommand, shortcuts]);
 
   const handleInput = useCallback((paneId: string, input: TerminalInput) => {

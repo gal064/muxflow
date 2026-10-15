@@ -256,14 +256,14 @@ describe("live Markdown commands", () => {
 
   it.each([
     ["- parent\n- item\n- last", "- parent\n  - item\n- last"],
-    ["1. parent\n2. item\n3. last", "1. parent\n   2. item\n3. last"],
-    ["9. first\n10. parent\n11. item", "9. first\n10. parent\n    11. item"],
+    ["1. parent\n2. item\n3. last", "1. parent\n   1. item\n2. last"],
+    ["9. first\n10. parent\n11. item", "9. first\n10. parent\n    1. item"],
     ["- [x] parent\n- [ ] item", "- [x] parent\n  - [ ] item"],
     ["- parent\n1. item", "- parent\n1. item"],
     ["> - parent\n> - item", "> - parent\n>   - item"],
     ["-     parent\n- item", "-     parent\n  - item"],
-    ["10. parent\n11. `item`", "10. parent\n    11. `item`"],
-    ["- root\n  1.\tparent\n  2. item", "- root\n  1.\tparent\n        2. item"],
+    ["10. parent\n11. `item`", "10. parent\n    1. `item`"],
+    ["- root\n  1.\tparent\n  2. item", "- root\n  1.\tparent\n        1. item"],
     ["- parent\n- item\n  > quote", "- parent\n  - item\n    > quote"],
     ["- parent\n- item\n  ```\n  > code\n  ```", "- parent\n  - item\n    ```\n    > code\n    ```"],
     ["> - parent\n> - item\n>   > quote", "> - parent\n>   - item\n>     > quote"],
@@ -276,6 +276,66 @@ describe("live Markdown commands", () => {
       expect(changeListIndent(editor, -1)).toBe(true);
       expect(editor.state.doc.toString()).toBe(doc);
     }
+  });
+
+  it.each([
+    ["1. parent\n   1. existing\n2. item\n3. last", "1. parent\n   1. existing\n   2. item\n2. last"],
+    ["1) parent\n2) item\n3) last", "1) parent\n   1) item\n2) last"],
+    ["> 1. parent\n> 2. item\n> 3. last", "> 1. parent\n>    1. item\n> 2. last"],
+    ["9. parent\n10. item\n    continued\n    - child", "9. parent\n   1. item\n      continued\n      - child"],
+  ])("renumbers new and existing nested lists without losing structure: %s", (doc, expected) => {
+    const editor = view(doc, doc.indexOf("item") + 4);
+    changeListIndent(editor, 1);
+    expect(editor.state.doc.toString()).toBe(expected);
+    expect(editor.state.doc.sliceString(editor.state.selection.main.head - 4, editor.state.selection.main.head)).toBe("item");
+  });
+
+  it("renumbers both remaining children and outer siblings when outdenting", () => {
+    const doc = "1. parent\n   1. first\n   2. item\n   3. remaining\n2. last";
+    const editor = view(doc, doc.indexOf("item"));
+    changeListIndent(editor, -1);
+    expect(editor.state.doc.toString()).toBe("1. parent\n   1. first\n2. item\n   1. remaining\n3. last");
+  });
+
+  it("preserves deliberate starts and adjusts descendants across digit boundaries", () => {
+    const doc = "8. first\n9. parent\n   1. item\n      continued\n      - child\n10. last";
+    const editor = view(doc, doc.indexOf("item"));
+    changeListIndent(editor, -1);
+    expect(editor.state.doc.toString()).toBe("8. first\n9. parent\n10. item\n    continued\n    - child\n11. last");
+  });
+
+  it("keeps ordered indentation and numbering in one undoable transaction", () => {
+    const doc = "1. parent\n2. item\n3. last";
+    const editor = new EditorView({
+      parent: document.body,
+      state: EditorState.create({ doc, selection: { anchor: doc.indexOf("item") }, extensions: [liveMarkdown({ onLink() {} }), history()] }),
+    });
+    views.push(editor);
+    changeListIndent(editor, 1);
+    expect(editor.state.doc.toString()).toBe("1. parent\n   1. item\n2. last");
+    undo(editor);
+    expect(editor.state.doc.toString()).toBe(doc);
+    redo(editor);
+    expect(editor.state.doc.toString()).toBe("1. parent\n   1. item\n2. last");
+  });
+
+  it("keeps an empty ordered item's caret after its marker spacing", () => {
+    const doc = "1. parent\n   1. x";
+    const editor = view(doc, doc.length);
+    deleteCharBackward(editor);
+    expect(editor.state.doc.toString()).toBe("1. parent\n   1. ");
+    const marker = editor.contentDOM.querySelector(".cm-line:last-child .cm-live-list-marker");
+    expect(marker?.querySelector(".cm-live-marker-space")).not.toBeNull();
+    expect(editor.state.selection.main.head).toBe(editor.state.doc.length);
+    editor.dispatch(editor.state.replaceSelection("y"));
+    expect(editor.state.doc.toString()).toBe("1. parent\n   1. y");
+  });
+
+  it("keeps numbering changes local to the moved lists", () => {
+    const doc = "1. parent\n2. item\n3. last\n\nOutside\n\n7. untouched\n9. authored";
+    const editor = view(doc, doc.indexOf("item"));
+    changeListIndent(editor, 1);
+    expect(editor.state.doc.toString()).toBe("1. parent\n   1. item\n2. last\n\nOutside\n\n7. untouched\n9. authored");
   });
 
   it("moves continuation lines and children once when their parent is selected", () => {
@@ -301,7 +361,7 @@ describe("live Markdown commands", () => {
     const doc = "1. parent\n2. first\n3. second\n4. last";
     const editor = view(doc, { anchor: doc.indexOf("2."), head: doc.indexOf("4.") });
     changeListIndent(editor, 1);
-    expect(editor.state.doc.toString()).toBe("1. parent\n   2. first\n   3. second\n4. last");
+    expect(editor.state.doc.toString()).toBe("1. parent\n   1. first\n   2. second\n2. last");
     changeListIndent(editor, -1);
     expect(editor.state.doc.toString()).toBe(doc);
   });
@@ -310,7 +370,7 @@ describe("live Markdown commands", () => {
     const doc = "1. parent\n\n2. first\n\n3. second\n\n4. last";
     const editor = view(doc, { anchor: doc.indexOf("2."), head: doc.indexOf("4.") });
     changeListIndent(editor, 1);
-    expect(editor.state.doc.toString()).toBe("1. parent\n\n   2. first\n\n   3. second\n\n4. last");
+    expect(editor.state.doc.toString()).toBe("1. parent\n\n   1. first\n\n   2. second\n\n2. last");
     changeListIndent(editor, -1);
     expect(editor.state.doc.toString()).toBe(doc);
     expect(changeListIndent(view("\n\n", 1), 1)).toBe(false);
