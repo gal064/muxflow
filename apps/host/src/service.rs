@@ -589,6 +589,7 @@ async fn serve_connection(
         TopologyOutputTrigger::new(topology_signal.clone(), tokio::runtime::Handle::current()),
         client_hello.connection_epoch,
         perf_connection_epoch,
+        terminal::host_terminal_colors(),
     )));
     let topology_lock = Arc::new(tokio::sync::Mutex::new(()));
     let topology_baseline = Arc::new(Mutex::new(None::<(tmux_control::TmuxSnapshot, String)>));

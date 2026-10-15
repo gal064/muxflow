@@ -1,5 +1,6 @@
 import type { ConnectionSpec } from "../../app/types";
 import { isAgentSortMode, type AgentSortMode } from "../agents/agentsList";
+import { isThemePreference, type ThemePreference } from "../../ui/appearance";
 
 export type AppTabKind = "file" | "markdown" | "gitDiff";
 /** How a Markdown tab is drawn; also the shape of the persisted default. */
@@ -9,6 +10,8 @@ export type PanelSurface = "files" | "git" | "ports";
 
 /** Sidebar geometry, from the plan's token table (cmux). */
 export const SIDEBAR_MIN_WIDTH = 240;
+/** The interface sizes Settings offers, as zoom factors of the whole window. */
+export const UI_SCALES = [0.9, 1, 1.1, 1.2, 1.3] as const;
 /** Fraction of the window a dragged sidebar may not exceed. */
 export const SIDEBAR_MAX_WINDOW_FRACTION = 1 / 3;
 /** Right panel geometry; the same rules as the sidebar, from its own edge. */
@@ -95,6 +98,8 @@ export interface ShellState {
   agentStateGlyphs: boolean;
   /** Hides per-agent activity lines from workspace rows. */
   compactWorkspaces: boolean;
+  /** Puts the tab strip in the title bar, beside the window controls. */
+  tabsInTitleBar: boolean;
   /** Focuses a terminal pane when the pointer rests on it, without a click. */
   focusFollowsMouse: boolean;
   /**
@@ -122,6 +127,10 @@ export interface ShellState {
   terminalApplicationClipboard: boolean;
   /** Terminal text size in integer CSS pixels. */
   terminalFontSize: number;
+  /** Light, dark, or whichever the OS is using. */
+  theme: ThemePreference;
+  /** Zoom of the whole interface, terminals included; 1 is 100%. */
+  uiScale: number;
   /** The host most recently picked in the New workspace dialog. */
   newWorkspaceHostProfileId?: string;
   /**
@@ -186,6 +195,7 @@ export const defaultShellState: ShellState = {
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
   compactWorkspaces: false,
+  tabsInTitleBar: false,
   focusFollowsMouse: false,
   pinnedOnly: false,
   terminalScreenReader: false,
@@ -193,6 +203,8 @@ export const defaultShellState: ShellState = {
   cleanWrappedCommands: true,
   terminalApplicationClipboard: true,
   terminalFontSize: 13,
+  theme: "system",
+  uiScale: 1,
   newWorkspaceHostProfileId: undefined,
   defaultMarkdownView: "split",
 };
@@ -238,6 +250,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
       compactWorkspaces: Boolean(shell?.compactWorkspaces),
+      tabsInTitleBar: Boolean(shell?.tabsInTitleBar),
       focusFollowsMouse: Boolean(shell?.focusFollowsMouse),
       pinnedOnly: Boolean(shell?.pinnedOnly),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
@@ -251,6 +264,8 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
         ? shell.terminalApplicationClipboard
         : defaultShellState.terminalApplicationClipboard,
       terminalFontSize: clampedTerminalFontSize(shell?.terminalFontSize),
+      theme: isThemePreference(shell?.theme) ? shell.theme : defaultShellState.theme,
+      uiScale: UI_SCALES.find((scale) => scale === shell?.uiScale) ?? defaultShellState.uiScale,
       newWorkspaceHostProfileId: typeof shell?.newWorkspaceHostProfileId === "string" && shell.newWorkspaceHostProfileId.trim()
         ? shell.newWorkspaceHostProfileId
         : undefined,

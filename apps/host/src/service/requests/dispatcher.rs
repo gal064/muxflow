@@ -573,6 +573,22 @@ pub(crate) async fn handle_request(
             )
             .await;
         }
+        (Handler::Terminal, Some(v1::Operation::SetTerminalColors)) => {
+            let result = crate::service::terminal::TerminalColors::from_hex(
+                &request.terminal_foreground,
+                &request.terminal_background,
+            )
+            .and_then(|colors| terminal.lock().unwrap().set_colors(colors));
+            send_response(
+                control_tx,
+                request_id,
+                result.map_or_else(
+                    |error| response_error("terminal_colors_rejected", &error.to_string()),
+                    |_| response_ok(),
+                ),
+            )
+            .await;
+        }
         (Handler::Terminal, Some(v1::Operation::RequestTerminalHistory)) => {
             // Nothing about the pane's state changes here, so — unlike a seed
             // request — this makes no claim of visibility and settles no debt.

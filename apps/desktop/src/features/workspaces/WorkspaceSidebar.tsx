@@ -67,6 +67,8 @@ interface WorkspaceSidebarProps {
   agentsRatio: number;
   /** The list's one filter: pinned workspaces only, plus whatever is selected. */
   pinnedOnly: boolean;
+  /** Present while the title bar holds the tabs and so has no room for New workspace. */
+  newWorkspace?: { enabled: boolean; onCreate(): void };
   onTogglePinnedOnly(): void;
   onSelectWorkspace(row: MergedWorkspaceRow): void;
   /**
@@ -511,6 +513,14 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           onClick={props.onTogglePinnedOnly}
           type="button"
         >{props.pinnedOnly ? "pinned only" : "all"}</button>
+        {props.newWorkspace && <button
+          aria-label="New workspace"
+          className="bar-button section-head-add"
+          disabled={!props.newWorkspace.enabled}
+          onClick={props.newWorkspace.onCreate}
+          title="New workspace"
+          type="button"
+        ><Icon name="plus" /></button>}
       </div>
       <div aria-labelledby="sidebar-workspaces-label" className="sidebar-scroll" role="list">
         {/* An empty list is about the host whether or not the filter is on:

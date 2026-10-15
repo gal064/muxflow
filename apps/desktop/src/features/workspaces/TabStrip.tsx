@@ -15,6 +15,8 @@ type AppTab = Extract<CombinedTab, { kind: "app" }>;
 
 interface TabStripProps {
   tabs: readonly CombinedTab[];
+  /** In the title bar, where the strip's empty space is what moves the window. */
+  inTitleBar?: boolean;
   activeKey?: string;
   activePaneId?: string;
   activeTerminalPaneCount: number;
@@ -250,6 +252,7 @@ export function TabStrip(props: TabStripProps) {
 
   return <div
     className={paneDrop ? "tabstrip drop-target" : "tabstrip"}
+    data-tauri-drag-region={props.inTitleBar || undefined}
     data-drop-host={dropWorkspace?.hostProfileId}
     data-drop-workspace={dropWorkspace?.sessionId}
   >
