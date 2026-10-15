@@ -23,6 +23,8 @@ type TerminalWorkspaceSurfaceProps = {
   activePane?: Pane;
   activeWindow?: Window;
   appFocused: boolean;
+  /** See `TerminalPane`'s `yieldFocus`; must be stable, or the memo here is defeated. */
+  yieldFocus?(): boolean;
   /** The active host's profile id; scopes every pane's screen cache. */
   cacheScope: string;
   clientId?: string;
@@ -125,6 +127,7 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
       <TerminalPane
         visible={props.visible}
         appFocused={props.appFocused}
+        yieldFocus={props.yieldFocus}
         cacheScope={props.cacheScope}
         clientId={props.clientId}
         pane={pane}

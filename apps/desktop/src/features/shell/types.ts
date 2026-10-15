@@ -25,6 +25,10 @@ export const PANEL_MIN_WIDTH = 240;
 export const PANEL_MAX_WINDOW_FRACTION = 1 / 2;
 /** The terminal width (about 60 columns) a rail may not squeeze below; past it the rail hides. */
 export const TERMINAL_MIN_WIDTH = 480;
+/** Share of the workspace a docked document takes by default, and the bounds a drag stays within. */
+export const DOCK_DEFAULT_FRACTION = 0.4;
+export const DOCK_MIN_FRACTION = 0.2;
+export const DOCK_MAX_FRACTION = 0.7;
 /** Share of the sidebar's height the agents section takes by default. */
 export const AGENTS_SECTION_DEFAULT_RATIO = 0.42;
 export const AGENTS_SECTION_MIN_RATIO = 0.15;
@@ -82,7 +86,16 @@ export interface WorkspaceUiRecord {
   sessionId: string;
   sessionName: string;
   selectedAppTabId?: string;
+  /**
+   * The one document shown beside the terminal rather than over it. Never the
+   * selected tab: selecting covers the terminal column, docking sits next to it.
+   */
+  dockedAppTabId?: string;
+  /** Which edge of the workspace the docked document sits on; absent when nothing is docked. */
+  dockSide?: DockSide;
 }
+
+export type DockSide = "left" | "right";
 
 export interface ShellState {
   /** Which segment of the right panel is showing when it is open. */
@@ -97,6 +110,8 @@ export interface ShellState {
   panelOpen: boolean;
   /** Drag-resizable from its left edge; clamped against the window at render time. */
   panelWidth: number;
+  /** A docked document's share of the workspace width, shared by every workspace. */
+  dockFraction: number;
   /** The agents section's one control. */
   agentSort: AgentSortMode;
   /** Position of the sidebar's internal divider, as a share of its height. */
@@ -199,6 +214,7 @@ export const defaultShellState: ShellState = {
   sidebarWidth: SIDEBAR_MIN_WIDTH,
   panelOpen: false,
   panelWidth: 300,
+  dockFraction: DOCK_DEFAULT_FRACTION,
   agentSort: "workspace",
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
@@ -263,6 +279,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       sidebarWidth: clampedSidebarWidth(shell?.sidebarWidth),
       panelOpen: Boolean(shell?.panelOpen),
       panelWidth: clampedPanelWidth(shell?.panelWidth),
+      dockFraction: clampedDockFraction(shell?.dockFraction),
       agentSort: migratedAgentSort(shell?.agentSort),
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
@@ -387,6 +404,11 @@ export function clampedSidebarWidth(value: unknown): number {
 export function clampedPanelWidth(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return defaultShellState.panelWidth;
   return Math.min(Math.max(Math.round(value), PANEL_MIN_WIDTH), 4_000);
+}
+
+export function clampedDockFraction(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DOCK_DEFAULT_FRACTION;
+  return Math.min(DOCK_MAX_FRACTION, Math.max(DOCK_MIN_FRACTION, value));
 }
 
 export function clampedAgentsRatio(value: unknown): number {
