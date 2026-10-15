@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import paletteCss from "@muxflow/client-core/palette.css?raw";
+import indexHtml from "../../index.html?raw";
 import { applyTheme, currentTheme, onAppearanceChange, rememberedTheme, rememberTheme, resolvedTheme } from "./appearance";
 
 function block(selector: string): Map<string, string> {
@@ -53,5 +54,15 @@ describe("appearance", () => {
     const light = block(':root[data-theme="light"], [data-palette="light"]');
     expect([...light.keys()].sort()).toEqual([...dark.keys()].sort());
     for (const [name, value] of light) expect(value, name).toMatch(/^#(?:[0-9a-f]{6}|[0-9a-f]{8})$/u);
+  });
+});
+
+describe("index.html", () => {
+  // Packaging adds a CSP nonce to any inline style element, and a nonce in
+  // style-src disables the 'unsafe-inline' that Monaco and CodeMirror need for
+  // the styles they generate: Live stops scrolling and Source loses its lines.
+  it("has no inline style for packaging to give a nonce", () => {
+    expect(indexHtml).not.toMatch(/<style[\s>]/iu);
+    expect(indexHtml).toContain('<link rel="stylesheet" href="/theme.css" />');
   });
 });
