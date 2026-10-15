@@ -79,7 +79,7 @@ describe("LiveMarkdownEditor", () => {
       editor.dispatch({ selection: { anchor: editor.state.doc.length } });
       editor.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true, cancelable: true }));
     });
-    expect(editor.state.doc.toString()).toBe("10. parent\n    11. item");
+    expect(editor.state.doc.toString()).toBe("10. parent\n    1. item");
     expect(props.onChange).toHaveBeenCalledTimes(1);
     act(() => editor.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", shiftKey: true, bubbles: true, cancelable: true })));
     expect(editor.state.doc.toString()).toBe("10. parent\n11. item");
