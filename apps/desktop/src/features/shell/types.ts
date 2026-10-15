@@ -96,6 +96,8 @@ export interface ShellState {
   agentStateGlyphs: boolean;
   /** Hides per-agent activity lines from workspace rows. */
   compactWorkspaces: boolean;
+  /** Puts the tab strip in the title bar, beside the window controls. */
+  tabsInTitleBar: boolean;
   /** Focuses a terminal pane when the pointer rests on it, without a click. */
   focusFollowsMouse: boolean;
   /**
@@ -189,6 +191,7 @@ export const defaultShellState: ShellState = {
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
   compactWorkspaces: false,
+  tabsInTitleBar: false,
   focusFollowsMouse: false,
   pinnedOnly: false,
   terminalScreenReader: false,
@@ -242,6 +245,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
       compactWorkspaces: Boolean(shell?.compactWorkspaces),
+      tabsInTitleBar: Boolean(shell?.tabsInTitleBar),
       focusFollowsMouse: Boolean(shell?.focusFollowsMouse),
       pinnedOnly: Boolean(shell?.pinnedOnly),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),

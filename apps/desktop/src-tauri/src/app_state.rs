@@ -133,6 +133,8 @@ pub struct ShellPreferences {
     #[serde(default)]
     pub compact_workspaces: bool,
     #[serde(default)]
+    pub tabs_in_title_bar: bool,
+    #[serde(default)]
     pub focus_follows_mouse: bool,
     /// The workspace list's one filter: pinned workspaces only.
     #[serde(default)]
@@ -614,6 +616,7 @@ mod tests {
                 agents_section_ratio: Some(0.42),
                 agent_state_glyphs: true,
                 compact_workspaces: true,
+                tabs_in_title_bar: true,
                 focus_follows_mouse: true,
                 pinned_only: true,
                 terminal_screen_reader: false,
@@ -786,6 +789,7 @@ mod tests {
         assert!(
             value.shell.agent_state_glyphs
                 && value.shell.compact_workspaces
+                && value.shell.tabs_in_title_bar
                 && value.shell.focus_follows_mouse
                 && value.shell.pinned_only
                 && value.shell.terminal_screen_reader

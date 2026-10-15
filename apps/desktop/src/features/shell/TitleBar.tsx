@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Icon } from "../../ui/Icon";
 import type { Platform } from "../../commands/registry";
 import type { WindowControls } from "./useWindowChrome";
@@ -28,6 +29,12 @@ interface TitleBarProps {
   update?: { version: string };
   /** Linux window buttons on a floating-window desktop; absent renders none. */
   windowControls?: WindowControls;
+  /**
+   * The tab strip, when the person chose to have it here. The bar then splits
+   * in two: the app's own controls over the sidebar, and the tabs over the
+   * workspace they belong to.
+   */
+  tabs?: ReactNode;
   onBack(): void;
   onForward(): void;
   onToggleSidebar(): void;
@@ -55,6 +62,14 @@ interface TitleBarProps {
  * On Linux GTK's own bar is turned off (`src-tauri/src/linux_window.rs`), so
  * the same drag region moves the window there too, and on a floating-window
  * desktop this bar ends in minimize, maximize and close.
+ *
+ * With `tabs`, the same controls are rearranged: window buttons, Settings, the
+ * bell and Back/Forward over the sidebar; the tabs over the workspace; the two
+ * rail toggles at the far end. The workspace name is dropped, since the
+ * selected tab and the sidebar row already say it, and New workspace moves to
+ * the sidebar's Workspaces header, staying here only while the sidebar is shut.
+ * Linux window buttons lead in this arrangement, where the far end is the
+ * tabs' own tools.
  */
 export function TitleBar(props: TitleBarProps) {
   const plural = props.unread === 1 ? "" : "s";
@@ -69,23 +84,23 @@ export function TitleBar(props: TitleBarProps) {
   const bellLabel = props.canJump
     ? `${props.unread} agent${plural} waiting; go to the next one`
     : bellHint;
-  return <header className={`titlebar ${props.platform === "mac" ? "titlebar-overlay" : ""}`} data-tauri-drag-region>
-    <button
-      aria-label="Settings"
-      className="bar-button"
-      onClick={props.onOpenSettings}
-      title={props.platform === "mac" ? "Settings (⌘,)" : "Settings (Ctrl+,)"}
-      type="button"
-    ><Icon name="settings" /></button>
-    <button
-      aria-disabled={!props.sidebarFits || undefined}
-      aria-label="Toggle sidebar"
-      aria-pressed={props.sidebarOpen}
-      className="bar-button"
-      onClick={() => { if (props.sidebarFits) props.onToggleSidebar(); }}
-      title={props.sidebarFits ? undefined : "Widen the window to show the sidebar"}
-      type="button"
-    ><Icon name="sidebarLeft" /></button>
+  const settings = <button
+    aria-label="Settings"
+    className="bar-button"
+    onClick={props.onOpenSettings}
+    title={props.platform === "mac" ? "Settings (⌘,)" : "Settings (Ctrl+,)"}
+    type="button"
+  ><Icon name="settings" /></button>;
+  const sidebarToggle = <button
+    aria-disabled={!props.sidebarFits || undefined}
+    aria-label="Toggle sidebar"
+    aria-pressed={props.sidebarOpen}
+    className="bar-button"
+    onClick={() => { if (props.sidebarFits) props.onToggleSidebar(); }}
+    title={props.sidebarFits ? undefined : "Widen the window to show the sidebar"}
+    type="button"
+  ><Icon name="sidebarLeft" /></button>;
+  const history = <>
     <button
       aria-label="Back"
       className="bar-button"
@@ -102,55 +117,89 @@ export function TitleBar(props: TitleBarProps) {
       title={props.platform === "mac" ? "Forward (⌘])" : "Forward (Ctrl+])"}
       type="button"
     ><Icon name="arrowRight" /></button>
+  </>;
+  const update = props.update && <button
+    className="titlebar-update"
+    onClick={props.onUpdate}
+    title={`Muxflow ${props.update.version} is available. Open the latest release page.`}
+    type="button"
+  >↑ Update {props.update.version}</button>;
+  const bell = <button
+    aria-label={bellLabel}
+    // `aria-disabled`, never `disabled`. A disabled button takes no mouse
+    // events and holds no focus, so neither the tooltip nor the label would
+    // reach anyone — and explaining itself is the entire point of the state.
+    aria-disabled={!props.canJump || undefined}
+    className="bar-button bar-button-badged"
+    onClick={() => { if (props.canJump) props.onBell(); }}
+    title={bellHint}
+    type="button"
+  >
+    <Icon name="bell" />
+    {props.unread > 0 && <span aria-hidden="true" className="badge badge-corner">{props.unread > 99 ? "99+" : props.unread}</span>}
+  </button>;
+  const newWorkspace = <button
+    aria-label="New workspace"
+    className="bar-button"
+    disabled={!props.canCreateWorkspace}
+    onClick={props.onNewWorkspace}
+    type="button"
+  ><Icon name="plus" /></button>;
+  const panelToggle = <button
+    aria-disabled={!props.panelFits || undefined}
+    aria-label="Toggle right panel"
+    aria-pressed={props.panelOpen}
+    className="bar-button"
+    onClick={() => { if (props.panelFits) props.onTogglePanel(); }}
+    title={props.panelFits ? undefined : "Widen the window to show Files and Git"}
+    type="button"
+  ><Icon name="panelRight" /></button>;
+  const windowButtons = props.windowControls && [
+    <button aria-label="Minimize" className="bar-button" key="minimize" onClick={props.windowControls.onMinimize} type="button"><Icon name="minus" /></button>,
+    <button
+      aria-label={props.windowControls.maximized ? "Restore" : "Maximize"}
+      className="bar-button"
+      key="maximize"
+      onClick={props.windowControls.onToggleMaximize}
+      type="button"
+    ><Icon name={props.windowControls.maximized ? "windowRestore" : "windowMaximize"} /></button>,
+    <button aria-label="Close window" className="bar-button window-close" key="close" onClick={props.windowControls.onClose} type="button"><Icon name="close" /></button>,
+  ];
+  const overlay = props.platform === "mac" ? "titlebar-overlay" : "";
+
+  if (props.tabs) {
+    return <header className={`titlebar titlebar-tabs ${overlay}`} data-tauri-drag-region>
+      <div className="titlebar-lead" data-tauri-drag-region>
+        {/* Close leads, the way it does wherever the buttons sit on the left. */}
+        {windowButtons && <div className="window-controls">{[windowButtons[2], windowButtons[0], windowButtons[1]]}</div>}
+        {settings}
+        {bell}
+        {history}
+        {!props.sidebarOpen && newWorkspace}
+      </div>
+      {props.tabs}
+      {/* Fixed, unlike the tabs' own empty space, which overflowing tabs use up:
+          with the sidebar shut there would be nothing left to move the window by. */}
+      <div className="titlebar-spacer" data-tauri-drag-region />
+      {update}
+      <div className="titlebar-rails">
+        {sidebarToggle}
+        {panelToggle}
+      </div>
+    </header>;
+  }
+  return <header className={`titlebar ${overlay}`} data-tauri-drag-region>
+    {settings}
+    {sidebarToggle}
+    {history}
     <div className="titlebar-title" data-tauri-drag-region>
       <span className="titlebar-workspace" data-tauri-drag-region={props.platform === "linux" || undefined}>{props.workspaceName ?? "No workspace"}</span>
     </div>
     <div className="titlebar-spacer" data-tauri-drag-region />
-    {props.update && <button
-      className="titlebar-update"
-      onClick={props.onUpdate}
-      title={`Muxflow ${props.update.version} is available. Open the latest release page.`}
-      type="button"
-    >↑ Update {props.update.version}</button>}
-    <button
-      aria-label={bellLabel}
-      // `aria-disabled`, never `disabled`. A disabled button takes no mouse
-      // events and holds no focus, so neither the tooltip nor the label would
-      // reach anyone — and explaining itself is the entire point of the state.
-      aria-disabled={!props.canJump || undefined}
-      className="bar-button bar-button-badged"
-      onClick={() => { if (props.canJump) props.onBell(); }}
-      title={bellHint}
-      type="button"
-    >
-      <Icon name="bell" />
-      {props.unread > 0 && <span aria-hidden="true" className="badge badge-corner">{props.unread > 99 ? "99+" : props.unread}</span>}
-    </button>
-    <button
-      aria-label="New workspace"
-      className="bar-button"
-      disabled={!props.canCreateWorkspace}
-      onClick={props.onNewWorkspace}
-      type="button"
-    ><Icon name="plus" /></button>
-    <button
-      aria-disabled={!props.panelFits || undefined}
-      aria-label="Toggle right panel"
-      aria-pressed={props.panelOpen}
-      className="bar-button"
-      onClick={() => { if (props.panelFits) props.onTogglePanel(); }}
-      title={props.panelFits ? undefined : "Widen the window to show Files and Git"}
-      type="button"
-    ><Icon name="panelRight" /></button>
-    {props.windowControls && <div className="window-controls">
-      <button aria-label="Minimize" className="bar-button" onClick={props.windowControls.onMinimize} type="button"><Icon name="minus" /></button>
-      <button
-        aria-label={props.windowControls.maximized ? "Restore" : "Maximize"}
-        className="bar-button"
-        onClick={props.windowControls.onToggleMaximize}
-        type="button"
-      ><Icon name={props.windowControls.maximized ? "windowRestore" : "windowMaximize"} /></button>
-      <button aria-label="Close window" className="bar-button window-close" onClick={props.windowControls.onClose} type="button"><Icon name="close" /></button>
-    </div>}
+    {update}
+    {bell}
+    {newWorkspace}
+    {panelToggle}
+    {windowButtons && <div className="window-controls">{windowButtons}</div>}
   </header>;
 }

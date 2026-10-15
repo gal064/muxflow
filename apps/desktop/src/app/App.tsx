@@ -1465,12 +1465,57 @@ export function App() {
     Math.floor(windowWidth / 2), windowWidth - TERMINAL_MIN_WIDTH - (sidebarOpen ? sidebarWidth : 0),
   ));
 
+  const tabsInTitleBar = appState.shell.tabsInTitleBar;
+  const tabStrip = <TabStrip
+    inTitleBar={tabsInTitleBar}
+    activeKey={activeCombinedTabKey}
+    activePaneId={activePane?.id}
+    activeTerminalPaneCount={panes.length}
+    canMutate={hostState.canMutate && Boolean(activeSession)}
+    commandScope={currentHostScope}
+    onClose={closeCombinedTab}
+    onCloseCurrent={(paneId, scope) => void runCommand("window.close", { kind: "focusedSurface", paneId, scope })}
+    onCloseOthers={(tab, scope) => bulkCloseTabs(tabsToCloseOthers(combinedTabs, tab.key), scope)}
+    onCloseNonAgent={(scope) => bulkCloseTabs(tabsToCloseNonAgent(combinedTabs), scope, true)}
+    onCloseRight={(tab, scope) => bulkCloseTabs(tabsToCloseRight(combinedTabs, tab.key), scope)}
+    onDownloadTab={(tab) => {
+      const appTab = workspaceAppTabs.find((item) => item.id === tab.id);
+      if (!appTab) return;
+      // The tab's own root snapshot when it has one, exactly as the
+      // surface reconstructs it; the live workspace root otherwise.
+      const root = appTab.rootPath && appTab.rootToken
+        ? {
+          token: appTab.rootToken,
+          path: appTab.rootPath,
+          paneId: fileScope?.paneId ?? "",
+          cwd: appTab.rootPath,
+          gitWorktree: false,
+          revision: "0",
+        }
+        : workspaceFiles.root;
+      if (root) void startDownloadFlow({ path: appTab.resource, kind: "file" }, root, "tabMenu");
+    }}
+    onMove={moveCombinedTab}
+    onNewTerminal={() => void runCommand("window.new")}
+    onPin={(tab) => pinOpenTab(tab.id)}
+    onTogglePinned={(tab) => toggleTabPin(tab, currentHostScope)}
+    onRenameTerminal={(tab, scope) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id, scope })}
+    onSelect={selectCombinedTab}
+    dragPayload={paneMoves.tabDragPayload}
+    dropWorkspace={hostState.canMutate && activeSession ? { hostProfileId: currentHostProfileId, sessionId: activeSession.id } : undefined}
+    platform={platform}
+    shortcuts={shortcuts}
+    stateGlyphs={appState.shell.agentStateGlyphs}
+    tabs={combinedTabs}
+  />;
+
   return <main
     className={[
       "shell",
       sidebarOpen ? "" : "sidebar-collapsed",
       panelOpen ? "panel-open" : "",
       platform === "mac" ? "platform-mac" : "platform-linux",
+      tabsInTitleBar ? "tabs-in-titlebar" : "",
     ].filter(Boolean).join(" ")}
     style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
   >
@@ -1494,6 +1539,7 @@ export function App() {
       sidebarFits={sidebarFits}
       unread={unread}
       update={availableUpdate ?? undefined}
+      tabs={tabsInTitleBar ? tabStrip : undefined}
       windowControls={windowControls}
       workspaceName={activeSession?.name}
     />
@@ -1564,6 +1610,7 @@ export function App() {
         onToggleShown={toggleHostShown}
         onSortMode={(mode) => updateShell({ agentSort: mode })}
         onWorkspaceCommand={(row, commandId) => void runCommand(commandId, { kind: "session", id: row.session.id, scope: row.scope })}
+        newWorkspace={tabsInTitleBar ? { enabled: canCreateWorkspace, onCreate: () => void runCommand("session.new") } : undefined}
         pinnedOnly={appState.shell.pinnedOnly}
         rows={sidebarRows}
         stateGlyphs={appState.shell.agentStateGlyphs}
@@ -1571,47 +1618,7 @@ export function App() {
         agentMoves={paneMoves.agentMoves}
       />}
       <section className="workspace" aria-label={activeSession ? `Workspace ${activeSession.name}` : "Workspace"}>
-        <TabStrip
-          activeKey={activeCombinedTabKey}
-          activePaneId={activePane?.id}
-          activeTerminalPaneCount={panes.length}
-          canMutate={hostState.canMutate && Boolean(activeSession)}
-          commandScope={currentHostScope}
-          onClose={closeCombinedTab}
-          onCloseCurrent={(paneId, scope) => void runCommand("window.close", { kind: "focusedSurface", paneId, scope })}
-          onCloseOthers={(tab, scope) => bulkCloseTabs(tabsToCloseOthers(combinedTabs, tab.key), scope)}
-          onCloseNonAgent={(scope) => bulkCloseTabs(tabsToCloseNonAgent(combinedTabs), scope, true)}
-          onCloseRight={(tab, scope) => bulkCloseTabs(tabsToCloseRight(combinedTabs, tab.key), scope)}
-          onDownloadTab={(tab) => {
-            const appTab = workspaceAppTabs.find((item) => item.id === tab.id);
-            if (!appTab) return;
-            // The tab's own root snapshot when it has one, exactly as the
-            // surface reconstructs it; the live workspace root otherwise.
-            const root = appTab.rootPath && appTab.rootToken
-              ? {
-                token: appTab.rootToken,
-                path: appTab.rootPath,
-                paneId: fileScope?.paneId ?? "",
-                cwd: appTab.rootPath,
-                gitWorktree: false,
-                revision: "0",
-              }
-              : workspaceFiles.root;
-            if (root) void startDownloadFlow({ path: appTab.resource, kind: "file" }, root, "tabMenu");
-          }}
-          onMove={moveCombinedTab}
-          onNewTerminal={() => void runCommand("window.new")}
-          onPin={(tab) => pinOpenTab(tab.id)}
-          onTogglePinned={(tab) => toggleTabPin(tab, currentHostScope)}
-          onRenameTerminal={(tab, scope) => void runCommand("window.rename", { kind: "terminalTab", id: tab.id, scope })}
-          onSelect={selectCombinedTab}
-          dragPayload={paneMoves.tabDragPayload}
-          dropWorkspace={hostState.canMutate && activeSession ? { hostProfileId: currentHostProfileId, sessionId: activeSession.id } : undefined}
-          platform={platform}
-          shortcuts={shortcuts}
-          stateGlyphs={appState.shell.agentStateGlyphs}
-          tabs={combinedTabs}
-        />
+        {!tabsInTitleBar && tabStrip}
         <div
           aria-label={activeCombinedTabKey ? undefined : "Workspace content"}
           aria-labelledby={activeCombinedTabKey ? workspaceTabDomId(activeCombinedTabKey) : undefined}
