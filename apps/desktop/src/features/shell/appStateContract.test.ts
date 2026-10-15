@@ -252,6 +252,9 @@ describe("reading state the previous build wrote", () => {
     expect(saved({}).shell.compactWorkspaces).toBe(false);
     expect(saved({ tabsInTitleBar: true }).shell.tabsInTitleBar).toBe(true);
     expect(saved({}).shell.tabsInTitleBar).toBe(false);
+    expect(saved({ uiScale: 1.2 }).shell.uiScale).toBe(1.2);
+    expect(saved({ uiScale: 7 }).shell.uiScale).toBe(1);
+    expect(saved({}).shell.uiScale).toBe(1);
   });
 
   it("restores focus-follows-mouse and leaves it off for saves without it", () => {

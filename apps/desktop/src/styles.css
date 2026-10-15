@@ -143,7 +143,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    the OS at their own size and a 28px bar clips them. `--bar-height` itself is
    shared with the tabstrip, the panel tabs and the editor toolbars, so the
    override is local to this bar. */
-.titlebar-overlay { --titlebar-height: 38px; padding-left: 78px; }
+/* Divided by the interface zoom: the traffic lights are drawn by the OS at a
+   fixed size, so the room kept for them must not grow or shrink with the page. */
+.titlebar-overlay { --titlebar-height: calc(38px / var(--ui-scale, 1)); padding-left: calc(78px / var(--ui-scale, 1)); }
 .titlebar-title {
   display: flex; align-items: center; gap: 7px; min-width: 0;
   margin-left: 6px;
@@ -197,7 +199,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   display: flex; align-items: center; gap: 2px; align-self: stretch;
   flex: 0 0 auto; width: var(--sidebar-width); min-width: max-content; padding: 0 6px;
 }
-.titlebar-overlay .titlebar-lead { padding-left: 78px; }
+.titlebar-overlay .titlebar-lead { padding-left: calc(78px / var(--ui-scale, 1)); }
 .sidebar-collapsed .titlebar-lead { width: auto; }
 .titlebar-lead .window-controls { margin: 0 8px 0 0; }
 .titlebar-tabs .tabstrip { flex: 1 1 auto; height: 100%; border-bottom: 0; }
@@ -753,7 +755,11 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    spending layout pixels. Keeping that line out of this shadow matters: the
    active state replaces the frame shadow with its focus ring, but must not
    make the split itself disappear. */
-.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); }
+/* `clip`, not `hidden`: a hidden overflow is still a scroll container, and when
+   focus returns to xterm's helper textarea before it has moved to the cursor's
+   new row, the browser scrolls the frame to reveal it, pushing the whole
+   terminal up. A zoom change does exactly that. Nothing here should scroll. */
+.pane-frame { position: absolute; overflow: clip; background: var(--term-bg); }
 .pane-frame.active { box-shadow: inset 0 0 0 var(--focus-ring) var(--accent); }
 .pane-frame.attention::after {
   content: ""; position: absolute; inset: var(--attention-inset);

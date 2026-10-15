@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import paletteCss from "@muxflow/client-core/palette.css?raw";
-import { applyTheme, currentTheme, onAppearanceChange, rememberedTheme, rememberTheme, resolvedTheme } from "./appearance";
+import { applyInterfaceScale, applyTheme, currentTheme, interfaceScale, onAppearanceChange, rememberedTheme, rememberTheme, resolvedTheme } from "./appearance";
 
 function block(selector: string): Map<string, string> {
   const start = paletteCss.indexOf(`${selector} {`);
@@ -53,5 +53,16 @@ describe("appearance", () => {
     const light = block(':root[data-theme="light"]');
     expect([...light.keys()].sort()).toEqual([...dark.keys()].sort());
     for (const [name, value] of light) expect(value, name).toMatch(/^#(?:[0-9a-f]{6}|[0-9a-f]{8})$/u);
+  });
+});
+
+describe("interface scale", () => {
+  it("reads back what was applied, and 100% before anything was", () => {
+    const root = document.createElement("html");
+    expect(interfaceScale(root)).toBe(1);
+    const storage = new Map<string, string>();
+    applyInterfaceScale(1.2, root, { setItem: (key, value) => storage.set(key, value) });
+    expect(interfaceScale(root)).toBe(1.2);
+    expect(storage.get("muxflow.uiScale")).toBe("1.2");
   });
 });

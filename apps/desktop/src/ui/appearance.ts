@@ -87,3 +87,29 @@ export function rememberedTheme(storage: Pick<Storage, "getItem"> | undefined = 
     return undefined;
   }
 }
+
+const SCALE_STORAGE_KEY = "muxflow.uiScale";
+
+/**
+ * Puts the interface zoom where the few lengths that must not zoom can divide
+ * by it, and where `public/theme.js` finds it before the next launch's first
+ * paint. The zoom itself is the backend's (`set_ui_scale`).
+ */
+export function applyInterfaceScale(
+  scale: number,
+  root: HTMLElement | undefined = globalThis.document?.documentElement,
+  storage: Pick<Storage, "setItem"> | undefined = globalThis.localStorage,
+): void {
+  root?.style.setProperty("--ui-scale", String(scale));
+  try {
+    storage?.setItem(SCALE_STORAGE_KEY, String(scale));
+  } catch {
+    // As with the theme: a startup nicety, never the source of truth.
+  }
+}
+
+/** The interface zoom on screen; 1 until one has been applied. */
+export function interfaceScale(root: HTMLElement | undefined = globalThis.document?.documentElement): number {
+  const scale = Number(root?.style.getPropertyValue("--ui-scale"));
+  return scale > 0 ? scale : 1;
+}

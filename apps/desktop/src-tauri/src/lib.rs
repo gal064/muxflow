@@ -194,6 +194,7 @@ pub fn run() {
             app.manage(connection::ProfileStore::load(profile_path)?);
             let app_state = app_state::AppStateStore::load(config_dir.join("app-state.json"));
             let theme = app_state.theme();
+            let ui_scale = app_state.ui_scale();
             app.manage(app_state);
             app.manage(incidents::IncidentJournal::new(app.path().app_log_dir()?));
             app.manage(connection::TerminalClients::default());
@@ -212,6 +213,7 @@ pub fn run() {
                 // the platform paints its default, which is dark on a dark OS. Painting
                 // the saved theme's background spares a light user that dark frame.
                 let _ = window.set_background_color(Some(window_background(theme, window)));
+                let _ = window.set_zoom(ui_scale);
                 macos_window::enable_native_full_screen(window)?;
                 // Cosmetic: a window that keeps GTK's bar is still a usable one,
                 // so a failure here must not stop the app from starting.
@@ -230,6 +232,7 @@ pub fn run() {
             app_state::load_app_state,
             app_state::save_app_state,
             app_state::reset_app_state,
+            app_state::set_ui_scale,
             connection::helper::probe_remote_helper,
             connection::helper::install_remote_helper,
             resolve_notification_route,

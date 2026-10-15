@@ -10,6 +10,8 @@ export type PanelSurface = "files" | "git" | "ports";
 
 /** Sidebar geometry, from the plan's token table (cmux). */
 export const SIDEBAR_MIN_WIDTH = 240;
+/** The interface sizes Settings offers, as zoom factors of the whole window. */
+export const UI_SCALES = [0.9, 1, 1.1, 1.2, 1.3] as const;
 /** Fraction of the window a dragged sidebar may not exceed. */
 export const SIDEBAR_MAX_WINDOW_FRACTION = 1 / 3;
 /** Right panel geometry; the same rules as the sidebar, from its own edge. */
@@ -127,6 +129,8 @@ export interface ShellState {
   terminalFontSize: number;
   /** Light, dark, or whichever the OS is using. */
   theme: ThemePreference;
+  /** Zoom of the whole interface, terminals included; 1 is 100%. */
+  uiScale: number;
   /** The host most recently picked in the New workspace dialog. */
   newWorkspaceHostProfileId?: string;
   /**
@@ -200,6 +204,7 @@ export const defaultShellState: ShellState = {
   terminalApplicationClipboard: true,
   terminalFontSize: 13,
   theme: "system",
+  uiScale: 1,
   newWorkspaceHostProfileId: undefined,
   defaultMarkdownView: "split",
 };
@@ -260,6 +265,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
         : defaultShellState.terminalApplicationClipboard,
       terminalFontSize: clampedTerminalFontSize(shell?.terminalFontSize),
       theme: isThemePreference(shell?.theme) ? shell.theme : defaultShellState.theme,
+      uiScale: UI_SCALES.find((scale) => scale === shell?.uiScale) ?? defaultShellState.uiScale,
       newWorkspaceHostProfileId: typeof shell?.newWorkspaceHostProfileId === "string" && shell.newWorkspaceHostProfileId.trim()
         ? shell.newWorkspaceHostProfileId
         : undefined,

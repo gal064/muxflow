@@ -157,6 +157,9 @@ pub struct ShellPreferences {
     /// default, which follows the OS.
     #[serde(default)]
     pub theme: Option<ThemePreference>,
+    /// `None` is a save written before the setting existed: 100%.
+    #[serde(default)]
+    pub ui_scale: Option<f64>,
     /// The host most recently picked in the New workspace dialog.
     #[serde(default)]
     pub new_workspace_host_profile_id: Option<String>,
@@ -284,6 +287,19 @@ pub struct AppStateStore {
 }
 
 impl AppStateStore {
+    /// The saved interface zoom, applied before the page loads so it never
+    /// lays out at 100% first.
+    pub fn ui_scale(&self) -> f64 {
+        // Only the sizes Settings offers, as the frontend reads the file: any
+        // other value would be applied here and then reset to 100% once it loads.
+        let scale = self.value.lock().unwrap().shell.ui_scale.unwrap_or(1.0);
+        if UI_SCALES.contains(&scale) {
+            scale
+        } else {
+            1.0
+        }
+    }
+
     /// The saved theme choice, for painting the window before the page loads.
     pub fn theme(&self) -> ThemePreference {
         self.value
@@ -516,6 +532,30 @@ fn validate_tmux_session_id(value: &str) -> Result<(), String> {
     }
 }
 
+/// What Settings offers; mirrors `UI_SCALES` in `features/shell/types.ts`.
+const UI_SCALES: [f64; 5] = [0.9, 1.0, 1.1, 1.2, 1.3];
+
+/// The zooms the interface may take: Settings offers 90% to 130%, and this
+/// leaves room around them without letting a bad value make the window unusable.
+fn valid_ui_scale(scale: f64) -> Result<f64, String> {
+    if (0.5..=2.0).contains(&scale) {
+        Ok(scale)
+    } else {
+        Err(format!(
+            "interface scale must be between 0.5 and 2, got {scale}"
+        ))
+    }
+}
+
+/// Zooms the whole page, terminals included, the way a browser's zoom does:
+/// every length scales together, so fixed-height rows never clip their text.
+#[tauri::command]
+pub fn set_ui_scale(window: tauri::WebviewWindow, scale: f64) -> Result<(), String> {
+    window
+        .set_zoom(valid_ui_scale(scale)?)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn load_app_state(store: State<'_, AppStateStore>) -> Result<PersistedAppState, String> {
     if let Some(error) = store.recovery_error.lock().unwrap().as_ref() {
@@ -625,6 +665,7 @@ mod tests {
                 terminal_application_clipboard: Some(false),
                 terminal_font_size: Some(13),
                 theme: Some(ThemePreference::Light),
+                ui_scale: Some(1.2),
                 new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
                 window_geometry: Some(WindowGeometry {
@@ -781,6 +822,7 @@ mod tests {
         assert_eq!(value.shell.agents_section_ratio, Some(0.42));
         assert_eq!(value.shell.terminal_font_size, Some(17));
         assert_eq!(value.shell.theme, Some(ThemePreference::Dark));
+        assert_eq!(value.shell.ui_scale, Some(1.1));
         assert_eq!(
             value.shell.new_workspace_host_profile_id.as_deref(),
             Some("ssh-remote-linux")
