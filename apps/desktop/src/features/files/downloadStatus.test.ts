@@ -44,6 +44,21 @@ describe("reconcileDownloadStatus", () => {
       .toEqual({ status: "File rename completed." });
   });
 
+  it("still announces the outcome when only routine chatter replaced the banner", () => {
+    // "Live" lands after every snapshot, so a download of any length finishes
+    // with it in the channel, while the queued toast is still on screen.
+    const active = { id: "download-1", path: "/repo/image.png", banner: "Download queued: /repo/image.png" };
+    for (const chatter of ["Live", "Topology changed; reconciling…", ""]) {
+      expect(reconcileDownloadStatus(chatter, active, [completed]))
+        .toEqual({
+          status: "Download complete: /tmp/image.png",
+          completion: { destination: "/tmp/image.png", message: "Download complete: /tmp/image.png" },
+        });
+      expect(reconcileDownloadStatus(chatter, active, [{ ...completed, state: "failed", outcome: "notPublished" }]))
+        .toEqual({ status: "Download failed: /repo/image.png" });
+    }
+  });
+
   it("does not let terminal history for the same source path complete a newer transfer", () => {
     const active = { id: "download-2", path: "/repo/image.png", banner: "Download running: /repo/image.png" };
     expect(reconcileDownloadStatus(active.banner, active, [completed]))
