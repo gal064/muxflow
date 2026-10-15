@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package tmux_agent.protocol.v1;
 
+import "automation.proto";
+
 message Envelope {
   uint32 protocol_major = 1;
   uint64 request_id = 3;
@@ -177,12 +179,16 @@ enum Operation {
   OPERATION_RESIZE_TERMINAL_WINDOW = 56;
   // Bounded filename search under the explicitly captured pane cwd.
   OPERATION_SEARCH_FILES = 57;
+  // Automations (automation.proto): list, save, delete, run now and schedule
+  // preview, with `Request.automation` / `Response.automation`. The desktop is
+  // the only caller.
+  OPERATION_AUTOMATION = 58;
   // The renderer's terminal foreground and background, as `#rrggbb` in
   // `terminal_foreground` / `terminal_background`. The host reports them to
   // programs that ask (OSC 10/11) instead of its dark default. Sent on
   // connect and on every theme change. tmux keeps one answer per pane, so the
   // host keeps one value for every connection: the last one any client sent.
-  OPERATION_SET_TERMINAL_COLORS = 58;
+  OPERATION_SET_TERMINAL_COLORS = 59;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -242,10 +248,12 @@ message Request {
   // this Voice controller was opened. Prevents an in-flight utterance from
   // reaching a reused pane ID after a live tmux-server replacement.
   string terminal_input_expected_server_identity = 23;
+  // OPERATION_AUTOMATION only.
+  AutomationRequest automation = 24;
   // SET_TERMINAL_COLORS only: `#rrggbb`.
-  string terminal_foreground = 24;
-  string terminal_background = 25;
-  // NEXT FREE FIELD = 26.
+  string terminal_foreground = 25;
+  string terminal_background = 26;
+  // NEXT FREE FIELD = 27.
 }
 
 message Response {
@@ -266,6 +274,8 @@ message Response {
   VoiceResponse voice = 13;
   // OPERATION_AGENT_DIAGNOSTICS only. Already sanitized and bounded by host.
   repeated string diagnostic_lines = 14;
+  // OPERATION_AUTOMATION only.
+  AutomationResponse automation = 15;
 }
 
 enum HookIngestDisposition {
@@ -330,6 +340,8 @@ enum EventKind {
   // A spoken agent reply, in `voice.reply`, pushed only to the connection that
   // registered a VOICE_SESSION for that agent. Nothing is kept on the host.
   EVENT_KIND_VOICE_REPLY = 21;
+  // Automations changed; sent only to connections that listed them.
+  EVENT_KIND_AUTOMATION = 22;
 }
 
 message HostEvent {
@@ -352,6 +364,8 @@ message HostEvent {
   uint64 topology_generation = 12;
   // VOICE_PROVISION and VOICE_REPLY payloads; unset on every other event.
   VoiceEvent voice = 13;
+  // EVENT_KIND_AUTOMATION only.
+  AutomationEvent automation = 14;
 }
 
 message Cancel {

@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Muxflow Automations Mocks</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a doc column of numbered mocks, each a framed slice of the Muxflow desktop (dark-only, like the app). */
+:root {
+  color-scheme: dark;
+  --page: #1f2228;
+  --chrome-bg: #282c34;
+  --chrome-raised: #2c313a;
+  --chrome-hairline: #313640;
+  --chrome-border: #3e4451;
+  --chrome-hover: #2f343e;
+  --chrome-selected: #353b45;
+  --ink: #c4c8c6;
+  --ink-strong: #ffffff;
+  --dim: #8f96a1;
+  --faint: #636b78;
+  --accent: #7aa6da;
+  --accent-ink: #282c34;
+  --accent-wash: rgba(122, 166, 218, 0.12);
+  --danger: #cc6566;
+  --danger-wash: rgba(204, 101, 102, 0.13);
+  --working: #f0c674;
+  --working-wash: rgba(240, 198, 116, 0.12);
+  --done: #b6bd68;
+  --done-wash: rgba(182, 189, 104, 0.13);
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --t-row: 13px;
+  --t-meta: 11px;
+  --t-label: 10px;
+}
+* { box-sizing: border-box; }
+body { background: var(--page); color: var(--ink); font-family: var(--font-sans); font-size: 14px; line-height: 1.5; }
+.doc { max-width: 1240px; margin: 0 auto; padding-inline: 20px; padding-block: 36px 64px; display: grid; gap: 44px; }
+header.intro { display: grid; gap: 10px; max-width: 760px; }
+h1 { margin: 0; font-size: 26px; font-weight: 600; color: var(--ink-strong); letter-spacing: -0.01em; text-wrap: balance; }
+h2 { margin: 0; font-size: 17px; font-weight: 600; color: var(--ink-strong); text-wrap: balance; }
+p { margin: 0; }
+.lede { color: var(--dim); max-width: 68ch; }
+.mock { display: grid; gap: 14px; }
+.mock-head { display: grid; gap: 4px; max-width: 760px; }
+.mock-head .num { font-family: var(--font-mono); font-size: var(--t-meta); color: var(--accent); letter-spacing: 0.08em; text-transform: uppercase; }
+.mock-head p { color: var(--dim); }
+.notes { display: grid; gap: 6px; padding-left: 18px; margin: 0; color: var(--dim); max-width: 80ch; }
+.notes b { color: var(--ink); font-weight: 500; }
+code, .mono { font-family: var(--font-mono); }
+.scroller { overflow-x: auto; border-radius: 10px; }
+
+/* ---------- app frame ---------- */
+.app { width: 1180px; height: 600px; display: grid; grid-template-columns: 228px 1fr 340px; grid-template-rows: 30px 1fr; background: var(--chrome-bg); border: 1px solid var(--chrome-border); border-radius: 10px; overflow: hidden; font-size: var(--t-row); }
+.titlebar { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding-inline: 12px; border-bottom: 1px solid var(--chrome-hairline); color: var(--ink); font-size: 12px; }
+.titlebar .sp { flex: 1; }
+.titlebar .ic { color: var(--faint); font-family: var(--font-mono); }
+.sidebar { border-right: 1px solid var(--chrome-hairline); padding: 10px 6px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.side-label { display: flex; justify-content: space-between; padding: 2px 8px 6px; font-size: var(--t-label); letter-spacing: 0.12em; color: var(--faint); text-transform: uppercase; }
+.side-label span:last-child { color: var(--accent); letter-spacing: 0.02em; text-transform: none; }
+.ws { border-radius: 6px; padding: 6px 8px; display: grid; gap: 1px; min-width: 0; }
+.ws.active { background: var(--accent); color: var(--accent-ink); }
+.ws .row { display: flex; align-items: center; gap: 8px; }
+.ws .idx { font-family: var(--font-mono); font-size: var(--t-meta); color: var(--faint); width: 10px; }
+.ws.active .idx { color: var(--accent-ink); }
+.ws .name { font-weight: 600; flex: 1; }
+.ws .sub { padding-left: 18px; font-size: var(--t-meta); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ws.active .sub { color: rgba(40,44,52,.82); }
+.badge { font-family: var(--font-mono); font-size: 9.5px; min-width: 15px; height: 15px; border-radius: 8px; display: inline-grid; place-items: center; background: var(--accent); color: var(--accent-ink); padding: 0 4px; }
+.ws.active .badge { background: var(--accent-ink); color: var(--accent); }
+.ws .auto-mark { font-family: var(--font-mono); font-size: 9.5px; border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; opacity: .75; }
+
+.main { display: grid; grid-template-rows: 30px 1fr; min-width: 0; }
+.tabs { display: flex; align-items: stretch; gap: 2px; padding-inline: 8px; border-bottom: 1px solid var(--chrome-hairline); font-family: var(--font-mono); font-size: var(--t-meta); }
+.tab { display: flex; align-items: center; gap: 6px; padding-inline: 10px; color: var(--faint); white-space: nowrap; position: relative; }
+.tab.active { color: var(--ink); }
+.tab.active::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: 0; height: 2px; background: var(--accent); border-radius: 1px 1px 0 0; }
+.tab .n { color: var(--faint); }
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.working { background: var(--working); }
+.dot.done { background: var(--done); }
+.dot.attn { background: var(--danger); }
+.dot.idle { background: var(--faint); }
+.term { margin: 6px; border: 1px solid var(--accent); border-radius: 6px; padding: 12px 14px; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; color: var(--ink); overflow: hidden; display: grid; align-content: start; gap: 8px; min-width: 0; }
+.term .prompt { color: var(--dim); }
+.term .user { background: #2f343e; padding: 6px 8px; color: var(--ink-strong); white-space: pre-wrap; }
+.term .faint { color: var(--faint); }
+.term .ok { color: var(--done); }
+.term .warn { color: var(--working); }
+.term .wrap { white-space: pre-wrap; word-break: break-word; }
+
+/* ---------- right panel ---------- */
+.panel { border-left: 1px solid var(--chrome-hairline); display: grid; grid-template-rows: auto auto 1fr; min-width: 0; min-height: 0; }
+.seg { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--chrome-hairline); font-size: 12px; }
+.seg span { padding: 6px 9px; color: var(--faint); position: relative; }
+.seg span.on { color: var(--ink-strong); }
+.seg span.on::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: -1px; height: 2px; background: var(--accent); }
+.panel-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 8px; }
+.panel-head .title { font-weight: 600; color: var(--ink-strong); flex: 1; }
+.host-chip { font-family: var(--font-mono); font-size: var(--t-meta); color: var(--dim); border: 1px solid var(--chrome-border); border-radius: 4px; padding: 1px 6px; }
+.btn { font: inherit; font-size: 12px; color: var(--ink); background: var(--chrome-raised); border: 1px solid var(--chrome-border); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.btn:hover { background: var(--chrome-hover); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--dim); }
+.btn.danger { background: transparent; color: var(--danger); border-color: transparent; }
+.btn:focus-visible, .seg-ctl button:focus-visible, input:focus-visible, textarea:focus-visible, .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.list { overflow: auto; padding: 0 6px 10px; display: grid; align-content: start; gap: 2px; }
+.auto { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; padding: 9px 8px; border-radius: 6px; }
+.auto:hover, .auto.sel { background: var(--chrome-selected); }
+.auto .name { font-weight: 600; color: var(--ink-strong); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.auto .meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: var(--t-meta); color: var(--dim); }
+.auto .meta .mono { color: var(--faint); }
+.auto.paused .name { color: var(--dim); }
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: var(--t-meta); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+.chip.working { color: var(--working); background: var(--working-wash); }
+.chip.done { color: var(--done); background: var(--done-wash); }
+.chip.attn { color: var(--danger); background: var(--danger-wash); }
+.chip.skip { color: var(--dim); background: var(--chrome-raised); }
+.chip.paused { color: var(--dim); background: var(--chrome-raised); }
+.row-actions { display: flex; align-items: center; gap: 6px; }
+.switch { width: 26px; height: 15px; border-radius: 8px; background: var(--chrome-border); position: relative; flex: none; border: 0; padding: 0; cursor: pointer; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: var(--dim); transition: left .15s; }
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"]::after { left: 13px; background: var(--accent-ink); }
+.icon-btn { font-family: var(--font-mono); font-size: 11px; color: var(--dim); border: 1px solid var(--chrome-border); border-radius: 4px; padding: 0 6px; background: transparent; cursor: pointer; }
+
+/* ---------- detail panel ---------- */
+.detail { overflow: auto; padding: 0 12px 12px; display: grid; align-content: start; gap: 12px; font-size: 12px; }
+.back { color: var(--accent); font-size: 12px; }
+.kv { display: grid; grid-template-columns: 92px 1fr; gap: 5px 10px; }
+.kv dt { color: var(--faint); }
+.kv dd { margin: 0; color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
+.prompt-box { background: var(--chrome-raised); border: 1px solid var(--chrome-hairline); border-radius: 6px; padding: 8px 10px; color: var(--ink); white-space: pre-wrap; }
+.sec { font-size: var(--t-label); letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); }
+.runs { display: grid; gap: 1px; }
+.run { display: grid; grid-template-columns: 34px 1fr auto; gap: 2px 8px; padding: 7px 6px; border-radius: 6px; align-items: center; }
+.run:hover { background: var(--chrome-hover); }
+.run .rn { font-family: var(--font-mono); color: var(--faint); font-variant-numeric: tabular-nums; }
+.run .when { color: var(--ink); font-variant-numeric: tabular-nums; }
+.run .msg { grid-column: 2 / -1; color: var(--dim); font-size: var(--t-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run .link { color: var(--accent); font-size: var(--t-meta); }
+.run .gone { color: var(--faint); font-size: var(--t-meta); }
+
+/* ---------- dialog ---------- */
+.stage { width: 1180px; padding: 36px 0; background: rgba(20,22,26,.9); border: 1px solid var(--chrome-border); border-radius: 10px; display: grid; place-items: center; }
+.dialog { width: 640px; background: var(--chrome-bg); border: 1px solid var(--chrome-border); border-radius: 10px; box-shadow: 0 18px 50px rgba(0,0,0,.45); font-size: var(--t-row); }
+.dialog-head { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--chrome-hairline); }
+.dialog-head .title { font-weight: 600; font-size: 14px; color: var(--ink-strong); flex: 1; }
+.form { padding: 14px 18px; display: grid; gap: 14px; }
+.field { display: grid; gap: 5px; }
+.field > label, .field > .lbl { font-size: 12px; color: var(--ink); font-weight: 500; }
+.hint { font-size: var(--t-meta); color: var(--faint); }
+input[type="text"], textarea { width: 100%; font: inherit; color: var(--ink-strong); background: var(--chrome-raised); border: 1px solid var(--chrome-border); border-radius: 6px; padding: 6px 9px; }
+textarea { min-height: 84px; resize: vertical; line-height: 1.5; }
+input.mono, textarea.mono { font-family: var(--font-mono); font-size: 12px; }
+input[readonly] { color: var(--dim); background: var(--chrome-bg); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.seg-ctl { display: inline-flex; border: 1px solid var(--chrome-border); border-radius: 6px; overflow: hidden; width: fit-content; }
+.seg-ctl button { font: inherit; font-size: 12px; padding: 5px 12px; background: transparent; color: var(--dim); border: 0; border-right: 1px solid var(--chrome-border); cursor: pointer; }
+.seg-ctl button:last-child { border-right: 0; }
+.seg-ctl button[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); }
+.cron-out { display: grid; gap: 2px; font-size: var(--t-meta); color: var(--dim); }
+.cron-out b { color: var(--ink); font-weight: 500; }
+.preview { background: #21252b; border: 1px solid var(--chrome-hairline); border-radius: 6px; padding: 8px 10px; font-family: var(--font-mono); font-size: 11.5px; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+.preview .k { color: var(--faint); }
+.inline { display: flex; align-items: center; gap: 8px; }
+.num-in { width: 64px !important; text-align: right; font-variant-numeric: tabular-nums; }
+.dialog-foot { display: flex; align-items: center; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--chrome-hairline); }
+.dialog-foot .sp { flex: 1; }
+
+/* ---------- small states ---------- */
+.states { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.state-card { background: var(--chrome-bg); border: 1px solid var(--chrome-border); border-radius: 10px; overflow: hidden; font-size: 12px; display: grid; align-content: start; }
+.state-card .cap { padding: 8px 12px; border-bottom: 1px solid var(--chrome-hairline); font-size: var(--t-meta); color: var(--faint); letter-spacing: .06em; text-transform: uppercase; }
+.state-body { padding: 14px 12px; display: grid; gap: 10px; }
+.banner { border: 1px solid rgba(204,101,102,.45); background: var(--danger-wash); color: var(--ink); border-radius: 6px; padding: 8px 10px; display: grid; gap: 4px; }
+.banner b { color: var(--danger); font-weight: 600; }
+.empty { text-align: center; color: var(--dim); display: grid; gap: 8px; justify-items: center; padding-block: 16px; }
+.empty .big { color: var(--ink-strong); font-weight: 600; font-size: 13px; }
+.mobile-note { color: var(--dim); }
+@media (max-width: 900px) { .states { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .switch::after { transition: none; } }
+</style>
+
+</head>
+<body>
+<div class="doc">
+  <header class="intro">
+    <h1>Muxflow Automations Mocks</h1>
+    <p class="lede">Desktop mocks for scheduled agent runs. The helper on each host owns the automations and runs them. Every run opens a new tab in a single <code>automation</code> workspace on that host. The examples below are made up.</p>
+  </header>
+
+  <!-- 1 -->
+  <section class="mock" aria-labelledby="m1">
+    <div class="mock-head">
+      <span class="num">Mock 1 · Overview</span>
+      <h2 id="m1">Automations panel next to Files, Git and Ports</h2>
+      <p>The automation workspace is an ordinary tmux session, so its run tabs, agent status and notifications use the existing UI. The new part is the panel on the right.</p>
+    </div>
+    <div class="scroller">
+      <div class="app" role="img" aria-label="Muxflow window with the automation workspace open and the Automations panel on the right">
+        <div class="titlebar"><span class="ic">▤ ‹ ›</span><span>automation</span><span class="sp"></span><span class="ic">⊕ ▥</span></div>
+        <aside class="sidebar">
+          <div class="side-label"><span>Workspaces</span><span>all</span></div>
+          <div class="ws"><div class="row"><span class="idx">1</span><span class="name">docs</span></div><div class="sub">Agent hooks documentation · done</div></div>
+          <div class="ws"><div class="row"><span class="idx">2</span><span class="name">muxflow</span><span class="badge">1</span></div><div class="sub">Screenshots section in setup.md · blocked</div></div>
+          <div class="ws active"><div class="row"><span class="idx">3</span><span class="name">automation</span><span class="auto-mark">auto</span><span class="badge">1</span></div><div class="sub">Review open PRs #31 · working</div><div class="sub">Fix failing CI #12 · done</div></div>
+        </aside>
+        <div class="main">
+          <div class="tabs">
+            <span class="tab"><span class="n">1</span>Fix failing CI #12<span class="dot done"></span></span>
+            <span class="tab"><span class="n">2</span>Review open PRs #30<span class="dot done"></span></span>
+            <span class="tab active"><span class="n">3</span>Review open PRs #31<span class="dot working"></span></span>
+          </div>
+          <div class="term">
+            <div class="prompt">~/dev/muxflow $ claude --dangerously-skip-permissions 'Review every open PR that has no review from me…'</div>
+            <div class="faint">Claude Code · bypass permissions on · ~/dev/muxflow</div>
+            <div class="user">Review every open PR that has no review from me. Leave inline comments for real bugs only. If there is nothing to review, say so and stop.</div>
+            <div class="wrap">● I'll list open PRs that are waiting for a review.</div>
+            <div class="wrap faint">  Bash(gh pr list --search "review-requested:@me" --json number,title)</div>
+            <div class="wrap">  ⎿ #41 Resume fresh SSH master on reconnect<br>     #43 Markdown live editor</div>
+            <div class="wrap">● Starting with #41. Reading the diff.</div>
+            <div class="warn">✻ Reviewing… (6m 12s)</div>
+          </div>
+        </div>
+        <aside class="panel">
+          <div class="seg"><span>Files</span><span>Git</span><span>Ports</span><span class="on">Automations</span></div>
+          <div class="panel-head"><span class="title">Automations</span><span class="host-chip">B · devbox</span><button class="btn primary" type="button">New</button></div>
+          <div class="list">
+            <div class="auto sel">
+              <span class="name">Review open PRs</span>
+              <span class="row-actions"><button class="icon-btn" type="button">Run now</button><button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enabled"></button></span>
+              <div class="meta"><span class="chip working"><span class="dot working"></span>#31 working · 20m</span><span>Every hour · next 15:00</span><span class="mono">claude</span></div>
+            </div>
+            <div class="auto">
+              <span class="name">Fix failing CI</span>
+              <span class="row-actions"><button class="icon-btn" type="button">Run now</button><button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enabled"></button></span>
+              <div class="meta"><span class="chip done">#12 done · 09:00</span><span>Weekdays 09:00 · next Wed 09:00</span><span class="mono">codex</span></div>
+            </div>
+            <div class="auto">
+              <span class="name">Nightly docs sweep</span>
+              <span class="row-actions"><button class="icon-btn" type="button">Run now</button><button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enabled"></button></span>
+              <div class="meta"><span class="chip attn">#7 needs attention</span><span>Daily 02:00 · next 02:00</span><span class="mono">claude</span></div>
+            </div>
+            <div class="auto paused">
+              <span class="name">Dependency audit</span>
+              <span class="row-actions"><button class="icon-btn" type="button">Run now</button><button class="switch" type="button" role="switch" aria-checked="false" aria-label="Enabled"></button></span>
+              <div class="meta"><span class="chip paused">Paused</span><span>Mondays 07:30</span><span class="mono">cx --print</span></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>Host-scoped like Ports.</b> The list belongs to the host chosen by the chip. With several hosts shown, the chip switches between them.</li>
+      <li><b>Run now</b> starts a run immediately. It skips the overlap check, and the run is still logged.</li>
+      <li><b>Toggle</b> pauses or resumes the automation. A paused automation keeps its tabs and history.</li>
+    </ul>
+  </section>
+
+  <!-- 2 -->
+  <section class="mock" aria-labelledby="m2">
+    <div class="mock-head">
+      <span class="num">Mock 2 · Editor</span>
+      <h2 id="m2">New or edit automation</h2>
+      <p>Pick Claude Code, Codex or Custom command and the dialog updates. The preview shows exactly what will be typed into the new tab.</p>
+    </div>
+    <div class="scroller">
+      <div class="stage">
+        <form class="dialog" id="editor" onsubmit="event.preventDefault()">
+          <div class="dialog-head"><span class="title">Edit automation</span><span class="host-chip">B · devbox</span></div>
+          <div class="form">
+            <div class="field"><label for="f-name">Name</label><input id="f-name" type="text" value="Fix failing CI"></div>
+            <div class="field">
+              <span class="lbl" id="agent-lbl">Runs</span>
+              <div class="seg-ctl" role="group" aria-labelledby="agent-lbl">
+                <button type="button" data-agent="claude" aria-pressed="false">Claude Code</button>
+                <button type="button" data-agent="codex" aria-pressed="true">Codex</button>
+                <button type="button" data-agent="custom" aria-pressed="false">Custom command</button>
+              </div>
+            </div>
+            <div class="field">
+              <label for="f-cmd">Command</label>
+              <input id="f-cmd" class="mono" type="text" readonly value="codex --dangerously-bypass-approvals-and-sandbox">
+              <span class="hint" id="cmd-hint">Default Codex command, fully unattended. The prompt is added at the end.</span>
+            </div>
+            <div class="field">
+              <label for="f-prompt">Prompt</label>
+              <textarea id="f-prompt">Check the latest CI run on main. If it failed, find the cause, fix it on a new branch and open a PR. If CI is green, say so and stop.</textarea>
+            </div>
+            <div class="two">
+              <div class="field">
+                <label for="f-cwd">Working directory</label>
+                <input id="f-cwd" class="mono" type="text" value="~/dev/muxflow">
+                <span class="hint">On devbox. Checked when you save.</span>
+              </div>
+              <div class="field">
+                <label for="f-cron">Schedule (cron)</label>
+                <input id="f-cron" class="mono" type="text" value="0 9 * * 1-5">
+                <div class="cron-out"><b>Weekdays at 09:00, host time (UTC+3)</b><span>Next: Wed 14 Oct 09:00 · Thu 15 Oct 09:00 · Fri 16 Oct 09:00</span></div>
+              </div>
+            </div>
+            <div class="two">
+              <div class="field">
+                <span class="lbl">Keep tabs</span>
+                <div class="inline"><input class="num-in mono" type="text" value="5" aria-label="Number of tabs to keep"><span class="hint">Newest runs stay open. Older tabs close once their run is done.</span></div>
+              </div>
+              <div class="field">
+                <span class="lbl">Overlap</span>
+                <div class="inline"><span class="hint">Skip a run while the last one is still working, for up to</span><input class="num-in mono" type="text" value="2h" aria-label="Maximum time a run blocks the next one"></div>
+              </div>
+            </div>
+            <div class="field">
+              <span class="lbl">What runs</span>
+              <div class="preview" id="preview"></div>
+            </div>
+          </div>
+          <div class="dialog-foot">
+            <button class="btn danger" type="button">Delete</button>
+            <span class="sp"></span>
+            <button class="btn ghost" type="button">Cancel</button>
+            <button class="btn" type="button">Save and run now</button>
+            <button class="btn primary" type="submit">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>Cron only</b>, in the host's local time, with a plain-English reading and the next three runs below it. There are no presets or time zones.</li>
+      <li><b>Custom command</b> is used exactly as typed. Muxflow only adds the quoted prompt at the end, so <code>cx --print</code> becomes <code>cx --print '…'</code>. Making that command work is up to you.</li>
+      <li>The command is typed into an interactive shell in the new tab, so aliases and shell functions like <code>cx</code> work.</li>
+    </ul>
+  </section>
+
+  <!-- 3 -->
+  <section class="mock" aria-labelledby="m3">
+    <div class="mock-head">
+      <span class="num">Mock 3 · Detail and history</span>
+      <h2 id="m3">One automation, its runs, and their tabs</h2>
+      <p>Clicking a row opens it in the same panel. Each run links to its tab while that tab is still open.</p>
+    </div>
+    <div class="scroller">
+      <div class="app" style="grid-template-columns: 228px 1fr 380px;" role="img" aria-label="Automation detail with run history">
+        <div class="titlebar"><span class="ic">▤ ‹ ›</span><span>automation</span><span class="sp"></span><span class="ic">⊕ ▥</span></div>
+        <aside class="sidebar">
+          <div class="side-label"><span>Workspaces</span><span>all</span></div>
+          <div class="ws"><div class="row"><span class="idx">1</span><span class="name">docs</span></div><div class="sub">Agent hooks documentation · done</div></div>
+          <div class="ws"><div class="row"><span class="idx">2</span><span class="name">muxflow</span></div><div class="sub">Screenshots section in setup.md · done</div></div>
+          <div class="ws active"><div class="row"><span class="idx">3</span><span class="name">automation</span><span class="auto-mark">auto</span></div><div class="sub">Review open PRs #31 · working</div></div>
+        </aside>
+        <div class="main">
+          <div class="tabs">
+            <span class="tab"><span class="n">1</span>Review open PRs #27<span class="dot done"></span></span>
+            <span class="tab"><span class="n">2</span>Review open PRs #29<span class="dot attn"></span></span>
+            <span class="tab"><span class="n">3</span>Review open PRs #30<span class="dot done"></span></span>
+            <span class="tab active"><span class="n">4</span>Review open PRs #31<span class="dot working"></span></span>
+          </div>
+          <div class="term">
+            <div class="wrap">● #43 looks fine. One real issue in LiveMarkdownEditor.tsx: the save handler ignores a rejected write.</div>
+            <div class="wrap faint">  Bash(gh pr review 43 --comment --body-file /tmp/review-43.md)</div>
+            <div class="warn">✻ Posting review… (19m 48s)</div>
+          </div>
+        </div>
+        <aside class="panel">
+          <div class="seg"><span>Files</span><span>Git</span><span>Ports</span><span class="on">Automations</span></div>
+          <div class="panel-head"><span class="back">‹ All</span><span class="title">Review open PRs</span><button class="btn" type="button">Edit</button><button class="btn" type="button">Run now</button></div>
+          <div class="detail">
+            <dl class="kv">
+              <dt>Schedule</dt><dd><span class="mono">0 * * * *</span> · every hour · next 15:00</dd>
+              <dt>Runs</dt><dd class="mono">claude --dangerously-skip-permissions</dd>
+              <dt>Directory</dt><dd class="mono">~/dev/muxflow</dd>
+              <dt>Tabs</dt><dd>Keep 5 · overlap limit 2h</dd>
+            </dl>
+            <div class="prompt-box">Review every open PR that has no review from me. Leave inline comments for real bugs only. If there is nothing to review, say so and stop.</div>
+            <div class="sec">Runs</div>
+            <div class="runs">
+              <div class="run"><span class="rn">#31</span><span class="when">Today 14:00 · 20m</span><span class="chip working">working</span><span class="msg">Running now</span><span class="link">Open tab</span></div>
+              <div class="run"><span class="rn">#30</span><span class="when">Today 13:00 · 14m</span><span class="chip done">done</span><span class="msg">Reviewed #41: no blocking issues. Commented on one race in reconnect.</span><span class="link">Open tab</span></div>
+              <div class="run"><span class="rn">#29</span><span class="when">Today 12:00 · 2m</span><span class="chip attn">needs attention</span><span class="msg">Waiting at a trust prompt in a new directory</span><span class="link">Open tab</span></div>
+              <div class="run"><span class="rn">#28</span><span class="when">Today 11:00</span><span class="chip skip">skipped</span><span class="msg">#27 was still working</span><span class="gone">no tab</span></div>
+              <div class="run"><span class="rn">#27</span><span class="when">Today 10:00 · 1h 22m</span><span class="chip done">done</span><span class="msg">Reviewed 3 PRs, left 4 comments.</span><span class="link">Open tab</span></div>
+              <div class="run"><span class="rn">#26</span><span class="when">Today 09:00 · 6m</span><span class="chip done">done</span><span class="msg">Nothing to review.</span><span class="gone">tab closed</span></div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>Status</b> comes from the existing agent hooks on the run's pane: working, done or needs attention. The last line is the agent's final message, which the Stop hook already records for voice replies.</li>
+      <li><b>Skipped</b> means the previous run was still working when this one was due. It has no tab.</li>
+      <li><b>Tab closed</b> means the run fell outside the newest five. Its history stays in the list after the tab is gone.</li>
+    </ul>
+  </section>
+
+  <!-- 4 -->
+  <section class="mock" aria-labelledby="m4">
+    <div class="mock-head">
+      <span class="num">Mock 4 · Edge states</span>
+      <h2 id="m4">Empty, bad JSON, and helper offline</h2>
+      <p>The JSON file is the source of truth, and an agent may edit it by hand. So the panel has to say clearly when the file can't be read.</p>
+    </div>
+    <div class="states">
+      <div class="state-card">
+        <div class="cap">No automations yet</div>
+        <div class="state-body">
+          <div class="empty">
+            <span class="big">No automations on devbox</span>
+            <span>Run an agent on a cron schedule. Each run opens a new tab in the automation workspace.</span>
+            <button class="btn primary" type="button">New automation</button>
+            <span class="hint mono">~/.local/state/muxflow/automations.json</span>
+          </div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="cap">automations.json has an error</div>
+        <div class="state-body">
+          <div class="banner"><b>automations.json can't be read</b><span>Line 14: expected <code>,</code> or <code>}</code>. The last version that loaded is still running. Fix the file, or save from here to replace it.</span></div>
+          <div class="auto" style="padding-inline:0"><span class="name">Review open PRs</span><span class="chip working">#31 working</span><div class="meta"><span>Every hour · next 15:00</span></div></div>
+        </div>
+      </div>
+      <div class="state-card">
+        <div class="cap">Host disconnected</div>
+        <div class="state-body">
+          <div class="banner" style="border-color: var(--chrome-border); background: var(--chrome-raised);"><b style="color: var(--ink)">devbox is disconnected</b><span>The helper keeps running automations while the desktop is closed. They stop if the host reboots, until the next time you connect.</span></div>
+          <p class="mobile-note">On mobile, the automation workspace and its tabs show up like any other workspace. There's no editing on mobile.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  var cmds = {
+    claude: { value: "claude --dangerously-skip-permissions", ro: true, hint: "Default Claude Code command, fully unattended. The prompt is added at the end." },
+    codex: { value: "codex --dangerously-bypass-approvals-and-sandbox", ro: true, hint: "Default Codex command, fully unattended. The prompt is added at the end." },
+    custom: { value: "cx --print", ro: false, hint: "Used exactly as typed. Muxflow adds the quoted prompt at the end." }
+  };
+  var form = document.getElementById("editor");
+  var cmd = document.getElementById("f-cmd");
+  var hint = document.getElementById("cmd-hint");
+  var prompt = document.getElementById("f-prompt");
+  var cwd = document.getElementById("f-cwd");
+  var name = document.getElementById("f-name");
+  var out = document.getElementById("preview");
+  function quote(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; }
+  function short(s) { return s.length > 90 ? s.slice(0, 88) + "…" : s; }
+  function render() {
+    out.textContent = "";
+    var lines = [
+      ["workspace ", "automation (created if missing)"],
+      ["new tab   ", (name.value || "Untitled") + " #13"],
+      ["in        ", cwd.value],
+      ["types     ", cmd.value + " " + quote(short(prompt.value))]
+    ];
+    lines.forEach(function (l, i) {
+      var k = document.createElement("span"); k.className = "k"; k.textContent = l[0];
+      out.appendChild(k); out.appendChild(document.createTextNode(l[1] + (i < lines.length - 1 ? "\n" : "")));
+    });
+  }
+  form.querySelectorAll("[data-agent]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      form.querySelectorAll("[data-agent]").forEach(function (o) { o.setAttribute("aria-pressed", String(o === b)); });
+      var c = cmds[b.dataset.agent];
+      cmd.value = c.value; cmd.readOnly = c.ro; hint.textContent = c.hint;
+      render();
+    });
+  });
+  [cmd, prompt, cwd, name].forEach(function (el) { el.addEventListener("input", render); });
+  document.querySelectorAll(".switch").forEach(function (s) {
+    s.addEventListener("click", function () { s.setAttribute("aria-checked", String(s.getAttribute("aria-checked") !== "true")); });
+  });
+  render();
+})();
+</script>
+</body>
+</html>

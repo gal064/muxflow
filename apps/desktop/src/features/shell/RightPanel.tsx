@@ -7,6 +7,8 @@ interface RightPanelProps {
   files: ReactNode;
   git: ReactNode;
   ports: ReactNode;
+  /** Enabled panel extensions, after the built-in segments. */
+  extensions?: readonly { id: string; label: string; body: ReactNode }[];
   onSurface(surface: PanelSurface): void;
   /** Current width in CSS pixels, already clamped against the window. */
   width: number;
@@ -15,7 +17,7 @@ interface RightPanelProps {
   onWidth(width: number): void;
 }
 
-const SURFACES: readonly { id: PanelSurface; label: string }[] = [
+const BUILT_IN_SURFACES: readonly { id: PanelSurface; label: string }[] = [
   { id: "files", label: "Files" },
   { id: "git", label: "Git" },
   { id: "ports", label: "Ports" },
@@ -33,15 +35,23 @@ const SURFACES: readonly { id: PanelSurface; label: string }[] = [
 export function RightPanel(props: RightPanelProps) {
   const container = useRef<HTMLElement>(null);
   const [displayedWidth, startWidthDrag] = useTransientDrag(props.width, props.onWidth);
+  const extensions = props.extensions ?? [];
+  const SURFACES = [...BUILT_IN_SURFACES, ...extensions];
+  // A surface that is not showable, such as an extension just turned off, is Files.
+  const surface = SURFACES.some((candidate) => candidate.id === props.surface) ? props.surface : "files";
+  const body = surface === "files" ? props.files
+    : surface === "git" ? props.git
+      : surface === "ports" ? props.ports
+        : extensions.find((extension) => extension.id === surface)?.body;
 
   const selectRelative = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
-    const index = SURFACES.findIndex((surface) => surface.id === props.surface);
+    const index = SURFACES.findIndex((candidate) => candidate.id === surface);
     const step = event.key === "ArrowRight" ? 1 : SURFACES.length - 1;
-    const surface = SURFACES[(index + step) % SURFACES.length].id;
-    props.onSurface(surface);
-    window.requestAnimationFrame(() => document.getElementById(panelTabId(surface))?.focus());
+    const next = SURFACES[(index + step) % SURFACES.length].id;
+    props.onSurface(next);
+    window.requestAnimationFrame(() => document.getElementById(panelTabId(next))?.focus());
   };
 
   return <aside
@@ -51,26 +61,26 @@ export function RightPanel(props: RightPanelProps) {
     style={{ "--panel-width": `${displayedWidth}px` } as CSSProperties}
   >
     <div aria-label="Panel surface" className="panel-tabs" role="tablist">
-      {SURFACES.map((surface) => <button
-        aria-controls={panelPanelId(surface.id)}
-        aria-selected={props.surface === surface.id}
-        className={props.surface === surface.id ? "panel-tab active" : "panel-tab"}
-        id={panelTabId(surface.id)}
-        key={surface.id}
-        onClick={() => props.onSurface(surface.id)}
+      {SURFACES.map((candidate) => <button
+        aria-controls={panelPanelId(candidate.id)}
+        aria-selected={surface === candidate.id}
+        className={surface === candidate.id ? "panel-tab active" : "panel-tab"}
+        id={panelTabId(candidate.id)}
+        key={candidate.id}
+        onClick={() => props.onSurface(candidate.id)}
         onKeyDown={selectRelative}
         role="tab"
-        tabIndex={props.surface === surface.id ? 0 : -1}
+        tabIndex={surface === candidate.id ? 0 : -1}
         type="button"
-      >{surface.label}</button>)}
+      >{candidate.label}</button>)}
     </div>
     <div
-      aria-labelledby={panelTabId(props.surface)}
+      aria-labelledby={panelTabId(surface)}
       className="panel-body"
-      id={panelPanelId(props.surface)}
+      id={panelPanelId(surface)}
       role="tabpanel"
       tabIndex={0}
-    >{props.surface === "files" ? props.files : props.surface === "git" ? props.git : props.ports}</div>
+    >{body}</div>
 
     {/* The panel's own width, dragged from its left edge — so ArrowLeft grows
         it and ArrowRight shrinks it, the mirror of the sidebar's handle. The

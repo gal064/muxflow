@@ -70,6 +70,8 @@ export type TerminalEvent = SequencedTerminalEvent & (
   | { kind: "fileService"; scope: string; event: WireFileEvent }
   | { kind: "gitService"; scope: string; event: WireGitEvent }
   | { kind: "agentService"; scope: string; event?: WireAgentEvent; snapshot?: WireAgentSnapshot }
+  /** The host's automations changed; whoever shows them lists again. */
+  | { kind: "automationChanged" }
 );
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -247,6 +249,9 @@ export function decodeTerminalEvent(buffer: ArrayBuffer, measurements?: Operatio
         sequence,
       };
     }
+    case 19:
+      requireHostSequence(sequence, "automation event");
+      return { kind: "automationChanged", sequence };
     default: throw new Error(`unknown terminal frame kind ${frame[0]}`);
   }
 }

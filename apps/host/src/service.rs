@@ -30,6 +30,7 @@ use git::GitService;
 mod terminal;
 use terminal::TerminalClients;
 use terminal::{OUTPUT_WINDOW_BYTES, OUTPUT_WINDOW_RECORDS, OutputCharge, OutputCredit};
+pub(crate) mod plugins;
 mod tmux_actions;
 mod tmux_config;
 pub(crate) mod voice;
