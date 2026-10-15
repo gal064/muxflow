@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DockDropZones, dockFractionAt, dockSideAt } from "./WorkspaceDock";
 import { finishInternalPathDrag, writeInternalPathDrag } from "../features/terminal/internalPathDrag";
 import { registerNativeDragDropTarget } from "../features/terminal/nativeDragDropCoordinator";
+import * as appearance from "../ui/appearance";
 
 const nativeDrag = vi.hoisted(() => ({ handler: undefined as ((event: { payload: Record<string, unknown> }) => void) | undefined }));
 vi.mock("@tauri-apps/api/webview", () => ({
@@ -45,6 +46,7 @@ async function mount() {
 afterEach(() => {
   for (const renderer of renderers.splice(0)) act(() => renderer.unmount());
   finishInternalPathDrag(false);
+  vi.restoreAllMocks();
 });
 
 describe("dock geometry", () => {
@@ -91,12 +93,13 @@ describe("DockDropZones", () => {
     expect(onDockPath).toHaveBeenCalledWith("/repo/notes.md", "right");
   });
 
-  it("wins a native drop at the edge over the pane under it, and leaves the middle to the pane", async () => {
+  it.each([1, 1.5])("routes native edge drops to the dock and middle drops to the pane at %sx interface scale", async (scale) => {
+    vi.spyOn(appearance, "interfaceScale").mockReturnValue(scale);
     Object.assign(globalThis, { window: { __TAURI_INTERNALS__: {} } });
     const pane = { owns: () => true, setDragging: vi.fn(), drop: vi.fn(), fail: vi.fn() };
     const release = registerNativeDragDropTarget(pane);
     const { onDockPath } = await mount();
-    const native = (type: string, x: number) => nativeDrag.handler?.({ payload: { type, paths: [], position: { x, y: 20 } } });
+    const native = (type: string, x: number) => nativeDrag.handler?.({ payload: { type, paths: [], position: { x: x * scale, y: 20 * scale } } });
 
     writeInternalPathDrag(transfer(), { ...scope, path: "/repo/notes.md" });
     finishInternalPathDrag(true);
@@ -108,9 +111,14 @@ describe("DockDropZones", () => {
     expect(pane.drop).not.toHaveBeenCalled();
 
     writeInternalPathDrag(transfer(), { ...scope, path: "/repo/notes.md" });
+    await act(async () => { native("enter", 950); finishInternalPathDrag(true); native("drop", 950); });
+    expect(onDockPath).toHaveBeenLastCalledWith("/repo/notes.md", "right");
+    expect(pane.drop).not.toHaveBeenCalled();
+
+    writeInternalPathDrag(transfer(), { ...scope, path: "/repo/notes.md" });
     await act(async () => { native("enter", 500); finishInternalPathDrag(true); native("drop", 500); });
     expect(pane.drop).toHaveBeenCalledWith([]);
-    expect(onDockPath).toHaveBeenCalledTimes(1);
+    expect(onDockPath).toHaveBeenCalledTimes(2);
 
     // A file from the desktop is never ours: it uploads into the pane.
     await act(async () => {

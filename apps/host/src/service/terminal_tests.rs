@@ -76,7 +76,11 @@ impl RecordedClient {
     /// attachment stays live instead of reading EOF and stopping.
     fn live_command(&self) -> std::process::Command {
         let mut command = std::process::Command::new("sh");
-        command.args(["-c", "exec 3>&1; exec cat > \"$0\"", &self.path.to_string_lossy()]);
+        command.args([
+            "-c",
+            "exec 3>&1; exec cat > \"$0\"",
+            &self.path.to_string_lossy(),
+        ]);
         command
     }
 
@@ -1019,7 +1023,10 @@ fn a_color_change_is_reported_for_every_attached_pane() {
 fn every_connection_reports_the_same_daemon_colors() {
     // tmux keeps one answer per pane, so a connection with colors of its own
     // would overwrite another's for every pane they share.
-    assert!(Arc::ptr_eq(&host_terminal_colors(), &host_terminal_colors()));
+    assert!(Arc::ptr_eq(
+        &host_terminal_colors(),
+        &host_terminal_colors()
+    ));
 }
 
 #[test]
@@ -1029,14 +1036,8 @@ fn terminal_colors_accept_only_six_hex_digits() {
         TerminalColors::default()
     );
     for bad in ["fafafa", "#fafaf", "#fafafag", "#fafafa0", "#fa'fa;", ""] {
-        assert!(
-            TerminalColors::from_hex(bad, "#fafafa").is_err(),
-            "{bad:?}"
-        );
-        assert!(
-            TerminalColors::from_hex("#fafafa", bad).is_err(),
-            "{bad:?}"
-        );
+        assert!(TerminalColors::from_hex(bad, "#fafafa").is_err(), "{bad:?}");
+        assert!(TerminalColors::from_hex("#fafafa", bad).is_err(), "{bad:?}");
     }
 }
 
