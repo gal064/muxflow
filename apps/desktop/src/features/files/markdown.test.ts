@@ -24,6 +24,41 @@ describe("renderSafeMarkdown", () => {
     expect(html).not.toMatch(/href="(?:file:|\/\/|data:)/);
   });
 
+  it("keeps explicit column and row header semantics for AT-SPI", () => {
+    const parsed = new DOMParser().parseFromString(renderSafeMarkdown("| Name | Value |\n| --- | --- |\n| One | Two |"), "text/html");
+    expect([...parsed.querySelectorAll("th")].map((cell) => cell.getAttribute("role"))).toEqual(["columnheader", "columnheader"]);
+    const row = new DOMParser().parseFromString(renderSafeMarkdown('<table><tr><th scope="row">Name</th><td>Value</td></tr></table>'), "text/html");
+    expect(row.querySelector("th")?.getAttribute("role")).toBe("rowheader");
+    const explicit = new DOMParser().parseFromString(renderSafeMarkdown('<table><tr><th role="rowheader">Name</th><td>Value</td></tr></table>'), "text/html");
+    expect(explicit.querySelector("th")?.getAttribute("role")).toBe("rowheader");
+    const implicit = new DOMParser().parseFromString(renderSafeMarkdown('<table><tr><th>Name</th><th>Value</th></tr><tr><th>One</th><td>Two</td></tr></table>'), "text/html");
+    expect([...implicit.querySelectorAll("th")].map((cell) => cell.getAttribute("role"))).toEqual(["columnheader", "columnheader", "rowheader"]);
+  });
+
+  it("accounts for rowspans and automatic scope when making header roles explicit", () => {
+    const html = renderSafeMarkdown('<table><tr><th scope="auto">A</th><th>B</th></tr><tr><td rowspan="2">Group</td><td>Value</td></tr><tr><th>Detail</th></tr></table>');
+    const parsed = new DOMParser().parseFromString(html, "text/html");
+    expect([...parsed.querySelectorAll("th")].map((cell) => cell.getAttribute("role"))).toEqual(["columnheader", "columnheader", "cell"]);
+    const groups = renderSafeMarkdown('<table><tbody><tr><td rowspan="0">Group</td><td>Value</td></tr><tr><th>Detail</th></tr></tbody><tbody><tr><th>Next group</th><td>Value</td></tr></tbody></table>');
+    const grouped = new DOMParser().parseFromString(groups, "text/html");
+    expect([...grouped.querySelectorAll("th")].map((cell) => cell.getAttribute("role"))).toEqual(["cell", "rowheader"]);
+  });
+
+  it("rejects the balanced-parenthesis CSS image payload in ordinary Markdown", () => {
+    const html = renderSafeMarkdown('![x](data:image/png;base64,AAAA("),url("https://example.invalid/x")/*)');
+    const image = new DOMParser().parseFromString(html, "text/html").querySelector("img");
+    expect(image?.hasAttribute("src")).toBe(false);
+  });
+
+  it("rejects quote and backslash payloads after an embedded image prefix", () => {
+    for (const payload of ['AAAA"),url("https://tracker.invalid/pixel.png', "AAAA\\evil", "AAAA&#34;),url(https://tracker.invalid/pixel.png)"]) {
+      const html = renderSafeMarkdown(`<img src='data:image/png;base64,${payload}'>`);
+      const image = new DOMParser().parseFromString(html, "text/html").querySelector("img");
+      expect(image?.hasAttribute("src")).toBe(false);
+    }
+    expect(renderSafeMarkdown("![valid](data:image/png;base64,AAAA)")).toContain('src="data:image/png;base64,AAAA"');
+  });
+
   it("sanitizes active and remote content from SVG image previews", () => {
     const svg = renderSafeSvg(`<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script><image href="https://tracker.invalid/a"/><path d="M0 0"/></svg>`);
     expect(svg).toContain("<svg");

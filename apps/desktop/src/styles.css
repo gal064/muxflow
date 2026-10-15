@@ -1500,9 +1500,12 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .live-markdown .cm-line.cm-live-list-continuation { text-indent: 0; }
 .live-markdown .cm-live-list > .cm-live-task { box-sizing: border-box; width: 1em; height: 1em; margin: 0 .5em 0 0; }
 .live-markdown .cm-live-task { margin: 0 .45em 0 0; vertical-align: -1px; accent-color: var(--accent); cursor: pointer; }
-.live-markdown .cm-live-task:disabled { cursor: default; }
+.live-markdown .cm-live-task:is(:disabled, [aria-disabled="true"]) { cursor: default; }
+.live-markdown span.cm-live-task { display: inline-block; line-height: 1; text-align: center; color: var(--accent); }
+.live-markdown span.cm-live-task:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .live-markdown .cm-live-rule { display: inline-block; width: 100%; height: 1px; vertical-align: middle; background: var(--chrome-hairline); }
 .live-markdown .cm-live-image { max-width: 100%; vertical-align: bottom; }
+.live-markdown .cm-live-image-background { display: inline-block; background: center / contain no-repeat; }
 /* The table's own margins would fall outside the widget, where CodeMirror
    cannot measure them, and every click below the table would land a line off. */
 .live-markdown .cm-live-table { max-width: 100%; padding: 2px 0; overflow-x: auto; cursor: text; }

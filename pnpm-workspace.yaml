@@ -38,7 +38,12 @@ allowBuilds:
 # the class ownership annotation and remove only these two invalid attributes.
 # Remove this patch when upgrading to an upstream fix:
 # https://github.com/expo/expo/issues/49214
+# WebKitGTK AT-SPI bug 279313 aborts when hidden image caret buffers and
+# Unicode coexist in contenteditable. Use empty inline boxes only on Linux
+# WebKit, keeping the buffers and accessibility. Remove when upstream fixes it.
+# https://bugs.webkit.org/show_bug.cgi?id=279313
 patchedDependencies:
+  '@codemirror/view@6.43.13': patches/@codemirror__view@6.43.13.patch
   '@xterm/addon-webgl@0.19.0': patches/@xterm__addon-webgl@0.19.0.patch
   '@xterm/xterm@6.0.0': patches/@xterm__xterm@6.0.0.patch
   expo-modules-jsi@57.0.5: patches/expo-modules-jsi@57.0.5.patch
