@@ -442,8 +442,10 @@ export function globalShortcutAllowed(
   const target = event.target as { closest?: (selector: string) => unknown } | null;
   if (!target?.closest) return true;
   // The way out of a document docked beside the terminal is the same chord
-  // that led into it, so it has to reach the shell from inside the editor.
-  if ((commandId === "pane.focusLeft" || commandId === "pane.focusRight") && target.closest("[data-docked-tab]")) return true;
+  // that led into it, and ⌘W closes it, so both reach the shell from inside
+  // its editor.
+  if ((commandId === "pane.focusLeft" || commandId === "pane.focusRight" || commandId === "window.close")
+    && target.closest("[data-docked-tab]")) return true;
   const editable = target.closest("input, textarea, select, [contenteditable=true], [role=textbox]");
   return !editable || Boolean(target.closest("[data-terminal-surface]"));
 }

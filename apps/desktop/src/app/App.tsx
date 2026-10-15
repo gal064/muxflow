@@ -109,6 +109,7 @@ import { useWorkspaceDomainController } from "./useWorkspaceDomainController";
 import { AppDialogLayer } from "./AppDialogLayer";
 import { TerminalWorkspaceSurface } from "./TerminalWorkspaceSurface";
 import { DockDropZones, DockResizeHandle, dockHoldsFocus, focusDockedDocument } from "./WorkspaceDock";
+import { DOCK_HOVER_TARGET, usePaneHoverFocus } from "./paneHoverFocus";
 import { useAppAgentController } from "./useAppAgentController";
 import { useAppShellChrome } from "./useAppShellChrome";
 import { useAppHostSettingsActions } from "./useAppHostSettingsActions";
@@ -1309,6 +1310,14 @@ export function App() {
     || Boolean(confirmation) || Boolean(textPrompt) || Boolean(newWorkspaceDialog)
     || agentModalOpen || agentHostSetup.open || appStateResetConfirmation || appRecovery.modalOpen
     || profileResetConfirmation || Boolean(hostDeleteConfirmation) || helperState.phase === "confirming" || helperState.phase === "upgrading";
+  const hoverFocus = appState.shell.focusFollowsMouse && appFocused && !modalOpen;
+  // Focus-follows-mouse treats the docked document as one more pane: resting
+  // on it takes the keyboard there, and resting on a pane takes it back.
+  const dockHover = usePaneHoverFocus({
+    enabled: hoverFocus && Boolean(dockedAppTab),
+    dockHoldsFocus: yieldTerminalFocus,
+    focus: () => { focusDockedDocument(workspaceContentRef.current); },
+  });
 
   const [journalCopyChord] = useState(() => createCopyChordJournal());
   useEffect(() => {
@@ -1723,6 +1732,7 @@ export function App() {
               activeWindow={activeWindow}
               appFocused={appFocused}
               yieldFocus={yieldTerminalFocus}
+              docked={Boolean(dockedAppTab)}
               beginDividerDrag={beginDividerDrag}
               cacheScope={currentHostProfileId}
               clientId={clientId}
@@ -1730,7 +1740,7 @@ export function App() {
               cleanWrappedCommands={appState.shell.cleanWrappedCommands}
               terminalApplicationClipboard={appState.shell.terminalApplicationClipboard}
               terminalFontSize={appState.shell.terminalFontSize}
-              hoverFocus={appState.shell.focusFollowsMouse && appFocused && !modalOpen}
+              hoverFocus={hoverFocus}
               controllers={controllers}
               focusPane={focusTerminalPane}
               onMeasurements={onMeasurements}
@@ -1781,6 +1791,11 @@ export function App() {
             data-docked-tab={docked ? tab.id : undefined}
             inert={onScreen ? undefined : true}
             key={appTabLayerKey(tab)}
+            // A press on the docked document's text or chrome, not only its
+            // editor, takes the keyboard out of the terminal: otherwise ⌘W
+            // there would close the terminal tab beside it.
+            tabIndex={docked ? -1 : undefined}
+            {...(docked ? dockHover(DOCK_HOVER_TARGET) : {})}
           >
             <Suspense fallback={<AppTabFrame tab={tab} />}>{tab.kind === "gitDiff" ? <GitDiffSurface
               visible={onScreen}
