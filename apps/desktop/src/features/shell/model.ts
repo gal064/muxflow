@@ -491,11 +491,13 @@ function withoutKeys(record: WorkspaceUiRecord, ...keys: (keyof WorkspaceUiRecor
 }
 
 /**
- * Puts a document on the main column, or the terminal back when `undefined`.
+ * Puts a document on screen, or the terminal back when `undefined`.
  *
- * The docked document is never selected: it is already on screen beside the
- * terminal, and selecting it would draw it twice. Asking for it leaves the
- * selection as it was, and the caller focuses the docked editor instead.
+ * While a document is docked, the next one replaces it in the side column
+ * rather than covering the terminal: that column is where this workspace reads
+ * files, and the terminal keeps its own. The replaced document stays an
+ * ordinary tab. The docked document itself is never selected: it is already
+ * on screen, so asking for it changes nothing, and the caller focuses it.
  */
 export function selectAppTab(
   state: PersistedAppState,
@@ -506,6 +508,9 @@ export function selectAppTab(
 ): PersistedAppState {
   return updateWorkspaceUi(state, currentHostProfileId, currentServerIdentity, session, (record) => {
     if (selectedAppTabId && selectedAppTabId === record.dockedAppTabId) return record;
+    if (selectedAppTabId && record.dockedAppTabId) {
+      return { ...withoutKeys(record, "selectedAppTabId"), dockedAppTabId: selectedAppTabId };
+    }
     const rest = withoutKeys(record, "selectedAppTabId");
     return selectedAppTabId ? { ...rest, selectedAppTabId } : rest;
   });
@@ -516,9 +521,10 @@ export function selectAppTab(
  *
  * A workspace docks one document. Docking another returns the previous one to
  * an ordinary tab, and docking the selected one gives the main column back to
- * the terminal. The tab is pinned: a docked preview would be the slot the next
- * single click in the explorer rewrites, swapping the file out from under the
- * column the user put it in.
+ * the terminal. A tab docked on purpose is pinned, so the explorer's next
+ * single click opens beside it as a new preview rather than rewriting it; a
+ * preview that reaches the side column by being opened (`selectAppTab`) stays
+ * one, and the next single click replaces it there.
  */
 export function dockAppTab(
   state: PersistedAppState,
