@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import paletteCss from "@muxflow/client-core/palette.css?raw";
+import indexHtml from "../../index.html?raw";
 import { applyInterfaceScale, applyTheme, currentTheme, interfaceScale, onAppearanceChange, rememberedTheme, rememberTheme, resolvedTheme } from "./appearance";
 
 function block(selector: string): Map<string, string> {
@@ -64,5 +65,15 @@ describe("interface scale", () => {
     applyInterfaceScale(1.2, root, { setItem: (key, value) => storage.set(key, value) });
     expect(interfaceScale(root)).toBe(1.2);
     expect(storage.get("muxflow.uiScale")).toBe("1.2");
+  });
+});
+
+describe("index.html", () => {
+  // Packaging adds a CSP nonce to any inline style element, and a nonce in
+  // style-src disables the 'unsafe-inline' that Monaco and CodeMirror need for
+  // the styles they generate: Live stops scrolling and Source loses its lines.
+  it("has no inline style for packaging to give a nonce", () => {
+    expect(indexHtml).not.toMatch(/<style[\s>]/iu);
+    expect(indexHtml).toContain('<link rel="stylesheet" href="/theme.css" />');
   });
 });
