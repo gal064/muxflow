@@ -214,7 +214,7 @@ describe("active agent row", () => {
   });
 
   it("uses the approved quiet fill without letting hover replace it", () => {
-    expect(stylesCss).toContain(".agent-button.selected { background: var(--chrome-selected); }");
+    expect(stylesCss).toContain(".agent-button.selected { background: var(--chrome-selected); box-shadow: inset 0 0 0 1px var(--chrome-selected-edge); }");
     expect(stylesCss).toContain(".agent-button:hover:not(.selected):not(:disabled):not([data-unavailable])");
     expect(stylesCss).toContain(".agent-button.selected .agent-mark { --badge-ring: var(--chrome-selected); }");
     const forcedColors = stylesCss.slice(stylesCss.indexOf("@media (forced-colors: active)"));
