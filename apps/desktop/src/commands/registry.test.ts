@@ -281,7 +281,7 @@ describe("command registry", () => {
     expect(globalShortcutAllowed(event(false, false), true)).toBe(false);
   });
 
-  it("lets the pane-focus chords out of an editor docked beside the terminal, and only those", () => {
+  it("lets the pane-focus chords and close out of an editor docked beside the terminal, and only those", () => {
     const inEditor = (docked: boolean) => ({
       key: "ArrowLeft", code: "ArrowLeft", keyCode: 37, altKey: true, ctrlKey: true, metaKey: false,
       target: {
@@ -291,6 +291,8 @@ describe("command registry", () => {
     });
     expect(globalShortcutAllowed(inEditor(true), false, "pane.focusLeft")).toBe(true);
     expect(globalShortcutAllowed(inEditor(true), false, "pane.focusRight")).toBe(true);
+    expect(globalShortcutAllowed(inEditor(true), false, "window.close")).toBe(true);
+    expect(globalShortcutAllowed(inEditor(false), false, "window.close")).toBe(false);
     expect(globalShortcutAllowed(inEditor(true), false, "pane.focusUp")).toBe(false);
     expect(globalShortcutAllowed(inEditor(false), false, "pane.focusLeft")).toBe(false);
     expect(globalShortcutAllowed(inEditor(true), true, "pane.focusLeft")).toBe(false);

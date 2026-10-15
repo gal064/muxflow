@@ -220,15 +220,13 @@ export function dockHoldsFocus(content: HTMLElement | null): boolean {
 
 /**
  * Puts the keyboard in the docked document: its editor where there is one
- * (Monaco's input, CodeMirror's content), otherwise its first focusable
- * control. Returns whether focus landed there.
+ * (Monaco's input, CodeMirror's content), otherwise the document itself, as a
+ * click on its text would. Returns whether focus landed there.
  */
 export function focusDockedDocument(content: HTMLElement | null): boolean {
   const layer = dockedLayer(content);
   if (!layer) return false;
-  const target = layer.querySelector<HTMLElement>(
-    ".monaco-editor textarea, .monaco-editor .native-edit-context, .cm-content, [tabindex]:not([tabindex='-1'])",
-  );
-  target?.focus();
+  const editor = layer.querySelector<HTMLElement>(".monaco-editor textarea, .monaco-editor .native-edit-context, .cm-content");
+  (editor ?? layer).focus({ preventScroll: true });
   return dockHoldsFocus(content);
 }
