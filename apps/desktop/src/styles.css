@@ -184,6 +184,31 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .window-controls { display: flex; gap: 2px; margin-left: 8px; }
 .window-controls .window-close:hover { background: var(--danger); color: var(--chrome-ink-strong); }
 
+/* Tabs in the title bar (Settings > Appearance). The row is a little taller
+   than the 28px bars, for the larger tab labels; macOS keeps the 38px its
+   traffic lights need. */
+.titlebar-tabs { gap: 0; padding: 0; }
+.titlebar-tabs:not(.titlebar-overlay) { --titlebar-height: 34px; }
+/* As wide as the sidebar below it, so the tabs start where the workspace does,
+   but never narrower than its own buttons: a sidebar dragged thin pushes the
+   tabs along rather than under them. It follows the saved width, so during a
+   sidebar drag it catches up when the drag ends. */
+.titlebar-lead {
+  display: flex; align-items: center; gap: 2px; align-self: stretch;
+  flex: 0 0 auto; width: var(--sidebar-width); min-width: max-content; padding: 0 6px;
+}
+.titlebar-overlay .titlebar-lead { padding-left: 78px; }
+.sidebar-collapsed .titlebar-lead { width: auto; }
+.titlebar-lead .window-controls { margin: 0 8px 0 0; }
+.titlebar-tabs .tabstrip { flex: 1 1 auto; height: 100%; border-bottom: 0; }
+.titlebar-tabs .titlebar-spacer { flex: 0 0 32px; }
+.titlebar-tabs .tab-select { font-size: 13px; }
+.titlebar-rails {
+  display: flex; align-items: center; gap: 2px; align-self: stretch;
+  padding: 0 6px 0 4px; border-left: 1px solid var(--chrome-hairline);
+}
+.tabs-in-titlebar .workspace { grid-template-rows: minmax(0, 1fr); }
+
 .badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 15px; height: 15px; padding: 0 4px;
@@ -254,6 +279,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-size: var(--type-label); letter-spacing: .04em;
 }
 .sort-toggle:hover { background: var(--chrome-hover); }
+/* A control-sized button in a header sized to its small caps label: centred,
+   and pulled into the padding so it does not make the header taller. */
+.section-head-add { align-self: center; margin-block: -4px; }
 
 .section-divider {
   position: relative; flex: 0 0 auto; height: 9px; margin: 2px 0;

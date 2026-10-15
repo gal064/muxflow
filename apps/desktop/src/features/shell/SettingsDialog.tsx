@@ -335,6 +335,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
             </label>)}
           </fieldset>
           <p className="settings-hint">System follows your OS appearance and switches when it does.</p>
+          <label className="settings-check">
+            <input checked={props.shell.tabsInTitleBar} onChange={(event) => props.onShell({ tabsInTitleBar: event.target.checked })} type="checkbox" />
+            Show tabs in the title bar
+          </label>
+          <p className="settings-hint">Gives the terminal the row the tab strip used. New workspace moves to the Workspaces header.</p>
         </>}
 
         {tab === "sounds" && <>
