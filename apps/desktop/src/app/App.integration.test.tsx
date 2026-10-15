@@ -170,6 +170,44 @@ describe("App orchestration", () => {
     await act(async () => renderer!.unmount());
   });
 
+  it.each(["l", "j"])("routes unhandled document %s shortcuts after editor handling", async (key) => {
+    const commands = key === "j" ? { shortcutOverrides: { "view.togglePanel": "Ctrl+J" } } : defaultAppState.commands;
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "load_app_state") return Promise.resolve({ ...defaultAppState, commands });
+      if (command === "list_host_profiles") return Promise.resolve({ lastProfileId: undefined, profiles: [] });
+      return Promise.resolve(undefined);
+    });
+    let renderer!: ReactTestRenderer;
+    const host = document.createElement("div");
+    host.className = "live-markdown-host";
+    const editable = document.createElement("div");
+    editable.setAttribute("contenteditable", "true");
+    host.append(editable);
+    document.body.append(host);
+    editable.addEventListener("keydown", (event) => {
+      if (event.key === "b") event.preventDefault(); // Editor-owned Bold.
+    });
+    const press = async (key: string) => {
+      const event = new KeyboardEvent("keydown", { key, code: `Key${key.toUpperCase()}`, ctrlKey: true, bubbles: true, cancelable: true });
+      await act(async () => { editable.dispatchEvent(event); });
+      return event;
+    };
+    try {
+      await act(async () => { renderer = create(<App />); });
+      expect(renderer.root.findByType("main").props.className).not.toContain("panel-open");
+      expect((await press(key)).defaultPrevented).toBe(true);
+      expect(renderer.root.findByType("main").props.className).toContain("panel-open");
+      expect((await press("b")).defaultPrevented).toBe(true);
+      expect(renderer.root.findByType("main").props.className).not.toContain("sidebar-collapsed");
+      expect((await press("c")).defaultPrevented).toBe(false);
+      expect((await press(key)).defaultPrevented).toBe(true);
+      expect(renderer.root.findByType("main").props.className).not.toContain("panel-open");
+    } finally {
+      await act(async () => renderer?.unmount());
+      host.remove();
+    }
+  });
+
   // The keydown wiring, not the decision behind it: `shortcutDisposition` is
   // unit-tested next door, but the bug this guards lived in the handler, where
   // an unavailable command returned before `preventDefault` and handed the
