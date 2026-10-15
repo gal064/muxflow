@@ -18,7 +18,7 @@
 export const WINDOW_ROW_THRESHOLD = 200;
 
 /** Used until a real row has been measured, and wherever layout has no height. */
-export const DEFAULT_ROW_HEIGHT = 22;
+export const DEFAULT_ROW_HEIGHT = 24;
 
 /** Rows kept mounted beyond the viewport, so a wheel tick paints no blanks. */
 export const OVERSCAN_ROWS = 12;
