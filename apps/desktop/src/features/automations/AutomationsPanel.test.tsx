@@ -34,7 +34,7 @@ function summary(overrides: Partial<AutomationSummary["definition"]> = {}): Auto
       number: 12, scheduledFor: "2026-10-13T09:00", startedAt: 1_000, finishedAt: 61_000, status: "done",
       sessionId: "$4", windowId: "@41", paneId: "%87", serverIdentity: "tmux:a", lastMessage: "CI is green.", error: "",
     }],
-    commandLine: "codex --dangerously-bypass-approvals-and-sandbox -- \"$(cat '/state/automations/prompts/fix-ci-<n>.txt')\"",
+    commandLine: "codex --approve-for-me -- \"$(cat '/state/automations/prompts/fix-ci-<n>.txt')\"",
   };
 }
 
@@ -210,7 +210,7 @@ describe("Automation editor", () => {
   it("previews exactly what is typed for presets and custom commands", () => {
     const base = summary().definition;
     expect(commandPreview(base, "/state")).toBe(
-      "codex --dangerously-bypass-approvals-and-sandbox -- \"$(cat '/state/automations/prompts/fix-ci-<n>.txt')\"",
+      "codex --approve-for-me -- \"$(cat '/state/automations/prompts/fix-ci-<n>.txt')\"",
     );
     expect(commandPreview({ ...base, agent: "custom", command: "cx --print" }, "/state"))
       .toBe("cx --print \"$(cat '/state/automations/prompts/fix-ci-<n>.txt')\"");
