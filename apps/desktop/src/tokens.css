@@ -107,4 +107,5 @@
 
 /* The palette's light block sets the colors; this tells WebKit to draw native
    controls and scrollbars to match. See `ui/appearance.ts` for the attribute. */
-:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="light"], [data-palette="light"] { color-scheme: light; }
+[data-palette="dark"] { color-scheme: dark; }

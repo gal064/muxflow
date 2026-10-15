@@ -60,6 +60,15 @@ pub enum ThemePreference {
     Dark,
 }
 
+/// Markdown's own palette, beside the app's theme.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MarkdownAppearance {
+    Default,
+    Light,
+    Dark,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AppTabViewMode {
@@ -157,6 +166,9 @@ pub struct ShellPreferences {
     /// default, which follows the OS.
     #[serde(default)]
     pub theme: Option<ThemePreference>,
+    /// `None` is a save from before the setting: Markdown follows the theme.
+    #[serde(default)]
+    pub markdown_appearance: Option<MarkdownAppearance>,
     /// The host most recently picked in the New workspace dialog.
     #[serde(default)]
     pub new_workspace_host_profile_id: Option<String>,
@@ -625,6 +637,7 @@ mod tests {
                 terminal_application_clipboard: Some(false),
                 terminal_font_size: Some(13),
                 theme: Some(ThemePreference::Light),
+                markdown_appearance: Some(MarkdownAppearance::Dark),
                 new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
                 window_geometry: Some(WindowGeometry {
@@ -781,6 +794,10 @@ mod tests {
         assert_eq!(value.shell.agents_section_ratio, Some(0.42));
         assert_eq!(value.shell.terminal_font_size, Some(17));
         assert_eq!(value.shell.theme, Some(ThemePreference::Dark));
+        assert_eq!(
+            value.shell.markdown_appearance,
+            Some(MarkdownAppearance::Light)
+        );
         assert_eq!(
             value.shell.new_workspace_host_profile_id.as_deref(),
             Some("ssh-remote-linux")

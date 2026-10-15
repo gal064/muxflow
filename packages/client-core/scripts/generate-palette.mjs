@@ -23,10 +23,12 @@ function stateDeclarations(state) {
 
 const block = (selector, declarations) => `${selector} {\n${declarations.join("\n")}\n}\n`;
 
-// Dark is the bare `:root`, so a document with no theme attribute is dark.
+// Dark is the bare `:root`, so a document with no theme attribute is dark. The
+// `data-palette` selectors let one part of the page take the other palette:
+// Markdown documents, when Settings gives them an appearance of their own.
 const css = `/* GENERATED from src/palette.ts; run pnpm --filter @muxflow/client-core palette:gen. */\n${[
-  block(":root", [...chromeDeclarations(colors), ...terminalDeclarations(terminalTheme), ...stateDeclarations(stateColors)]),
-  block(':root[data-theme="light"]', [
+  block(':root, [data-palette="dark"]', [...chromeDeclarations(colors), ...terminalDeclarations(terminalTheme), ...stateDeclarations(stateColors)]),
+  block(':root[data-theme="light"], [data-palette="light"]', [
     ...chromeDeclarations(lightColors), ...terminalDeclarations(lightTerminalTheme), ...stateDeclarations(lightStateColors),
   ]),
 ].join("")}`;
