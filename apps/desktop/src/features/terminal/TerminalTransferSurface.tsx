@@ -47,7 +47,9 @@ export interface TerminalTransferSurfaceController {
  * the two platforms this app ships it is not: wry takes the macOS point from
  * `NSDraggingInfo.draggingLocation` against `NSView.frame`, both AppKit points,
  * and the GTK one from `drag-motion`/`drag-drop` widget coordinates. Both are
- * logical — the same units `getBoundingClientRect` reports.
+ * logical: the units `getBoundingClientRect` reports at 100%. Under an
+ * interface size other than 100% the page's CSS pixels are zoomed and the
+ * window's are not, so the caller divides by `interfaceScale()` first.
  *
  * Dividing by `devicePixelRatio` therefore halved every drop coordinate on a
  * Retina display, so the hit test rejected the drop and nothing was uploaded:

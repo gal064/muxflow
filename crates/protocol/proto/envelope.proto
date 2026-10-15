@@ -177,6 +177,12 @@ enum Operation {
   OPERATION_RESIZE_TERMINAL_WINDOW = 56;
   // Bounded filename search under the explicitly captured pane cwd.
   OPERATION_SEARCH_FILES = 57;
+  // The renderer's terminal foreground and background, as `#rrggbb` in
+  // `terminal_foreground` / `terminal_background`. The host reports them to
+  // programs that ask (OSC 10/11) instead of its dark default. Sent on
+  // connect and on every theme change. tmux keeps one answer per pane, so the
+  // host keeps one value for every connection: the last one any client sent.
+  OPERATION_SET_TERMINAL_COLORS = 58;
   OPERATION_TEST_DELAY = 100;
   OPERATION_TEST_INJECT_GAP = 101;
   OPERATION_TEST_OVERFLOW = 102;
@@ -236,7 +242,10 @@ message Request {
   // this Voice controller was opened. Prevents an in-flight utterance from
   // reaching a reused pane ID after a live tmux-server replacement.
   string terminal_input_expected_server_identity = 23;
-  // NEXT FREE FIELD = 24.
+  // SET_TERMINAL_COLORS only: `#rrggbb`.
+  string terminal_foreground = 24;
+  string terminal_background = 25;
+  // NEXT FREE FIELD = 26.
 }
 
 message Response {

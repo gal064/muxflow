@@ -5,9 +5,10 @@ import type { HostProfile } from "../../app/types";
 import type { NotificationPermissionStatus } from "../agents/notifications";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
+import type { ThemePreference } from "../../ui/appearance";
 import { hostLetter } from "./hostProfiles";
 import {
-  clampedTerminalFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN,
+  clampedTerminalFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, UI_SCALES,
   type AppTabViewMode, type ShellState, type WorkspaceDefaults,
 } from "./types";
 
@@ -69,12 +70,19 @@ interface SettingsDialogProps {
   agentSetup: { available: boolean; reports: boolean; connected: boolean; onSetUp(): void };
 }
 
-type SettingsTab = "connection" | "workspace" | "terminal" | "sounds" | "accessibility";
+type SettingsTab = "connection" | "workspace" | "terminal" | "appearance" | "sounds" | "accessibility";
+
+const THEMES: readonly { id: ThemePreference; label: string }[] = [
+  { id: "system", label: "System" },
+  { id: "light", label: "Light" },
+  { id: "dark", label: "Dark" },
+];
 
 const TABS: readonly { id: SettingsTab; label: string }[] = [
   { id: "connection", label: "Connection" },
   { id: "workspace", label: "Workspace" },
   { id: "terminal", label: "Terminal" },
+  { id: "appearance", label: "Appearance" },
   { id: "sounds", label: "Sounds" },
   { id: "accessibility", label: "Accessibility" },
 ];
@@ -317,6 +325,31 @@ export function SettingsDialog(props: SettingsDialogProps) {
             Focus pane on hover
           </label>
           <p className="settings-hint">Moves keyboard focus to a split pane when the pointer rests on it.</p>
+        </>}
+
+        {tab === "appearance" && <>
+          <fieldset className="settings-modes">
+            <legend>Theme</legend>
+            {THEMES.map((item) => <label key={item.id}>
+              <input checked={props.shell.theme === item.id} name="theme" onChange={() => props.onShell({ theme: item.id })} type="radio" /> {item.label}
+            </label>)}
+          </fieldset>
+          <p className="settings-hint">System follows your OS appearance and switches when it does.</p>
+          <label>Interface size
+            <select
+              aria-label="Interface size"
+              onChange={(event) => props.onShell({ uiScale: Number(event.target.value) })}
+              value={props.shell.uiScale}
+            >
+              {UI_SCALES.map((scale) => <option key={scale} value={scale}>{Math.round(scale * 100)}%</option>)}
+            </select>
+          </label>
+          <p className="settings-hint">Scales everything, terminals included. The terminal font size setting applies on top.</p>
+          <label className="settings-check">
+            <input checked={props.shell.tabsInTitleBar} onChange={(event) => props.onShell({ tabsInTitleBar: event.target.checked })} type="checkbox" />
+            Show tabs in the title bar
+          </label>
+          <p className="settings-hint">Gives the terminal the row the tab strip used. New workspace moves to the Workspaces header.</p>
         </>}
 
         {tab === "sounds" && <>

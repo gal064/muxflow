@@ -25,6 +25,10 @@ export const colors = {
   // ── Status ────────────────────────────────────────────────────────────
   ok: "#28c840",
   warn: "#febc2e",
+
+  // ── Elevation ─────────────────────────────────────────────────────────
+  // Shadows and scrims mix this toward transparent at their own strength.
+  shadow: "#000000",
 } as const;
 
 export const terminalTheme = {
@@ -58,6 +62,72 @@ export const stateColors = {
   done: terminalTheme.cyan,
   unknown: colors.chromeDim,
 } as const;
+
+// ── Light theme (desktop) ───────────────────────────────────────────────
+// One Light, the counterpart of the One Dark chrome above, under the same rule:
+// the chrome starts at the terminal background and steps toward the ink.
+export const lightColors = {
+  chromeBg: "#fafafa",
+  chromeRaised: "#f2f2f3",
+  chromeHairline: "#ececed",
+  chromeBorder: "#dbdbde",
+  chromeHover: "#efeff0",
+  chromeSelected: "#e6e6e8",
+
+  chromeInk: "#383a42",
+  chromeInkStrong: "#121317",
+  chromeDim: "#696c77",
+  chromeFaint: "#a0a1a7",
+
+  accent: "#4078f2",
+  accentInk: "#ffffff",
+  accentWash: "rgba(64, 120, 242, 0.12)",
+  danger: "#e45649",
+  dangerInk: "#c13b2f",
+  dangerWash: "rgba(228, 86, 73, 0.13)",
+
+  ok: "#2fa84f",
+  warn: "#c18401",
+
+  // Softer than black: a light surface needs a fraction of the dark lift.
+  shadow: "#16181e59",
+} as const satisfies Record<keyof typeof colors, string>;
+
+// One Light's syntax colors, with yellow and cyan from its deeper shades so they
+// stay readable on the background. White (7) and bright white (15) are greys
+// dark enough to read on the background (GitHub Light's values), because CLIs
+// print headings and emphasis in them and a near-white would erase that text.
+export const lightTerminalTheme = {
+  background: "#fafafa",
+  foreground: "#383a42",
+  cursor: "#526fff",
+  cursorAccent: "#fafafa",
+  selectionBackground: "#383a42",
+  selectionForeground: "#fafafa",
+  black: "#383a42",
+  red: "#e45649",
+  green: "#50a14f",
+  yellow: "#c18401",
+  blue: "#4078f2",
+  magenta: "#a626a4",
+  cyan: "#0184bc",
+  white: "#6e7781",
+  brightBlack: "#696c77",
+  brightRed: "#ca1243",
+  brightGreen: "#3d8c3c",
+  brightYellow: "#986801",
+  brightBlue: "#2f5af3",
+  brightMagenta: "#8b2a96",
+  brightCyan: "#0997b3",
+  brightWhite: "#8c959f",
+} as const satisfies Record<keyof typeof terminalTheme, string>;
+
+export const lightStateColors = {
+  working: lightTerminalTheme.yellow,
+  blocked: lightTerminalTheme.red,
+  done: lightTerminalTheme.cyan,
+  unknown: lightColors.chromeDim,
+} as const satisfies Record<keyof typeof stateColors, string>;
 
 
 export const terminalCssTokens: Record<keyof typeof terminalTheme, string> = {
