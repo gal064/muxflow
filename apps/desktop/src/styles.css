@@ -13,7 +13,7 @@
  * are written inline on purpose; promoting each of those to a variable would
  * make the token file a dictionary of single-use names.
  *
- * Layout follows the approved mock: a 28px titlebar, a 240px sidebar, a 28px
+ * Layout follows the approved mock: a 28px titlebar, a 240px sidebar, a 34px
  * tab strip, and everything else is terminal.
  */
 
@@ -130,7 +130,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    paint made the whole bar jump. */
 .titlebar {
   display: flex; align-items: center; gap: 2px;
-  height: var(--titlebar-height, var(--bar-height)); flex: 0 0 auto; overflow: hidden;
+  height: var(--titlebar-height); flex: 0 0 auto; overflow: hidden;
   padding: 0 6px;
   background: var(--chrome-bg); border-bottom: 1px solid var(--chrome-hairline);
 }
@@ -152,7 +152,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 }
 .titlebar-workspace {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--chrome-ink); font-size: var(--type-row); font-weight: 550;
+  color: var(--chrome-ink); font-size: var(--type-titlebar); font-weight: 550;
 }
 .titlebar-spacer { flex: 1; min-width: 8px; align-self: stretch; }
 /* Persistent until the app is updated: red like an alert, but a pill the size
@@ -186,11 +186,10 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .window-controls { display: flex; gap: 2px; margin-left: 8px; }
 .window-controls .window-close:hover { background: var(--danger); color: var(--chrome-ink-strong); }
 
-/* Tabs in the title bar (Settings > Appearance). The row is a little taller
-   than the 28px bars, for the larger tab labels; macOS keeps the 38px its
-   traffic lights need. */
+/* Tabs in the title bar (Settings > Appearance). The bar is then as tall as
+   the tab strip it replaces; macOS keeps the 38px its traffic lights need. */
 .titlebar-tabs { gap: 0; padding: 0; }
-.titlebar-tabs:not(.titlebar-overlay) { --titlebar-height: 34px; }
+.titlebar-tabs:not(.titlebar-overlay) { --titlebar-height: var(--bar-height); }
 /* As wide as the sidebar below it, so the tabs start where the workspace does,
    but never narrower than its own buttons: a sidebar dragged thin pushes the
    tabs along rather than under them. It follows the saved width, so during a
@@ -204,7 +203,6 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .titlebar-lead .window-controls { margin: 0 8px 0 0; }
 .titlebar-tabs .tabstrip { flex: 1 1 auto; height: 100%; border-bottom: 0; }
 .titlebar-tabs .titlebar-spacer { flex: 0 0 32px; }
-.titlebar-tabs .tab-select { font-size: 13px; }
 .titlebar-rails {
   display: flex; align-items: center; gap: 2px; align-self: stretch;
   padding: 0 6px 0 4px; border-left: 1px solid var(--chrome-hairline);
@@ -218,7 +216,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-size: 9px; font-weight: 600; font-variant-numeric: tabular-nums;
 }
 .badge-corner { position: absolute; top: -1px; right: -3px; }
-.badge-row { position: absolute; top: 7px; right: 7px; pointer-events: none; }
+.badge-row { position: absolute; top: 8px; right: 8px; pointer-events: none; }
 /* A compact workspace row is a single line of flex children, so the count can
    simply be the last one. Floating it would have made it overlap the agent
    cluster it sits next to, which is the reason `.badge-row` is absolute at
@@ -311,8 +309,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .list-block:first-child > .list-divider { padding-top: 0; }
 .workspace-row, .agent-row { position: relative; }
 .workspace-button {
-  display: flex; flex-direction: column; gap: 3px;
-  width: 100%; padding: 7px 9px 8px; margin-bottom: 2px;
+  display: flex; flex-direction: column; gap: 4px;
+  width: 100%; padding: 8px 10px 9px; margin-bottom: 2px;
   border: 0; border-radius: var(--radius-row);
   background: transparent; color: inherit; text-align: left;
 }
@@ -321,12 +319,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* The host behind the row is not connected: still listed, still selectable, not live. */
 .workspace-button.offline:not(.active) { opacity: 0.55; }
 /* Compact rows are one line, so the row is a line: name on the left, the
-   agent cluster and any unread count pushed to the right edge. ~24px is the
-   Explorer's row budget, which is what makes a long workspace list scannable
-   at all — the column layout above would have made every row 32px. */
+   agent cluster and any unread count pushed to the right edge. A row near the
+   Explorer's row budget is what makes a long workspace list scannable at all
+   — the column layout above would have made every row 36px. */
 .workspace-button.compact {
   flex-direction: row; align-items: center; gap: 6px;
-  min-height: 24px; padding: 3px 8px; margin-bottom: 1px;
+  min-height: 28px; padding: 4px 8px; margin-bottom: 1px;
 }
 .workspace-title {
   display: flex; align-items: center; gap: 6px; min-width: 0;
@@ -424,7 +422,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 .agent-button {
   display: block;
-  width: 100%; padding: 3px 7px;
+  width: 100%; padding: 4px 7px;
   border: 0; border-radius: var(--radius-control);
   background: transparent; color: inherit; text-align: left;
 }
@@ -466,7 +464,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .agent-button[data-unavailable] { opacity: .5; cursor: not-allowed; }
 .agent-line {
   display: flex; align-items: center; gap: 6px; min-width: 0;
-  font-size: 11.5px; font-weight: var(--weight-row); color: var(--chrome-ink);
+  font-size: 12.5px; font-weight: var(--weight-row); color: var(--chrome-ink);
 }
 .agent-icon { width: 12px; height: 12px; flex: 0 0 auto; color: var(--chrome-dim); }
 .agent-icon.codex { fill: currentColor; }
@@ -707,8 +705,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .tab { position: relative; display: flex; align-items: stretch; flex: 0 0 auto; max-width: 220px; }
 .tab-select {
   display: inline-flex; align-items: center; gap: 6px; min-width: 0;
-  padding: 0 12px; border: 0; background: transparent;
-  color: var(--chrome-dim); font-size: 11.5px;
+  padding: 0 14px; border: 0; background: transparent;
+  color: var(--chrome-dim); font-size: 13px;
 }
 .tab.active .tab-select { color: var(--chrome-ink-strong); }
 /* Docked beside the terminal: on screen, so not dimmed, but not the active tab
@@ -806,7 +804,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* `clip`, not `hidden`: a hidden overflow is still a scroll container, and when
    focus returns to xterm's helper textarea before it has moved to the cursor's
    new row, the browser scrolls the frame to reveal it, pushing the whole
-   terminal up. A zoom change does exactly that. Nothing here should scroll. */
+   terminal up. Turning off tabs in the title bar does exactly that, since the
+   pane loses the row the tab strip takes back. Nothing here should scroll. */
 .pane-frame { position: absolute; overflow: clip; background: var(--term-bg); }
 .pane-frame.active { box-shadow: inset 0 0 0 var(--focus-ring) var(--accent); }
 .pane-frame.attention::after {
@@ -959,8 +958,8 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   padding: 0 6px; border-bottom: 1px solid var(--chrome-hairline);
 }
 .panel-tab {
-  position: relative; display: inline-flex; align-items: center; padding: 0 10px;
-  border: 0; background: transparent; color: var(--chrome-dim); font-size: 11px;
+  position: relative; display: inline-flex; align-items: center; padding: 0 11px;
+  border: 0; background: transparent; color: var(--chrome-dim); font-size: 12.5px;
 }
 .panel-tab.active { color: var(--chrome-ink-strong); }
 .panel-tab.active::after {
@@ -974,7 +973,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 
 .explorer-tree { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; overflow: hidden; }
 .explorer-root {
-  display: flex; align-items: center; gap: 7px; min-height: 35px;
+  display: flex; align-items: center; gap: 7px; min-height: 40px;
   padding: 5px 12px; border-bottom: 1px solid var(--chrome-hairline);
 }
 /* Sits in the header, never in the scrolling tree: an indicator inside the tree
@@ -995,7 +994,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
    4px, and a "Load more" button of some other height offset every row below any
    expanded incomplete directory. The bottom padding is safe — it grows the
    scrollable area after the last row and shifts nothing. */
-.file-tree { --explorer-row-height: 22px; min-height: 0; padding: 0 0 12px; overflow: auto; outline: 0; }
+.file-tree { --explorer-row-height: 24px; min-height: 0; padding: 0 0 12px; overflow: auto; outline: 0; }
 /* Measured by `useTreeViewport`; see `ROW_METRIC_CLASS`. Out of flow and
    zero-width, so it costs no layout and is measurable with no rows at all. */
 .file-row-metric {
@@ -1010,7 +1009,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .file-row[aria-selected="true"] { background: var(--chrome-selected); }
 /* The tree is UI text, not code: it was 11px monospace, which is the one place
    in the app where a proportional stack reads better — VS Code's explorer is
-   the UI font at the row size, on the same 22px rows. Nothing depends on
+   the UI font at the row size, on rows near its 22px. Nothing depends on
    monospace alignment any more; the letter glyphs that did are icons now. */
 .file-main {
   display: grid; grid-template-columns: 12px 16px minmax(90px, 1fr);
@@ -1069,7 +1068,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   border-bottom: 1px solid var(--chrome-hairline);
 }
 .git-sidebar-identity { display: grid; gap: 1px; flex: 1; min-width: 0; }
-.git-sidebar-header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.git-sidebar-header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .git-sidebar-header small {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
@@ -1082,7 +1081,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .git-file {
   display: flex; align-items: center; gap: 6px;
   width: 100%; padding: 3px 12px; border: 0; background: transparent;
-  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px; text-align: left;
+  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 12px; text-align: left;
 }
 /* The row, not the button: the hover actions sit outside the button but inside
    the row, so pointing at one must not make the row look un-hovered. */
@@ -1130,12 +1129,14 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .git-commit textarea {
   min-height: 46px; resize: vertical; padding: 6px;
   border: 1px solid var(--chrome-border); border-radius: 4px;
-  background: var(--chrome-bg); color: var(--chrome-ink); font-size: 11px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-size: 12px;
 }
 /* Commit, its one extra action, and Push on one row. The split button is a
    single control visually — one border, one hairline between the halves — so
    the caret reads as belonging to Commit rather than as a third button. */
 .git-commit-actions { display: flex; gap: 6px; align-items: stretch; }
+/* The panel's own text size, not the larger base size buttons inherit. */
+.git-commit-actions button { font-size: 12px; }
 .git-commit-actions .split-button { display: flex; flex: 1 1 auto; min-width: 0; }
 .git-commit-actions .split-button > button:first-child {
   flex: 1 1 auto; min-width: 0; border-top-right-radius: 0; border-bottom-right-radius: 0;
@@ -1160,9 +1161,9 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .ports-form input {
   flex: 1 1 0; min-width: 0; padding: 4px 6px;
   border: 1px solid var(--chrome-border); border-radius: 4px;
-  background: var(--chrome-bg); color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-family: var(--font-mono); font-size: 12px;
 }
-.ports-form button { flex: 0 0 auto; padding: 4px 10px; border: 1px solid; border-radius: 4px; font-size: 11px; }
+.ports-form button { flex: 0 0 auto; padding: 4px 10px; border: 1px solid; border-radius: 4px; font-size: 12px; }
 .ports-list { margin: 0; padding: 0; list-style: none; }
 .port-forward {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px 8px 2px 12px;
@@ -1174,7 +1175,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .port-forward.failed .port-forward-dot { background: var(--danger); }
 .port-forward-link {
   flex: 1 1 auto; min-width: 0; padding: 2px 0; border: 0; background: transparent;
-  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px; text-align: left;
+  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 12px; text-align: left;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .port-forward-link:hover:not(:disabled) { color: var(--accent); text-decoration: underline; }
@@ -1189,7 +1190,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .port-suggestion {
   display: inline-flex; align-items: baseline; gap: 4px; padding: 2px 7px;
   border: 1px solid var(--chrome-border); border-radius: 10px;
-  background: var(--chrome-raised); color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px;
+  background: var(--chrome-raised); color: var(--chrome-ink); font-family: var(--font-mono); font-size: 12px;
 }
 .port-suggestion:hover { border-color: var(--accent); }
 .port-suggestion small { color: var(--chrome-faint); font-family: var(--font-sans); font-size: var(--type-meta); }
