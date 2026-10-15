@@ -216,7 +216,7 @@ input[readonly] { color: var(--dim); background: var(--chrome-bg); }
             <span class="tab active"><span class="n">3</span>Review open PRs #31<span class="dot working"></span></span>
           </div>
           <div class="term">
-            <div class="prompt">~/dev/muxflow $ claude --dangerously-skip-permissions 'Review every open PR that has no review from me…'</div>
+            <div class="prompt">~/dev/muxflow $ claude --permission-mode auto 'Review every open PR that has no review from me…'</div>
             <div class="faint">Claude Code · bypass permissions on · ~/dev/muxflow</div>
             <div class="user">Review every open PR that has no review from me. Leave inline comments for real bugs only. If there is nothing to review, say so and stop.</div>
             <div class="wrap">● I'll list open PRs that are waiting for a review.</div>
@@ -284,8 +284,8 @@ input[readonly] { color: var(--dim); background: var(--chrome-bg); }
             </div>
             <div class="field">
               <label for="f-cmd">Command</label>
-              <input id="f-cmd" class="mono" type="text" readonly value="codex --dangerously-bypass-approvals-and-sandbox">
-              <span class="hint" id="cmd-hint">Default Codex command, fully unattended. The prompt is added at the end.</span>
+              <input id="f-cmd" class="mono" type="text" readonly value="codex --approve-for-me">
+              <span class="hint" id="cmd-hint">Default Codex command, approved by its automatic reviewer. The prompt is added at the end.</span>
             </div>
             <div class="field">
               <label for="f-prompt">Prompt</label>
@@ -370,7 +370,7 @@ input[readonly] { color: var(--dim); background: var(--chrome-bg); }
           <div class="detail">
             <dl class="kv">
               <dt>Schedule</dt><dd><span class="mono">0 * * * *</span> · every hour · next 15:00</dd>
-              <dt>Runs</dt><dd class="mono">claude --dangerously-skip-permissions</dd>
+              <dt>Runs</dt><dd class="mono">claude --permission-mode auto</dd>
               <dt>Directory</dt><dd class="mono">~/dev/muxflow</dd>
               <dt>Tabs</dt><dd>Keep 5 · overlap limit 2h</dd>
             </dl>
@@ -435,8 +435,8 @@ input[readonly] { color: var(--dim); background: var(--chrome-bg); }
 <script>
 (function () {
   var cmds = {
-    claude: { value: "claude --dangerously-skip-permissions", ro: true, hint: "Default Claude Code command, fully unattended. The prompt is added at the end." },
-    codex: { value: "codex --dangerously-bypass-approvals-and-sandbox", ro: true, hint: "Default Codex command, fully unattended. The prompt is added at the end." },
+    claude: { value: "claude --permission-mode auto", ro: true, hint: "Default Claude Code command, in auto mode. The prompt is added at the end." },
+    codex: { value: "codex --approve-for-me", ro: true, hint: "Default Codex command, approved by its automatic reviewer. The prompt is added at the end." },
     custom: { value: "cx --print", ro: false, hint: "Used exactly as typed. Muxflow adds the quoted prompt at the end." }
   };
   var form = document.getElementById("editor");

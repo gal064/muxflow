@@ -10,8 +10,9 @@ Mock: [design/automations-mock.html](design/automations-mock.html) (open locally
 An automation is a cron schedule, a working directory, a command and a prompt,
 stored as JSON on the host. The helper daemon runs it. Each run opens a new tab
 in one dedicated `automation` workspace (tmux session) on that host and types
-the command with the prompt appended. Claude Code and Codex have built-in,
-fully unattended default commands, and any other command can be used instead.
+the command with the prompt appended. Claude Code and Codex have built-in
+default commands that run unattended in each agent's auto-approval mode, and
+any other command can be used instead.
 The helper tracks each run's status through the existing agent hooks. It skips
 a run while the previous one is still working and keeps only the newest N tabs
 per automation.
@@ -58,8 +59,11 @@ format."
 
 Things to know:
 
-- **Unattended.** The default commands skip every permission prompt, and Codex
-  also runs without its sandbox. They act with your full user permissions.
+- **Unattended.** The default commands approve actions without asking you:
+  Claude Code in auto mode, which checks each action for safety first, and
+  Codex with its automatic approval reviewer inside its workspace sandbox. For
+  full permissions, use a custom command such as
+  `claude --dangerously-skip-permissions`.
 - **Write the prompt for an empty run.** There is no precheck; tell the agent
   to stop when there is nothing to do.
 - **Pausing.** Set `"enabled": false`.
@@ -76,7 +80,7 @@ Things to know:
   unless an agent in the tab is working or waiting on you. Tabs of an
   automation you delete stay until you close them.
 - **First run in a new directory.** On the machine tested, neither default
-  command stopped at a folder-trust or bypass confirmation. If an agent version
+  command stopped at a folder-trust or auto-mode confirmation. If an agent version
   does, the run waits in its tab, reading as `working` (or `needs_attention`
   if a hook reports the question), until you answer it once.
 
@@ -96,9 +100,9 @@ Settled with the user:
   working, with a maximum runtime after which the old run stops blocking.
 - The newest N tabs per automation are kept (default 5), and older finished
   ones are closed.
-- Default commands run fully unattended:
-  - Claude Code: `claude --dangerously-skip-permissions`
-  - Codex: `codex --dangerously-bypass-approvals-and-sandbox`
+- Default commands run unattended in each agent's auto-approval mode:
+  - Claude Code: `claude --permission-mode auto`
+  - Codex: `codex --approve-for-me`
 - A custom command is used as typed, with the prompt appended as its last
   argument, for example `cx --print '<prompt>'`. Making a custom command work
   is the user's responsibility.
@@ -308,8 +312,8 @@ functions such as `cx` work. This matches the mobile agent command.
 
 | `agent` | `<command>` |
 |---|---|
-| `claude` | `claude --dangerously-skip-permissions --` |
-| `codex` | `codex --dangerously-bypass-approvals-and-sandbox --` |
+| `claude` | `claude --permission-mode auto --` |
+| `codex` | `codex --approve-for-me --` |
 | `custom` | the `command` field, unchanged |
 
 The `--` keeps a prompt that starts with `-`, such as a bullet list, from
@@ -598,13 +602,20 @@ into a fresh directory in a scratch tmux session through bracketed paste:
   `attention_kind` `completed`.
 - Only bash was available; zsh and fish typing is untested.
 
+Repeated for the auto-approval defaults with Claude Code 2.1.300 and Codex
+0.162.1, in fresh directories: neither stopped at a folder-trust or auto-mode
+prompt, both answered the quoted prompt verbatim, and both ran a network
+command (`curl -sI https://example.com`) without asking.
+
 ## Risks and open questions
 
 - **Unattended prompts:** a future agent version may add a first-run
   confirmation. The run then waits in its tab and blocks the next runs until
   `maxRuntimeMinutes`.
-- **Fully unattended agents:** they run with the user's full permissions and,
-  for Codex, without a sandbox. This is the user's explicit choice.
+- **Auto-approved agents:** the defaults rely on each agent's own reviewer.
+  An action that reviewer refuses fails or is retried by the agent; a version
+  that falls back to asking a person leaves the run waiting in its tab, like a
+  first-run prompt. A custom command can skip the reviewers entirely.
 - **Shell startup:** some prompt frameworks drop typeahead. The wait for the
   first prompt covers the common case; zsh and fish are untested.
 - **Environment:** the tab's shell is started by the tmux server and gets that
