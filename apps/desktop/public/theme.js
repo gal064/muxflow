@@ -11,6 +11,9 @@ try {
         ? "dark"
         : "light";
   document.documentElement.dataset.theme = theme;
+  // The interface zoom, for the lengths that divide by it (`applyInterfaceScale`).
+  const scale = Number(localStorage.getItem("muxflow.uiScale"));
+  if (scale > 0) document.documentElement.style.setProperty("--ui-scale", String(scale));
 } catch {
   // No storage or media API: main.tsx applies the theme a moment later.
 }

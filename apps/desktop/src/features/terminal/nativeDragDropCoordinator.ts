@@ -1,4 +1,5 @@
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
+import { interfaceScale } from "../../ui/appearance";
 import {
   cancelNativeInternalPathDrag,
   claimNativeInternalPathDrag,
@@ -67,7 +68,11 @@ function routeNativeDragDrop(payload: DragDropEvent): void {
     return;
   }
 
-  const owner = [...targets].find((target) => target.owns(payload.position));
+  // Window points, which the interface zoom does not scale; the panes' boxes
+  // are page pixels, which it does.
+  const scale = interfaceScale();
+  const point = { x: payload.position.x / scale, y: payload.position.y / scale };
+  const owner = [...targets].find((target) => target.owns(point));
   if (payload.type === "enter" && payload.paths.length === 0) claimNativeInternalPathDrag();
   if (payload.type !== "drop") {
     for (const target of targets) target.setDragging(target === owner);

@@ -49,7 +49,7 @@ import { sameHelperInstallConnection, sameHostConnection, type HostScopeToken } 
 import { useShellCommands } from "../features/shell/useShellCommands";
 import { railLayout } from "../features/shell/responsiveShell";
 import { usePersistedAppState } from "../features/shell/usePersistedAppState";
-import { useAppearance } from "../features/shell/useAppearance";
+import { useAppearance, useInterfaceScale } from "../features/shell/useAppearance";
 import {
   clampedAgentsRatio, panelWidthForWindow, sidebarWidthForWindow,
   PANEL_MIN_WIDTH, SIDEBAR_MIN_WIDTH, TERMINAL_MIN_WIDTH,
@@ -232,6 +232,7 @@ export function App() {
   const { appState, appStateLoaded, appStateRecovery, resetAppState, setAppState } = usePersistedAppState(setStatus, platform);
   // A failed load still settles: the defaults are what is on screen from then on.
   useAppearance(appState.shell.theme, appStateLoaded || appStateRecovery !== undefined);
+  useInterfaceScale(appState.shell.uiScale, appStateLoaded || appStateRecovery !== undefined);
   const availableUpdate = useUpdateCheck();
   // Read by things that run later than the render that scheduled them — the
   // workspace-create prompt is submitted long after the command that opened it,

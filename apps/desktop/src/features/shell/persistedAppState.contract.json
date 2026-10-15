@@ -69,6 +69,7 @@
     "terminalApplicationClipboard": true,
     "terminalFontSize": 17,
     "theme": "dark",
+    "uiScale": 1.1,
     "newWorkspaceHostProfileId": "ssh-remote-linux",
     "defaultMarkdownView": "live",
     "windowGeometry": {
