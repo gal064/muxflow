@@ -201,7 +201,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .titlebar-overlay .titlebar-lead { padding-left: calc(78px / var(--ui-scale, 1)); }
 .sidebar-collapsed .titlebar-lead { width: auto; }
 .titlebar-lead .window-controls { margin: 0 8px 0 0; }
-.titlebar-tabs .tabstrip { flex: 1 1 auto; height: 100%; border-bottom: 0; }
+.titlebar-tabs .tabstrip { flex: 1 1 auto; height: 100%; border-bottom: 0; background: none; }
 .titlebar-tabs .titlebar-spacer { flex: 0 0 32px; }
 .titlebar-rails {
   display: flex; align-items: center; gap: 2px; align-self: stretch;
@@ -457,7 +457,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    spinner. One size for every group-heading indicator. */
 .state-dot.agent-group-dot, .spinner.agent-group-dot { width: 7px; height: 7px; align-self: center; }
 .spinner.agent-group-dot { color: var(--chrome-dim); }
-.agent-button.selected { background: var(--chrome-selected); }
+/* The edge is invisible in dark, where it is the fill; light rows are white on
+   a near-white sidebar and need it. */
+.agent-button.selected { background: var(--chrome-selected); box-shadow: inset 0 0 0 1px var(--chrome-selected-edge); }
 .agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
 /* Reachable by keyboard, still clearly not actionable — see the note at the
    call site for why this is not `disabled`. */
@@ -698,7 +700,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   /* `min-width: 0` for the same reason as the grid track above: the strip must
      never be the thing that decides how wide the workspace column is. */
   height: var(--bar-height); min-width: 0; padding: 0 4px; gap: 1px;
-  background: var(--chrome-bg); border-bottom: 1px solid var(--chrome-hairline);
+  /* The terminal's ground, not the chrome's: light draws the work area a shade
+     whiter than the sidebar and panel, and the strip belongs to the work area. */
+  background: var(--term-bg); border-bottom: 1px solid var(--chrome-hairline);
 }
 .tabstrip-tabs { display: flex; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .tabstrip-tabs::-webkit-scrollbar { display: none; }
@@ -1006,7 +1010,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   min-width: max-content; width: 100%; height: var(--explorer-row-height); padding-right: 5px;
 }
 .file-row:hover, .file-row:focus-within { background: var(--chrome-hover); }
-.file-row[aria-selected="true"] { background: var(--chrome-selected); }
+.file-row[aria-selected="true"] { background: var(--chrome-selected); box-shadow: inset 0 0 0 1px var(--chrome-selected-edge); }
 /* The tree is UI text, not code: it was 11px monospace, which is the one place
    in the app where a proportional stack reads better — VS Code's explorer is
    the UI font at the row size, on rows near its 22px. Nothing depends on
@@ -1669,7 +1673,10 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
    dim text that did not read as a control in either state — and would have
    done the same to the next button added to any dialog. Opt out with
    `.bar-button` / `.inline-action`, which bring their own chrome. */
-:where(.modal-backdrop) button:not(.bar-button):not(.inline-action):not(.segment) {
+/* Not the palette's rows: they are buttons inside a backdrop too, and this rule
+   outranked `.palette-row.selected`, boxing every row and leaving the selected
+   one unfilled with its shortcut drawn in the knockout ink on no fill. */
+:where(.modal-backdrop) button:not(.bar-button):not(.inline-action):not(.segment):not(.palette-row) {
   padding: 6px 12px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
   background: var(--chrome-bg); color: var(--chrome-ink);
 }
@@ -1736,7 +1743,9 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   background-repeat: no-repeat;
 }
 .settings-check { display: flex !important; align-items: center; gap: 8px; color: var(--chrome-ink) !important; }
-.settings-hint { margin: -6px 0 4px 22px; color: var(--chrome-faint); font-size: var(--type-secondary); line-height: 1.5; }
+/* The secondary grey, as help text is everywhere else: the faint one is for
+   placeholders and disabled controls, and drew these at about 2.5:1. */
+.settings-hint { margin: -6px 0 4px 22px; color: var(--chrome-dim); font-size: var(--type-secondary); line-height: 1.5; }
 /* The picker and "+ Add host" on one row: choosing a saved host and starting a
    new one are the same decision, and separating them made the button read as an
    action on whatever the picker was showing. Aligned to the end of the row so

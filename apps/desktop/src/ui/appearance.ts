@@ -9,6 +9,8 @@
 
 export type ThemePreference = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
+/** Markdown's own palette: the app's, or one kept whatever the app uses. */
+export type MarkdownAppearance = "default" | "light" | "dark";
 
 const STORAGE_KEY = "muxflow.theme";
 const SYSTEM_DARK_QUERY = "(prefers-color-scheme: dark)";
@@ -16,6 +18,19 @@ const listeners = new Set<() => void>();
 
 export function isThemePreference(value: unknown): value is ThemePreference {
   return value === "system" || value === "light" || value === "dark";
+}
+
+export function isMarkdownAppearance(value: unknown): value is MarkdownAppearance {
+  return value === "default" || value === "light" || value === "dark";
+}
+
+/**
+ * The `data-palette` a Markdown view takes, or none to follow the app. Only the
+ * views drawn with CSS can take it: Source is Monaco, whose one theme is shared
+ * by every editor in the window, so it always follows the app.
+ */
+export function markdownPalette(appearance: MarkdownAppearance): ResolvedTheme | undefined {
+  return appearance === "default" ? undefined : appearance;
 }
 
 export function resolvedTheme(theme: ThemePreference, systemDark: boolean): ResolvedTheme {
