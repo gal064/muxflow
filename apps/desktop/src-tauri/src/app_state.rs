@@ -54,6 +54,14 @@ pub struct AppTabRecord {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub enum ThemePreference {
+    System,
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub enum AppTabViewMode {
     Source,
     Live,
@@ -143,6 +151,10 @@ pub struct ShellPreferences {
     pub terminal_application_clipboard: Option<bool>,
     #[serde(default)]
     pub terminal_font_size: Option<u8>,
+    /// `None` is a save written before the setting existed: the frontend
+    /// default, which follows the OS.
+    #[serde(default)]
+    pub theme: Option<ThemePreference>,
     /// The host most recently picked in the New workspace dialog.
     #[serde(default)]
     pub new_workspace_host_profile_id: Option<String>,
@@ -270,6 +282,16 @@ pub struct AppStateStore {
 }
 
 impl AppStateStore {
+    /// The saved theme choice, for painting the window before the page loads.
+    pub fn theme(&self) -> ThemePreference {
+        self.value
+            .lock()
+            .unwrap()
+            .shell
+            .theme
+            .unwrap_or(ThemePreference::System)
+    }
+
     pub fn load(path: PathBuf) -> Self {
         let loaded = load_value(&path).and_then(|value| {
             validate(&value)?;
@@ -599,6 +621,7 @@ mod tests {
                 clean_wrapped_commands: Some(false),
                 terminal_application_clipboard: Some(false),
                 terminal_font_size: Some(13),
+                theme: Some(ThemePreference::Light),
                 new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
                 window_geometry: Some(WindowGeometry {
@@ -754,6 +777,7 @@ mod tests {
         assert_eq!(value.shell.panel_width, Some(320.0));
         assert_eq!(value.shell.agents_section_ratio, Some(0.42));
         assert_eq!(value.shell.terminal_font_size, Some(17));
+        assert_eq!(value.shell.theme, Some(ThemePreference::Dark));
         assert_eq!(
             value.shell.new_workspace_host_profile_id.as_deref(),
             Some("ssh-remote-linux")

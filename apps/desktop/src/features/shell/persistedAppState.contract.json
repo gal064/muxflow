@@ -67,6 +67,7 @@
     "cleanWrappedCommands": true,
     "terminalApplicationClipboard": true,
     "terminalFontSize": 17,
+    "theme": "dark",
     "newWorkspaceHostProfileId": "ssh-remote-linux",
     "defaultMarkdownView": "live",
     "windowGeometry": {
