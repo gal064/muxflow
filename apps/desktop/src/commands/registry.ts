@@ -469,15 +469,31 @@ export type ShortcutDisposition =
   | { kind: "yield"; commandId: CommandId }
   | { kind: "run"; commandId: CommandId };
 
+/** Document editors get first refusal before unhandled shortcuts reach the app. */
+export function isDocumentEditorTarget(target: EventTarget | null): boolean {
+  return Boolean((target as { closest?: (selector: string) => unknown } | null)
+    ?.closest?.(".live-markdown-host, .monaco-host, .git-diff-content"));
+}
+
 export function shortcutDisposition(
   event: KeyboardEvent,
   platform: Platform,
   overrides: ShortcutOverrides,
   overlayOpen: boolean,
   context: CommandContext,
+  editorFallback = false,
 ): ShortcutDisposition {
+  if (event.defaultPrevented) return { kind: "ignore" };
   const command = commandForKeyboardEvent(event, platform, overrides);
-  if (!command || !globalShortcutAllowed(event, overlayOpen, command.id)) return { kind: "ignore" };
+  if (!command) return { kind: "ignore" };
+  // Copy/cut/paste are browser editing actions, often handled after keydown
+  // rather than by the editor's keymap. Keep those native even on fallback.
+  const primary = platform === "mac" ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+  const nativeEditing = primary && !event.altKey && /^[cxv]$/i.test(event.key);
+  const nativeTyping = event.key.length === 1 && !event.ctrlKey && !event.metaKey;
+  const fromEditor = editorFallback && !overlayOpen && !nativeEditing && !nativeTyping && !command.nativeFallback
+    && isDocumentEditorTarget(event.target);
+  if (!fromEditor && !globalShortcutAllowed(event, overlayOpen, command.id)) return { kind: "ignore" };
   if (!commandAvailable(command, context)) return command.nativeFallback ? { kind: "ignore" } : { kind: "swallow" };
   if (platform === "linux" && command.id === "terminal.copy" && shortcutFromEvent(event) === "Ctrl+C"
     && !context.hasTerminalSelection()) {
