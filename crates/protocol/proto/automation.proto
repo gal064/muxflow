@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package tmux_agent.protocol.v1;
+
+// Automations (docs/automations.md): agent runs on a cron schedule that the
+// helper owns. Kept in its own file so the feature can be removed with it;
+// envelope.proto names it in exactly five places.
+
+enum AutomationAction {
+  AUTOMATION_ACTION_UNSPECIFIED = 0;
+  // Every automation in the file, and a subscription to AUTOMATION events for
+  // this connection.
+  AUTOMATION_ACTION_LIST = 1;
+  // Adds or replaces the automation with `definition.id`.
+  AUTOMATION_ACTION_SAVE = 2;
+  AUTOMATION_ACTION_DELETE = 3;
+  // Starts a run of `id` now, whether or not one is still working.
+  AUTOMATION_ACTION_RUN_NOW = 4;
+  // Reads `schedule`: its error, or its next runs.
+  AUTOMATION_ACTION_PREVIEW_SCHEDULE = 5;
+}
+
+// One entry of automations.json, as written there.
+message AutomationDefinition {
+  string id = 1;
+  string name = 2;
+  bool enabled = 3;
+  string schedule = 4;
+  string cwd = 5;
+  // "claude", "codex" or "custom".
+  string agent = 6;
+  string command = 7;
+  string prompt = 8;
+  uint32 keep_tabs = 9;
+  uint32 max_runtime_minutes = 10;
+}
+
+message AutomationRun {
+  uint32 number = 1;
+  // The local minute it was due, "YYYY-MM-DDTHH:MM"; empty for Run now.
+  string scheduled_for = 2;
+  int64 started_at_unix_millis = 3;
+  int64 finished_at_unix_millis = 4;
+  // launched, working, needs_attention, done, closed, failed or skipped.
+  string status = 5;
+  string session_id = 6;
+  string window_id = 7;
+  string pane_id = 8;
+  string server_identity = 9;
+  string last_message = 10;
+  string error = 11;
+}
+
+message AutomationSummary {
+  AutomationDefinition definition = 1;
+  // Why this entry does not run; empty when it is valid.
+  string definition_error = 2;
+  // The next local minute it runs, "YYYY-MM-DDTHH:MM"; empty when it will not.
+  string next_run = 3;
+  // Newest first, at most twenty.
+  repeated AutomationRun recent_runs = 4;
+  // The line typed into a run's tab, with the prompt as `<prompt>`.
+  string command_line = 5;
+}
+
+message AutomationRequest {
+  AutomationAction action = 1;
+  AutomationDefinition definition = 2;
+  // DELETE and RUN_NOW.
+  string id = 3;
+  // SAVE and DELETE: the `generation` the caller last listed. A file changed
+  // since is refused with `stale_generation`, so an edit made elsewhere is
+  // never overwritten.
+  string base_generation = 4;
+  // PREVIEW_SCHEDULE.
+  string schedule = 5;
+}
+
+message AutomationResponse {
+  repeated AutomationSummary automations = 1;
+  // Why automations.json cannot be read; the helper keeps running the last
+  // set that loaded.
+  string file_error = 2;
+  // A hash of automations.json as listed.
+  string generation = 3;
+  // Where automations.json lives on the host.
+  string state_dir = 4;
+  // PREVIEW_SCHEDULE: the next three local minutes, or the schedule's error.
+  repeated string next_runs = 5;
+  string schedule_error = 6;
+}
+
+// Something changed: list again.
+message AutomationEvent {
+  bool changed = 1;
+}

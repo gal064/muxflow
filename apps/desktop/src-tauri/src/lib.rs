@@ -263,6 +263,7 @@ pub fn run() {
             connection::files::cancel_file_request,
             connection::git::git_request,
             connection::agent::agent_request,
+            connection::automation::automation_request,
             connection::git::cancel_git_request,
             connection::git_content::read_git_diff_content,
             connection::git_content::cancel_git_diff_content,

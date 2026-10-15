@@ -116,6 +116,9 @@ pub struct WorkspaceUiRecord {
 pub struct ShellPreferences {
     #[serde(default)]
     pub panel_surface: PanelSurface,
+    /// The right-panel extensions turned on in Settings, by id.
+    #[serde(default)]
+    pub enabled_panel_extensions: Vec<String>,
     #[serde(default)]
     pub sidebar_collapsed: bool,
     #[serde(default)]
@@ -204,14 +207,18 @@ pub struct CommandPreferences {
     pub shortcut_overrides: HashMap<String, Option<String>>,
 }
 
-/// Which segment of the right panel is showing when it is open.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PanelSurface {
-    #[default]
-    Files,
-    Git,
-    Ports,
+/// Which segment of the right panel is showing when it is open: a built-in
+/// one (`files`, `git`, `ports`) or a panel extension's id. A string, not an
+/// enum, so a surface this build does not know loads rather than failing the
+/// whole file; the frontend shows Files for one it cannot show.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct PanelSurface(pub String);
+
+impl Default for PanelSurface {
+    fn default() -> Self {
+        Self("files".into())
+    }
 }
 
 /// The agents section's ordering: workspace order, attention order, or
@@ -647,7 +654,8 @@ mod tests {
                 selected_app_tab_id: Some("tab-1".into()),
             }],
             shell: ShellPreferences {
-                panel_surface: PanelSurface::Git,
+                panel_surface: PanelSurface("git".into()),
+                enabled_panel_extensions: vec!["automations".into()],
                 sidebar_collapsed: true,
                 sidebar_width: Some(260.0),
                 panel_open: true,
@@ -815,7 +823,8 @@ mod tests {
             include_str!("../../src/features/shell/persistedAppState.contract.json");
         let value: PersistedAppState =
             serde_json::from_str(CONTRACT).expect("the frontend's own payload must deserialize");
-        assert_eq!(value.shell.panel_surface, PanelSurface::Ports);
+        assert_eq!(value.shell.panel_surface.0, "automations");
+        assert_eq!(value.shell.enabled_panel_extensions, ["automations"]);
         assert_eq!(value.shell.agent_sort, AgentSortMode::Status);
         assert_eq!(value.shell.sidebar_width, Some(260.0));
         assert_eq!(value.shell.panel_width, Some(320.0));
@@ -935,7 +944,7 @@ mod tests {
             }
         });
         let value: PersistedAppState = serde_json::from_value(legacy).unwrap();
-        assert_eq!(value.shell.panel_surface, PanelSurface::Files);
+        assert_eq!(value.shell.panel_surface, PanelSurface::default());
         assert_eq!(value.shell.agent_sort, AgentSortMode::Workspace);
         assert!(!value.shell.sidebar_collapsed);
         assert_eq!(value.shell.copy_on_select, None);

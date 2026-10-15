@@ -975,6 +975,9 @@ fn process_event(
                 },
             )?;
         }
+        v1::EventKind::Automation => {
+            send_protocol_event(channel, event_sequence, TerminalEvent::AutomationChanged)?;
+        }
         _ => send_protocol_event(channel, event_sequence, TerminalEvent::ProtocolProgress)?,
     }
     // No pane of a host the renderer has not named a session on is being

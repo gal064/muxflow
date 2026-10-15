@@ -5,8 +5,13 @@ import { isThemePreference, type ThemePreference } from "../../ui/appearance";
 export type AppTabKind = "file" | "markdown" | "gitDiff";
 /** How a Markdown tab is drawn; also the shape of the persisted default. */
 export type AppTabViewMode = "source" | "live" | "preview" | "split";
-/** The segments of the right panel; they share one 300px surface. */
-export type PanelSurface = "files" | "git" | "ports";
+/** The right panel's own segments; they share one 300px surface. */
+export const BUILT_IN_PANEL_SURFACES = ["files", "git", "ports"] as const;
+/**
+ * A built-in segment, or the id of a panel extension (`panelExtensions.ts`).
+ * A string so an extension adds no case here.
+ */
+export type PanelSurface = string;
 
 /** Sidebar geometry, from the plan's token table (cmux). */
 export const SIDEBAR_MIN_WIDTH = 240;
@@ -80,8 +85,10 @@ export interface WorkspaceUiRecord {
 }
 
 export interface ShellState {
-  /** Which half of the right panel is showing when it is open. */
+  /** Which segment of the right panel is showing when it is open. */
   panelSurface: PanelSurface;
+  /** The right-panel extensions turned on in Settings, by id. */
+  enabledPanelExtensions: string[];
   /** ⌘B. Collapsed means 0px, not a 44px icon strip. */
   sidebarCollapsed: boolean;
   /** Drag-resizable; clamped against the window at render time. */
@@ -187,6 +194,7 @@ export interface PersistedAppState {
 
 export const defaultShellState: ShellState = {
   panelSurface: "files",
+  enabledPanelExtensions: [],
   sidebarCollapsed: false,
   sidebarWidth: SIDEBAR_MIN_WIDTH,
   panelOpen: false,
@@ -236,12 +244,21 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
   // shell field is read defensively instead, so state written by the previous
   // build loads with the new preferences at their defaults.
   const shell = candidate.shell as Partial<ShellState> | undefined;
+  const enabledPanelExtensions = Array.isArray(shell?.enabledPanelExtensions)
+    ? [...new Set(shell.enabledPanelExtensions.filter((id): id is string => typeof id === "string" && id !== ""))]
+    : [];
   return {
     schemaVersion: 1,
     appTabs: candidate.appTabs,
     workspaceUi: candidate.workspaceUi,
     shell: {
-      panelSurface: shell?.panelSurface === "git" || shell?.panelSurface === "ports" ? shell.panelSurface : "files",
+      // An extension turned off, or one this build does not have, is Files.
+      panelSurface: typeof shell?.panelSurface === "string"
+        && ((BUILT_IN_PANEL_SURFACES as readonly string[]).includes(shell.panelSurface)
+          || enabledPanelExtensions.includes(shell.panelSurface))
+        ? shell.panelSurface
+        : "files",
+      enabledPanelExtensions,
       sidebarCollapsed: Boolean(shell?.sidebarCollapsed),
       sidebarWidth: clampedSidebarWidth(shell?.sidebarWidth),
       panelOpen: Boolean(shell?.panelOpen),

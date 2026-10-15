@@ -30,6 +30,7 @@ mod flow_control;
 use flow_control::{FlowControl, resume_command, take_injected_rejection};
 mod input;
 pub(crate) use input::InputDelivery;
+pub(in crate::service) use input::send_input_batch;
 mod input_client;
 use input_client::PersistentInputClient;
 mod output_credit;

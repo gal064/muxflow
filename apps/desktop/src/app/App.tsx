@@ -116,6 +116,7 @@ import { useBulkTabClose } from "./useBulkTabClose";
 import { useTerminalFileOpen } from "./useTerminalFileOpen";
 import { usePortForwards } from "../features/ports/usePortForwards";
 import type { PortsHost } from "../features/ports/PortsPanel";
+import type { PanelHost } from "../features/shell/panelExtensions";
 import { usePaneMoves } from "./usePaneMoves";
 import { DragGhost } from "../features/dragDrop/DragGhost";
 
@@ -313,6 +314,14 @@ export function App() {
       connection: link.connection,
     }]
     : []), [links, profiles]);
+  const panelHosts = useMemo<readonly PanelHost[]>(() => links.map((link) => ({
+    profileId: link.profileId,
+    label: profiles.find((profile) => profile.id === link.profileId)?.label ?? link.profileId,
+    clientId: link.clientId,
+    connected: link.hostState.phase === "connected",
+    serverIdentity: link.hostState.serverIdentity,
+    hasPane: (paneId: string) => Object.hasOwn(link.hostState.panes, paneId),
+  })), [links, profiles]);
   const portForwards = usePortForwards(
     useMemo(() => portHosts.map((host) => host.profileId), [portHosts]),
     connectionController.profilesHydrated,
@@ -1014,6 +1023,15 @@ export function App() {
       shellNavigation.selectAppTab(activeSession.id, activeWindowId, tab.id);
     }
   }, [activeSession, activeWindowId, agentRuntime.acknowledgePane, hostState.serverIdentity, selectWindow, shellNavigation, snapshot.panes]);
+
+  /** A panel extension's pane, on whichever host it is. */
+  const openPaneOnHost = useCallback((target: { profileId: string; sessionId: string; paneId: string; source: string }) => {
+    if (target.profileId !== hostScopeRef.current.hostProfileId) return selectOnHost(target);
+    const destination = resolveTerminalDestination(snapshot.panes, target.paneId);
+    if (destination.kind === "unavailable") return setStatus(`${target.source}'s tab is no longer open.`);
+    void surfacePaneDestination(destination.pane, target.source)
+      .then((result) => reportAnnouncedPaneResult(result, setStatus));
+  }, [hostScopeRef, selectOnHost, snapshot.panes, surfacePaneDestination]);
 
   const paneMoves = usePaneMoves({
     hostProfileId: currentHostProfileId,
@@ -1780,8 +1798,19 @@ export function App() {
         onMessage={setStatus}
         onMutate={mutateFile}
         onOpenFile={openExplorerEntry}
-        onSurface={(surface) => void runCommand(surface === "files" ? "view.showFiles" : surface === "git" ? "view.showGit" : "view.showPorts")}
+        onSurface={(surface) => {
+          if (surface === "files" || surface === "git" || surface === "ports") {
+            void runCommand(surface === "files" ? "view.showFiles" : surface === "git" ? "view.showGit" : "view.showPorts");
+          } else updateShell({ panelOpen: true, panelSurface: surface });
+        }}
         onWidth={(width) => updateShell({ panelWidth: panelWidthForWindow(Math.min(width, panelMaxWidth), windowWidth) })}
+        enabledExtensions={appState.shell.enabledPanelExtensions}
+        extensionProps={{
+          activeProfileId: currentHostProfileId,
+          hosts: panelHosts,
+          onMessage: setStatus,
+          onOpenPane: openPaneOnHost,
+        }}
         portForwards={portForwards}
         portHosts={portHosts}
         surface={appState.shell.panelSurface}
