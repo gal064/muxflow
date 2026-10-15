@@ -10,6 +10,7 @@ import { SurfaceError } from "../../ui/SurfaceError";
 import type { SaveState } from "../files/autosave";
 import { useVisibleSaveState } from "../files/saveStatus";
 import type { AppOwnedTab, AppTabViewMode } from "./types";
+import type { ResolvedTheme } from "../../ui/appearance";
 import { useEditorPaint } from "../../perf/surfacePaint";
 
 /**
@@ -40,6 +41,8 @@ interface Props {
   onStatus(message: string): void;
   onOpenFile(path: string): void;
   onViewMode(mode: AppTabViewMode): void;
+  /** The palette Markdown's Live and Preview take, or none to follow the app. */
+  markdownPalette?: ResolvedTheme;
 }
 
 export function AppTabSurface(props: Props) {
@@ -155,7 +158,7 @@ export function AppTabSurface(props: Props) {
   >
     {toolbar(view?.state ?? "saved", shown, liveUnavailable)}
     {view?.error && <SurfaceError className="editor-error" detail={view.error} />}
-    {editorRequested && shown === "live" && <div className="live-markdown-host" ref={editor.bindHost}>
+    {editorRequested && shown === "live" && <div className="live-markdown-host" data-palette={props.markdownPalette} ref={editor.bindHost}>
       <Suspense fallback={<DelayedLoading detail="Loading…" />}>
         <LiveMarkdownEditor
           key={modelPath(props.tab)}
@@ -182,7 +185,7 @@ export function AppTabSurface(props: Props) {
         />
       </Suspense>
     </div>}
-    {props.tab.kind === "markdown" && (mode === "preview" || mode === "split") && <MarkdownPreview source={source} onStatus={props.onStatus} onFileLink={onFileLink} />}
+    {props.tab.kind === "markdown" && (mode === "preview" || mode === "split") && <MarkdownPreview palette={props.markdownPalette} source={source} onStatus={props.onStatus} onFileLink={onFileLink} />}
   </section>;
 }
 
@@ -234,7 +237,8 @@ function EditorToolbar({ canWrite, download, liveUnavailable, mode, onViewMode, 
  * selected. The gesture is tracked here and handed to the hook, which parks a
  * finished sanitize until the selection is gone.
  */
-export function MarkdownPreview({ source, onStatus, onFileLink }: {
+export function MarkdownPreview({ palette, source, onStatus, onFileLink }: {
+  palette?: ResolvedTheme;
   source: string;
   onStatus(message: string): void;
   onFileLink(href: string): void;
@@ -270,7 +274,7 @@ export function MarkdownPreview({ source, onStatus, onFileLink }: {
     };
   }, [selecting]);
 
-  return <><article className="markdown-preview" ref={article} onPointerDown={(event) => {
+  return <><article className="markdown-preview" data-palette={palette} ref={article} onPointerDown={(event) => {
     if (event.button !== 0) return;
     pressedAt.current = { x: event.clientX, y: event.clientY };
     setSelecting(true);

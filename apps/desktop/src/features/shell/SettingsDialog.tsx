@@ -5,7 +5,7 @@ import type { HostProfile } from "../../app/types";
 import type { NotificationPermissionStatus } from "../agents/notifications";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
-import type { ThemePreference } from "../../ui/appearance";
+import type { MarkdownAppearance, ThemePreference } from "../../ui/appearance";
 import { hostLetter } from "./hostProfiles";
 import { PANEL_EXTENSIONS } from "./panelExtensions";
 import {
@@ -75,6 +75,12 @@ type SettingsTab = "connection" | "workspace" | "terminal" | "appearance" | "sou
 
 const THEMES: readonly { id: ThemePreference; label: string }[] = [
   { id: "system", label: "System" },
+  { id: "light", label: "Light" },
+  { id: "dark", label: "Dark" },
+];
+
+const MARKDOWN_APPEARANCES: readonly { id: MarkdownAppearance; label: string }[] = [
+  { id: "default", label: "Muxflow default" },
   { id: "light", label: "Light" },
   { id: "dark", label: "Dark" },
 ];
@@ -366,6 +372,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
             Show tabs in the title bar
           </label>
           <p className="settings-hint">Gives the terminal the row the tab strip used. New workspace moves to the Workspaces header.</p>
+          <fieldset className="settings-modes">
+            <legend>Markdown appearance</legend>
+            {MARKDOWN_APPEARANCES.map((item) => <label key={item.id}>
+              <input checked={props.shell.markdownAppearance === item.id} name="markdown-appearance" onChange={() => props.onShell({ markdownAppearance: item.id })} type="radio" /> {item.label}
+            </label>)}
+          </fieldset>
+          <p className="settings-hint">Colors for Markdown in Live and Preview. Muxflow default follows the theme; Source always does.</p>
         </>}
 
         {tab === "sounds" && <>
