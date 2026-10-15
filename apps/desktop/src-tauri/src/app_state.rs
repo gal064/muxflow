@@ -85,6 +85,19 @@ pub struct WorkspaceUiRecord {
     pub session_id: String,
     pub session_name: String,
     pub selected_app_tab_id: Option<String>,
+    /// The document shown beside the terminal; never the selected tab.
+    #[serde(default)]
+    pub docked_app_tab_id: Option<String>,
+    #[serde(default)]
+    pub dock_side: Option<DockSide>,
+}
+
+/// Which edge of the workspace a docked document sits on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DockSide {
+    Left,
+    Right,
 }
 
 /// The shell preferences the frontend owns.
@@ -116,6 +129,8 @@ pub struct ShellPreferences {
     pub panel_open: bool,
     #[serde(default)]
     pub panel_width: Option<f64>,
+    #[serde(default)]
+    pub dock_fraction: Option<f64>,
     #[serde(default)]
     pub agent_sort: AgentSortMode,
     #[serde(default)]
@@ -455,18 +470,27 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
         )) {
             return Err("duplicate workspace UI state".into());
         }
-        if let Some(tab_id) = workspace.selected_app_tab_id.as_deref() {
+        for (role, tab_id) in [
+            ("selected", workspace.selected_app_tab_id.as_deref()),
+            ("docked", workspace.docked_app_tab_id.as_deref()),
+        ] {
+            let Some(tab_id) = tab_id else { continue };
             let Some(tab) = known_tabs.get(&(workspace.host_profile_id.as_str(), tab_id)) else {
-                return Err(format!("selected app tab {tab_id} does not exist"));
+                return Err(format!("{role} app tab {tab_id} does not exist"));
             };
             if tab.server_identity != workspace.server_identity
                 || tab.session_id != workspace.session_id
                 || tab.session_name != workspace.session_name
             {
                 return Err(format!(
-                    "selected app tab {tab_id} belongs to a different workspace"
+                    "{role} app tab {tab_id} belongs to a different workspace"
                 ));
             }
+        }
+        if workspace.docked_app_tab_id.is_some()
+            && workspace.docked_app_tab_id == workspace.selected_app_tab_id
+        {
+            return Err("the docked app tab cannot also be the selected one".into());
         }
     }
     Ok(())
@@ -581,6 +605,8 @@ mod tests {
                 session_id: "$1".into(),
                 session_name: "project".into(),
                 selected_app_tab_id: Some("tab-1".into()),
+                docked_app_tab_id: None,
+                dock_side: None,
             }],
             shell: ShellPreferences {
                 panel_surface: PanelSurface::Git,
@@ -588,6 +614,7 @@ mod tests {
                 sidebar_width: Some(260.0),
                 panel_open: true,
                 panel_width: Some(320.0),
+                dock_fraction: Some(0.4),
                 agent_sort: AgentSortMode::Status,
                 agents_section_ratio: Some(0.42),
                 agent_state_glyphs: true,
@@ -703,6 +730,22 @@ mod tests {
         assert!(validate(&value).unwrap_err().contains("does not exist"));
 
         let mut value = sample_state();
+        value.workspace_ui[0].docked_app_tab_id = Some("missing".into());
+        assert!(
+            validate(&value)
+                .unwrap_err()
+                .contains("docked app tab missing")
+        );
+
+        let mut value = sample_state();
+        value.workspace_ui[0].docked_app_tab_id = Some("tab-1".into());
+        assert!(
+            validate(&value)
+                .unwrap_err()
+                .contains("cannot also be the selected")
+        );
+
+        let mut value = sample_state();
         value.app_tabs.push(value.app_tabs[0].clone());
         assert!(validate(&value).unwrap_err().contains("duplicate app tab"));
     }
@@ -752,6 +795,12 @@ mod tests {
         assert_eq!(value.shell.agent_sort, AgentSortMode::Status);
         assert_eq!(value.shell.sidebar_width, Some(260.0));
         assert_eq!(value.shell.panel_width, Some(320.0));
+        assert_eq!(value.shell.dock_fraction, Some(0.35));
+        assert_eq!(
+            value.workspace_ui[0].docked_app_tab_id.as_deref(),
+            Some("tab-2")
+        );
+        assert_eq!(value.workspace_ui[0].dock_side, Some(DockSide::Right));
         assert_eq!(value.shell.agents_section_ratio, Some(0.42));
         assert_eq!(value.shell.terminal_font_size, Some(17));
         assert_eq!(

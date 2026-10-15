@@ -16,6 +16,8 @@ export interface CommandContext {
   hasHostProfile: boolean;
   /** Whether the sidebar is currently filtered to pinned workspaces. */
   pinnedOnly: boolean;
+  /** Whether there is a document to dock beside the terminal, or a docked one to return. */
+  canToggleDock?: boolean;
   /**
    * Row commands (`requires: "row"`) published by whichever row surface holds
    * the row the user last pointed at. See `rowCommands.ts`: the publishing
@@ -51,7 +53,7 @@ export type CommandId =
   | "shortcuts.configure"
   | "settings.show"
   | "host.delete"
-  | "view.toggleSidebar" | "view.togglePanel" | "view.showFiles" | "view.showGit" | "view.showPorts"
+  | "view.toggleSidebar" | "view.togglePanel" | "view.showFiles" | "view.showGit" | "view.showPorts" | "view.toggleDock"
   | "focus.workspaces" | "focus.tabs" | "focus.back" | "focus.forward"
   | "tab.previous" | "tab.next"
   | "agents.jumpUnread" | "agents.toggleSort"
@@ -165,6 +167,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "view.showFiles", title: "Show Files", group: "View", defaults: { mac: "Meta+Shift+E", linux: "Ctrl+Shift+E" } },
   { id: "view.showGit", title: "Show Source Control", group: "View", defaults: { mac: "Meta+Shift+G", linux: "Ctrl+Shift+G" } },
   { id: "view.showPorts", title: "Show Ports", group: "View" },
+  { id: "view.toggleDock", title: "Toggle file beside the terminal", group: "View" },
   { id: "focus.workspaces", title: "Focus workspace list", group: "View" },
   { id: "focus.tabs", title: "Focus tab strip", group: "View" },
   // The titlebar's Back and Forward arrows run these same commands; the
@@ -280,6 +283,7 @@ export function commandAvailable(command: CommandDefinition, context: CommandCon
   // host picker and is available when any shown host is writable, even if the
   // host currently on screen is not.
   if (command.id === "session.new") return context.canCreateWorkspace;
+  if (command.id === "view.toggleDock") return Boolean(context.canToggleDock);
   if (command.mutates && !context.canMutate) return false;
   if (command.id === "window.close" && context.hasWindow && !context.canMutate) return false;
   if (command.requires === "session" && !context.hasSession) return false;
@@ -437,6 +441,9 @@ export function globalShortcutAllowed(
     && (selectionIndex(commandId, "workspace.select") || selectionIndex(commandId, "tab.select"))) return true;
   const target = event.target as { closest?: (selector: string) => unknown } | null;
   if (!target?.closest) return true;
+  // The way out of a document docked beside the terminal is the same chord
+  // that led into it, so it has to reach the shell from inside the editor.
+  if ((commandId === "pane.focusLeft" || commandId === "pane.focusRight") && target.closest("[data-docked-tab]")) return true;
   const editable = target.closest("input, textarea, select, [contenteditable=true], [role=textbox]");
   return !editable || Boolean(target.closest("[data-terminal-surface]"));
 }
