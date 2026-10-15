@@ -17,9 +17,11 @@ use crate::service::{
 
 pub(super) type Tmux = dyn Fn() -> anyhow::Result<Command>;
 
-/// Fully unattended defaults. Anything else is a custom command.
-const CLAUDE_COMMAND: &str = "claude --dangerously-skip-permissions";
-const CODEX_COMMAND: &str = "codex --dangerously-bypass-approvals-and-sandbox";
+/// Unattended defaults that keep each agent's own safety review: Claude Code's
+/// auto mode, and Codex's automatic approval reviewer inside its workspace
+/// sandbox. Anything else is a custom command.
+const CLAUDE_COMMAND: &str = "claude --permission-mode auto";
+const CODEX_COMMAND: &str = "codex --approve-for-me";
 
 /// Marks the one session runs open in. A tag rather than a name, so renaming
 /// the workspace does not make the helper create another.
@@ -236,12 +238,12 @@ mod tests {
         let file = Path::new("/home/me/Library/Application Support/x/ci-3.txt");
         assert_eq!(
             command_line(&definition(Agent::Claude, ""), file).unwrap(),
-            "claude --dangerously-skip-permissions -- \"$(cat '/home/me/Library/Application Support/x/ci-3.txt')\""
+            "claude --permission-mode auto -- \"$(cat '/home/me/Library/Application Support/x/ci-3.txt')\""
         );
         assert!(
             command_line(&definition(Agent::Codex, ""), file)
                 .unwrap()
-                .starts_with("codex --dangerously-bypass-approvals-and-sandbox -- \"$(cat '")
+                .starts_with("codex --approve-for-me -- \"$(cat '")
         );
         assert!(
             command_line(&definition(Agent::Custom, "cx --print"), file)

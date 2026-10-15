@@ -4,10 +4,10 @@ import { automationsApi, isStaleGeneration, refusalText } from "./api";
 import { describeMinute, describeSchedule } from "./cronText";
 import type { AutomationDefinition, AutomationListing, AutomationSummary, SchedulePreview } from "./types";
 
-/** The helper's fully unattended defaults; docs/automations.md. */
+/** The helper's unattended defaults, in each agent's auto-approval mode; docs/automations.md. */
 export const PRESET_COMMANDS: Record<string, string> = {
-  claude: "claude --dangerously-skip-permissions",
-  codex: "codex --dangerously-bypass-approvals-and-sandbox",
+  claude: "claude --permission-mode auto",
+  codex: "codex --approve-for-me",
 };
 
 const AGENTS = [
@@ -204,7 +204,9 @@ export function AutomationEditor(props: AutomationEditorProps) {
         </label>
         <p className="settings-hint">{draft.agent === "custom"
           ? "Typed exactly as written into an interactive shell, so aliases and functions work. The prompt is added at the end; making the command work is up to you."
-          : `Default ${draft.agent === "codex" ? "Codex" : "Claude Code"} command, fully unattended: it skips every permission prompt${draft.agent === "codex" ? " and runs without a sandbox" : ""}. The prompt is added at the end.`}</p>
+          : draft.agent === "codex"
+            ? "Default Codex command: approval requests go to Codex's automatic reviewer, inside its workspace sandbox. The prompt is added at the end."
+            : "Default Claude Code command in auto mode: actions are approved automatically after a safety check. The prompt is added at the end."}</p>
         <label>Prompt
           <textarea {...flag("prompt")} name="prompt" onChange={(event) => update({ prompt: event.target.value })} rows={5} value={draft.prompt} />
         </label>
