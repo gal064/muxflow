@@ -64,6 +64,19 @@ describe("live Markdown rendering", () => {
     expect(atomic).toEqual(["> ", "- ", "[ ] ", "---"]);
   });
 
+  it("keeps a nascent horizontal rule editable while entering bold on an empty line", () => {
+    const editor = view("Unicode – 😀\n\n", 14);
+    editor.dispatch({ effects: setFocused.of(true) });
+    toggleInline("**")(editor);
+    expect(editor.state.doc.toString()).toBe("Unicode – 😀\n\n****");
+    expect(editor.contentDOM.querySelector(".cm-live-rule")).toBeNull();
+    editor.dispatch(editor.state.replaceSelection("bold"));
+    expect(editor.state.doc.toString()).toBe("Unicode – 😀\n\n**bold**");
+    editor.dispatch({ effects: setFocused.of(false) });
+    const inactive = state("---\n\nend");
+    expect(liveRanges(inactive, 0, inactive.doc.length)).toContainEqual({ kind: "rule", from: 0, to: 3 });
+  });
+
   it.each([1, 2, 3, 4, 5, 6])("reveals level %i heading markers at the beginning, text and end", (level) => {
     const mark = "#".repeat(level);
     const doc = `${mark} Title ${mark}\n\nbody`;
@@ -556,5 +569,79 @@ describe("live Markdown commands", () => {
     vi.spyOn(editor, "posAtCoords").mockReturnValue(1);
     editor.contentDOM.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, ctrlKey: true }));
     expect(onLink).toHaveBeenCalledWith("x.md");
+  });
+});
+
+describe("WebKitGTK accessible widgets", () => {
+  function gtk() {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 AppleWebKit/605.1.15");
+  }
+  afterEach(() => vi.restoreAllMocks());
+
+  it("does not render quote or backslash payloads as images or background URLs", () => {
+    gtk();
+    for (const payload of ['AAAA"),url("https://tracker.invalid/pixel.png', "AAAA\\evil"]) {
+      const doc = `![Picture](<data:image/png;base64,${payload}>)\n\nUnicode – 😀`;
+      const editor = view(doc, doc.length);
+      expect(editor.contentDOM.querySelector(".cm-live-image")).toBeNull();
+      expect(editor.contentDOM.querySelector('[style*="background-image"]')).toBeNull();
+    }
+  });
+
+  it("rejects the balanced-parenthesis CSS image payload", () => {
+    const doc = '![x](data:image/png;base64,AAAA("),url("https://example.invalid/x")/*)\n\nend';
+    expect(ranges(doc, doc.length).some((range) => range.kind === "image")).toBe(false);
+  });
+
+  it("keeps task actions, checked state and keyboard activation without a native input", () => {
+    gtk();
+    const doc = "- [ ] open\n\nUnicode – 😀";
+    const editor = view(doc, doc.length);
+    const checkbox = () => editor.contentDOM.querySelector<HTMLElement>('[role="checkbox"]')!;
+    expect(editor.contentDOM.querySelector("input")).toBeNull();
+    expect(checkbox().getAttribute("aria-label")).toBe("Open task");
+    expect(checkbox().getAttribute("aria-checked")).toBe("false");
+    checkbox().dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    expect(editor.state.doc.toString()).toBe("- [x] open\n\nUnicode – 😀");
+    expect(checkbox().getAttribute("aria-checked")).toBe("true");
+    checkbox().click();
+    expect(editor.state.doc.toString()).toBe(doc);
+  });
+
+  it("keeps a read-only task disabled and out of the tab order", () => {
+    gtk();
+    const doc = "- [ ] open";
+    const editor = new EditorView({ parent: document.body,
+      state: EditorState.create({ doc, extensions: [liveMarkdown({ onLink() {} }), EditorState.readOnly.of(true)] }),
+    });
+    views.push(editor);
+    const box = editor.contentDOM.querySelector<HTMLElement>('[role="checkbox"]')!;
+    expect(box.getAttribute("aria-disabled")).toBe("true");
+    expect(box.tabIndex).toBe(-1);
+    box.click();
+    expect(editor.state.doc.toString()).toBe(doc);
+  });
+
+  it("keeps an embedded image's name, intrinsic size and aspect ratio without an img in the editor", () => {
+    gtk();
+    const create = document.createElement.bind(document);
+    const images: HTMLImageElement[] = [];
+    vi.spyOn(document, "createElement").mockImplementation(((tag: string, options?: ElementCreationOptions) => {
+      const element = create(tag, options);
+      if (tag === "img") images.push(element as HTMLImageElement);
+      return element;
+    }) as typeof document.createElement);
+    const doc = "![Picture](data:image/png;base64,AAAA)\n\nUnicode – 😀";
+    const editor = view(doc, doc.length);
+    const image = editor.contentDOM.querySelector<HTMLElement>('[role="img"]')!;
+    expect(editor.contentDOM.querySelector("img.cm-live-image")).toBeNull();
+    expect(image.getAttribute("aria-label")).toBe("Picture");
+    expect(image.style.backgroundImage).toContain("data:image/png;base64,AAAA");
+    const loader = images.find((image) => image.className === "cm-live-image")!;
+    Object.defineProperties(loader, { naturalWidth: { value: 240 }, naturalHeight: { value: 120 } });
+    loader.dispatchEvent(new Event("load"));
+    expect(image.style.width).toBe("240px");
+    expect(image.style.aspectRatio).toBe("240 / 120");
   });
 });

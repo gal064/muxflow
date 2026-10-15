@@ -1,0 +1,36 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 224fb1129590c9c84b2b91b5d394d25bebae5f91..828a2c57c3c5abd0cef1accd25a148c3ce34d158 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -2191,7 +2191,12 @@ class WidgetTile extends Tile {
+ // uneditable inline content.
+ class WidgetBufferTile extends Tile {
+     constructor(flags) {
+-        let img = document.createElement("img");
++        // WebKitGTK counts hidden image buffers in DOM caret offsets but omits
++        // them from accessible text (WebKit bug 279313). Use an empty inline
++        // box on that engine so AT-SPI selection notifications stay in bounds.
++        let gtkWebKit = browser.webkit && browser.linux && !browser.chrome;
++        let img = document.createElement(gtkWebKit ? "span" : "img");
++        if (gtkWebKit) img.style.display = "inline-block";
+         img.className = "cm-widgetBuffer";
+         img.setAttribute("aria-hidden", "true");
+         super(img, 0, flags);
+diff --git a/dist/index.js b/dist/index.js
+index 522f3b69e1e0bc9c8738282c2b52d0aa4a63543b..565486f748d0bbcaa1c36d78ae45066069d25b4c 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -2187,7 +2187,12 @@ class WidgetTile extends Tile {
+ // uneditable inline content.
+ class WidgetBufferTile extends Tile {
+     constructor(flags) {
+-        let img = document.createElement("img");
++        // WebKitGTK counts hidden image buffers in DOM caret offsets but omits
++        // them from accessible text (WebKit bug 279313). Use an empty inline
++        // box on that engine so AT-SPI selection notifications stay in bounds.
++        let gtkWebKit = browser.webkit && browser.linux && !browser.chrome;
++        let img = document.createElement(gtkWebKit ? "span" : "img");
++        if (gtkWebKit) img.style.display = "inline-block";
+         img.className = "cm-widgetBuffer";
+         img.setAttribute("aria-hidden", "true");
+         super(img, 0, flags);
