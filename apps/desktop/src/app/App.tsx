@@ -386,7 +386,9 @@ export function App() {
     // Closed and evicted tabs drop out here rather than inside the rule: a tab
     // the strip no longer has must not hold a slot open for itself.
     retainedAppTabs.current.ids.filter((id) => liveAppTabIds.has(id)),
-    selectedAppTab?.id,
+    // Switching files in the side column is selection too: a file docked a
+    // moment ago comes back as a repaint, like a recently selected one.
+    selectedAppTab?.id ?? dockedAppTab?.id,
     MOUNTED_APP_TAB_LIMIT,
   );
   const retainedAppTabIds = retainedAppTabs.current.ids;
@@ -1106,10 +1108,11 @@ export function App() {
     // back to, a neighbouring document in the same workspace is next, and
     // only then the workspace's terminal. A bulk close skips both: its
     // neighbours are about to go too, and the terminal is where it ends up.
-    if (mode === "single" && selectedAppTabRef.current?.id === tab.id && sameHostConnection(scope, hostScopeRef.current)) {
+    // With a document docked, both would put the next one in the side column
+    // in place of it, so closing the one covering the terminal just uncovers it.
+    if (mode === "single" && !dockedAppTab && selectedAppTabRef.current?.id === tab.id && sameHostConnection(scope, hostScopeRef.current)) {
       if (focusNavigation.navigateBackFromClosing(tab.id)) return commit();
-      // The docked document is already on screen beside the terminal.
-      const neighbours = workspaceAppTabs.filter((item) => item.id !== tab.id && item.id !== dockedAppTab?.id);
+      const neighbours = workspaceAppTabs.filter((item) => item.id !== tab.id);
       const neighbour = neighbours.filter((item) => item.order < tab.order).at(-1) ?? neighbours[0];
       if (neighbour) {
         shellNavigation.selectAppTab(tab.sessionId, activeWindowId, neighbour.id);
