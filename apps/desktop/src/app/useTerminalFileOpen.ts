@@ -1,8 +1,8 @@
 import { useCallback, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { FileWorkspaceScope, TerminalFileResolver } from "../features/files/types";
 import { sameHostConnection, type HostScopeToken } from "../features/shell/hostScope";
-import { openFileTab } from "../features/shell/model";
-import type { AppTabViewMode, PersistedAppState } from "../features/shell/types";
+import { appTabsForWorkspace, dockAppTab, openFileTab } from "../features/shell/model";
+import type { AppTabViewMode, DockSide, PersistedAppState } from "../features/shell/types";
 import { currentTerminalFilePane } from "./terminalFileOpenRoute";
 import type { TmuxSnapshot } from "./types";
 
@@ -34,7 +34,8 @@ export function useTerminalFileOpen(options: TerminalFileOpenOptions) {
     clientIdRef, defaultMarkdownView, fileClient, fileScope, hostScopeRef, selectLocalAppTab,
     setAppState, setStatus, snapshotRef,
   } = options;
-  return useCallback(async (paneId: string, candidate: string): Promise<void> => {
+  /** `dockSide` opens the file beside the terminal instead of over it. */
+  return useCallback(async (paneId: string, candidate: string, dockSide?: DockSide): Promise<void> => {
     const pane = snapshotRef.current.panes.find((item) => item.id === paneId);
     const capturedHost = hostScopeRef.current;
     const liveClientId = clientIdRef.current;
@@ -77,16 +78,23 @@ export function useTerminalFileOpen(options: TerminalFileOpenOptions) {
         livePane.windowId,
         `file:${resolved.root.token}:${resolved.path}`,
         () => {
-          setAppState((current) => openFileTab(
-            current,
-            capturedHost.hostProfileId,
-            capturedHost.serverIdentity!,
-            session,
-            resolved.path,
-            kind,
-            resolved.root,
-            { preview: false, refreshRoot: true, viewMode: defaultMarkdownView() },
-          ));
+          setAppState((current) => {
+            const serverIdentity = capturedHost.serverIdentity!;
+            const opened = openFileTab(
+              current,
+              capturedHost.hostProfileId,
+              serverIdentity,
+              session,
+              resolved.path,
+              kind,
+              resolved.root,
+              { preview: false, refreshRoot: true, viewMode: defaultMarkdownView() },
+            );
+            if (!dockSide) return opened;
+            const tab = appTabsForWorkspace(opened, capturedHost.hostProfileId, serverIdentity, session)
+              .find((item) => item.resource === resolved.path && item.kind !== "gitDiff");
+            return tab ? dockAppTab(opened, capturedHost.hostProfileId, serverIdentity, session, tab.id, dockSide) : opened;
+          });
         },
       );
     } catch (error) {

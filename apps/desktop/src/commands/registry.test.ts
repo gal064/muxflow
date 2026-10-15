@@ -281,6 +281,21 @@ describe("command registry", () => {
     expect(globalShortcutAllowed(event(false, false), true)).toBe(false);
   });
 
+  it("lets the pane-focus chords out of an editor docked beside the terminal, and only those", () => {
+    const inEditor = (docked: boolean) => ({
+      key: "ArrowLeft", code: "ArrowLeft", keyCode: 37, altKey: true, ctrlKey: true, metaKey: false,
+      target: {
+        closest: (selector: string) => selector.includes("data-docked-tab") ? (docked ? {} : null)
+          : selector.includes("data-terminal-surface") ? null : {},
+      } as unknown as EventTarget,
+    });
+    expect(globalShortcutAllowed(inEditor(true), false, "pane.focusLeft")).toBe(true);
+    expect(globalShortcutAllowed(inEditor(true), false, "pane.focusRight")).toBe(true);
+    expect(globalShortcutAllowed(inEditor(true), false, "pane.focusUp")).toBe(false);
+    expect(globalShortcutAllowed(inEditor(false), false, "pane.focusLeft")).toBe(false);
+    expect(globalShortcutAllowed(inEditor(true), true, "pane.focusLeft")).toBe(false);
+  });
+
   it("has collision-free platform defaults and detects user override collisions", () => {
     // A duplicate binding silently disables *both* commands — the resolver
     // takes a match only when there is exactly one — so this has to stay empty

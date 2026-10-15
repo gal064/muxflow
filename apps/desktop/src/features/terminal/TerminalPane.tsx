@@ -219,6 +219,12 @@ interface Props {
   /** Covered terminals retain a toast because their inline diagnostic is hidden. */
   visible?: boolean;
   appFocused?: boolean;
+  /**
+   * True while something beside the terminal holds the keyboard — a document
+   * docked next to it — so the active pane does not take focus back when tmux
+   * re-reports it or the app returns to the foreground.
+   */
+  yieldFocus?(): boolean;
   clientId?: string;
   /**
    * Which host this pane belongs to; pane ids repeat across tmux servers.
@@ -270,6 +276,7 @@ interface Props {
 export function TerminalPane({
   visible = true,
   appFocused = true,
+  yieldFocus,
   clientId,
   cacheScope,
   pane,
@@ -324,6 +331,7 @@ export function TerminalPane({
   const openFilePathRef = useRef(onOpenFilePath);
   const clientIdRef = useRef(clientId);
   const appFocusedRef = useRef(appFocused);
+  const yieldFocusRef = useCommittedRef(yieldFocus);
   const copyOnSelectRef = useRef(copyOnSelect);
   const cleanWrappedCommandsRef = useRef(cleanWrappedCommands);
   const terminalApplicationClipboardRef = useRef(terminalApplicationClipboard);
@@ -1513,8 +1521,8 @@ export function TerminalPane({
   }, [cacheKey, clientId, hub, pane.id]);
 
   useEffect(() => {
-    if (pane.active) rendererRef.current?.focus();
-  }, [pane.active]);
+    if (pane.active && !yieldFocusRef.current?.()) rendererRef.current?.focus();
+  }, [pane.active, yieldFocusRef]);
 
   useEffect(() => {
     const regainedFocus = appFocused && !appFocusedRef.current;
@@ -1524,8 +1532,8 @@ export function TerminalPane({
     // `focus`; do the same on the actual foreground transition. This runs
     // before a pointer's own focus action, so clicking a sidebar control still
     // leaves that control focused.
-    if (regainedFocus && pane.active) rendererRef.current?.focus();
-  }, [appFocused, pane.active]);
+    if (regainedFocus && pane.active && !yieldFocusRef.current?.()) rendererRef.current?.focus();
+  }, [appFocused, pane.active, yieldFocusRef]);
 
   // tmux resized this pane (a split, a zoom, another client attaching). Follow
   // it immediately rather than at the next ResizeObserver callback, which a

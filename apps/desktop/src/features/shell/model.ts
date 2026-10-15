@@ -1,7 +1,7 @@
 import type { Pane, Session, TmuxSnapshot, Window as TmuxWindow } from "../../app/types";
 import { renderedPanes } from "../terminal/layout";
 import { usableWorkspaceDefault } from "./types";
-import type { AppOwnedTab, AppTabViewMode, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord } from "./types";
+import type { AppOwnedTab, AppTabViewMode, DockSide, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord } from "./types";
 import type { GitDiffTarget, GitStatusEntry, GitStatusSnapshot } from "../git/types";
 import type { AgentAdapterId, AgentAttentionRollup, AgentTopologyAuthority } from "../agents/types";
 import { stripAgentStatusGlyphs } from "../agents/agentLabels";
@@ -460,6 +460,43 @@ export function discardServerAppState(state: PersistedAppState, hostProfileId: s
   };
 }
 
+/** Rewrites one workspace's UI record, creating it when the workspace has none yet. */
+function updateWorkspaceUi(
+  state: PersistedAppState,
+  currentHostProfileId: string,
+  currentServerIdentity: string,
+  session: Session,
+  update: (record: WorkspaceUiRecord) => WorkspaceUiRecord,
+): PersistedAppState {
+  const index = state.workspaceUi.findIndex((item) => item.hostProfileId === currentHostProfileId
+    && item.serverIdentity === currentServerIdentity
+    && item.sessionId === session.id);
+  const record = update({
+    ...(index >= 0 ? state.workspaceUi[index] : {}),
+    hostProfileId: currentHostProfileId,
+    serverIdentity: currentServerIdentity,
+    sessionId: session.id,
+    sessionName: session.name,
+  });
+  const workspaceUi = [...state.workspaceUi];
+  if (index >= 0) workspaceUi[index] = record;
+  else workspaceUi.push(record);
+  return { ...state, workspaceUi };
+}
+
+function withoutKeys(record: WorkspaceUiRecord, ...keys: (keyof WorkspaceUiRecord)[]): WorkspaceUiRecord {
+  const next = { ...record };
+  for (const key of keys) delete next[key];
+  return next;
+}
+
+/**
+ * Puts a document on the main column, or the terminal back when `undefined`.
+ *
+ * The docked document is never selected: it is already on screen beside the
+ * terminal, and selecting it would draw it twice. Asking for it leaves the
+ * selection as it was, and the caller focuses the docked editor instead.
+ */
 export function selectAppTab(
   state: PersistedAppState,
   currentHostProfileId: string,
@@ -467,20 +504,64 @@ export function selectAppTab(
   session: Session,
   selectedAppTabId: string | undefined,
 ): PersistedAppState {
-  const record: WorkspaceUiRecord = {
-    hostProfileId: currentHostProfileId,
-    serverIdentity: currentServerIdentity,
-    sessionId: session.id,
-    sessionName: session.name,
-    ...(selectedAppTabId ? { selectedAppTabId } : {}),
-  };
-  const index = state.workspaceUi.findIndex((item) => item.hostProfileId === currentHostProfileId
-    && item.serverIdentity === currentServerIdentity
-    && item.sessionId === session.id);
-  const workspaceUi = [...state.workspaceUi];
-  if (index >= 0) workspaceUi[index] = record;
-  else workspaceUi.push(record);
-  return { ...state, workspaceUi };
+  return updateWorkspaceUi(state, currentHostProfileId, currentServerIdentity, session, (record) => {
+    if (selectedAppTabId && selectedAppTabId === record.dockedAppTabId) return record;
+    const rest = withoutKeys(record, "selectedAppTabId");
+    return selectedAppTabId ? { ...rest, selectedAppTabId } : rest;
+  });
+}
+
+/**
+ * Shows one document beside the terminal, on `side`.
+ *
+ * A workspace docks one document. Docking another returns the previous one to
+ * an ordinary tab, and docking the selected one gives the main column back to
+ * the terminal. The tab is pinned: a docked preview would be the slot the next
+ * single click in the explorer rewrites, swapping the file out from under the
+ * column the user put it in.
+ */
+export function dockAppTab(
+  state: PersistedAppState,
+  currentHostProfileId: string,
+  currentServerIdentity: string,
+  session: Session,
+  tabId: string,
+  side: DockSide,
+): PersistedAppState {
+  const target = appTabsForWorkspace(state, currentHostProfileId, currentServerIdentity, session)
+    .find((tab) => tab.id === tabId);
+  if (!target) return state;
+  const pinned = target.preview
+    ? { ...state, appTabs: state.appTabs.map((tab) => tab === target ? withoutPreview(tab) : tab) }
+    : state;
+  return updateWorkspaceUi(pinned, currentHostProfileId, currentServerIdentity, session, (record) => ({
+    ...(record.selectedAppTabId === tabId ? withoutKeys(record, "selectedAppTabId") : record),
+    dockedAppTabId: tabId,
+    dockSide: side,
+  }));
+}
+
+/** Returns the docked document to an ordinary tab, selected so it stays on screen. */
+export function undockAppTab(
+  state: PersistedAppState,
+  currentHostProfileId: string,
+  currentServerIdentity: string,
+  session: Session,
+): PersistedAppState {
+  return updateWorkspaceUi(state, currentHostProfileId, currentServerIdentity, session, (record) => {
+    const rest = withoutKeys(record, "dockedAppTabId", "dockSide");
+    return record.dockedAppTabId ? { ...rest, selectedAppTabId: record.dockedAppTabId } : rest;
+  });
+}
+
+/** Forgets `tabId` wherever a workspace selected or docked it. */
+function forgetAppTab(state: PersistedAppState, currentHostProfileId: string, tabId: string): WorkspaceUiRecord[] {
+  return state.workspaceUi.map((item) => {
+    if (item.hostProfileId !== currentHostProfileId) return item;
+    if (item.selectedAppTabId === tabId) return withoutKeys(item, "selectedAppTabId");
+    if (item.dockedAppTabId === tabId) return withoutKeys(item, "dockedAppTabId", "dockSide");
+    return item;
+  });
 }
 
 /**
@@ -775,10 +856,7 @@ export function setMarkdownViewMode(
 
 export function closeAppTab(state: PersistedAppState, currentHostProfileId: string, tabId: string): PersistedAppState {
   const appTabs = state.appTabs.filter((tab) => tab.hostProfileId !== currentHostProfileId || tab.id !== tabId);
-  const workspaceUi = state.workspaceUi.map((item) => item.hostProfileId === currentHostProfileId && item.selectedAppTabId === tabId
-    ? { ...item, selectedAppTabId: undefined }
-    : item);
-  return { ...state, appTabs, workspaceUi };
+  return { ...state, appTabs, workspaceUi: forgetAppTab(state, currentHostProfileId, tabId) };
 }
 
 export function reorderAppTab(
@@ -857,9 +935,7 @@ export function moveAppTabToWorkspace(
     appTabs: state.appTabs.map((tab) => tab === moving
       ? { ...tab, sessionId: target.id, sessionName: target.name, order, preview: undefined }
       : tab),
-    workspaceUi: state.workspaceUi.map((item) => item.hostProfileId === currentHostProfileId && item.selectedAppTabId === tabId
-      ? { ...item, selectedAppTabId: undefined }
-      : item),
+    workspaceUi: forgetAppTab(state, currentHostProfileId, tabId),
   };
 }
 

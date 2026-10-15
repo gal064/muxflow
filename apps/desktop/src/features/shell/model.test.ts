@@ -6,6 +6,7 @@ import {
   closeAppTab,
   combineWorkspaceTabs,
   discardServerAppState,
+  dockAppTab,
   mountedAppTabIds,
   mountedTerminalPanes,
   moveAppTabTo,
@@ -31,6 +32,7 @@ import {
   tabsToCloseNonAgent,
   tabsToCloseRight,
   tabsEligibleAtBulkCloseCommit,
+  undockAppTab,
   setWorkspaceDefaults,
   workspaceDefaultsFor,
   type CombinedTab,
@@ -370,6 +372,44 @@ describe("application shell model", () => {
     // The destination already has this file open: one tab per document.
     const doubled = { ...tabs, appTabs: [...tabs.appTabs, { ...tabs.appTabs[1], id: "a2", sessionId: "$2", sessionName: "two" }] };
     expect(moveAppTabToWorkspace(doubled, "local", "server-a", "a", sessions[0])).toBe(doubled);
+  });
+
+  it("docks one document beside the terminal, never as the selection too", () => {
+    const ui = (state: PersistedAppState) => state.workspaceUi[0];
+    const previewed = { ...tabs, appTabs: tabs.appTabs.map((tab) => tab.id === "a" ? { ...tab, preview: true } : tab) };
+    const selected = selectAppTab(previewed, "local", "server-a", sessions[1], "a");
+
+    // Docking the selected document hands the main column back to the terminal,
+    // and pins it so the explorer's preview slot cannot rewrite it.
+    const docked = dockAppTab(selected, "local", "server-a", sessions[1], "a", "right");
+    expect(ui(docked)).toMatchObject({ dockedAppTabId: "a", dockSide: "right" });
+    expect(ui(docked).selectedAppTabId).toBeUndefined();
+    expect(docked.appTabs.find((tab) => tab.id === "a")?.preview).toBeUndefined();
+
+    // Selection and the dock are independent, and selecting the docked tab is no selection.
+    const both = selectAppTab(docked, "local", "server-a", sessions[1], "b");
+    expect(ui(both)).toMatchObject({ selectedAppTabId: "b", dockedAppTabId: "a" });
+    expect(ui(selectAppTab(both, "local", "server-a", sessions[1], "a")).selectedAppTabId).toBe("b");
+    expect(ui(selectAppTab(both, "local", "server-a", sessions[1], undefined))).toMatchObject({ dockedAppTabId: "a" });
+
+    // Docking another replaces it; an unknown tab changes nothing.
+    const replaced = dockAppTab(both, "local", "server-a", sessions[1], "b", "left");
+    expect(ui(replaced)).toMatchObject({ dockedAppTabId: "b", dockSide: "left" });
+    expect(ui(replaced).selectedAppTabId).toBeUndefined();
+    expect(dockAppTab(both, "local", "server-a", sessions[1], "missing", "left")).toBe(both);
+
+    // Undocking returns it to an ordinary, selected tab.
+    const undocked = undockAppTab(replaced, "local", "server-a", sessions[1]);
+    expect(ui(undocked)).toEqual(expect.objectContaining({ selectedAppTabId: "b" }));
+    expect(ui(undocked).dockedAppTabId).toBeUndefined();
+    expect(ui(undocked).dockSide).toBeUndefined();
+
+    // Closing or moving the docked document away forgets the dock.
+    const closed = closeAppTab(docked, "local", "a");
+    expect(ui(closed).dockedAppTabId).toBeUndefined();
+    expect(ui(closed).dockSide).toBeUndefined();
+    const moved = moveAppTabToWorkspace(docked, "local", "server-a", "a", sessions[0]);
+    expect(ui(moved).dockedAppTabId).toBeUndefined();
   });
 
   it("persists separate staged and unstaged Git diff identities across root changes", () => {

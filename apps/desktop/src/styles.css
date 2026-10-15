@@ -651,6 +651,45 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    margin, view zones, overlays — so a hidden layer still painted the editor
    over the terminal. Opacity cannot be overridden from inside. */
 .app-tab-layer-covered { visibility: hidden; opacity: 0; }
+/* A docked document takes one edge of the workspace and every other layer —
+   the terminal and the documents that cover it — the rest. Still absolute
+   boxes, only with one edge moved, so nothing about the stacking above
+   changes: the terminal column narrowing is an ordinary resize of
+   `.terminal-window`, and `useClientResize` takes it to tmux from there.
+   `--dock-width` is written by the divider (`WorkspaceDock.tsx`). */
+.workspace-content[data-dock-side="right"] > .terminal-layer,
+.workspace-content[data-dock-side="right"] > .app-tab-layer:not(.docked) { right: var(--dock-width, 40%); }
+.workspace-content[data-dock-side="left"] > .terminal-layer,
+.workspace-content[data-dock-side="left"] > .app-tab-layer:not(.docked) { left: var(--dock-width, 40%); }
+.workspace-content[data-dock-side="right"] > .app-tab-layer.docked {
+  left: auto; width: var(--dock-width, 40%); border-left: 1px solid var(--chrome-hairline);
+}
+.workspace-content[data-dock-side="left"] > .app-tab-layer.docked {
+  right: auto; width: var(--dock-width, 40%); border-right: 1px solid var(--chrome-hairline);
+}
+.dock-resize {
+  position: absolute; z-index: 8; top: 0; bottom: 0; width: 7px;
+  cursor: col-resize; touch-action: none;
+}
+.dock-resize.right { right: calc(var(--dock-width, 40%) - 4px); }
+.dock-resize.left { left: calc(var(--dock-width, 40%) - 4px); }
+/* Mounted only while a drag that can dock is in flight, over everything in the
+   workspace: a pointer drag hit-tests them (`data-drop-dock`), an HTML5 drag
+   from the explorer drops on them. A tab has nothing else to do over the
+   terminal, so its zones are wide; a path still pastes into the pane it lands
+   on, so its zones are a strip at the edge. Widths match `dockZoneWidth`. */
+.dock-drop-zone { position: absolute; z-index: 10; top: 0; bottom: 0; }
+.dock-drop-zone.left { left: 0; }
+.dock-drop-zone.right { right: 0; }
+.dock-drop-zone.for-tab { width: 25%; }
+.dock-drop-zone.for-path { width: min(12%, 120px); }
+.dock-drop-hint {
+  position: absolute; z-index: 9; top: 6px; bottom: 6px;
+  border: 2px dashed var(--accent); border-radius: 6px;
+  background: var(--accent-wash); pointer-events: none;
+}
+.dock-drop-hint.left { left: 6px; }
+.dock-drop-hint.right { right: 6px; }
 
 /* ── Tab strip ─────────────────────────────────────────────────────────── */
 
@@ -670,6 +709,13 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   color: var(--chrome-dim); font-size: 11.5px;
 }
 .tab.active .tab-select { color: var(--chrome-ink-strong); }
+/* Docked beside the terminal: on screen, so not dimmed, but not the active tab
+   either, so a fainter mark than the active one's. */
+.tab.docked .tab-select { color: var(--chrome-ink); }
+.tab.docked::after {
+  content: ""; position: absolute; left: 8px; right: 8px; bottom: 0;
+  height: 2px; border-radius: 1px 1px 0 0; background: var(--accent); opacity: 0.4;
+}
 .tab.active::after {
   content: ""; position: absolute; left: 8px; right: 8px; bottom: 0;
   height: 2px; border-radius: 1px 1px 0 0; background: var(--accent);
