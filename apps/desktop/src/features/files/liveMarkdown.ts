@@ -3,6 +3,7 @@ import { EditorSelection, EditorState, Prec, RangeSet, StateEffect, StateField, 
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type Command, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import type { SyntaxNode, SyntaxNodeRef } from "@lezer/common";
 import { tags } from "@lezer/highlight";
+import { isEmbeddedMarkdownImage } from "@muxflow/markdown";
 import { GFM, parser } from "@lezer/markdown";
 import { TableWidget, enterTable, linkHandler } from "./liveTable";
 
@@ -27,9 +28,6 @@ const markdownLanguage = new Language(
   [],
   "markdown",
 );
-
-/** Only embedded raster images render, the same policy as the preview. */
-const SAFE_EMBEDDED_IMAGE = /^data:image\/(?:png|gif|jpe?g|webp);base64,/i;
 
 /** Whether the editor has focus. Syntax is only revealed for a user who is in it. */
 export const setFocused = StateEffect.define<boolean>();
@@ -170,6 +168,10 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
           break;
         }
         case "HorizontalRule":
+          // Ctrl+B on an empty line inserts **** with the caret between the
+          // pairs. Keep that source editable instead of hiding it as a rule
+          // (and invalidating WebKitGTK's accessible caret offsets).
+          if (touches(active, node.from, node.to)) break;
           out.push({ kind: "rule", from: node.from, to: node.to });
           out.push({ kind: "atomic", from: node.from, to: node.to });
           break;
@@ -297,7 +299,7 @@ function liveLink(node: SyntaxNode, doc: Doc, active: Active, out: LiveRange[]) 
   const textTo = marks[1]?.from ?? node.to;
   if (node.name === "Image" && url && !touches(active, node.from, node.to)) {
     const src = doc.sliceString(url.from, url.to);
-    if (SAFE_EMBEDDED_IMAGE.test(src)) {
+    if (isEmbeddedMarkdownImage(src)) {
       out.push({ kind: "image", from: node.from, to: node.to, src, alt: doc.sliceString(textFrom, textTo) });
       return;
     }
@@ -341,6 +343,12 @@ export function linkTarget(raw: string): string {
   return /^[^\s/:@]+@[^\s/:@]+\.[^\s/:@]+$/.test(target) ? `mailto:${target}` : target;
 }
 
+/** Native WebKitGTK has AT-SPI offset bugs around replaced elements in an editor. */
+function isWebKitGtk(): boolean {
+  return /Linux|X11/.test(navigator.platform) && /AppleWebKit/.test(navigator.userAgent)
+    && !/Chrome\//.test(navigator.userAgent);
+}
+
 class BulletWidget extends WidgetType {
   eq() { return true; }
   toDOM() {
@@ -364,11 +372,27 @@ class TaskWidget extends WidgetType {
   constructor(readonly checked: boolean, readonly readOnly: boolean) { super(); }
   eq(other: TaskWidget) { return other.checked === this.checked && other.readOnly === this.readOnly; }
   toDOM(view: EditorView) {
-    const box = document.createElement("input");
-    box.type = "checkbox";
+    // Native inputs have the same accessible-text/caret disagreement as imgs
+    // on WebKitGTK. Keep the checkbox semantics on a text-backed span there.
+    const box = document.createElement(isWebKitGtk() ? "span" : "input");
     box.className = "cm-live-task";
-    box.checked = this.checked;
-    box.disabled = this.readOnly;
+    if (box instanceof HTMLInputElement) {
+      box.type = "checkbox";
+      box.checked = this.checked;
+      box.disabled = this.readOnly;
+    } else {
+      box.setAttribute("role", "checkbox");
+      box.setAttribute("aria-checked", String(this.checked));
+      box.setAttribute("aria-disabled", String(this.readOnly));
+      box.tabIndex = this.readOnly ? -1 : 0;
+      box.textContent = this.checked ? "☑" : "☐";
+      box.addEventListener("keydown", (event) => {
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          box.click();
+        }
+      });
+    }
     box.setAttribute("aria-label", this.checked ? "Completed task" : "Open task");
     box.addEventListener("mousedown", (event) => event.preventDefault());
     box.addEventListener("click", (event) => {
@@ -388,11 +412,29 @@ class TaskWidget extends WidgetType {
 class ImageWidget extends WidgetType {
   constructor(readonly src: string, readonly alt: string) { super(); }
   eq(other: ImageWidget) { return other.src === this.src && other.alt === this.alt; }
-  toDOM() {
+  toDOM(view: EditorView) {
     const image = document.createElement("img");
     image.className = "cm-live-image";
-    image.src = this.src;
     image.alt = this.alt;
+    // WebKitGTK's AT-SPI caret offsets count an img inside contenteditable,
+    // while its accessible text omits it (WebKit bug 279313). A background
+    // image keeps the picture and its accessible name without that DOM image.
+    if (isWebKitGtk()) {
+      const span = document.createElement("span");
+      span.className = "cm-live-image cm-live-image-background";
+      span.setAttribute("role", "img");
+      span.setAttribute("aria-label", this.alt || "Image");
+      span.style.backgroundImage = `url(${JSON.stringify(this.src)})`;
+      image.onload = () => {
+        span.style.width = `${image.naturalWidth}px`;
+        span.style.aspectRatio = `${image.naturalWidth} / ${image.naturalHeight}`;
+        view.requestMeasure();
+      };
+      image.onerror = () => { span.textContent = this.alt; view.requestMeasure(); };
+      image.src = this.src;
+      return span;
+    }
+    image.src = this.src;
     return image;
   }
 }
