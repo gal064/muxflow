@@ -667,6 +667,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .workspace-content[data-dock-side="left"] > .app-tab-layer.docked {
   right: auto; width: var(--dock-width, 40%); border-right: 1px solid var(--chrome-hairline);
 }
+/* Focusable only so a press anywhere in it takes the keyboard; no ring for that. */
+.app-tab-layer.docked:focus { outline: none; }
 .dock-resize {
   position: absolute; z-index: 8; top: 0; bottom: 0; width: 7px;
   cursor: col-resize; touch-action: none;

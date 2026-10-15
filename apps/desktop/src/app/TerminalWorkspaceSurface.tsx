@@ -25,6 +25,8 @@ type TerminalWorkspaceSurfaceProps = {
   appFocused: boolean;
   /** See `TerminalPane`'s `yieldFocus`; must be stable, or the memo here is defeated. */
   yieldFocus?(): boolean;
+  /** A document is docked beside the panes, so even a lone pane has somewhere for hover to come from. */
+  docked?: boolean;
   /** The active host's profile id; scopes every pane's screen cache. */
   cacheScope: string;
   clientId?: string;
@@ -81,7 +83,8 @@ export const TerminalWorkspaceSurface = memo(function TerminalWorkspaceSurface(p
   const { activePane, activeWindow, grid } = props;
   const hasMultiplePanes = props.mountedPanes.length > 1;
   const hoverHandlers = usePaneHoverFocus({
-    enabled: Boolean(props.hoverFocus) && hasMultiplePanes,
+    enabled: Boolean(props.hoverFocus) && (hasMultiplePanes || Boolean(props.docked)),
+    dockHoldsFocus: props.yieldFocus,
     activePaneId: activePane?.id,
     focus: (paneId) => props.controllers.current.get(paneId)?.focus(),
   });
