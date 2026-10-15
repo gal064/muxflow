@@ -46,7 +46,7 @@ export function renderSafeMarkdown(source: string): string {
       if (row.parentElement !== group) { occupiedUntil = []; group = row.parentElement; }
       let column = 0;
       for (const cell of row.cells) {
-        while (occupiedUntil[column] > row.rowIndex) column += 1;
+        while ((occupiedUntil[column] ?? 0) > row.rowIndex) column += 1;
         const firstColumn = column === 0;
         const end = column + cell.colSpan;
         for (; column < end; column += 1) occupiedUntil[column] = cell.rowSpan ? row.rowIndex + cell.rowSpan : Infinity;
