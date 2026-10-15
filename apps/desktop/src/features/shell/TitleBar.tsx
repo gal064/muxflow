@@ -47,7 +47,8 @@ interface TitleBarProps {
 
 /**
  * The only full-width bar: 38px on macOS, where it has to clear the native
- * traffic lights drawn over it, and 28px like every other bar elsewhere.
+ * traffic lights drawn over it, and 28px elsewhere: thinner than the 34px
+ * tab strip below it, since every pixel it gives up goes to the terminal.
  *
  * It carries seven controls, Settings first, plus an eighth while a newer
  * release is published: a red pill that opens the latest release page. It has no
