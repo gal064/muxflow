@@ -49,8 +49,8 @@ describe("appearance", () => {
   it("gives the light theme every color the dark one has, as hex", () => {
     // Monaco throws on a rule color that is not six or eight hex digits, and
     // a token missing here would show the dark value inside the light theme.
-    const dark = block(":root");
-    const light = block(':root[data-theme="light"]');
+    const dark = block(':root, [data-palette="dark"]');
+    const light = block(':root[data-theme="light"], [data-palette="light"]');
     expect([...light.keys()].sort()).toEqual([...dark.keys()].sort());
     for (const [name, value] of light) expect(value, name).toMatch(/^#(?:[0-9a-f]{6}|[0-9a-f]{8})$/u);
   });

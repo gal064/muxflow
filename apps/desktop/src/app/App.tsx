@@ -79,6 +79,7 @@ import {
   type PendingShellTab,
 } from "../features/shell/model";
 import { useContextMenusOpen } from "../ui/ContextMenu";
+import { markdownPalette } from "../ui/appearance";
 import { useFocusHistoryNavigation } from "./useFocusHistoryNavigation";
 import { TabStrip, workspaceTabDomId, workspaceTabPanelDomId } from "../features/workspaces/TabStrip";
 import {
@@ -1727,6 +1728,7 @@ export function App() {
                 void openTerminalFilePath(fileScope.paneId, path);
               }}
               onViewMode={(viewMode) => setAppState((current) => setMarkdownViewMode(current, currentHostProfileId, tab.id, viewMode))}
+              markdownPalette={markdownPalette(appState.shell.markdownAppearance)}
               scope={fileScope}
               tab={tab}
             />}</Suspense>

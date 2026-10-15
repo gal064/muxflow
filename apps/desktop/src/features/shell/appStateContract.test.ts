@@ -187,6 +187,16 @@ describe("per-host workspace defaults", () => {
     expect(shell({}).theme).toBe("system");
   });
 
+  it("restores the Markdown appearance and follows the theme for saves from before it", () => {
+    const shell = (value: Record<string, unknown>) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: value,
+    }).shell;
+    expect(shell({ markdownAppearance: "light" }).markdownAppearance).toBe("light");
+    expect(shell({ markdownAppearance: "dark" }).markdownAppearance).toBe("dark");
+    expect(shell({ markdownAppearance: "sepia" }).markdownAppearance).toBe("default");
+    expect(shell({}).markdownAppearance).toBe("default");
+  });
+
   it("retains the last host chosen for workspace creation without inventing one for old saves", () => {
     const selected = (value: unknown) => normalizePersistedAppState({
       schemaVersion: 1, appTabs: [], workspaceUi: [], shell: { newWorkspaceHostProfileId: value },

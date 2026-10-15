@@ -1,5 +1,5 @@
 /* GENERATED from src/palette.ts; run pnpm --filter @muxflow/client-core palette:gen. */
-:root {
+:root, [data-palette="dark"] {
   --chrome-bg: #282c34;
   --chrome-raised: #2c313a;
   --chrome-hairline: #313640;
@@ -47,7 +47,7 @@
   --state-done: #8abeb7;
   --state-unknown: #a4abb6;
 }
-:root[data-theme="light"] {
+:root[data-theme="light"], [data-palette="light"] {
   --chrome-bg: #fafafa;
   --chrome-raised: #f4f4f5;
   --chrome-hairline: #e4e4e7;
