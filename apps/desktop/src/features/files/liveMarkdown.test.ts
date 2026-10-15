@@ -3,8 +3,8 @@
 import { Compartment, EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { deleteCharBackward } from "@codemirror/commands";
-import { blockMarkupEnd, breakBeforeHeading, continueMarkup, linkAt, linkTarget, liveMarkdown, liveRanges, setFocused, softBreaks, tableRanges, toggleInline, type LiveRange } from "./liveMarkdown";
+import { cursorCharLeft, deleteCharBackward, history, redo, undo } from "@codemirror/commands";
+import { blockMarkupEnd, breakBeforeHeading, changeListIndent, continueMarkup, linkAt, linkTarget, liveMarkdown, liveRanges, setFocused, softBreaks, tableRanges, toggleInline, type LiveRange } from "./liveMarkdown";
 
 function state(doc: string, cursor?: number, focused = cursor !== undefined) {
   const created = EditorState.create({
@@ -56,11 +56,48 @@ describe("live Markdown rendering", () => {
     expect(hidden(doc, 30)).toEqual(["# ", "**", "**"]);
   });
 
-  it("never shows block markers, and keeps each one whole for the caret", () => {
+  it("reveals active headings while keeping other block markers whole", () => {
     const doc = "## Title\n\n> - [ ] task\n\n---\n";
-    for (const cursor of [5, 18, doc.length - 2]) expect(hidden(doc, cursor)).toEqual(["## ", "> ", "- "]);
+    expect(hidden(doc, 5)).toEqual(["> ", "- "]);
+    for (const cursor of [18, doc.length - 2]) expect(hidden(doc, cursor)).toEqual(["## ", "> ", "- "]);
     const atomic = ranges(doc, 5).filter((range) => range.kind === "atomic").map((range) => doc.slice(range.from, range.to));
-    expect(atomic).toEqual(["## ", "> ", "- ", "[ ] ", "---"]);
+    expect(atomic).toEqual(["> ", "- ", "[ ] ", "---"]);
+  });
+
+  it.each([1, 2, 3, 4, 5, 6])("reveals level %i heading markers at the beginning, text and end", (level) => {
+    const mark = "#".repeat(level);
+    const doc = `${mark} Title ${mark}\n\nbody`;
+    expect(hidden(doc)).toEqual([`${mark} `, ` ${mark}`]);
+    for (const cursor of [0, level + 1, doc.indexOf("\n")]) {
+      expect(hidden(doc, cursor)).toEqual([]);
+      expect(ranges(doc, cursor).filter((range) => range.kind === "atomic")).toEqual([]);
+    }
+    expect(hidden(doc, doc.length)).toEqual([`${mark} `, ` ${mark}`]);
+  });
+
+  it("reveals a heading on focus even when the initial cursor has not moved", () => {
+    const editor = view("### Title\n\nbody", 0);
+    expect(editor.contentDOM.textContent).toBe("Titlebody");
+    editor.dispatch({ effects: setFocused.of(true) });
+    expect(editor.contentDOM.textContent).toBe("### Titlebody");
+    expect(editor.state.selection.main.head).toBe(0);
+    editor.dispatch({ effects: setFocused.of(false) });
+    expect(editor.contentDOM.textContent).toBe("Titlebody");
+    expect(editor.state.doc.toString()).toBe("### Title\n\nbody");
+  });
+
+  it.each([
+    "- parent\n  - item  \n    continued\n\n    another paragraph",
+    "- parent\n  - [ ] item\n    continued",
+    "1. parent\n   2. item\\\n      continued",
+  ])("aligns visible continuation lines with their nested item's content: %s", (doc) => {
+    const editor = view(doc, doc.length);
+    const continuations = editor.contentDOM.querySelectorAll<HTMLElement>(".cm-live-list-continuation");
+    expect(continuations.length).toBeGreaterThan(0);
+    for (const line of continuations) {
+      expect(line.style.getPropertyValue("--cm-list-depth")).toBe("1");
+      expect(line.textContent).not.toMatch(/^\s/);
+    }
   });
 
   it("renders everything while the editor does not have focus", () => {
@@ -98,10 +135,18 @@ describe("live Markdown rendering", () => {
   it("draws bullets and tasks, and leaves ordered numbers alone", () => {
     const doc = "- one\n- [ ] open\n- [x] done\n1. first\n";
     const drawn = ranges(doc);
-    expect(drawn).toContainEqual({ kind: "bullet", from: 0, to: 1 });
-    expect(drawn).toContainEqual({ kind: "task", from: 8, to: 11, checked: false });
-    expect(drawn).toContainEqual({ kind: "task", from: 19, to: 22, checked: true });
+    expect(drawn).toContainEqual({ kind: "bullet", from: 0, to: 2 });
+    expect(drawn).toContainEqual({ kind: "task", from: 8, to: 12, checked: false });
+    expect(drawn).toContainEqual({ kind: "task", from: 19, to: 23, checked: true });
     expect(hidden(doc)).toEqual(["- ", "- "]);
+  });
+
+  it("includes task separator spaces in the checkbox's layout column", () => {
+    const doc = "- [ ]   task  \n  continued";
+    const editor = view(doc, doc.length);
+    expect(editor.contentDOM.querySelector(".cm-live-list")?.textContent).toBe("task  ");
+    expect(editor.contentDOM.querySelector(".cm-live-list-continuation")?.textContent).toBe("continued");
+    expect(editor.state.doc.toString()).toBe(doc);
   });
 
   it("hides fences but keeps code lines styled and the language visible", () => {
@@ -181,6 +226,126 @@ describe("linkTarget", () => {
 });
 
 describe("live Markdown commands", () => {
+  it("moves and edits the caret through a revealed heading prefix", () => {
+    const editor = view("### Title", 4);
+    editor.dispatch({ effects: setFocused.of(true) });
+    cursorCharLeft(editor);
+    expect(editor.state.selection.main.head).toBe(3);
+    editor.dispatch({ selection: { anchor: 0 } });
+    expect(editor.state.selection.main.head).toBe(0);
+    editor.dispatch({ selection: { anchor: 3 } });
+    deleteCharBackward(editor);
+    expect(editor.state.doc.toString()).toBe("## Title");
+    editor.dispatch({ selection: { anchor: 3 } });
+    expect(breakBeforeHeading(editor)).toBe(true);
+    expect(editor.state.doc.toString()).toBe("\n## Title");
+  });
+
+  it.each([
+    ["- parent\n- item\n- last", "- parent\n  - item\n- last"],
+    ["1. parent\n2. item\n3. last", "1. parent\n   2. item\n3. last"],
+    ["9. first\n10. parent\n11. item", "9. first\n10. parent\n    11. item"],
+    ["- [x] parent\n- [ ] item", "- [x] parent\n  - [ ] item"],
+    ["- parent\n1. item", "- parent\n1. item"],
+    ["> - parent\n> - item", "> - parent\n>   - item"],
+    ["-     parent\n- item", "-     parent\n  - item"],
+    ["10. parent\n11. `item`", "10. parent\n    11. `item`"],
+    ["- root\n  1.\tparent\n  2. item", "- root\n  1.\tparent\n        2. item"],
+    ["- parent\n- item\n  > quote", "- parent\n  - item\n    > quote"],
+    ["- parent\n- item\n  ```\n  > code\n  ```", "- parent\n  - item\n    ```\n    > code\n    ```"],
+    ["> - parent\n> - item\n>   > quote", "> - parent\n>   - item\n>     > quote"],
+  ])("indents whole items using the preceding marker's content column: %s", (doc, indented) => {
+    const editor = view(doc, doc.indexOf("item"));
+    expect(changeListIndent(editor, 1)).toBe(true);
+    expect(editor.state.doc.toString()).toBe(indented);
+    if (indented !== doc) {
+      expect(editor.contentDOM.querySelector<HTMLElement>('.cm-live-list[style*="--cm-list-depth: 1"]')).not.toBeNull();
+      expect(changeListIndent(editor, -1)).toBe(true);
+      expect(editor.state.doc.toString()).toBe(doc);
+    }
+  });
+
+  it("moves continuation lines and children once when their parent is selected", () => {
+    const doc = "- parent\n- item\n  continued\n  - child\n- last";
+    const editor = view(doc, { anchor: doc.indexOf("- item"), head: doc.indexOf("- last") });
+    changeListIndent(editor, 1);
+    expect(editor.state.doc.toString()).toBe("- parent\n  - item\n    continued\n    - child\n- last");
+    changeListIndent(editor, -1);
+    expect(editor.state.doc.toString()).toBe(doc);
+  });
+
+  it("moves tab-indented items by columns while retaining their child structure", () => {
+    const doc = "- root\n\t- parent\n\t- item\n\t  - child";
+    const editor = view(doc, doc.indexOf("item"));
+    changeListIndent(editor, 1);
+    expect(editor.state.doc.toString()).toBe("- root\n\t- parent\n      - item\n        - child");
+    expect(editor.contentDOM.querySelectorAll('.cm-live-list[style*="--cm-list-depth: 2"]')).toHaveLength(1);
+    changeListIndent(editor, -1);
+    expect(editor.state.doc.toString()).toBe("- root\n\t- parent\n    - item\n      - child");
+  });
+
+  it("indents selected siblings as one group and restores them together", () => {
+    const doc = "1. parent\n2. first\n3. second\n4. last";
+    const editor = view(doc, { anchor: doc.indexOf("2."), head: doc.indexOf("4.") });
+    changeListIndent(editor, 1);
+    expect(editor.state.doc.toString()).toBe("1. parent\n   2. first\n   3. second\n4. last");
+    changeListIndent(editor, -1);
+    expect(editor.state.doc.toString()).toBe(doc);
+  });
+
+  it("keeps sibling selection structural across blank separators in a loose list", () => {
+    const doc = "1. parent\n\n2. first\n\n3. second\n\n4. last";
+    const editor = view(doc, { anchor: doc.indexOf("2."), head: doc.indexOf("4.") });
+    changeListIndent(editor, 1);
+    expect(editor.state.doc.toString()).toBe("1. parent\n\n   2. first\n\n   3. second\n\n4. last");
+    changeListIndent(editor, -1);
+    expect(editor.state.doc.toString()).toBe(doc);
+    expect(changeListIndent(view("\n\n", 1), 1)).toBe(false);
+  });
+
+  it("keeps invalid nesting operations as no-ops and leaves other text to generic commands", () => {
+    const first = view("- first\n- second", 2);
+    expect(changeListIndent(first, 1)).toBe(true);
+    expect(changeListIndent(first, -1)).toBe(true);
+    expect(first.state.doc.toString()).toBe("- first\n- second");
+    first.dispatch({ selection: { anchor: 0, head: first.state.doc.length } });
+    changeListIndent(first, 1);
+    expect(first.state.doc.toString()).toBe("- first\n- second");
+    expect(changeListIndent(view("plain", 2), 1)).toBe(false);
+    expect(changeListIndent(view("```\n- code\n```", 8), 1)).toBe(false);
+  });
+
+  it("updates nesting immediately through repeated commands and supports undo/redo", () => {
+    const doc = "- parent\n- item";
+    const editor = new EditorView({
+      parent: document.body,
+      state: EditorState.create({ doc, selection: { anchor: doc.length }, extensions: [liveMarkdown({ onLink() {} }), history()] }),
+    });
+    views.push(editor);
+    for (let round = 0; round < 4; round += 1) {
+      changeListIndent(editor, 1);
+      expect(editor.contentDOM.querySelectorAll('.cm-live-list[style*="--cm-list-depth: 1"]')).toHaveLength(1);
+      changeListIndent(editor, -1);
+      expect(editor.state.doc.toString()).toBe(doc);
+      expect(editor.contentDOM.querySelectorAll('.cm-live-list[style*="--cm-list-depth: 1"]')).toHaveLength(0);
+    }
+    changeListIndent(editor, 1);
+    undo(editor);
+    expect(editor.state.doc.toString()).toBe(doc);
+    redo(editor);
+    expect(editor.state.doc.toString()).toBe("- parent\n  - item");
+  });
+
+  it("does not indent a read-only list", () => {
+    const editor = new EditorView({
+      parent: document.body,
+      state: EditorState.create({ doc: "- parent\n- item", selection: { anchor: 15 }, extensions: [liveMarkdown({ onLink() {} }), EditorState.readOnly.of(true)] }),
+    });
+    views.push(editor);
+    expect(changeListIndent(editor, 1)).toBe(false);
+    expect(editor.state.doc.toString()).toBe("- parent\n- item");
+  });
+
   it("continues a bullet, a number and a task", () => {
     const bullet = view("- one", 5);
     expect(continueMarkup(bullet)).toBe(true);
