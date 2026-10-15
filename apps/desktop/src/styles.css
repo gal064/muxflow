@@ -373,7 +373,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    the adapter marks were reading at --chrome-faint and --chrome-dim against a
    light accent, which is the one combination the palette has no contrast for. */
 .workspace-button.active .workspace-shortcut-index,
-.workspace-button.active .agent-icon { color: var(--accent-ink); }
+.workspace-button.active .agent-icon,
+.agent-button.selected .agent-icon { color: var(--accent-ink); }
 .workspace-shortcut-index {
   width: 12px; flex: 0 0 auto;
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
@@ -388,6 +389,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-family: var(--font-mono); font-size: var(--type-meta); font-weight: 600; color: var(--chrome-dim);
   text-align: center; text-transform: uppercase;
 }
+.agent-button.selected .host-letter,
 .workspace-button.active .host-letter { color: var(--accent-ink); }
 /* The compact row's workspace-level state, beside the name. It takes the plain
    8px `.state-dot`, and the rule below brings the spinner to the same 8px, so
@@ -457,9 +459,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    spinner. One size for every group-heading indicator. */
 .state-dot.agent-group-dot, .spinner.agent-group-dot { width: 7px; height: 7px; align-self: center; }
 .spinner.agent-group-dot { color: var(--chrome-dim); }
-/* The edge is invisible in dark, where it is the fill; light rows are white on
-   a near-white sidebar and need it. */
-.agent-button.selected { background: var(--chrome-selected); box-shadow: inset 0 0 0 1px var(--chrome-selected-edge); }
+/* The same accent block as the active workspace, so a selection in either list
+   reads as one thing; what sits on it flips to the knockout ink below. */
+.agent-button.selected { background: var(--accent); }
+.agent-button.selected .agent-line,
+.agent-button.selected .agent-pin { color: var(--accent-ink); }
+.agent-button.selected .agent-detail { color: color-mix(in srgb, var(--accent-ink) 72%, transparent); }
 .agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
 /* Reachable by keyboard, still clearly not actionable — see the note at the
    call site for why this is not `disabled`. */
@@ -489,9 +494,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    around it keeps one uniform gap, and that gap now separates agents rather
    than alternating between "this agent's state" and "the next agent's icon". */
 .agent-mark-glyphs { align-items: center; gap: 3px; }
-.agent-button.selected .agent-mark { --badge-ring: var(--chrome-selected); }
 .agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) .agent-mark,
 .workspace-button:hover:not(.active) .agent-mark { --badge-ring: var(--chrome-hover); }
+.agent-button.selected .agent-mark,
 .workspace-button.active .agent-mark { --badge-ring: var(--accent); }
 .agent-mark-badge {
   position: absolute; right: -2px; bottom: -2px;
@@ -511,12 +516,14 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    where --state-unknown lands near 2.4:1 and vanishes on the one row the eye
    is already on. Same knockout flip the shortcut index and the adapter icons
    make two rules up. */
+.agent-button.selected .agent-mark-badge.unknown,
 .workspace-button.active .agent-mark-badge.unknown { border-color: color-mix(in srgb, var(--accent-ink) 65%, transparent); }
 /* `.spinner` supplies the ring and the animation; this only sizes and colours
    it, and fills the middle so the mark does not show through the badge. Every
    spinner in the app is the same neutral ink — motion alone says "working",
    and the state colours stay reserved for the static dots. */
 .agent-mark-badge.working { width: 7px; height: 7px; background: var(--badge-ring); color: var(--chrome-ink); }
+.agent-button.selected .agent-mark-badge.working,
 .workspace-button.active .agent-mark-badge.working { color: var(--accent-ink); }
 /* The name and its pin are one cell, so the pin sits against the end of the
    text rather than out at the row's edge; the label alone still shrinks and

@@ -77,21 +77,21 @@
   --term-0: #000000;
   --term-1: #cd3131;
   --term-2: #107c10;
-  --term-3: #949800;
+  --term-3: #8f6a00;
   --term-4: #0451a5;
   --term-5: #bc05bc;
-  --term-6: #0598bc;
+  --term-6: #0e7490;
   --term-7: #555555;
   --term-8: #666666;
   --term-9: #cd3131;
-  --term-10: #0e8a0e;
-  --term-11: #7d8000;
+  --term-10: #0a7a0a;
+  --term-11: #7a6400;
   --term-12: #0451a5;
   --term-13: #bc05bc;
-  --term-14: #0598bc;
-  --term-15: #767676;
+  --term-14: #0e7490;
+  --term-15: #6e6e6e;
   --state-working: #d97706;
   --state-blocked: #dc2626;
-  --state-done: #0598bc;
+  --state-done: #0e7490;
   --state-unknown: #71717b;
 }
