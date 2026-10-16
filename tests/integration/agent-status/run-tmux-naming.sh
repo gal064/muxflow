@@ -27,6 +27,7 @@ cleanup() {
   tmux -L "$user_socket" kill-server 2>/dev/null || true
   tmux -L "ade-phase13-naming-fmt-$$" kill-server 2>/dev/null || true
   tmux -L "ade-phase13-naming-mixed-$$" kill-server 2>/dev/null || true
+  tmux -L "ade-phase13-naming-upgrade-$$" kill-server 2>/dev/null || true
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -77,6 +78,20 @@ sleep 0.5
 named=$(tmux -L "$socket" display-message -p -t "$pane" '#{window_name}')
 echo "window name after the pane announced itself: $named"
 [[ "$named" == "inductive" ]] || fail "window name did not follow the pane title (got '$named')"
+
+# Claude Code clears its title as it exits, while the pane still runs `claude`.
+# Renaming to that left a blank tab that nothing named again, because
+# `rename-window` had switched automatic renaming off. An empty title hands the
+# window back to tmux, which names it after the command.
+tmux -L "$socket" select-pane -t "$pane" -T ""
+sleep 1
+named=$(tmux -L "$socket" display-message -p -t "$pane" '#{window_name}')
+auto=$(tmux -L "$socket" display-message -p -t "$pane" '#{automatic-rename}')
+echo "window name after the pane cleared its title: $named (automatic-rename $auto)"
+[[ -n "$named" ]] || fail "an empty pane title left the window without a name"
+[[ "$auto" == "1" ]] || fail "an empty pane title did not hand the name back to tmux"
+tmux -L "$socket" select-pane -t "$pane" -T inductive
+sleep 0.5
 
 # A window has one name even when it has several panes. Only the first pane in
 # layout order owns that name; otherwise two agents independently updating
@@ -150,6 +165,23 @@ grep -q '"outcome":"alreadyCurrent"' "$work/again.json" \
 count=$(tmux -L "$socket" show-options -g pane-title-changed | grep -c 'rename-window')
 [[ "$count" == "1" ]] || fail "applying twice left $count hooks"
 echo "applied twice: $count hook"
+
+# ── upgrade ─────────────────────────────────────────────────────────────────
+# A server still carrying an older hook of ours — here the one that renamed a
+# window to an empty title — is updated in place, not reported as current.
+upgrade_socket="ade-phase13-naming-upgrade-$$"
+cat > "$work/upgrade.conf" <<'CONF'
+set-hook -g pane-title-changed 'if -F "#{&&:#{==:#{pane_index},#{pane-base-index}},#{||:#{==:#{pane_current_command},codex},#{==:#{pane_current_command},claude}}}" "rename-window \"#{pane_title}\""'
+CONF
+tmux -f "$work/upgrade.conf" -L "$upgrade_socket" new-session -d -s ade-phase13-upgrade -x 80 -y 24
+ADE_TMUX_SOCKET_NAME="$upgrade_socket" "$helper" host-naming > "$work/upgrade.json" \
+  || fail "host-naming failed against a server with an older hook"
+grep -q '"outcome":"applied"' "$work/upgrade.json" \
+  || fail "expected applied over an older hook of ours, got $(cat "$work/upgrade.json")"
+upgraded=$(tmux -L "$upgrade_socket" show-options -g pane-title-changed)
+[[ "$upgraded" == *"automatic-rename"* ]] || fail "the older hook was not replaced (got $upgraded)"
+tmux -L "$upgrade_socket" kill-server
+echo "older hook replaced"
 
 # ── user config present ─────────────────────────────────────────────────────
 cat > "$work/tmux.conf" <<'CONF'
