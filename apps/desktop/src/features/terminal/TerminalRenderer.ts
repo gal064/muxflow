@@ -4,6 +4,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { terminalScreenReaderMode } from "./accessibilityPreference";
+import { onAppearanceChange } from "../../ui/appearance";
 import { installAtlasFontSmoothing } from "./atlasFontSmoothing";
 import { watchAtlasStaleness } from "./atlasStaleProbe";
 import { GHOSTTY_TEXT_OPTIONS, searchDecorations, terminalFacesPending, terminalFacesReady, terminalFont, terminalTheme } from "./theme";
@@ -491,6 +492,11 @@ export class XtermRenderer implements TerminalRenderer {
         }
       };
     }
+    // xterm holds its palette as values, so a theme switch re-reads the tokens
+    // the new `:root` attributes resolve to. Search hits take theirs per search.
+    this.#disposables.push({ dispose: onAppearanceChange(() => {
+      if (!this.#disposed) this.#terminal.options.theme = terminalTheme();
+    }) });
     this.#disposables.push(this.#terminal.onSelectionChange(() => {
       this.#selectionFromSearch = this.#searching;
     }));

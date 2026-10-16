@@ -51,6 +51,7 @@ import type { HostScopeToken } from "../features/shell/hostScope";
 import { perfProbeEnabled, recordPerfCounter, recordPerfRecord } from "../perf/probe";
 import { recordIncident } from "../diagnostics/incidents";
 import { writeTerminalApplicationClipboard } from "../features/terminal/terminalTransferApi";
+import { publishAutomationChanged } from "../features/automations/api";
 
 type ControllerArguments = {
   agentClient: TauriAgentClient;
@@ -812,6 +813,9 @@ export function useAppConnectionController({
           };
           if (event.snapshot) agentClient.publishWireSnapshot(agentScope, event.snapshot);
           else if (event.event) agentClient.publishWireEvent(agentScope, event.event);
+        } else if (event.kind === "automationChanged") {
+          // Every host's, like agents: the panel may be showing any of them.
+          publishAutomationChanged(profileId);
         }
       });
     }).then((id) => {

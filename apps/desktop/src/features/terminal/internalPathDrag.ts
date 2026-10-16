@@ -23,6 +23,34 @@ const ACTIVE_DRAG_MILLIS = 30_000;
 const ACCEPTED_DRAG_GRACE_MILLIS = 2_000;
 let activeDrag: ActiveInternalPathDrag | undefined;
 let nextGestureId = 0;
+/**
+ * Whether a row is being dragged right now: from dragstart to dragend, and
+ * nothing after. Narrower than `activeDrag`, which outlives dragend on macOS
+ * to bridge the native drop; this is what drop targets that only exist during
+ * a drag (the dock zones) show themselves for.
+ */
+let gestureLive = false;
+const gestureListeners = new Set<() => void>();
+
+function setGestureLive(live: boolean): void {
+  if (gestureLive === live) return;
+  gestureLive = live;
+  for (const listener of gestureListeners) listener();
+}
+
+export function internalPathDragLive(): boolean {
+  return gestureLive;
+}
+
+export function subscribeInternalPathDrag(listener: () => void): () => void {
+  gestureListeners.add(listener);
+  return () => gestureListeners.delete(listener);
+}
+
+/** Whether the native lane is carrying one of our drags, so a native drop with no paths is ours. */
+export function nativeInternalPathDragClaimed(): boolean {
+  return Boolean(currentActiveDrag()?.nativeClaimed);
+}
 
 type InternalPathDrop =
   | { kind: "absent" }
@@ -49,6 +77,7 @@ export function writeInternalPathDrag(
     source: { ...source },
     expiresAt: Date.now() + ACTIVE_DRAG_MILLIS,
   };
+  setGestureLive(true);
 }
 
 /** Marks an empty-path native enter as the macOS half of our active DOM drag. */
@@ -83,6 +112,7 @@ export function consumeNativeInternalPathDrop(target: InternalPathDragTarget | u
  * bounded tightly instead so a native drop that never arrives cannot leak.
  */
 export function finishInternalPathDrag(accepted: boolean): void {
+  setGestureLive(false);
   if (!activeDrag) return;
   if (!accepted || !activeDrag.nativeClaimed) {
     activeDrag = undefined;
@@ -113,7 +143,10 @@ export function cancelNativeInternalPathDrag(): void {
 export function cancelInternalPathDragSource(target: InternalPathDragTarget): void {
   if (activeDrag
     && activeDrag.source.hostProfileId === target.hostProfileId
-    && activeDrag.source.serverIdentity === target.serverIdentity) activeDrag = undefined;
+    && activeDrag.source.serverIdentity === target.serverIdentity) {
+    activeDrag = undefined;
+    setGestureLive(false);
+  }
 }
 
 export function readInternalPathDrop(

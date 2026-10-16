@@ -145,6 +145,19 @@ shell_name=$(tmux -L "$socket" display-message -p -t "$shell_window" '#{window_n
 echo "non-agent window kept its own name: $shell_name"
 [[ "$shell_name" != "operator@host:~/somewhere" ]] || fail "a non-agent window took its pane title"
 
+# An agent window whose name is locked — an automation run's tab — keeps that
+# name even though its first pane is an agent announcing a title.
+locked_window=$(tmux -L "$socket" new-window -d -t ade-phase13 -n "Fix CI #3" -P -F '#{window_id}' \
+  "$work/bin/claude hook ingest --adapter codex")
+tmux -L "$socket" set-option -w -t "$locked_window" @muxflow-name-locked 1
+locked_pane=$(tmux -L "$socket" list-panes -t "$locked_window" -F '#{pane_id}' | head -1)
+sleep 0.5
+tmux -L "$socket" select-pane -t "$locked_pane" -T "agent title"
+sleep 0.5
+locked_name=$(tmux -L "$socket" display-message -p -t "$locked_window" '#{window_name}')
+echo "locked agent window kept its name: $locked_name"
+[[ "$locked_name" == "Fix CI #3" ]] || fail "a locked window took its agent's title (got '$locked_name')"
+
 # ── twice ───────────────────────────────────────────────────────────────────
 "$helper" host-naming > "$work/again.json" || fail "second host-naming failed"
 grep -q '"outcome":"alreadyCurrent"' "$work/again.json" \

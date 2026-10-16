@@ -281,6 +281,23 @@ describe("command registry", () => {
     expect(globalShortcutAllowed(event(false, false), true)).toBe(false);
   });
 
+  it("lets the pane-focus chords and close out of an editor docked beside the terminal, and only those", () => {
+    const inEditor = (docked: boolean) => ({
+      key: "ArrowLeft", code: "ArrowLeft", keyCode: 37, altKey: true, ctrlKey: true, metaKey: false,
+      target: {
+        closest: (selector: string) => selector.includes("data-docked-tab") ? (docked ? {} : null)
+          : selector.includes("data-terminal-surface") ? null : {},
+      } as unknown as EventTarget,
+    });
+    expect(globalShortcutAllowed(inEditor(true), false, "pane.focusLeft")).toBe(true);
+    expect(globalShortcutAllowed(inEditor(true), false, "pane.focusRight")).toBe(true);
+    expect(globalShortcutAllowed(inEditor(true), false, "window.close")).toBe(true);
+    expect(globalShortcutAllowed(inEditor(false), false, "window.close")).toBe(false);
+    expect(globalShortcutAllowed(inEditor(true), false, "pane.focusUp")).toBe(false);
+    expect(globalShortcutAllowed(inEditor(false), false, "pane.focusLeft")).toBe(false);
+    expect(globalShortcutAllowed(inEditor(true), true, "pane.focusLeft")).toBe(false);
+  });
+
   it("has collision-free platform defaults and detects user override collisions", () => {
     // A duplicate binding silently disables *both* commands — the resolver
     // takes a match only when there is exactly one — so this has to stay empty
@@ -433,6 +450,37 @@ describe("keyboard disposition", () => {
     // Every command flagged that way has to be one the platform can answer.
     expect(commandRegistry.filter((command) => command.nativeFallback).map((command) => command.id))
       .toEqual(["terminal.copy", "terminal.paste"]);
+  });
+});
+
+describe("document editor shortcut fallback", () => {
+  const press = (key: string, platform: "mac" | "linux", prevented = false) => ({
+    key, code: `Key${key.toUpperCase()}`, metaKey: platform === "mac", ctrlKey: platform === "linux",
+    altKey: false, shiftKey: false, keyCode: 0, isComposing: false, defaultPrevented: prevented,
+    target: { closest: (selector: string) => selector.includes(".live-markdown-host") || selector.includes("contenteditable") ? {} : null },
+  }) as unknown as KeyboardEvent;
+
+  it.each(["mac", "linux"] as const)("lets unhandled %s editor chords reach configured app commands", (platform) => {
+    const event = press("l", platform);
+    expect(shortcutDisposition(event, platform, {}, false, context())).toEqual({ kind: "ignore" });
+    expect(shortcutDisposition(event, platform, {}, false, context(), true)).toEqual({ kind: "run", commandId: "view.togglePanel" });
+    const overrides = { "view.togglePanel": platform === "mac" ? "Meta+J" : "Ctrl+J" };
+    expect(shortcutDisposition(press("j", platform), platform, overrides, false, context(), true)).toEqual({ kind: "run", commandId: "view.togglePanel" });
+  });
+
+  it("keeps editor-handled chords and modal input out of the app", () => {
+    expect(shortcutDisposition(press("b", "mac", true), "mac", {}, false, context(), true)).toEqual({ kind: "ignore" });
+    expect(shortcutDisposition(press("l", "mac"), "mac", {}, true, context(), true)).toEqual({ kind: "ignore" });
+  });
+
+  it("preserves printable text even when an app command has an unmodified binding", () => {
+    const event = { ...press("l", "linux"), ctrlKey: false } as KeyboardEvent;
+    expect(shortcutDisposition(event, "linux", { "view.togglePanel": "L" }, false, context(), true)).toEqual({ kind: "ignore" });
+  });
+
+  it.each(["c", "x", "v"])("preserves native editing for %s even when an app command is rebound to it", (key) => {
+    expect(shortcutDisposition(press(key, "mac"), "mac", { "view.togglePanel": `Meta+${key.toUpperCase()}`, "terminal.copy": null, "terminal.paste": null }, false, context(), true))
+      .toEqual({ kind: "ignore" });
   });
 });
 

@@ -6,6 +6,7 @@ import {
   closeAppTab,
   combineWorkspaceTabs,
   discardServerAppState,
+  dockAppTab,
   mountedAppTabIds,
   mountedTerminalPanes,
   moveAppTabTo,
@@ -31,6 +32,7 @@ import {
   tabsToCloseNonAgent,
   tabsToCloseRight,
   tabsEligibleAtBulkCloseCommit,
+  undockAppTab,
   setWorkspaceDefaults,
   workspaceDefaultsFor,
   type CombinedTab,
@@ -370,6 +372,75 @@ describe("application shell model", () => {
     // The destination already has this file open: one tab per document.
     const doubled = { ...tabs, appTabs: [...tabs.appTabs, { ...tabs.appTabs[1], id: "a2", sessionId: "$2", sessionName: "two" }] };
     expect(moveAppTabToWorkspace(doubled, "local", "server-a", "a", sessions[0])).toBe(doubled);
+  });
+
+  it("docks one document beside the terminal, never as the selection too", () => {
+    const ui = (state: PersistedAppState) => state.workspaceUi[0];
+    const previewed = { ...tabs, appTabs: tabs.appTabs.map((tab) => tab.id === "a" ? { ...tab, preview: true } : tab) };
+    const selected = selectAppTab(previewed, "local", "server-a", sessions[1], "a");
+
+    // Docking the selected document hands the main column back to the terminal,
+    // and pins it so the explorer's preview slot cannot rewrite it.
+    const docked = dockAppTab(selected, "local", "server-a", sessions[1], "a", "right");
+    expect(ui(docked)).toMatchObject({ dockedAppTabId: "a", dockSide: "right" });
+    expect(ui(docked).selectedAppTabId).toBeUndefined();
+    expect(docked.appTabs.find((tab) => tab.id === "a")?.preview).toBeUndefined();
+
+    // While one is docked, selecting another document replaces it in the side
+    // column; selecting the docked one, or the terminal, leaves the dock alone.
+    const switched = selectAppTab(docked, "local", "server-a", sessions[1], "b");
+    expect(ui(switched)).toMatchObject({ dockedAppTabId: "b", dockSide: "right" });
+    expect(ui(switched).selectedAppTabId).toBeUndefined();
+    expect(selectAppTab(docked, "local", "server-a", sessions[1], "a")).toEqual(docked);
+    expect(ui(selectAppTab(docked, "local", "server-a", sessions[1], undefined))).toMatchObject({ dockedAppTabId: "a" });
+
+    // A document can still cover the terminal beside the dock, put there before docking.
+    const both = dockAppTab(selectAppTab(previewed, "local", "server-a", sessions[1], "b"), "local", "server-a", sessions[1], "a", "right");
+    expect(ui(both)).toMatchObject({ selectedAppTabId: "b", dockedAppTabId: "a" });
+
+    // Docking another replaces it; an unknown tab changes nothing.
+    const replaced = dockAppTab(both, "local", "server-a", sessions[1], "b", "left");
+    expect(ui(replaced)).toMatchObject({ dockedAppTabId: "b", dockSide: "left" });
+    expect(ui(replaced).selectedAppTabId).toBeUndefined();
+    expect(dockAppTab(both, "local", "server-a", sessions[1], "missing", "left")).toBe(both);
+
+    // Undocking returns it to an ordinary, selected tab.
+    const undocked = undockAppTab(replaced, "local", "server-a", sessions[1]);
+    expect(ui(undocked)).toEqual(expect.objectContaining({ selectedAppTabId: "b" }));
+    expect(ui(undocked).dockedAppTabId).toBeUndefined();
+    expect(ui(undocked).dockSide).toBeUndefined();
+
+    // Closing or moving the docked document away forgets the dock.
+    const closed = closeAppTab(docked, "local", "a");
+    expect(ui(closed).dockedAppTabId).toBeUndefined();
+    expect(ui(closed).dockSide).toBeUndefined();
+    const moved = moveAppTabToWorkspace(docked, "local", "server-a", "a", sessions[0]);
+    expect(ui(moved).dockedAppTabId).toBeUndefined();
+  });
+
+  it("opens files into the side column while one is docked, browsing previews in place", () => {
+    const ui = (state: PersistedAppState) => state.workspaceUi.find((record) => record.sessionId === sessions[1].id)!;
+    const root = { path: "/repo", token: "root-token", revision: "1" };
+    const open = (state: PersistedAppState, resource: string, preview: boolean) =>
+      openFileTab(state, "local", "server-a", sessions[1], resource, "file", root, { preview });
+    const first = open(defaultAppState, "/repo/a.ts", false);
+    const pinnedId = first.appTabs[0].id;
+    const docked = dockAppTab(first, "local", "server-a", sessions[1], pinnedId, "right");
+
+    // A single click opens a preview beside the terminal; the docked file stays a tab.
+    const browsed = open(docked, "/repo/b.ts", true);
+    const previewId = ui(browsed).dockedAppTabId!;
+    expect(previewId).not.toBe(pinnedId);
+    expect(ui(browsed).selectedAppTabId).toBeUndefined();
+    expect(browsed.appTabs.map((tab) => tab.resource)).toEqual(["/repo/a.ts", "/repo/b.ts"]);
+
+    // The next single click rewrites that preview in place, still docked.
+    const browsedAgain = open(browsed, "/repo/c.ts", true);
+    expect(ui(browsedAgain)).toMatchObject({ dockedAppTabId: previewId, dockSide: "right" });
+    expect(browsedAgain.appTabs.map((tab) => tab.resource)).toEqual(["/repo/a.ts", "/repo/c.ts"]);
+
+    // Reopening the first file, as the palette or its tab would, docks it again.
+    expect(ui(open(browsedAgain, "/repo/a.ts", false)).dockedAppTabId).toBe(pinnedId);
   });
 
   it("persists separate staged and unstaged Git diff identities across root changes", () => {

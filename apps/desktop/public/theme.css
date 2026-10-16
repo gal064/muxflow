@@ -1,0 +1,5 @@
+/* Linked from index.html before any other stylesheet, so the first paint is
+   already the canvas of the chosen theme. A file, not a style element in the page:
+   packaging gives every inline style element a CSP nonce, and a nonce in style-src
+   turns off the 'unsafe-inline' the editors' generated styles depend on. */
+:root[data-theme="light"] { color-scheme: light; }
