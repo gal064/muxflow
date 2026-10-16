@@ -26,7 +26,9 @@ use super::snapshot::tmux_command;
 /// running in it: `configure_new_session` names the session and leaves the
 /// window alone, because an explicit name would have been overwritten by this
 /// hook the moment an agent announced a title. A rename by the user, from
-/// either side, is final until the next one.
+/// either side, is final until the next one. An empty title hands the window
+/// back to tmux's own naming instead, so an agent that exits leaves `bash`
+/// behind rather than a blank tab.
 const PANE_TITLE_HOOK: &str = "pane-title-changed";
 const AUTOMATIC_RENAME_FORMAT: &str = "automatic-rename-format";
 const TITLE_OWNER_CONDITION: &str = "#{==:#{pane_index},#{pane-base-index}}";
@@ -43,13 +45,16 @@ const TITLE_OWNER_CONDITION: &str = "#{==:#{pane_index},#{pane-base-index}}";
 /// `if -F` means the command never runs for a non-agent pane at all, so an
 /// ordinary shell window keeps the name tmux would have given it.
 fn recommended_hook_command() -> String {
-    format!("if -F \"{}\" \"{OWNED_HOOK_BODY}\"", guard_condition())
+    format!(
+        "if -F \"{}\" \"if -F '#{{pane_title}}' '{OWNED_HOOK_BODY}' '{EMPTY_TITLE_FALLBACK}'\"",
+        guard_condition()
+    )
 }
 
 /// The tmux format that is true exactly for the first pane when it is running
 /// an agent this app understands. Built from the registry, so adding an
 /// adapter changes it — and that change is what `AlreadyCurrent` has to be able
-/// to notice.
+/// to notice, along with any change to the hook's body.
 fn guard_condition() -> String {
     let mut agent_condition = String::new();
     for adapter in super::agents::adapters::all() {
@@ -72,13 +77,31 @@ fn guard_condition() -> String {
 /// version. This body is the part that never varies.
 const OWNED_HOOK_BODY: &str = "rename-window \\\"#{pane_title}\\\"";
 
+/// What the hook does instead of renaming when the title is empty. Claude Code
+/// clears its title as it exits, while the pane still runs `claude`; renaming
+/// to that left a blank tab, and `rename-window` had already switched tmux's
+/// automatic renaming off, so nothing ever named it again. Unsetting the
+/// window's override returns it to the global setting rather than forcing it
+/// on over a user who turned automatic renaming off.
+const EMPTY_TITLE_FALLBACK: &str = "set -wu automatic-rename";
+
+/// Whether an installed hook entry is exactly the command this app would set.
+/// tmux reads the leading `if` back as `if-shell`, so the command word is left
+/// out of the comparison.
+fn is_current_hook(installed: &str, command: &str) -> bool {
+    match (installed.split_once(' '), command.split_once(' ')) {
+        (Some((_, installed)), Some((_, command))) => installed == command,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NamingOutcome {
     /// This app set or replaced the hook. The tmux server holds it in memory
     /// only.
     Applied,
-    /// This app's hook is already on the server and already covers every
-    /// adapter it knows about. Nothing was written.
+    /// This app's hook is already on the server exactly as this version would
+    /// set it. Nothing was written.
     AlreadyCurrent,
     /// The user's own configuration already syncs pane titles to window names,
     /// by a hook of their own or by an `automatic-rename-format`. Theirs is
@@ -134,8 +157,11 @@ pub(crate) fn apply_recommended_naming() -> anyhow::Result<NamingOutcome> {
     {
         return Ok(NamingOutcome::UserConfigured);
     }
-    let guard = guard_condition();
-    if !existing.is_empty() && existing.iter().all(|value| value.contains(&guard)) {
+    if !existing.is_empty()
+        && existing
+            .iter()
+            .all(|value| is_current_hook(value, &command))
+    {
         return Ok(NamingOutcome::AlreadyCurrent);
     }
     if existing.is_empty() && syncs_titles_by_format()? {
@@ -377,6 +403,10 @@ mod tests {
             "only the first pane may own the window title: {command}"
         );
         assert!(command.contains(OWNED_HOOK_BODY));
+        assert!(
+            command.contains(EMPTY_TITLE_FALLBACK),
+            "an empty title must not rename the window: {command}"
+        );
         assert!(!command.contains("status"), "nothing cosmetic: {command}");
         assert_eq!(NamingOutcome::Applied.label(), "applied");
         assert_eq!(NamingOutcome::AlreadyCurrent.label(), "alreadyCurrent");
@@ -444,6 +474,31 @@ mod tests {
         assert!(
             !theirs.contains(OWNED_HOOK_BODY),
             "someone else's hook is not ours"
+        );
+    }
+
+    /// A hook with today's guard but an older body — the one that renamed a
+    /// window to an empty title — is ours and must still be replaced.
+    #[test]
+    fn a_hook_is_current_only_when_its_whole_command_matches() {
+        let command = recommended_hook_command();
+        let installed = command.replacen("if -F ", "if-shell -F ", 1);
+        assert!(
+            is_current_hook(&installed, &command),
+            "tmux's read-back of our own hook"
+        );
+
+        let older = format!(
+            "if-shell -F \"{}\" \"{OWNED_HOOK_BODY}\"",
+            guard_condition()
+        );
+        assert!(
+            older.contains(OWNED_HOOK_BODY),
+            "an older body is still ours"
+        );
+        assert!(
+            !is_current_hook(&older, &command),
+            "and it must be replaced"
         );
     }
 }
