@@ -1,5 +1,5 @@
 import type { Pane, Session, Window as TmuxWindow } from "../../app/types";
-import type { AppOwnedTab } from "../shell/types";
+import type { AppOwnedTab, DockSide } from "../shell/types";
 import type { TmuxAction } from "../tmux/actions";
 import type { DragPayload, DropTarget } from "./pointerDrag";
 
@@ -11,6 +11,8 @@ export interface DropContext {
   panes: readonly Pane[];
   /** This server's document tabs, so a move never opens one twice in a workspace. */
   appTabs: readonly Pick<AppOwnedTab, "id" | "sessionId" | "kind" | "resource">[];
+  /** The document docked beside the terminal in the workspace on screen, and on which edge. */
+  dock?: { tabId: string; side: DockSide };
 }
 
 export type DropPlan =
@@ -21,11 +23,17 @@ export type DropPlan =
   | { kind: "action"; action: TmuxAction }
   | { kind: "moveAppTab"; tabId: string; targetTabId: string; side: "before" | "after" }
   | { kind: "moveAppTabToWorkspace"; tabId: string; session: Session }
+  | { kind: "dockAppTab"; tabId: string; side: DockSide }
+  /**
+   * The docked document back among the tabs: anywhere on its own strip, and
+   * at the gap it was dropped on when that gap is beside another document.
+   */
+  | { kind: "undockAppTab"; tabId: string; place?: { targetTabId: string; side: "before" | "after" } }
   | { kind: "refuse"; reason: string };
 
 export const CLOSES_WORKSPACE = "Moving a workspace's only tab would close the workspace.";
 export const ONE_PANE_TAB_ONLY = "Only a tab with a single pane can become a split.";
-export const NO_DOCUMENT_SPLITS = "File tabs can't become splits.";
+export const NO_DOCUMENT_SPLITS = "Drop a file at the left or right edge to open it beside the terminal.";
 export const SAME_HOST_ONLY = "Tabs and agents can only move within one host.";
 export const ALREADY_OPEN = "That file is already open in the workspace.";
 
@@ -79,13 +87,24 @@ export function planDrop(payload: DragPayload, dropped: DropTarget, context: Dro
       return joinPlan(panes[0].id, targetPane.id, target);
     }
     case "appTab": {
+      const docked = context.dock?.tabId === payload.tabId;
+      if (target.kind === "dock") {
+        if (docked && context.dock?.side === target.side) return undefined;
+        return { kind: "dockAppTab", tabId: payload.tabId, side: target.side };
+      }
       if (target.kind === "tab") {
         const targetTabId = appTabId(target.tabKey);
+        if (docked) {
+          return targetTabId && targetTabId !== payload.tabId
+            ? { kind: "undockAppTab", tabId: payload.tabId, place: { targetTabId, side: target.side } }
+            : { kind: "undockAppTab", tabId: payload.tabId };
+        }
         if (!targetTabId || targetTabId === payload.tabId) return undefined;
         return { kind: "moveAppTab", tabId: payload.tabId, targetTabId, side: target.side };
       }
       if (target.kind === "workspace") {
         const destination = session(target.sessionId);
+        if (docked && destination?.id === payload.sessionId) return { kind: "undockAppTab", tabId: payload.tabId };
         if (!destination || destination.id === payload.sessionId) return undefined;
         const moving = context.appTabs.find((tab) => tab.id === payload.tabId);
         if (moving && context.appTabs.some((tab) => tab.sessionId === destination.id

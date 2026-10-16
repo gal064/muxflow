@@ -40,6 +40,7 @@ use operations::{Bound, OperationClaim, OperationLane, OperationRegistry};
 mod writer;
 use writer::ControlWriterHandle;
 pub(crate) mod agent;
+pub(crate) mod automation;
 pub(crate) mod files;
 pub(crate) mod git;
 pub(crate) mod git_content;
@@ -801,6 +802,64 @@ fn input_epoch_is_current(client: &TerminalClient, epoch: u64) -> bool {
 
 #[derive(Default)]
 pub struct TerminalClients(Mutex<HashMap<String, Arc<TerminalClient>>>);
+
+/// The terminal foreground and background on screen, as `#rrggbb`. One for
+/// the whole app, because every connection draws with the same theme.
+static TERMINAL_COLORS: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+/// Held across a whole send, so two quick theme changes cannot reach a host
+/// out of order.
+static TERMINAL_COLORS_SEND: Mutex<()> = Mutex::new(());
+
+/// `None` until the renderer has said which colors it draws with.
+fn terminal_colors_request() -> Option<v1::Request> {
+    let (foreground, background) = TERMINAL_COLORS.lock().unwrap().clone()?;
+    Some(v1::Request {
+        operation: v1::Operation::SetTerminalColors.into(),
+        terminal_foreground: foreground,
+        terminal_background: background,
+        ..Default::default()
+    })
+}
+
+/// Tells every host which colors the terminal is drawn with, so programs that
+/// ask (Codex, Neovim, bat) pick a palette that matches the theme.
+///
+/// Stored first, then sent to each live connection. A connection that is not
+/// up yet sends the stored colors once it is; a failed send is left to that,
+/// since the colors are a hint and never worth failing a theme switch.
+#[tauri::command]
+pub fn set_terminal_colors(
+    foreground: String,
+    background: String,
+    clients: State<'_, TerminalClients>,
+) -> Result<(), String> {
+    for color in [&foreground, &background] {
+        let hex = color.strip_prefix('#').unwrap_or_default();
+        if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!("terminal color must be #rrggbb, got {color:?}"));
+        }
+    }
+    *TERMINAL_COLORS.lock().unwrap() = Some((foreground, background));
+    send_terminal_colors(clients.0.lock().unwrap().values().cloned().collect());
+    Ok(())
+}
+
+/// Sends the current colors to `clients`, off the calling thread.
+///
+/// The colors are read under the send lock rather than when the send was
+/// asked for, so a send that waited behind another carries the newest ones.
+fn send_terminal_colors(clients: Vec<Arc<TerminalClient>>) {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _serial = TERMINAL_COLORS_SEND.lock().unwrap();
+        let Some(request) = terminal_colors_request() else {
+            return;
+        };
+        for client in clients {
+            let _ = client.request(request.clone());
+        }
+    });
+}
 
 #[tauri::command]
 pub fn start_terminal(

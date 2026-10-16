@@ -4,7 +4,7 @@ use tmux_agent_protocol::v1;
 use super::super::terminal::validate_tmux_id;
 
 const MAX_NAME_BYTES: usize = 200;
-pub(super) const APP_SHELL: &str = "exec \"${SHELL:-/bin/sh}\"";
+pub(in crate::service) const APP_SHELL: &str = "exec \"${SHELL:-/bin/sh}\"";
 
 /// The whole `new-session` argv, built and judged before a session exists.
 ///
@@ -25,7 +25,7 @@ pub(super) const APP_SHELL: &str = "exec \"${SHELL:-/bin/sh}\"";
 /// is spawned before the desktop can put that variable on the new server.
 /// tmux keeps it as the session's own value, so it outlives an uninstall and
 /// wins over a global one for that session until the server restarts.
-pub(super) fn configure_new_session(
+pub(in crate::service) fn configure_new_session(
     command: &mut std::process::Command,
     action: &v1::TmuxAction,
     embedded_codex: bool,
@@ -76,7 +76,7 @@ pub(super) fn configure_new_session(
 /// Applied at every one of those sites rather than only the new ones: a
 /// workspace name that is safe to create and unsafe to rename to is the worst
 /// of both, and the whole point is that a name means the characters in it.
-pub(super) fn escaped_format_literal(value: &str) -> String {
+pub(in crate::service) fn escaped_format_literal(value: &str) -> String {
     value.replace('#', "##")
 }
 
@@ -87,7 +87,7 @@ pub(super) fn escaped_format_literal(value: &str) -> String {
 /// that is the home directory the session would have started in anyway; a
 /// relative path has no meaning at the point tmux runs, so it is refused rather
 /// than resolved against whatever this process's cwd happens to be.
-fn resolved_start_directory(directory: &str) -> anyhow::Result<String> {
+pub(in crate::service) fn resolved_start_directory(directory: &str) -> anyhow::Result<String> {
     if directory.contains('\0') || directory.chars().any(char::is_control) {
         bail!("workspace start directory must not contain control characters");
     }
@@ -263,14 +263,14 @@ pub(super) fn configure_break_pane(command: &mut std::process::Command, action: 
     ]);
 }
 
-pub(super) fn validate_name(name: &str) -> anyhow::Result<()> {
+pub(in crate::service) fn validate_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control) {
         bail!("tmux name must be 1 to {MAX_NAME_BYTES} bytes without control characters");
     }
     Ok(())
 }
 
-pub(super) fn run(mut command: std::process::Command) -> anyhow::Result<()> {
+pub(in crate::service) fn run(mut command: std::process::Command) -> anyhow::Result<()> {
     let output = command.output().context("run tmux action")?;
     if !output.status.success() {
         bail!(
@@ -297,7 +297,7 @@ pub(super) fn run_for_id(
     Ok(id)
 }
 
-pub(super) fn run_for_ids(
+pub(in crate::service) fn run_for_ids(
     mut command: std::process::Command,
     prefixes: &[char],
 ) -> anyhow::Result<Vec<String>> {

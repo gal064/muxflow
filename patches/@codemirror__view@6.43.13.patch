@@ -1,0 +1,84 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 224fb1129590c9c84b2b91b5d394d25bebae5f91..4362614ddc519633925d40df5b9cf1c3f1bf9f43 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -2191,13 +2191,20 @@ class WidgetTile extends Tile {
+ // uneditable inline content.
+ class WidgetBufferTile extends Tile {
+     constructor(flags) {
+-        let img = document.createElement("img");
++        // WebKitGTK counts hidden image buffers in DOM caret offsets but omits
++        // them from accessible text (WebKit bug 279313). Use an empty inline
++        // box on that engine so AT-SPI selection notifications stay in bounds.
++        let gtkWebKit = browser.webkit && browser.linux && !browser.chrome;
++        let img = document.createElement(gtkWebKit ? "span" : "img");
++        if (gtkWebKit) img.style.display = "inline-block";
+         img.className = "cm-widgetBuffer";
+         img.setAttribute("aria-hidden", "true");
+         super(img, 0, flags);
+     }
+     get isHidden() { return true; }
+-    get overrideDOMText() { return state.Text.empty; }
++    // Unlike an img, a GTK span can receive native text insertion. Read it
++    // normally so characters typed at an empty widget edge enter the document.
++    get overrideDOMText() { return this.dom.nodeName == "SPAN" ? null : state.Text.empty; }
+     coordsIn(pos, side, rtl) {
+         let rect = this.dom.getBoundingClientRect();
+         return rtl == null ? rect : flattenRect(rect, (side > 0) == rtl);
+@@ -2492,8 +2499,13 @@ class TileBuilder {
+     getBuffer(side) {
+         let flags = 2 /* TileFlag.Synced */ | (side < 0 ? 16 /* TileFlag.Before */ : 32 /* TileFlag.After */);
+         let found = this.cache.find(WidgetBufferTile, undefined, 1 /* Reused.Full */);
+-        if (found)
++        if (found) {
++            // DOMReader has consumed any native text before this buffer is
++            // reused. Keep the buffer empty alongside the new text tile.
++            if (found.dom.nodeName == "SPAN" && found.dom.textContent)
++                found.dom.textContent = "";
+             found.flags = flags;
++        }
+         return found || new WidgetBufferTile(flags);
+     }
+     flushBuffer() {
+diff --git a/dist/index.js b/dist/index.js
+index 522f3b69e1e0bc9c8738282c2b52d0aa4a63543b..7d104f5f802ec7e06a98912a2d0c0c466d486c06 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -2187,13 +2187,20 @@ class WidgetTile extends Tile {
+ // uneditable inline content.
+ class WidgetBufferTile extends Tile {
+     constructor(flags) {
+-        let img = document.createElement("img");
++        // WebKitGTK counts hidden image buffers in DOM caret offsets but omits
++        // them from accessible text (WebKit bug 279313). Use an empty inline
++        // box on that engine so AT-SPI selection notifications stay in bounds.
++        let gtkWebKit = browser.webkit && browser.linux && !browser.chrome;
++        let img = document.createElement(gtkWebKit ? "span" : "img");
++        if (gtkWebKit) img.style.display = "inline-block";
+         img.className = "cm-widgetBuffer";
+         img.setAttribute("aria-hidden", "true");
+         super(img, 0, flags);
+     }
+     get isHidden() { return true; }
+-    get overrideDOMText() { return Text.empty; }
++    // Unlike an img, a GTK span can receive native text insertion. Read it
++    // normally so characters typed at an empty widget edge enter the document.
++    get overrideDOMText() { return this.dom.nodeName == "SPAN" ? null : Text.empty; }
+     coordsIn(pos, side, rtl) {
+         let rect = this.dom.getBoundingClientRect();
+         return rtl == null ? rect : flattenRect(rect, (side > 0) == rtl);
+@@ -2488,8 +2495,13 @@ class TileBuilder {
+     getBuffer(side) {
+         let flags = 2 /* TileFlag.Synced */ | (side < 0 ? 16 /* TileFlag.Before */ : 32 /* TileFlag.After */);
+         let found = this.cache.find(WidgetBufferTile, undefined, 1 /* Reused.Full */);
+-        if (found)
++        if (found) {
++            // DOMReader has consumed any native text before this buffer is
++            // reused. Keep the buffer empty alongside the new text tile.
++            if (found.dom.nodeName == "SPAN" && found.dom.textContent)
++                found.dom.textContent = "";
+             found.flags = flags;
++        }
+         return found || new WidgetBufferTile(flags);
+     }
+     flushBuffer() {

@@ -13,6 +13,8 @@ export function usePersistedAppState(
   platform: Platform,
 ): {
   appState: PersistedAppState;
+  /** False until the saved state has loaded or been reset; `appState` is the defaults until then. */
+  appStateLoaded: boolean;
   appStateRecovery?: string;
   resetAppState(): Promise<void>;
   setAppState: Dispatch<SetStateAction<PersistedAppState>>;
@@ -117,5 +119,5 @@ export function usePersistedAppState(
     report(`Saved shell state was reset; the invalid original was preserved for recovery.${displacedShortcuts}`);
   }, [platform, report]);
 
-  return { appState: state, appStateRecovery: recovery, resetAppState: reset, setAppState: setState };
+  return { appState: state, appStateLoaded: loaded.current, appStateRecovery: recovery, resetAppState: reset, setAppState: setState };
 }

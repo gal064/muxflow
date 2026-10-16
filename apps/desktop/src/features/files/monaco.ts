@@ -1,5 +1,6 @@
 import { loader } from "@monaco-editor/react";
 import { terminalTheme, tokenWithFallback } from "../terminal/theme";
+import { currentTheme, onAppearanceChange } from "../../ui/appearance";
 import * as monaco from "monaco-editor";
 import CssWorker from "monaco-editor/language/css/css.worker?worker";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -55,7 +56,7 @@ loader.config({ monaco });
  *    in an editor. It takes `--chrome-dim`, the app's own quiet ink, picked for
  *    legibility on exactly this background (4.70:1) by exactly this argument.
  */
-export const ADE_MONACO_THEME = "ade-dark";
+export const ADE_MONACO_THEME = "ade";
 
 export function defineAdeMonacoTheme(root: Element | undefined = globalThis.document?.documentElement): void {
   // Neither map below holds a colour of its own. The chrome half reads through
@@ -74,7 +75,7 @@ export function defineAdeMonacoTheme(root: Element | undefined = globalThis.docu
   const token = tokenWithFallback(root);
   const ansi = terminalTheme(root);
   monaco.editor.defineTheme(ADE_MONACO_THEME, {
-    base: "vs-dark",
+    base: currentTheme(root) === "light" ? "vs" : "vs-dark",
     inherit: true,
     rules: [
       { token: "comment", foreground: token("--chrome-dim"), fontStyle: "italic" },
@@ -99,15 +100,21 @@ export function defineAdeMonacoTheme(root: Element | undefined = globalThis.docu
       "scrollbarSlider.background": token("--chrome-border"),
       "scrollbarSlider.hoverBackground": token("--chrome-hover"),
       "scrollbarSlider.activeBackground": token("--chrome-dim"),
-      // Translucent additions over whatever line the diff lands on, so they are
-      // eight digits and not a token: the added-line green has no counterpart in
-      // the palette at all, and the removed-line red is `--danger` at an alpha
-      // `--danger-wash` does not carry. A `colors` entry takes any CSS colour,
-      // unlike a `rules` entry, which is why these can live here.
+      // Translucent additions over whatever line the diff lands on. The
+      // added-line green has no counterpart in the palette and reads on either
+      // theme; the removed-line red is `--danger` at an alpha `--danger-wash`
+      // does not carry. A `colors` entry takes any CSS colour, unlike a `rules`
+      // entry, which is why these can live here.
       "diffEditor.insertedTextBackground": "#2ea04326",
-      "diffEditor.removedTextBackground": "#cc656626",
+      "diffEditor.removedTextBackground": `${token("--danger")}26`,
     },
   });
 }
 
 defineAdeMonacoTheme();
+// Monaco themes are global: redefining the one theme and setting it again
+// repaints every open editor and diff.
+onAppearanceChange(() => {
+  defineAdeMonacoTheme();
+  monaco.editor.setTheme(ADE_MONACO_THEME);
+});

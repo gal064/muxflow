@@ -43,7 +43,8 @@ interface Props {
    * reuses. Every deliberate open (double-click, Enter, the Open item, the
    * palette command) asks for a permanent one.
    */
-  onOpen(entry: FileEntry, options: { preview: boolean }): void;
+  /** `dock` opens the file beside the terminal instead of over it. */
+  onOpen(entry: FileEntry, options: { preview: boolean; dock?: boolean }): void;
   onMutate(mutation: FileMutation): Promise<void>;
   onBackgroundMutationError?(message: string): void;
   /**
@@ -469,7 +470,10 @@ export function ExplorerTree(props: Props) {
       anchor={menu.anchor}
       items={menu.entry
         ? [
-          ...(menu.entry.kind === "directory" ? [] : [{ id: "open", label: "Open", run: () => props.onOpen(menu.entry!, { preview: false }) }]),
+          ...(menu.entry.kind === "directory" ? [] : [
+            { id: "open", label: "Open", run: () => props.onOpen(menu.entry!, { preview: false }) },
+            { id: "openToSide", label: "Open to the Side", run: () => props.onOpen(menu.entry!, { preview: false, dock: true }) },
+          ]),
           { id: "rename", label: "Rename…", disabled: props.disabled, run: () => begin("rename", menu.entry) },
           { id: "move", label: "Move…", disabled: props.disabled, run: () => begin("move", menu.entry) },
           { id: "duplicate", label: "Duplicate…", disabled: props.disabled, run: () => begin("duplicate", menu.entry) },

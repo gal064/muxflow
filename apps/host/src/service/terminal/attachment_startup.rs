@@ -32,6 +32,7 @@ pub(super) struct AttachmentRuntime {
     pub(super) output_credit: Arc<OutputCredit>,
     pub(super) emission_order: Arc<Mutex<()>>,
     pub(super) topology_trigger: TopologyOutputTrigger,
+    pub(super) terminal_colors: Arc<Mutex<super::TerminalColors>>,
 }
 
 impl TerminalAttachment {
@@ -66,6 +67,7 @@ impl TerminalAttachment {
             output_credit,
             emission_order,
             topology_trigger,
+            terminal_colors,
         } = runtime;
         validate_tmux_id(session_id, '$')?;
         if pane_ids.is_empty() {
@@ -116,7 +118,8 @@ impl TerminalAttachment {
             let mut writer = stdin.lock().unwrap();
             for pane_id in pane_ids {
                 if reports_terminal_colors {
-                    write_terminal_color_reports(&mut *writer, pane_id)?;
+                    let colors = terminal_colors.lock().unwrap().clone();
+                    write_terminal_color_reports(&mut *writer, pane_id, &colors)?;
                 }
                 queue_capture(&mut *writer, pane_id)?;
             }
@@ -182,6 +185,7 @@ impl TerminalAttachment {
             workers,
             last_size: None,
             reports_terminal_colors,
+            colors: terminal_colors,
         })
     }
 }

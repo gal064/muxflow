@@ -15,7 +15,13 @@ type AppTab = Extract<CombinedTab, { kind: "app" }>;
 
 interface TabStripProps {
   tabs: readonly CombinedTab[];
+  /** In the title bar, where the strip's empty space is what moves the window. */
+  inTitleBar?: boolean;
   activeKey?: string;
+  /** The document docked beside the terminal: on screen, but never the active tab. */
+  dockedKey?: string;
+  /** Docks a document beside the terminal, or (`false`) returns the docked one to the strip. */
+  onDock?(tab: AppTab, dock: boolean): void;
   activePaneId?: string;
   activeTerminalPaneCount: number;
   canMutate: boolean;
@@ -250,6 +256,7 @@ export function TabStrip(props: TabStripProps) {
 
   return <div
     className={paneDrop ? "tabstrip drop-target" : "tabstrip"}
+    data-tauri-drag-region={props.inTitleBar || undefined}
     data-drop-host={dropWorkspace?.hostProfileId}
     data-drop-workspace={dropWorkspace?.sessionId}
   >
@@ -280,7 +287,8 @@ export function TabStrip(props: TabStripProps) {
         // tabs breaks ownership, and assistive technology then cannot say
         // "tab 3 of 5".
         const dropClass = dropMarker === `${tab.key}|before` ? " drop-before" : dropMarker === `${tab.key}|after` ? " drop-after" : "";
-        return <div className={`${active ? "tab active" : "tab"}${dropClass}`} data-drop-tab={tab.key} key={tab.key} role="presentation">
+        const docked = tab.key === props.dockedKey ? " docked" : "";
+        return <div className={`${active ? "tab active" : "tab"}${docked}${dropClass}`} data-drop-tab={tab.key} key={tab.key} role="presentation">
           <button
             // Only the selected tab's panel exists in the DOM, so only the
             // selected tab may claim to control one.
@@ -458,6 +466,13 @@ export function TabStrip(props: TabStripProps) {
           : []),
         { id: "left", label: "Move left", disabled: !menu.tab.canMoveLeft || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "left", menu.scope) },
         { id: "right", label: "Move right", disabled: !menu.tab.canMoveRight || (menu.tab.kind === "terminal" && !props.canMutate), run: () => props.onMove(menu.tab, "right", menu.scope) },
+        ...(menu.tab.kind === "app" && props.onDock
+          ? [{
+            id: "dock",
+            label: menu.tab.key === props.dockedKey ? "Undock" : "Move to the Side",
+            run: () => props.onDock?.(menu.tab as AppTab, menu.tab.key !== props.dockedKey),
+          }]
+          : []),
         "separator",
         {
           id: "close",

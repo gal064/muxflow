@@ -89,9 +89,11 @@ export function useWorkspaceDomainController(arguments_: WorkspaceDomainArgument
   );
   const persistedWorkspaceUi = workspaceUiRecord(appState, currentHostProfileId, serverIdentity, activeSession);
   const selectedAppTab = workspaceAppTabs.find((tab) => tab.id === persistedWorkspaceUi?.selectedAppTabId);
+  const dockedAppTab = workspaceAppTabs.find((tab) => tab.id === persistedWorkspaceUi?.dockedAppTabId);
+  const dockSide = dockedAppTab ? persistedWorkspaceUi?.dockSide ?? "right" : undefined;
 
   return {
-    activePane, activeSession, activeWindow, fileScope, panes, selectedAppTab,
+    activePane, activeSession, activeWindow, dockedAppTab, dockSide, fileScope, panes, selectedAppTab,
     terminalTransferScope, workspaceAppTabs, workspaceFiles, workspaceGit,
   };
 }

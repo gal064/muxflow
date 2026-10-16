@@ -30,6 +30,7 @@ pub(crate) enum Handler {
     Git,
     Agent,
     Voice,
+    Automation,
     Daemon,
     Test,
 }
@@ -92,7 +93,8 @@ impl OperationPolicy {
             | v1::Operation::YieldTerminalSizing
             | v1::Operation::SetTerminalVisibility
             | v1::Operation::RequestTerminalSeed
-            | v1::Operation::SelectTerminalSession => {
+            | v1::Operation::SelectTerminalSession
+            | v1::Operation::SetTerminalColors => {
                 (Lane::Control, Scheduling::Inline, Handler::Terminal)
             }
             v1::Operation::TmuxAction => (Lane::Control, Scheduling::Inline, Handler::TmuxAction),
@@ -172,6 +174,9 @@ impl OperationPolicy {
             v1::Operation::VoiceProvision
             | v1::Operation::VoiceTranscribe
             | v1::Operation::VoiceSpeak => (Lane::Control, Scheduling::Detached, Handler::Voice),
+            // Detached: a run started now waits on the new tab's shell, and
+            // a save waits on the scheduler's lock while a tick launches.
+            v1::Operation::Automation => (Lane::Control, Scheduling::Detached, Handler::Automation),
             v1::Operation::TestDelay
             | v1::Operation::TestInjectGap
             | v1::Operation::TestOverflow => (Lane::Control, Scheduling::Inline, Handler::Test),
@@ -237,9 +242,9 @@ mod tests {
     /// lists of the same operations would be the very drift being guarded.
     fn expected_policies() -> Vec<(v1::Operation, Lane, Scheduling, Handler)> {
         use Handler::{
-            ActiveRoot as AR, Agent as AH, Daemon as DH, Filesystem as FH, Git as GH,
-            Snapshot as SH, Terminal as TH, Test as XH, TmuxAction as MH, Unsupported as UH,
-            Voice as VH,
+            ActiveRoot as AR, Agent as AH, Automation as AU, Daemon as DH, Filesystem as FH,
+            Git as GH, Snapshot as SH, Terminal as TH, Test as XH, TmuxAction as MH,
+            Unsupported as UH, Voice as VH,
         };
         use Lane::{Bulk as B, Control as C};
         use Scheduling::{Detached as Dd, Inline as I};
@@ -298,11 +303,13 @@ mod tests {
             (ReconcileTerminalUpload, B, I, FH),
             (AgentHostNaming, C, I, AH),
             (SelectTerminalSession, C, I, TH),
+            (SetTerminalColors, C, I, TH),
             (VoiceStatus, C, I, VH),
             (VoiceProvision, C, Dd, VH),
             (VoiceTranscribe, C, Dd, VH),
             (VoiceSpeak, C, Dd, VH),
             (VoiceSession, C, I, VH),
+            (Automation, C, Dd, AU),
             (TestDelay, C, I, XH),
             (TestInjectGap, C, I, XH),
             (TestOverflow, C, I, XH),

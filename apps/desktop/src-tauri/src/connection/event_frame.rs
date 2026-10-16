@@ -104,6 +104,8 @@ pub(super) enum TerminalEvent {
         scope: String,
         payload: Vec<u8>,
     },
+    /// The host's automations changed: list them again. No payload.
+    AutomationChanged,
 }
 
 /// The one agent scope that is not a host agent event.
@@ -227,6 +229,7 @@ pub(super) fn encode_event_with_sequence(event: TerminalEvent, protocol_sequence
         TerminalEvent::AgentService { scope, payload } => {
             encode_bytes(14, scope, sequence, payload)
         }
+        TerminalEvent::AutomationChanged => encode_empty(19, "automation".into(), sequence),
         TerminalEvent::Snapshot {
             snapshot,
             sequence,
@@ -350,5 +353,16 @@ mod tests {
         let sequence_at = 3 + label_len;
         assert_eq!(&frame[sequence_at..sequence_at + 8], &23_u64.to_be_bytes());
         assert_eq!(&frame[sequence_at + 8..], payload);
+    }
+
+    /// `features/terminal/api.ts` reads kind 19 as "automations changed".
+    #[test]
+    fn an_automation_change_is_frame_kind_19_with_its_sequence_and_nothing_else() {
+        let frame = encode_event_with_sequence(TerminalEvent::AutomationChanged, 31);
+        assert_eq!(frame[0], 19);
+        let label_len = usize::from(u16::from_be_bytes([frame[1], frame[2]]));
+        assert_eq!(&frame[3..3 + label_len], b"automation");
+        let sequence_at = 3 + label_len;
+        assert_eq!(&frame[sequence_at..], &31_u64.to_be_bytes());
     }
 }

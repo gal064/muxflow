@@ -30,6 +30,7 @@ use git::GitService;
 mod terminal;
 use terminal::TerminalClients;
 use terminal::{OUTPUT_WINDOW_BYTES, OUTPUT_WINDOW_RECORDS, OutputCharge, OutputCredit};
+pub(crate) mod plugins;
 mod tmux_actions;
 mod tmux_config;
 pub(crate) mod voice;
@@ -589,6 +590,7 @@ async fn serve_connection(
         TopologyOutputTrigger::new(topology_signal.clone(), tokio::runtime::Handle::current()),
         client_hello.connection_epoch,
         perf_connection_epoch,
+        terminal::host_terminal_colors(),
     )));
     let topology_lock = Arc::new(tokio::sync::Mutex::new(()));
     let topology_baseline = Arc::new(Mutex::new(None::<(tmux_control::TmuxSnapshot, String)>));
