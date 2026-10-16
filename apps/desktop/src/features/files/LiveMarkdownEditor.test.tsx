@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LiveMarkdownEditor, PendingEchoes, minimalChange } from "./LiveMarkdownEditor";
 import { EditorView } from "@codemirror/view";
+import { setFocused } from "./liveMarkdown";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -60,6 +61,29 @@ describe("LiveMarkdownEditor", () => {
     expect(props.onReady).toHaveBeenCalledTimes(1);
     expect(editor.state.doc.toString()).toBe(source);
     expect(props.onChange).not.toHaveBeenCalled();
+  });
+
+  it("does not emit edits when heading markers reveal and hide on focus", () => {
+    const { props, editor } = mount("### Title\n\nbody");
+    act(() => editor.dispatch({ effects: setFocused.of(true) }));
+    expect(editor.contentDOM.querySelector(".cm-live-h3")?.textContent).toBe("### Title");
+    act(() => editor.dispatch({ selection: { anchor: editor.state.doc.length } }));
+    expect(editor.contentDOM.querySelector(".cm-live-h3")?.textContent).toBe("Title");
+    expect(props.onChange).not.toHaveBeenCalled();
+  });
+
+  it("handles Tab and Shift-Tab as one source edit each for numbered items", () => {
+    const { props, editor } = mount("10. parent\n11. item");
+    act(() => {
+      editor.focus();
+      editor.dispatch({ selection: { anchor: editor.state.doc.length } });
+      editor.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true, cancelable: true }));
+    });
+    expect(editor.state.doc.toString()).toBe("10. parent\n    1. item");
+    expect(props.onChange).toHaveBeenCalledTimes(1);
+    act(() => editor.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", shiftKey: true, bubbles: true, cancelable: true })));
+    expect(editor.state.doc.toString()).toBe("10. parent\n11. item");
+    expect(props.onChange).toHaveBeenCalledTimes(2);
   });
 
   it("does not undo a keystroke when the render carrying the previous one arrives late", () => {

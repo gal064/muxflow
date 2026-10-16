@@ -3,9 +3,9 @@
  *
  * Every color comes from `tokens.css`: there is not one hex literal below this
  * comment, and that is the point — the build this replaces carried ~150 of them
- * across one file, with a second palette inside the terminal renderer. The only
- * literal colors left are `rgb(0 0 0 / α)` shadows and the modal backdrop,
- * which are opacities over whatever is behind them rather than palette entries.
+ * across one file, with a second palette inside the terminal renderer. Shadows
+ * and the modal backdrop mix `--shadow` toward transparent at their own
+ * strength, so each theme decides how heavy elevation reads.
  *
  * Metrics are tokenized where the token table names them (bar heights, sidebar
  * and panel widths, rings, palette and menu rows, the type scale). One-off
@@ -13,7 +13,7 @@
  * are written inline on purpose; promoting each of those to a variable would
  * make the token file a dictionary of single-use names.
  *
- * Layout follows the approved mock: a 28px titlebar, a 240px sidebar, a 28px
+ * Layout follows the approved mock: a 28px titlebar, a 240px sidebar, a 34px
  * tab strip, and everything else is terminal.
  */
 
@@ -130,7 +130,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    paint made the whole bar jump. */
 .titlebar {
   display: flex; align-items: center; gap: 2px;
-  height: var(--titlebar-height, var(--bar-height)); flex: 0 0 auto; overflow: hidden;
+  height: var(--titlebar-height); flex: 0 0 auto; overflow: hidden;
   padding: 0 6px;
   background: var(--chrome-bg); border-bottom: 1px solid var(--chrome-hairline);
 }
@@ -143,14 +143,16 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    the OS at their own size and a 28px bar clips them. `--bar-height` itself is
    shared with the tabstrip, the panel tabs and the editor toolbars, so the
    override is local to this bar. */
-.titlebar-overlay { --titlebar-height: 38px; padding-left: 78px; }
+/* Divided by the interface zoom: the traffic lights are drawn by the OS at a
+   fixed size, so the room kept for them must not grow or shrink with the page. */
+.titlebar-overlay { --titlebar-height: calc(38px / var(--ui-scale, 1)); padding-left: calc(78px / var(--ui-scale, 1)); }
 .titlebar-title {
   display: flex; align-items: center; gap: 7px; min-width: 0;
   margin-left: 6px;
 }
 .titlebar-workspace {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--chrome-ink); font-size: var(--type-row); font-weight: 550;
+  color: var(--chrome-ink); font-size: var(--type-titlebar); font-weight: 550;
 }
 .titlebar-spacer { flex: 1; min-width: 8px; align-self: stretch; }
 /* Persistent until the app is updated: red like an alert, but a pill the size
@@ -184,6 +186,29 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .window-controls { display: flex; gap: 2px; margin-left: 8px; }
 .window-controls .window-close:hover { background: var(--danger); color: var(--chrome-ink-strong); }
 
+/* Tabs in the title bar (Settings > Appearance). The bar is then as tall as
+   the tab strip it replaces; macOS keeps the 38px its traffic lights need. */
+.titlebar-tabs { gap: 0; padding: 0; }
+.titlebar-tabs:not(.titlebar-overlay) { --titlebar-height: var(--bar-height); }
+/* As wide as the sidebar below it, so the tabs start where the workspace does,
+   but never narrower than its own buttons: a sidebar dragged thin pushes the
+   tabs along rather than under them. It follows the saved width, so during a
+   sidebar drag it catches up when the drag ends. */
+.titlebar-lead {
+  display: flex; align-items: center; gap: 2px; align-self: stretch;
+  flex: 0 0 auto; width: var(--sidebar-width); min-width: max-content; padding: 0 6px;
+}
+.titlebar-overlay .titlebar-lead { padding-left: calc(78px / var(--ui-scale, 1)); }
+.sidebar-collapsed .titlebar-lead { width: auto; }
+.titlebar-lead .window-controls { margin: 0 8px 0 0; }
+.titlebar-tabs .tabstrip { flex: 1 1 auto; height: 100%; border-bottom: 0; background: none; }
+.titlebar-tabs .titlebar-spacer { flex: 0 0 32px; }
+.titlebar-rails {
+  display: flex; align-items: center; gap: 2px; align-self: stretch;
+  padding: 0 6px 0 4px; border-left: 1px solid var(--chrome-hairline);
+}
+.tabs-in-titlebar .workspace { grid-template-rows: minmax(0, 1fr); }
+
 .badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 15px; height: 15px; padding: 0 4px;
@@ -191,7 +216,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-size: 9px; font-weight: 600; font-variant-numeric: tabular-nums;
 }
 .badge-corner { position: absolute; top: -1px; right: -3px; }
-.badge-row { position: absolute; top: 7px; right: 7px; pointer-events: none; }
+.badge-row { position: absolute; top: 8px; right: 8px; pointer-events: none; }
 /* A compact workspace row is a single line of flex children, so the count can
    simply be the last one. Floating it would have made it overlap the agent
    cluster it sits next to, which is the reason `.badge-row` is absolute at
@@ -254,6 +279,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-size: var(--type-label); letter-spacing: .04em;
 }
 .sort-toggle:hover { background: var(--chrome-hover); }
+/* A control-sized button in a header sized to its small caps label: centred,
+   and pulled into the padding so it does not make the header taller. */
+.section-head-add { align-self: center; margin-block: -4px; }
 
 .section-divider {
   position: relative; flex: 0 0 auto; height: 9px; margin: 2px 0;
@@ -281,8 +309,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .list-block:first-child > .list-divider { padding-top: 0; }
 .workspace-row, .agent-row { position: relative; }
 .workspace-button {
-  display: flex; flex-direction: column; gap: 3px;
-  width: 100%; padding: 7px 9px 8px; margin-bottom: 2px;
+  display: flex; flex-direction: column; gap: 4px;
+  width: 100%; padding: 8px 10px 9px; margin-bottom: 2px;
   border: 0; border-radius: var(--radius-row);
   background: transparent; color: inherit; text-align: left;
 }
@@ -291,12 +319,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* The host behind the row is not connected: still listed, still selectable, not live. */
 .workspace-button.offline:not(.active) { opacity: 0.55; }
 /* Compact rows are one line, so the row is a line: name on the left, the
-   agent cluster and any unread count pushed to the right edge. ~24px is the
-   Explorer's row budget, which is what makes a long workspace list scannable
-   at all — the column layout above would have made every row 32px. */
+   agent cluster and any unread count pushed to the right edge. A row near the
+   Explorer's row budget is what makes a long workspace list scannable at all
+   — the column layout above would have made every row 36px. */
 .workspace-button.compact {
   flex-direction: row; align-items: center; gap: 6px;
-  min-height: 24px; padding: 3px 8px; margin-bottom: 1px;
+  min-height: 28px; padding: 4px 8px; margin-bottom: 1px;
 }
 .workspace-title {
   display: flex; align-items: center; gap: 6px; min-width: 0;
@@ -317,9 +345,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .workspace-activity {
   /* The gap is one wider than it was: the badge overhangs the mark's box by
      3.5px, and at the old 5px it very nearly touched the name beside it. */
-  --activity-icon: 12px; --activity-gap: 6px;
+  --activity-icon: 13px; --activity-gap: 6px;
   display: flex; flex-direction: column; gap: 1px; min-width: 0;
-  font-size: var(--type-secondary); line-height: 1.35; color: var(--chrome-dim);
+  font-size: 12.5px; line-height: 1.35; color: var(--chrome-dim);
 }
 .workspace-activity-line { display: flex; align-items: center; gap: var(--activity-gap); min-width: 0; }
 .workspace-activity-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -345,7 +373,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    the adapter marks were reading at --chrome-faint and --chrome-dim against a
    light accent, which is the one combination the palette has no contrast for. */
 .workspace-button.active .workspace-shortcut-index,
-.workspace-button.active .agent-icon { color: var(--accent-ink); }
+.workspace-button.active .agent-icon,
+.agent-button.selected .agent-icon { color: var(--accent-ink); }
 .workspace-shortcut-index {
   width: 12px; flex: 0 0 auto;
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
@@ -360,6 +389,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   font-family: var(--font-mono); font-size: var(--type-meta); font-weight: 600; color: var(--chrome-dim);
   text-align: center; text-transform: uppercase;
 }
+.agent-button.selected .host-letter,
 .workspace-button.active .host-letter { color: var(--accent-ink); }
 /* The compact row's workspace-level state, beside the name. It takes the plain
    8px `.state-dot`, and the rule below brings the spinner to the same 8px, so
@@ -394,7 +424,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 
 .agent-button {
   display: block;
-  width: 100%; padding: 3px 7px;
+  width: 100%; padding: 7px; margin-bottom: 1px;
   border: 0; border-radius: var(--radius-control);
   background: transparent; color: inherit; text-align: left;
 }
@@ -407,7 +437,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .agent-workspace-heading {
   display: flex; align-items: baseline; gap: 6px; min-width: 0;
   margin: 0 4px; padding: 2px 0 1px;
-  font-size: var(--type-label); font-weight: 600; color: var(--chrome-dim);
+  font-size: 11.5px; font-weight: 600; color: var(--chrome-dim);
 }
 .agent-workspace-heading > span:not(.agent-group-count),
 .agent-session-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -429,16 +459,24 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    spinner. One size for every group-heading indicator. */
 .state-dot.agent-group-dot, .spinner.agent-group-dot { width: 7px; height: 7px; align-self: center; }
 .spinner.agent-group-dot { color: var(--chrome-dim); }
-.agent-button.selected { background: var(--chrome-selected); }
+/* The same accent block as the active workspace, so a selection in either list
+   reads as one thing; what sits on it flips to the knockout ink below. */
+.agent-button.selected { background: var(--accent); }
+.agent-button.selected .agent-line,
+.agent-button.selected .agent-pin { color: var(--accent-ink); }
+.agent-button.selected .agent-detail { color: color-mix(in srgb, var(--accent-ink) 72%, transparent); }
 .agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
 /* Reachable by keyboard, still clearly not actionable — see the note at the
    call site for why this is not `disabled`. */
 .agent-button[data-unavailable] { opacity: .5; cursor: not-allowed; }
 .agent-line {
   display: flex; align-items: center; gap: 6px; min-width: 0;
-  font-size: 11.5px; font-weight: var(--weight-row); color: var(--chrome-ink);
+  font-size: var(--type-row); font-weight: var(--weight-row); color: var(--chrome-ink);
 }
 .agent-icon { width: 12px; height: 12px; flex: 0 0 auto; color: var(--chrome-dim); }
+/* A step up in the sidebar, where agents are rows of their own and the names
+   beside the marks are the workspace names' size. */
+.sidebar .agent-icon { width: 13px; height: 13px; }
 .agent-icon.codex { fill: currentColor; }
 .agent-icon.claude, .agent-icon.generic { fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.35; }
 /* Four strokes at 2, against Codex's solid mass. The eight-spoke asterisk at
@@ -459,9 +497,9 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    around it keeps one uniform gap, and that gap now separates agents rather
    than alternating between "this agent's state" and "the next agent's icon". */
 .agent-mark-glyphs { align-items: center; gap: 3px; }
-.agent-button.selected .agent-mark { --badge-ring: var(--chrome-selected); }
 .agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) .agent-mark,
 .workspace-button:hover:not(.active) .agent-mark { --badge-ring: var(--chrome-hover); }
+.agent-button.selected .agent-mark,
 .workspace-button.active .agent-mark { --badge-ring: var(--accent); }
 .agent-mark-badge {
   position: absolute; right: -2px; bottom: -2px;
@@ -481,12 +519,14 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    where --state-unknown lands near 2.4:1 and vanishes on the one row the eye
    is already on. Same knockout flip the shortcut index and the adapter icons
    make two rules up. */
+.agent-button.selected .agent-mark-badge.unknown,
 .workspace-button.active .agent-mark-badge.unknown { border-color: color-mix(in srgb, var(--accent-ink) 65%, transparent); }
 /* `.spinner` supplies the ring and the animation; this only sizes and colours
    it, and fills the middle so the mark does not show through the badge. Every
    spinner in the app is the same neutral ink — motion alone says "working",
    and the state colours stay reserved for the static dots. */
 .agent-mark-badge.working { width: 7px; height: 7px; background: var(--badge-ring); color: var(--chrome-ink); }
+.agent-button.selected .agent-mark-badge.working,
 .workspace-button.active .agent-mark-badge.working { color: var(--accent-ink); }
 /* The name and its pin are one cell, so the pin sits against the end of the
    text rather than out at the row's edge; the label alone still shrinks and
@@ -498,7 +538,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .agent-detail {
   min-width: 0; max-width: 45%; flex: 0 1 auto;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: var(--type-secondary); color: var(--chrome-dim);
+  font-size: 12px; color: var(--chrome-dim);
 }
 
 .state-dot {
@@ -621,6 +661,47 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    margin, view zones, overlays — so a hidden layer still painted the editor
    over the terminal. Opacity cannot be overridden from inside. */
 .app-tab-layer-covered { visibility: hidden; opacity: 0; }
+/* A docked document takes one edge of the workspace and every other layer —
+   the terminal and the documents that cover it — the rest. Still absolute
+   boxes, only with one edge moved, so nothing about the stacking above
+   changes: the terminal column narrowing is an ordinary resize of
+   `.terminal-window`, and `useClientResize` takes it to tmux from there.
+   `--dock-width` is written by the divider (`WorkspaceDock.tsx`). */
+.workspace-content[data-dock-side="right"] > .terminal-layer,
+.workspace-content[data-dock-side="right"] > .app-tab-layer:not(.docked) { right: var(--dock-width, 40%); }
+.workspace-content[data-dock-side="left"] > .terminal-layer,
+.workspace-content[data-dock-side="left"] > .app-tab-layer:not(.docked) { left: var(--dock-width, 40%); }
+.workspace-content[data-dock-side="right"] > .app-tab-layer.docked {
+  left: auto; width: var(--dock-width, 40%); border-left: 1px solid var(--chrome-hairline);
+}
+.workspace-content[data-dock-side="left"] > .app-tab-layer.docked {
+  right: auto; width: var(--dock-width, 40%); border-right: 1px solid var(--chrome-hairline);
+}
+/* Focusable only so a press anywhere in it takes the keyboard; no ring for that. */
+.app-tab-layer.docked:focus { outline: none; }
+.dock-resize {
+  position: absolute; z-index: 8; top: 0; bottom: 0; width: 7px;
+  cursor: col-resize; touch-action: none;
+}
+.dock-resize.right { right: calc(var(--dock-width, 40%) - 4px); }
+.dock-resize.left { left: calc(var(--dock-width, 40%) - 4px); }
+/* Mounted only while a drag that can dock is in flight, over everything in the
+   workspace: a pointer drag hit-tests them (`data-drop-dock`), an HTML5 drag
+   from the explorer drops on them. A tab has nothing else to do over the
+   terminal, so its zones are wide; a path still pastes into the pane it lands
+   on, so its zones are a strip at the edge. Widths match `dockZoneWidth`. */
+.dock-drop-zone { position: absolute; z-index: 10; top: 0; bottom: 0; }
+.dock-drop-zone.left { left: 0; }
+.dock-drop-zone.right { right: 0; }
+.dock-drop-zone.for-tab { width: 25%; }
+.dock-drop-zone.for-path { width: min(12%, 120px); }
+.dock-drop-hint {
+  position: absolute; z-index: 9; top: 6px; bottom: 6px;
+  border: 2px dashed var(--accent); border-radius: 6px;
+  background: var(--accent-wash); pointer-events: none;
+}
+.dock-drop-hint.left { left: 6px; }
+.dock-drop-hint.right { right: 6px; }
 
 /* ── Tab strip ─────────────────────────────────────────────────────────── */
 
@@ -629,17 +710,26 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   /* `min-width: 0` for the same reason as the grid track above: the strip must
      never be the thing that decides how wide the workspace column is. */
   height: var(--bar-height); min-width: 0; padding: 0 4px; gap: 1px;
-  background: var(--chrome-bg); border-bottom: 1px solid var(--chrome-hairline);
+  /* The terminal's ground, not the chrome's: light draws the work area a shade
+     whiter than the sidebar and panel, and the strip belongs to the work area. */
+  background: var(--term-bg); border-bottom: 1px solid var(--chrome-hairline);
 }
 .tabstrip-tabs { display: flex; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .tabstrip-tabs::-webkit-scrollbar { display: none; }
 .tab { position: relative; display: flex; align-items: stretch; flex: 0 0 auto; max-width: 220px; }
 .tab-select {
   display: inline-flex; align-items: center; gap: 6px; min-width: 0;
-  padding: 0 12px; border: 0; background: transparent;
-  color: var(--chrome-dim); font-size: 11.5px;
+  padding: 0 14px; border: 0; background: transparent;
+  color: var(--chrome-dim); font-size: 13px;
 }
 .tab.active .tab-select { color: var(--chrome-ink-strong); }
+/* Docked beside the terminal: on screen, so not dimmed, but not the active tab
+   either, so a fainter mark than the active one's. */
+.tab.docked .tab-select { color: var(--chrome-ink); }
+.tab.docked::after {
+  content: ""; position: absolute; left: 8px; right: 8px; bottom: 0;
+  height: 2px; border-radius: 1px 1px 0 0; background: var(--accent); opacity: 0.4;
+}
 .tab.active::after {
   content: ""; position: absolute; left: 8px; right: 8px; bottom: 0;
   height: 2px; border-radius: 1px 1px 0 0; background: var(--accent);
@@ -725,7 +815,12 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    spending layout pixels. Keeping that line out of this shadow matters: the
    active state replaces the frame shadow with its focus ring, but must not
    make the split itself disappear. */
-.pane-frame { position: absolute; overflow: hidden; background: var(--term-bg); }
+/* `clip`, not `hidden`: a hidden overflow is still a scroll container, and when
+   focus returns to xterm's helper textarea before it has moved to the cursor's
+   new row, the browser scrolls the frame to reveal it, pushing the whole
+   terminal up. Turning off tabs in the title bar does exactly that, since the
+   pane loses the row the tab strip takes back. Nothing here should scroll. */
+.pane-frame { position: absolute; overflow: clip; background: var(--term-bg); }
 .pane-frame.active { box-shadow: inset 0 0 0 var(--focus-ring) var(--accent); }
 .pane-frame.attention::after {
   content: ""; position: absolute; inset: var(--attention-inset);
@@ -769,7 +864,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   position: absolute; z-index: 6; top: 6px; right: 6px;
   display: flex; align-items: center; gap: 3px; padding: 4px;
   border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
-  background: var(--chrome-raised); box-shadow: 0 5px 18px rgb(0 0 0 / .5);
+  background: var(--chrome-raised); box-shadow: 0 5px 18px color-mix(in srgb, var(--shadow) 50%, transparent);
 }
 .terminal-search input {
   width: 190px; padding: 4px 7px;
@@ -825,7 +920,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   border: 1px solid var(--accent); border-radius: 4px;
   color: var(--chrome-ink); background: var(--chrome-raised);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 0.35); font-size: var(--type-menu);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--shadow) 35%, transparent); font-size: var(--type-menu);
   pointer-events: none; transform: translate(12px, 12px);
 }
 /* Over a target the drop would refuse: the reason shows on release. */
@@ -835,7 +930,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   display: grid; gap: 5px; width: min(360px, calc(100% - 20px));
   max-height: min(260px, calc(100% - 20px)); padding: 8px; overflow: auto;
   border: 1px solid var(--chrome-border); border-radius: 6px;
-  background: var(--chrome-raised); box-shadow: 0 8px 26px rgb(0 0 0 / .55);
+  background: var(--chrome-raised); box-shadow: 0 8px 26px color-mix(in srgb, var(--shadow) 55%, transparent);
 }
 .terminal-upload-progress h3 { margin: 0; color: var(--chrome-dim); font-size: var(--type-meta); letter-spacing: .06em; text-transform: uppercase; }
 .terminal-upload { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; font-size: var(--type-meta); }
@@ -851,7 +946,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   max-width: min(360px, calc(100% - 20px)); padding: 6px;
   border: 1px solid var(--danger); border-radius: 4px;
   color: var(--danger-ink); background: var(--chrome-raised);
-  box-shadow: 0 8px 26px rgb(0 0 0 / .55); font-size: var(--type-meta); overflow-wrap: anywhere;
+  box-shadow: 0 8px 26px color-mix(in srgb, var(--shadow) 55%, transparent); font-size: var(--type-meta); overflow-wrap: anywhere;
 }
 .terminal-upload-review { display: grid; gap: 10px; width: min(620px, calc(100vw - 32px)); max-height: min(720px, calc(100vh - 24px)); overflow: auto; }
 .terminal-upload-review ul { max-height: 190px; margin: 0; padding-left: 22px; overflow: auto; color: var(--chrome-dim); font-size: 11px; }
@@ -877,8 +972,8 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   padding: 0 6px; border-bottom: 1px solid var(--chrome-hairline);
 }
 .panel-tab {
-  position: relative; display: inline-flex; align-items: center; padding: 0 10px;
-  border: 0; background: transparent; color: var(--chrome-dim); font-size: 11px;
+  position: relative; display: inline-flex; align-items: center; padding: 0 11px;
+  border: 0; background: transparent; color: var(--chrome-dim); font-size: 12.5px;
 }
 .panel-tab.active { color: var(--chrome-ink-strong); }
 .panel-tab.active::after {
@@ -892,7 +987,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 
 .explorer-tree { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; overflow: hidden; }
 .explorer-root {
-  display: flex; align-items: center; gap: 7px; min-height: 35px;
+  display: flex; align-items: center; gap: 7px; min-height: 40px;
   padding: 5px 12px; border-bottom: 1px solid var(--chrome-hairline);
 }
 /* Sits in the header, never in the scrolling tree: an indicator inside the tree
@@ -913,7 +1008,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
    4px, and a "Load more" button of some other height offset every row below any
    expanded incomplete directory. The bottom padding is safe — it grows the
    scrollable area after the last row and shifts nothing. */
-.file-tree { --explorer-row-height: 22px; min-height: 0; padding: 0 0 12px; overflow: auto; outline: 0; }
+.file-tree { --explorer-row-height: 24px; min-height: 0; padding: 0 0 12px; overflow: auto; outline: 0; }
 /* Measured by `useTreeViewport`; see `ROW_METRIC_CLASS`. Out of flow and
    zero-width, so it costs no layout and is measurable with no rows at all. */
 .file-row-metric {
@@ -925,10 +1020,10 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   min-width: max-content; width: 100%; height: var(--explorer-row-height); padding-right: 5px;
 }
 .file-row:hover, .file-row:focus-within { background: var(--chrome-hover); }
-.file-row[aria-selected="true"] { background: var(--chrome-selected); }
+.file-row[aria-selected="true"] { background: var(--chrome-selected); box-shadow: inset 0 0 0 1px var(--chrome-selected-edge); }
 /* The tree is UI text, not code: it was 11px monospace, which is the one place
    in the app where a proportional stack reads better — VS Code's explorer is
-   the UI font at the row size, on the same 22px rows. Nothing depends on
+   the UI font at the row size, on rows near its 22px. Nothing depends on
    monospace alignment any more; the letter glyphs that did are icons now. */
 .file-main {
   display: grid; grid-template-columns: 12px 16px minmax(90px, 1fr);
@@ -987,7 +1082,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   border-bottom: 1px solid var(--chrome-hairline);
 }
 .git-sidebar-identity { display: grid; gap: 1px; flex: 1; min-width: 0; }
-.git-sidebar-header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.git-sidebar-header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .git-sidebar-header small {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--font-mono); font-size: var(--type-meta); color: var(--chrome-faint);
@@ -1000,7 +1095,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .git-file {
   display: flex; align-items: center; gap: 6px;
   width: 100%; padding: 3px 12px; border: 0; background: transparent;
-  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px; text-align: left;
+  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 12px; text-align: left;
 }
 /* The row, not the button: the hover actions sit outside the button but inside
    the row, so pointing at one must not make the row look un-hovered. */
@@ -1048,12 +1143,14 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .git-commit textarea {
   min-height: 46px; resize: vertical; padding: 6px;
   border: 1px solid var(--chrome-border); border-radius: 4px;
-  background: var(--chrome-bg); color: var(--chrome-ink); font-size: 11px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-size: 12px;
 }
 /* Commit, its one extra action, and Push on one row. The split button is a
    single control visually — one border, one hairline between the halves — so
    the caret reads as belonging to Commit rather than as a third button. */
 .git-commit-actions { display: flex; gap: 6px; align-items: stretch; }
+/* The panel's own text size, not the larger base size buttons inherit. */
+.git-commit-actions button { font-size: 12px; }
 .git-commit-actions .split-button { display: flex; flex: 1 1 auto; min-width: 0; }
 .git-commit-actions .split-button > button:first-child {
   flex: 1 1 auto; min-width: 0; border-top-right-radius: 0; border-bottom-right-radius: 0;
@@ -1061,7 +1158,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .git-commit-actions .split-button-more {
   flex: 0 0 auto; padding-inline: 7px;
   border-top-left-radius: 0; border-bottom-left-radius: 0;
-  box-shadow: inset 1px 0 0 rgb(0 0 0 / .22);
+  box-shadow: inset 1px 0 0 color-mix(in srgb, var(--shadow) 22%, transparent);
 }
 .git-output {
   max-height: 96px; margin: 0; overflow: auto; padding: 6px; border-radius: 3px;
@@ -1078,9 +1175,9 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .ports-form input {
   flex: 1 1 0; min-width: 0; padding: 4px 6px;
   border: 1px solid var(--chrome-border); border-radius: 4px;
-  background: var(--chrome-bg); color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-family: var(--font-mono); font-size: 12px;
 }
-.ports-form button { flex: 0 0 auto; padding: 4px 10px; border: 1px solid; border-radius: 4px; font-size: 11px; }
+.ports-form button { flex: 0 0 auto; padding: 4px 10px; border: 1px solid; border-radius: 4px; font-size: 12px; }
 .ports-list { margin: 0; padding: 0; list-style: none; }
 .port-forward {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px 8px 2px 12px;
@@ -1092,7 +1189,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .port-forward.failed .port-forward-dot { background: var(--danger); }
 .port-forward-link {
   flex: 1 1 auto; min-width: 0; padding: 2px 0; border: 0; background: transparent;
-  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px; text-align: left;
+  color: var(--chrome-ink); font-family: var(--font-mono); font-size: 12px; text-align: left;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .port-forward-link:hover:not(:disabled) { color: var(--accent); text-decoration: underline; }
@@ -1107,10 +1204,140 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .port-suggestion {
   display: inline-flex; align-items: baseline; gap: 4px; padding: 2px 7px;
   border: 1px solid var(--chrome-border); border-radius: 10px;
-  background: var(--chrome-raised); color: var(--chrome-ink); font-family: var(--font-mono); font-size: 11px;
+  background: var(--chrome-raised); color: var(--chrome-ink); font-family: var(--font-mono); font-size: 12px;
 }
 .port-suggestion:hover { border-color: var(--accent); }
 .port-suggestion small { color: var(--chrome-faint); font-family: var(--font-sans); font-size: var(--type-meta); }
+
+/* Automations: a panel extension (features/automations), host-scoped like Ports. */
+.automations-panel { display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+.automations-head { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 6px 12px; }
+.automations-host { flex: 1; min-width: 0; display: flex; }
+.automations-host select { flex: 1; min-width: 0; }
+.automations-host-name { flex: 1; min-width: 0; color: var(--chrome-dim); font-size: var(--type-secondary); }
+.automations-new { flex: 0 0 auto; padding: 3px 10px; border: 1px solid; border-radius: 4px; font-size: 11px; }
+.automations-banner {
+  display: grid; gap: 3px; margin: 0 12px 8px; padding: 8px 10px;
+  border: 1px solid var(--danger); border-radius: 4px; background: var(--danger-wash);
+  color: var(--chrome-ink); font-size: var(--type-secondary); overflow-wrap: anywhere;
+}
+.automations-banner strong { color: var(--danger-ink); }
+.automations-panel > .automations-banner:first-child { margin-top: 8px; }
+.automations-empty {
+  display: grid; gap: 8px; justify-items: center; padding: 24px 16px;
+  color: var(--chrome-dim); font-size: var(--type-secondary); line-height: 1.5; text-align: center;
+}
+.automations-empty strong { color: var(--chrome-ink-strong); font-size: var(--type-row); }
+.automations-empty p { margin: 0; }
+.automations-empty button { padding: 4px 10px; border: 1px solid; border-radius: 4px; font-size: 11px; }
+.automations-empty code { color: var(--chrome-faint); font-family: var(--font-mono); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.automations-list { display: grid; gap: 2px; margin: 0; padding: 0 6px 10px; list-style: none; }
+/* The main button spans the row, so its meta line runs under the actions too;
+   the actions sit over its first line, which leaves them room. */
+.automation-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; padding: 8px; border-radius: 6px; }
+.automation-row > * { grid-row: 1; }
+.automation-row:hover, .automation-row:focus-within { background: var(--chrome-hover); }
+.automation-row-main {
+  grid-column: 1 / -1; min-width: 0; display: grid; gap: 4px; padding: 0; border: 0;
+  background: transparent; color: var(--chrome-ink); text-align: left;
+}
+.automation-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--chrome-ink-strong); font-size: var(--type-row); font-weight: 600; }
+.automation-row-main > .automation-name { margin-right: 118px; }
+.automation-row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; color: var(--chrome-dim); font-size: var(--type-meta); }
+.automation-row-meta > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.automation-row-meta > .automation-row-error { white-space: normal; }
+.automation-row-agent { color: var(--chrome-faint); font-family: var(--font-mono); overflow-wrap: anywhere; }
+.automation-row-error { color: var(--danger-ink); }
+.automation-row.paused .automation-name { color: var(--chrome-dim); }
+.automation-row-actions { grid-column: 2; display: flex; align-items: center; gap: 8px; padding-top: 1px; }
+.automation-button {
+  padding: 1px 7px; border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: transparent; color: var(--chrome-dim); font-size: var(--type-meta); white-space: nowrap;
+}
+.automation-button:hover:not(:disabled) { background: var(--chrome-hover); color: var(--chrome-ink); }
+.automation-switch {
+  position: relative; flex: none; width: 26px; height: 15px; padding: 0; border: 0; border-radius: 8px;
+  background: var(--chrome-border);
+}
+.automation-switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%;
+  background: var(--chrome-dim); transition: left .15s;
+}
+.automation-switch[aria-checked="true"] { background: var(--accent); }
+.automation-switch[aria-checked="true"]::after { left: 13px; background: var(--chrome-bg); }
+.automation-switch:disabled { opacity: .45; }
+.automation-switch:focus-visible { outline: 2px solid var(--chrome-ink-strong); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .automation-switch::after { transition: none; } }
+.automation-chip {
+  flex: 0 0 auto; padding: 1px 6px; border-radius: 4px; background: var(--chrome-raised);
+  color: var(--chrome-dim); font-size: var(--type-meta); white-space: nowrap;
+}
+.automation-chip.working, .automation-chip.launched { color: var(--state-working); background: color-mix(in srgb, var(--state-working) 14%, transparent); }
+.automation-chip.done { color: var(--state-done); background: color-mix(in srgb, var(--state-done) 14%, transparent); }
+.automation-chip.needs_attention, .automation-chip.failed { color: var(--danger-ink); background: var(--danger-wash); }
+.automation-detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 8px 12px 12px; }
+.automation-detail-head { display: flex; align-items: center; gap: 8px; font-size: var(--type-secondary); }
+.automation-detail-head .automation-name { flex: 1; }
+.automation-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 10px; margin: 0; font-size: var(--type-secondary); }
+.automation-facts dt { color: var(--chrome-faint); }
+.automation-facts dd { margin: 0; color: var(--chrome-ink); overflow-wrap: anywhere; }
+.automation-facts code { font-family: var(--font-mono); font-size: var(--type-meta); }
+.automation-prompt {
+  margin: 0; padding: 8px 10px; border: 1px solid var(--chrome-hairline); border-radius: 6px; background: var(--chrome-raised);
+  color: var(--chrome-ink); font-size: var(--type-secondary); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.automation-detail > .section-label { margin: 6px 0 0; }
+.automation-detail > .quiet-empty { margin: 0; padding: 0; }
+.automation-runs { margin: 0; padding: 0; list-style: none; }
+.automation-run {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 2px 8px;
+  padding: 6px 0; border-top: 1px solid var(--chrome-hairline); font-size: var(--type-secondary);
+}
+.automation-run-number { color: var(--chrome-faint); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.automation-run-when { color: var(--chrome-ink); font-variant-numeric: tabular-nums; }
+.automation-run-open { font-size: var(--type-meta); }
+.automation-run-gone { color: var(--chrome-faint); font-size: var(--type-meta); }
+.automation-run-message {
+  grid-column: 2 / -1; overflow: hidden; color: var(--chrome-dim); font-size: var(--type-meta);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere;
+}
+.automation-editor {
+  display: grid; grid-template-rows: auto minmax(0, 1fr); width: min(620px, calc(100vw - 32px)); max-height: min(720px, 84vh);
+  border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
+  background: var(--chrome-raised); box-shadow: 0 24px 60px rgb(0 0 0 / .6);
+}
+.automation-editor > header { display: flex; align-items: baseline; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--chrome-hairline); }
+.automation-editor > header h2 { margin: 0; font-size: 16px; }
+.automation-editor-host { color: var(--chrome-faint); font-size: var(--type-secondary); }
+.automation-editor-form { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-height: 0; }
+.automation-editor-form > footer { display: grid; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--chrome-hairline); }
+.automation-editor-body { display: grid; align-content: start; gap: 12px; padding: 16px; overflow-y: auto; }
+.automation-editor-body label { display: grid; gap: 5px; color: var(--chrome-dim); font-size: 11.5px; }
+.automation-editor-body input, .automation-editor-body textarea {
+  width: 100%; min-height: 30px; padding: 6px; border: 1px solid var(--chrome-border); border-radius: 4px;
+  background: var(--chrome-bg); color: var(--chrome-ink); font-size: var(--type-row);
+}
+.automation-editor-body [aria-invalid="true"] { border-color: var(--danger); }
+.automation-editor-body textarea { resize: vertical; line-height: 1.45; }
+.automation-editor-body .mono { font-family: var(--font-mono); font-size: 12px; }
+.automation-editor-body input[readonly] { border-style: dashed; background: transparent; color: var(--chrome-dim); }
+.automation-editor-body .settings-hint { margin: -6px 0 0; }
+.automation-editor-body .settings-hint strong { color: var(--chrome-ink); font-weight: 500; }
+.automation-editor-body .dialog-error strong { color: inherit; }
+.automation-editor-agent { display: grid; gap: 5px; margin: 0; padding: 0; border: 0; }
+.automation-editor-agent legend { padding: 0 0 5px; color: var(--chrome-dim); font-size: 11.5px; }
+.automation-editor-agent .segmented { gap: 0; width: fit-content; overflow: hidden; border: 1px solid var(--chrome-border); border-radius: 6px; }
+.automation-editor-agent .segment { border-right: 1px solid var(--chrome-border); border-radius: 0; padding: 5px 12px; }
+.automation-editor-agent .segment:last-child { border-right: 0; }
+.automation-editor-agent .segment.active { background: var(--accent-wash); color: var(--accent); }
+.automation-editor-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.automation-editor-preview { display: grid; gap: 4px; }
+.automation-editor-preview code {
+  padding: 6px 8px; border-radius: 4px; background: var(--chrome-bg);
+  color: var(--chrome-ink); font-family: var(--font-mono); font-size: var(--type-meta); overflow-wrap: anywhere;
+}
+.automation-editor .dialog-actions { margin: 0; }
+.automation-editor-delete { margin-right: auto; }
 
 /* ── Document surfaces ─────────────────────────────────────────────────── */
 
@@ -1197,26 +1424,42 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .file-tab-surface[data-view-mode="split"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .file-tab-surface[data-view-mode="split"] .editor-toolbar { grid-column: 1 / -1; }
 .monaco-host { min-width: 0; min-height: 0; overflow: hidden; }
+/* Document typography belongs to the page, independently of the app's menu scale. */
+.markdown-preview, .live-markdown {
+  --markdown-content-width: 720px;
+  --markdown-gutter: clamp(20px, 4vw, 48px);
+  font-size: 16px;
+  line-height: 1.65;
+}
 .markdown-preview {
-  min-width: 0; min-height: 0; margin: 0; padding: 24px clamp(18px, 5vw, 56px); overflow: auto;
+  min-width: 0; min-height: 0; margin: 0; padding: 48px var(--markdown-gutter) 80px; overflow: auto;
   border-left: 1px solid var(--chrome-hairline);
-  color: var(--chrome-ink); background: var(--chrome-bg); font-size: var(--type-menu); line-height: 1.62;
+  color: var(--chrome-ink); background: var(--chrome-bg);
   /* Rendered Markdown is document text: it selects, it says so under the
      pointer, and it keeps saying so if the chrome around it ever stops being
      selectable. */
   user-select: text; cursor: text;
 }
+.markdown-preview > * { max-width: var(--markdown-content-width); margin-inline: auto; }
+.markdown-preview p { margin-block: 0 1.65em; }
+.markdown-preview :is(h1, h2, h3, h4, h5, h6) { margin-block: 1em .4em; font-weight: 650; letter-spacing: -.02em; color: var(--chrome-ink-strong); }
+.markdown-preview h1 { font-size: 2em; line-height: 1.25; }
+.markdown-preview h2 { font-size: 1.55em; line-height: 1.3; }
+.markdown-preview h3 { font-size: 1.25em; line-height: 1.4; }
+.markdown-preview h4 { font-size: 1.125em; }
+.markdown-preview :is(h5, h6) { font-size: 1em; }
+.markdown-preview :is(ul, ol) { padding-inline-start: 1.5em; margin-block: .5em 1.4em; }
+.markdown-preview :is(ul, ol) :is(ul, ol) { padding-inline-start: 32px; margin-block: 0; }
+.markdown-preview li::marker { color: var(--chrome-dim); }
 .markdown-preview :first-child { margin-top: 0; }
-.markdown-preview h1, .markdown-preview h2, .markdown-preview h3 { color: var(--chrome-ink-strong); }
-.markdown-preview h1, .markdown-preview h2 { padding-bottom: .3em; border-bottom: 1px solid var(--chrome-hairline); }
 .markdown-preview a { color: var(--accent); cursor: pointer; }
-.markdown-preview code { padding: 2px 4px; border-radius: 3px; background: var(--chrome-raised); }
-.markdown-preview pre { padding: 12px; overflow: auto; border: 1px solid var(--chrome-hairline); border-radius: 6px; background: var(--chrome-raised); }
+.markdown-preview code { padding: 2px 5px; border-radius: 4px; background: var(--chrome-raised); font-size: .875em; }
+.markdown-preview pre { padding: 16px 18px; overflow: auto; border: 1px solid var(--chrome-hairline); border-radius: 8px; background: var(--chrome-raised); line-height: 1.65; }
 .markdown-preview pre code { padding: 0; background: transparent; }
 .markdown-preview img { max-width: 100%; cursor: default; }
-.markdown-preview blockquote { margin-left: 0; padding-left: 14px; border-left: 3px solid var(--chrome-border); color: var(--chrome-dim); }
+.markdown-preview blockquote { padding-left: 18px; border-left: 2px solid var(--chrome-border); color: var(--chrome-dim); }
 /* Typora-style table grid, with the approved roomier cell spacing. */
-:is(.markdown-preview, .cm-live-table) table { width: 100%; margin: .8em 0 1.6em; border-collapse: collapse; border-spacing: 0; word-break: initial; font-size: 14px; line-height: 1.55; }
+:is(.markdown-preview, .cm-live-table) table { width: 100%; margin: .8em auto 1.6em; border-collapse: collapse; border-spacing: 0; word-break: initial; font-size: 14px; line-height: 1.55; }
 :is(.markdown-preview, .cm-live-table) :is(th, td) { padding: 12px 18px; border: 1px solid var(--chrome-border); text-align: left; vertical-align: top; }
 :is(.markdown-preview, .cm-live-table) :is(thead, tbody tr:nth-child(even)) { background: var(--chrome-raised); }
 :is(.markdown-preview, .cm-live-table) th { color: var(--chrome-ink-strong); font-weight: 600; }
@@ -1227,26 +1470,31 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
    preview so that switching between the two does not move the text. */
 .live-markdown-host { min-width: 0; min-height: 0; overflow: hidden; }
 .live-markdown { height: 100%; }
-.live-markdown .cm-editor { height: 100%; background: var(--chrome-bg); color: var(--chrome-ink); font-size: var(--type-menu); }
+.live-markdown .cm-editor { height: 100%; background: var(--chrome-bg); color: var(--chrome-ink); font-size: inherit; }
 .live-markdown .cm-editor.cm-focused { outline: none; }
-.live-markdown .cm-editor .cm-scroller { font-family: var(--font-sans); line-height: 1.62; }
+.live-markdown .cm-editor .cm-cursor { border-left-color: var(--chrome-ink-strong); }
+.live-markdown .cm-editor .cm-scroller .cm-selectionLayer .cm-selectionBackground { background: var(--accent-wash); }
+
+.live-markdown .cm-editor .cm-scroller { font-family: var(--font-sans); line-height: 1.65; }
 .live-markdown .cm-editor .cm-content {
   box-sizing: border-box; width: 100%;
-  padding: 24px clamp(18px, 5vw, 56px) 40vh; caret-color: var(--chrome-ink-strong);
+  max-width: calc(var(--markdown-content-width) + 2 * var(--markdown-gutter)); margin-inline: auto;
+  padding: 48px var(--markdown-gutter) 40vh; caret-color: var(--chrome-ink-strong);
 }
 /* Text, code blocks, quote bars and tables share one left edge, as in the preview. */
 .live-markdown .cm-editor .cm-line { padding: 0; }
-.live-markdown .cm-line.cm-live-h1 { font-size: 1.9em; line-height: 1.3; padding-top: .5em; padding-bottom: .2em; border-bottom: 1px solid var(--chrome-hairline); }
-.live-markdown .cm-line.cm-live-h2 { font-size: 1.5em; line-height: 1.35; padding-top: .45em; padding-bottom: .15em; border-bottom: 1px solid var(--chrome-hairline); }
-.live-markdown .cm-line.cm-live-h3 { font-size: 1.25em; padding-top: .35em; }
-.live-markdown .cm-line.cm-live-h4 { font-size: 1.1em; padding-top: .3em; }
+.live-markdown .cm-line:is(.cm-live-h1, .cm-live-h2, .cm-live-h3, .cm-live-h4, .cm-live-h5, .cm-live-h6) { font-weight: 650; letter-spacing: -.02em; color: var(--chrome-ink-strong); }
+.live-markdown .cm-line.cm-live-h1 { font-size: 2em; line-height: 1.25; padding-top: .5em; padding-bottom: .2em; }
+.live-markdown .cm-line.cm-live-h2 { font-size: 1.55em; line-height: 1.3; padding-top: .6em; padding-bottom: .2em; }
+.live-markdown .cm-line.cm-live-h3 { font-size: 1.25em; line-height: 1.4; padding-top: .5em; padding-bottom: .15em; }
+.live-markdown .cm-line.cm-live-h4 { font-size: 1.125em; padding-top: .4em; }
 .live-markdown .cm-line:is(.cm-live-h5, .cm-live-h6) { padding-top: .25em; }
-.live-markdown .cm-line.cm-live-quote { padding-left: 14px; border-left: 3px solid var(--chrome-border); color: var(--chrome-dim); }
-.live-markdown .cm-line.cm-live-code { padding: 0 12px; background: var(--chrome-raised); font-family: var(--font-mono); line-height: 1.5; }
-.live-markdown .cm-line.cm-live-code-first { padding-top: 8px; border-radius: 6px 6px 0 0; }
-.live-markdown .cm-line.cm-live-code-last { padding-bottom: 8px; border-radius: 0 0 6px 6px; }
-.live-markdown .cm-line.cm-live-code-first.cm-live-code-last { border-radius: 6px; }
-.live-markdown .cm-live-inline-code { padding: 1px 3px; border-radius: 3px; background: var(--chrome-raised); }
+.live-markdown .cm-line.cm-live-quote { padding-left: 18px; border-left: 2px solid var(--chrome-border); color: var(--chrome-dim); }
+.live-markdown .cm-line.cm-live-code { padding: 0 18px; border-inline: 1px solid var(--chrome-hairline); background: var(--chrome-raised); font-family: var(--font-mono); font-size: .875em; line-height: 1.65; }
+.live-markdown .cm-line.cm-live-code-first { padding-top: 12px; border-top: 1px solid var(--chrome-hairline); border-radius: 8px 8px 0 0; }
+.live-markdown .cm-line.cm-live-code-last { padding-bottom: 12px; border-bottom: 1px solid var(--chrome-hairline); border-radius: 0 0 8px 8px; }
+.live-markdown .cm-line.cm-live-code-first.cm-live-code-last { border-radius: 8px; }
+.live-markdown .cm-live-inline-code { padding: 2px 5px; border-radius: 4px; background: var(--chrome-raised); font-size: .875em; }
 .live-markdown .cm-live-link { color: var(--accent); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); text-underline-offset: 2px; }
 /* A bare or angle-bracket URL is styled as a URL by the highlighter too; inside a link it reads as one. */
 .live-markdown .cm-live-link span { color: inherit; }
@@ -1255,13 +1503,28 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .live-markdown .cm-live-image-alt { color: var(--chrome-dim); font-style: italic; }
 .live-markdown .cm-live-strike { color: var(--chrome-dim); }
 .live-markdown .cm-live-bullet { display: inline-block; min-width: 1em; color: var(--chrome-dim); }
+.live-markdown .cm-line.cm-live-list {
+  padding-left: calc(var(--cm-list-depth) * 32px + var(--cm-list-marker));
+  text-indent: calc(-1 * var(--cm-list-marker));
+}
+.live-markdown .cm-line.cm-live-list.cm-live-quote { padding-left: calc(18px + var(--cm-list-depth) * 32px + var(--cm-list-marker)); }
+.live-markdown .cm-live-list-marker { display: inline-block; width: var(--cm-list-marker); text-indent: 0; }
+/* Give the editable number a real trailing caret boundary at the content edge. */
+.live-markdown .cm-live-list-marker:not(.cm-live-bullet) { display: inline-flex; align-items: baseline; justify-content: flex-end; font-variant-numeric: tabular-nums; }
+.live-markdown .cm-live-marker-space { flex: 0 0 .5em; align-self: stretch; }
+.live-markdown .cm-live-bullet.cm-live-list-marker { min-width: 0; }
+.live-markdown .cm-line.cm-live-list-continuation { text-indent: 0; }
+.live-markdown .cm-live-list > .cm-live-task { box-sizing: border-box; width: 1em; height: 1em; margin: 0 .5em 0 0; text-indent: 0; }
 .live-markdown .cm-live-task { margin: 0 .45em 0 0; vertical-align: -1px; accent-color: var(--accent); cursor: pointer; }
-.live-markdown .cm-live-task:disabled { cursor: default; }
+.live-markdown .cm-live-task:is(:disabled, [aria-disabled="true"]) { cursor: default; }
+.live-markdown span.cm-live-task { display: inline-block; line-height: 1; text-align: center; color: var(--accent); }
+.live-markdown span.cm-live-task:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .live-markdown .cm-live-rule { display: inline-block; width: 100%; height: 1px; vertical-align: middle; background: var(--chrome-hairline); }
 .live-markdown .cm-live-image { max-width: 100%; vertical-align: bottom; }
+.live-markdown .cm-live-image-background { display: inline-block; background: center / contain no-repeat; }
 /* The table's own margins would fall outside the widget, where CodeMirror
    cannot measure them, and every click below the table would land a line off. */
-.live-markdown .cm-live-table { padding: 2px 0; cursor: text; }
+.live-markdown .cm-live-table { max-width: 100%; padding: 2px 0; overflow-x: auto; cursor: text; }
 .live-markdown .cm-live-table table { margin: 0; }
 .live-markdown .cm-live-table a { color: var(--accent); }
 /* A cell being typed into: the table keeps its face, the cell says where the caret is. */
@@ -1306,7 +1569,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   position: fixed; z-index: 60; display: grid; min-width: 180px; padding: 4px;
   max-height: calc(100vh - 16px); overflow-y: auto;
   border: 1px solid var(--chrome-border); border-radius: 7px;
-  background: var(--chrome-raised); box-shadow: 0 10px 28px rgb(0 0 0 / .6);
+  background: var(--chrome-raised); box-shadow: 0 10px 28px color-mix(in srgb, var(--shadow) 60%, transparent);
   font-size: var(--type-menu);
 }
 .context-menu-item {
@@ -1332,12 +1595,12 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .modal-backdrop {
   position: fixed; z-index: 100; inset: 0;
   display: grid; place-items: start center; padding-top: 12vh;
-  background: rgb(0 0 0 / .35); backdrop-filter: blur(1px);
+  background: color-mix(in srgb, var(--shadow) 35%, transparent); backdrop-filter: blur(1px);
 }
 .palette {
   width: var(--palette-width); max-width: calc(100vw - 32px);
   border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
-  background: var(--chrome-raised); box-shadow: 0 24px 60px rgb(0 0 0 / .6);
+  background: var(--chrome-raised); box-shadow: 0 24px 60px color-mix(in srgb, var(--shadow) 60%, transparent);
   overflow: hidden;
 }
 .palette-input {
@@ -1391,7 +1654,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .confirmation, .shortcut-dialog, .settings-dialog {
   width: min(620px, calc(100vw - 32px));
   border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
-  background: var(--chrome-raised); box-shadow: 0 24px 60px rgb(0 0 0 / .6);
+  background: var(--chrome-raised); box-shadow: 0 24px 60px color-mix(in srgb, var(--shadow) 60%, transparent);
 }
 .confirmation { padding: 20px; }
 .confirmation h2 { margin: 0 0 10px; font-size: 16px; }
@@ -1429,7 +1692,10 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
    dim text that did not read as a control in either state — and would have
    done the same to the next button added to any dialog. Opt out with
    `.bar-button` / `.inline-action`, which bring their own chrome. */
-:where(.modal-backdrop) button:not(.bar-button):not(.inline-action):not(.segment) {
+/* Not the palette's rows: they are buttons inside a backdrop too, and this rule
+   outranked `.palette-row.selected`, boxing every row and leaving the selected
+   one unfilled with its shortcut drawn in the knockout ink on no fill. */
+:where(.modal-backdrop) button:not(.bar-button):not(.inline-action):not(.segment):not(.palette-row) {
   padding: 6px 12px; border: 1px solid var(--chrome-border); border-radius: var(--radius-control);
   background: var(--chrome-bg); color: var(--chrome-ink);
 }
@@ -1496,7 +1762,9 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   background-repeat: no-repeat;
 }
 .settings-check { display: flex !important; align-items: center; gap: 8px; color: var(--chrome-ink) !important; }
-.settings-hint { margin: -6px 0 4px 22px; color: var(--chrome-faint); font-size: var(--type-secondary); line-height: 1.5; }
+/* The secondary grey, as help text is everywhere else: the faint one is for
+   placeholders and disabled controls, and drew these at about 2.5:1. */
+.settings-hint { margin: -6px 0 4px 22px; color: var(--chrome-dim); font-size: var(--type-secondary); line-height: 1.5; }
 /* The picker and "+ Add host" on one row: choosing a saved host and starting a
    new one are the same decision, and separating them made the button read as an
    action on whatever the picker was showing. Aligned to the end of the row so
@@ -1522,6 +1790,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
    field with a hint under it. */
 .settings-fieldset { display: grid; align-content: start; gap: 12px; padding: 0; border: 0; }
 .settings-fieldset .settings-hint { margin-left: 0; }
+.settings-modes + .settings-hint { margin-left: 0; }
 .settings-helper { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .settings-helper p { flex-basis: 100%; margin: 0; color: var(--chrome-dim); font-size: 11px; }
 .helper-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; flex-basis: 100%; margin: 0; font-size: var(--type-meta); }
@@ -1560,7 +1829,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
   width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 24px); padding: 20px; overflow: hidden;
   border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
-  background: var(--chrome-raised); box-shadow: 0 18px 60px rgb(0 0 0 / .6);
+  background: var(--chrome-raised); box-shadow: 0 18px 60px color-mix(in srgb, var(--shadow) 60%, transparent);
 }
 .hook-review-scroll { min-height: 0; padding-right: 4px; overflow-y: auto; scrollbar-width: thin; }
 .hook-review h2 { margin: 2px 0 0; font-size: 16px; }
@@ -1592,7 +1861,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
   width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 24px); padding: 20px; overflow: hidden;
   border: 1px solid var(--chrome-border); border-radius: var(--radius-panel);
-  background: var(--chrome-raised); box-shadow: 0 18px 60px rgb(0 0 0 / .6);
+  background: var(--chrome-raised); box-shadow: 0 18px 60px color-mix(in srgb, var(--shadow) 60%, transparent);
 }
 .host-setup h2 { margin: 2px 0 0; font-size: 16px; }
 .host-setup header small { color: var(--chrome-faint); }
@@ -1617,7 +1886,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   position: fixed; z-index: 90; right: 14px; bottom: 14px;
   display: grid; gap: 5px; max-width: 420px; padding: 12px;
   border: 1px solid var(--chrome-border); border-radius: 8px;
-  background: var(--chrome-raised); box-shadow: 0 12px 32px rgb(0 0 0 / .7);
+  background: var(--chrome-raised); box-shadow: 0 12px 32px color-mix(in srgb, var(--shadow) 70%, transparent);
   font-size: 11px;
 }
 .toast[role="alert"], .toast-problem { border-color: var(--danger); }

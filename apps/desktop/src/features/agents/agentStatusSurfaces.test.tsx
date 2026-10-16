@@ -213,10 +213,10 @@ describe("active agent row", () => {
     expect(sidebar({ agents: rows, activePaneId: "%missing" })).not.toContain("agent-button selected");
   });
 
-  it("uses the approved quiet fill without letting hover replace it", () => {
-    expect(stylesCss).toContain(".agent-button.selected { background: var(--chrome-selected); }");
+  it("uses the active workspace's accent block without letting hover replace it", () => {
+    expect(stylesCss).toContain(".agent-button.selected { background: var(--accent); }");
     expect(stylesCss).toContain(".agent-button:hover:not(.selected):not(:disabled):not([data-unavailable])");
-    expect(stylesCss).toContain(".agent-button.selected .agent-mark { --badge-ring: var(--chrome-selected); }");
+    expect(stylesCss).toContain(".agent-button.selected .agent-mark,\n.workspace-button.active .agent-mark { --badge-ring: var(--accent); }");
     const forcedColors = stylesCss.slice(stylesCss.indexOf("@media (forced-colors: active)"));
     expect(forcedColors).toContain(".agent-button.selected");
   });

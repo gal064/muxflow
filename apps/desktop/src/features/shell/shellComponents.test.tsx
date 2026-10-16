@@ -1266,6 +1266,34 @@ describe("application shell accessibility contracts", () => {
     expect(press("ports", "ArrowLeft")).toBe("git");
   });
 
+  it("adds an enabled extension after the built-ins, and falls back to Files for one that is gone", () => {
+    const extensions = [{ id: "automations", label: "Automations", body: <p>automations surface</p> }];
+    const html = renderToStaticMarkup(<RightPanel
+      extensions={extensions} files={<p>files surface</p>} git={null} maxWidth={800} onSurface={noop}
+      onWidth={noop} ports={null} surface="automations" width={320}
+    />);
+    expect(html).toContain('id="panel-tab-automations"');
+    expect(html).toContain("automations surface");
+    const gone = renderToStaticMarkup(<RightPanel
+      files={<p>files surface</p>} git={null} maxWidth={800} onSurface={noop}
+      onWidth={noop} ports={null} surface="automations" width={320}
+    />);
+    expect(gone).toContain("files surface");
+    expect(gone).not.toContain("panel-tab-automations");
+
+    const onSurface = vi.fn();
+    let renderer!: ReturnType<typeof create>;
+    act(() => {
+      renderer = create(<RightPanel
+        extensions={extensions} files={null} git={null} maxWidth={800} onSurface={onSurface}
+        onWidth={noop} ports={null} surface="ports" width={320}
+      />);
+    });
+    renderer.root.findByProps({ id: "panel-tab-ports" }).props.onKeyDown({ key: "ArrowRight", preventDefault: vi.fn() });
+    expect(onSurface).toHaveBeenLastCalledWith("automations");
+    renderer.unmount();
+  });
+
   it("puts seven controls and an unread count on the titlebar, and no more", () => {
     const html = renderToStaticMarkup(<TitleBar
       canCreateWorkspace canGoBack canGoForward={false} canJump onBack={noop} onBell={noop} onForward={noop}

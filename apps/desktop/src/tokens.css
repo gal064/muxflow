@@ -78,17 +78,23 @@
      drew as bold and its wider glyphs truncated rows SF Pro fits. */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
-  --type-row: 12.5px;
-  --type-secondary: 10.5px;
-  --type-meta: 10px;
-  --type-label: 9.5px;
+  --type-row: 13.5px;
+  --type-secondary: 11.5px;
+  --type-meta: 11px;
+  --type-label: 10.5px;
   --type-menu: 13px;
   --weight-row: 600;
   --tracking-label: 0.12em;
   --term-font-size: 13px;
 
   /* ── Metrics ─────────────────────────────────────────────────────────── */
-  --bar-height: 28px;
+  --bar-height: 34px;
+  /* The window's top bar stays as thin as its buttons allow: it holds a few
+     controls and the workspace name, and every pixel it gives up goes to the
+     terminal. Its text keeps the size it had before the rest grew, for the
+     same reason. */
+  --titlebar-height: 28px;
+  --type-titlebar: 12.5px;
   --sidebar-width: 240px;
   --panel-width: 300px;
   --menu-row-height: 24px;
@@ -104,3 +110,8 @@
 
   color-scheme: dark;
 }
+
+/* The palette's light block sets the colors; this tells WebKit to draw native
+   controls and scrollbars to match. See `ui/appearance.ts` for the attribute. */
+:root[data-theme="light"], [data-palette="light"] { color-scheme: light; }
+[data-palette="dark"] { color-scheme: dark; }

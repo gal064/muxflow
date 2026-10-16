@@ -442,7 +442,7 @@ fn pins_path() -> std::path::PathBuf {
     crate::paths::state_dir().join("pins.json")
 }
 
-fn load_sidecar<T: Default + serde::de::DeserializeOwned>(
+pub(super) fn load_sidecar<T: Default + serde::de::DeserializeOwned>(
     path: &std::path::Path,
     label: &str,
 ) -> anyhow::Result<T> {
@@ -455,10 +455,20 @@ fn load_sidecar<T: Default + serde::de::DeserializeOwned>(
     }
 }
 
-fn save_sidecar<T: serde::Serialize>(
+pub(super) fn save_sidecar<T: serde::Serialize>(
     path: &std::path::Path,
     label: &str,
     state: &T,
+) -> anyhow::Result<()> {
+    write_private_atomic(path, label, &serde_json::to_vec(state)?)
+}
+
+/// Replaces `path` with `bytes`, privately and atomically: a 0600 temporary
+/// beside it, synced, renamed over it, and the directory synced.
+pub(super) fn write_private_atomic(
+    path: &std::path::Path,
+    label: &str,
+    bytes: &[u8],
 ) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -476,7 +486,7 @@ fn save_sidecar<T: serde::Serialize>(
             .mode(0o600)
             .open(&temporary)
             .with_context(|| format!("create private {label} state"))?;
-        file.write_all(&serde_json::to_vec(state)?)?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
         fs::rename(&temporary, path)
@@ -505,7 +515,7 @@ pub(crate) fn inherited_server_identity() -> Option<String> {
     (identity != "tmux:none").then_some(identity)
 }
 
-fn server_identity_from_command(mut command: Command) -> String {
+pub(super) fn server_identity_from_command(mut command: Command) -> String {
     let output = command
         .args(["display-message", "-p", "#{socket_path}"])
         .output();

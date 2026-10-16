@@ -1,15 +1,16 @@
 /* GENERATED from src/palette.ts; run pnpm --filter @muxflow/client-core palette:gen. */
-:root {
+:root, [data-palette="dark"] {
   --chrome-bg: #282c34;
   --chrome-raised: #2c313a;
   --chrome-hairline: #313640;
   --chrome-border: #3e4451;
   --chrome-hover: #2f343e;
   --chrome-selected: #353b45;
+  --chrome-selected-edge: #353b45;
   --chrome-ink: #c4c8c6;
   --chrome-ink-strong: #ffffff;
-  --chrome-dim: #8f96a1;
-  --chrome-faint: #636b78;
+  --chrome-dim: #a4abb6;
+  --chrome-faint: #7f8794;
   --accent: #7aa6da;
   --accent-ink: #282c34;
   --accent-wash: #7aa6da1f;
@@ -18,6 +19,7 @@
   --danger-wash: #cc656622;
   --ok: #28c840;
   --warn: #febc2e;
+  --shadow: #000000;
   --term-bg: #282c34;
   --term-fg: #ffffff;
   --term-cursor: #ffffff;
@@ -43,5 +45,53 @@
   --state-working: #f0c674;
   --state-blocked: #cc6566;
   --state-done: #8abeb7;
-  --state-unknown: #8f96a1;
+  --state-unknown: #a4abb6;
+}
+:root[data-theme="light"], [data-palette="light"] {
+  --chrome-bg: #fafafa;
+  --chrome-raised: #f4f4f5;
+  --chrome-hairline: #e4e4e7;
+  --chrome-border: #d4d4d8;
+  --chrome-hover: #ececee;
+  --chrome-selected: #ffffff;
+  --chrome-selected-edge: #d4d4d8;
+  --chrome-ink: #27272a;
+  --chrome-ink-strong: #18181b;
+  --chrome-dim: #71717b;
+  --chrome-faint: #85858e;
+  --accent: #2f6fe0;
+  --accent-ink: #ffffff;
+  --accent-wash: #2f6fe01f;
+  --danger: #dc2626;
+  --danger-ink: #b91c1c;
+  --danger-wash: #dc262622;
+  --ok: #16a34a;
+  --warn: #b45309;
+  --shadow: #18181b40;
+  --term-bg: #fcfcfc;
+  --term-fg: #1c2129;
+  --term-cursor: #26384e;
+  --term-cursor-text: #fcfcfc;
+  --term-selection-bg: #253f6333;
+  --term-selection-fg: #1c2129;
+  --term-0: #000000;
+  --term-1: #cd3131;
+  --term-2: #107c10;
+  --term-3: #8f6a00;
+  --term-4: #0451a5;
+  --term-5: #bc05bc;
+  --term-6: #0e7490;
+  --term-7: #555555;
+  --term-8: #666666;
+  --term-9: #cd3131;
+  --term-10: #0a7a0a;
+  --term-11: #7a6400;
+  --term-12: #0451a5;
+  --term-13: #bc05bc;
+  --term-14: #0e7490;
+  --term-15: #6e6e6e;
+  --state-working: #d97706;
+  --state-blocked: #dc2626;
+  --state-done: #0e7490;
+  --state-unknown: #71717b;
 }

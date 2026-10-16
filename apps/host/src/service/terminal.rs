@@ -3,7 +3,7 @@ use std::{
     io::Write,
     process::{Child, ChildStdin},
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc as std_mpsc,
     },
@@ -30,6 +30,7 @@ mod flow_control;
 use flow_control::{FlowControl, resume_command, take_injected_rejection};
 mod input;
 pub(crate) use input::InputDelivery;
+pub(in crate::service) use input::send_input_batch;
 mod input_client;
 use input_client::PersistentInputClient;
 mod output_credit;
@@ -55,10 +56,66 @@ use attachment_startup::tmux_supports_control_color_reports;
 const TERMINAL_CLIENT_CELL_BOUNDS: std::ops::RangeInclusive<u32> = 2..=500;
 
 // tmux's OSC report syntax uses four hexadecimal digits per channel. These
-// mirror `--term-fg` and `--term-bg` in the desktop's canonical `tokens.css`;
+// mirror the dark `--term-fg` and `--term-bg` in the shared palette;
 // `control_client_palette_matches_terminal_theme_tokens` guards that boundary.
+// They are what panes report until a desktop sends SET_TERMINAL_COLORS.
 const TERMINAL_FOREGROUND_OSC_RGB: &str = "ffff/ffff/ffff";
 const TERMINAL_BACKGROUND_OSC_RGB: &str = "2828/2c2c/3434";
+
+/// The foreground and background tmux reports to a program that asks (OSC
+/// 10/11), in tmux's four-digits-per-channel form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TerminalColors {
+    foreground: String,
+    background: String,
+}
+
+impl Default for TerminalColors {
+    fn default() -> Self {
+        Self {
+            foreground: TERMINAL_FOREGROUND_OSC_RGB.into(),
+            background: TERMINAL_BACKGROUND_OSC_RGB.into(),
+        }
+    }
+}
+
+impl TerminalColors {
+    /// Reads the renderer's `#rrggbb` pair. Nothing but six hex digits is
+    /// accepted, because the result is interpolated into a tmux command line.
+    pub(super) fn from_hex(foreground: &str, background: &str) -> anyhow::Result<Self> {
+        Ok(Self {
+            foreground: osc_rgb(foreground)?,
+            background: osc_rgb(background)?,
+        })
+    }
+}
+
+/// The colors every connection reports, shared across the daemon.
+///
+/// tmux keeps one OSC 10/11 answer per pane, not per client, so connections
+/// reporting colors of their own would overwrite each other: a phone attaching
+/// a pane would tell the desktop's programs the terminal is dark. One value for
+/// the daemon means the last colors a desktop sent are the ones every
+/// connection reports, and a client that never sends any (mobile) reports them
+/// too instead of resetting the pane to the default.
+pub(super) fn host_terminal_colors() -> Arc<Mutex<TerminalColors>> {
+    static COLORS: LazyLock<Arc<Mutex<TerminalColors>>> = LazyLock::new(Arc::default);
+    Arc::clone(&COLORS)
+}
+
+fn osc_rgb(hex: &str) -> anyhow::Result<String> {
+    let digits = hex
+        .strip_prefix('#')
+        .filter(|digits| digits.len() == 6 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| anyhow::anyhow!("terminal color must be #rrggbb, got {hex:?}"))?
+        .to_ascii_lowercase();
+    Ok(format!(
+        "{0}{0}/{1}{1}/{2}{2}",
+        &digits[0..2],
+        &digits[2..4],
+        &digits[4..6]
+    ))
+}
 
 pub(super) struct TerminalAttachment {
     pane_ids: HashSet<String>,
@@ -94,6 +151,9 @@ pub(super) struct TerminalAttachment {
     /// 3.3. Older supported releases keep their existing fallback instead of
     /// receiving a command-line option they do not understand.
     reports_terminal_colors: bool,
+    /// The connection's colors, shared with [`TerminalClients`] so a pane
+    /// added after a theme change is reported with the new ones.
+    colors: Arc<Mutex<TerminalColors>>,
 }
 
 pub(super) struct VisibilityChange {
@@ -165,12 +225,38 @@ impl TerminalAttachment {
         self.pane_ids.contains(pane_id)
     }
 
+    /// The colors to report for a newly added pane, or `None` on a tmux that
+    /// cannot take the reports.
+    fn color_reports(&self) -> Option<TerminalColors> {
+        self.reports_terminal_colors
+            .then(|| self.colors.lock().unwrap().clone())
+    }
+
+    /// Re-reports every pane this client holds, after the colors changed.
+    ///
+    /// A program that already asked keeps the answer it got; one that asks
+    /// from now on gets the new colors.
+    fn report_colors(&self) -> anyhow::Result<()> {
+        let Some(colors) = self.color_reports() else {
+            return Ok(());
+        };
+        let mut pane_ids: Vec<_> = self.pane_ids.iter().collect();
+        pane_ids.sort();
+        let mut stdin = self.stdin.lock().unwrap();
+        for pane_id in pane_ids {
+            write_terminal_color_reports(&mut *stdin, pane_id, &colors)?;
+        }
+        stdin.flush()?;
+        Ok(())
+    }
+
     fn update_panes(
         &mut self,
         pane_ids: &HashSet<String>,
         resources: &mut PaneResourceStore,
         mounted_elsewhere: &HashSet<String>,
     ) -> anyhow::Result<()> {
+        let colors = self.color_reports();
         let update = {
             let mut stdin = self.stdin.lock().unwrap();
             apply_membership_update(
@@ -179,7 +265,7 @@ impl TerminalAttachment {
                 &self.stream_tx,
                 &mut *stdin,
                 &self.capture_in_flight,
-                self.reports_terminal_colors,
+                colors.as_ref(),
             )
         };
         let removed = match update {
@@ -360,7 +446,7 @@ fn apply_membership_update(
     stream_tx: &std_mpsc::Sender<StreamControl>,
     stdin: &mut impl Write,
     capture_in_flight: &Mutex<HashSet<String>>,
-    reports_terminal_colors: bool,
+    color_reports: Option<&TerminalColors>,
 ) -> anyhow::Result<Vec<String>> {
     let (added, removed) = membership_delta(current, desired);
     if added.is_empty() && removed.is_empty() {
@@ -377,8 +463,8 @@ fn apply_membership_update(
     let write_result = (|| -> anyhow::Result<()> {
         writeln!(stdin, "display-message -p '__ADE_MEMBERSHIP__'")?;
         for pane_id in &added {
-            if reports_terminal_colors {
-                write_terminal_color_reports(stdin, pane_id)?;
+            if let Some(colors) = color_reports {
+                write_terminal_color_reports(stdin, pane_id, colors)?;
             }
             queue_capture(stdin, pane_id)?;
         }
@@ -409,20 +495,29 @@ fn apply_membership_update(
 /// tmux consumes an application's OSC 10/11 query before pane output reaches
 /// xterm. A `-C` client has no terminal of its own, so without these documented
 /// `refresh-client -r` reports tmux answers black; Codex then derives its
-/// `rgb(30,30,30)` composer from that false background. These values mirror the
-/// fixed terminal palette in `apps/desktop/src/features/terminal/theme.ts`.
+/// `rgb(30,30,30)` composer from that false background. The values are the
+/// connection's [`TerminalColors`]: the desktop sends the palette on screen, so
+/// a light theme is reported as light.
 ///
 /// The reports must be separate commands: tmux accepts `-r` once per
 /// `refresh-client` invocation, so repeating the option retains only the last
 /// report.
-fn write_terminal_color_reports(stdin: &mut impl Write, pane_id: &str) -> std::io::Result<()> {
+fn write_terminal_color_reports(
+    stdin: &mut impl Write,
+    pane_id: &str,
+    colors: &TerminalColors,
+) -> std::io::Result<()> {
+    let TerminalColors {
+        foreground,
+        background,
+    } = colors;
     writeln!(
         stdin,
-        "refresh-client -r '{pane_id}:\x1b]10;rgb:{TERMINAL_FOREGROUND_OSC_RGB}\x1b\\'"
+        "refresh-client -r '{pane_id}:\x1b]10;rgb:{foreground}\x1b\\'"
     )?;
     writeln!(
         stdin,
-        "refresh-client -r '{pane_id}:\x1b]11;rgb:{TERMINAL_BACKGROUND_OSC_RGB}\x1b\\'"
+        "refresh-client -r '{pane_id}:\x1b]11;rgb:{background}\x1b\\'"
     )
 }
 
@@ -510,6 +605,9 @@ pub(super) struct TerminalClients {
     /// wake topology reconciliation; see
     /// [`crate::service::topology_output_trigger`].
     topology_trigger: TopologyOutputTrigger,
+    /// What this connection's panes report as their colors: the daemon-wide
+    /// [`host_terminal_colors`], shared with every attachment.
+    colors: Arc<Mutex<TerminalColors>>,
 }
 
 impl TerminalClients {
@@ -523,6 +621,7 @@ impl TerminalClients {
             topology_trigger,
             0,
             crate::diagnostics::PerfConnectionEpoch::new(0),
+            Arc::default(),
         )
     }
 
@@ -531,6 +630,7 @@ impl TerminalClients {
         topology_trigger: TopologyOutputTrigger,
         connection_epoch: u64,
         perf_connection_epoch: crate::diagnostics::PerfConnectionEpoch,
+        colors: Arc<Mutex<TerminalColors>>,
     ) -> Self {
         Self {
             connection_epoch,
@@ -554,7 +654,28 @@ impl TerminalClients {
             owed_seeds: HashSet::new(),
             output_credit,
             emission_order: Arc::new(Mutex::new(())),
+            colors,
         }
+    }
+
+    /// Takes the colors the renderer is drawing with and re-reports them for
+    /// every attached pane, so a theme switch reaches programs that ask next.
+    ///
+    /// Always re-reports, even when the daemon already holds these colors:
+    /// another desktop may have set them, and this connection's own panes may
+    /// still answer with the ones before.
+    pub(super) fn set_colors(&mut self, colors: TerminalColors) -> anyhow::Result<()> {
+        *self.colors.lock().unwrap() = colors;
+        // Every client gets its reports even if one cannot take them.
+        let mut first_error = None;
+        for client in self.clients.values() {
+            if !client.stopped.load(Ordering::Acquire)
+                && let Err(error) = client.report_colors()
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     pub(super) fn attach(
@@ -631,6 +752,7 @@ impl TerminalClients {
                 output_credit: Arc::clone(&self.output_credit),
                 emission_order: Arc::clone(&self.emission_order),
                 topology_trigger: self.topology_trigger.clone(),
+                terminal_colors: Arc::clone(&self.colors),
             },
         ) {
             Ok(attachment) => attachment,

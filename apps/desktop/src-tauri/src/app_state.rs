@@ -54,6 +54,23 @@ pub struct AppTabRecord {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub enum ThemePreference {
+    System,
+    Light,
+    Dark,
+}
+
+/// Markdown's own palette, beside the app's theme.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MarkdownAppearance {
+    Default,
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub enum AppTabViewMode {
     Source,
     Live,
@@ -85,6 +102,19 @@ pub struct WorkspaceUiRecord {
     pub session_id: String,
     pub session_name: String,
     pub selected_app_tab_id: Option<String>,
+    /// The document shown beside the terminal; never the selected tab.
+    #[serde(default)]
+    pub docked_app_tab_id: Option<String>,
+    #[serde(default)]
+    pub dock_side: Option<DockSide>,
+}
+
+/// Which edge of the workspace a docked document sits on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DockSide {
+    Left,
+    Right,
 }
 
 /// The shell preferences the frontend owns.
@@ -108,6 +138,9 @@ pub struct WorkspaceUiRecord {
 pub struct ShellPreferences {
     #[serde(default)]
     pub panel_surface: PanelSurface,
+    /// The right-panel extensions turned on in Settings, by id.
+    #[serde(default)]
+    pub enabled_panel_extensions: Vec<String>,
     #[serde(default)]
     pub sidebar_collapsed: bool,
     #[serde(default)]
@@ -117,6 +150,8 @@ pub struct ShellPreferences {
     #[serde(default)]
     pub panel_width: Option<f64>,
     #[serde(default)]
+    pub dock_fraction: Option<f64>,
+    #[serde(default)]
     pub agent_sort: AgentSortMode,
     #[serde(default)]
     pub agents_section_ratio: Option<f64>,
@@ -124,6 +159,8 @@ pub struct ShellPreferences {
     pub agent_state_glyphs: bool,
     #[serde(default)]
     pub compact_workspaces: bool,
+    #[serde(default)]
+    pub tabs_in_title_bar: bool,
     #[serde(default)]
     pub focus_follows_mouse: bool,
     /// The workspace list's one filter: pinned workspaces only.
@@ -143,6 +180,16 @@ pub struct ShellPreferences {
     pub terminal_application_clipboard: Option<bool>,
     #[serde(default)]
     pub terminal_font_size: Option<u8>,
+    /// `None` is a save written before the setting existed: the frontend
+    /// default, which follows the OS.
+    #[serde(default)]
+    pub theme: Option<ThemePreference>,
+    /// `None` is a save written before the setting existed: 100%.
+    #[serde(default)]
+    pub ui_scale: Option<f64>,
+    /// `None` is a save from before the setting: Markdown follows the theme.
+    #[serde(default)]
+    pub markdown_appearance: Option<MarkdownAppearance>,
     /// The host most recently picked in the New workspace dialog.
     #[serde(default)]
     pub new_workspace_host_profile_id: Option<String>,
@@ -187,14 +234,18 @@ pub struct CommandPreferences {
     pub shortcut_overrides: HashMap<String, Option<String>>,
 }
 
-/// Which segment of the right panel is showing when it is open.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum PanelSurface {
-    #[default]
-    Files,
-    Git,
-    Ports,
+/// Which segment of the right panel is showing when it is open: a built-in
+/// one (`files`, `git`, `ports`) or a panel extension's id. A string, not an
+/// enum, so a surface this build does not know loads rather than failing the
+/// whole file; the frontend shows Files for one it cannot show.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct PanelSurface(pub String);
+
+impl Default for PanelSurface {
+    fn default() -> Self {
+        Self("files".into())
+    }
 }
 
 /// The agents section's ordering: workspace order, attention order, or
@@ -270,6 +321,29 @@ pub struct AppStateStore {
 }
 
 impl AppStateStore {
+    /// The saved interface zoom, applied before the page loads so it never
+    /// lays out at 100% first.
+    pub fn ui_scale(&self) -> f64 {
+        // Only the sizes Settings offers, as the frontend reads the file: any
+        // other value would be applied here and then reset to 100% once it loads.
+        let scale = self.value.lock().unwrap().shell.ui_scale.unwrap_or(1.0);
+        if UI_SCALES.contains(&scale) {
+            scale
+        } else {
+            1.0
+        }
+    }
+
+    /// The saved theme choice, for painting the window before the page loads.
+    pub fn theme(&self) -> ThemePreference {
+        self.value
+            .lock()
+            .unwrap()
+            .shell
+            .theme
+            .unwrap_or(ThemePreference::System)
+    }
+
     pub fn load(path: PathBuf) -> Self {
         let loaded = load_value(&path).and_then(|value| {
             validate(&value)?;
@@ -455,18 +529,27 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
         )) {
             return Err("duplicate workspace UI state".into());
         }
-        if let Some(tab_id) = workspace.selected_app_tab_id.as_deref() {
+        for (role, tab_id) in [
+            ("selected", workspace.selected_app_tab_id.as_deref()),
+            ("docked", workspace.docked_app_tab_id.as_deref()),
+        ] {
+            let Some(tab_id) = tab_id else { continue };
             let Some(tab) = known_tabs.get(&(workspace.host_profile_id.as_str(), tab_id)) else {
-                return Err(format!("selected app tab {tab_id} does not exist"));
+                return Err(format!("{role} app tab {tab_id} does not exist"));
             };
             if tab.server_identity != workspace.server_identity
                 || tab.session_id != workspace.session_id
                 || tab.session_name != workspace.session_name
             {
                 return Err(format!(
-                    "selected app tab {tab_id} belongs to a different workspace"
+                    "{role} app tab {tab_id} belongs to a different workspace"
                 ));
             }
+        }
+        if workspace.docked_app_tab_id.is_some()
+            && workspace.docked_app_tab_id == workspace.selected_app_tab_id
+        {
+            return Err("the docked app tab cannot also be the selected one".into());
         }
     }
     Ok(())
@@ -490,6 +573,30 @@ fn validate_tmux_session_id(value: &str) -> Result<(), String> {
     } else {
         Err(format!("invalid tmux session ID {value}"))
     }
+}
+
+/// What Settings offers; mirrors `UI_SCALES` in `features/shell/types.ts`.
+const UI_SCALES: [f64; 5] = [0.9, 1.0, 1.1, 1.2, 1.3];
+
+/// The zooms the interface may take: Settings offers 90% to 130%, and this
+/// leaves room around them without letting a bad value make the window unusable.
+fn valid_ui_scale(scale: f64) -> Result<f64, String> {
+    if (0.5..=2.0).contains(&scale) {
+        Ok(scale)
+    } else {
+        Err(format!(
+            "interface scale must be between 0.5 and 2, got {scale}"
+        ))
+    }
+}
+
+/// Zooms the whole page, terminals included, the way a browser's zoom does:
+/// every length scales together, so fixed-height rows never clip their text.
+#[tauri::command]
+pub fn set_ui_scale(window: tauri::WebviewWindow, scale: f64) -> Result<(), String> {
+    window
+        .set_zoom(valid_ui_scale(scale)?)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -581,17 +688,22 @@ mod tests {
                 session_id: "$1".into(),
                 session_name: "project".into(),
                 selected_app_tab_id: Some("tab-1".into()),
+                docked_app_tab_id: None,
+                dock_side: None,
             }],
             shell: ShellPreferences {
-                panel_surface: PanelSurface::Git,
+                panel_surface: PanelSurface("git".into()),
+                enabled_panel_extensions: vec!["automations".into()],
                 sidebar_collapsed: true,
                 sidebar_width: Some(260.0),
                 panel_open: true,
                 panel_width: Some(320.0),
+                dock_fraction: Some(0.4),
                 agent_sort: AgentSortMode::Status,
                 agents_section_ratio: Some(0.42),
                 agent_state_glyphs: true,
                 compact_workspaces: true,
+                tabs_in_title_bar: true,
                 focus_follows_mouse: true,
                 pinned_only: true,
                 terminal_screen_reader: false,
@@ -599,6 +711,9 @@ mod tests {
                 clean_wrapped_commands: Some(false),
                 terminal_application_clipboard: Some(false),
                 terminal_font_size: Some(13),
+                theme: Some(ThemePreference::Light),
+                ui_scale: Some(1.2),
+                markdown_appearance: Some(MarkdownAppearance::Dark),
                 new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
                 window_geometry: Some(WindowGeometry {
@@ -703,6 +818,22 @@ mod tests {
         assert!(validate(&value).unwrap_err().contains("does not exist"));
 
         let mut value = sample_state();
+        value.workspace_ui[0].docked_app_tab_id = Some("missing".into());
+        assert!(
+            validate(&value)
+                .unwrap_err()
+                .contains("docked app tab missing")
+        );
+
+        let mut value = sample_state();
+        value.workspace_ui[0].docked_app_tab_id = Some("tab-1".into());
+        assert!(
+            validate(&value)
+                .unwrap_err()
+                .contains("cannot also be the selected")
+        );
+
+        let mut value = sample_state();
         value.app_tabs.push(value.app_tabs[0].clone());
         assert!(validate(&value).unwrap_err().contains("duplicate app tab"));
     }
@@ -748,12 +879,25 @@ mod tests {
             include_str!("../../src/features/shell/persistedAppState.contract.json");
         let value: PersistedAppState =
             serde_json::from_str(CONTRACT).expect("the frontend's own payload must deserialize");
-        assert_eq!(value.shell.panel_surface, PanelSurface::Ports);
+        assert_eq!(value.shell.panel_surface.0, "automations");
+        assert_eq!(value.shell.enabled_panel_extensions, ["automations"]);
         assert_eq!(value.shell.agent_sort, AgentSortMode::Status);
         assert_eq!(value.shell.sidebar_width, Some(260.0));
         assert_eq!(value.shell.panel_width, Some(320.0));
+        assert_eq!(value.shell.dock_fraction, Some(0.35));
+        assert_eq!(
+            value.workspace_ui[0].docked_app_tab_id.as_deref(),
+            Some("tab-2")
+        );
+        assert_eq!(value.workspace_ui[0].dock_side, Some(DockSide::Right));
         assert_eq!(value.shell.agents_section_ratio, Some(0.42));
         assert_eq!(value.shell.terminal_font_size, Some(17));
+        assert_eq!(value.shell.theme, Some(ThemePreference::Dark));
+        assert_eq!(value.shell.ui_scale, Some(1.1));
+        assert_eq!(
+            value.shell.markdown_appearance,
+            Some(MarkdownAppearance::Light)
+        );
         assert_eq!(
             value.shell.new_workspace_host_profile_id.as_deref(),
             Some("ssh-remote-linux")
@@ -762,6 +906,7 @@ mod tests {
         assert!(
             value.shell.agent_state_glyphs
                 && value.shell.compact_workspaces
+                && value.shell.tabs_in_title_bar
                 && value.shell.focus_follows_mouse
                 && value.shell.pinned_only
                 && value.shell.terminal_screen_reader
@@ -865,7 +1010,7 @@ mod tests {
             }
         });
         let value: PersistedAppState = serde_json::from_value(legacy).unwrap();
-        assert_eq!(value.shell.panel_surface, PanelSurface::Files);
+        assert_eq!(value.shell.panel_surface, PanelSurface::default());
         assert_eq!(value.shell.agent_sort, AgentSortMode::Workspace);
         assert!(!value.shell.sidebar_collapsed);
         assert_eq!(value.shell.copy_on_select, None);

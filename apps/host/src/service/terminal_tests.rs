@@ -41,6 +41,7 @@ fn start_long_lived_attachment(
             output_credit,
             emission_order,
             topology_trigger: TopologyOutputTrigger::default(),
+            terminal_colors: Arc::default(),
         },
         long_lived_attachment_command(),
         true,
@@ -68,6 +69,18 @@ impl RecordedClient {
     fn command(&self) -> std::process::Command {
         let mut command = std::process::Command::new("sh");
         command.args(["-c", "exec cat > \"$0\"", &self.path.to_string_lossy()]);
+        command
+    }
+
+    /// Like `command`, but holds the control stream's stdout open, so the
+    /// attachment stays live instead of reading EOF and stopping.
+    fn live_command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new("sh");
+        command.args([
+            "-c",
+            "exec 3>&1; exec cat > \"$0\"",
+            &self.path.to_string_lossy(),
+        ]);
         command
     }
 
@@ -124,6 +137,13 @@ impl Drop for RecordedClient {
 fn clients_with_recorded_client(
     recorded: &RecordedClient,
 ) -> (TerminalClients, mpsc::Receiver<SequencerControl>) {
+    clients_with_client_command(recorded, recorded.command())
+}
+
+fn clients_with_client_command(
+    recorded: &RecordedClient,
+    command: std::process::Command,
+) -> (TerminalClients, mpsc::Receiver<SequencerControl>) {
     let output_credit = Arc::new(OutputCredit::new());
     let mut clients =
         TerminalClients::new(Arc::clone(&output_credit), TopologyOutputTrigger::default());
@@ -141,8 +161,9 @@ fn clients_with_recorded_client(
             output_credit,
             emission_order: Arc::clone(&clients.emission_order),
             topology_trigger: TopologyOutputTrigger::default(),
+            terminal_colors: Arc::clone(&clients.colors),
         },
-        recorded.command(),
+        command,
         true,
     )
     .unwrap();
@@ -976,6 +997,51 @@ fn control_client_reports_the_terminal_palette_before_its_first_capture() {
 }
 
 #[test]
+fn a_color_change_is_reported_for_every_attached_pane() {
+    let recorded = RecordedClient::new();
+    let (mut clients, _events) = clients_with_client_command(&recorded, recorded.live_command());
+    let light = "refresh-client -r '%1:\x1b]11;rgb:fafa/fafa/fafa\x1b\\'";
+    clients
+        .set_colors(TerminalColors::from_hex("#383A42", "#fafafa").unwrap())
+        .unwrap();
+    recorded.wait_for(1, light);
+    assert!(
+        recorded
+            .written()
+            .contains("refresh-client -r '%1:\x1b]10;rgb:3838/3a3a/4242\x1b\\'")
+    );
+    // The same colors again still re-report: another desktop may have set
+    // them, and these panes may still answer with the ones before.
+    clients
+        .set_colors(TerminalColors::from_hex("#383a42", "#fafafa").unwrap())
+        .unwrap();
+    recorded.wait_for(2, light);
+    clients.stop();
+}
+
+#[test]
+fn every_connection_reports_the_same_daemon_colors() {
+    // tmux keeps one answer per pane, so a connection with colors of its own
+    // would overwrite another's for every pane they share.
+    assert!(Arc::ptr_eq(
+        &host_terminal_colors(),
+        &host_terminal_colors()
+    ));
+}
+
+#[test]
+fn terminal_colors_accept_only_six_hex_digits() {
+    assert_eq!(
+        TerminalColors::from_hex("#FFFFFF", "#282c34").unwrap(),
+        TerminalColors::default()
+    );
+    for bad in ["fafafa", "#fafaf", "#fafafag", "#fafafa0", "#fa'fa;", ""] {
+        assert!(TerminalColors::from_hex(bad, "#fafafa").is_err(), "{bad:?}");
+        assert!(TerminalColors::from_hex("#fafafa", bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
 fn color_reports_are_capability_gated_for_tmux_33() {
     assert!(tmux_supports_control_color_reports(
         b"refresh-client (refresh) [-cDlLRSU] [-A pane:state] [-B name:what:format] [-C XxY] [-f flags] [-r pane:report] [-t target-client] [adjustment]\n"
@@ -1084,7 +1150,7 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
             &stream_tx,
             &mut stdin,
             &capture_ledger(),
-            true
+            Some(&TerminalColors::default())
         )
         .unwrap()
         .is_empty()
@@ -1103,7 +1169,7 @@ fn exact_membership_noop_emits_nothing_and_delta_emits_one_batch() {
             &stream_tx,
             &mut stdin,
             &capture_ledger(),
-            true
+            Some(&TerminalColors::default())
         )
         .unwrap(),
         vec!["%1".to_owned()]
@@ -1136,7 +1202,7 @@ fn malformed_membership_id_has_no_partial_effects() {
             &stream_tx,
             &mut stdin,
             &capture_ledger(),
-            true
+            Some(&TerminalColors::default())
         )
         .is_err()
     );
@@ -1186,7 +1252,7 @@ fn failed_membership_batch_remains_retryable() {
             &stream_tx,
             &mut stdin,
             &capture_ledger(),
-            true,
+            Some(&TerminalColors::default()),
         )
         .is_err()
     );
@@ -1230,7 +1296,7 @@ fn failed_membership_batch_remains_retryable() {
             &stream_tx,
             &mut stdin,
             &capture_ledger(),
-            true,
+            Some(&TerminalColors::default()),
         )
         .unwrap(),
         vec!["%1".to_owned()]

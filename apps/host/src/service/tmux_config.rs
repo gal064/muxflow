@@ -32,6 +32,9 @@ use super::snapshot::tmux_command;
 const PANE_TITLE_HOOK: &str = "pane-title-changed";
 const AUTOMATIC_RENAME_FORMAT: &str = "automatic-rename-format";
 const TITLE_OWNER_CONDITION: &str = "#{==:#{pane_index},#{pane-base-index}}";
+/// A window whose name something else owns, such as an automation run tab,
+/// sets this option; the hook then leaves it alone.
+const NAME_UNLOCKED_CONDITION: &str = "#{==:#{@muxflow-name-locked},}";
 
 /// The hook, built from the adapter registry so it cannot drift from the set of
 /// agents this app understands.
@@ -52,7 +55,8 @@ fn recommended_hook_command() -> String {
 }
 
 /// The tmux format that is true exactly for the first pane when it is running
-/// an agent this app understands. Built from the registry, so adding an
+/// an agent this app understands, in a window whose name nobody has locked.
+/// Built from the registry, so adding an
 /// adapter changes it — and that change is what `AlreadyCurrent` has to be able
 /// to notice, along with any change to the hook's body.
 fn guard_condition() -> String {
@@ -65,7 +69,7 @@ fn guard_condition() -> String {
             format!("#{{||:{agent_condition},{test}}}")
         };
     }
-    format!("#{{&&:{TITLE_OWNER_CONDITION},{agent_condition}}}")
+    format!("#{{&&:{NAME_UNLOCKED_CONDITION},#{{&&:{TITLE_OWNER_CONDITION},{agent_condition}}}}}")
 }
 
 /// The body that identifies a `pane-title-changed` hook as this app's.
@@ -401,6 +405,10 @@ mod tests {
         assert!(
             command.contains(TITLE_OWNER_CONDITION),
             "only the first pane may own the window title: {command}"
+        );
+        assert!(
+            command.contains(NAME_UNLOCKED_CONDITION),
+            "a window with a locked name is never renamed: {command}"
         );
         assert!(command.contains(OWNED_HOOK_BODY));
         assert!(

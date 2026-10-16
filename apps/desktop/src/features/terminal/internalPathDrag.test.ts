@@ -5,8 +5,11 @@ import {
   consumeNativeInternalPathDrop,
   finishInternalPathDrag,
   INTERNAL_PATH_DRAG_TYPE,
+  internalPathDragLive,
+  nativeInternalPathDragClaimed,
   readInternalPathDrop,
   releaseNativeInternalPathDrag,
+  subscribeInternalPathDrag,
   writeInternalPathDrag,
 } from "./internalPathDrag";
 
@@ -57,6 +60,30 @@ describe("internal path drag payload", () => {
     writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
     claimNativeInternalPathDrag();
     expect(consumeNativeInternalPathDrop({ hostProfileId: "remote", serverIdentity: "server-a" })).toMatchObject({ kind: "rejected" });
+  });
+
+  it("is live from dragstart to dragend only, even while the native drop is still owed", () => {
+    finishInternalPathDrag(false); // earlier cases leave a gesture open
+    const listener = vi.fn();
+    const unsubscribe = subscribeInternalPathDrag(listener);
+    const data = transfer();
+    writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
+    expect(internalPathDragLive()).toBe(true);
+    expect(nativeInternalPathDragClaimed()).toBe(false);
+    claimNativeInternalPathDrag();
+    expect(nativeInternalPathDragClaimed()).toBe(true);
+    finishInternalPathDrag(true);
+    // The gesture is over, so the dock zones go; the claim stays for the native drop.
+    expect(internalPathDragLive()).toBe(false);
+    expect(nativeInternalPathDragClaimed()).toBe(true);
+    expect(listener).toHaveBeenCalledTimes(2);
+    consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" });
+    consumeNativeInternalPathDrop({ hostProfileId: "local", serverIdentity: "server-a" });
+
+    writeInternalPathDrag(data, { hostProfileId: "local", serverIdentity: "server-a", path: "/repo/file" });
+    cancelInternalPathDragSource({ hostProfileId: "local", serverIdentity: "server-a" });
+    expect(internalPathDragLive()).toBe(false);
+    unsubscribe();
   });
 
   it("clears an unclaimed drag at dragend and keeps a claimed accepted one for the native drop", () => {

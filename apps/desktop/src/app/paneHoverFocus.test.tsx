@@ -2,7 +2,7 @@
 import { act, create } from "react-test-renderer";
 import type { PointerEvent } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HOVER_FOCUS_DELAY_MS, usePaneHoverFocus, type PaneHoverFocusOptions, type PaneHoverHandlers } from "./paneHoverFocus";
+import { DOCK_HOVER_TARGET, HOVER_FOCUS_DELAY_MS, usePaneHoverFocus, type PaneHoverFocusOptions, type PaneHoverHandlers } from "./paneHoverFocus";
 
 const enter = (buttons = 0) => ({ buttons } as PointerEvent<HTMLElement>);
 
@@ -91,6 +91,63 @@ describe("usePaneHoverFocus", () => {
     pane("%2").onPointerEnter(enter());
     vi.advanceTimersByTime(HOVER_FOCUS_DELAY_MS);
     expect(focus).toHaveBeenCalledWith("%2");
+  });
+
+  it("moves between the panes and a docked document, whose editor is not a field to protect", () => {
+    const docked = document.createElement("div");
+    docked.dataset.dockedTab = "tab-1";
+    const editor = document.createElement("textarea");
+    editor.className = "inputarea";
+    const monaco = document.createElement("div");
+    monaco.className = "monaco-editor";
+    monaco.append(editor);
+    docked.append(monaco);
+    document.body.append(docked);
+    let inDock = false;
+    const { focus, pane } = harness({ enabled: true, activePaneId: "%1", dockHoldsFocus: () => inDock });
+
+    pane(DOCK_HOVER_TARGET).onPointerEnter(enter());
+    vi.advanceTimersByTime(HOVER_FOCUS_DELAY_MS);
+    expect(focus).toHaveBeenLastCalledWith(DOCK_HOVER_TARGET);
+
+    // With the caret in the docked editor, even the active pane takes it back.
+    editor.focus();
+    inDock = true;
+    pane("%1").onPointerEnter(enter());
+    vi.advanceTimersByTime(HOVER_FOCUS_DELAY_MS);
+    expect(focus).toHaveBeenLastCalledWith("%1");
+
+    // Resting on the docked document while it has the keyboard does nothing.
+    focus.mockClear();
+    pane(DOCK_HOVER_TARGET).onPointerEnter(enter());
+    vi.advanceTimersByTime(HOVER_FOCUS_DELAY_MS);
+    expect(focus).not.toHaveBeenCalled();
+  });
+
+  it("keeps focus in the docked editor's Find field when the pointer rests on a terminal", () => {
+    const docked = document.createElement("div");
+    docked.dataset.dockedTab = "tab-1";
+    const monaco = document.createElement("div");
+    monaco.className = "monaco-editor";
+    const search = document.createElement("input");
+    monaco.append(search);
+    docked.append(monaco);
+    document.body.append(docked);
+    search.focus();
+    const { focus, pane } = harness({ enabled: true, activePaneId: "%1", dockHoldsFocus: () => true });
+    pane("%1").onPointerEnter(enter());
+    vi.advanceTimersByTime(HOVER_FOCUS_DELAY_MS);
+    expect(focus).not.toHaveBeenCalled();
+  });
+
+  it("does not take the docked document from a field outside it", () => {
+    const search = document.createElement("input");
+    document.body.append(search);
+    search.focus();
+    const { focus, pane } = harness({ enabled: true, activePaneId: "%1", dockHoldsFocus: () => false });
+    pane(DOCK_HOVER_TARGET).onPointerEnter(enter());
+    vi.advanceTimersByTime(HOVER_FOCUS_DELAY_MS);
+    expect(focus).not.toHaveBeenCalled();
   });
 
   it("cancels a pending focus when the setting turns off, as a dialog opening does", () => {

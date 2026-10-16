@@ -1,14 +1,22 @@
 import type { ConnectionSpec } from "../../app/types";
 import { isAgentSortMode, type AgentSortMode } from "../agents/agentsList";
+import { isMarkdownAppearance, isThemePreference, type MarkdownAppearance, type ThemePreference } from "../../ui/appearance";
 
 export type AppTabKind = "file" | "markdown" | "gitDiff";
 /** How a Markdown tab is drawn; also the shape of the persisted default. */
 export type AppTabViewMode = "source" | "live" | "preview" | "split";
-/** The segments of the right panel; they share one 300px surface. */
-export type PanelSurface = "files" | "git" | "ports";
+/** The right panel's own segments; they share one 300px surface. */
+export const BUILT_IN_PANEL_SURFACES = ["files", "git", "ports"] as const;
+/**
+ * A built-in segment, or the id of a panel extension (`panelExtensions.ts`).
+ * A string so an extension adds no case here.
+ */
+export type PanelSurface = string;
 
 /** Sidebar geometry, from the plan's token table (cmux). */
 export const SIDEBAR_MIN_WIDTH = 240;
+/** The interface sizes Settings offers, as zoom factors of the whole window. */
+export const UI_SCALES = [0.9, 1, 1.1, 1.2, 1.3] as const;
 /** Fraction of the window a dragged sidebar may not exceed. */
 export const SIDEBAR_MAX_WINDOW_FRACTION = 1 / 3;
 /** Right panel geometry; the same rules as the sidebar, from its own edge. */
@@ -17,6 +25,10 @@ export const PANEL_MIN_WIDTH = 240;
 export const PANEL_MAX_WINDOW_FRACTION = 1 / 2;
 /** The terminal width (about 60 columns) a rail may not squeeze below; past it the rail hides. */
 export const TERMINAL_MIN_WIDTH = 480;
+/** Share of the workspace a docked document takes by default, and the bounds a drag stays within. */
+export const DOCK_DEFAULT_FRACTION = 0.4;
+export const DOCK_MIN_FRACTION = 0.2;
+export const DOCK_MAX_FRACTION = 0.7;
 /** Share of the sidebar's height the agents section takes by default. */
 export const AGENTS_SECTION_DEFAULT_RATIO = 0.42;
 export const AGENTS_SECTION_MIN_RATIO = 0.15;
@@ -74,11 +86,22 @@ export interface WorkspaceUiRecord {
   sessionId: string;
   sessionName: string;
   selectedAppTabId?: string;
+  /**
+   * The one document shown beside the terminal rather than over it. Never the
+   * selected tab: selecting covers the terminal column, docking sits next to it.
+   */
+  dockedAppTabId?: string;
+  /** Which edge of the workspace the docked document sits on; absent when nothing is docked. */
+  dockSide?: DockSide;
 }
 
+export type DockSide = "left" | "right";
+
 export interface ShellState {
-  /** Which half of the right panel is showing when it is open. */
+  /** Which segment of the right panel is showing when it is open. */
   panelSurface: PanelSurface;
+  /** The right-panel extensions turned on in Settings, by id. */
+  enabledPanelExtensions: string[];
   /** ⌘B. Collapsed means 0px, not a 44px icon strip. */
   sidebarCollapsed: boolean;
   /** Drag-resizable; clamped against the window at render time. */
@@ -87,6 +110,8 @@ export interface ShellState {
   panelOpen: boolean;
   /** Drag-resizable from its left edge; clamped against the window at render time. */
   panelWidth: number;
+  /** A docked document's share of the workspace width, shared by every workspace. */
+  dockFraction: number;
   /** The agents section's one control. */
   agentSort: AgentSortMode;
   /** Position of the sidebar's internal divider, as a share of its height. */
@@ -95,6 +120,8 @@ export interface ShellState {
   agentStateGlyphs: boolean;
   /** Hides per-agent activity lines from workspace rows. */
   compactWorkspaces: boolean;
+  /** Puts the tab strip in the title bar, beside the window controls. */
+  tabsInTitleBar: boolean;
   /** Focuses a terminal pane when the pointer rests on it, without a click. */
   focusFollowsMouse: boolean;
   /**
@@ -122,6 +149,12 @@ export interface ShellState {
   terminalApplicationClipboard: boolean;
   /** Terminal text size in integer CSS pixels. */
   terminalFontSize: number;
+  /** Light, dark, or whichever the OS is using. */
+  theme: ThemePreference;
+  /** Zoom of the whole interface, terminals included; 1 is 100%. */
+  uiScale: number;
+  /** Markdown's Live and Preview colors: the app's, or always light or dark. */
+  markdownAppearance: MarkdownAppearance;
   /** The host most recently picked in the New workspace dialog. */
   newWorkspaceHostProfileId?: string;
   /**
@@ -178,14 +211,17 @@ export interface PersistedAppState {
 
 export const defaultShellState: ShellState = {
   panelSurface: "files",
+  enabledPanelExtensions: [],
   sidebarCollapsed: false,
   sidebarWidth: SIDEBAR_MIN_WIDTH,
   panelOpen: false,
   panelWidth: 300,
+  dockFraction: DOCK_DEFAULT_FRACTION,
   agentSort: "workspace",
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
   compactWorkspaces: false,
+  tabsInTitleBar: false,
   focusFollowsMouse: false,
   pinnedOnly: false,
   terminalScreenReader: false,
@@ -193,6 +229,9 @@ export const defaultShellState: ShellState = {
   cleanWrappedCommands: true,
   terminalApplicationClipboard: true,
   terminalFontSize: 13,
+  theme: "system",
+  uiScale: 1,
+  markdownAppearance: "default",
   newWorkspaceHostProfileId: undefined,
   defaultMarkdownView: "split",
 };
@@ -224,20 +263,31 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
   // shell field is read defensively instead, so state written by the previous
   // build loads with the new preferences at their defaults.
   const shell = candidate.shell as Partial<ShellState> | undefined;
+  const enabledPanelExtensions = Array.isArray(shell?.enabledPanelExtensions)
+    ? [...new Set(shell.enabledPanelExtensions.filter((id): id is string => typeof id === "string" && id !== ""))]
+    : [];
   return {
     schemaVersion: 1,
     appTabs: candidate.appTabs,
     workspaceUi: candidate.workspaceUi,
     shell: {
-      panelSurface: shell?.panelSurface === "git" || shell?.panelSurface === "ports" ? shell.panelSurface : "files",
+      // An extension turned off, or one this build does not have, is Files.
+      panelSurface: typeof shell?.panelSurface === "string"
+        && ((BUILT_IN_PANEL_SURFACES as readonly string[]).includes(shell.panelSurface)
+          || enabledPanelExtensions.includes(shell.panelSurface))
+        ? shell.panelSurface
+        : "files",
+      enabledPanelExtensions,
       sidebarCollapsed: Boolean(shell?.sidebarCollapsed),
       sidebarWidth: clampedSidebarWidth(shell?.sidebarWidth),
       panelOpen: Boolean(shell?.panelOpen),
       panelWidth: clampedPanelWidth(shell?.panelWidth),
+      dockFraction: clampedDockFraction(shell?.dockFraction),
       agentSort: migratedAgentSort(shell?.agentSort),
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
       compactWorkspaces: Boolean(shell?.compactWorkspaces),
+      tabsInTitleBar: Boolean(shell?.tabsInTitleBar),
       focusFollowsMouse: Boolean(shell?.focusFollowsMouse),
       pinnedOnly: Boolean(shell?.pinnedOnly),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),
@@ -251,6 +301,9 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
         ? shell.terminalApplicationClipboard
         : defaultShellState.terminalApplicationClipboard,
       terminalFontSize: clampedTerminalFontSize(shell?.terminalFontSize),
+      theme: isThemePreference(shell?.theme) ? shell.theme : defaultShellState.theme,
+      uiScale: UI_SCALES.find((scale) => scale === shell?.uiScale) ?? defaultShellState.uiScale,
+      markdownAppearance: isMarkdownAppearance(shell?.markdownAppearance) ? shell.markdownAppearance : defaultShellState.markdownAppearance,
       newWorkspaceHostProfileId: typeof shell?.newWorkspaceHostProfileId === "string" && shell.newWorkspaceHostProfileId.trim()
         ? shell.newWorkspaceHostProfileId
         : undefined,
@@ -355,6 +408,11 @@ export function clampedSidebarWidth(value: unknown): number {
 export function clampedPanelWidth(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return defaultShellState.panelWidth;
   return Math.min(Math.max(Math.round(value), PANEL_MIN_WIDTH), 4_000);
+}
+
+export function clampedDockFraction(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DOCK_DEFAULT_FRACTION;
+  return Math.min(DOCK_MAX_FRACTION, Math.max(DOCK_MIN_FRACTION, value));
 }
 
 export function clampedAgentsRatio(value: unknown): number {

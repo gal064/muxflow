@@ -145,6 +145,11 @@ describe("binary terminal IPC", () => {
     expect(() => decodeTerminalEvent(frame(18, "pane", 12, page(1, 0, "")))).toThrow("invalid pane label");
   });
 
+  it("decodes an automation change as a bare host event", () => {
+    expect(decodeTerminalEvent(frame(19, "automation", 21))).toEqual({ kind: "automationChanged", sequence: 21 });
+    expect(() => decodeTerminalEvent(frame(19, "automation", 0))).toThrow("nonzero");
+  });
+
   it("rejects frames truncated before the label, sequence, or terminal generation", () => {
     expect(() => decodeTerminalEvent(Uint8Array.from([1, 0, 4, 37]).buffer)).toThrow("common header");
     expect(() => decodeTerminalEvent(Uint8Array.from([1, 0, 4, 37, 49, 50, 51, ...u64(1).slice(0, 7)]).buffer)).toThrow("truncated");

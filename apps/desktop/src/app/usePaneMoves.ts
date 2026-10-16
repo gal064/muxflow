@@ -3,8 +3,8 @@ import type { Pane, Session, TmuxSnapshot } from "./types";
 import type { TmuxAction, TmuxActionResult } from "../features/tmux/actions";
 import type { AgentListRow } from "../features/agents/agentsList";
 import type { SelectableTab } from "../features/shell/model";
-import { moveAppTabTo, moveAppTabToWorkspace, orderedSessions } from "../features/shell/model";
-import type { PersistedAppState } from "../features/shell/types";
+import { dockAppTab, moveAppTabTo, moveAppTabToWorkspace, orderedSessions, undockAppTab } from "../features/shell/model";
+import type { DockSide, PersistedAppState } from "../features/shell/types";
 import type { AgentMoves } from "../features/workspaces/WorkspaceSidebar";
 import { stripAgentStatusGlyphs } from "../features/agents/agentLabels";
 import { planDrop, type DropContext, type DropPlan } from "../features/dragDrop/dropRules";
@@ -20,6 +20,8 @@ interface PaneMovesOptions {
   /** False while a document tab covers the terminal: a split made there would happen out of sight. */
   terminalOnScreen: boolean;
   appTabs: PersistedAppState["appTabs"];
+  /** The document docked beside the terminal in the workspace on screen. */
+  dock?: { tabId: string; side: DockSide };
   performAction(action: TmuxAction): Promise<TmuxActionResult | undefined>;
   /** Shows a pane wherever it now is: how focus follows the pane on screen when it moves. */
   selectPane(pane: Pane): void;
@@ -48,6 +50,7 @@ export function usePaneMoves(options: PaneMovesOptions) {
     panes: latest.current.snapshot.panes,
     appTabs: latest.current.appTabs.filter((tab) => tab.hostProfileId === latest.current.hostProfileId
       && tab.serverIdentity === latest.current.serverIdentity),
+    dock: latest.current.dock,
   });
 
   /**
@@ -84,6 +87,22 @@ export function usePaneMoves(options: PaneMovesOptions) {
           current.setAppState((state) => moveAppTabTo(
             state, current.hostProfileId, current.serverIdentity, session, plan.tabId, plan.targetTabId, plan.side,
           ));
+        }
+        return;
+      case "dockAppTab":
+      case "undockAppTab":
+        if (current.activeSession && current.serverIdentity) {
+          const session = current.activeSession;
+          const serverIdentity = current.serverIdentity;
+          current.setAppState((state) => {
+            if (plan.kind === "dockAppTab") {
+              return dockAppTab(state, current.hostProfileId, serverIdentity, session, plan.tabId, plan.side);
+            }
+            const undocked = undockAppTab(state, current.hostProfileId, serverIdentity, session);
+            return plan.place
+              ? moveAppTabTo(undocked, current.hostProfileId, serverIdentity, session, plan.tabId, plan.place.targetTabId, plan.place.side)
+              : undocked;
+          });
         }
         return;
       case "moveAppTabToWorkspace":

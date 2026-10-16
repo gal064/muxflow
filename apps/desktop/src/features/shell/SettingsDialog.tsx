@@ -1,13 +1,15 @@
-import { useEffect, useId, useState } from "react";
+import { Fragment, useEffect, useId, useState } from "react";
 import { useModalDialog } from "../../commands/useModalDialog";
 import { SurfaceError } from "../../ui/SurfaceError";
 import type { HostProfile } from "../../app/types";
 import type { NotificationPermissionStatus } from "../agents/notifications";
 import type { AgentSoundPreferences } from "../agents/types";
 import type { HelperUpgradeState, RemoteHelperProbe } from "./helperUpgrade";
+import type { MarkdownAppearance, ThemePreference } from "../../ui/appearance";
 import { hostLetter } from "./hostProfiles";
+import { PANEL_EXTENSIONS } from "./panelExtensions";
 import {
-  clampedTerminalFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN,
+  clampedTerminalFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN, UI_SCALES,
   type AppTabViewMode, type ShellState, type WorkspaceDefaults,
 } from "./types";
 
@@ -69,12 +71,25 @@ interface SettingsDialogProps {
   agentSetup: { available: boolean; reports: boolean; connected: boolean; onSetUp(): void };
 }
 
-type SettingsTab = "connection" | "workspace" | "terminal" | "sounds" | "accessibility";
+type SettingsTab = "connection" | "workspace" | "terminal" | "appearance" | "sounds" | "accessibility";
+
+const THEMES: readonly { id: ThemePreference; label: string }[] = [
+  { id: "system", label: "System" },
+  { id: "light", label: "Light" },
+  { id: "dark", label: "Dark" },
+];
+
+const MARKDOWN_APPEARANCES: readonly { id: MarkdownAppearance; label: string }[] = [
+  { id: "default", label: "Muxflow default" },
+  { id: "light", label: "Light" },
+  { id: "dark", label: "Dark" },
+];
 
 const TABS: readonly { id: SettingsTab; label: string }[] = [
   { id: "connection", label: "Connection" },
   { id: "workspace", label: "Workspace" },
   { id: "terminal", label: "Terminal" },
+  { id: "appearance", label: "Appearance" },
   { id: "sounds", label: "Sounds" },
   { id: "accessibility", label: "Accessibility" },
 ];
@@ -247,6 +262,21 @@ export function SettingsDialog(props: SettingsDialogProps) {
             Compact workspace list
           </label>
           <p className="settings-hint">Hides individual agent lines under each workspace while keeping its activity, unread count, and connection status visible.</p>
+          {PANEL_EXTENSIONS.map((extension) => <Fragment key={extension.id}>
+            <label className="settings-check">
+              <input
+                checked={props.shell.enabledPanelExtensions.includes(extension.id)}
+                onChange={(event) => props.onShell({
+                  enabledPanelExtensions: event.target.checked
+                    ? [...props.shell.enabledPanelExtensions, extension.id]
+                    : props.shell.enabledPanelExtensions.filter((id) => id !== extension.id),
+                })}
+                type="checkbox"
+              />
+              {extension.settingLabel}
+            </label>
+            <p className="settings-hint">{extension.settingHint}</p>
+          </Fragment>)}
           <label>Default Markdown view
             <select
               aria-label="Default Markdown view"
@@ -317,6 +347,38 @@ export function SettingsDialog(props: SettingsDialogProps) {
             Focus pane on hover
           </label>
           <p className="settings-hint">Moves keyboard focus to a split pane when the pointer rests on it.</p>
+        </>}
+
+        {tab === "appearance" && <>
+          <fieldset className="settings-modes">
+            <legend>Theme</legend>
+            {THEMES.map((item) => <label key={item.id}>
+              <input checked={props.shell.theme === item.id} name="theme" onChange={() => props.onShell({ theme: item.id })} type="radio" /> {item.label}
+            </label>)}
+          </fieldset>
+          <p className="settings-hint">System follows your OS appearance and switches when it does.</p>
+          <label>Interface size
+            <select
+              aria-label="Interface size"
+              onChange={(event) => props.onShell({ uiScale: Number(event.target.value) })}
+              value={props.shell.uiScale}
+            >
+              {UI_SCALES.map((scale) => <option key={scale} value={scale}>{Math.round(scale * 100)}%</option>)}
+            </select>
+          </label>
+          <p className="settings-hint">Scales everything, terminals included. The terminal font size setting applies on top.</p>
+          <label className="settings-check">
+            <input checked={props.shell.tabsInTitleBar} onChange={(event) => props.onShell({ tabsInTitleBar: event.target.checked })} type="checkbox" />
+            Show tabs in the title bar
+          </label>
+          <p className="settings-hint">Gives the terminal the row the tab strip used. New workspace moves to the Workspaces header.</p>
+          <fieldset className="settings-modes">
+            <legend>Markdown appearance</legend>
+            {MARKDOWN_APPEARANCES.map((item) => <label key={item.id}>
+              <input checked={props.shell.markdownAppearance === item.id} name="markdown-appearance" onChange={() => props.onShell({ markdownAppearance: item.id })} type="radio" /> {item.label}
+            </label>)}
+          </fieldset>
+          <p className="settings-hint">Colors for Markdown in Live and Preview. Muxflow default follows the theme; Source always does.</p>
         </>}
 
         {tab === "sounds" && <>

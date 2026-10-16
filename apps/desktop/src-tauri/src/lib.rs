@@ -192,9 +192,10 @@ pub fn run() {
             let config_dir = app.path().app_config_dir()?;
             let profile_path = config_dir.join("profiles.json");
             app.manage(connection::ProfileStore::load(profile_path)?);
-            app.manage(app_state::AppStateStore::load(
-                config_dir.join("app-state.json"),
-            ));
+            let app_state = app_state::AppStateStore::load(config_dir.join("app-state.json"));
+            let theme = app_state.theme();
+            let ui_scale = app_state.ui_scale();
+            app.manage(app_state);
             app.manage(incidents::IncidentJournal::new(app.path().app_log_dir()?));
             app.manage(connection::TerminalClients::default());
             app.manage(connection::files::DownloadManager::default());
@@ -208,6 +209,11 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || prompt.request_authorization());
             app.manage(notifications);
             for window in app.webview_windows().values() {
+                // The page sets its own colors only once its script runs; until then
+                // the platform paints its default, which is dark on a dark OS. Painting
+                // the saved theme's background spares a light user that dark frame.
+                let _ = window.set_background_color(Some(window_background(theme, window)));
+                let _ = window.set_zoom(ui_scale);
                 macos_window::enable_native_full_screen(window)?;
                 // Cosmetic: a window that keeps GTK's bar is still a usable one,
                 // so a failure here must not stop the app from starting.
@@ -226,6 +232,7 @@ pub fn run() {
             app_state::load_app_state,
             app_state::save_app_state,
             app_state::reset_app_state,
+            app_state::set_ui_scale,
             connection::helper::probe_remote_helper,
             connection::helper::install_remote_helper,
             resolve_notification_route,
@@ -246,6 +253,7 @@ pub fn run() {
             connection::probe_terminal_link,
             connection::discard_ssh_masters,
             connection::set_terminal_visibility,
+            connection::set_terminal_colors,
             connection::request_terminal_seed,
             connection::request_terminal_history,
             connection::terminal_link_stats,
@@ -255,6 +263,7 @@ pub fn run() {
             connection::files::cancel_file_request,
             connection::git::git_request,
             connection::agent::agent_request,
+            connection::automation::automation_request,
             connection::git::cancel_git_request,
             connection::git_content::read_git_diff_content,
             connection::git_content::cancel_git_diff_content,
@@ -294,6 +303,26 @@ pub fn run() {
                 connection::close_all_control_masters();
             }
         });
+}
+
+/// The chrome background (`--bg` in palette.css) of the theme the page will
+/// draw, resolving System the way the page's `prefers-color-scheme` will.
+fn window_background(
+    theme: app_state::ThemePreference,
+    window: &tauri::WebviewWindow,
+) -> tauri::window::Color {
+    let dark = match theme {
+        app_state::ThemePreference::Dark => true,
+        app_state::ThemePreference::Light => false,
+        app_state::ThemePreference::System => window
+            .theme()
+            .map_or(true, |theme| theme == tauri::Theme::Dark),
+    };
+    if dark {
+        tauri::window::Color(0x28, 0x2c, 0x34, 0xff)
+    } else {
+        tauri::window::Color(0xfa, 0xfa, 0xfa, 0xff)
+    }
 }
 
 #[cfg(test)]

@@ -315,6 +315,10 @@ fn run_bridge_once(
     }
     super::flush_delivery_ack(client)?;
     *connected_at = Some(Instant::now());
+    // Only now that requests can be written: a theme change that landed while
+    // this connection was coming up could not reach it, and this send reads
+    // whatever is current.
+    super::send_terminal_colors(vec![Arc::clone(client)]);
     // From here on the frame parser reads through a counter, so a late answer
     // can name the bytes that were ahead of it on the wire. Free in a build
     // without the measurement compiled in.
@@ -970,6 +974,9 @@ fn process_event(
                     payload,
                 },
             )?;
+        }
+        v1::EventKind::Automation => {
+            send_protocol_event(channel, event_sequence, TerminalEvent::AutomationChanged)?;
         }
         _ => send_protocol_event(channel, event_sequence, TerminalEvent::ProtocolProgress)?,
     }

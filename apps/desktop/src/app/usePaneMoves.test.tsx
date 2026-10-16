@@ -7,6 +7,7 @@ import { paneOnScreenMovedBy, usePaneMoves } from "./usePaneMoves";
 import { beginPointerDrag, type DragPayload } from "../features/dragDrop/pointerDrag";
 import type { TmuxActionResult } from "../features/tmux/actions";
 import type { AgentListRow } from "../features/agents/agentsList";
+import { defaultAppState } from "../features/shell/types";
 
 const session = (id: string): Session => ({ id, name: id, windowCount: 0, attachedClients: 0 });
 const window_ = (id: string, sessionId: string): TmuxWindow => ({ id, sessionId, index: 0, name: id, active: true, layout: "" });
@@ -80,6 +81,34 @@ describe("paneOnScreenMovedBy", () => {
 });
 
 describe("usePaneMoves", () => {
+  it("docks a document tab dropped on a workspace edge", async () => {
+    const appTabs = [
+      { id: "notes", hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", sessionName: "$1", kind: "markdown" as const, resource: "/r/notes.md", title: "notes.md", order: 0 },
+    ];
+    let state = { ...defaultAppState, appTabs, workspaceUi: [{ hostProfileId: "local", serverIdentity: "server-a", sessionId: "$1", sessionName: "$1", selectedAppTabId: "notes" }] };
+    const setAppState = vi.fn((update: (current: typeof state) => typeof state) => { state = update(state); });
+    let moves!: ReturnType<typeof usePaneMoves>;
+    function Harness() {
+      moves = usePaneMoves({
+        hostProfileId: "local", serverIdentity: "server-a", canMutate: true, snapshot, activeSession: snapshot.sessions[0], activePane: onScreen,
+        terminalOnScreen: false, appTabs, performAction: vi.fn(), selectPane: vi.fn(), focusTerminal: vi.fn(),
+        setAppState: setAppState as never, setStatus: vi.fn(),
+      });
+      return null;
+    }
+    act(() => { create(<Harness />); });
+    const zone = document.createElement("div");
+    zone.dataset.dropDock = "right";
+    document.body.append(zone);
+    document.elementsFromPoint = vi.fn(() => [zone]);
+    const press = { button: 0, pointerId: 1, clientX: 0, clientY: 0, currentTarget: document.createElement("div") };
+    beginPointerDrag(press as unknown as ReactPointerEvent<HTMLElement>, moves.tabDragPayload({ kind: "app", id: "notes", title: "notes.md" } as never));
+    window.dispatchEvent(pointer("pointermove"));
+    await act(async () => { window.dispatchEvent(pointer("pointerup")); });
+    expect(state.workspaceUi[0]).toMatchObject({ dockedAppTabId: "notes", dockSide: "right" });
+    expect(state.workspaceUi[0].selectedAppTabId).toBeUndefined();
+  });
+
   it("follows the pane on screen to the workspace it was moved to", async () => {
     const { performAction, selectPane, moves } = harness({ sessionId: "$2", windowId: "@9", paneId: "%1", topologyGeneration: 2 });
     await dropOnWorkspace(moves().paneDragPayload(onScreen)!);

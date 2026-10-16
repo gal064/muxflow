@@ -74,6 +74,11 @@ interface ShellCommandOptions {
   /** Live subscription to what the row surfaces currently offer. */
   rowCommands: readonly CommandId[];
   selectedAppTab?: AppOwnedTab;
+  /** The document docked beside the terminal, and whether the keyboard is in it right now. */
+  dockedAppTab?: AppOwnedTab;
+  dockHoldsFocus?(): boolean;
+  /** Docks the selected document beside the terminal, or returns the docked one to the strip. */
+  toggleDock?(): void;
   requestNewWorkspace(): void;
   createWindow(sessionId: string): void;
   serverIdentity?: string;
@@ -237,7 +242,13 @@ export function useShellCommands(options: ShellCommandOptions): {
       performAction: options.performAction, isScopeCurrent: options.isHostScopeCurrent,
     };
     const host = (target && options.hostForScope(target.scope)) ?? activeHost;
-    const resolvedTarget = resolveCommandTarget({ ...options, hostScope: host.scope, snapshot: host.snapshot }, target);
+    // With the keyboard in the docked document, that document is what an
+    // ambient command (⌘W) is about, not the terminal or tab beside it.
+    const focusedAppTab = options.dockedAppTab && options.dockHoldsFocus?.() ? options.dockedAppTab : options.selectedAppTab;
+    const resolvedTarget = resolveCommandTarget(
+      { ...options, selectedAppTab: focusedAppTab, hostScope: host.scope, snapshot: host.snapshot },
+      target,
+    );
     const targetSession = resolvedTarget.kind === "session" ? resolvedTarget.value
       : resolvedTarget.kind === "ambient" ? resolvedTarget.session : undefined;
     const targetWindow = resolvedTarget.kind === "terminalTab" ? resolvedTarget.value
@@ -316,6 +327,7 @@ export function useShellCommands(options: ShellCommandOptions): {
           shell: shellAfterSidebarCommand(current.shell, commandId),
         }));
         return;
+      case "view.toggleDock": options.toggleDock?.(); return;
       case "agents.toggleSort":
         options.setAppState((current) => ({ ...current, shell: { ...current.shell, agentSort: nextSortMode(current.shell.agentSort) } }));
         return;
@@ -418,6 +430,7 @@ export function useShellCommands(options: ShellCommandOptions): {
       : Boolean(options.activeWindow && relativeWindowReorderAction(options.windows, options.activeWindow.id, "right")),
     hasHostProfile: Boolean(options.deletableHostProfile),
     pinnedOnly: options.appState.shell.pinnedOnly,
+    canToggleDock: Boolean(options.selectedAppTab || options.dockedAppTab),
     rowCommands: options.rowCommands,
     hasTerminalSelection: () => Boolean(options.activePane && !options.selectedAppTab
       && options.controllers.current.get(options.activePane.id)?.hasCopyableSelection()),
