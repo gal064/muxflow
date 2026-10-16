@@ -1,7 +1,7 @@
-import { HighlightStyle, Language, LanguageSupport, defineLanguageFacet, syntaxHighlighting, syntaxTree } from "@codemirror/language";
+import { HighlightStyle, Language, LanguageSupport, defineLanguageFacet, ensureSyntaxTree, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { EditorSelection, EditorState, Prec, RangeSet, StateEffect, StateField, countColumn, type ChangeSpec, type Extension, type Range, type Text, type Transaction } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type Command, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-import type { SyntaxNode, SyntaxNodeRef } from "@lezer/common";
+import type { SyntaxNode, SyntaxNodeRef, Tree } from "@lezer/common";
 import { tags } from "@lezer/highlight";
 import { isEmbeddedMarkdownImage } from "@muxflow/markdown";
 import { GFM, parser } from "@lezer/markdown";
@@ -79,6 +79,7 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
   const active = activeRanges(state);
   const doc = state.doc;
   const out: LiveRange[] = [];
+  const listWidths = new Map<number, number>();
   // Clamped to the range: a long block that merely overlaps it is styled one
   // visible range at a time, not end to end on every keystroke.
   const lineClass = (start: number, end: number, className: string) => {
@@ -155,12 +156,12 @@ export function liveRanges(state: EditorState, from: number, to: number): LiveRa
           blockMark(node.from, node.to, true);
           break;
         case "ListMark":
-          liveListLayout(node, state, out);
+          liveListLayout(node, state, out, listWidths);
           liveListMark(node, doc, out, blockMark);
           break;
         case "Paragraph":
         case "Task":
-          liveListParagraph(node, state, out, from, to);
+          liveListParagraph(node, state, out, from, to, listWidths);
           break;
         case "TaskMarker": {
           const end = node.to + /^[ \t]*/.exec(doc.sliceString(node.to, doc.lineAt(node.to).to))![0].length;
@@ -231,11 +232,11 @@ function liveCodeBlock(node: SyntaxNodeRef, doc: Doc, active: Active, out: LiveR
 }
 
 /** Source indentation is structural; the rendered list uses a fixed step per level. */
-function liveListLayout(node: SyntaxNodeRef, state: EditorState, out: LiveRange[]) {
+function liveListLayout(node: SyntaxNodeRef, state: EditorState, out: LiveRange[], widths: Map<number, number>) {
   const item = node.node.parent;
   if (!item) return;
   const line = state.doc.lineAt(node.from);
-  liveListLine(item, state, line, node.from, false, out);
+  liveListLine(item, state, line, node.from, false, out, widths);
   if (item.parent?.name === "OrderedList") {
     const spaces = /^[ \t]*/.exec(state.doc.sliceString(node.to, line.to))![0].length;
     out.push({ kind: "mark", from: node.from, to: node.to + spaces, className: "cm-live-list-marker" });
@@ -246,7 +247,7 @@ function liveListLayout(node: SyntaxNodeRef, state: EditorState, out: LiveRange[
   }
 }
 
-function liveListLine(item: SyntaxNode, state: EditorState, line: { from: number; text: string }, contentFrom: number, continuation: boolean, out: LiveRange[]) {
+function liveListLine(item: SyntaxNode, state: EditorState, line: { from: number; text: string }, contentFrom: number, continuation: boolean, out: LiveRange[], widths: Map<number, number>) {
   let depth = 0;
   for (let parent = item.parent?.parent; parent; parent = parent.parent) {
     if (parent.name === "ListItem") depth += 1;
@@ -256,13 +257,27 @@ function liveListLine(item: SyntaxNode, state: EditorState, line: { from: number
     out.push({ kind: "hide", from: start, to: contentFrom });
     out.push({ kind: "atomic", from: start, to: contentFrom });
   }
-  const marker = item.getChild("ListMark")!;
-  const width = item.parent?.name === "OrderedList" ? `max(1.5em, ${marker.to - marker.from + 1}ch)` : "1.5em";
+  const list = item.parent;
+  let width = "1.5em";
+  if (list?.name === "OrderedList") {
+    let columns = widths.get(list.from);
+    if (columns === undefined) {
+      columns = 0;
+      // Siblings share a marker column, including ones outside the viewport.
+      // Nested lists size their own column independently.
+      for (const sibling of list.getChildren("ListItem")) {
+        const mark = sibling.getChild("ListMark")!;
+        columns = Math.max(columns, mark.to - mark.from + 1);
+      }
+      widths.set(list.from, columns);
+    }
+    width = `max(1.5em, ${columns}ch)`;
+  }
   out.push({ kind: "line", from: line.from, className: `cm-live-list${continuation ? " cm-live-list-continuation" : ""}`, style: `--cm-list-depth: ${depth}; --cm-list-marker: ${width}` });
 }
 
 /** Hard breaks and later paragraphs get the same content column as the item's text. */
-function liveListParagraph(node: SyntaxNodeRef, state: EditorState, out: LiveRange[], from: number, to: number) {
+function liveListParagraph(node: SyntaxNodeRef, state: EditorState, out: LiveRange[], from: number, to: number, widths: Map<number, number>) {
   let item = node.node.parent;
   while (item && item.name !== "ListItem") item = item.parent;
   if (!item) return;
@@ -279,7 +294,7 @@ function liveListParagraph(node: SyntaxNodeRef, state: EditorState, out: LiveRan
     }
     const line = doc.line(number);
     const indent = indentation(line.text);
-    liveListLine(item, state, line, line.from + indent.from + indent.text.length, true, out);
+    liveListLine(item, state, line, line.from + indent.from + indent.text.length, true, out, widths);
   }
 }
 
@@ -834,8 +849,8 @@ function inCode(state: EditorState, pos: number, includeInline = true): boolean 
   return false;
 }
 
-function enclosing(state: EditorState, pos: number, name: string): SyntaxNode | undefined {
-  for (let node: SyntaxNode | null = syntaxTree(state).resolveInner(pos, -1); node; node = node.parent) {
+function enclosing(state: EditorState, pos: number, name: string, tree: Tree = syntaxTree(state)): SyntaxNode | undefined {
+  for (let node: SyntaxNode | null = tree.resolveInner(pos, -1); node; node = node.parent) {
     if (node.name === name) return node;
   }
   return undefined;
@@ -861,25 +876,31 @@ function enclosingQuotes(item: SyntaxNode): number {
 }
 
 /**
- * Renumber only the ordered lists affected by a structural move. Existing
+ * Renumber only the ordered lists affected by a structural edit. Existing
  * lists keep their starting number; a newly nested list starts at one.
  */
-function movedListNumbers(move: Transaction, moved: readonly SyntaxNode[]): ChangeSpec[] {
+function listNumberChanges(move: Transaction, affected: readonly SyntaxNode[], moved: readonly SyntaxNode[] = affected): ChangeSpec[] {
+  if (!affected.some((item) => item.parent?.name === "OrderedList")) return [];
   const before = move.startState;
   const after = move.state;
+  // Structural changes must include offscreen siblings. The view's ordinary
+  // tree may stop parsing near the viewport, even halfway through this list.
+  const beforeTree = ensureSyntaxTree(before, before.doc.length, Infinity)!;
+  const afterTree = ensureSyntaxTree(after, after.doc.length, Infinity)!;
   const movedStarts = new Set(moved.map((item) => item.from));
   const lists = new Map<number, SyntaxNode>();
   const movedItem = (item: SyntaxNode) => {
     const mark = item.getChild("ListMark")!;
-    return enclosing(after, move.changes.mapPos(mark.from, 1) + 1, "ListItem");
+    return enclosing(after, move.changes.mapPos(mark.from, 1) + 1, "ListItem", afterTree);
   };
   const include = (item: SyntaxNode | undefined) => {
     if (item?.parent?.name === "OrderedList") lists.set(item.parent.from, item.parent);
   };
   const sources = new Map<number, SyntaxNode>();
-  for (const item of moved) {
-    include(movedItem(item));
-    sources.set(item.parent!.from, item.parent!);
+  for (const item of affected) {
+    const complete = enclosing(before, item.getChild("ListMark")!.from + 1, "ListItem", beforeTree)!;
+    include(movedItem(complete));
+    sources.set(complete.parent!.from, complete.parent!);
   }
   // Removing items can split the old list into several lists.
   for (const source of sources.values()) {
@@ -897,7 +918,7 @@ function movedListNumbers(move: Transaction, moved: readonly SyntaxNode[]): Chan
     // when the first item was moved away or a group was inserted before it.
     for (const child of children) {
       const mark = child.getChild("ListMark")!;
-      const original = enclosing(before, inverse.mapPos(mark.from, 1) + 1, "ListItem");
+      const original = enclosing(before, inverse.mapPos(mark.from, 1) + 1, "ListItem", beforeTree);
       if (!original || movedStarts.has(original.from) || original.parent?.name !== "OrderedList") continue;
       const first = original.parent.getChild("ListItem")!.getChild("ListMark")!;
       number = Number.parseInt(before.doc.sliceString(first.from, first.to), 10);
@@ -959,7 +980,11 @@ export function changeListIndent(view: EditorView, direction: 1 | -1): boolean {
     }
   }
   if (!items.size) return false;
-  const selected = [...items.values()].sort((a, b) => a.from - b.from);
+  // An item's descendants can extend well past the rendered viewport too.
+  const tree = ensureSyntaxTree(state, state.doc.length, Infinity)!;
+  const selected = [...items.values()]
+    .map((item) => enclosing(state, item.getChild("ListMark")!.from + 1, "ListItem", tree)!)
+    .sort((a, b) => a.from - b.from);
   const roots: SyntaxNode[] = [];
   for (const item of selected) {
     if (!roots.length || roots[roots.length - 1].to < item.to) roots.push(item);
@@ -1012,7 +1037,7 @@ export function changeListIndent(view: EditorView, direction: 1 | -1): boolean {
     const changeSet = state.changes(changes);
     const spec = { changes: changeSet, selection: state.selection.map(changeSet), scrollIntoView: true, userEvent: direction === 1 ? "input.indent" : "delete.dedent" };
     const move = state.update(spec);
-    const numbers = movedListNumbers(move, moved);
+    const numbers = listNumberChanges(move, moved);
     // One transaction keeps the caret, autosave and undo together with the move.
     view.dispatch(numbers.length ? state.update(spec, { changes: numbers, sequential: true }) : move);
   }
@@ -1038,7 +1063,14 @@ export const continueMarkup: Command = (view) => {
   const line = state.doc.lineAt(range.head);
   if (inCode(state, range.head)) return false;
   const br = state.lineBreak;
-  const insert = (text: string) => view.dispatch(state.update(state.replaceSelection(text), { scrollIntoView: true, userEvent: "input" }));
+  const insert = (text: string, item?: SyntaxNode) => {
+    const spec = { ...state.replaceSelection(text), scrollIntoView: true, userEvent: "input" };
+    const added = state.update(spec);
+    // Enter adds an item without moving any existing ones. Their original
+    // list start survives, and later siblings advance in the same undo step.
+    const numbers = item ? listNumberChanges(added, [item], []) : [];
+    view.dispatch(numbers.length ? state.update(spec, { changes: numbers, sequential: true }) : added);
+  };
   // The parser's word, not the pattern's: `* * *` matches but is a rule.
   const candidate = LIST_ITEM.exec(line.text);
   const item = candidate && syntaxTree(state).resolveInner(line.from + candidate[1].length, 1).name === "ListMark" ? candidate : undefined;
@@ -1052,7 +1084,7 @@ export const continueMarkup: Command = (view) => {
       view.dispatch({ changes: { from: line.from, to: line.to, insert: prefix }, selection: { anchor: line.from + prefix.length }, userEvent: "input" });
       return true;
     }
-    if (item) insert(`${br}${nextItem(item)}`);
+    if (item) insert(`${br}${nextItem(item)}`, enclosing(state, range.head, "ListItem"));
     // A blank quote line between, or the new line would continue the paragraph.
     else insert(`${br}${marker[0].trimEnd()}${br}${marker[0]}`);
     return true;
@@ -1062,7 +1094,7 @@ export const continueMarkup: Command = (view) => {
   // A wrapped item's later line: the next item takes the marker of the item's first line.
   const listItem = paragraph.parent?.name === "ListItem" ? paragraph.parent : undefined;
   const first = listItem && LIST_ITEM.exec(state.doc.lineAt(listItem.from).text);
-  insert(first ? `${br}${nextItem(first)}` : `${br}${br}`);
+  insert(first ? `${br}${nextItem(first)}` : `${br}${br}`, listItem);
   return true;
 };
 
