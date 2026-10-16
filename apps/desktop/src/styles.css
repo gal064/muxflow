@@ -1510,11 +1510,11 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .live-markdown .cm-line.cm-live-list.cm-live-quote { padding-left: calc(18px + var(--cm-list-depth) * 32px + var(--cm-list-marker)); }
 .live-markdown .cm-live-list-marker { display: inline-block; width: var(--cm-list-marker); text-indent: 0; }
 /* Give the editable number a real trailing caret boundary at the content edge. */
-.live-markdown .cm-live-list-marker:not(.cm-live-bullet) { display: inline-flex; align-items: baseline; }
-.live-markdown .cm-live-marker-space { flex: 1; align-self: stretch; }
+.live-markdown .cm-live-list-marker:not(.cm-live-bullet) { display: inline-flex; align-items: baseline; justify-content: flex-end; font-variant-numeric: tabular-nums; }
+.live-markdown .cm-live-marker-space { flex: 0 0 .5em; align-self: stretch; }
 .live-markdown .cm-live-bullet.cm-live-list-marker { min-width: 0; }
 .live-markdown .cm-line.cm-live-list-continuation { text-indent: 0; }
-.live-markdown .cm-live-list > .cm-live-task { box-sizing: border-box; width: 1em; height: 1em; margin: 0 .5em 0 0; }
+.live-markdown .cm-live-list > .cm-live-task { box-sizing: border-box; width: 1em; height: 1em; margin: 0 .5em 0 0; text-indent: 0; }
 .live-markdown .cm-live-task { margin: 0 .45em 0 0; vertical-align: -1px; accent-color: var(--accent); cursor: pointer; }
 .live-markdown .cm-live-task:is(:disabled, [aria-disabled="true"]) { cursor: default; }
 .live-markdown span.cm-live-task { display: inline-block; line-height: 1; text-align: center; color: var(--accent); }
