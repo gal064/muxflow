@@ -154,6 +154,29 @@ describe("live Markdown rendering", () => {
     expect(hidden(doc)).toEqual(["- ", "- "]);
   });
 
+  it("shares an ordered marker column across digit boundaries and continuation lines", () => {
+    const doc = "8. eight  \n   continued\n9. nine\n10. ten\n\nOutside\n\n99. another\n100. hundred";
+    const lines = ranges(doc).filter((range) => range.kind === "line").filter((range) => range.className.includes("cm-live-list"));
+    expect(lines.map((line) => line.style)).toEqual([
+      "--cm-list-depth: 0; --cm-list-marker: max(1.5em, 4ch)",
+      "--cm-list-depth: 0; --cm-list-marker: max(1.5em, 4ch)",
+      "--cm-list-depth: 0; --cm-list-marker: max(1.5em, 4ch)",
+      "--cm-list-depth: 0; --cm-list-marker: max(1.5em, 4ch)",
+      "--cm-list-depth: 0; --cm-list-marker: max(1.5em, 5ch)",
+      "--cm-list-depth: 0; --cm-list-marker: max(1.5em, 5ch)",
+    ]);
+  });
+
+  it("sizes a visible list item from offscreen siblings, independently of its children", () => {
+    const doc = "9. parent\n   99. nested\n   100. nested\n10. sibling";
+    const current = state(doc);
+    const start = liveRanges(current, 0, 9).find((range) => range.kind === "line" && range.className === "cm-live-list");
+    expect(start).toMatchObject({ style: "--cm-list-depth: 0; --cm-list-marker: max(1.5em, 4ch)" });
+    const nested = ranges(doc).filter((range) => range.kind === "line").filter((range) => range.style?.includes("--cm-list-depth: 1"));
+    expect(nested).toHaveLength(2);
+    expect(nested.every((range) => range.style?.includes("5ch"))).toBe(true);
+  });
+
   it("includes task separator spaces in the checkbox's layout column", () => {
     const doc = "- [ ]   task  \n  continued";
     const editor = view(doc, doc.length);
@@ -331,6 +354,22 @@ describe("live Markdown commands", () => {
     expect(editor.state.doc.toString()).toBe("1. parent\n   1. y");
   });
 
+  it("keeps offscreen siblings numbered when moving an item in a long list", () => {
+    const doc = Array.from({ length: 1000 }, (_, index) => `${index + 1}. item ${index + 1}`).join("\n");
+    const editor = view(doc, doc.indexOf("item 2"));
+    changeListIndent(editor, 1);
+    const expected = ["1. item 1", "   1. item 2", ...Array.from({ length: 998 }, (_, index) => `${index + 2}. item ${index + 3}`)].join("\n");
+    expect(editor.state.doc.toString()).toBe(expected);
+  });
+
+  it("moves every offscreen descendant with its parent", () => {
+    const children = Array.from({ length: 500 }, (_, index) => `  - child ${index}`);
+    const doc = ["- before", "- parent", ...children].join("\n");
+    const editor = view(doc, doc.indexOf("parent"));
+    changeListIndent(editor, 1);
+    expect(editor.state.doc.toString()).toBe(["- before", "  - parent", ...children.map((line) => `  ${line}`)].join("\n"));
+  });
+
   it("keeps numbering changes local to the moved lists", () => {
     const doc = "1. parent\n2. item\n3. last\n\nOutside\n\n7. untouched\n9. authored";
     const editor = view(doc, doc.indexOf("item"));
@@ -429,6 +468,36 @@ describe("live Markdown commands", () => {
     const task = view("- [x] done", 10);
     continueMarkup(task);
     expect(task.state.doc.toString()).toBe("- [x] done\n- [ ] ");
+  });
+
+  it.each([
+    ["1. one\n2. two", "one", "1. one\n2. \n3. two"],
+    ["9) nine\n10) ten", "nine", "9) nine\n10) \n11) ten"],
+    ["1. parent\n   1. one\n   2. two\n2. last", "one", "1. parent\n   1. one\n   2. \n   3. two\n2. last"],
+    ["8. eight\n9. nine\n   - child\n10. last", "eight", "8. eight\n9. \n10. nine\n    - child\n11. last"],
+    ["1. [x] done\n2. [ ] next", "done", "1. [x] done\n2. [ ] \n3. [ ] next"],
+  ])("renumbers later ordered siblings when Enter adds an item: %s", (doc, word, expected) => {
+    const editor = view(doc, doc.indexOf(word) + word.length);
+    continueMarkup(editor);
+    expect(editor.state.doc.toString()).toBe(expected);
+    expect(editor.state.doc.sliceString(editor.state.selection.main.head, editor.state.selection.main.head + 1)).toBe("\n");
+  });
+
+  it("keeps Enter and following-number updates in one change and undo step", () => {
+    const doc = "1. one\n2. two";
+    const changed = vi.fn();
+    const editor = new EditorView({ parent: document.body, state: EditorState.create({
+      doc, selection: { anchor: 6 }, extensions: [liveMarkdown({ onLink() {} }), history(),
+        EditorView.updateListener.of((update) => { if (update.docChanged) changed(); })],
+    }) });
+    views.push(editor);
+    continueMarkup(editor);
+    expect(editor.state.doc.toString()).toBe("1. one\n2. \n3. two");
+    expect(changed).toHaveBeenCalledTimes(1);
+    undo(editor);
+    expect(editor.state.doc.toString()).toBe(doc);
+    redo(editor);
+    expect(editor.state.doc.toString()).toBe("1. one\n2. \n3. two");
   });
 
   it("ends the list on an empty item", () => {
