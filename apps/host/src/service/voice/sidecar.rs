@@ -24,7 +24,7 @@ use tokio::{
 
 pub(crate) const PYTHON_PIN: &str = "3.12";
 pub(crate) const TRANSCRIBE_CPP_PIN: &str = "0.2.3";
-pub(crate) const EDGE_TTS_PIN: &str = "7.2.8";
+pub(crate) const EDGE_TTS_PIN: &str = "7.3.1";
 /// The largest body the sidecar may answer with: the reply MP3 cap (§2b).
 pub(crate) const MAX_REPLY_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_HEADER_BYTES: u64 = 64 * 1024;
