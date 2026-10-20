@@ -1,6 +1,6 @@
-# Codex and Claude Code hooks
+# Codex, Claude Code and pi hooks
 
-Codex and Claude Code are the only V1 agent adapters. The app can launch them or
+Codex, Claude Code and pi are the agent adapters. The app can launch them or
 detect manually started processes.
 
 **Hooks are the primary source of lifecycle state.** For Codex, the daemon also
@@ -59,7 +59,7 @@ The same installer is reachable without a UI, which is how it is exercised
 against a copy of a real configuration:
 
 ```
-muxflow-host hook status    [--adapter codex|claude-code] [--home DIR] [--settings-path FILE]
+muxflow-host hook status    [--adapter codex|claude-code|pi] [--home DIR] [--settings-path FILE]
 muxflow-host hook install   [--adapter …] [--home …] [--settings-path …] [--yes]
 muxflow-host hook uninstall [--adapter …] [--home …] [--settings-path …] [--yes]
 ```
@@ -81,6 +81,56 @@ exactly the adapter named by `--adapter`, which it requires. Without
 uninstall on every adapter that has entries of this app's to remove. Either
 verb reports every adapter it did not act on and why, and exits non-zero if any
 adapter failed — after printing what the others did.
+
+## pi
+
+pi has no hook setting. It loads every file in `~/.pi/agent/extensions/` as an
+in-process TypeScript extension and does not ask before it runs one. The
+install for pi is therefore one file, `~/.pi/agent/extensions/muxflow-agent-status.ts`,
+which this app writes and owns whole. Its first line is the ownership marker
+`// muxflow-managed owner=muxflow adapter=pi`:
+
+- Install writes the file and touches nothing else, so it needs no backup.
+- Uninstall deletes the file.
+- A file at that path without the marker is yours. It reports `unavailable`
+  and is never written over or deleted.
+- A marked file whose content differs from what this helper would write (an
+  older extension, or a helper that moved) reports `partial`, and an
+  already-consented host brings it current on connect.
+
+The extension sends each pi event under the lifecycle name the daemon already
+uses for the other adapters, so pi takes the generic ingest path:
+
+| pi event | Sent as | State |
+| --- | --- | --- |
+| `session_start` | `SessionStart` (and `UserPromptSubmit` if a run is in progress after a reload) | idle |
+| `agent_start` | `UserPromptSubmit` | working |
+| `ui_prompt_start` during a run | `PermissionRequest` | blocked |
+| `ui_prompt_end` of the last open dialog, run still active | `PostToolUse` | working |
+| `agent_settled` with an idle agent | `Stop`, with the run's final assistant message | idle |
+| `session_shutdown` | `SessionEnd` | idle |
+
+`agent_settled` is used rather than `agent_end` because a run can continue
+after `agent_end` with a retry, a compaction or a queued message. A dialog an
+extension opens while pi is idle is a command the user is already looking at,
+so it does not read as blocked. pi has no permission prompts of its own; the
+blocked state comes from extension dialogs (`ctx.ui.confirm`, `select`,
+`input`, `editor`).
+
+The extension does nothing outside a tmux pane and outside pi's interactive
+(`tui`) mode. A pi that another pi starts in the same pane, for example from its
+bash tool, inherits `TMUX_PANE`. The first pi records its process ID in
+`MUXFLOW_PI_OWNER`, and a pi that finds another process's ID there stays
+silent. Each event starts `muxflow-host hook ingest --adapter pi` with the
+JSON on stdin. pi's own `pi.exec` has no stdin, so the extension uses
+`child_process.spawn`. Events are sent in order, and no pi handler waits for
+them except on quit, where pi waits until `SessionEnd` and anything queued
+before it have been sent. A send gets five seconds, the same allowance as the
+other adapters' hooks and enough for the helper to fall back to its durable
+mailbox when the daemon does not answer. Every failure is ignored. Only the
+event name, the session ID and, on `Stop`, the final assistant message are
+sent. The message is left out when the run was aborted. Resume uses
+`pi --session <id>`.
 
 ## Events taken, and the gaps
 
@@ -237,6 +287,6 @@ when the daemon drains it. No other event forwards it, `StopFailure` included.
 A host that never opened voice mode and runs no automations receives the field
 and drops it.
 
-For validation, use installed `codex --version` / `codex --help` and
-`claude --version` / `claude --help` only. Release QA must not send prompts or
+For validation, use installed `codex --version` / `codex --help`,
+`claude --version` / `claude --help` and `pi --version` / `pi --help` only. Release QA must not send prompts or
 perform network-backed agent work with the user's accounts.
