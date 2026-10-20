@@ -27,7 +27,8 @@ so an import failure stops promptly.
 
 ## Release to testers
 
-Choose the tag's iOS audience when releasing:
+iOS rides along with a normal Muxflow release. Add a suffix to the release tag
+to switch it on and choose the audience:
 
 | Tag | iOS behavior |
 |---|---|
@@ -36,7 +37,9 @@ Choose the tag's iOS audience when releasing:
 | `vX.Y.Z-ios` | Signed upload, internal Checksum testing, and external Beta submission |
 
 The same suffixes work after `-rc.N`. All these tags still package the other
-platforms. RC tags may point to a branch; stable tags must point to `main`.
+platforms, and the GitHub release is named Muxflow X.Y.Z (or X.Y.Z-rc.N)
+without the suffix: there is no separate iOS release.
+RC tags may point to a branch; stable tags must point to `main`.
 The GitHub release stays a draft until you publish it. iOS upload and
 TestFlight submission do not wait for GitHub draft publication.
 

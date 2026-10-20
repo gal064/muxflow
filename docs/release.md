@@ -44,15 +44,18 @@ pushed version tag and leaves them in a draft GitHub Release:
 
 | Tag example | iOS upload and distribution | GitHub release |
 |---|---|---|
-| `v0.1.14` | Skip iOS | Stable draft |
-| `v0.1.14-ios` | Upload, assign internal testers, submit external Beta review | Stable draft |
-| `v0.1.14-ios-internal` | Upload and assign internal testers only | Stable draft |
-| `v0.1.14-rc.1` | Skip iOS | Prerelease draft |
-| `v0.1.14-rc.1-ios` | Upload, assign internal testers, submit external Beta review | Prerelease draft |
-| `v0.1.14-rc.1-ios-internal` | Upload and assign internal testers only | Prerelease draft |
+| `v0.1.14` | Skip iOS | Muxflow 0.1.14 (stable draft) |
+| `v0.1.14-ios` | Upload, assign internal testers, submit external Beta review | Muxflow 0.1.14 (stable draft) |
+| `v0.1.14-ios-internal` | Upload and assign internal testers only | Muxflow 0.1.14 (stable draft) |
+| `v0.1.14-rc.1` | Skip iOS | Muxflow 0.1.14-rc.1 (prerelease draft) |
+| `v0.1.14-rc.1-ios` | Upload, assign internal testers, submit external Beta review | Muxflow 0.1.14-rc.1 (prerelease draft) |
+| `v0.1.14-rc.1-ios-internal` | Upload and assign internal testers only | Muxflow 0.1.14-rc.1 (prerelease draft) |
 
-The suffix controls iOS distribution; all six tags still build Linux, macOS,
-and Android packages. `-ios` does not make a stable version a prerelease.
+The `-ios` and `-ios-internal` suffixes are only a switch that says "do iOS as
+well". They are never part of the release's name: a release is Muxflow X.Y.Z
+(or X.Y.Z-rc.N), whichever switch built it, and is never called an iOS release.
+All six tags still build Linux, macOS, and Android packages, and the switch
+does not make a stable version a prerelease.
 Unsupported tag formats fail before any build or upload.
 Choose one stable tag variant for each product version; do not publish both
 `vX.Y.Z` and `vX.Y.Z-ios` for the same version. To promote a build already
@@ -63,8 +66,8 @@ uploaded internally, use the distribution action instead of another release tag.
    passes.
 2. Tag the merged commit and push the tag:
    `git tag vX.Y.Z && git push origin vX.Y.Z`. Append `-ios` or `-ios-internal`
-   when the release should upload iOS. For example, the next external iOS
-   release after build 3 can use `release/set-version.sh 0.1.14 4`, followed by
+   when the release should also upload iOS. For example, release 0.1.14 with
+   an external iOS upload after build 3 can use `release/set-version.sh 0.1.14 4`, followed by
    `git tag v0.1.14-ios && git push origin v0.1.14-ios` after merging.
 3. Stable releases stop unless the tagged commit is on `main` and the tree's
    version matches the tag. It then reruns the CI gate. The signing secrets
@@ -91,7 +94,7 @@ uploaded internally, use the distribution action instead of another release tag.
    build later with **Distribute TestFlight build**, choosing `external` and
    providing What to Test. Do not push another iOS tag to re-upload the same
    build number; see [TestFlight releases](mobile/testflight.md).
-5. A draft release appears with the DMG, both Linux tarballs, the APK,
+5. A draft release named Muxflow X.Y.Z (or X.Y.Z-rc.N) appears with the DMG, both Linux tarballs, the APK,
    `install.sh` (the one-line Linux and macOS installer, from `release/get.sh`),
    `SHA256SUMS`, and `latest.json`. Its notes start with the install
    instructions in `release/release-notes.md`, followed by the generated
