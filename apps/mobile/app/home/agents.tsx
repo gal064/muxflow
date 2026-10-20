@@ -83,7 +83,7 @@ export default function AgentsScreen() {
     <EmptyState
       heading="No agents running"
       lines={[
-        "Agents started from the desktop show up here. Codex and Claude Code are supported.",
+        "Agents started from the desktop show up here. Codex, Claude Code and Pi are supported.",
         ...(noAdapterWired(adapters)
           ? ["Agent status hooks are not set up on this host. Set them up from the desktop: Settings → Connection → Set up agent status…"]
           : []),

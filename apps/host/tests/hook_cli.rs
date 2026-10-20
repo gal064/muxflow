@@ -57,7 +57,7 @@ fn cli_persists_an_exact_unsequenced_hook_envelope() {
 }
 
 #[test]
-fn cli_discards_large_tool_results_for_claude_and_codex() {
+fn cli_discards_large_tool_results_for_every_adapter() {
     let runtime_root = if cfg!(target_os = "macos") {
         PathBuf::from("/private/tmp")
     } else {
@@ -65,7 +65,7 @@ fn cli_discards_large_tool_results_for_claude_and_codex() {
     };
     let private_image = "private-image-data".repeat(32 * 1024);
 
-    for adapter in ["claude-code", "codex"] {
+    for adapter in ["claude-code", "codex", "pi"] {
         let runtime = runtime_root.join(format!("large-hook-{adapter}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&runtime).unwrap();
         let payload = serde_json::to_vec(&serde_json::json!({

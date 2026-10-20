@@ -105,8 +105,8 @@ macOS, Linux, and Android. iOS is coming soon.
 
 ## Supported agents
 
-Codex and Claude Code have lifecycle adapters. Any other CLI agent runs as an
-ordinary tmux window without attention tracking; add your own with
+Codex, Claude Code and [pi](https://pi.dev) have lifecycle adapters. Any other
+CLI agent runs as an ordinary tmux window without attention tracking; add your own with
 [agent hooks](./docs/agent-hooks.md).
 
 ## Install

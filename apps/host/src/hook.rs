@@ -1421,7 +1421,7 @@ fn prune_fallbacks(runtime: &Path, prefix: &str) {
 fn parse_adapter(arguments: &[String]) -> anyhow::Result<v1::AgentAdapterKind> {
     let value = Options::parse(arguments)
         .adapter
-        .context("hook ingest requires --adapter codex|claude-code")?;
+        .context("hook ingest requires --adapter codex|claude-code|pi")?;
     crate::service::agents::adapters::by_id(&value)
         .map(|adapter| adapter.legacy_kind())
         .ok_or_else(|| anyhow::anyhow!("unsupported hook adapter"))
@@ -1923,10 +1923,11 @@ mod tests {
     /// the final message rides `Stop` for both adapters, is cut on a char
     /// boundary past 32 KiB without failing the hook, and rides nothing else.
     #[test]
-    fn stop_forwards_the_last_assistant_message_for_both_adapters() {
+    fn stop_forwards_the_last_assistant_message_for_every_adapter() {
         for adapter in [
             v1::AgentAdapterKind::ClaudeCode,
             v1::AgentAdapterKind::Codex,
+            v1::AgentAdapterKind::Pi,
         ] {
             let event = build_event(
                 adapter,

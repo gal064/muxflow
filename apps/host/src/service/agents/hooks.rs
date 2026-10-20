@@ -156,6 +156,20 @@ impl HookManager {
     ) -> anyhow::Result<v1::AgentHookWiring> {
         inspect_config_path(path)?;
         let bytes = read_config(path)?;
+        if let Some(expected) = adapter.managed_file(&self.helper_path) {
+            return Ok(if bytes == expected.as_bytes() {
+                v1::AgentHookWiring::Wired
+            } else if owns_file(&bytes, &expected) {
+                // An older extension, or one naming a helper that moved.
+                v1::AgentHookWiring::Partial
+            } else if !bytes.is_empty() {
+                bail!("{} exists and is not managed by muxflow", path.display());
+            } else if !running.contains(adapter.id()) && !self.agent_is_present(adapter) {
+                v1::AgentHookWiring::Absent
+            } else {
+                v1::AgentHookWiring::NotWired
+            });
+        }
         let value = parse_config(&bytes)?;
         validate_hook_shape(&value, adapter.hook_events())?;
         Ok(
@@ -209,16 +223,23 @@ impl HookManager {
     /// rules as install/uninstall so packaging cannot drift from hook formats.
     pub(crate) fn managed_adapters(&self) -> anyhow::Result<Vec<&'static str>> {
         let mut managed = Vec::new();
-        for kind in [
-            v1::AgentAdapterKind::Codex,
-            v1::AgentAdapterKind::ClaudeCode,
-        ] {
-            let adapter = adapters::adapter(kind).context("agent adapter is required")?;
+        for adapter in adapters::all() {
             let path = self.config_path(adapter);
-            inspect_config_path(&path)?;
-            let value = parse_config(&read_config(&path)?)?;
-            validate_hook_shape(&value, adapter.hook_events())?;
-            if managed_entry_count(&value, adapter) > 0 {
+            let owned = match adapter.managed_file(&self.helper_path) {
+                // A managed file is never written through an unsafe path, so a
+                // path that cannot be read safely holds nothing of ours. Its
+                // state must not fail the answer for every other adapter.
+                Some(expected) => {
+                    read_config(&path).is_ok_and(|bytes| owns_file(&bytes, &expected))
+                }
+                None => {
+                    inspect_config_path(&path)?;
+                    let value = parse_config(&read_config(&path)?)?;
+                    validate_hook_shape(&value, adapter.hook_events())?;
+                    managed_entry_count(&value, adapter) > 0
+                }
+            };
+            if owned {
                 managed.push(adapter.id());
             }
         }
@@ -234,6 +255,9 @@ impl HookManager {
         let path = self.config_path(adapter_impl);
         inspect_config_path(&path)?;
         let bytes = read_config(&path)?;
+        if let Some(expected) = adapter_impl.managed_file(&self.helper_path) {
+            return self.review_file(adapter, action, &path, &bytes, &expected);
+        }
         let value = parse_config(&bytes)?;
         ensure_no_future_managed(&value, adapter_impl)?;
         validate_hook_shape(&value, adapter_impl.hook_events())?;
@@ -335,6 +359,14 @@ impl HookManager {
         if confirmation_token(adapter, action, &bytes) != review.confirmation_token {
             bail!("hook review changed while acquiring the configuration lock");
         }
+        if let Some(expected) = adapter_impl.managed_file(&self.helper_path) {
+            if action == v1::HookManagementAction::Install {
+                write_atomic(&path, expected.as_bytes(), &bytes)?;
+            } else {
+                remove_atomic(&path, &bytes)?;
+            }
+            return self.review(adapter, action);
+        }
         let mut value = parse_config(&bytes)?;
         remove_managed(&mut value, adapter_impl);
         if action == v1::HookManagementAction::Install {
@@ -348,6 +380,73 @@ impl HookManager {
         }
         self.review(adapter, action)
     }
+
+    /// The plan for an adapter whose managed artifact is a whole file. Install
+    /// writes exactly `expected`; uninstall deletes the file. Neither touches
+    /// anything else, so there is no merge and no backup, and a file at the
+    /// path that does not carry the marker is the user's and is refused.
+    fn review_file(
+        &self,
+        adapter: v1::AgentAdapterKind,
+        action: v1::HookManagementAction,
+        path: &Path,
+        bytes: &[u8],
+        expected: &str,
+    ) -> anyhow::Result<v1::HookManagementPlan> {
+        let adapter_impl = adapters::adapter(adapter).context("agent adapter is required")?;
+        if !bytes.is_empty() && !owns_file(bytes, expected) {
+            bail!("{} exists and is not managed by muxflow", path.display());
+        }
+        let proposed: &[u8] = match action {
+            v1::HookManagementAction::Install => expected.as_bytes(),
+            v1::HookManagementAction::Uninstall => &[],
+            _ => bytes,
+        };
+        let before_preview = bounded(String::from_utf8_lossy(bytes).into_owned());
+        let after_preview = bounded(String::from_utf8_lossy(proposed).into_owned());
+        Ok(v1::HookManagementPlan {
+            adapter_id: adapter_impl.id().into(),
+            action: action.into(),
+            config_path: path.to_string_lossy().into_owned(),
+            backup_path: String::new(),
+            managed_version: adapters::MANAGED_VERSION.to_string(),
+            summary: match action {
+                v1::HookManagementAction::Install => {
+                    "Write muxflow's managed extension file; nothing else is changed"
+                }
+                v1::HookManagementAction::Uninstall => {
+                    "Delete muxflow's managed extension file; nothing else is changed"
+                }
+                _ => "Review managed extension file",
+            }
+            .into(),
+            confirmation_token: confirmation_token(adapter, action, bytes),
+            already_current: bytes == proposed,
+            proposed_events: adapter_impl
+                .hook_events()
+                .iter()
+                .map(|event| (*event).into())
+                .collect(),
+            proposed_command: adapter_impl.hook_command(&self.helper_path),
+            ownership_marker: expected.lines().next().unwrap_or_default().into(),
+            trust_guidance: adapter_impl.hook_trust_guidance().into(),
+            before_hash: blake3::hash(bytes).to_hex().to_string(),
+            after_hash: blake3::hash(proposed).to_hex().to_string(),
+            creates_config: bytes.is_empty() && action == v1::HookManagementAction::Install,
+            removes_config: !bytes.is_empty() && action == v1::HookManagementAction::Uninstall,
+            before_preview: before_preview.0,
+            after_preview: after_preview.0,
+            diff_preview: String::new(),
+            preview_truncated: before_preview.1 || after_preview.1,
+        })
+    }
+}
+
+/// A managed file is ours when its first line is the first line of what we
+/// would write: the marker, whatever version of the rest it carries.
+fn owns_file(bytes: &[u8], expected: &str) -> bool {
+    let marker = expected.lines().next().unwrap_or_default();
+    !marker.is_empty() && bytes.split(|byte| *byte == b'\n').next() == Some(marker.as_bytes())
 }
 
 /// The wiring an agent snapshot carries, re-read only when a configuration file
@@ -1068,11 +1167,146 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        // An older managed pi extension still counts: its marker is all that
+        // ownership needs.
+        let pi = adapters::adapter(v1::AgentAdapterKind::Pi).unwrap();
+        let pi_path = pi.hook_path(&home);
+        fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+        let marker = pi
+            .managed_file(Path::new("/opt/muxflow/bin/muxflow-host"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_owned();
+        fs::write(&pi_path, format!("{marker}\n// an older extension\n")).unwrap();
         let manager = HookManager::for_home(&home);
         assert_eq!(
             manager.managed_adapters().unwrap(),
-            ["codex", "claude-code"]
+            ["codex", "claude-code", "pi"]
         );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn pi_extension_installs_reports_and_uninstalls_as_one_owned_file() {
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase8-pi-extension-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&home).unwrap();
+        let manager = HookManager::for_home(&home);
+        let pi = adapters::adapter(v1::AgentAdapterKind::Pi).unwrap();
+        let path = pi.hook_path(&home);
+        let expected = pi
+            .managed_file(Path::new("/opt/muxflow/bin/muxflow-host"))
+            .unwrap();
+        let wiring = |manager: &HookManager| {
+            manager
+                .wiring_with_running(&["pi"].into_iter().collect())
+                .into_iter()
+                .find(|(adapter, _)| adapter.id() == "pi")
+                .unwrap()
+                .1
+        };
+        assert_eq!(wiring(&manager).state, v1::AgentHookWiring::NotWired);
+
+        let review = manager
+            .review(v1::AgentAdapterKind::Pi, v1::HookManagementAction::Install)
+            .unwrap();
+        assert!(review.creates_config && !review.already_current);
+        assert!(review.backup_path.is_empty() && review.diff_preview.is_empty());
+        assert_eq!(review.after_preview, expected);
+        manager
+            .apply(
+                v1::AgentAdapterKind::Pi,
+                v1::HookManagementAction::Install,
+                &review.confirmation_token,
+            )
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(wiring(&manager).state, v1::AgentHookWiring::Wired);
+        assert!(
+            manager
+                .review(v1::AgentAdapterKind::Pi, v1::HookManagementAction::Install)
+                .unwrap()
+                .already_current
+        );
+
+        // An older extension is ours to bring current.
+        fs::write(
+            &path,
+            format!("{}\n// older\n", expected.lines().next().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(wiring(&manager).state, v1::AgentHookWiring::Partial);
+
+        let review = manager
+            .review(
+                v1::AgentAdapterKind::Pi,
+                v1::HookManagementAction::Uninstall,
+            )
+            .unwrap();
+        assert!(review.removes_config && !review.already_current);
+        manager
+            .apply(
+                v1::AgentAdapterKind::Pi,
+                v1::HookManagementAction::Uninstall,
+                &review.confirmation_token,
+            )
+            .unwrap();
+        assert!(!path.exists());
+        assert!(manager.managed_adapters().unwrap().is_empty());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn pi_extension_path_owned_by_the_user_is_never_written() {
+        use std::os::unix::fs::symlink;
+        let home = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("phase8-pi-unowned-{}", uuid::Uuid::new_v4()));
+        let manager = HookManager::for_home(&home);
+        let pi = adapters::adapter(v1::AgentAdapterKind::Pi).unwrap();
+        let path = pi.hook_path(&home);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"export default function () {}\n").unwrap();
+        let observed = manager
+            .wiring()
+            .into_iter()
+            .find(|(adapter, _)| adapter.id() == "pi")
+            .unwrap()
+            .1;
+        assert_eq!(observed.state, v1::AgentHookWiring::Unavailable);
+        assert!(observed.detail.contains("not managed by muxflow"));
+        for action in [
+            v1::HookManagementAction::Install,
+            v1::HookManagementAction::Uninstall,
+        ] {
+            assert!(manager.review(v1::AgentAdapterKind::Pi, action).is_err());
+        }
+        assert!(manager.managed_adapters().unwrap().is_empty());
+        assert_eq!(fs::read(&path).unwrap(), b"export default function () {}\n");
+
+        fs::remove_file(&path).unwrap();
+        symlink(home.join("elsewhere.ts"), &path).unwrap();
+        assert!(
+            manager
+                .review(v1::AgentAdapterKind::Pi, v1::HookManagementAction::Install)
+                .is_err()
+        );
+        // A pi directory muxflow could never have written through, such as
+        // one stowed from a dotfiles repository, holds nothing of ours and
+        // does not fail the answer for the other adapters.
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        fs::create_dir_all(home.join("dotfiles")).unwrap();
+        symlink(home.join("dotfiles"), path.parent().unwrap()).unwrap();
+        assert!(manager.managed_adapters().unwrap().is_empty());
         fs::remove_dir_all(home).unwrap();
     }
 
