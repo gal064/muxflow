@@ -20,14 +20,25 @@ pub(super) fn hook_candidates(
             native: None,
         };
     }
+    // The record already on the pane is the one this hook displaces. A resumed
+    // session's own record can still sit on the pane it came from; taking it
+    // instead left the pane's placeholder behind as a second row for the pane,
+    // and preferring any other occupant also clears one an earlier host left.
     let pane = state
         .agents
         .values()
-        .find(|record| {
+        .filter(|record| {
             record.adapter_id == adapter_id
                 && record.route.server_identity == active_server_identity
                 && ((!route.pane_id.is_empty() && record.route.pane_id == route.pane_id)
                     || record.agent_id == agent_id)
+        })
+        .min_by_key(|record| {
+            (
+                record.route.pane_id != route.pane_id,
+                record.agent_id == agent_id,
+                record.agent_id.as_str(),
+            )
         })
         .map(|record| record.agent_id.clone());
     let native = if native_session_id.is_empty() {
