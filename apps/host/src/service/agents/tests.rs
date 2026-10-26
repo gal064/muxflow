@@ -808,6 +808,124 @@ fn outage_replacement_keeps_pane_ownership_across_a_daemon_restart() {
     );
 }
 
+fn claude_session_start(id: &str, native_session_id: &str, pane_id: &str) -> v1::AgentHookEvent {
+    let mut value = event(id, 0, "SessionStart");
+    value.adapter = v1::AgentAdapterKind::ClaudeCode.into();
+    value.native_session_id = native_session_id.into();
+    value.pane_id = pane_id.into();
+    value
+}
+
+fn pane_records(runtime: &AgentRuntime, pane_id: &str) -> Vec<v1::AgentRecord> {
+    runtime
+        .snapshot_for("server-a")
+        .agents
+        .into_iter()
+        .filter(|agent| agent.route.as_ref().unwrap().pane_id == pane_id)
+        .collect()
+}
+
+/// `claude --resume` in a second pane, picking a session still open in the
+/// first, then `/branch`: the second pane must end with one row.
+#[test]
+fn resuming_a_session_into_a_detected_pane_leaves_no_placeholder() {
+    let runtime = runtime("resume-into-placeholder");
+    let mut topology = two_pane_topology();
+    topology
+        .panes
+        .iter_mut()
+        .for_each(|pane| pane.current_command = "claude".into());
+    let original = "resumed-session-8";
+    // The defect needed the session's own record to come first in the store.
+    assert!(
+        identity::native_agent_id("claude-code", "server-a", original)
+            < identity::manual_agent_id("claude-code", "server-a", "%8")
+    );
+    runtime
+        .ingest_hook_with_context(
+            &claude_session_start("start", original, "%7"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    // The resume picker is running: process detection's placeholder for %8.
+    runtime.reconcile_topology(&topology, "server-a").unwrap();
+    assert!(pane_records(&runtime, "%8")[0].native_session_id.is_empty());
+
+    runtime
+        .ingest_hook_with_context(
+            &claude_session_start("resume", original, "%8"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    let resumed = pane_records(&runtime, "%8");
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].native_session_id, original);
+
+    runtime
+        .ingest_hook_with_context(
+            &claude_session_start("branch", "branched-session", "%8"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    runtime.reconcile_topology(&topology, "server-a").unwrap();
+    let branched = pane_records(&runtime, "%8");
+    assert_eq!(branched.len(), 1);
+    assert_eq!(branched[0].native_session_id, "branched-session");
+}
+
+#[test]
+fn a_hook_clears_a_placeholder_left_beside_its_session() {
+    let runtime = runtime("stale-placeholder");
+    let mut topology = topology("claude");
+    // As above: the session's own record must come first in the store.
+    assert!(
+        identity::native_agent_id("claude-code", "server-a", "session-1")
+            < identity::manual_agent_id("claude-code", "server-a", "%7")
+    );
+    runtime.reconcile_topology(&topology, "server-a").unwrap();
+    let placeholder = runtime
+        .state
+        .lock()
+        .unwrap()
+        .agents
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    runtime
+        .ingest_hook_with_context(
+            &claude_session_start("start", "session-1", "%7"),
+            "server-a",
+            Some(&topology),
+        )
+        .unwrap();
+    // What an earlier host left behind: the placeholder beside the session.
+    runtime
+        .state
+        .lock()
+        .unwrap()
+        .agents
+        .insert(placeholder.agent_id.clone(), placeholder.clone());
+    assert_eq!(pane_records(&runtime, "%7").len(), 2);
+
+    topology.panes[0].title = "✳ next".into();
+    let mut prompt = claude_session_start("prompt", "session-1", "%7");
+    prompt.payload_json = serde_json::to_vec(&serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+    }))
+    .unwrap();
+    let event = runtime
+        .ingest_hook_with_context(&prompt, "server-a", Some(&topology))
+        .unwrap();
+    assert_eq!(event.retired_agent_ids, [placeholder.agent_id]);
+    let records = pane_records(&runtime, "%7");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].native_session_id, "session-1");
+}
+
 #[test]
 fn a_known_session_move_keeps_its_state_and_retires_the_displaced_session() {
     let runtime = runtime("known-session-move");
