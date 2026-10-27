@@ -1534,6 +1534,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
 .live-markdown .cm-editor .cm-panel.cm-search { padding: 6px 28px 6px 8px; font-size: var(--type-meta); }
 .live-markdown .cm-editor .cm-panel.cm-search label { color: var(--chrome-dim); font-size: var(--type-meta); }
 .live-markdown .cm-editor .cm-panel.cm-search input[type="checkbox"] { accent-color: var(--accent); }
+.live-markdown .cm-editor .cm-search-count { display: inline-block; min-width: 7ch; margin: 0 6px; color: var(--chrome-dim); font-variant-numeric: tabular-nums; }
 .live-markdown .cm-editor .cm-textfield {
   padding: 3px 6px; border: 1px solid var(--chrome-border); border-radius: 4px;
   background: var(--chrome-bg); color: var(--chrome-ink); font-size: var(--type-meta);
