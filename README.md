@@ -66,7 +66,7 @@ Browse, edit, and download files on the host with a Markdown preview; diff, stag
 
 ### Notifications on desktop and mobile
 
-Get told when a Codex or Claude Code agent blocks on a question or finishes, whether you are at the desk or on your phone. Lifecycle comes from reviewable [agent hooks](./docs/agent-hooks.md).
+Get told when a Codex, Claude Code or pi agent blocks on a question or finishes, whether you are at the desk or on your phone. Lifecycle comes from reviewable [agent hooks](./docs/agent-hooks.md).
 
 </td>
 <td width="50%" align="center" valign="middle"><img src="docs/assets/mobile-notifications.gif" alt="An agent notification on Android, opened into the agent's terminal" width="55%" /></td>
@@ -134,7 +134,7 @@ For Android, install the APK from the
    `~/.local/bin` on the remote machine. No root needed.
 6. Click **Connect**.
 
-Optionally, click **Set up agent status…** to get Codex and Claude Code
+Optionally, click **Set up agent status…** to get Codex, Claude Code and pi
 notifications from that machine. More in [SSH hosts](./docs/remote-host.md).
 
 ## Troubleshooting
