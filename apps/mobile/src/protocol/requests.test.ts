@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { Operation, VoiceProvider } from "./gen/envelope_pb";
-import { agentDiagnostics, resolveTerminalFile, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "./requests";
+import { Operation, TmuxActionKind, VoiceProvider } from "./gen/envelope_pb";
+import { agentDiagnostics, closeTmuxTarget, resolveTerminalFile, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "./requests";
 
 describe("terminal file request builder", () => {
   it("binds the candidate to the exact pane route and host generation", () => {
@@ -82,5 +82,20 @@ describe("voice request builders", () => {
     expect(register.voice?.operationId).toBe("");
 
     expect(voiceSession("").voice?.paneId).toBe("");
+  });
+});
+
+// The host refuses an unconfirmed close (`require_confirmation` in
+// apps/host/src/service/tmux_actions.rs), and a pinned generation would come
+// back stale_topology under an animating pane title.
+describe("close request builder", () => {
+  it("sends a confirmed, generation-free close for each target kind", () => {
+    expect(closeTmuxTarget({ kind: "pane", sessionId: "$1", windowId: "@2", paneId: "%3" }, "server-a").tmuxAction)
+      .toMatchObject({ kind: TmuxActionKind.CLOSE_PANE, sessionId: "$1", windowId: "@2", paneId: "%3", expectedServerIdentity: "server-a", expectedGeneration: 0n, confirmed: true });
+    expect(closeTmuxTarget({ kind: "window", sessionId: "$1", windowId: "@2" }, "server-a").tmuxAction)
+      .toMatchObject({ kind: TmuxActionKind.CLOSE_WINDOW, sessionId: "$1", windowId: "@2", paneId: "", confirmed: true });
+    const session = closeTmuxTarget({ kind: "session", sessionId: "$1" }, "server-a");
+    expect(session.operation).toBe(Operation.TMUX_ACTION);
+    expect(session.tmuxAction).toMatchObject({ kind: TmuxActionKind.CLOSE_SESSION, sessionId: "$1", windowId: "", paneId: "", confirmed: true });
   });
 });

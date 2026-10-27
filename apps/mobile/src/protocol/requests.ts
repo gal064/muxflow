@@ -141,6 +141,38 @@ export function createWindow(sessionId: string, expectedServerIdentity: string, 
   });
 }
 
+export type CloseTarget =
+  | { kind: "session"; sessionId: string }
+  | { kind: "window"; sessionId: string; windowId: string }
+  | { kind: "pane"; sessionId: string; windowId: string; paneId: string };
+
+const CLOSE_KINDS = {
+  session: TmuxActionKind.CLOSE_SESSION,
+  window: TmuxActionKind.CLOSE_WINDOW,
+  pane: TmuxActionKind.CLOSE_PANE,
+} as const;
+
+/**
+ * Closing a window's only pane closes the window too (tmux). The hold sheet's
+ * tap is the consent, so `confirmed` is always set. No generation is pinned:
+ * the target id plus server identity is the whole guard, as the desktop's
+ * `closePrecondition` (features/tmux/actions.ts) explains.
+ */
+export function closeTmuxTarget(target: CloseTarget, expectedServerIdentity: string): Request {
+  return create(RequestSchema, {
+    operation: Operation.TMUX_ACTION,
+    tmuxAction: create(TmuxActionSchema, {
+      kind: CLOSE_KINDS[target.kind],
+      sessionId: target.sessionId,
+      windowId: target.kind === "session" ? "" : target.windowId,
+      paneId: target.kind === "pane" ? target.paneId : "",
+      expectedServerIdentity,
+      expectedGeneration: 0n,
+      confirmed: true,
+    }),
+  });
+}
+
 export function resolveActiveRoot(
   operationId: string,
   paneId: string,
