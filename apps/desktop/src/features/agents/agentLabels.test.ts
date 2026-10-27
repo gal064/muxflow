@@ -28,6 +28,9 @@ describe("agent status glyph stripping", () => {
       .toBe("Action Required | 01a03cb0-7122-7410-a867-f5c95d64faa5");
     expect(stripAgentStatusGlyphs("[ ! ] Action Required | 01a03cb0-7122-7410-a867-f5c95d64faa5"))
       .toBe("Action Required | 01a03cb0-7122-7410-a867-f5c95d64faa5");
+     // pi names itself first: `π - <session> - <dir>`, or `π - <dir>`.
+    expect(stripAgentStatusGlyphs("π - aaa - muxflow")).toBe("aaa - muxflow");
+    expect(stripAgentStatusGlyphs("π - muxflow")).toBe("muxflow");
   });
 
   it("leaves deliberate names alone", () => {
@@ -36,6 +39,7 @@ describe("agent status glyph stripping", () => {
     expect(stripAgentStatusGlyphs("Fix tests")).toBe("Fix tests");
     // Glyphs after the first word are content, not status.
     expect(stripAgentStatusGlyphs("release ✳ notes")).toBe("release ✳ notes");
+    expect(stripAgentStatusGlyphs("π-calculus notes")).toBe("π-calculus notes");
     // A title that is nothing but the glyph keeps it rather than going blank.
     expect(stripAgentStatusGlyphs("✳")).toBe("✳");
   });
