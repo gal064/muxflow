@@ -3426,3 +3426,87 @@ fn identical_window_names_never_route_one_agents_state_to_another() {
         "the identically named window kept its own state"
     );
 }
+
+/// pi's managed extension sends its lifecycle under names ingest already
+/// understands, so a pi session takes the generic path end to end: a run, a
+/// dialog that waits for the user, the run's final message, `/new` replacing
+/// the session in the same pane, and quitting.
+#[test]
+fn a_pi_session_takes_the_generic_lifecycle_path() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("phase6-agent-pi-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let reply_calls = Arc::clone(&replies);
+    let runtime = AgentRuntime::isolated_with_sink(
+        path,
+        Box::new(move |reply| reply_calls.lock().unwrap().push(reply)),
+    );
+    let topology = topology("node");
+    let pi_hook = |id: &str, session: &str, payload: serde_json::Value| {
+        let mut value = event(id, 0, "");
+        value.adapter = v1::AgentAdapterKind::Pi.into();
+        value.adapter_id = "pi".into();
+        value.native_session_id = session.into();
+        value.payload_json = serde_json::to_vec(&payload).unwrap();
+        runtime
+            .ingest_hook_with_context(&value, "server-a", Some(&topology))
+            .unwrap()
+    };
+    let lifecycle = |event: &v1::AgentEvent| event.agent.as_ref().unwrap().lifecycle;
+    let hook = |name: &str| serde_json::json!({"hook_event_name": name, "session_id": "pi-1"});
+
+    let started = pi_hook("start", "pi-1", hook("SessionStart"));
+    assert_eq!(lifecycle(&started), v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(started.agent.as_ref().unwrap().adapter_id, "pi");
+    let first = started.agent.unwrap().agent_id;
+    for (id, name, expected) in [
+        ("run", "UserPromptSubmit", v1::AgentLifecycleState::Working),
+        (
+            "dialog",
+            "PermissionRequest",
+            v1::AgentLifecycleState::Blocked,
+        ),
+        ("answered", "PostToolUse", v1::AgentLifecycleState::Working),
+    ] {
+        assert_eq!(
+            lifecycle(&pi_hook(id, "pi-1", hook(name))),
+            expected as i32,
+            "{name}"
+        );
+    }
+    let mut stop = hook("Stop");
+    stop[adapters::LAST_ASSISTANT_MESSAGE_FIELD] = "Done.".into();
+    assert_eq!(
+        lifecycle(&pi_hook("settled", "pi-1", stop)),
+        v1::AgentLifecycleState::Idle as i32
+    );
+    assert_eq!(
+        replies
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|reply| reply.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Done."]
+    );
+
+    let replaced = pi_hook(
+        "new",
+        "pi-2",
+        serde_json::json!({"hook_event_name": "SessionStart", "session_id": "pi-2"}),
+    );
+    assert_ne!(replaced.agent.as_ref().unwrap().agent_id, first);
+    assert_eq!(replaced.retired_agent_ids, vec![first]);
+    assert_eq!(
+        lifecycle(&pi_hook(
+            "quit",
+            "pi-2",
+            serde_json::json!({"hook_event_name": "SessionEnd", "session_id": "pi-2"}),
+        )),
+        v1::AgentLifecycleState::Idle as i32
+    );
+    assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
+}

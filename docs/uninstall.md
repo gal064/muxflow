@@ -1,8 +1,8 @@
 # Upgrade and uninstall
 
-Before uninstalling, use the agent-hook review UI to uninstall managed Codex and
-Claude Code hooks. This removes only labeled app-owned entries and preserves all
-unrelated configuration.
+Before uninstalling, use the agent-hook review UI to uninstall managed Codex,
+Claude Code and pi hooks. This removes only labeled app-owned entries and
+preserves all unrelated configuration.
 
 Run the installed uninstaller:
 
