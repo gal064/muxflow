@@ -1011,6 +1011,12 @@ failed) which opens the Connection sheet (§9.8). Settings opens the phone's
 - Press and hold → a sheet with `New terminal` and `New agent`, both in the
   agent's workspace. New agent first creates the same interactive terminal as
   New terminal, then sends the configured Agent command plus Enter once.
+  A present agent's sheet ends with `Close agent` in `--danger-ink`, which
+  closes the agent's pane (`CLOSE_PANE`) with no dialog: the other panes of
+  a split window stay, and a window whose only pane it was closes with it
+  (and its workspace, if that was the last window).
+  The host then retires the agent, so its row leaves the list. A gone agent
+  has no pane and gets no close row.
 
 Acceptance: a blocked agent appears under `Blocked` with a red dot and the
 red edge bar, and counts one on the tab badge; opening it changes nothing
@@ -1045,7 +1051,7 @@ once the tab loses focus or the app is backgrounded.
   is green on the Agents tab; one with a blocked agent is red on both.
 - Tap → Workspace screen (§9.4).
 - Press and hold → the same `New terminal` / `New agent` sheet scoped to this
-  workspace.
+  workspace, ending with `Close workspace` (`CLOSE_SESSION`), no dialog.
 
 ### 9.4 Workspace — `app/workspace/[sessionId].tsx`
 
@@ -1058,6 +1064,17 @@ or nothing.
 
 Tap → Terminal screen for the window's **active pane** (`panes` where
 `windowId` matches and `active === true`; if none, lowest `index`).
+Press and hold → the same sheet, ending with `Close terminal`
+(`CLOSE_WINDOW`), no dialog. Closing the last window closes the workspace.
+Whenever the workspace disappears while this screen is focused — closed here
+or elsewhere — the screen goes back to the list.
+
+Every close from a hold sheet carries `confirmed` (the tap is the consent)
+and no generation pin, only the server identity captured when the row was
+held (tmux reuses ids on a new server) — the desktop's
+`closePrecondition` rule. A `stale_topology` refusal is sent once more at
+once (nothing ran, and the host has already published the newer baseline);
+any other refusal, or a second one, toasts `"Couldn't close: {displayMessage}"`.
 
 Two action rows above the list (48 dp each, `--chrome-raised`): a folder
 icon with `"Browse files"` → Files screen (§9.6) rooted from the

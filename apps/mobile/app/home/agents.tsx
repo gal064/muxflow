@@ -99,6 +99,10 @@ export default function AgentsScreen() {
         sessionId={actionsFor?.route.sessionId}
         title={actionsFor ? agentTitle({ adapters, windows }, actionsFor) : undefined}
         visible={actionsFor !== null}
+        // A gone agent has no pane left to close.
+        close={actionsFor?.present && actionsFor.route.paneId
+          ? { label: "Close agent", target: { kind: "pane", sessionId: actionsFor.route.sessionId, windowId: actionsFor.route.windowId, paneId: actionsFor.route.paneId } }
+          : undefined}
       />
     </>
   );

@@ -70,6 +70,7 @@ export default function WorkspacesScreen() {
       sessionId={actionsFor?.id}
       title={actionsFor ? stripAgentStatusGlyphs(actionsFor.name) : undefined}
       visible={actionsFor !== null}
+      close={actionsFor ? { label: "Close workspace", target: { kind: "session", sessionId: actionsFor.id } } : undefined}
     />
     </>
   );

@@ -1,14 +1,15 @@
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import { useCallback, useState } from "react";
+import { Stack, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { agentDisplayName, agentsInWindow, loudestPill } from "../../src/features/agents/agentViews";
 import { stripAgentStatusGlyphs } from "../../src/features/agents/agentLabels";
 import { createTerminalWindow } from "../../src/features/terminal/createWindow";
 import { activePaneForWindow } from "../../src/features/terminal/panes";
+import { WorkspaceActionsSheet } from "../../src/features/terminal/WorkspaceActionsSheet";
 import { fromRouteParam, toRouteParam } from "../../src/navigation/routeParams";
 import { getConnection, toast } from "../../src/session/connectionManager";
-import { sessionStore } from "../../src/store/sessionStore";
+import { sessionStore, type Window } from "../../src/store/sessionStore";
 import { ConnectionStrip } from "../../src/features/hosts/ConnectionStrip";
 import { ListRow } from "../../src/ui/components/ListRow";
 import { StatusPill } from "../../src/ui/components/StatusPill";
@@ -28,6 +29,18 @@ export default function WorkspaceScreen() {
   const windows = Object.values(state.windows).filter((w) => w.sessionId === sessionId).sort((a, b) => a.index - b.index);
   const connected = state.connection.state === "connected";
   const [creating, setCreating] = useState(false);
+  const [actionsFor, setActionsFor] = useState<Window | null>(null);
+
+  // Closing the last window closes the workspace with it; leave the empty
+  // screen rather than show a workspace that no longer exists.
+  // Only while focused: this screen stays mounted under a terminal or files
+  // screen, and `back()` pops whichever screen is on top.
+  const focused = useIsFocused();
+  const sessionSeen = useRef(false);
+  useEffect(() => {
+    if (session) sessionSeen.current = true;
+    else if (sessionSeen.current && connected && focused && router.canGoBack()) router.back();
+  }, [connected, focused, router, session]);
 
   const openPane = useCallback((paneId: string) => {
     router.push({ pathname: "/terminal/[paneId]", params: { paneId: toRouteParam(paneId), sessionId: toRouteParam(sessionId ?? "") } });
@@ -74,6 +87,7 @@ export default function WorkspaceScreen() {
             <ListRow
               height={metrics.windowRowHeight}
               onPress={pane ? () => openPane(pane.id) : undefined}
+              onLongPress={() => setActionsFor(item)}
               subtitle={subtitle}
               title={`${item.index}: ${stripAgentStatusGlyphs(item.name)}`}
               trailing={pill ? <StatusPill state={pill} /> : undefined}
@@ -81,6 +95,13 @@ export default function WorkspaceScreen() {
           );
         }}
         style={styles.list}
+      />
+      <WorkspaceActionsSheet
+        close={actionsFor ? { label: "Close terminal", target: { kind: "window", sessionId: actionsFor.sessionId, windowId: actionsFor.id } } : undefined}
+        onDismiss={() => setActionsFor(null)}
+        sessionId={sessionId}
+        title={actionsFor ? `${actionsFor.index}: ${stripAgentStatusGlyphs(actionsFor.name)}` : undefined}
+        visible={actionsFor !== null}
       />
     </View>
   );

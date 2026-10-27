@@ -1,9 +1,10 @@
 import { useRouter } from "expo-router";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { useStore } from "zustand";
 
 import { toRouteParam } from "../../navigation/routeParams";
+import type { CloseTarget } from "../../protocol/requests";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { prefsStore } from "../../store/prefsStore";
@@ -12,6 +13,7 @@ import { Hairline } from "../../ui/components/Button";
 import { Sheet } from "../../ui/components/Sheet";
 import { useSession } from "../../ui/hooks";
 import { colors, typeScale } from "../../ui/tokens";
+import { closeTarget } from "./closeTarget";
 import { createAgentWindow, createTerminalWindow, isConnectionScopeCurrent, type CreatedAgentWindow, type CreatedWindow } from "./createWindow";
 
 const NEW_PANE_TOPOLOGY_WAIT_MS = 3_000;
@@ -21,10 +23,12 @@ interface WorkspaceActionsSheetProps {
   title: string | undefined;
   visible: boolean;
   onDismiss(): void;
+  /** The row's own close, last and in danger ink; no dialog follows the tap. */
+  close?: { label: string; target: CloseTarget } | undefined;
 }
 
-/** The two hold shortcuts shared by workspace and agent rows. */
-export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss }: WorkspaceActionsSheetProps) {
+/** The hold shortcuts shared by workspace, window and agent rows. */
+export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss, close }: WorkspaceActionsSheetProps) {
   const router = useRouter();
   const connected = useSession((state) => state.connection.state === "connected");
   const agentCommand = useStore(prefsStore, (state) => state.agentCommand);
@@ -79,20 +83,46 @@ export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss }: 
     }
   }, [agentCommand, onDismiss, router, sessionId]);
 
+  // The server the held row belongs to. tmux restarts its ids at $0/@0/%0, so
+  // a close sent against whatever server is live at tap time could name a
+  // different, newer target. Empty is the host's "no guard": never sent.
+  const heldServerIdentity = useRef("");
+  useEffect(() => {
+    if (visible) heldServerIdentity.current = getConnection()?.serverIdentity ?? "";
+  }, [visible]);
+
+  const runClose = useCallback(async (target: CloseTarget) => {
+    const connection = getConnection();
+    const serverIdentity = heldServerIdentity.current;
+    onDismiss();
+    if (!connection || !serverIdentity) return;
+    try {
+      await closeTarget(connection, target, serverIdentity);
+    } catch (error) {
+      toast(`Couldn't close: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [onDismiss]);
+
   return (
     <Sheet onDismiss={onDismiss} title={title} visible={visible}>
       <SheetAction busy={creating === "terminal"} disabled={!connected || !sessionId || creating !== null} label="New terminal" onPress={() => void createWindow("terminal")} />
       <Hairline />
       <SheetAction busy={creating === "agent"} disabled={!connected || !sessionId || creating !== null} label="New agent" onPress={() => void createWindow("agent")} />
       <Text style={styles.command} numberOfLines={1}>Runs: {agentCommand || "Not configured"}</Text>
+      {close ? (
+        <>
+          <Hairline />
+          <SheetAction busy={false} danger disabled={!connected} label={close.label} onPress={() => void runClose(close.target)} />
+        </>
+      ) : null}
     </Sheet>
   );
 }
 
-function SheetAction({ label, onPress, disabled, busy }: { label: string; onPress(): void; disabled: boolean; busy: boolean }) {
+function SheetAction({ label, onPress, disabled, busy, danger }: { label: string; onPress(): void; disabled: boolean; busy: boolean; danger?: boolean }) {
   return (
     <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.action, pressed && styles.pressed, disabled && styles.disabled]}>
-      <Text style={styles.actionLabel}>{label}</Text>
+      <Text style={[styles.actionLabel, danger && styles.dangerLabel]}>{label}</Text>
       {busy ? <ActivityIndicator color={colors.accent} size="small" /> : null}
     </Pressable>
   );
@@ -123,6 +153,7 @@ function diagnosticErrorCode(error: unknown): string {
 const styles = StyleSheet.create({
   action: { alignItems: "center", flexDirection: "row", minHeight: 52, paddingVertical: 12 },
   actionLabel: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.rowTitle },
+  dangerLabel: { color: colors.dangerInk },
   command: { color: colors.chromeDim, fontSize: typeScale.meta, paddingBottom: 4, paddingTop: 8 },
   pressed: { opacity: 0.75 },
   disabled: { opacity: 0.45 },
