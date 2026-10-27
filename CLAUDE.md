@@ -14,3 +14,7 @@ or misbehave against the new host, or the new mobile app against the previous
 released host. Additive changes the other side ignores harmlessly do not bump.
 For every wire change, answer both directions in review. Do not add
 compatibility arms for mobile either; a mismatch is refused, not supported.
+
+## Cleanup
+
+Kill stale dev daemons once you are done.
