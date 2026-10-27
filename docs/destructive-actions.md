@@ -14,6 +14,11 @@ instant it happens. The wire contract is unchanged: those actions still carry
 `confirmed` and the authoritative precondition, captured when the command ran.
 Only the dialog is gone, and only for the tab strip.
 
+The phone asks for no confirmation at all. Its hold sheet's `Close agent`,
+`Close terminal` and `Close workspace` act on the row the user pressed and held,
+and the sheet tap is the consent; the request carries `confirmed` like the
+desktop's.
+
 A bulk close keeps the protections the dialog never provided. Dirty editors are
 flushed before anything is destroyed and the whole set is abandoned if a save
 fails; a terminal that has gained an agent since the set was built is rechecked
