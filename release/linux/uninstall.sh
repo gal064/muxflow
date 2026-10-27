@@ -62,7 +62,7 @@ if ! hook_status=$("$lib_dir/muxflow-host" hooks-status 2>/dev/null); then
   exit 73
 fi
 if grep -Fq '"managedHooksPresent":true' <<<"$hook_status"; then
-  echo "Managed Codex or Claude Code hooks are still installed." >&2
+  echo "Managed agent hooks are still installed." >&2
   echo "Uninstall them from the app first, then rerun this script." >&2
   exit 73
 fi

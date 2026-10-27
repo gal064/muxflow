@@ -28,6 +28,15 @@ export function AgentIcon({ adapterId }: { adapterId: AgentAdapterId }) {
       </g>
     </svg>;
   }
+  if (adapterId === "pi") {
+    return <svg aria-hidden="true" className="agent-icon pi" data-agent-icon="pi" data-icon-source="pi-favicon" viewBox="0 0 560 560">
+      {/* pi.dev's favicon mark, its three blocks joined into one path. Solid
+          blocks carry more ink than the blossom, so the inset is deeper. */}
+      <g transform="translate(280 280) scale(.76) translate(-280 -280)">
+        <path d="M420 280H280V140H0V0H420V280ZM560 560H420V280H560V560ZM140 560H0V140H140V280H280V420H140V560Z" />
+      </g>
+    </svg>;
+  }
   return <svg aria-hidden="true" className="agent-icon generic" data-agent-icon="agent" viewBox="0 0 16 16">
     <circle cx="8" cy="8" r="5.5" /><circle cx="6" cy="7" r=".8" /><circle cx="10" cy="7" r=".8" /><path d="M5.5 10h5" />
   </svg>;
