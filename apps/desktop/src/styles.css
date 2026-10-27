@@ -477,7 +477,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 /* A step up in the sidebar, where agents are rows of their own and the names
    beside the marks are the workspace names' size. */
 .sidebar .agent-icon { width: 13px; height: 13px; }
-.agent-icon.codex { fill: currentColor; }
+.agent-icon.codex, .agent-icon.pi { fill: currentColor; }
 .agent-icon.claude, .agent-icon.generic { fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.35; }
 /* Four strokes at 2, against Codex's solid mass. The eight-spoke asterisk at
    1.35 was more ink than the blossom and less shape, and at 12px the spokes

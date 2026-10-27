@@ -2,6 +2,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tmux_agent_protocol::v1;
 
+mod pi;
+
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
 pub(crate) const CODEX_APPROVAL_REVIEWER_FIELD: &str = "approval_reviewer";
 pub(crate) const CODEX_APPROVAL_TURN_ID_FIELD: &str = "approval_turn_id";
@@ -61,6 +63,14 @@ pub(crate) trait AgentAdapter: Send + Sync {
     fn identifies_process(&self, command: &str) -> bool;
     fn launch(&self, native_session_id: Option<&str>) -> LaunchSpec;
     fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str>;
+
+    /// The whole file this adapter installs at [`Self::hook_path`], for an
+    /// agent that loads an extension file instead of reading a hooks setting.
+    /// `None` means the managed artifact is entries merged into a JSON
+    /// configuration.
+    fn managed_file(&self, _helper_path: &Path) -> Option<String> {
+        None
+    }
 
     fn hook_path(&self, home: &Path) -> PathBuf {
         home.join(self.hook_relative_path())
@@ -346,15 +356,21 @@ impl AgentAdapter for ClaudeCodeAdapter {
 pub(crate) fn adapter(kind: v1::AgentAdapterKind) -> Option<&'static dyn AgentAdapter> {
     static CODEX: CodexAdapter = CodexAdapter;
     static CLAUDE: ClaudeCodeAdapter = ClaudeCodeAdapter;
-    [&CODEX as &dyn AgentAdapter, &CLAUDE as &dyn AgentAdapter]
-        .into_iter()
-        .find(|adapter| adapter.legacy_kind() == kind)
+    static PI: pi::PiAdapter = pi::PiAdapter;
+    [
+        &CODEX as &dyn AgentAdapter,
+        &CLAUDE as &dyn AgentAdapter,
+        &PI as &dyn AgentAdapter,
+    ]
+    .into_iter()
+    .find(|adapter| adapter.legacy_kind() == kind)
 }
 
 pub(crate) fn all() -> impl Iterator<Item = &'static dyn AgentAdapter> {
     [
         v1::AgentAdapterKind::Codex,
         v1::AgentAdapterKind::ClaudeCode,
+        v1::AgentAdapterKind::Pi,
     ]
     .into_iter()
     .filter_map(adapter)
@@ -584,7 +600,11 @@ mod tests {
     fn registry_owns_descriptors_manifests_paths_and_commands() {
         let home = Path::new("/fixture/home");
         let observed: Vec<super::super::hooks::ObservedAdapter> = all()
-            .zip([v1::AgentHookWiring::Wired, v1::AgentHookWiring::NotWired])
+            .zip([
+                v1::AgentHookWiring::Wired,
+                v1::AgentHookWiring::NotWired,
+                v1::AgentHookWiring::Absent,
+            ])
             .map(|(adapter, state)| {
                 (
                     adapter,
@@ -598,7 +618,7 @@ mod tests {
             })
             .collect();
         let descriptors = descriptors(home, &observed);
-        assert_eq!(descriptors.len(), 2);
+        assert_eq!(descriptors.len(), 3);
         let codex = adapter(v1::AgentAdapterKind::Codex).unwrap();
         assert_eq!(codex.hook_path(home), home.join(".codex/hooks.json"));
         assert_eq!(codex.hook_events().len(), 10);
@@ -633,8 +653,16 @@ mod tests {
             [
                 ("codex", v1::AgentHookWiring::Wired as i32, false),
                 ("claude-code", v1::AgentHookWiring::NotWired as i32, true),
+                ("pi", v1::AgentHookWiring::Absent as i32, false),
             ]
         );
+        let pi = adapter(v1::AgentAdapterKind::Pi).unwrap();
+        assert_eq!(
+            pi.hook_path(home),
+            home.join(".pi/agent/extensions/muxflow-agent-status.ts")
+        );
+        assert!(codex.managed_file(Path::new("/opt/muxflow-host")).is_none());
+        assert!(pi.managed_file(Path::new("/opt/muxflow-host")).is_some());
     }
 
     /// Only a running subagent extends the user's turn. Ordinary background

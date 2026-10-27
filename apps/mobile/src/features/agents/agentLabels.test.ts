@@ -50,12 +50,13 @@ describe("agentSessionLabel (the row's name: the tab, not the adapter)", () => {
     expect(agentSessionLabel(agent({ windowName: "⠋", displayName: "", adapterId: "codex" }), []))
       .toBe("Codex");
     expect(agentSessionLabel(agent({ windowName: "", displayName: "", adapterId: "claude-code" }), [])).toBe("Claude");
+    expect(agentSessionLabel(agent({ windowName: "", displayName: "", adapterId: "pi" }), [])).toBe("Pi");
     expect(agentSessionLabel(agent({ windowName: "", displayName: "", adapterId: "claude" }), [])).toBe("Agent");
     expect(agentSessionLabel(agent({ windowName: "", displayName: "", adapterId: "other" }), [])).toBe("Agent");
   });
 
   it("rejects generic and machine tab names, case-insensitively", () => {
-    for (const generic of ["agent", "Codex", "claude", "Claude-Code", "CLAUDE"]) {
+    for (const generic of ["agent", "Codex", "claude", "Claude-Code", "CLAUDE", "pi"]) {
       expect(agentSessionLabel(agent({ windowName: generic, displayName: "Fix tests" }), []), generic).toBe("Fix tests");
     }
     expect(agentSessionLabel(agent({ windowName: "01a03cb0-7122-7410-a867-f5c95d64faa5", displayName: "Fix tests" }), []))
