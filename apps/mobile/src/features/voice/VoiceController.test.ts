@@ -6,7 +6,7 @@ import type { VoiceHaptics } from "./haptics";
 import type { VoiceTones } from "./tones";
 import { VoiceRecorderCoordinator } from "./recorderCoordinator";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, speechResponse, statusResponse, transcriptResponse } from "./testing";
-import { MIN_UTTERANCE_MS, SESSION_REFRESH_MS, VoiceController } from "./VoiceController";
+import { MAX_UTTERANCE_MS, MIN_UTTERANCE_MS, SESSION_REFRESH_MS, VoiceController } from "./VoiceController";
 import { createVoiceStore, latestReply } from "./voiceStore";
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -251,6 +251,56 @@ describe("VoiceController", () => {
     await h.controller.endUtterance();
     expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
     expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(2);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+  });
+
+  it("sends a take still recording at the maximum length once, and the late release sends nothing", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(MAX_UTTERANCE_MS - 1);
+    expect(h.recorder.recording).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
+    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(2);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+
+    await h.controller.endUtterance();
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
+  });
+
+  it("a press whose recorder never started does not end a later take early", async () => {
+    const h = harness();
+    h.controller.beginUtterance(); // not focused: the recorder is not armed
+    await settle();
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+
+    await vi.advanceTimersByTimeAsync(100_000);
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(h.recorder.recording).toBe(true);
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+  });
+
+  it("a take released or canceled before the maximum length is not sent again", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    await h.controller.endUtterance();
+    h.controller.beginUtterance();
+    await settle();
+    await h.controller.cancelUtterance();
+
+    await vi.advanceTimersByTimeAsync(MAX_UTTERANCE_MS);
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
     expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
   });
 
