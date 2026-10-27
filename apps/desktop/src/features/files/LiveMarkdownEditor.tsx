@@ -4,6 +4,7 @@ import { Annotation, Compartment, EditorSelection, EditorState, Prec, Transactio
 import { EditorView, drawSelection, keymap } from "@codemirror/view";
 import { useEffect, useRef } from "react";
 import { continueMarkup, liveMarkdown, toggleInline } from "./liveMarkdown";
+import { searchCount } from "./searchCount";
 
 export interface LiveMarkdownEditorProps {
   /** Stable identity of the buffer, so the caret and scroll survive a mode switch. */
@@ -98,6 +99,7 @@ export function LiveMarkdownEditor(props: LiveMarkdownEditorProps) {
           // where WebKit's native caret can disappear or sit inside a marker.
           drawSelection(),
           search({ top: true }),
+          searchCount,
           highlightSelectionMatches(),
           readOnly.current.of(editable(initial.readOnly)),
           Prec.high(keymap.of([
