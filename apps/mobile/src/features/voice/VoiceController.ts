@@ -61,6 +61,12 @@ const UTTERANCE_STEPS = new Set(["record", "recorder.stop", "transcribe", "input
 /** Releases shorter than this are a mis-tap, not an utterance (§5.2). */
 export const MIN_UTTERANCE_MS = 300;
 /**
+ * A take still recording this long after the press is sent as if released.
+ * The host refuses audio over 120 s (`MAX_AUDIO_MILLIS`); the gap covers
+ * `TAIL_HOLD_MS` and the encoder's clock not matching the phone's.
+ */
+export const MAX_UTTERANCE_MS = 115_000;
+/**
  * How long the recorder keeps running after the finger lifts. Android's
  * MediaRecorder drops the audio still in its encoder pipeline when stopped
  * (the phone's clips came out ~200 ms shorter than the hold), and a speaker
@@ -104,6 +110,8 @@ export class VoiceController {
   private arming: Promise<void> | undefined;
   /** A right-swipe or locked-screen exit is stopping and discarding the current take. */
   private canceling: Promise<void> | undefined;
+  /** Ends the current take at `MAX_UTTERANCE_MS` so it is sent instead of refused. */
+  private autoSendTimer: ReturnType<typeof setTimeout> | undefined;
   /** Stable identity for this controller's entry in the shared listening set. */
   private readonly recorderOwner = Symbol("voice-recorder-owner");
   private readonly unsubscribePlayer: () => void;
@@ -229,6 +237,7 @@ export class VoiceController {
     this.disposed = true;
     this.focused = false;
     this.wantRegistered = false;
+    this.clearAutoSend();
     this.disarm(true);
     this.stopRefreshTimer();
     this.unsubscribePlayer();
@@ -323,6 +332,14 @@ export class VoiceController {
           this.setPhaseIfAlive("idle");
           return;
         }
+        // Armed only once the recorder runs: a start that fails never leaves
+        // a timer behind to end some later take early.
+        this.clearAutoSend();
+        this.autoSendTimer = setTimeout(() => {
+          this.autoSendTimer = undefined;
+          this.log("utterance.autoSend");
+          void this.endUtterance();
+        }, MAX_UTTERANCE_MS);
         this.options.haptics?.listening();
       } catch (error) {
         this.setListening(false);
@@ -343,6 +360,7 @@ export class VoiceController {
   async cancelUtterance(): Promise<void> {
     if (this.canceling) return this.canceling;
     if (this.recordingPhase() === undefined) return;
+    this.clearAutoSend();
     this.options.store.getState().setPhase(this.sessionKey, "canceling");
     this.log("utterance.canceled");
     const { recorder, files } = this.options;
@@ -372,6 +390,7 @@ export class VoiceController {
     if (this.disposed) return;
     const store = this.options.store.getState();
     if (this.recordingPhase() === undefined) return;
+    this.clearAutoSend();
     store.setPhase(this.sessionKey, "transcribing");
     const { recorder, files } = this.options;
     // The press may still be waiting for the recorder (see beginUtterance).
@@ -748,6 +767,11 @@ export class VoiceController {
       .finally(() => {
         this.arming = undefined;
       });
+  }
+
+  private clearAutoSend(): void {
+    if (this.autoSendTimer !== undefined) clearTimeout(this.autoSendTimer);
+    this.autoSendTimer = undefined;
   }
 
   private recordingPhase(): "recording" | "recordingLocked" | undefined {
