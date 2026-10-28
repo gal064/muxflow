@@ -1318,6 +1318,7 @@ body[data-pointer-drag="true"], body[data-pointer-drag="true"] * { cursor: grabb
   background: var(--chrome-bg); color: var(--chrome-ink); font-size: var(--type-row);
 }
 .automation-editor-body [aria-invalid="true"] { border-color: var(--danger); }
+.automation-editor-body .automation-editor-warning { color: var(--warn); }
 .automation-editor-body textarea { resize: vertical; line-height: 1.45; }
 .automation-editor-body .mono { font-family: var(--font-mono); font-size: 12px; }
 .automation-editor-body input[readonly] { border-style: dashed; background: transparent; color: var(--chrome-dim); }

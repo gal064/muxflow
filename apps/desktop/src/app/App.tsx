@@ -328,7 +328,8 @@ export function App() {
     connected: link.hostState.phase === "connected",
     serverIdentity: link.hostState.serverIdentity,
     hasPane: (paneId: string) => Object.hasOwn(link.hostState.panes, paneId),
-  })), [links, profiles]);
+    startDirectory: appState.workspaceDefaults[link.profileId]?.directory,
+  })), [links, profiles, appState.workspaceDefaults]);
   const portForwards = usePortForwards(
     useMemo(() => portHosts.map((host) => host.profileId), [portHosts]),
     connectionController.profilesHydrated,

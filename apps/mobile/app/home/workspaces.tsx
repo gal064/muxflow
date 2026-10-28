@@ -70,6 +70,7 @@ export default function WorkspacesScreen() {
       sessionId={actionsFor?.id}
       title={actionsFor ? stripAgentStatusGlyphs(actionsFor.name) : undefined}
       visible={actionsFor !== null}
+      pin={actionsFor ? { label: actionsFor.pinned ? "Unpin workspace" : "Pin workspace", target: { kind: "session", sessionId: actionsFor.id }, pinned: !actionsFor.pinned } : undefined}
       close={actionsFor ? { label: "Close workspace", target: { kind: "session", sessionId: actionsFor.id } } : undefined}
     />
     </>

@@ -294,4 +294,24 @@ describe("Automation editor", () => {
     expect(api.remove).toHaveBeenCalledWith("client-1", "fix-ci", "g1");
     expect(onSaved).toHaveBeenCalledWith(listing([]), "fix-ci");
   });
+
+  it("starts a new automation in the host's start directory, and an existing one where it was", async () => {
+    const cwd = (renderer: ReactTestRenderer) => renderer.root.findByProps({ name: "cwd" }).props.value;
+    expect(cwd(await render(editor({ startDirectory: "~/dev/muxflow" })))).toBe("~/dev/muxflow");
+    expect(cwd(await render(editor()))).toBe("~/");
+    expect(cwd(await render(editor({ startDirectory: "~/dev", summary: summary({ cwd: "/srv/app" }) })))).toBe("/srv/app");
+  });
+
+  it("warns that a Claude Code automation in the home folder asks for trust every run", async () => {
+    const warning = "Claude Code never remembers trust for your home folder";
+    const renderer = await render(editor());
+    expect(text(renderer)).toContain("ask before working in a folder they don't trust yet");
+    expect(text(renderer)).toContain(warning);
+    await act(async () => { renderer.root.findByProps({ name: "cwd" }).props.onChange({ target: { value: "~/dev" } }); });
+    expect(text(renderer)).not.toContain(warning);
+    const codex = await render(editor({ summary: summary({ cwd: "~" }) }));
+    expect(text(codex)).not.toContain(warning);
+    const custom = await render(editor({ summary: summary({ agent: "custom", command: "cx", cwd: "~" }) }));
+    expect(text(custom)).not.toContain("trust");
+  });
 });

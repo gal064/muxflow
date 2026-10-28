@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Operation, TmuxActionKind, VoiceProvider } from "./gen/envelope_pb";
-import { agentDiagnostics, closeTmuxTarget, resolveTerminalFile, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "./requests";
+import { agentDiagnostics, closeTmuxTarget, resolveTerminalFile, setPinnedTarget, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "./requests";
 
 describe("terminal file request builder", () => {
   it("binds the candidate to the exact pane route and host generation", () => {
@@ -97,5 +97,14 @@ describe("close request builder", () => {
     const session = closeTmuxTarget({ kind: "session", sessionId: "$1" }, "server-a");
     expect(session.operation).toBe(Operation.TMUX_ACTION);
     expect(session.tmuxAction).toMatchObject({ kind: TmuxActionKind.CLOSE_SESSION, sessionId: "$1", windowId: "", paneId: "", confirmed: true });
+  });
+});
+
+describe("pin request builder", () => {
+  it("writes the given pin for a workspace, or for a tab inside it, without a generation", () => {
+    expect(setPinnedTarget({ kind: "session", sessionId: "$1" }, true, "server-a").tmuxAction)
+      .toMatchObject({ kind: TmuxActionKind.SET_PINNED, sessionId: "$1", windowId: "", pinned: true, expectedServerIdentity: "server-a", expectedGeneration: 0n });
+    expect(setPinnedTarget({ kind: "window", sessionId: "$1", windowId: "@2" }, false, "server-a").tmuxAction)
+      .toMatchObject({ kind: TmuxActionKind.SET_PINNED, sessionId: "$1", windowId: "@2", pinned: false });
   });
 });

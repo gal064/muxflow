@@ -29,6 +29,7 @@ export default function AgentsScreen() {
   const windows = useSession((s) => s.windows);
   const [refreshing, setRefreshing] = useState(false);
   const [actionsFor, setActionsFor] = useState<Agent | null>(null);
+  const heldWindow = actionsFor?.present ? windows[actionsFor.route.windowId] : undefined;
   const screenSummary = useCallback(() => {
     const window = Dimensions.get("window");
     const keyboard = Keyboard.metrics();
@@ -99,6 +100,8 @@ export default function AgentsScreen() {
         sessionId={actionsFor?.route.sessionId}
         title={actionsFor ? agentTitle({ adapters, windows }, actionsFor) : undefined}
         visible={actionsFor !== null}
+        // An agent's pin is its tab's, as on the desktop; a gone agent's tab may be gone too.
+        pin={heldWindow ? { label: heldWindow.pinned ? "Unpin agent" : "Pin agent", target: { kind: "window", sessionId: heldWindow.sessionId, windowId: heldWindow.id }, pinned: !heldWindow.pinned } : undefined}
         // A gone agent has no pane left to close.
         close={actionsFor?.present && actionsFor.route.paneId
           ? { label: "Close agent", target: { kind: "pane", sessionId: actionsFor.route.sessionId, windowId: actionsFor.route.windowId, paneId: actionsFor.route.paneId } }

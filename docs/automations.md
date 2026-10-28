@@ -79,10 +79,13 @@ Things to know:
   Older ones close once their run has finished or passed `maxRuntimeMinutes`,
   unless an agent in the tab is working or waiting on you. Tabs of an
   automation you delete stay until you close them.
-- **First run in a new directory.** On the machine tested, neither default
-  command stopped at a folder-trust or auto-mode confirmation. If an agent version
-  does, the run waits in its tab, reading as `working` (or `needs_attention`
-  if a hook reports the question), until you answer it once.
+- **Folder trust.** Claude Code and Codex ask before working in a folder they
+  don't trust yet (Codex only inside a git repository). The run waits in its
+  tab on that question, reading as `working` (or `needs_attention` if a hook
+  reports the question), until someone answers it. Trust the folder once by
+  opening the agent there; Run now shows whether a folder is ready. Claude Code
+  never saves trust for the home directory, so a Claude automation in `~` asks
+  on every run. The editor warns about that case.
 
 ## Decisions
 
@@ -91,7 +94,10 @@ Settled with the user:
 - The helper owns the automations, stores them as JSON, and runs them whether
   or not a desktop is connected.
 - There is one `automation` workspace per host, and each run is a new tab in it.
-- Each automation has its own working directory.
+- Each automation has its own working directory. A new one starts from
+  Settings' "Start in directory" for that host, or `~/` when that is unset.
+- The helper does not skip the agents' folder-trust question: no flag, setting
+  or config write trusts a folder on the user's behalf.
 - Schedules are cron only, evaluated in the host's local time. There are no
   presets and no time zone field.
 - There is no catch-up for missed runs. If the helper is down, asleep or not

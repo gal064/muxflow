@@ -5,7 +5,7 @@ import { Operation, ResponseSchema, TmuxActionKind } from "../../protocol/gen/en
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../../protocol/testing/fakeTransport";
 import { createSessionStore } from "../../store/sessionStore";
 import { logLines, logStore } from "../../session/log";
-import { closeTarget } from "./closeTarget";
+import { closeTarget, pinTarget } from "./closeTarget";
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
 
@@ -63,5 +63,19 @@ describe("Close from the hold sheet (§9.3, §9.4)", () => {
     transport.feed(hostEnvelope({ case: "response", value: stale() }, { requestId: second.requestId }));
     await expect(pending).rejects.toMatchObject({ code: "stale_topology" });
     expect(transport.drain()).toHaveLength(0);
+  });
+
+  it("pins and unpins the same way, once more after stale_topology", async () => {
+    const { transport, connection } = await connected();
+    const pending = pinTarget(connection, { kind: "window", sessionId: "$1", windowId: "@2" }, true, "server-held");
+    const [first] = transport.drain();
+    if (first?.payload.case !== "request") throw new Error("expected a request");
+    expect(first.payload.value.tmuxAction).toMatchObject({ kind: TmuxActionKind.SET_PINNED, windowId: "@2", pinned: true, expectedServerIdentity: "server-held" });
+    transport.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "stale_topology", displayMessage: "stale topology" }) }, { requestId: first.requestId }));
+    await settle();
+    const [second] = transport.drain();
+    transport.feed(hostEnvelope({ case: "response", value: okResponse({}) }, { requestId: second!.requestId }));
+    await expect(pending).resolves.toBeUndefined();
+    expect(logLines().join("\n")).toContain("pin.target response kind=window attempt=2 target=@2");
   });
 });
