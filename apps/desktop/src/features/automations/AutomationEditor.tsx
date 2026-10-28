@@ -32,6 +32,9 @@ export function commandPreview(definition: AutomationDefinition, stateDir: strin
   return `${program} "$(cat '${stateDir}/automations/prompts/${definition.id || "<id>"}-<n>.txt')"`;
 }
 
+/** Claude Code never saves trust for the home directory, so it asks on every run there. */
+const isHome = (cwd: string) => /^~\/*$/.test(cwd.trim());
+
 const blank: AutomationDefinition = {
   id: "",
   name: "",
@@ -54,6 +57,8 @@ interface AutomationEditorProps {
   existingIds: readonly string[];
   /** Absent for a new automation. */
   summary?: AutomationSummary;
+  /** Where a new automation starts: Settings' start directory for new workspaces. */
+  startDirectory?: string;
   onClose(): void;
   onSaved(listing: AutomationListing, deletedId?: string): void;
   /** The file changed on the host since it was opened: list it again. */
@@ -65,7 +70,11 @@ export function AutomationEditor(props: AutomationEditorProps) {
   const scheduleHintId = useId();
   const errorId = useId();
   const dialog = useModalDialog<HTMLElement>(props.onClose);
-  const [draft, setDraft] = useState<AutomationDefinition>(() => ({ ...blank, ...props.summary?.definition }));
+  const [draft, setDraft] = useState<AutomationDefinition>(() => ({
+    ...blank,
+    cwd: props.startDirectory || blank.cwd,
+    ...props.summary?.definition,
+  }));
   const [preview, setPreview] = useState<SchedulePreview>();
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -213,7 +222,11 @@ export function AutomationEditor(props: AutomationEditorProps) {
         <label>Working directory
           <input {...flag("cwd")} className="mono" name="cwd" onChange={(event) => update({ cwd: event.target.value })} value={draft.cwd} />
         </label>
-        <p className="settings-hint">On {props.hostLabel}. Checked when you save.</p>
+        <p className="settings-hint">On {props.hostLabel}. Checked when you save.{draft.agent === "custom" ? null
+          : " Claude Code and Codex ask before working in a folder they don't trust yet, and an automation will wait on that question. Open the agent in this folder once and trust it, or use Run now to check."}</p>
+        {draft.agent === "claude" && isHome(draft.cwd) && <p className="settings-hint automation-editor-warning" role="note">
+          Claude Code never remembers trust for your home folder, so this automation will stop at the trust question every time. Choose a project folder.
+        </p>}
         <label>Schedule (cron)
           <input aria-describedby={scheduleHintId} aria-invalid={Boolean(preview?.scheduleError)} className="mono" onChange={(event) => update({ schedule: event.target.value })} value={draft.schedule} />
         </label>

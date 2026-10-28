@@ -173,6 +173,27 @@ export function closeTmuxTarget(target: CloseTarget, expectedServerIdentity: str
   });
 }
 
+/** A workspace pin names no window; an agent's pin is its tab's, as on the desktop. */
+export type PinTarget = Exclude<CloseTarget, { kind: "pane" }>;
+
+/**
+ * SET_PINNED writes the flag it is given, so a repeat is harmless. Guarded like
+ * a close: by target id and server identity, no generation.
+ */
+export function setPinnedTarget(target: PinTarget, pinned: boolean, expectedServerIdentity: string): Request {
+  return create(RequestSchema, {
+    operation: Operation.TMUX_ACTION,
+    tmuxAction: create(TmuxActionSchema, {
+      kind: TmuxActionKind.SET_PINNED,
+      sessionId: target.sessionId,
+      windowId: target.kind === "window" ? target.windowId : "",
+      pinned,
+      expectedServerIdentity,
+      expectedGeneration: 0n,
+    }),
+  });
+}
+
 export function resolveActiveRoot(
   operationId: string,
   paneId: string,

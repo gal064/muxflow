@@ -1011,7 +1011,9 @@ failed) which opens the Connection sheet (§9.8). Settings opens the phone's
 - Press and hold → a sheet with `New terminal` and `New agent`, both in the
   agent's workspace. New agent first creates the same interactive terminal as
   New terminal, then sends the configured Agent command plus Enter once.
-  A present agent's sheet ends with `Close agent` in `--danger-ink`, which
+  A present agent's sheet then offers `Pin agent` / `Unpin agent`, which
+  pins its tab (`SET_PINNED` with the window), as the desktop's agent row does.
+  It ends with `Close agent` in `--danger-ink`, which
   closes the agent's pane (`CLOSE_PANE`) with no dialog: the other panes of
   a split window stay, and a window whose only pane it was closes with it
   (and its workspace, if that was the last window).
@@ -1051,7 +1053,8 @@ once the tab loses focus or the app is backgrounded.
   is green on the Agents tab; one with a blocked agent is red on both.
 - Tap → Workspace screen (§9.4).
 - Press and hold → the same `New terminal` / `New agent` sheet scoped to this
-  workspace, ending with `Close workspace` (`CLOSE_SESSION`), no dialog.
+  workspace, then `Pin workspace` / `Unpin workspace` (`SET_PINNED`), ending
+  with `Close workspace` (`CLOSE_SESSION`), no dialog.
 
 ### 9.4 Workspace — `app/workspace/[sessionId].tsx`
 
@@ -1064,7 +1067,8 @@ or nothing.
 
 Tap → Terminal screen for the window's **active pane** (`panes` where
 `windowId` matches and `active === true`; if none, lowest `index`).
-Press and hold → the same sheet, ending with `Close terminal`
+Press and hold → the same sheet, then `Pin terminal` / `Unpin terminal`
+(`SET_PINNED` with the window), ending with `Close terminal`
 (`CLOSE_WINDOW`), no dialog. Closing the last window closes the workspace.
 Whenever the workspace disappears while this screen is focused — closed here
 or elsewhere — the screen goes back to the list.
@@ -1075,6 +1079,9 @@ held (tmux reuses ids on a new server) — the desktop's
 `closePrecondition` rule. A `stale_topology` refusal is sent once more at
 once (nothing ran, and the host has already published the newer baseline);
 any other refusal, or a second one, toasts `"Couldn't close: {displayMessage}"`.
+A pin or unpin is sent the same way, without `confirmed` (it writes the flag
+it names, so a repeat is harmless), and a failure toasts
+`"Couldn't pin: …"` / `"Couldn't unpin: …"`.
 
 Two action rows above the list (48 dp each, `--chrome-raised`): a folder
 icon with `"Browse files"` → Files screen (§9.6) rooted from the
