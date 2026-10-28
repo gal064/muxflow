@@ -1,6 +1,7 @@
 import { DiffEditor } from "@monaco-editor/react";
 import { languageForPath } from "../files/editorLanguage";
 import { useEditorLayout } from "../files/editorLayout";
+import { editorTextOptions } from "../files/editorText";
 import { ADE_MONACO_THEME } from "../files/monaco";
 
 export interface GitDiffEditorProps {
@@ -34,6 +35,7 @@ export function GitDiffEditor(props: GitDiffEditorProps) {
       attachLayout(editor);
     }}
     options={{
+      ...editorTextOptions(),
       // Left on for the reason stated in `FileEditor`: disabling it is gated on
       // resize/restore coverage that needs the packaged macOS lane.
       automaticLayout: true,
