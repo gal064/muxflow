@@ -1,6 +1,7 @@
 import Editor from "@monaco-editor/react";
 import { languageForPath } from "./editorLanguage";
 import { useEditorLayout } from "./editorLayout";
+import { editorTextOptions } from "./editorText";
 import { ADE_MONACO_THEME } from "./monaco";
 
 export interface FileEditorProps {
@@ -35,6 +36,7 @@ export function FileEditor(props: FileEditorProps) {
       attachLayout(editor);
     }}
     options={{
+      ...editorTextOptions(),
       // Left on, and it is a deferral rather than a preference. Turning it off
       // is gated on coverage of every resize and restore path, and the paths
       // the custom observer in `editorLayout.ts` exists for — WKWebView not

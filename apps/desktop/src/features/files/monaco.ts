@@ -1,5 +1,5 @@
 import { loader } from "@monaco-editor/react";
-import { terminalTheme, tokenWithFallback } from "../terminal/theme";
+import { terminalFacesReady, terminalTheme, tokenWithFallback } from "../terminal/theme";
 import { currentTheme, onAppearanceChange } from "../../ui/appearance";
 import * as monaco from "monaco-editor";
 import CssWorker from "monaco-editor/language/css/css.worker?worker";
@@ -7,6 +7,7 @@ import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import HtmlWorker from "monaco-editor/language/html/html.worker?worker";
 import JsonWorker from "monaco-editor/language/json/json.worker?worker";
 import TypeScriptWorker from "monaco-editor/language/typescript/ts.worker?worker";
+import { extendPython, extendTypeScript } from "./monarch";
 
 self.MonacoEnvironment = {
   getWorker(_workerId: string, label: string): Worker {
@@ -22,6 +23,24 @@ self.MonacoEnvironment = {
 // work offline and remote-host selection must never influence editor assets.
 loader.config({ monaco });
 
+// Replaces the bundled grammar factories with the extended ones. A factory, not
+// a provider, so each grammar still loads the first time a file in that
+// language opens, from the same chunk the bundled factory would have used.
+monaco.languages.registerTokensProviderFactory("python", {
+  create: () => import("monaco-editor/languages/definitions/python/python").then((m) => extendPython(m.language)),
+});
+monaco.languages.registerTokensProviderFactory("typescript", {
+  create: () => import("monaco-editor/languages/definitions/typescript/typescript").then((m) => extendTypeScript(m.language)),
+});
+monaco.languages.registerTokensProviderFactory("javascript", {
+  create: () => import("monaco-editor/languages/definitions/javascript/javascript").then((m) => extendTypeScript(m.language)),
+});
+
+// Monaco measures glyph widths once, when the first editor mounts. If that is
+// before JetBrains Mono has loaded it measures the fallback face, and every
+// cursor and selection is then off by the difference.
+void terminalFacesReady().then(() => monaco.editor.remeasureFonts());
+
 /**
  * The document surfaces read from the same token file as everything else.
  *
@@ -32,23 +51,20 @@ loader.config({ monaco });
  * second application, and it is exactly what 11.1.1's "one token file" exists
  * to prevent.
  *
- * The syntax colours are the terminal's ANSI palette. Phase 11 left them at
- * `vs-dark`'s, on the argument that the token table said nothing about them —
- * true then, when the editor ground was a near-black the vs-dark colours were
- * tuned for. The ground is `--chrome-bg` and `--chrome-bg` is now the terminal
- * background, which vs-dark's darker syntax colours sit on at a contrast they
- * were never chosen for. The mapping below is deliberately small: Monaco's token
- * names are coarse, and a full TextMate table would be a much larger claim than
- * "an editor and a terminal showing the same file should agree about what a
- * string looks like".
+ * The syntax colours are the terminal's ANSI palette, and plain code is the
+ * terminal's own foreground, so an editor and a terminal showing the same file
+ * agree about what text and a string look like. `vs-dark`'s colours were tuned
+ * for a near-black ground; this ground is the terminal background, and the
+ * chrome ink it used to draw code in left most of a file at a contrast well
+ * below what the terminal beside it shows.
  *
- * Small also means each row has to earn its place, so two were checked against
- * the bundled Monarch grammars rather than assumed:
+ * The rows follow what the grammars emit. Python and TypeScript go through
+ * `monarch.ts`, which adds `function`, `predefined`, `constant`,
+ * `variable.language`, `annotation` and Python's `operator`; the other bundled
+ * grammars emit a subset of the same names. Two rows are deliberate choices:
  *
- *  - `function` and `variable` are absent, because nothing emits them where it
- *    would show. TypeScript and Rust emit `identifier`, never `function`, and
- *    `variable` appears only in Markdown's link definitions. A rule that colours
- *    nothing is a rule nobody notices going wrong.
+ *  - Punctuation and operators take `--chrome-dim`, so the names between them
+ *    carry the line.
  *  - `comment` is the one row that is deliberately *not* an ANSI colour.
  *    `--term-8` is Ghostty's dim grey — dim against a terminal's brighter
  *    neighbours, and only 2.44:1 on this ground, which is worse than the
@@ -79,14 +95,24 @@ export function defineAdeMonacoTheme(root: Element | undefined = globalThis.docu
     inherit: true,
     rules: [
       { token: "comment", foreground: token("--chrome-dim"), fontStyle: "italic" },
-      { token: "keyword", foreground: ansi.magenta },
+      { token: "keyword", foreground: ansi.brightMagenta },
       { token: "string", foreground: ansi.green },
       { token: "number", foreground: ansi.yellow },
+      { token: "constant", foreground: ansi.yellow },
+      { token: "annotation", foreground: ansi.yellow },
       { token: "type", foreground: ansi.cyan },
+      { token: "predefined", foreground: ansi.cyan },
+      { token: "function", foreground: ansi.brightBlue },
+      { token: "variable.language", foreground: ansi.red, fontStyle: "italic" },
+      { token: "regexp", foreground: ansi.red },
+      { token: "regexp.escape", foreground: ansi.yellow },
+      { token: "delimiter", foreground: token("--chrome-dim") },
+      { token: "operator", foreground: token("--chrome-dim") },
     ],
     colors: {
       "editor.background": token("--chrome-bg"),
-      "editor.foreground": token("--chrome-ink"),
+      // `terminalTheme` always fills the foreground; the type just cannot say so.
+      "editor.foreground": ansi.foreground ?? token("--chrome-ink"),
       "editorGutter.background": token("--chrome-bg"),
       "editorLineNumber.foreground": token("--chrome-faint"),
       "editorLineNumber.activeForeground": token("--chrome-ink"),
@@ -95,7 +121,13 @@ export function defineAdeMonacoTheme(root: Element | undefined = globalThis.docu
       "editorCursor.foreground": token("--accent"),
       "editorWidget.background": token("--chrome-raised"),
       "editorWidget.border": token("--chrome-border"),
-      "editorIndentGuide.background1": token("--chrome-hairline"),
+      "editorIndentGuide.background1": token("--chrome-border"),
+      "editorIndentGuide.activeBackground1": token("--chrome-faint"),
+      // Bracket-pair colouring is on by default and otherwise cycles Monaco's
+      // own gold, orchid and azure, the loudest colours on any line.
+      "editorBracketHighlight.foreground1": ansi.yellow ?? token("--chrome-ink"),
+      "editorBracketHighlight.foreground2": ansi.magenta ?? token("--chrome-ink"),
+      "editorBracketHighlight.foreground3": ansi.blue ?? token("--chrome-ink"),
       "editorOverviewRuler.border": token("--chrome-hairline"),
       "scrollbarSlider.background": token("--chrome-border"),
       "scrollbarSlider.hoverBackground": token("--chrome-hover"),
