@@ -221,6 +221,7 @@ export function AutomationsPanel(props: PanelExtensionProps) {
         setEditing(undefined);
       }}
       onStale={reload}
+      startDirectory={host.startDirectory}
       stateDir={listing.stateDir}
       summary={editing.summary}
     />}

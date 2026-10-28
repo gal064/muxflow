@@ -12,6 +12,8 @@ export interface PanelHost {
   serverIdentity?: string;
   /** Whether a pane is open on that server now. */
   hasPane(paneId: string): boolean;
+  /** Settings' "Start in directory" for new workspaces on this host, if set. */
+  startDirectory?: string;
 }
 
 export interface PanelExtensionProps {
