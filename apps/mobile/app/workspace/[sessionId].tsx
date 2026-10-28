@@ -97,6 +97,7 @@ export default function WorkspaceScreen() {
         style={styles.list}
       />
       <WorkspaceActionsSheet
+        pin={actionsFor ? { label: actionsFor.pinned ? "Unpin terminal" : "Pin terminal", target: { kind: "window", sessionId: actionsFor.sessionId, windowId: actionsFor.id }, pinned: !actionsFor.pinned } : undefined}
         close={actionsFor ? { label: "Close terminal", target: { kind: "window", sessionId: actionsFor.sessionId, windowId: actionsFor.id } } : undefined}
         onDismiss={() => setActionsFor(null)}
         sessionId={sessionId}
