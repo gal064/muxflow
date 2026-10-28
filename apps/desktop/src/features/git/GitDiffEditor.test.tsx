@@ -27,4 +27,13 @@ describe("GitDiffEditor", () => {
     expect(lastOptions?.renderSideBySide).toBe(true);
     expect(lastOptions?.enableSplitViewResizing).toBe(true);
   });
+
+  it("draws code in the terminal's face and size", () => {
+    renderToStaticMarkup(<GitDiffEditor
+      modified={"b\n"} modifiedModelPath="git://modified/a.ts" onReady={() => {}}
+      original={"a\n"} originalModelPath="git://original/a.ts" path="a.ts"
+    />);
+    expect(lastOptions?.fontFamily).toContain("JetBrains Mono");
+    expect(lastOptions?.fontSize).toBe(13);
+  });
 });
