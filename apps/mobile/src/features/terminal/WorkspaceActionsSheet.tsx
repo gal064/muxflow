@@ -4,7 +4,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-nati
 import { useStore } from "zustand";
 
 import { toRouteParam } from "../../navigation/routeParams";
-import type { CloseTarget } from "../../protocol/requests";
+import type { CloseTarget, PinTarget } from "../../protocol/requests";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { prefsStore } from "../../store/prefsStore";
@@ -13,7 +13,7 @@ import { Hairline } from "../../ui/components/Button";
 import { Sheet } from "../../ui/components/Sheet";
 import { useSession } from "../../ui/hooks";
 import { colors, typeScale } from "../../ui/tokens";
-import { closeTarget } from "./closeTarget";
+import { closeTarget, pinTarget } from "./closeTarget";
 import { createAgentWindow, createTerminalWindow, isConnectionScopeCurrent, type CreatedAgentWindow, type CreatedWindow } from "./createWindow";
 
 const NEW_PANE_TOPOLOGY_WAIT_MS = 3_000;
@@ -25,10 +25,12 @@ interface WorkspaceActionsSheetProps {
   onDismiss(): void;
   /** The row's own close, last and in danger ink; no dialog follows the tap. */
   close?: { label: string; target: CloseTarget } | undefined;
+  /** The row's pin toggle, above its close; `pinned` is what the tap writes. */
+  pin?: { label: string; target: PinTarget; pinned: boolean } | undefined;
 }
 
 /** The hold shortcuts shared by workspace, window and agent rows. */
-export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss, close }: WorkspaceActionsSheetProps) {
+export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss, close, pin }: WorkspaceActionsSheetProps) {
   const router = useRouter();
   const connected = useSession((state) => state.connection.state === "connected");
   const agentCommand = useStore(prefsStore, (state) => state.agentCommand);
@@ -103,12 +105,30 @@ export function WorkspaceActionsSheet({ sessionId, title, visible, onDismiss, cl
     }
   }, [onDismiss]);
 
+  const runPin = useCallback(async (target: PinTarget, pinned: boolean) => {
+    const connection = getConnection();
+    const serverIdentity = heldServerIdentity.current;
+    onDismiss();
+    if (!connection || !serverIdentity) return;
+    try {
+      await pinTarget(connection, target, pinned, serverIdentity);
+    } catch (error) {
+      toast(`Couldn't ${pinned ? "pin" : "unpin"}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [onDismiss]);
+
   return (
     <Sheet onDismiss={onDismiss} title={title} visible={visible}>
       <SheetAction busy={creating === "terminal"} disabled={!connected || !sessionId || creating !== null} label="New terminal" onPress={() => void createWindow("terminal")} />
       <Hairline />
       <SheetAction busy={creating === "agent"} disabled={!connected || !sessionId || creating !== null} label="New agent" onPress={() => void createWindow("agent")} />
       <Text style={styles.command} numberOfLines={1}>Runs: {agentCommand || "Not configured"}</Text>
+      {pin ? (
+        <>
+          <Hairline />
+          <SheetAction busy={false} disabled={!connected} label={pin.label} onPress={() => void runPin(pin.target, pin.pinned)} />
+        </>
+      ) : null}
       {close ? (
         <>
           <Hairline />
