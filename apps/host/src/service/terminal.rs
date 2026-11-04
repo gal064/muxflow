@@ -460,6 +460,11 @@ fn apply_membership_update(
     }
     send_authoritative_membership(stream_tx, desired)
         .map_err(|_| anyhow::anyhow!("terminal stream coordinator is disconnected"))?;
+    // Before the write, for the reason on `queue_capture`.
+    capture_in_flight
+        .lock()
+        .unwrap()
+        .extend(added.iter().cloned());
     let write_result = (|| -> anyhow::Result<()> {
         writeln!(stdin, "display-message -p '__ADE_MEMBERSHIP__'")?;
         for pane_id in &added {
@@ -477,12 +482,12 @@ fn apply_membership_update(
         // `current` cannot hit the no-op fast path while the reader stays on
         // the failed membership.
         let _ = send_authoritative_membership(stream_tx, current);
+        let mut in_flight = capture_in_flight.lock().unwrap();
+        for pane_id in &added {
+            in_flight.remove(pane_id);
+        }
         return Err(error);
     }
-    capture_in_flight
-        .lock()
-        .unwrap()
-        .extend(added.iter().cloned());
     // Commit only after the reader notification and every correlated tmux
     // command were accepted. On a partial write the caller can retry the same
     // delta; treating it as an exact no-op would strand panes without seeds.
@@ -1480,12 +1485,16 @@ fn remove_released_pane_resources<'a>(
 /// capture carries tmux's own `#{pane_id}` and `capture_metadata` refuses a
 /// capture whose metadata names a different pane.
 ///
-/// The pane is recorded in `capture_in_flight` by the caller, and only once the
-/// write has been *flushed*: the ledger's one job is to suppress a second seed
-/// for a pane a photograph is already coming for, so an entry for a capture
-/// tmux never received would coalesce away the request that replaces it and
-/// leave the pane waiting for a screen nobody is taking. Recording late risks
-/// one redundant photograph; recording early risks none at all.
+/// The pane is recorded in `capture_in_flight` by the caller *before* the
+/// write, and the entry is taken back if the write fails. The ledger's one job
+/// is to suppress a second seed for a pane a photograph is already coming for,
+/// so an entry nothing will clear coalesces away every later request and
+/// leaves the pane waiting for a screen nobody is taking. Recording after the
+/// flush made exactly that entry: the running reader can answer the capture
+/// and clear the pane before the caller records it, and the record that lands
+/// afterwards is never cleared. Recording first cannot race the reader, which
+/// can only answer a capture tmux has already received; the rollback keeps a
+/// capture that never left this process out of the ledger.
 fn queue_capture(stdin: &mut impl Write, pane_id: &str) -> anyhow::Result<()> {
     validate_tmux_id(pane_id, '%')?;
     writeln!(stdin, "{}", queue_marker("__ADE_CAPTURE__", pane_id))?;
@@ -1533,20 +1542,27 @@ fn write_capture_request_resuming<W: Write>(
     let mut writer = stdin
         .lock()
         .map_err(|_| anyhow::anyhow!("tmux control stdin is poisoned"))?;
-    if resume_first {
-        // The marker names the pane this resume belongs to, so a rejected
-        // resume resnapshots one pane instead of the whole connection.
-        writeln!(writer, "{}", queue_marker("__ADE_RESUME__", pane_id))?;
-        writeln!(
-            writer,
-            "{}",
-            resume_command(pane_id, take_injected_rejection())
-        )?;
-    }
-    queue_capture(&mut *writer, pane_id)?;
-    writer.flush()?;
+    // Before the write, for the reason on `queue_capture`.
     capture_in_flight.lock().unwrap().insert(pane_id.to_owned());
-    Ok(())
+    let written = (|| -> anyhow::Result<()> {
+        if resume_first {
+            // The marker names the pane this resume belongs to, so a rejected
+            // resume resnapshots one pane instead of the whole connection.
+            writeln!(writer, "{}", queue_marker("__ADE_RESUME__", pane_id))?;
+            writeln!(
+                writer,
+                "{}",
+                resume_command(pane_id, take_injected_rejection())
+            )?;
+        }
+        queue_capture(&mut *writer, pane_id)?;
+        writer.flush()?;
+        Ok(())
+    })();
+    if written.is_err() {
+        capture_in_flight.lock().unwrap().remove(pane_id);
+    }
+    written
 }
 
 /// The correlation marker written ahead of a command whose `%error` has to be
