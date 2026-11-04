@@ -125,9 +125,10 @@ impl TerminalAttachment {
             }
             writer.flush()?;
         }
-        // After the flush, for the reason on `queue_capture`: a ledger entry
-        // for a capture that never left this process silences the seed that
-        // would replace it.
+        // After the flush, because a ledger entry for a capture that never
+        // left this process silences the seed that would replace it. Unlike
+        // the writers `queue_capture` describes, nothing can answer these
+        // captures before they are recorded: the reader starts below.
         capture_in_flight
             .lock()
             .unwrap()

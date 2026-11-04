@@ -840,12 +840,11 @@ fn failed_visibility_admission_invalidates_the_speculative_transition() {
     }
 }
 
-/// The ledger records a capture tmux received, not one this process wrote.
+/// A capture that never left this process is taken back out of the ledger.
 ///
 /// It is read to *suppress* seeds, so an entry standing for a capture that
 /// never left this process silences the request that would replace it, and the
-/// pane waits for a photograph nobody is taking. Recording after the flush
-/// risks one redundant photograph; recording before it risks none at all.
+/// pane waits for a photograph nobody is taking.
 #[test]
 fn a_capture_whose_flush_failed_is_not_recorded_as_in_flight() {
     struct UnflushableStdin;
@@ -864,6 +863,57 @@ fn a_capture_whose_flush_failed_is_not_recorded_as_in_flight() {
     assert!(
         ledger.lock().unwrap().is_empty(),
         "a capture tmux never received would coalesce away the seed that replaces it"
+    );
+}
+
+/// The running reader can answer a capture before its writer returns.
+///
+/// tmux and the reader are free to answer the moment the flush lands, and the
+/// reader clears the pane's entry as it does. An entry recorded after the
+/// flush lands after that clear, is never cleared again, and every later seed
+/// request for the pane is coalesced away: a newly created window attached and
+/// asked for its seed and never got one. This stdin plays the reader, clearing
+/// the ledger inside the flush.
+#[test]
+fn a_capture_answered_before_its_writer_returns_leaves_no_ledger_entry() {
+    struct AnsweredOnFlush {
+        ledger: Arc<Mutex<HashSet<String>>>,
+    }
+    impl Write for AnsweredOnFlush {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.ledger.lock().unwrap().clear();
+            Ok(())
+        }
+    }
+
+    let ledger = Arc::new(Mutex::new(HashSet::new()));
+    let stdin = Arc::new(Mutex::new(AnsweredOnFlush {
+        ledger: Arc::clone(&ledger),
+    }));
+    write_capture_request_resuming(&stdin, &ledger, "%1", false).unwrap();
+    assert!(
+        ledger.lock().unwrap().is_empty(),
+        "a seed request's capture was answered, so nothing may coalesce against it"
+    );
+
+    let mut current = HashSet::from(["%1".into()]);
+    let desired = HashSet::from(["%1".into(), "%2".into()]);
+    let (stream_tx, _stream_rx) = std_mpsc::channel();
+    apply_membership_update(
+        &mut current,
+        &desired,
+        &stream_tx,
+        &mut *stdin.lock().unwrap(),
+        &ledger,
+        None,
+    )
+    .unwrap();
+    assert!(
+        ledger.lock().unwrap().is_empty(),
+        "a new member's capture was answered, so nothing may coalesce against it"
     );
 }
 
