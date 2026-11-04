@@ -26,9 +26,20 @@ pub enum LayoutParseError {
     Invalid(usize),
     #[error("tmux layout has trailing input at byte {0}")]
     Trailing(usize),
+    #[error("invalid tmux JSON layout: {0}")]
+    Json(String),
 }
 
+/// Parses a tmux layout in either form tmux prints.
+///
+/// tmux 3.8 prints `#{window_layout}` as a versioned JSON document
+/// (`{"V":2,"L":{...}}`); earlier releases, and 3.8's own `%layout-change`
+/// notifications, print the checksummed `b25d,160x48,0,0{...}` form. A
+/// checksummed layout starts with hex digits, so a leading `{` is unambiguous.
 pub fn parse_layout(layout: &str) -> Result<LayoutNode, LayoutParseError> {
+    if layout.starts_with('{') {
+        return parse_json_layout(layout);
+    }
     let bytes = layout.as_bytes();
     let start = layout.find(',').ok_or(LayoutParseError::Invalid(0))? + 1;
     let mut parser = Parser {
@@ -40,6 +51,89 @@ pub fn parse_layout(layout: &str) -> Result<LayoutNode, LayoutParseError> {
         return Err(LayoutParseError::Trailing(parser.offset));
     }
     Ok(node)
+}
+
+#[derive(Deserialize)]
+struct JsonLayout {
+    #[serde(rename = "V")]
+    version: u32,
+    #[serde(rename = "L")]
+    root: JsonLayoutNode,
+}
+
+/// One cell of a version 2 layout. Fields this parser has no use for — the
+/// pane's index (`i`), active and last-active flags, a floating pane's
+/// z-order — are ignored.
+#[derive(Deserialize)]
+struct JsonLayoutNode {
+    t: String,
+    w: u16,
+    h: u16,
+    x: u16,
+    y: u16,
+    #[serde(default)]
+    c: Vec<JsonLayoutNode>,
+    /// The pane id (`%N`): what the checksummed form's leaf number is.
+    #[serde(rename = "I")]
+    pane_id: Option<String>,
+}
+
+fn parse_json_layout(layout: &str) -> Result<LayoutNode, LayoutParseError> {
+    let document: JsonLayout =
+        serde_json::from_str(layout).map_err(|error| LayoutParseError::Json(error.to_string()))?;
+    if document.version != 2 {
+        return Err(LayoutParseError::Json(format!(
+            "unsupported layout version {}",
+            document.version
+        )));
+    }
+    json_node(document.root)
+}
+
+fn json_node(node: JsonLayoutNode) -> Result<LayoutNode, LayoutParseError> {
+    let invalid = |reason: &str| LayoutParseError::Json(reason.to_owned());
+    let mut result = LayoutNode {
+        width: node.w,
+        height: node.h,
+        left: node.x,
+        top: node.y,
+        pane_index: None,
+        axis: None,
+        children: Vec::new(),
+    };
+    match node.t.as_str() {
+        "p" => {
+            if !node.c.is_empty() {
+                return Err(invalid("a pane cell has children"));
+            }
+            let pane_id = node
+                .pane_id
+                .ok_or_else(|| invalid("a pane cell has no id"))?;
+            result.pane_index = Some(
+                pane_id
+                    .strip_prefix('%')
+                    .and_then(|number| number.parse().ok())
+                    .ok_or_else(|| invalid("a pane cell has a malformed id"))?,
+            );
+        }
+        axis @ ("h" | "v") => {
+            if node.c.is_empty() {
+                return Err(invalid("a split cell has no children"));
+            }
+            result.axis = Some(if axis == "h" {
+                LayoutAxis::Horizontal
+            } else {
+                LayoutAxis::Vertical
+            });
+            result.children = node
+                .c
+                .into_iter()
+                .map(json_node)
+                .collect::<Result<_, _>>()?;
+        }
+        _ => return Err(invalid("unknown cell type")),
+    }
+    Ok(result)
 }
 
 struct Parser<'a> {
@@ -155,5 +249,36 @@ mod tests {
             parse_layout("ffff,80x24,0,0{"),
             Err(LayoutParseError::Invalid(_))
         ));
+    }
+
+    /// tmux 3.8's `#{window_layout}`, with a floating pane (`z`) in the tree.
+    #[test]
+    fn parses_tmux_38_json_layout_as_the_checksummed_form() {
+        let json = r#"{"V":2,"L":{"t":"h","w":80,"h":24,"x":0,"y":0,"c":[{"t":"p","w":40,"h":24,"x":0,"y":0,"l":1,"i":0,"I":"%0"},{"t":"v","w":39,"h":24,"x":41,"y":0,"c":[{"t":"p","w":39,"h":12,"x":41,"y":0,"a":true,"i":1,"I":"%1"},{"t":"p","w":39,"h":11,"x":41,"y":13,"l":0,"i":2,"I":"%7"}]}]}}"#;
+        let classic = "0000,80x24,0,0{40x24,0,0,0,39x24,41,0[39x12,41,0,1,39x11,41,13,7]}";
+        assert_eq!(parse_layout(json).unwrap(), parse_layout(classic).unwrap());
+
+        let floating = r#"{"V":2,"L":{"t":"v","w":39,"h":24,"x":41,"y":0,"c":[{"t":"p","w":39,"h":24,"x":41,"y":0,"a":true,"i":1,"I":"%1"},{"t":"p","w":40,"h":6,"x":4,"y":2,"l":0,"i":2,"z":0,"I":"%2"}]}}"#;
+        assert_eq!(
+            parse_layout(floating).unwrap().children[1].pane_index,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_or_unknown_json_layouts() {
+        for layout in [
+            r#"{"V":3,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"I":"%0"}}"#,
+            r#"{"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0}}"#,
+            r#"{"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"I":"0"}}"#,
+            r#"{"V":2,"L":{"t":"h","w":80,"h":24,"x":0,"y":0,"c":[]}}"#,
+            r#"{"V":2,"L":{"t":"q","w":80,"h":24,"x":0,"y":0,"I":"%0"}}"#,
+            r#"{"V":2,"L":{"t":"p","w":80,"h":24,"x":0,"y":0,"I":"%0"}}junk"#,
+        ] {
+            assert!(
+                matches!(parse_layout(layout), Err(LayoutParseError::Json(_))),
+                "{layout}"
+            );
+        }
     }
 }
