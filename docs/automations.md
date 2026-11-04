@@ -44,8 +44,8 @@ Write `automations.json` in the helper's state directory, or ask an agent to:
 }
 ```
 
-Or turn on "Show Automations" in the desktop's Settings, Workspace tab, and use
-the Automations panel beside Files, Git and Ports.
+Or use the Automations panel beside Files, Git and Ports in the desktop. It is
+on by default; "Show Automations" in Settings, Workspace tab, turns it off.
 
 The helper notices changes within 15 seconds. Each run opens a tab named
 `Fix failing CI #<n>` in the `automation` workspace, which shows up on desktop
@@ -563,7 +563,7 @@ Compatibility:
   while the file can't be read, the list is read-only and saving is refused
   instead of replacing the file, which would throw away every other automation
   in it. The banner says to fix the file on the host. Run now still works.
-- Hidden unless "Show Automations" is checked in Settings, Workspace tab.
+- Shown by default; "Show Automations" in Settings, Workspace tab, hides it.
 
 ### Mobile
 
