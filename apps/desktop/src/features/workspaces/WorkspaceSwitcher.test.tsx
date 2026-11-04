@@ -67,10 +67,19 @@ describe("Quick Open", () => {
 
   it("deduplicates file tabs and ranks names above path-only matches", () => {
     const rows = quickOpenItems([workspace], [tab], files, "work", tab.key, hostLabel);
-    expect(rows.map((item) => item.kind)).toEqual(["tab", "workspace", "file"]);
+    expect(rows.map((item) => item.kind)).toEqual(["workspace", "tab", "file"]);
     expect(rows.filter((item) => item.title === "work.ts")).toHaveLength(1);
     expect(quickOpenScore("work.ts", "deep/path", "work")).toBeGreaterThan(quickOpenScore("other.ts", "/work/path", "work")!);
-    expect(quickOpenItems([workspace], [tab], files, "", tab.key, hostLabel).map((item) => item.kind)).toEqual(["tab", "workspace"]);
+    expect(quickOpenItems([workspace], [tab], files, "", tab.key, hostLabel).map((item) => item.kind)).toEqual(["workspace", "tab"]);
+  });
+
+  it("groups agents, then workspaces, then files with and without a query", () => {
+    const terminal: SelectableTab = { key: "terminal:@1", kind: "terminal", id: "@1", title: "wxxxoxxxrxxxk", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "present", pinned: false };
+    const keys = (query: string) => quickOpenItems([workspace], [tab, terminal], files, query, undefined, hostLabel).map((item) => item.key);
+    expect(keys("")).toEqual(["terminal:@1", "workspace:local\0$1", "app:editor"]);
+    // The terminal's scattered match scores below the workspace's exact name, yet stays first.
+    expect(quickOpenScore(terminal.title, "Terminal", "work")!).toBeLessThan(quickOpenScore("work", "", "work")!);
+    expect(keys("work")).toEqual(["terminal:@1", "workspace:local\0$1", "app:editor", "file:/repo/workspace.ts"]);
   });
 
   it("keeps files idle on opening and debounces requests while typing", async () => {
@@ -91,7 +100,7 @@ describe("Quick Open", () => {
   it("preserves the selected tab when higher-scoring files arrive", async () => {
     const pending = deferred<FileSearchResults>();
     props.client.searchFiles = vi.fn(() => pending.promise);
-    await render(); await type("work"); await key("ArrowDown"); await key("ArrowUp");
+    await render(); await type("work"); await key("ArrowDown");
     const selected = container.querySelector('[aria-selected=true]')!.id;
     await act(async () => vi.advanceTimersByTimeAsync(100));
     await act(async () => pending.resolve({ matches: Array.from({ length: 75 }, (_, index) => ({ path: `/repo/work-${index}`, relativePath: `work-${index}`, score: 9999 })), complete: true }));
@@ -138,7 +147,7 @@ describe("Quick Open", () => {
     await render(); await type("work");
     await act(async () => vi.advanceTimersByTimeAsync(100));
     expect(container.textContent).toContain("File search unavailable");
-    await key("ArrowDown");
+    await key("ArrowDown"); await key("ArrowUp");
     await key("Enter");
     expect(props.onSelect).toHaveBeenCalledWith(workspace);
     await type("unmatched");
