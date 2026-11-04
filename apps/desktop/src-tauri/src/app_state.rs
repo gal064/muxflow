@@ -138,9 +138,11 @@ pub enum DockSide {
 pub struct ShellPreferences {
     #[serde(default)]
     pub panel_surface: PanelSurface,
-    /// The right-panel extensions turned on in Settings, by id.
+    /// The right-panel extensions turned on in Settings, by id. `None` is
+    /// "never set", so the frontend's default list applies; an explicit empty
+    /// list is "all turned off". See `copy_on_select` for why absence is kept.
     #[serde(default)]
-    pub enabled_panel_extensions: Vec<String>,
+    pub enabled_panel_extensions: Option<Vec<String>>,
     #[serde(default)]
     pub sidebar_collapsed: bool,
     #[serde(default)]
@@ -157,10 +159,12 @@ pub struct ShellPreferences {
     pub agents_section_ratio: Option<f64>,
     #[serde(default)]
     pub agent_state_glyphs: bool,
+    /// `None` is "never set", so the frontend's default — on — applies. See
+    /// `copy_on_select`. The same holds for `tabs_in_title_bar`.
     #[serde(default)]
-    pub compact_workspaces: bool,
+    pub compact_workspaces: Option<bool>,
     #[serde(default)]
-    pub tabs_in_title_bar: bool,
+    pub tabs_in_title_bar: Option<bool>,
     #[serde(default)]
     pub focus_follows_mouse: bool,
     /// The workspace list's one filter: pinned workspaces only.
@@ -693,7 +697,7 @@ mod tests {
             }],
             shell: ShellPreferences {
                 panel_surface: PanelSurface("git".into()),
-                enabled_panel_extensions: vec!["automations".into()],
+                enabled_panel_extensions: Some(vec!["automations".into()]),
                 sidebar_collapsed: true,
                 sidebar_width: Some(260.0),
                 panel_open: true,
@@ -702,8 +706,8 @@ mod tests {
                 agent_sort: AgentSortMode::Status,
                 agents_section_ratio: Some(0.42),
                 agent_state_glyphs: true,
-                compact_workspaces: true,
-                tabs_in_title_bar: true,
+                compact_workspaces: Some(true),
+                tabs_in_title_bar: Some(true),
                 focus_follows_mouse: true,
                 pinned_only: true,
                 terminal_screen_reader: false,
@@ -880,7 +884,10 @@ mod tests {
         let value: PersistedAppState =
             serde_json::from_str(CONTRACT).expect("the frontend's own payload must deserialize");
         assert_eq!(value.shell.panel_surface.0, "automations");
-        assert_eq!(value.shell.enabled_panel_extensions, ["automations"]);
+        assert_eq!(
+            value.shell.enabled_panel_extensions,
+            Some(vec!["automations".to_owned()])
+        );
         assert_eq!(value.shell.agent_sort, AgentSortMode::Status);
         assert_eq!(value.shell.sidebar_width, Some(260.0));
         assert_eq!(value.shell.panel_width, Some(320.0));
@@ -905,8 +912,8 @@ mod tests {
         assert!(value.shell.sidebar_collapsed && value.shell.panel_open);
         assert!(
             value.shell.agent_state_glyphs
-                && value.shell.compact_workspaces
-                && value.shell.tabs_in_title_bar
+                && value.shell.compact_workspaces == Some(true)
+                && value.shell.tabs_in_title_bar == Some(true)
                 && value.shell.focus_follows_mouse
                 && value.shell.pinned_only
                 && value.shell.terminal_screen_reader
@@ -1013,6 +1020,9 @@ mod tests {
         assert_eq!(value.shell.panel_surface, PanelSurface::default());
         assert_eq!(value.shell.agent_sort, AgentSortMode::Workspace);
         assert!(!value.shell.sidebar_collapsed);
+        assert_eq!(value.shell.enabled_panel_extensions, None);
+        assert_eq!(value.shell.compact_workspaces, None);
+        assert_eq!(value.shell.tabs_in_title_bar, None);
         assert_eq!(value.shell.copy_on_select, None);
         assert_eq!(value.shell.clean_wrapped_commands, None);
         assert_eq!(value.shell.terminal_application_clipboard, None);

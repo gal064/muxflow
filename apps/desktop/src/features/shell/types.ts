@@ -211,7 +211,7 @@ export interface PersistedAppState {
 
 export const defaultShellState: ShellState = {
   panelSurface: "files",
-  enabledPanelExtensions: [],
+  enabledPanelExtensions: ["automations"],
   sidebarCollapsed: false,
   sidebarWidth: SIDEBAR_MIN_WIDTH,
   panelOpen: false,
@@ -220,8 +220,8 @@ export const defaultShellState: ShellState = {
   agentSort: "workspace",
   agentsSectionRatio: AGENTS_SECTION_DEFAULT_RATIO,
   agentStateGlyphs: false,
-  compactWorkspaces: false,
-  tabsInTitleBar: false,
+  compactWorkspaces: true,
+  tabsInTitleBar: true,
   focusFollowsMouse: false,
   pinnedOnly: false,
   terminalScreenReader: false,
@@ -265,7 +265,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
   const shell = candidate.shell as Partial<ShellState> | undefined;
   const enabledPanelExtensions = Array.isArray(shell?.enabledPanelExtensions)
     ? [...new Set(shell.enabledPanelExtensions.filter((id): id is string => typeof id === "string" && id !== ""))]
-    : [];
+    : [...defaultShellState.enabledPanelExtensions];
   return {
     schemaVersion: 1,
     appTabs: candidate.appTabs,
@@ -286,8 +286,12 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       agentSort: migratedAgentSort(shell?.agentSort),
       agentsSectionRatio: clampedAgentsRatio(shell?.agentsSectionRatio),
       agentStateGlyphs: Boolean(shell?.agentStateGlyphs),
-      compactWorkspaces: Boolean(shell?.compactWorkspaces),
-      tabsInTitleBar: Boolean(shell?.tabsInTitleBar),
+      compactWorkspaces: typeof shell?.compactWorkspaces === "boolean"
+        ? shell.compactWorkspaces
+        : defaultShellState.compactWorkspaces,
+      tabsInTitleBar: typeof shell?.tabsInTitleBar === "boolean"
+        ? shell.tabsInTitleBar
+        : defaultShellState.tabsInTitleBar,
       focusFollowsMouse: Boolean(shell?.focusFollowsMouse),
       pinnedOnly: Boolean(shell?.pinnedOnly),
       terminalScreenReader: Boolean(shell?.terminalScreenReader),

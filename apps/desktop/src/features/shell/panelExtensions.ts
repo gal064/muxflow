@@ -26,8 +26,8 @@ export interface PanelExtensionProps {
 
 /**
  * An optional segment of the right panel, beside Files, Git and Ports. It is
- * hidden until turned on in Settings, Workspace tab; adding one is an entry
- * here and nothing else.
+ * turned on or off in Settings, Workspace tab; `defaultShellState` says which
+ * ones start on. Adding one is an entry here and nothing else.
  */
 export interface PanelExtension {
   id: string;
