@@ -99,7 +99,10 @@ describe("persisted app state contract", () => {
     expect(surface("agents")).toBe("files");
     expect(surface(undefined)).toBe("files");
     // An extension's surface needs the extension turned on.
-    expect(surface("automations")).toBe("files");
+    expect(normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [],
+      shell: { panelSurface: "automations", enabledPanelExtensions: [] },
+    }).shell.panelSurface).toBe("files");
     expect(normalizePersistedAppState({
       schemaVersion: 1, appTabs: [], workspaceUi: [],
       shell: { panelSurface: "automations", enabledPanelExtensions: ["automations", 3, "automations"] },
@@ -265,15 +268,21 @@ describe("reading state the previous build wrote", () => {
     expect(saved({}).shell.agentSort).toBe(defaultShellState.agentSort);
   });
 
-  it("restores the global compact workspace preference and defaults old saves to normal", () => {
+  it("restores the global compact workspace preference and turns it on for saves without it", () => {
     expect(saved({ compactWorkspaces: true }).shell.compactWorkspaces).toBe(true);
     expect(saved({ compactWorkspaces: false }).shell.compactWorkspaces).toBe(false);
-    expect(saved({}).shell.compactWorkspaces).toBe(false);
+    expect(saved({}).shell.compactWorkspaces).toBe(true);
     expect(saved({ tabsInTitleBar: true }).shell.tabsInTitleBar).toBe(true);
-    expect(saved({}).shell.tabsInTitleBar).toBe(false);
+    expect(saved({ tabsInTitleBar: false }).shell.tabsInTitleBar).toBe(false);
+    expect(saved({}).shell.tabsInTitleBar).toBe(true);
     expect(saved({ uiScale: 1.2 }).shell.uiScale).toBe(1.2);
     expect(saved({ uiScale: 7 }).shell.uiScale).toBe(1);
     expect(saved({}).shell.uiScale).toBe(1);
+  });
+
+  it("turns on Automations for saves without an extension list, and keeps an explicit empty one", () => {
+    expect(saved({}).shell.enabledPanelExtensions).toEqual(["automations"]);
+    expect(saved({ enabledPanelExtensions: [] }).shell.enabledPanelExtensions).toEqual([]);
   });
 
   it("restores focus-follows-mouse and leaves it off for saves without it", () => {
