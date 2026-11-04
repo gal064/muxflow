@@ -11,6 +11,12 @@ export type QuickOpenItem = Item & (
   | { kind: "file"; file: FileSearchMatch }
 );
 
+/** Fixed section order: agent terminals, then workspaces, then files and other app tabs. */
+function quickOpenGroup(item: QuickOpenItem): number {
+  if (item.kind === "tab") return item.tab.kind === "terminal" ? 0 : 2;
+  return item.kind === "workspace" ? 1 : 2;
+}
+
 export function quickOpenScore(title: string, detail: string, query: string): number | undefined {
   const name = fuzzyMatch(title, query);
   return name ? name.score + 1000 : fuzzyMatch(detail, query)?.score;
@@ -35,10 +41,10 @@ export function quickOpenItems(
     kind: "file", key: `file:${file.path}`, file, title: file.relativePath.split("/").at(-1)!,
     detail: file.relativePath, current: false,
   })));
-  if (!query) return items.slice(0, 75);
-  const ranked = items.map((item, index) => ({ item, index, score: item.kind === "file" ? item.file.score : quickOpenScore(item.title, item.detail, query) }))
+  if (!query) return items.sort((a, b) => quickOpenGroup(a) - quickOpenGroup(b)).slice(0, 75);
+  const ranked = items.map((item, index) => ({ item, index, group: quickOpenGroup(item), score: item.kind === "file" ? item.file.score : quickOpenScore(item.title, item.detail, query) }))
     .filter((row): row is typeof row & { score: number } => row.score !== undefined)
-    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .sort((a, b) => a.group - b.group || b.score - a.score || a.index - b.index)
     .map((row) => row.item);
   const visible = ranked.slice(0, 75);
   const selected = ranked.find((item) => item.key === selectedKey);
