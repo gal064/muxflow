@@ -54,9 +54,9 @@ void terminalFacesReady().then(() => monaco.editor.remeasureFonts());
  * The syntax colours are the terminal's ANSI palette, so an editor and a
  * terminal showing the same file agree about what a string looks like;
  * `vs-dark`'s colours were tuned for a near-black ground, and this ground is the
- * terminal background. Plain code is the chrome ink, not the terminal's pure
- * white: a whole file of white on this ground reads heavy, and `--chrome-ink`
- * sits beside the `#CCCCCC` VS Code draws code in.
+ * terminal background. Plain code is the chrome ink, not the terminal's own
+ * foreground: in the dark theme that is pure white, which reads heavy across a
+ * whole file, and `--chrome-ink` sits beside the `#CCCCCC` VS Code draws code in.
  *
  * The rows follow what the grammars emit. Python and TypeScript go through
  * `monarch.ts`, which adds `function`, `predefined`, `constant`,
@@ -82,10 +82,11 @@ export function defineAdeMonacoTheme(root: Element | undefined = globalThis.docu
   // blend colours rather than theme colours and are called out there.
   //
   // One asymmetry worth knowing before editing a token these read: `colors`
-  // takes any CSS colour, `rules` does not. A rule foreground must be six or
-  // eight hex digits — Monaco *throws* on anything else, at first editor mount
-  // rather than here — so a `--term-*` or `--chrome-dim` written as `rgb(…)` or
-  // as a `var()` reference would take the editor surface down rather than
+  // takes any CSS colour, `rules` does not, and Monaco turns `editor.foreground`
+  // into a rule. A rule foreground must be six or eight hex digits — Monaco
+  // *throws* on anything else, at first editor mount rather than here — so a
+  // `--term-*`, `--chrome-dim` or `--chrome-ink` written as `rgb(…)` or as a
+  // `var()` reference would take the editor surface down rather than
   // degrade. `theme.test.ts` pins every one of them to exact hex today, which
   // is what makes that safe.
   const token = tokenWithFallback(root);
