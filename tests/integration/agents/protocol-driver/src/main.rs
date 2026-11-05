@@ -333,23 +333,6 @@ fn main() -> Result<(), String> {
     if seen.seen_generation != done.attention_generation {
         return Err("exact seen generation not applied".into());
     }
-    let renamed = connection
-        .request(v1::Request {
-            operation: v1::Operation::AgentAction.into(),
-            agent: Some(v1::AgentRequest {
-                action: v1::AgentActionKind::Rename.into(),
-                agent_id: done.agent_id.clone(),
-                display_name: "Remote build agent".into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        })?
-        .agent
-        .and_then(|value| value.agent)
-        .ok_or("rename omitted agent")?;
-    if renamed.display_name != "Remote build agent" {
-        return Err("rename failed".into());
-    }
 
     let (resumed, _) = agent_action_retry(
         &mut connection,
@@ -439,7 +422,6 @@ fn main() -> Result<(), String> {
             "duplicateRejected": true,
             "outOfOrderRejected": true,
             "seenExact": true,
-            "rename": renamed.display_name,
             "exactDirectRoute": true,
             "foreignUnmapped": true,
             "serverIdentity": current.server_identity,

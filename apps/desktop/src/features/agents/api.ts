@@ -111,7 +111,6 @@ export interface AgentClient {
   snapshot(scope: AgentRequestScope): Promise<AgentSnapshot>;
   launch(scope: AgentRequestScope, request: AgentLaunchRequest): Promise<void>;
   resume(scope: AgentRequestScope, agentId: string, nativeSessionId: string, request: AgentLaunchRequest): Promise<void>;
-  rename(scope: AgentRequestScope, agentId: string, displayName: string): Promise<void>;
   markSeen(scope: AgentRequestScope, agentId: string, attentionGeneration: AgentGeneration): Promise<void | AgentRecord>;
   reviewHooks(scope: AgentRequestScope, adapter: AgentAdapterId, action?: "install" | "uninstall"): Promise<AgentHookReview>;
   applyHooks(scope: AgentRequestScope, review: AgentHookReview): Promise<void>;
@@ -149,18 +148,6 @@ export class TauriAgentClient implements AgentClient {
       placement: request.placement, sessionId: request.sessionId, windowId: request.windowId,
       paneId: request.placement === "split" ? request.paneId : "",
       activeRoot: request.activeRoot, rootToken: request.rootToken,
-    });
-  }
-
-  async rename(scope: AgentRequestScope, agentId: string, displayName: string): Promise<void> {
-    const normalized = displayName.trim();
-    if (!normalized) throw new Error("Agent name cannot be empty.");
-    const response = await this.#request(scope, { operation: "rename", agentId, displayName: normalized });
-    if (!response.agent || response.acceptedGeneration === undefined) throw new Error("Host omitted the accepted rename mutation.");
-    this.#publish({
-      kind: "upsert", hostProfileId: scope.hostProfileId, serverIdentity: scope.serverIdentity, connectionEpoch: scope.connectionEpoch,
-      sequence: agentGeneration(response.acceptedGeneration, "agent response accepted generation"),
-      record: mapRecord(scope, response.agent), replayed: false,
     });
   }
 

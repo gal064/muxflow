@@ -199,23 +199,6 @@ fn lifecycle_change_time_ignores_same_status_hooks_and_advances_on_transition() 
 }
 
 #[test]
-fn rename_returns_a_canonical_published_event_generation() {
-    let runtime = runtime("rename-event");
-    let topology_snapshot = topology("codex");
-    runtime
-        .reconcile_topology(&topology_snapshot, "server-a")
-        .unwrap();
-    let before = runtime.snapshot_for("server-a");
-    let renamed = runtime
-        .rename(&before.agents[0].agent_id, "Build agent")
-        .unwrap();
-    assert_eq!(renamed.reason, "renamed");
-    assert!(!renamed.notify);
-    assert!(renamed.generation > before.generation);
-    assert_eq!(renamed.agent.unwrap().display_name, "Build agent");
-}
-
-#[test]
 fn title_animation_does_not_churn_routes_but_process_changes_still_reconcile() {
     let runtime = runtime("title-animation-reconciliation");
     let mut first = topology("codex");
@@ -331,13 +314,6 @@ fn persist_failure_rolls_back_runtime_mutations() {
         reply_sink: Box::new(|_| {}),
     };
     let agent_id = baseline_state.agents.keys().next().unwrap().clone();
-
-    let runtime = failing();
-    assert!(runtime.rename(&agent_id, "must rollback").is_err());
-    assert_eq!(
-        runtime.state.lock().unwrap().generation,
-        baseline_state.generation
-    );
 
     let runtime = failing();
     assert!(runtime.mark_seen(&agent_id, 0).is_err());

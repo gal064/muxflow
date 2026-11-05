@@ -147,7 +147,7 @@ where
         panes: query(
             &mut execute,
             "list-panes",
-            "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}__ADE_TMUX_FIELD_9C71__#{?#{||:#{==:#{pane_title},#{host}},#{==:#{pane_title},#{host_short}}},,#{pane_title}}",
+            PANE_FORMAT,
         )?
         .iter()
         .map(|line| parse_pane(line))
@@ -161,7 +161,10 @@ where
 
 const SESSION_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{session_name}__ADE_TMUX_FIELD_9C71__#{session_windows}__ADE_TMUX_FIELD_9C71__#{session_attached}";
 const WINDOW_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{window_index}__ADE_TMUX_FIELD_9C71__#{window_name}__ADE_TMUX_FIELD_9C71__#{window_active}__ADE_TMUX_FIELD_9C71__#{window_layout}__ADE_TMUX_FIELD_9C71__#{window_zoomed_flag}";
-const PANE_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}__ADE_TMUX_FIELD_9C71__#{?#{||:#{==:#{pane_title},#{host}},#{==:#{pane_title},#{host_short}}},,#{pane_title}}";
+/// A title that says nothing about the pane is published empty: tmux's default of
+/// the host name, and every title in a window whose name is locked, because that
+/// name is the one the window's agents go by.
+const PANE_FORMAT: &str = "#{session_id}__ADE_TMUX_FIELD_9C71__#{window_id}__ADE_TMUX_FIELD_9C71__#{pane_id}__ADE_TMUX_FIELD_9C71__#{pane_index}__ADE_TMUX_FIELD_9C71__#{pane_active}__ADE_TMUX_FIELD_9C71__#{pane_width}__ADE_TMUX_FIELD_9C71__#{pane_height}__ADE_TMUX_FIELD_9C71__#{pane_left}__ADE_TMUX_FIELD_9C71__#{pane_top}__ADE_TMUX_FIELD_9C71__#{pane_current_path}__ADE_TMUX_FIELD_9C71__#{pane_current_command}__ADE_TMUX_FIELD_9C71__#{pane_pid}__ADE_TMUX_FIELD_9C71__#{pane_start_command}__ADE_TMUX_FIELD_9C71__#{?#{||:#{@muxflow-name-locked},#{||:#{==:#{pane_title},#{host}},#{==:#{pane_title},#{host_short}}}},,#{pane_title}}";
 
 const IDENTITY_MARKER: &str = "__ADE_ID__";
 const SESSION_MARKER: &str = "__ADE_S__";
@@ -539,5 +542,39 @@ mod tests {
         assert_eq!(snapshot.windows.len(), 100);
         assert_eq!(snapshot.panes.len(), 100);
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_locked_window_publishes_no_pane_title() {
+        let socket = format!("ade-discovery-lock-{}", std::process::id());
+        let tmux = |arguments: &[&str]| {
+            let output = Command::new("tmux")
+                .env_remove("TMUX")
+                .args(["-L", &socket, "-f", "/dev/null"])
+                .args(arguments)
+                .output()
+                .expect("tmux must be installed for this test");
+            assert!(output.status.success(), "tmux {arguments:?} failed");
+        };
+        let title = || {
+            discover_with_socket_name(&socket).unwrap().panes[0]
+                .title
+                .clone()
+        };
+        tmux(&["new-session", "-d", "-s", "lock", "-x", "80", "-y", "24"]);
+        tmux(&["select-pane", "-t", "lock", "-T", "agent title"]);
+        let unlocked = title();
+        tmux(&[
+            "set-option",
+            "-w",
+            "-t",
+            "lock",
+            "@muxflow-name-locked",
+            "1",
+        ]);
+        let locked = title();
+        tmux(&["kill-server"]);
+        assert_eq!(unlocked, "agent title");
+        assert_eq!(locked, "");
     }
 }
