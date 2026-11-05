@@ -51,12 +51,12 @@ void terminalFacesReady().then(() => monaco.editor.remeasureFonts());
  * second application, and it is exactly what 11.1.1's "one token file" exists
  * to prevent.
  *
- * The syntax colours are the terminal's ANSI palette, and plain code is the
- * terminal's own foreground, so an editor and a terminal showing the same file
- * agree about what text and a string look like. `vs-dark`'s colours were tuned
- * for a near-black ground; this ground is the terminal background, and the
- * chrome ink it used to draw code in left most of a file at a contrast well
- * below what the terminal beside it shows.
+ * The syntax colours are the terminal's ANSI palette, so an editor and a
+ * terminal showing the same file agree about what a string looks like;
+ * `vs-dark`'s colours were tuned for a near-black ground, and this ground is the
+ * terminal background. Plain code is the chrome ink, not the terminal's pure
+ * white: a whole file of white on this ground reads heavy, and `--chrome-ink`
+ * sits beside the `#CCCCCC` VS Code draws code in.
  *
  * The rows follow what the grammars emit. Python and TypeScript go through
  * `monarch.ts`, which adds `function`, `predefined`, `constant`,
@@ -111,8 +111,7 @@ export function defineAdeMonacoTheme(root: Element | undefined = globalThis.docu
     ],
     colors: {
       "editor.background": token("--chrome-bg"),
-      // `terminalTheme` always fills the foreground; the type just cannot say so.
-      "editor.foreground": ansi.foreground ?? token("--chrome-ink"),
+      "editor.foreground": token("--chrome-ink"),
       "editorGutter.background": token("--chrome-bg"),
       "editorLineNumber.foreground": token("--chrome-faint"),
       "editorLineNumber.activeForeground": token("--chrome-ink"),
