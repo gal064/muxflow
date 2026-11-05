@@ -1327,14 +1327,15 @@ Layout:
    0) and `x MB of y MB · n%`; `ready` → no card.
 4. **Mic** (96 dp `--accent` disc, label `Hold to talk` 16 sp semibold):
    press-in records and press-out sends. Swipe left to lock; releasing then
-   keeps recording and the first tap anywhere stops and sends without starting
-   another take. Swipe right stops and discards the take without transcription
+   keeps recording, the conversation stays scrollable, and the first tap
+   anywhere on the talk pane (its controls row included) stops and sends
+   without starting another take. End is disabled while locked. Swipe right stops and discards the take without transcription
    or terminal input. While listening, a labelled lock destination appears to
    the left of the mic and a labelled trash/discard destination to the right;
    the active destination highlights as the mic follows the horizontal drag.
    A locked recording carries the lock mark on the mic. `--danger` with a
    pulsing ring while recording (`Listening…`, or
-   `Locked · tap anywhere to send`), a spinner while `Transcribing…` /
+   `Locked · tap here to send`), a spinner while `Transcribing…` /
    `Sending…`.
    Disabled (40 % opacity, with the reason under the label) when not
    connected, the agent is gone, or the host is not `ready`. A departed
@@ -1368,13 +1369,18 @@ them). A pushed `EVENT_KIND_VOICE_REPLY`
 replaces the previous reply's MP3 (`<cache>/voice/<agent>.mp3`; stopping
 it if it was playing), appends the reply unplayed, and auto-plays it only
 when the screen is focused, the app is active, persisted `voiceAutoPlay` is on,
-and the microphone is not listening. A reply received while recording is never
-auto-played later; its Play control remains available. Otherwise
-it plays on the next focus / foreground. Replies for agents without a
-session are ignored. End session sends `voiceSession("")`, deletes the file
+and the microphone is not listening. A reply received on the focused screen
+while recording is never auto-played later; its Play control remains
+available. Otherwise it plays on the next focus / foreground, including a
+reply for this session that arrived while another session was recording.
+Replies for agents without a session are ignored. Reply audio is heard only on
+its own screen: leaving the screen or backgrounding the app stops the reply and
+destroys the native player, so the OS cannot resume it elsewhere. A reply cut
+off this way stays stopped and does not replay on return. End session sends `voiceSession("")`, deletes the file
 and forgets the session; a user disconnect disposes every session locally.
-Leaving the Voice screen or backgrounding while a locked take is active
-cancels it, deletes its file and releases the microphone.
+Leaving the Voice screen while a locked take is active sends it. Leaving while
+a take is held, or backgrounding during either kind, cancels it, deletes its
+file and releases the microphone.
 
 Agent identity lifecycle is separate from the local Voice-session lifecycle.
 The initial agent ID normally becomes the immutable session/controller key; if

@@ -64,9 +64,15 @@ export function createExpoPlayer(): VoicePlayer {
       return () => listeners.delete(listener);
     },
     release() {
-      player?.remove();
+      if (!player) return;
+      // `remove` only forgets the player natively; `release` is what tears it
+      // down. Pause first so audio focus goes back, and `remove` before `release`
+      // because native calls throw once it is released. An idle player is not
+      // paused: on iOS that deactivates the audio session under a live recording.
+      if (player.playing) player.pause();
+      player.remove();
+      player.release();
       player = undefined;
-      listeners.clear();
     },
   };
 }

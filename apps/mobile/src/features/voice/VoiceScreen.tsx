@@ -102,6 +102,8 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     const live = controller.isDisposed ? open() : controller;
     if (live !== controller) setController(live);
     setScreenFocused(true);
+    // A cached session may hold a value from before the preference changed, and focus can autoplay.
+    live.setAutoPlay(prefsStore.getState().voiceAutoPlay);
     live.focus();
     return () => {
       setScreenFocused(false);
@@ -118,6 +120,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
       setAppActive(active);
       if (active) controller.onAppActive();
       else controller.onAppInactive();
+      if (next === "background") controller.onAppBackground();
     });
     return () => subscription.remove();
   }, [controller]);
@@ -165,7 +168,11 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     router.back();
   }, [router, sessionKey]);
 
-  const scrollToEnd = useCallback((animated: boolean) => list.current?.scrollToEnd({ animated }), []);
+  // A locked take frees the hands to read, so a reply landing mid-take must not pull the list away.
+  const locked = phase === "recordingLocked";
+  const scrollToEnd = useCallback((animated: boolean) => {
+    if (!locked) list.current?.scrollToEnd({ animated });
+  }, [locked]);
 
   return (
     <View style={[styles.root, { paddingBottom: insets.bottom, paddingTop: insets.top }]}>
@@ -177,7 +184,8 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
         </Pressable>
         {agent ? <AgentMark adapterId={agent.adapterId} animate={animateAgentState} ring={colors.chromeRaised} state={agentDisplayState} surface={colors.chromeBg} /> : null}
         <Text {...fixedChromeText} accessibilityLabel={agent ? `${title}, ${agentStateLabel(agent)}` : title} accessibilityRole="header" numberOfLines={1} style={styles.title}>{title}</Text>
-        <Pressable accessibilityLabel="End session" accessibilityRole="button" onPress={() => setConfirmEnd(true)} style={styles.endButton}>
+        {/* Ending disposes the session and would discard a locked take; Back sends it instead. */}
+        <Pressable accessibilityLabel="End session" accessibilityRole="button" accessibilityState={{ disabled: locked }} disabled={locked} onPress={() => setConfirmEnd(true)} style={[styles.endButton, locked && styles.endButtonDisabled]}>
           <Text {...fixedChromeText} numberOfLines={1} style={styles.endLabel}>End</Text>
         </Pressable>
       </View>
@@ -196,7 +204,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
       <VoiceStatusCard connected={connected} controller={controller} />
 
       <View style={[styles.pane, bigPane && { height: bigPaneHeight(windowHeight, insets.top, insets.bottom, metrics.terminalHeaderHeight) }]}>
-        <View style={styles.paneControls}>
+        <View accessibilityElementsHidden={locked} importantForAccessibility={locked ? "no-hide-descendants" : "auto"} style={styles.paneControls}>
           <View style={styles.speedGroup}>
             <Text {...fixedChromeText} numberOfLines={1} style={styles.speedCaption}>Speed</Text>
             <SpeedButton onChange={(rate) => prefsStore.getState().setVoicePlaybackRate(rate)} rate={playbackRate} />
@@ -231,17 +239,16 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
           onSubmit={() => void controller.endUtterance()}
           phase={phase}
         />
+        {locked ? (
+          <Pressable
+            accessibilityHint="Stops recording and sends it"
+            accessibilityLabel="Stop and send locked recording"
+            accessibilityRole="button"
+            onPressIn={() => void controller.endUtterance()}
+            style={styles.lockedStopTarget}
+          />
+        ) : null}
       </View>
-
-      {phase === "recordingLocked" ? (
-        <Pressable
-          accessibilityHint="Stops recording and sends it"
-          accessibilityLabel="Stop and send locked recording"
-          accessibilityRole="button"
-          onPressIn={() => void controller.endUtterance()}
-          style={styles.lockedStopTarget}
-        />
-      ) : null}
 
       <Dialog
         actions={[
@@ -309,6 +316,7 @@ const styles = StyleSheet.create({
   iconButton: { alignItems: "center", height: 48, justifyContent: "center", width: 48 },
   title: { color: colors.chromeInkStrong, flex: 1, fontSize: typeScale.appBarTitle, fontWeight: "600", minWidth: 0 },
   endButton: { alignItems: "center", height: 48, justifyContent: "center", paddingHorizontal: 12 },
+  endButtonDisabled: { opacity: 0.4 },
   endLabel: { color: colors.dangerInk, fontSize: typeScale.body, fontWeight: "600" },
   list: { flex: 1 },
   listContent: { flexGrow: 1, gap: 8, paddingHorizontal: 12, paddingVertical: 12 },
