@@ -18,8 +18,6 @@ pub struct AgentCommand {
     #[serde(default)]
     pub native_session_id: String,
     #[serde(default)]
-    pub display_name: String,
-    #[serde(default)]
     pub session_id: String,
     #[serde(default)]
     pub window_id: String,
@@ -71,7 +69,6 @@ pub async fn agent_request(
             adapter_id,
             agent_id: command.agent_id,
             native_session_id: command.native_session_id,
-            display_name: command.display_name,
             session_id: command.session_id,
             window_id: command.window_id,
             pane_id: command.pane_id,
@@ -123,7 +120,6 @@ fn operation_from_name(
             Hook::Unspecified,
         )),
         "resume" => Ok((Operation::AgentAction, Action::Resume, Hook::Unspecified)),
-        "rename" => Ok((Operation::AgentAction, Action::Rename, Hook::Unspecified)),
         "markSeen" => Ok((
             Operation::AgentMarkSeen,
             Action::Unspecified,

@@ -40,7 +40,7 @@ const mergedRow = (row: WorkspaceRowModel): MergedWorkspaceRow => ({
 const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
   adapters={[]} agents={[]} hostAdapters={[]} agentSort="status" agentsRatio={0.4} compactWorkspaces={false} hosts={[remoteHost]}
   maxWidth={426} onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop}
-  onRenameAgent={noop} onResumeAgent={noop} onReviewHooks={noop} onSelectAgent={noop}
+  onRenameAgentTab={noop} onResumeAgent={noop} onReviewHooks={noop} onSelectAgent={noop}
   onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onToggleShown={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
   rows={[]} stateGlyphs={false} width={240}
   {...overrides}

@@ -346,7 +346,7 @@ describe("the shell over several hosts", () => {
     await app.unmount();
   });
 
-  it("renames a peer's agent on the peer, and offers no resume for it until that host is on screen", async () => {
+  it("renames a peer agent's tab on the peer, and offers no resume for it until that host is on screen", async () => {
     const app = await shell([LOCAL, REMOTE]);
     await act(async () => {
       app.bridgeFor("local").publish(connected);
@@ -361,13 +361,14 @@ describe("the shell over several hosts", () => {
     await act(async () => { agentButton().props.onContextMenu({ preventDefault() {}, clientX: 10, clientY: 10 }); });
     expect(app.renderer.root.findAllByProps({ "data-menu-item": "resume-window" }).map((item) => item.props.disabled)).toEqual([true]);
     await act(async () => { app.menuItem("rename").props.onClick(); });
-    const input = app.renderer.root.findAllByType("input").find((node) => node.props.value === "Codex on qa")!;
-    await act(async () => { input.props.onChange({ target: { value: "Codex two" } }); });
+    // The dialog opens on the tab name, not the agent's stored name.
+    const input = app.renderer.root.findByType("form").findByType("input");
+    expect(input.props.value).toBe("work");
+    await act(async () => { input.props.onChange({ target: { value: "Release notes" } }); });
     await act(async () => { app.renderer.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
-    const renames = calls("agent_request").filter((request) => (request.command as { operation: string }).operation === "rename");
-    expect(renames).toEqual([expect.objectContaining({
+    expect(calls("tmux_action")).toEqual([expect.objectContaining({
       clientId: "client-2",
-      command: expect.objectContaining({ operation: "rename", agentId: "agent-qa", displayName: "Codex two", hostProfileId: "remote-a" }),
+      action: expect.objectContaining({ kind: "renameWindow", window_id: "@1", name: "Release notes" }),
     })]);
     await app.unmount();
   });

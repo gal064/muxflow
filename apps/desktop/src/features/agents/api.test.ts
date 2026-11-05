@@ -63,18 +63,6 @@ describe("TauriAgentClient", () => {
     expect(invokeMock.mock.calls[0][1].command).toMatchObject({ operation: "resume", agentId: "agent-1", nativeSessionId: "native-1", placement: "window", sessionId: "$1", windowId: "@1", paneId: "", activeRoot: "/repo", rootToken: "root-token" });
   });
 
-  it("publishes the accepted rename RPC response immediately through the reducer stream", async () => {
-    const renamed = { ...wireRecord, displayName: "Renamed now" };
-    invokeMock.mockResolvedValue({ agent: renamed, acceptedGeneration: "7", connectionEpoch: "4" });
-    const client = new TauriAgentClient();
-    const listener = vi.fn();
-    client.subscribe(listener);
-    await client.rename(scope, "agent-1", " Renamed now ");
-    expect(listener).toHaveBeenCalledWith(expect.objectContaining({
-      kind: "upsert", sequence: "7", record: expect.objectContaining({ id: "agent-1", displayName: "Renamed now" }),
-    }));
-  });
-
   it("requires a host-issued confirmation token before hook install or uninstall", async () => {
     invokeMock.mockResolvedValueOnce({ hookPlan: { adapterId: "claude-code", action: "review", configPath: "/config", backupPath: "/backup", managedVersion: "muxflow/v1", summary: "one managed hook", confirmationToken: "confirm", alreadyCurrent: false, ownershipMarker: "Claude adapter", proposedCommand: "/usr/bin/host hook ingest", proposedEvents: ["Stop"], trustGuidance: "Review trust", beforeHash: "old", afterHash: "new", createsConfig: false, removesConfig: true, beforePreview: "{\n  redacted\n}", afterPreview: "{\n  managed\n}", diffPreview: "--- before\n-redacted\n+++ after\n+managed", previewTruncated: false } }).mockResolvedValueOnce({});
     const client = new TauriAgentClient();

@@ -1124,3 +1124,29 @@ fn ordinary_client_undo_never_reports_false_success() {
         &before,
     ));
 }
+
+#[test]
+fn a_window_rename_locks_the_name_before_setting_it() {
+    let mut command = std::process::Command::new("tmux");
+    add_user_rename(&mut command, "@1", "Release notes");
+    let arguments: Vec<_> = command
+        .get_args()
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        arguments,
+        [
+            "set-option",
+            "-w",
+            "-t",
+            "@1",
+            "@muxflow-name-locked",
+            "1",
+            ";",
+            "rename-window",
+            "-t",
+            "@1",
+            "Release notes",
+        ]
+    );
+}

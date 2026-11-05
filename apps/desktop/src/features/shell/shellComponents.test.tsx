@@ -159,7 +159,7 @@ const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
   onAgentsRatio: noop,
   onLaunchAgent: noop,
   onOpenSettings: noop,
-  onRenameAgent: noop,
+  onRenameAgentTab: noop,
   onResumeAgent: noop,
   onReviewHooks: noop,
   onSelectAgent: noop,
@@ -536,7 +536,7 @@ describe("application shell accessibility contracts", () => {
 
   it("reaches the agent row actions from the command registry, on the last agent focused", async () => {
     const onSelectAgent = vi.fn();
-    const onRenameAgent = vi.fn();
+    const onRenameAgentTab = vi.fn();
     const onResumeAgent = vi.fn();
     const agents = buildAgentRows(
       [agent({ id: "a1", displayName: "Codex one", lifecycle: "blocked" })],
@@ -549,7 +549,7 @@ describe("application shell accessibility contracts", () => {
     }];
     let renderer!: ReturnType<typeof create>;
     const element = (rows: typeof agents) => <WorkspaceSidebar
-      {...sidebarProps({ adapters, agents: rows, onRenameAgent, onResumeAgent, onSelectAgent, rows: [] })}
+      {...sidebarProps({ adapters, agents: rows, onRenameAgentTab, onResumeAgent, onSelectAgent, rows: [] })}
     />;
     await act(async () => { renderer = create(element(agents)); });
     // No agent focused: nothing to act on.
@@ -569,6 +569,21 @@ describe("application shell accessibility contracts", () => {
     // and its commands go with it, rather than acting on a stale record.
     await act(async () => { renderer.update(element([])); });
     expect(rowCommandRegistry.available()).toEqual([]);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("offers no tab rename for an agent with no tab", async () => {
+    const agents = buildAgentRows(
+      [agent({ id: "a1", displayName: "Codex one" })],
+      () => ({ workspaceOrder: 0, workspaceName: "work" }), () => false, "workspace",
+    );
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<WorkspaceSidebar {...sidebarProps({ agents, rows: [] })} />); });
+    const row = renderer.root.findAllByProps({ className: "agent-button" })[0];
+    await act(async () => { row.props.onFocus(); });
+    expect(rowCommandRegistry.available()).not.toContain("agents.renameRow");
+    await act(async () => { row.props.onContextMenu({ preventDefault() {}, clientX: 10, clientY: 10 }); });
+    expect(renderer.root.findByProps({ "data-menu-item": "rename" }).props.disabled).toBe(true);
     await act(async () => { renderer.unmount(); });
   });
 

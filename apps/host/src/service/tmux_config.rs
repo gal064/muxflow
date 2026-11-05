@@ -25,15 +25,17 @@ use super::snapshot::tmux_command;
 /// included, starts with the name tmux gives it and keeps following the command
 /// running in it: `configure_new_session` names the session and leaves the
 /// window alone, because an explicit name would have been overwritten by this
-/// hook the moment an agent announced a title. A rename by the user, from
-/// either side, is final until the next one. An empty title hands the window
+/// hook the moment an agent announced a title. A rename through the app locks
+/// the name against this hook, so it is final until the next one, and one made
+/// directly in tmux lasts until the next title. An empty title hands the window
 /// back to tmux's own naming instead, so an agent that exits leaves `bash`
 /// behind rather than a blank tab.
 const PANE_TITLE_HOOK: &str = "pane-title-changed";
 const AUTOMATIC_RENAME_FORMAT: &str = "automatic-rename-format";
 const TITLE_OWNER_CONDITION: &str = "#{==:#{pane_index},#{pane-base-index}}";
-/// A window whose name something else owns, such as an automation run tab,
-/// sets this option; the hook then leaves it alone.
+/// A window whose name something else owns, an automation run tab or a tab the
+/// user renamed, sets this option; the hook then leaves it alone.
+pub(crate) const NAME_LOCK_OPTION: &str = "@muxflow-name-locked";
 const NAME_UNLOCKED_CONDITION: &str = "#{==:#{@muxflow-name-locked},}";
 
 /// The hook, built from the adapter registry so it cannot drift from the set of

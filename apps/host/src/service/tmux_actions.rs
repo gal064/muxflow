@@ -5,6 +5,7 @@ use super::snapshot::{
     discover_consistent, reorder_session, server_identity, set_pinned, tmux_command,
 };
 use super::terminal::validate_tmux_id;
+use super::tmux_config::NAME_LOCK_OPTION;
 pub(in crate::service) use command::{
     APP_SHELL, configure_new_session, escaped_format_literal, resolved_start_directory, run,
     run_for_ids, validate_name,
@@ -132,12 +133,7 @@ pub(super) fn execute(
         }
         v1::TmuxActionKind::RenameWindow => {
             validate_name(&action.name)?;
-            command.args([
-                "rename-window",
-                "-t",
-                &action.window_id,
-                &escaped_format_literal(&action.name),
-            ]);
+            add_user_rename(&mut command, &action.window_id, &action.name);
             run(command)?;
             result.window_id = action.window_id;
         }
@@ -1004,6 +1000,24 @@ fn relative_reorder_position(
         target -= 1;
     }
     Ok(target.min(length.saturating_sub(1)))
+}
+
+/// Locks the name before setting it, so an agent title landing mid-rename cannot
+/// replace it through the naming hook.
+fn add_user_rename(command: &mut std::process::Command, window_id: &str, name: &str) {
+    command.args([
+        "set-option",
+        "-w",
+        "-t",
+        window_id,
+        NAME_LOCK_OPTION,
+        "1",
+        ";",
+        "rename-window",
+        "-t",
+        window_id,
+        &escaped_format_literal(name),
+    ]);
 }
 
 #[cfg(test)]

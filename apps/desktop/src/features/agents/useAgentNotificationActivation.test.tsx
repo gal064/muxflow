@@ -27,7 +27,7 @@ const route = {
 
 function client(): AgentClient {
   return {
-    snapshot: vi.fn(), launch: vi.fn(), resume: vi.fn(), rename: vi.fn(), markSeen: vi.fn(async () => undefined),
+    snapshot: vi.fn(), launch: vi.fn(), resume: vi.fn(), markSeen: vi.fn(async () => undefined),
     reviewHooks: vi.fn(), applyHooks: vi.fn(), applyHostNaming: vi.fn(async () => "alreadyCurrent" as const),
     publishWireEvent: vi.fn(), publishWireSnapshot: vi.fn(), subscribe: vi.fn(() => () => undefined),
   };
