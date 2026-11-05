@@ -3,7 +3,7 @@
 // expo-audio implementation, imported only by the Voice screen so nothing
 // audio-related loads until it opens (§2c).
 
-import { AudioModule, AudioQuality, IOSOutputFormat, requestRecordingPermissionsAsync, setAudioModeAsync, type RecordingOptions } from "expo-audio";
+import { AudioModule, AudioQuality, getRecordingPermissionsAsync, IOSOutputFormat, requestRecordingPermissionsAsync, setAudioModeAsync, type RecordingOptions } from "expo-audio";
 import type { AudioRecorder } from "expo-audio";
 import { Directory, File, Paths } from "expo-file-system";
 import { Platform } from "react-native";
@@ -53,8 +53,13 @@ export function createExpoRecorder(log?: (line: string) => void): VoiceRecorder 
     preparedUri = null;
   };
   const prepareNow = async (): Promise<void> => {
-    report("permission.requested");
-    const permission = await requestRecordingPermissionsAsync();
+    // Asking opens a system activity on Android even when already granted, which
+    // reads as the app leaving the foreground and would stop the reply that focus started.
+    let permission = await getRecordingPermissionsAsync();
+    if (!permission.granted) {
+      report("permission.requested");
+      permission = await requestRecordingPermissionsAsync();
+    }
     report(`permission.${permission.granted ? "granted" : "denied"}`);
     if (!permission.granted) throw new RecordingPermissionDenied();
     await setAudioModeAsync({
