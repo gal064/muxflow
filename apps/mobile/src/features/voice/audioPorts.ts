@@ -36,6 +36,10 @@ export interface VoicePlayer {
   /** Playback speed for the current and every later source (1 = natural), pitch kept. */
   setRate(rate: number): void;
   onStatus(listener: (status: PlayerStatus) => void): () => void;
+  /**
+   * Stops and destroys the native player, along with any pending OS resume of
+   * it. Status listeners stay, and the next `load` creates a new one.
+   */
   release(): void;
 }
 
