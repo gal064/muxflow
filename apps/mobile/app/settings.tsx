@@ -11,6 +11,7 @@ import { colors, fixedChromeText, radii, typeScale } from "../src/ui/tokens";
 export default function SettingsScreen() {
   const agentCommand = useStore(prefsStore, (state) => state.agentCommand);
   const voiceKeepAwake = useStore(prefsStore, (state) => state.voiceKeepAwake);
+  const voicePlayScreenOff = useStore(prefsStore, (state) => state.voicePlayScreenOff);
   const update = useStore(updateStore, (state) => state.update);
   return (
     <View style={styles.root}>
@@ -43,6 +44,21 @@ export default function SettingsScreen() {
           value={voiceKeepAwake}
         />
       </View>
+      {Platform.OS === "android" ? (
+        <View style={styles.settingRow}>
+          <View style={styles.settingCopy}>
+            <Text {...fixedChromeText} style={styles.label}>Play replies with screen off</Text>
+            <Text style={styles.help}>Keeps playing replies when you turn the phone off on the Voice screen.</Text>
+          </View>
+          <Switch
+            accessibilityLabel="Play replies with screen off"
+            onValueChange={(value) => prefsStore.getState().setVoicePlayScreenOff(value)}
+            thumbColor={voicePlayScreenOff ? colors.accent : colors.chromeDim}
+            trackColor={{ false: colors.chromeBorder, true: colors.accentWash }}
+            value={voicePlayScreenOff}
+          />
+        </View>
+      ) : null}
       <View style={styles.settingRow}>
         <Text style={styles.help}>Version {Constants.expoConfig?.version ?? "unknown"}</Text>
         {Platform.OS === "ios" ? (
