@@ -30,6 +30,8 @@ export interface PrefsPersisted {
   voiceBigPane: boolean;
   /** Prevent screen sleep while the focused Voice screen is in the foreground. */
   voiceKeepAwake: boolean;
+  /** Android: keep playing voice replies when the phone is turned off on the Voice screen. */
+  voicePlayScreenOff: boolean;
 }
 
 export interface PrefsState extends PrefsPersisted {
@@ -46,11 +48,12 @@ export interface PrefsActions {
   setVoiceAutoPlay(autoPlay: boolean): void;
   setVoiceBigPane(big: boolean): void;
   setVoiceKeepAwake(keepAwake: boolean): void;
+  setVoicePlayScreenOff(playScreenOff: boolean): void;
 }
 
 export type PrefsStore = StoreApi<PrefsState & PrefsActions>;
 
-export const DEFAULT_PREFS: PrefsPersisted = { agentListMode: "priority", agentCommand: DEFAULT_AGENT_COMMAND, voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false };
+export const DEFAULT_PREFS: PrefsPersisted = { agentListMode: "priority", agentCommand: DEFAULT_AGENT_COMMAND, voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true };
 
 /** Tolerates anything on disk: an unknown or missing field falls back to its default. */
 export function parsePersistedPrefs(raw: string | null): PrefsPersisted {
@@ -65,6 +68,7 @@ export function parsePersistedPrefs(raw: string | null): PrefsPersisted {
       voiceAutoPlay: typeof fields.voiceAutoPlay === "boolean" ? fields.voiceAutoPlay : DEFAULT_PREFS.voiceAutoPlay,
       voiceBigPane: typeof fields.voiceBigPane === "boolean" ? fields.voiceBigPane : DEFAULT_PREFS.voiceBigPane,
       voiceKeepAwake: typeof fields.voiceKeepAwake === "boolean" ? fields.voiceKeepAwake : DEFAULT_PREFS.voiceKeepAwake,
+      voicePlayScreenOff: typeof fields.voicePlayScreenOff === "boolean" ? fields.voicePlayScreenOff : DEFAULT_PREFS.voicePlayScreenOff,
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -77,8 +81,8 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
 
   return createStore<PrefsState & PrefsActions>((set, get) => {
     const persist = (): void => {
-      const { agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake } = get();
-      const value = JSON.stringify({ agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake } satisfies PrefsPersisted);
+      const { agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake, voicePlayScreenOff } = get();
+      const value = JSON.stringify({ agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake, voicePlayScreenOff } satisfies PrefsPersisted);
       writes = writes.then(
         () =>
           storage.setItem(PREFS_STORAGE_KEY, value).catch((error: unknown) => {
@@ -140,6 +144,12 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
       setVoiceKeepAwake(keepAwake) {
         if (get().voiceKeepAwake === keepAwake && get().hydrated) return;
         set({ voiceKeepAwake: keepAwake, hydrated: true });
+        persist();
+      },
+
+      setVoicePlayScreenOff(playScreenOff) {
+        if (get().voicePlayScreenOff === playScreenOff && get().hydrated) return;
+        set({ voicePlayScreenOff: playScreenOff, hydrated: true });
         persist();
       },
     };

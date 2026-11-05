@@ -1,12 +1,13 @@
 import { create } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { BackgroundTimer } from "../../protocol/backgroundTimer";
 import { HostError } from "../../protocol/HostConnection";
 import { Operation, ResponseSchema, VoiceReadiness, VoiceResponseSchema, VoiceSpeechSchema, type VoiceSpeech } from "../../protocol/gen/envelope_pb";
 import type { VoiceHaptics } from "./haptics";
 import type { VoiceTones } from "./tones";
 import { VoiceRecorderCoordinator } from "./recorderCoordinator";
 import { FakeConnection, FakeFiles, FakePlayer, FakeRecorder, speechResponse, statusResponse, transcriptResponse } from "./testing";
-import { MAX_UTTERANCE_MS, MIN_UTTERANCE_MS, SESSION_REFRESH_MS, VoiceController } from "./VoiceController";
+import { MAX_UTTERANCE_MS, MIN_UTTERANCE_MS, SCREEN_OFF_CHECK_MS, SESSION_REFRESH_MS, VoiceController } from "./VoiceController";
 import { createVoiceStore, latestReply } from "./voiceStore";
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -27,7 +28,7 @@ class FakeTones implements VoiceTones {
   failed() { this.calls.push("failed"); }
 }
 
-function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHoldMs = 0) {
+function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHoldMs = 0, backgroundTimer?: BackgroundTimer) {
   const haptics = new FakeHaptics();
   const tones = new FakeTones();
   const store = createVoiceStore();
@@ -41,6 +42,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHold
   let foreground = true;
   let canSubmit = true;
   let autoPlay = true;
+  let screenOff = false;
   const toasts: string[] = [];
   const logs: string[] = [];
   const controller = new VoiceController({
@@ -57,6 +59,8 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHold
     player,
     files,
     appInForeground: () => foreground,
+    canPlayScreenOff: () => screenOff,
+    backgroundTimer,
     autoPlay,
     canSubmit: () => canSubmit,
     haptics,
@@ -78,6 +82,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHold
     toasts,
     logs,
     setForeground: (value: boolean) => { foreground = value; },
+    setScreenOff: (value: boolean) => { screenOff = value; },
     setCanSubmit: (value: boolean) => { canSubmit = value; },
     setAutoPlay: (value: boolean) => { autoPlay = value; controller.setAutoPlay(value); },
   };
@@ -530,6 +535,42 @@ describe("VoiceController", () => {
     b.dispose();
   });
 
+  it("keeps the session refresh, the tail hold and the Enter on the background clock", async () => {
+    const pending: { delayMs: number; fn: () => void }[] = [];
+    const timer: BackgroundTimer = {
+      set(delayMs, fn) {
+        pending.push({ delayMs, fn });
+        return { token: String(pending.length) };
+      },
+      clear() {},
+    };
+    const fire = (delayMs: number): void => {
+      const index = pending.findIndex((entry) => entry.delayMs === delayMs);
+      pending.splice(index, 1)[0]!.fn();
+    };
+    const { controller, connection } = harness("agent-a", "%3", 25, 40, timer);
+    controller.focus();
+    await settle();
+    expect(connection.of(Operation.VOICE_SESSION)).toHaveLength(1);
+
+    fire(SESSION_REFRESH_MS);
+    await settle();
+    expect(connection.of(Operation.VOICE_SESSION)).toHaveLength(2);
+    expect(pending.filter((entry) => entry.delayMs === SESSION_REFRESH_MS)).toHaveLength(1);
+
+    controller.beginUtterance();
+    await settle();
+    await vi.advanceTimersByTimeAsync(MIN_UTTERANCE_MS);
+    const sent = controller.endUtterance();
+    await settle();
+    fire(40);
+    await settle();
+    expect(pending.some((entry) => entry.delayMs === 25)).toBe(true);
+    fire(25);
+    await sent;
+    controller.dispose();
+  });
+
   it("re-sends the registration every refresh interval and after a reconnect; only End clears it", async () => {
     const h = harness();
     h.controller.focus();
@@ -884,6 +925,112 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
     await settle();
     expect(h.player.playing).toBe(true);
     expect(latestReply(h.store.getState().sessions["agent-a"])!.played).toBe(true);
+  });
+
+  function background(h: ReturnType<typeof harness>, screenOff: boolean): void {
+    h.setForeground(false);
+    h.setScreenOff(screenOff);
+    h.controller.onAppInactive();
+    h.controller.onAppBackground();
+  }
+
+  it("turning the phone off on the screen keeps the reply going and plays the next one", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "First."));
+
+    background(h, true);
+    expect(h.player.playing).toBe(true);
+    expect(h.player.calls).not.toContain("release");
+
+    h.controller.onVoiceReply(reply("agent-a", "Second."));
+    expect(h.player.playing).toBe(true);
+    expect(latestReply(h.store.getState().sessions["agent-a"])!.played).toBe(true);
+  });
+
+  it("switching apps still stops the reply and keeps the next one for the return", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "First."));
+
+    background(h, false);
+    expect(h.player.playing).toBe(false);
+
+    h.controller.onVoiceReply(reply("agent-a", "Second."));
+    expect(h.player.playing).toBe(false);
+    expect(latestReply(h.store.getState().sessions["agent-a"])!.played).toBe(false);
+  });
+
+  it("turning the phone off away from the Voice screen plays nothing", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.blur();
+
+    background(h, true);
+    h.controller.onVoiceReply(reply("agent-a", "First."));
+    expect(h.player.playing).toBe(false);
+    expect(latestReply(h.store.getState().sessions["agent-a"])!.played).toBe(false);
+  });
+
+  it("unlocking into another app ends a reply that was playing with the screen off", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "First."));
+    background(h, true);
+
+    h.setScreenOff(false);
+    await vi.advanceTimersByTimeAsync(SCREEN_OFF_CHECK_MS);
+    expect(h.player.calls).toContain("release");
+    expect(h.player.playing).toBe(false);
+    expect(h.store.getState().playback).toBeUndefined();
+
+    h.controller.onVoiceReply(reply("agent-a", "Second."));
+    expect(h.player.playing).toBe(false);
+  });
+
+  it("unlocking into another app with nothing playing ends it too, even after locking again", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    background(h, true);
+
+    h.setScreenOff(false);
+    await vi.advanceTimersByTimeAsync(SCREEN_OFF_CHECK_MS);
+    h.setScreenOff(true);
+
+    h.controller.onVoiceReply(reply("agent-a", "First."));
+    expect(h.player.playing).toBe(false);
+    expect(latestReply(h.store.getState().sessions["agent-a"])!.played).toBe(false);
+  });
+
+  it("the phone staying off keeps it going past any number of checks", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    background(h, true);
+
+    await vi.advanceTimersByTimeAsync(SCREEN_OFF_CHECK_MS * 5);
+    h.controller.onVoiceReply(reply("agent-a", "First."));
+    expect(h.player.playing).toBe(true);
+  });
+
+  it("unlocking back onto the screen keeps the reply going", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "First."));
+    background(h, true);
+
+    h.setScreenOff(false);
+    h.setForeground(true);
+    h.controller.onAppActive();
+    await vi.advanceTimersByTimeAsync(SCREEN_OFF_CHECK_MS);
+    expect(h.player.playing).toBe(true);
+    expect(h.player.calls).not.toContain("release");
   });
 
   it("nothing plays into a live microphone, by tap or by resume", async () => {

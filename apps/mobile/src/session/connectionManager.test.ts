@@ -35,6 +35,7 @@ function fakeNative() {
     }),
     scheduleWake: unsupported,
     cancelWake: unsupported,
+    isScreenOffOrLocked: () => false,
     addListener: vi.fn((eventName, listener) => {
       if (eventName !== "onDisconnectRequested") throw new Error(`unexpected subscription to ${eventName}`);
       disconnectListeners.add(listener);

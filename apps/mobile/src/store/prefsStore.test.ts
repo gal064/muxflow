@@ -33,7 +33,7 @@ describe("parsePersistedPrefs", () => {
     ['{"agentListMode":"Pinned"}', "priority"],
     ['{"agentListMode":"priority"}', "priority"],
   ])("%j → %s", (raw, mode) => {
-    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false });
+    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true });
   });
 
   it.each<[string, number, boolean]>([
@@ -54,6 +54,8 @@ describe("parsePersistedPrefs", () => {
   it("accepts only a boolean Voice wake-lock preference and defaults it off", () => {
     expect(parsePersistedPrefs('{"voiceKeepAwake":true}').voiceKeepAwake).toBe(true);
     expect(parsePersistedPrefs('{"voiceKeepAwake":"true"}').voiceKeepAwake).toBe(false);
+    expect(parsePersistedPrefs('{"voicePlayScreenOff":false}').voicePlayScreenOff).toBe(false);
+    expect(parsePersistedPrefs('{"voicePlayScreenOff":"false"}').voicePlayScreenOff).toBe(true);
   });
 });
 
@@ -73,7 +75,7 @@ describe("prefsStore", () => {
     store.getState().setAgentListMode("workspace");
     expect(store.getState().agentListMode).toBe("workspace");
     await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(1));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false });
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true });
 
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
@@ -94,13 +96,14 @@ describe("prefsStore", () => {
     store.getState().setVoiceAutoPlay(false);
     store.getState().setVoiceBigPane(true);
     store.getState().setVoiceKeepAwake(true);
+    store.getState().setVoicePlayScreenOff(false);
     // Setting the value already held writes nothing.
     store.getState().setVoiceBigPane(true);
-    await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(4));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", agentCommand: "codex", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true });
+    await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(5));
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", agentCommand: "codex", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true, voicePlayScreenOff: false });
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
-    expect(restarted.getState()).toMatchObject({ agentListMode: "pinned", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true });
+    expect(restarted.getState()).toMatchObject({ agentListMode: "pinned", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true, voicePlayScreenOff: false });
   });
 
   it("persists the command used by the New agent shortcut", async () => {

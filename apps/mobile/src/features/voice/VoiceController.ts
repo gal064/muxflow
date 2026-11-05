@@ -5,6 +5,7 @@
 // session. The session outlives the screen: `voiceRegistry` keeps the
 // controller until `endSession()`; the screen `focus()`es and `blur()`s it.
 
+import { jsBackgroundTimer, type BackgroundTimer, type BackgroundTimerHandle } from "../../protocol/backgroundTimer";
 import { HostError, type HostConnection } from "../../protocol/HostConnection";
 import type { VoiceSpeech } from "../../protocol/gen/envelope_pb";
 import { newOperationId, terminalInput, voiceProvision, voiceSession, voiceSpeak, voiceStatus, voiceTranscribe } from "../../protocol/requests";
@@ -34,6 +35,14 @@ export interface VoiceControllerOptions {
   files: VoiceFiles;
   /** `AppState.currentState === "active"`: nothing auto-plays in the background (§1). */
   appInForeground: () => boolean;
+  /**
+   * The phone is off or locked and the preference allows replies then. Checked
+   * when the app backgrounds and every `SCREEN_OFF_CHECK_MS` after, so unlocking
+   * into another app ends it. Absent means never.
+   */
+  canPlayScreenOff?: () => boolean;
+  /** Android freezes JS timers while the app is backgrounded; the delays that must still elapse then run here. */
+  backgroundTimer?: BackgroundTimer;
   /** Tactile acknowledgements for the steps the user cannot see; absent in tests that do not care. */
   haptics?: VoiceHaptics;
   /** Short tones for the same steps, all but the press (a sound there would be recorded). */
@@ -56,6 +65,8 @@ export interface VoiceControllerOptions {
 }
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
+/** Nothing tells a backgrounded app that the phone was unlocked into another one, so it looks. */
+export const SCREEN_OFF_CHECK_MS = 2_000;
 /** The steps between press and pane whose failure loses the utterance; each gets the error haptic. */
 const UTTERANCE_STEPS = new Set(["record", "recorder.stop", "transcribe", "input"]);
 /** Releases shorter than this are a mis-tap, not an utterance (§5.2). */
@@ -96,7 +107,9 @@ export class VoiceController {
   private wantRegistered = false;
   private disposed = false;
   /** Runs only after a registration succeeded; stops on a refusal that says the host is not ready. */
-  private refreshTimer: ReturnType<typeof setInterval> | undefined;
+  private refreshTimer: BackgroundTimerHandle | undefined;
+  /** Set while the app is backgrounded with this screen on top because the phone was turned off or locked. */
+  private screenOffTimer: BackgroundTimerHandle | undefined;
   private registering = false;
   /** A `reregister()` that arrived while one was in flight runs right after it settles. */
   private registerAgain = false;
@@ -117,6 +130,7 @@ export class VoiceController {
   private readonly unsubscribePlayer: () => void;
   private readonly now: () => number;
   private readonly sessionRefreshMs: number;
+  private readonly backgroundTimer: BackgroundTimer;
   private readonly tailHoldMs: number;
   private readonly submitDelayMs: number;
   private playbackRate: number;
@@ -134,6 +148,7 @@ export class VoiceController {
     this.sessionId = options.sessionId;
     this.now = options.now ?? Date.now;
     this.sessionRefreshMs = options.sessionRefreshMs ?? SESSION_REFRESH_MS;
+    this.backgroundTimer = options.backgroundTimer ?? jsBackgroundTimer;
     this.tailHoldMs = options.tailHoldMs ?? TAIL_HOLD_MS;
     this.submitDelayMs = options.submitDelayMs ?? SUBMIT_DELAY_MS;
     this.playbackRate = options.playbackRate ?? 1;
@@ -183,6 +198,7 @@ export class VoiceController {
     // The next mount re-baselines the lifecycle: an edge that happened while
     // another screen was up is not acknowledged late, or for the wrong turn.
     this.lastLifecycle = undefined;
+    this.endScreenOff();
     this.stopForExit("blur");
     // React Native can unmount the pressed control without delivering
     // `onPressOut`, so a held take is canceled here and cannot keep the
@@ -195,6 +211,7 @@ export class VoiceController {
 
   /** The app came back to the foreground while this screen is on top. */
   onAppActive(): void {
+    this.endScreenOff();
     if (this.focused) this.arm();
     this.playUnplayedIfListening();
   }
@@ -205,9 +222,15 @@ export class VoiceController {
     else this.disarm();
   }
 
-  /** A reply is only heard on its screen, so backgrounding ends it. iOS `inactive` (Control Center) does not. */
+  /**
+   * A reply is only heard on its screen, so backgrounding ends it, unless the
+   * phone was turned off with that screen on top. iOS `inactive` (Control
+   * Center) does not end it either.
+   */
   onAppBackground(): void {
-    this.stopForExit("background");
+    this.endScreenOff();
+    if (this.focused && this.options.canPlayScreenOff?.() === true) this.watchScreenOff();
+    else this.stopForExit("background");
   }
 
   /** Every reconnect is a new connection, and the host's registration is per connection (§4.3). */
@@ -245,6 +268,7 @@ export class VoiceController {
     this.disposed = true;
     this.focused = false;
     this.wantRegistered = false;
+    this.endScreenOff();
     this.clearAutoSend();
     this.disarm(true);
     this.stopRefreshTimer();
@@ -401,7 +425,8 @@ export class VoiceController {
     // The press may still be waiting for the recorder (see beginUtterance).
     await (this.arming ?? Promise.resolve()).catch(() => undefined);
     // Let the last syllable land before the encoder is stopped (TAIL_HOLD_MS).
-    if (this.tailHoldMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, this.tailHoldMs));
+    // On the background clock: locking the phone right after sending must not leave the take recording.
+    if (this.tailHoldMs > 0) await new Promise<void>((resolve) => this.backgroundTimer.set(this.tailHoldMs, resolve));
     if (this.disposed) return;
     let uri: string | null = null;
     let durationMs = 0;
@@ -497,7 +522,8 @@ export class VoiceController {
         voice: true,
         expectedServerIdentity: this.options.serverIdentity,
       }));
-      if (this.submitDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, this.submitDelayMs));
+      // On the background clock: locking the phone right after sending must not hold back the Enter.
+      if (this.submitDelayMs > 0) await new Promise<void>((resolve) => this.backgroundTimer.set(this.submitDelayMs, resolve));
       if (this.disposed || this.options.canSubmit?.(this.paneId) === false) {
         this.log("input.submit.skipped pane-agent-departed");
         this.setPhaseIfAlive("idle");
@@ -689,7 +715,25 @@ export class VoiceController {
 
   /** Replies are heard only on their own focused screen, and never into a live microphone. */
   private playbackAllowed(): boolean {
-    return !this.disposed && this.focused && this.options.appInForeground() && !this.options.recorderCoordinator.isListening;
+    if (this.disposed || !this.focused || this.options.recorderCoordinator.isListening) return false;
+    return this.options.appInForeground() || (this.screenOffTimer !== undefined && this.options.canPlayScreenOff?.() === true);
+  }
+
+  /** Runs until the app returns or the phone is in use elsewhere, which ends it for good. */
+  private watchScreenOff(): void {
+    this.screenOffTimer = this.backgroundTimer.set(SCREEN_OFF_CHECK_MS, () => {
+      if (this.options.appInForeground() || this.options.canPlayScreenOff?.() === true) {
+        this.watchScreenOff();
+        return;
+      }
+      this.screenOffTimer = undefined;
+      this.stopForExit("screenOn");
+    });
+  }
+
+  private endScreenOff(): void {
+    if (this.screenOffTimer !== undefined) this.backgroundTimer.clear(this.screenOffTimer);
+    this.screenOffTimer = undefined;
   }
 
   /**
@@ -816,7 +860,7 @@ export class VoiceController {
       if (this.disposed) return;
       this.everRegistered = true;
       this.log("session.registered");
-      this.refreshTimer ??= setInterval(() => void this.registerSession(), this.sessionRefreshMs);
+      this.startRefreshTimer();
       // The host just answered on this lane, so a status probe that never
       // settled (or was skipped) is not the host's fault: ask once more rather
       // than leave the card at "Checking voice on the host…".
@@ -842,8 +886,17 @@ export class VoiceController {
     }
   }
 
+  /** On the background clock: the host drops a session it has not heard from, and any reply with it. */
+  private startRefreshTimer(): void {
+    this.refreshTimer ??= this.backgroundTimer.set(this.sessionRefreshMs, () => {
+      this.refreshTimer = undefined;
+      this.startRefreshTimer();
+      void this.registerSession();
+    });
+  }
+
   private stopRefreshTimer(): void {
-    if (this.refreshTimer !== undefined) clearInterval(this.refreshTimer);
+    if (this.refreshTimer !== undefined) this.backgroundTimer.clear(this.refreshTimer);
     this.refreshTimer = undefined;
   }
 

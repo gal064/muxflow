@@ -38,7 +38,12 @@ Decisions made during planning:
   and pushed replies are stored as unplayed messages; nothing auto-plays in
   the background. Returning to the screen auto-plays the newest unplayed
   message. A reply that is playing stops when you leave its screen or
-  background the app, and stays stopped on return.
+  background the app, and stays stopped on return. The exception is Android
+  with **Play replies with screen off** on (the default): turning the phone
+  off on the Voice screen keeps the reply playing and auto-plays new ones, so
+  the phone can go in a pocket. Switching apps still stops audio, and
+  unlocking into another app ends it. iOS has no equivalent, because it
+  suspends the app between replies.
 - **Reply source**: the `Stop` hook's `last_assistant_message`, pushed to the
   phone, nothing kept on the host. The alternative considered is reading the
   agent's on-disk transcript at `Stop` (Claude Code and Codex both keep
