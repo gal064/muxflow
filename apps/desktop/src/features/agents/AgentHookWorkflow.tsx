@@ -47,7 +47,6 @@ interface AgentWorkflowOptions {
 export interface AgentWorkflow {
   launch(adapter: AgentAdapterId, placement: AgentPlacement): void;
   resume(agent: AgentRecord, placement: AgentPlacement): void;
-  rename(agent: AgentRecord, displayName: string): void;
   reviewHooks(adapter: AgentAdapterId, action: "install" | "uninstall"): void;
   /** Opens a review that was already loaded for the captured setup host. */
   openHookReview(
@@ -106,12 +105,6 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
       .catch((cause) => onStatus(String(cause)));
   }, [launchContext, onStatus, runtime]);
 
-  const rename = useCallback((agent: AgentRecord, displayName: string) => {
-    void runtime.rename(agent, displayName)
-      .then(() => onStatus(`Renaming agent to ${displayName}…`))
-      .catch((cause) => onStatus(String(cause)));
-  }, [onStatus, runtime]);
-
   const reviewHooks = useCallback((adapter: AgentAdapterId, action: "install" | "uninstall") => {
     if (!host) {
       onStatus("Reviewing hook changes requires a live authoritative host.");
@@ -147,5 +140,5 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
     }}
   /> : null;
 
-  return { launch, resume, rename, reviewHooks, openHookReview, dialog };
+  return { launch, resume, reviewHooks, openHookReview, dialog };
 }

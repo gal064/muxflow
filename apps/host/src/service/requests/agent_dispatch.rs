@@ -191,17 +191,11 @@ fn handle_inner(
         }
         v1::Operation::AgentAction => {
             let action = v1::AgentActionKind::try_from(request.action).unwrap_or_default();
-            if action == v1::AgentActionKind::Rename {
-                let event = runtime.rename(&request.agent_id, &request.display_name)?;
-                response.agent = event.agent.clone();
-                publish(event);
-            } else {
-                let (session_id, window_id, pane_id) =
-                    launch_agent(&request, action, generation, topology_baseline)?;
-                response.session_id = session_id;
-                response.window_id = window_id;
-                response.pane_id = pane_id;
-            }
+            let (session_id, window_id, pane_id) =
+                launch_agent(&request, action, generation, topology_baseline)?;
+            response.session_id = session_id;
+            response.window_id = window_id;
+            response.pane_id = pane_id;
         }
         _ => bail!("unsupported agent operation"),
     }

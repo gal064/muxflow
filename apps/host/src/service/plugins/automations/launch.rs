@@ -13,6 +13,7 @@ use crate::service::{
         APP_SHELL, configure_new_session, escaped_format_literal, resolved_start_directory, run,
         run_for_ids, validate_name,
     },
+    tmux_config::NAME_LOCK_OPTION,
 };
 
 pub(super) type Tmux = dyn Fn() -> anyhow::Result<Command>;
@@ -29,8 +30,6 @@ pub(super) const WORKSPACE_TAG: &str = "@muxflow-automation-workspace";
 const WORKSPACE_NAME: &str = "automation";
 pub(super) const AUTOMATION_TAG: &str = "@muxflow-automation";
 pub(super) const RUN_TAG: &str = "@muxflow-automation-run";
-/// Tells this app's own window-naming hook to leave the window's name alone.
-const NAME_LOCK_TAG: &str = "@muxflow-name-locked";
 
 const PROMPT_WAIT_STEP: Duration = Duration::from_millis(100);
 const PROMPT_WAIT_STEPS: u32 = 100;
@@ -137,7 +136,7 @@ fn tag_and_type(
     for (option, value) in [
         (AUTOMATION_TAG, definition.id.as_str()),
         (RUN_TAG, number.as_str()),
-        (NAME_LOCK_TAG, "1"),
+        (NAME_LOCK_OPTION, "1"),
         ("automatic-rename", "off"),
         ("allow-rename", "off"),
     ] {

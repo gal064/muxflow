@@ -179,8 +179,7 @@ client) plus the active `focus`, requests one snapshot per scope, decides
 notifications and sounds for every host, and acknowledges seen only for the
 focused pane on the active host. It returns the active host's `agents`,
 `adapters`, `rollups` as today plus `byHost: ReadonlyMap<string, { agents; adapters; rollups }>`.
-Launch, resume and hook actions use the active host's scope; a rename uses
-the agent's own host, which is where the name lives.
+Launch, resume and hook actions use the active host's scope.
 
 ## Cross-host actions
 
@@ -188,7 +187,7 @@ the agent's own host, which is where the name lives.
   then `selectSession(sessionId)` once the facade reports that host (an effect
   keyed on a pending `{ profileId, sessionId, paneId? }`).
 - Bell jump and notification click use the same path.
-- Row mutations (pin, rename, move, close, agent tab pin, agent rename) run
+- Row mutations (pin, rename, move, close, agent tab pin, agent tab rename) run
   against the row's host: `useTmuxActionPerformer` accepts an optional target
   `{ clientId, canMutate, scopeRef }`, resolved from the row's `hostProfileId`
   via `linkFor`; `useShellCommands` resolves a targeted command's host through

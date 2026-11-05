@@ -1046,35 +1046,6 @@ impl AgentRuntime {
         })
     }
 
-    pub(super) fn rename(&self, agent_id: &str, name: &str) -> anyhow::Result<v1::AgentEvent> {
-        let name = name.trim();
-        if name.is_empty() || name.chars().count() > 128 || name.chars().any(char::is_control) {
-            bail!("agent name must be 1-128 printable characters");
-        }
-        let mut state = self.state.lock().unwrap();
-        let original = state.clone();
-        state.generation = state.generation.saturating_add(1);
-        let generation = state.generation;
-        let record = state
-            .agents
-            .get_mut(agent_id)
-            .context("agent no longer exists")?;
-        record.display_name = name.into();
-        record.state_generation = generation;
-        let result = snapshot::record(record);
-        if let Err(error) = self.persist_locked(&state) {
-            *state = original;
-            return Err(error);
-        }
-        Ok(v1::AgentEvent {
-            agent: Some(result),
-            generation,
-            notify: false,
-            reason: "renamed".into(),
-            retired_agent_ids: Vec::new(),
-        })
-    }
-
     fn persist_locked(&self, state: &StoredState) -> anyhow::Result<()> {
         store::persist(&self.state_path, state)
     }

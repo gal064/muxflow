@@ -1035,7 +1035,8 @@ enum AgentActionKind {
   AGENT_ACTION_KIND_LAUNCH_WINDOW = 1;
   AGENT_ACTION_KIND_LAUNCH_SPLIT = 2;
   AGENT_ACTION_KIND_RESUME = 3;
-  AGENT_ACTION_KIND_RENAME = 4;
+  reserved 4;
+  reserved "AGENT_ACTION_KIND_RENAME";
 }
 
 enum AgentPlacementKind {
@@ -1182,7 +1183,8 @@ message AgentRequest {
   AgentActionKind action = 1;
   string agent_id = 3;
   string native_session_id = 4;
-  string display_name = 5;
+  reserved 5;
+  reserved "display_name";
   string session_id = 6;
   string window_id = 7;
   string pane_id = 8;

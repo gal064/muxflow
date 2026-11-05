@@ -415,8 +415,10 @@ session stays resident.
 - The opt-in host-naming hook (`service/tmux_config.rs`) renames windows from
   agent pane titles. Its guard condition includes
   `#{==:#{@muxflow-name-locked},}`, so it skips any window with the lock tag.
-  The tag is general on purpose: it is the first step of T053, and it stays if
-  automations are removed.
+  The tag is general on purpose: a tab renamed through the app sets it too, and
+  it stays if automations are removed.
+- An agent in a window with the lock tag goes by the tab name rather than its
+  pane title: the host publishes no pane title for such a window.
 - Because the guard changed, a host whose hook was already applied gets it
   re-applied once (`host-naming` reports `applied`, and the desktop shows its
   usual "applied" status line).

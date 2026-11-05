@@ -180,7 +180,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
   // heading whenever the group changes down the list, so a group split across
   // two places in this array would print its heading twice.
   { id: "agents.focusRow", title: "Focus the selected agent's pane", group: "Agents", requires: "row" },
-  { id: "agents.renameRow", title: "Rename the selected agent…", group: "Agents", requires: "row" },
+  { id: "agents.renameRow", title: "Rename the selected agent's tab…", group: "Agents", requires: "row" },
   { id: "agents.resumeRow", title: "Resume the selected agent", group: "Agents", requires: "row" },
   { id: "session.new", title: "New workspace", group: "Workspace", defaults: { mac: "Meta+N", linux: "Ctrl+N" }, mutates: true },
   { id: "session.rename", title: "Rename workspace", group: "Workspace", mutates: true, requires: "session" },

@@ -97,7 +97,7 @@ interface WorkspaceSidebarProps {
   onOpenSettings(): void;
   onLaunchAgent(adapter: AgentAdapterId, placement: AgentPlacement): void;
   onResumeAgent(agent: AgentRecord, placement: AgentPlacement, scope: HostScopeToken): void;
-  onRenameAgent(agent: AgentRecord, scope: HostScopeToken): void;
+  onRenameAgentTab(agent: AgentRecord, scope: HostScopeToken): void;
   onReviewHooks(adapter: AgentAdapterId, action: "install" | "uninstall"): void;
   /**
    * Set when this host cannot report agent status at all. The section says so
@@ -211,7 +211,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     if (!focusedAgent) return [];
     const ids: CommandId[] = [];
     if (focusedAgent.routable) ids.push("agents.focusRow");
-    if (focusedAgentCanMutate) ids.push("agents.renameRow");
+    if (focusedAgentCanMutate && focusedAgent.routable) ids.push("agents.renameRow");
     if (canResume(focusedAgent) && focusedAgentResume) ids.push("agents.resumeRow");
     return ids;
     // `canResume` reads the hosts: a switch that leaves the row's identity
@@ -222,7 +222,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     if (!focusedAgent) return;
     switch (commandId) {
       case "agents.focusRow": props.onSelectAgent(focusedAgent, focusedAgentTarget!.scope); return;
-      case "agents.renameRow": props.onRenameAgent(focusedAgent.agent, focusedAgentTarget!.scope); return;
+      case "agents.renameRow": props.onRenameAgentTab(focusedAgent.agent, focusedAgentTarget!.scope); return;
       // The context menu offers one item per placement because it has room to.
       // The palette is a single line, so it takes the adapter's first declared
       // placement rather than inventing a second prompt to ask which.
@@ -782,7 +782,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
         ? [
           { id: "focus", label: "Focus this agent's pane", disabled: !agentMenu.row.routable, run: () => props.onSelectAgent(agentMenu.row!, agentMenu.scope) },
           { id: "pin", label: agentMenu.row.location.tabPinned ? "Unpin tab" : "Pin tab", run: () => props.onTogglePinnedAgentTab(agentMenu.row!, agentMenu.scope) },
-          { id: "rename", label: "Rename agent…", disabled: !agentHost(agentMenu.row).canMutate, run: () => props.onRenameAgent(agentMenu.row!.agent, agentMenu.scope) },
+          { id: "rename", label: "Rename tab…", disabled: !agentHost(agentMenu.row).canMutate || !agentMenu.row.routable, run: () => props.onRenameAgentTab(agentMenu.row!.agent, agentMenu.scope) },
           ...agentMoveItems(agentMenu.row, agentMenu.anchor),
           ...resumePlacements(props.adapters, agentMenu.row.agent).map((placement) => ({
             id: `resume-${placement}`,

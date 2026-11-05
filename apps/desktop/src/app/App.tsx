@@ -1665,20 +1665,7 @@ export function App() {
         width={sidebarWidth}
         onLaunchAgent={agentWorkflow.launch}
         onOpenSettings={() => setSettingsOpen(true)}
-        // The rename names the agent where it lives, on the active host or
-        // beside it; the runtime routes it by the agent's own host.
-        onRenameAgent={(agent, scope) => {
-          if (!scopeIsLive(scope)) return;
-          setTextPrompt({
-            title: "Rename agent",
-            label: "Agent name",
-            initialValue: agent.displayName,
-            submit: (name) => {
-              setTextPrompt(undefined);
-              if (scopeIsLive(scope)) agentWorkflow.rename(agent, name);
-            },
-          });
-        }}
+        onRenameAgentTab={(agent, scope) => void runCommand("window.rename", { kind: "terminalTab", id: agent.windowId, scope })}
         // A resume opens a new pane beside the one on screen, under the
         // active root the explorer has — both facts of the host on screen.
         // An agent on another host is resumed from there, once it is.

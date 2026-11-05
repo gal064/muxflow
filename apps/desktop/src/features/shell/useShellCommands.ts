@@ -4,6 +4,7 @@ import { createTmuxConfirmation, type PendingTmuxConfirmation } from "../../comm
 import type { PendingTextPrompt } from "../../commands/TextInputDialog";
 import { commandRegistry, selectionIndex, type CommandContext, type CommandId, type CommandTarget } from "../../commands/registry";
 import { rowCommandRegistry } from "../../commands/rowCommands";
+import { stripAgentStatusGlyphs } from "../agents/agentLabels";
 import { nextSortMode } from "../agents/agentsList";
 import type { TerminalPaneController } from "../terminal/TerminalPane";
 import { closePrecondition, type TmuxAction, type TmuxActionResult } from "../tmux/actions";
@@ -372,8 +373,9 @@ export function useShellCommands(options: ShellCommandOptions): {
       }
       case "window.rename": {
         const scope = host.scope;
-        // Display-only normalization must not rewrite the stored tmux name.
-        if (targetWindow) options.setTextPrompt({ title: "Rename terminal tab", label: "Tab name", initialValue: targetWindow.name, submit: (name) => {
+        // The name as the tab shows it: a saved rename locks, so a ticker frame
+        // left in the field would be frozen into the stored name.
+        if (targetWindow) options.setTextPrompt({ title: "Rename terminal tab", label: "Tab name", initialValue: stripAgentStatusGlyphs(targetWindow.name), submit: (name) => {
           options.setTextPrompt(undefined);
           if (!host.isScopeCurrent(scope)) return options.setStatus("Terminal-tab rename was cancelled because its host scope changed.");
           void host.performAction({ kind: "renameWindow", sessionId: targetWindow.sessionId, windowId: targetWindow.id, name });
