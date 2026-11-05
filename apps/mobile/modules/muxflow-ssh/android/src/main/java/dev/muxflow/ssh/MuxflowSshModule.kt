@@ -1,8 +1,10 @@
 package dev.muxflow.ssh
 
+import android.app.KeyguardManager
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.exception.Exceptions
@@ -202,6 +204,13 @@ class MuxflowSshModule : Module() {
     AsyncFunction("cancelWake") { token: String ->
       synchronized(wakes) { wakes.remove(token) }?.let(wakeHandler::removeCallbacks)
       Unit
+    }
+
+    // Locked counts as well as off, so waking the phone to glance at the lock screen changes nothing.
+    Function("isScreenOffOrLocked") {
+      val power = context.getSystemService(PowerManager::class.java)
+      val keyguard = context.getSystemService(KeyguardManager::class.java)
+      power?.isInteractive == false || keyguard?.isKeyguardLocked == true
     }
 
     OnDestroy {
