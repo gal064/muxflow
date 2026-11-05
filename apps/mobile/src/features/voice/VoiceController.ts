@@ -183,10 +183,13 @@ export class VoiceController {
     // The next mount re-baselines the lifecycle: an edge that happened while
     // another screen was up is not acknowledged late, or for the wrong turn.
     this.lastLifecycle = undefined;
+    this.stopForExit("blur");
     // React Native can unmount the pressed control without delivering
-    // `onPressOut`. Stop either kind of live take so this session cannot keep
-    // the process-global recorder from the next voice screen.
-    if (this.recordingPhase() !== undefined) void this.cancelUtterance();
+    // `onPressOut`, so a held take is canceled here and cannot keep the
+    // process-global recorder from the next voice screen. A locked take is no
+    // longer held by a finger: leaving sends it, however the screen was left.
+    if (this.recordingPhase() === "recordingLocked") void this.endUtterance();
+    else if (this.recordingPhase() !== undefined) void this.cancelUtterance();
     else this.disarm();
   }
 
@@ -200,6 +203,11 @@ export class VoiceController {
   onAppInactive(): void {
     if (this.recordingPhase() !== undefined) void this.cancelUtterance();
     else this.disarm();
+  }
+
+  /** A reply is only heard on its screen, so backgrounding ends it. iOS `inactive` (Control Center) does not. */
+  onAppBackground(): void {
+    this.stopForExit("background");
   }
 
   /** Every reconnect is a new connection, and the host's registration is per connection (§4.3). */
@@ -242,10 +250,7 @@ export class VoiceController {
     this.stopRefreshTimer();
     this.unsubscribePlayer();
     const store = this.options.store.getState();
-    if (this.ownPlayback()) {
-      this.options.player.stop();
-      store.setPlayback(undefined);
-    }
+    this.stopForExit("dispose");
     this.loadedMessageId = undefined;
     const reply = latestReply(store.sessions[this.sessionKey]);
     if (reply?.fileUri) this.options.files.delete(reply.fileUri);
@@ -552,7 +557,7 @@ export class VoiceController {
       // The shared player is stopped only if it still holds *this* reply; another
       // session may have taken it since (`loadedMessageId` alone would be stale).
       if (store.playback?.messageId === previous.id) {
-        this.options.player.stop();
+        this.options.player.release();
         store.setPlayback(undefined);
       }
       if (this.loadedMessageId === previous.id) this.loadedMessageId = undefined;
@@ -564,7 +569,9 @@ export class VoiceController {
       truncated: speech.truncated,
       played: false,
     });
-    this.autoPlaySuppressedMessageId = this.options.recorderCoordinator.isListening ? message.id : undefined;
+    // Only a reply that lands on this screen mid-take is held back; one for a
+    // session in the background waits for its own screen, like any other.
+    this.autoPlaySuppressedMessageId = this.focused && this.options.recorderCoordinator.isListening ? message.id : undefined;
     if (speech.audio.byteLength > 0) {
       try {
         message.fileUri = this.options.files.writeReply(this.sessionKey, speech.audio);
@@ -605,7 +612,7 @@ export class VoiceController {
   // ---- playback ---------------------------------------------------------------
 
   play(messageId: string): void {
-    if (this.disposed) return;
+    if (!this.playbackAllowed()) return;
     const message = this.find(messageId);
     if (!message?.fileUri) return;
     const store = this.options.store.getState();
@@ -646,7 +653,7 @@ export class VoiceController {
 
   resume(): void {
     const playback = this.ownPlayback();
-    if (!playback) return;
+    if (!playback || !this.playbackAllowed()) return;
     this.options.player.play();
     this.options.store.getState().setPlayback({ ...playback, state: "playing" });
   }
@@ -680,6 +687,23 @@ export class VoiceController {
     store.setPlayback({ ...playback, state, positionMs, durationMs: status.durationMs || playback.durationMs });
   }
 
+  /** Replies are heard only on their own focused screen, and never into a live microphone. */
+  private playbackAllowed(): boolean {
+    return !this.disposed && this.focused && this.options.appInForeground() && !this.options.recorderCoordinator.isListening;
+  }
+
+  /**
+   * The reply is over once its screen goes. `stop` is not enough: the OS may
+   * have paused the player already, and it resumes such a player on its own.
+   */
+  private stopForExit(reason: string): void {
+    if (!this.ownPlayback()) return;
+    this.options.player.release();
+    this.options.store.getState().setPlayback(undefined);
+    this.loadedMessageId = undefined;
+    this.log(`playback.stopped reason=${reason}`);
+  }
+
   /** The store's playback entry when the shared player holds one of this session's replies. */
   private ownPlayback() {
     const playback = this.options.store.getState().playback;
@@ -688,8 +712,7 @@ export class VoiceController {
 
   /** §1: the newest unplayed reply plays when this screen is focused, in the foreground, with auto-play on. */
   private playUnplayedIfListening(): void {
-    if (this.disposed || !this.focused || !this.options.appInForeground() || this.options.recorderCoordinator.isListening) return;
-    if (!this.autoPlay) return;
+    if (!this.playbackAllowed() || !this.autoPlay) return;
     const store = this.options.store.getState();
     const reply = latestReply(store.sessions[this.sessionKey]);
     if (reply && !reply.played && reply.fileUri && reply.id !== this.autoPlaySuppressedMessageId) this.play(reply.id);

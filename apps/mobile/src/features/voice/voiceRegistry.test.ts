@@ -81,7 +81,7 @@ describe("VoiceRegistry", () => {
     expect(h.store.getState().sessions["%1"]?.messages).toEqual([]);
   });
 
-  it("keeps B's reply manual-only when it arrives while A owns the listening microphone", async () => {
+  it("autoplays B's reply on B's screen even if it arrived while A owned the listening microphone", async () => {
     const h = harness();
     const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });
     const b = h.registry.open({ paneId: "%2", sessionId: "$1", ...h.deps });
@@ -101,8 +101,8 @@ describe("VoiceRegistry", () => {
     a.blur();
     b.focus();
     await settle();
-    expect(message.played).toBe(false);
-    expect(h.deps.player.calls).not.toContain("play");
+    expect(latestReply(h.store.getState().sessions["%2"])!.played).toBe(true);
+    expect(h.deps.player.calls).toContain("play");
     h.registry.disposeAll();
   });
 

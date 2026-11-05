@@ -60,7 +60,7 @@ export function MicButton({ phase, disabled, hint, onPressIn, onSubmit, onLock, 
     opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] }),
     transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.6] }) }],
   };
-  const label = locked ? "Locked · tap anywhere to send" : recording ? "Listening…" : phase === "canceling" ? "Canceling…" : phase === "transcribing" ? "Transcribing…" : phase === "sending" ? "Sending…" : "Hold anywhere here to talk";
+  const label = locked ? "Locked · tap here to send" : recording ? "Listening…" : phase === "canceling" ? "Canceling…" : phase === "transcribing" ? "Transcribing…" : phase === "sending" ? "Sending…" : "Hold anywhere here to talk";
 
   const resetGesturePreview = () => {
     dragX.setValue(0);
