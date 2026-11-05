@@ -119,7 +119,11 @@ export class FakePlayer implements VoicePlayer {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
-  release(): void {}
+  release(): void {
+    this.playing = false;
+    this.loaded = undefined;
+    this.calls.push("release");
+  }
   /** The native player reporting. */
   emit(status: Partial<PlayerStatus>): void {
     const full: PlayerStatus = { positionMs: this.positionMs, durationMs: 4_000, playing: this.playing, finished: false, ...status };
