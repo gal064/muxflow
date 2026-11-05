@@ -1,7 +1,7 @@
 import { useFocusEffect, useRouter } from "expo-router";
 import { useKeepAwake } from "expo-keep-awake";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { AppState, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { AppState, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useStore } from "zustand";
 
@@ -9,6 +9,8 @@ import { agentForPane, agentStateLabel, agentTitle } from "../agents/agentViews"
 import { markState } from "../agents/agentListModel";
 import { AgentMark } from "../agents/ui/AgentMark";
 import { notificationAttention } from "../notifications/attention";
+import { androidConnectionServices } from "../../session/AndroidConnectionServices";
+import { backgroundTimer } from "../../session/backgroundTimer";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
@@ -65,6 +67,8 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     getConnection,
     ...sharedAudio(),
     appInForeground: () => AppState.currentState === "active",
+    canPlayScreenOff: () => Platform.OS === "android" && prefsStore.getState().voicePlayScreenOff && androidConnectionServices().isScreenOffOrLocked(),
+    backgroundTimer: backgroundTimer(),
     canSubmit: (targetPaneId) => agentForPane(sessionStore.getState(), targetPaneId)?.present === true,
     playbackRate: prefsStore.getState().voicePlaybackRate,
     autoPlay: prefsStore.getState().voiceAutoPlay,
