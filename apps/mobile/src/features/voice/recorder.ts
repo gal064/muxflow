@@ -66,6 +66,7 @@ export function createExpoRecorder(log?: (line: string) => void): VoiceRecorder 
       allowsRecording: true,
       playsInSilentMode: true,
       interruptionMode: "duckOthers",
+      shouldPlayInBackground: PLAY_IN_BACKGROUND,
       // The loudspeaker remains the phone fallback, while selecting a headset
       // input below moves the play-and-record route to that headset as a pair.
       shouldRouteThroughEarpiece: false,
@@ -172,11 +173,18 @@ function restorePlaybackRoute(recorder: AudioRecorder | undefined, bluetoothSele
   }
 }
 
+/**
+ * Android replies may keep playing with the screen off, so the controller
+ * decides when they stop rather than expo-audio. iOS has no background audio mode.
+ */
+const PLAY_IN_BACKGROUND = Platform.OS === "android";
+
 function setPlaybackAudioMode(): Promise<void> {
   return setAudioModeAsync({
     allowsRecording: false,
     playsInSilentMode: true,
     interruptionMode: "duckOthers",
+    shouldPlayInBackground: PLAY_IN_BACKGROUND,
     shouldRouteThroughEarpiece: false,
   });
 }

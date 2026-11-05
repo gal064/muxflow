@@ -12,6 +12,7 @@ export interface AndroidConnectionServices {
   scheduleWake(token: string, delayMs: number): Promise<void>;
   cancelWake(token: string): Promise<void>;
   addWakeListener(listener: (token: string) => void): () => void;
+  isScreenOffOrLocked(): boolean;
 }
 
 export interface NativeAndroidConnectionServices {
@@ -20,6 +21,7 @@ export interface NativeAndroidConnectionServices {
   setServiceNotification(title: string, body: string): Promise<void>;
   scheduleWake(token: string, delayMs: number): Promise<void>;
   cancelWake(token: string): Promise<void>;
+  isScreenOffOrLocked(): boolean;
   addListener(eventName: string, listener: (payload: unknown) => void): NativeSubscription;
 }
 
@@ -30,6 +32,7 @@ export function createAndroidConnectionServices(native: NativeAndroidConnectionS
     setServiceNotification: (title, body) => native.setServiceNotification(title, body),
     scheduleWake: (token, delayMs) => native.scheduleWake(token, delayMs),
     cancelWake: (token) => native.cancelWake(token),
+    isScreenOffOrLocked: () => native.isScreenOffOrLocked(),
     addWakeListener: fanOut((deliver) => native.addListener(NATIVE_WAKE_EVENT_NAME, deliver), (payload) => {
       if (typeof payload !== "object" || payload === null) return null;
       const token = (payload as { token?: unknown }).token;

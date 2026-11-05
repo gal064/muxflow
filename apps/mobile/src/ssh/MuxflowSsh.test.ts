@@ -50,6 +50,7 @@ function harness(options: { deferWrites?: boolean } = {}): Harness {
     setServiceNotification: vi.fn(async () => undefined),
     scheduleWake: vi.fn(async () => undefined),
     cancelWake: vi.fn(async () => undefined),
+    isScreenOffOrLocked: () => false,
     addListener: vi.fn((eventName, listener) => {
       const set =
         eventName === NATIVE_WAKE_EVENT_NAME

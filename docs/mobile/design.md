@@ -1376,7 +1376,12 @@ reply for this session that arrived while another session was recording.
 Replies for agents without a session are ignored. Reply audio is heard only on
 its own screen: leaving the screen or backgrounding the app stops the reply and
 destroys the native player, so the OS cannot resume it elsewhere. A reply cut
-off this way stays stopped and does not replay on return. End session sends `voiceSession("")`, deletes the file
+off this way stays stopped and does not replay on return. On Android with
+`voicePlayScreenOff` on (the default), turning the phone off on the Voice
+screen is the exception: the reply keeps playing and new ones auto-play until
+the phone is unlocked into another app. The session refresh and the Enter
+after a transcript run on the background clock, because Android freezes JS
+timers while the app is backgrounded. End session sends `voiceSession("")`, deletes the file
 and forgets the session; a user disconnect disposes every session locally.
 Leaving the Voice screen while a locked take is active sends it. Leaving while
 a take is held, or backgrounding during either kind, cancels it, deletes its
