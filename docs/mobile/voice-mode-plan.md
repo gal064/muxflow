@@ -37,7 +37,8 @@ Decisions made during planning:
 - **Background**: while the app is backgrounded the session stays registered
   and pushed replies are stored as unplayed messages; nothing auto-plays in
   the background. Returning to the screen auto-plays the newest unplayed
-  message.
+  message. A reply that is playing stops when you leave its screen or
+  background the app, and stays stopped on return.
 - **Reply source**: the `Stop` hook's `last_assistant_message`, pushed to the
   phone, nothing kept on the host. The alternative considered is reading the
   agent's on-disk transcript at `Stop` (Claude Code and Codex both keep

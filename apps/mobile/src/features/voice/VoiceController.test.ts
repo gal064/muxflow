@@ -151,7 +151,7 @@ describe("VoiceController", () => {
     h.setForeground(false);
     h.controller.onVoiceReply(reply("agent-a", "Second answer."));
     expect(h.files.deleted).toContain("file:///cache/voice/agent-a.mp3");
-    expect(h.player.calls.at(-1)).toBe("stop");
+    expect(h.player.calls.at(-1)).toBe("release");
     latest = latestReply(h.store.getState().sessions["agent-a"])!;
     expect(latest.displayText).toBe("Second answer.");
     expect(latest.played).toBe(false);
@@ -366,13 +366,12 @@ describe("VoiceController", () => {
     expect(diagnostics).not.toContain("sk-proj-");
   });
 
-  it.each([false, true])("cancels and releases an active recording on blur (locked=%s)", async (locked) => {
+  it("cancels and releases a held recording on blur", async () => {
     const h = harness();
     h.controller.focus();
     await settle();
     h.controller.beginUtterance();
     await settle();
-    if (locked) h.controller.lockUtterance();
 
     h.controller.blur();
     await settle();
@@ -381,6 +380,23 @@ describe("VoiceController", () => {
     expect(h.recorder.released).toBe(1);
     expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
     expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(0);
+  });
+
+  it("sends a locked recording on blur and still releases the microphone", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+    h.controller.lockUtterance();
+
+    h.controller.blur();
+    await settle();
+
+    expect(h.recorder.recording).toBe(false);
+    expect(h.recorder.released).toBe(1);
+    expect(h.store.getState().sessions["agent-a"]?.phase).toBe("idle");
+    expect(h.connection.of(Operation.VOICE_TRANSCRIBE)).toHaveLength(1);
   });
 
   it.each([false, true])("cancels and releases an active recording in the background (locked=%s)", async (locked) => {
@@ -502,8 +518,10 @@ describe("VoiceController", () => {
     expect(latestReply(a.store.getState().sessions["agent-a"])!.played).toBe(true);
     expect(latestReply(a.store.getState().sessions["agent-b"])!.played).toBe(false);
     expect(latestReply(a.store.getState().sessions["agent-b"])!.fileUri).toBe("file:///cache/voice/agent-b.mp3");
-    // B taking the player takes the playback slot; A's controls stop applying.
-    b.play(latestReply(a.store.getState().sessions["agent-b"])!.id);
+    // B's screen taking over takes the playback slot; A's controls stop applying.
+    a.controller.blur();
+    b.focus();
+    await settle();
     expect(a.player.loaded).toBe("file:///cache/voice/agent-b.mp3");
     a.controller.pause();
     expect(a.store.getState().playback?.state).toBe("playing");
@@ -722,9 +740,9 @@ describe("VoiceController against a host that is not set up (review round 1)", (
       appInForeground: () => true,
     });
     a.controller.focus();
+    b.focus();
     await settle();
     b.onVoiceReply(reply("agent-b", "For B."));
-    b.play(latestReply(a.store.getState().sessions["agent-b"])!.id);
     expect(a.player.playing).toBe(true);
     a.controller.beginUtterance();
     expect(a.player.playing).toBe(false);
@@ -771,14 +789,119 @@ describe("VoiceController shared resources and lifecycle (review round 2)", () =
     await settle();
     h.controller.onVoiceReply(reply("agent-a", "A one."));
     h.controller.blur();
+    h.b.focus();
+    await settle();
     h.b.onVoiceReply(reply("agent-b", "B one."));
-    h.b.play(latestReply(h.store.getState().sessions["agent-b"])!.id);
     expect(h.player.loaded).toBe("file:///cache/voice/agent-b.mp3");
     h.controller.onVoiceReply(reply("agent-a", "A two."));
     expect(h.player.playing).toBe(true);
     expect(h.store.getState().playback?.state).toBe("playing");
     expect(h.files.deleted).toContain("file:///cache/voice/agent-a.mp3");
     h.b.dispose();
+  });
+
+  it("leaving the screen ends the reply, and it does not restart on return", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "Long reply."));
+    expect(h.player.playing).toBe(true);
+
+    h.controller.blur();
+    expect(h.player.calls).toContain("release");
+    expect(h.player.playing).toBe(false);
+    expect(h.store.getState().playback).toBeUndefined();
+
+    h.player.calls.length = 0;
+    h.controller.focus();
+    await settle();
+    expect(h.player.calls).not.toContain("play");
+  });
+
+  it("backgrounding ends the reply; a transient inactive state does not", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "Long reply."));
+
+    h.controller.onAppInactive();
+    expect(h.player.playing).toBe(true);
+
+    h.controller.onAppBackground();
+    expect(h.player.calls).toContain("release");
+    expect(h.player.playing).toBe(false);
+    expect(h.store.getState().playback).toBeUndefined();
+  });
+
+  it("a session that left does not touch the reply another screen is playing", async () => {
+    const h = pair();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "A one."));
+    h.b.focus();
+    await settle();
+    h.b.onVoiceReply(reply("agent-b", "B one."));
+    expect(h.player.loaded).toBe("file:///cache/voice/agent-b.mp3");
+
+    h.controller.blur();
+    expect(h.player.playing).toBe(true);
+    expect(h.store.getState().playback?.state).toBe("playing");
+    h.b.dispose();
+  });
+
+  it("a reply arriving on another screen waits and autoplays on its own screen", async () => {
+    const h = pair();
+    h.controller.focus();
+    await settle();
+    h.b.onVoiceReply(reply("agent-b", "B one."));
+    expect(h.player.playing).toBe(false);
+    expect(latestReply(h.store.getState().sessions["agent-b"])!.played).toBe(false);
+
+    h.controller.blur();
+    h.b.focus();
+    await settle();
+    expect(h.player.loaded).toBe("file:///cache/voice/agent-b.mp3");
+    expect(h.player.playing).toBe(true);
+    expect(latestReply(h.store.getState().sessions["agent-b"])!.played).toBe(true);
+    h.b.dispose();
+  });
+
+  it("a Retry that finishes after leaving stays unplayed and autoplays on return", async () => {
+    const h = harness();
+    h.connection.answer(Operation.VOICE_SPEAK, () => speechResponse(MP3, "Spoken."));
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "Spoken.", new Uint8Array(0)), "edge-tts: network unreachable");
+    const message = latestReply(h.store.getState().sessions["agent-a"])!;
+
+    const retry = h.controller.retrySpeak(message.id);
+    h.controller.blur();
+    await retry;
+    expect(h.player.calls).not.toContain("play");
+    expect(latestReply(h.store.getState().sessions["agent-a"])!.played).toBe(false);
+
+    h.controller.focus();
+    await settle();
+    expect(h.player.playing).toBe(true);
+    expect(latestReply(h.store.getState().sessions["agent-a"])!.played).toBe(true);
+  });
+
+  it("nothing plays into a live microphone, by tap or by resume", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("agent-a", "A reply."));
+    const message = latestReply(h.store.getState().sessions["agent-a"])!;
+    h.controller.pause();
+    h.controller.beginUtterance();
+    await settle();
+    h.controller.lockUtterance();
+    h.player.calls.length = 0;
+
+    h.controller.resume();
+    h.controller.play(message.id);
+    expect(h.player.calls).not.toContain("play");
+    expect(h.player.playing).toBe(false);
   });
 
   it("a release before the recorder ever started is discarded without a host round trip", async () => {
