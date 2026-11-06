@@ -1,1 +1,1 @@
-Test voice mode (agent replies are read aloud again), Markdown documents, terminal colours, SSH connection, scrolling, and reconnecting after switching apps.
+Test voice mode: lock a recording, scroll while you talk, then tap the bottom panel to send. Replies should stop when you leave the voice screen, and the newest unplayed reply should play when you return to that session's voice screen. Also test Markdown documents, terminal colours, SSH connection, scrolling, and reconnecting after switching apps.
