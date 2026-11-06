@@ -2,7 +2,7 @@
   "expo": {
     "name": "Muxflow",
     "slug": "muxflow-mobile",
-    "version": "0.1.26",
+    "version": "0.1.27",
     "scheme": "muxflow",
     "orientation": "default",
     "userInterfaceStyle": "dark",
@@ -16,7 +16,7 @@
         "monochromeImage": "./assets/adaptive-icon-monochrome.png",
         "backgroundColor": "#021962"
       },
-      "versionCode": 126,
+      "versionCode": 127,
       "backgroundColor": "#282c34",
       "predictiveBackGestureEnabled": false
     },
@@ -87,7 +87,7 @@
     "ios": {
       "bundleIdentifier": "dev.muxflow.mobile",
       "icon": "./assets/icon.png",
-      "buildNumber": "6",
+      "buildNumber": "7",
       "supportsTablet": true,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
