@@ -1,0 +1,30 @@
+appId: dev.muxflow.mobile
+---
+# Files navigation blurs the terminal input and dismisses its keyboard.
+- tapOn: Files
+- extendedWaitUntil:
+    visible: '.*README\.md,.*'
+    timeout: 30000
+- tapOn: '.*README\.md,.*'
+- extendedWaitUntil:
+    visible: iOS fixture document
+    timeout: 30000
+- takeScreenshot: markdown
+- tapOn:
+    id: BackButton
+- tapOn:
+    id: BackButton
+- pressKey: Home
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      text: Send
+      enabled: true
+    timeout: 30000
+- runFlow:
+    file: send-terminal.yaml
+    env:
+      COMMAND: "printf 'resumed\\n' > ios-resumed.marker"
+      EXPECTED: '.*ios-resumed\.marker.*'
+- takeScreenshot: resumed
