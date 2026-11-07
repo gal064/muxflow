@@ -20,7 +20,11 @@ function isBlockStart(line: string): boolean {
   return HEADING.test(line) || LIST_ITEM.test(line) || FENCE.test(line) || RULE.test(line) || /^\s{0,3}>\s?/u.test(line);
 }
 
-/** A small native block model for the reply shapes agents commonly emit. */
+/**
+ * A small native block model for the reply shapes agents commonly emit. Line
+ * breaks in paragraphs and quotes stay, because replies are often emails or
+ * messages whose lines carry meaning.
+ */
 export function parseVoiceMarkdown(source: string): MarkdownBlock[] {
   const lines = source.replace(/\r\n?/gu, "\n").split("\n");
   const blocks: MarkdownBlock[] = [];
@@ -81,7 +85,7 @@ export function parseVoiceMarkdown(source: string): MarkdownBlock[] {
         quote.push(next[1]!);
         index += 1;
       }
-      blocks.push({ kind: "quote", content: parseInlineMarkdown(quote.join(" ")) });
+      blocks.push({ kind: "quote", content: parseInlineMarkdown(quote.join("\n").trim()) });
       continue;
     }
 
@@ -91,7 +95,7 @@ export function parseVoiceMarkdown(source: string): MarkdownBlock[] {
       paragraph.push(lines[index]!.trim());
       index += 1;
     }
-    blocks.push({ kind: "paragraph", content: parseInlineMarkdown(paragraph.join(" ")) });
+    blocks.push({ kind: "paragraph", content: parseInlineMarkdown(paragraph.join("\n")) });
   }
   return blocks;
 }
@@ -116,13 +120,13 @@ export function parseInlineMarkdown(source: string): MarkdownInline[] {
       : "";
     const code = character === "`" ? rest.match(/^`([^`]+)`/u) : null;
     const link = character === "[" ? markdownLink(rest) : undefined;
-    const autoLink = character === "<" ? rest.match(/^<(https?:\/\/[^>]+)>/iu) : null;
+    const autoLink = character === "<" ? rest.match(/^<(https?:\/\/[^\s>]+)>/iu) : null;
     const bareLink = (character === "h" || character === "H") ? rest.match(/^https?:\/\/[^\s<]+/iu) : null;
     // CommonMark underscores cannot open emphasis inside a word. Agent replies
     // contain identifiers such as `voice_auto_play` often, and those
     // underscores must remain visible.
     const canOpenEmphasis = character === "*" || (character === "_" && (index === 0 || !/[\p{L}\p{N}]/u.test(source[index - 1]!)));
-    let strong = canOpenEmphasis ? rest.match(character === "_" ? /^__(.+?)__/u : /^\*\*(.+?)\*\*/u) : null;
+    let strong = canOpenEmphasis ? rest.match(character === "_" ? /^__(.+?)__/su : /^\*\*(.+?)\*\*/su) : null;
     let emphasis = canOpenEmphasis ? rest.match(character === "_" ? /^_([^_]+?)_/u : /^\*([^*]+?)\*/u) : null;
     if (character === "_") {
       if (strong && /[\p{L}\p{N}]/u.test(source[index + strong[0].length] ?? "")) strong = null;

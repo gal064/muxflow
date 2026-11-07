@@ -18,10 +18,30 @@ describe("voice Markdown model", () => {
     ]);
   });
 
-  it("keeps paragraph soft-wraps natural and preserves code newlines", () => {
+  it("keeps line breaks in paragraphs and code", () => {
     expect(parseVoiceMarkdown("one\ntwo\n\n~~~\na\nb\n~~~")).toEqual([
-      { kind: "paragraph", content: [{ kind: "text", text: "one two" }] },
+      { kind: "paragraph", content: [{ kind: "text", text: "one\ntwo" }] },
       { kind: "code", text: "a\nb" },
+    ]);
+  });
+
+  it("keeps the paragraphs and line breaks of a quoted email", () => {
+    expect(parseVoiceMarkdown("> Subject: Hello\n>\n> Hi Sam,\n>\n> Thanks,\n> Gal\n>")).toEqual([
+      { kind: "quote", content: [{ kind: "text", text: "Subject: Hello\n\nHi Sam,\n\nThanks,\nGal" }] },
+    ]);
+  });
+
+  it("does not link an autolink that spans a line break", () => {
+    expect(parseInlineMarkdown("<https://a.com\nb>")).toEqual([
+      { kind: "text", text: "<" },
+      { kind: "link", text: "https://a.com", href: "https://a.com" },
+      { kind: "text", text: "\nb>" },
+    ]);
+  });
+
+  it("keeps emphasis that spans a line break", () => {
+    expect(parseVoiceMarkdown("**one\ntwo** and __three\nfour__")).toEqual([
+      { kind: "paragraph", content: [{ kind: "strong", text: "one\ntwo" }, { kind: "text", text: " and " }, { kind: "strong", text: "three\nfour" }] },
     ]);
   });
 
