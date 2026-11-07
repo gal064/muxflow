@@ -62,6 +62,8 @@ export interface VoiceControllerOptions {
   submitDelayMs?: number;
   /** Rechecked after transcription and before Enter so an ordinary shell never receives a submission. */
   canSubmit?: (paneId: string) => boolean;
+  /** iOS: holds off suspension while an utterance is on its way to the pane. The answer ends the hold. */
+  keepAlive?: () => () => void;
 }
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
@@ -137,6 +139,8 @@ export class VoiceController {
   private autoPlay: boolean;
   /** A reply that arrived while the microphone was listening stays manual-play only. */
   private autoPlaySuppressedMessageId: string | undefined;
+  /** The utterance on its way to the pane, from release until it lands or fails. */
+  private submission: Promise<void> | undefined;
   /** The agent lifecycle last reported by the screen; the working acknowledgement fires on the edge into `working`. */
   private lastLifecycle: AgentLifecycle | undefined;
   /** The "you" message whose pickup by the agent was already acknowledged. */
@@ -159,6 +163,10 @@ export class VoiceController {
 
   get isDisposed(): boolean {
     return this.disposed;
+  }
+
+  get pendingSubmission(): Promise<void> | undefined {
+    return this.submission;
   }
 
   get target(): { paneId: string; sessionId: string } {
@@ -420,9 +428,18 @@ export class VoiceController {
 
   /** Press-out: stop → read → VOICE_TRANSCRIBE → TERMINAL_INPUT of the transcript as a paste, then a CR on its own. */
   async endUtterance(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || this.recordingPhase() === undefined) return;
+    // Begun here, while the app is still in the foreground, so a user who leaves right after letting go is covered.
+    const endKeepAlive = this.options.keepAlive?.();
+    this.submission = this.submitUtterance().finally(() => {
+      this.submission = undefined;
+      endKeepAlive?.();
+    });
+    return this.submission;
+  }
+
+  private async submitUtterance(): Promise<void> {
     const store = this.options.store.getState();
-    if (this.recordingPhase() === undefined) return;
     this.clearAutoSend();
     store.setPhase(this.sessionKey, "transcribing");
     const { recorder, files } = this.options;

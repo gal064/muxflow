@@ -20,6 +20,29 @@ function harness() {
 }
 
 describe("VoiceRegistry", () => {
+  it("reports a pending submission on any pane until it settles", async () => {
+    const h = harness();
+    let answer: ((response: ReturnType<typeof transcriptResponse>) => void) | undefined;
+    h.connection.answer(Operation.VOICE_TRANSCRIBE, () => new Promise((resolve) => { answer = resolve; }));
+    const controller = h.registry.open({ ...h.deps, submitDelayMs: 0, paneId: "%1", sessionId: "$1" });
+    h.registry.open({ ...h.deps, submitDelayMs: 0, paneId: "%2", sessionId: "$1" });
+    controller.focus();
+    await settle();
+    expect(h.registry.pendingSubmissions()).toBeUndefined();
+
+    controller.beginUtterance();
+    await settle();
+    void controller.endUtterance();
+    await settle();
+    const pending = h.registry.pendingSubmissions();
+    expect(pending).toBeDefined();
+
+    answer!(transcriptResponse("hello"));
+    await pending;
+    await settle();
+    expect(h.registry.pendingSubmissions()).toBeUndefined();
+  });
+
   it("routes VOICE_REPLY_TEXT by pane and pairs it with the VOICE_REPLY that follows", () => {
     const h = harness();
     h.registry.open({ ...h.deps, paneId: "%1", sessionId: "$1" });
