@@ -130,7 +130,7 @@ other adapters' hooks and enough for the helper to fall back to its durable
 mailbox when the daemon does not answer. Every failure is ignored. Only the
 event name, the session ID and, on `Stop`, the final assistant message are
 sent. The message is left out when the run was aborted. Resume uses
-`pi --session <id>`.
+`pi --session <id>`, and branch uses `pi --fork <id>`.
 
 ## Events taken, and the gaps
 

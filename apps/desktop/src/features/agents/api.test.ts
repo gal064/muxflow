@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TauriAgentClient } from "./api";
 import { agentGeneration } from "./generation";
+import { agent } from "./testFixtures";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -61,6 +62,21 @@ describe("TauriAgentClient", () => {
     const request = { adapterId: "codex", placement: "window" as const, sessionId: "$1", windowId: "@1", paneId: "%1", activeRoot: "/repo", rootToken: "root-token" };
     await client.resume(scope, "agent-1", "native-1", request);
     expect(invokeMock.mock.calls[0][1].command).toMatchObject({ operation: "resume", agentId: "agent-1", nativeSessionId: "native-1", placement: "window", sessionId: "$1", windowId: "@1", paneId: "", activeRoot: "/repo", rootToken: "root-token" });
+  });
+
+  it("sends a branch the agent's own workspace and pane, and no root", async () => {
+    invokeMock.mockResolvedValue({ sessionId: "$7", windowId: "@8", paneId: "%9" });
+    const client = new TauriAgentClient();
+    const placement = await client.branch(scope, agent({ sessionId: "$2", paneId: "%4" }));
+    expect(placement).toEqual({ sessionId: "$7", paneId: "%9" });
+    const { command } = invokeMock.mock.calls[0][1];
+    expect(command).toMatchObject({ operation: "branch", agentId: "agent-1", nativeSessionId: "native-1", adapterId: "codex", sessionId: "$2", paneId: "%4" });
+    expect(command).not.toHaveProperty("activeRoot");
+  });
+
+  it("refuses a branch reply that does not say where it opened", async () => {
+    invokeMock.mockResolvedValue({});
+    await expect(new TauriAgentClient().branch(scope, agent())).rejects.toThrow("did not say where");
   });
 
   it("requires a host-issued confirmation token before hook install or uninstall", async () => {

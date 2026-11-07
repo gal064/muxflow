@@ -163,6 +163,12 @@ export interface AgentLaunchRequest {
   rootToken: string;
 }
 
+/** Where a branch opened, as the host reports it. */
+export interface AgentBranchPlacement {
+  sessionId: string;
+  paneId: string;
+}
+
 export interface AgentHookChange {
   path: string;
   summary: string;
