@@ -26,9 +26,8 @@ env:
   # vite's production build of the desktop (Monaco included) can exceed
   # Node's default heap on the 7 GB macOS runners.
   NODE_OPTIONS: --max-old-space-size=6144
-  # `cargo test` spends minutes compiling and seconds running. Dependencies keep
-  # their profile; only our own crates get the cheaper build here.
-  CARGO_PROFILE_DEV_OPT_LEVEL: 0
+  # `cargo test` spends minutes compiling and seconds running. Keep backtraces,
+  # drop the rest of the debug info. Opt level stays: at 0 test threads overflow.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
@@ -109,6 +108,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: astral-sh/setup-uv@v6
       - run: pnpm install --frozen-lockfile
 
       - name: Repository hygiene
