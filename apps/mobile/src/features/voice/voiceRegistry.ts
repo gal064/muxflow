@@ -58,7 +58,7 @@ export class VoiceRegistry {
       if (progress) this.store.getState().applyProvisionProgress(provisionFromProto(progress));
       return;
     }
-    if (event.kind !== EventKind.VOICE_REPLY) return;
+    if (event.kind !== EventKind.VOICE_REPLY && event.kind !== EventKind.VOICE_REPLY_TEXT) return;
     const reply = event.voice?.reply;
     if (!reply) return;
     const controller = this.controllers.get(this.key(reply.serverIdentity, reply.paneId));
@@ -66,7 +66,8 @@ export class VoiceRegistry {
       this.log?.(`[muxflow] voice reply server=${reply.serverIdentity.slice(0, 12)} pane=${reply.paneId} ignored (no session)`);
       return;
     }
-    controller.onVoiceReply(reply, event.voice?.status?.detail ?? "");
+    if (event.kind === EventKind.VOICE_REPLY_TEXT) controller.onVoiceReplyText(reply);
+    else controller.onVoiceReply(reply, event.voice?.status?.detail ?? "");
   }
 
   onConnected(serverIdentity: string): void {
