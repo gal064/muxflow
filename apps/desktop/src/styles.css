@@ -308,13 +308,54 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    supplies the space above it. */
 .list-block:first-child > .list-divider { padding-top: 0; }
 .workspace-row, .agent-row { position: relative; }
+/* The hover actions float over the row's right edge, so showing them moves
+   nothing. Their backing is the row's own colour, and it fades out to the left
+   so whatever they cover ends softly rather than mid-letter. Inset past the
+   list's scrollbar, which on Linux takes the pointer over the last 15px of a
+   long list. */
+.row-actions {
+  --row-actions-bg: var(--chrome-hover);
+  position: absolute; top: 4px; right: 18px; z-index: 1;
+  display: none; align-items: center; gap: 2px; padding: 1px;
+  background: var(--row-actions-bg); color: var(--chrome-dim);
+}
+.row-actions::before {
+  content: ""; position: absolute; top: 0; bottom: 0; right: 100%; width: 14px;
+  background: linear-gradient(to right, transparent, var(--row-actions-bg));
+  pointer-events: none;
+}
+.workspace-row:hover > .row-actions, .agent-row:hover > .row-actions { display: inline-flex; }
+/* A compact row's agent marks reach its edge, and the fade would tint their
+   state badges into other states. */
+.workspace-button.compact ~ .row-actions::before { display: none; }
+/* Rows that take no hover fill, and rows dimmed whole, so the backing still
+   matches what is behind it. */
+.agent-button[data-unavailable] ~ .row-actions { --row-actions-bg: var(--chrome-bg); }
+.workspace-button.offline:not(.active) ~ .row-actions { opacity: 0.55; }
+/* The actions take the count's place: a wide one would poke out past them. */
+.workspace-row:hover > .badge-row, .workspace-row:hover .badge-inline { visibility: hidden; }
+.workspace-button.active ~ .row-actions,
+.agent-button.selected ~ .row-actions { --row-actions-bg: var(--accent); color: var(--accent-ink); }
+.row-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0;
+  border: 0; border-radius: 4px; background: transparent; color: inherit;
+}
+.row-action:hover:not(:disabled) { background: color-mix(in srgb, var(--chrome-ink) 14%, transparent); color: var(--chrome-ink); }
+.workspace-button.active ~ .row-actions .row-action:hover,
+.agent-button.selected ~ .row-actions .row-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-ink) 18%, transparent); color: var(--accent-ink);
+}
+.row-action:disabled { opacity: 0.4; }
 .workspace-button {
   display: flex; flex-direction: column; gap: 4px;
   width: 100%; padding: 8px 10px 9px; margin-bottom: 2px;
   border: 0; border-radius: var(--radius-row);
   background: transparent; color: inherit; text-align: left;
 }
-.workspace-button:hover:not(.active) { background: var(--chrome-hover); }
+/* On the row, not the button: the hover actions sit beside the button, and
+   reaching for them must not switch the row's highlight off. */
+.workspace-row:hover > .workspace-button:not(.active) { background: var(--chrome-hover); }
 .workspace-button.active { background: var(--accent); }
 /* The host behind the row is not connected: still listed, still selectable, not live. */
 .workspace-button.offline:not(.active) { opacity: 0.55; }
@@ -465,7 +506,7 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
 .agent-button.selected .agent-line,
 .agent-button.selected .agent-pin { color: var(--accent-ink); }
 .agent-button.selected .agent-detail { color: color-mix(in srgb, var(--accent-ink) 72%, transparent); }
-.agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
+.agent-row:hover > .agent-button:not(.selected):not(:disabled):not([data-unavailable]) { background: var(--chrome-hover); }
 /* Reachable by keyboard, still clearly not actionable — see the note at the
    call site for why this is not `disabled`. */
 .agent-button[data-unavailable] { opacity: .5; cursor: not-allowed; }
@@ -497,8 +538,8 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
    around it keeps one uniform gap, and that gap now separates agents rather
    than alternating between "this agent's state" and "the next agent's icon". */
 .agent-mark-glyphs { align-items: center; gap: 3px; }
-.agent-button:hover:not(.selected):not(:disabled):not([data-unavailable]) .agent-mark,
-.workspace-button:hover:not(.active) .agent-mark { --badge-ring: var(--chrome-hover); }
+.agent-row:hover > .agent-button:not(.selected):not(:disabled):not([data-unavailable]) .agent-mark,
+.workspace-row:hover > .workspace-button:not(.active) .agent-mark { --badge-ring: var(--chrome-hover); }
 .agent-button.selected .agent-mark,
 .workspace-button.active .agent-mark { --badge-ring: var(--accent); }
 .agent-mark-badge {
@@ -796,6 +837,17 @@ hr { height: 1px; margin: 4px 6px; border: 0; background: var(--chrome-hairline)
   border: 0; border-radius: 3px; background: transparent; color: var(--chrome-faint);
 }
 .tab-close:hover { background: var(--chrome-hover); color: var(--chrome-ink); }
+/* A slot of its own, as `.tab-close` has, so nothing in the tab is covered. It
+   replaces most of the tab's trailing padding to cost as little width as it
+   can, and `visibility` keeps that width when it is not shown. */
+.tab:has(> .tab-pin-toggle) > .tab-select { padding-right: 2px; }
+.tab-pin-toggle {
+  visibility: hidden; display: inline-flex; align-items: center; justify-content: center;
+  flex: none; width: 18px; padding: 0; margin-right: 4px;
+  border: 0; border-radius: 3px; background: transparent; color: var(--chrome-faint);
+}
+.tab:hover > .tab-pin-toggle { visibility: visible; }
+.tab-pin-toggle:hover { background: var(--chrome-hover); color: var(--chrome-ink); }
 .tabstrip-tools { display: flex; align-items: center; gap: 2px; margin-left: auto; padding-left: 6px; }
 
 /* ── Panes ─────────────────────────────────────────────────────────────── */

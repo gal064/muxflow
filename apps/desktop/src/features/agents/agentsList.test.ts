@@ -79,7 +79,7 @@ describe("agents section ordering", () => {
     const unknown = agent({ id: "unknown", lifecycle: "unknown" });
     const rows = buildAgentRows([idle, working, done, blocked, unknown], locate, () => true, "status");
     const groups = groupAgentRowsByStatus(rows);
-    // Completion attention belongs in Recent; its row dot and badge carry the
+    // Completion attention belongs in Recent; its row dot carries the
     // unread fact. Unknown shares Idle's bucket — a gap in reporting is not a
     // separate thing an agent can be doing.
     expect(groups.map((group) => [group.label, group.rows.map((row) => row.agent.id)])).toEqual([

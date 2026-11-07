@@ -16,7 +16,7 @@ const scope: AgentRequestScope = { clientId: "client", hostProfileId: "local", s
 function clientFor(snapshot: AgentSnapshot): AgentClient & { markSeen: ReturnType<typeof vi.fn>; publish(event: AgentWireEvent): void } {
   const listeners = new Set<(event: AgentWireEvent) => void>();
   return {
-    snapshot: vi.fn(async () => snapshot), launch: vi.fn(), resume: vi.fn(),
+    snapshot: vi.fn(async () => snapshot), launch: vi.fn(), resume: vi.fn(), branch: vi.fn(),
     markSeen: vi.fn(async () => undefined), reviewHooks: vi.fn(), applyHooks: vi.fn(), applyHostNaming: vi.fn(async () => "alreadyCurrent" as const),
     publishWireEvent: vi.fn(), publishWireSnapshot: vi.fn(),
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
