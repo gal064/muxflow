@@ -70,4 +70,15 @@ describe("Rust-produced framed protobuf", () => {
     expect(reply.provider).toBe(VoiceProvider.EDGE_TTS);
     expect(reply.stateGeneration).toBe((1n << 53n) + 5n);
   });
+
+  it("preserves a text-only voice reply and the time that pairs it with its audio", () => {
+    const payload = decode("voiceText");
+    expect(payload.case).toBe("event");
+    if (payload.case !== "event") throw new Error("wrong event payload");
+    expect(payload.value.kind).toBe(EventKind.VOICE_REPLY_TEXT);
+    const reply = payload.value.voice!.reply!;
+    expect(reply.displayMarkdown).toBe("Done.");
+    expect(reply.audio.byteLength).toBe(0);
+    expect(reply.replyAtUnixMillis).toBe((1n << 53n) + 7n);
+  });
 });

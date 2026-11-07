@@ -47,6 +47,8 @@ export interface VoiceMessage {
   fileUri: string | undefined;
   /** Set when the host could not synthesize this reply; a Retry offers VOICE_SPEAK. */
   audioError: string | undefined;
+  /** The text is on screen and the host is still synthesizing its audio. */
+  audioPending: boolean;
   /** An agent reply that has been heard (auto-played or tapped). Always true for "you". */
   played: boolean;
 }
@@ -95,8 +97,10 @@ export interface VoiceActions {
    */
   appendReply(sessionKey: string, message: VoiceMessage): string | undefined;
   markPlayed(sessionKey: string, messageId: string): void;
-  /** A retried VOICE_SPEAK filled in the audio. */
+  /** The pushed audio, or a retried VOICE_SPEAK, filled in the audio. */
   setMessageAudio(sessionKey: string, messageId: string, fileUri: string): void;
+  /** The audio is not coming; a Retry offers VOICE_SPEAK. */
+  setMessageAudioError(sessionKey: string, messageId: string, audioError: string): void;
   setPlayback(playback: Playback | undefined): void;
   removeSession(sessionKey: string): void;
   setLastError(message: string | undefined): void;
@@ -200,7 +204,11 @@ export function createVoiceStore(): VoiceStore {
       },
 
       setMessageAudio(agentId, messageId, fileUri) {
-        updateMessage(agentId, messageId, (message) => ({ ...message, fileUri, audioError: undefined }));
+        updateMessage(agentId, messageId, (message) => ({ ...message, fileUri, audioError: undefined, audioPending: false }));
+      },
+
+      setMessageAudioError(agentId, messageId, audioError) {
+        updateMessage(agentId, messageId, (message) => ({ ...message, audioError, audioPending: false }));
       },
 
       setPlayback(playback) {
