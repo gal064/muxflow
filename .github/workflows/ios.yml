@@ -81,11 +81,12 @@ jobs:
           xcodebuild -version
           xcrun simctl list devices available
           pod --version
+          # Only what shapes the build. GitHub rolls runner images out gradually,
+          # so the image version or Node's patch would split one app across keys.
           toolchain_key=$(
             {
-              printf '%s\n' "${ImageVersion:?Missing runner image version}"
               xcodebuild -version
-              node --version
+              node --version | cut -d . -f 1
               pod --version
             } | shasum -a 256 | cut -d ' ' -f 1
           )
