@@ -1,13 +1,20 @@
-//! Whether a newer Muxflow release has been published.
+//! Whether a newer Muxflow release has been published, and installing it.
 //!
-//! There is no auto-update: this only reads the small manifest the release
-//! workflow attaches to every GitHub release, so the title bar can say that a
-//! newer version exists and link to the latest release page. `releases/latest` never
+//! The check reads the small manifest the release workflow attaches to every
+//! GitHub release, so the title bar can offer the update. `releases/latest` never
 //! resolves to a draft or a pre-release, so a version appears here only once it
 //! has been published. The fetch happens here rather than in the webview so the
 //! content security policy stays closed to every outside origin.
+//!
+//! Installing runs the published installer, the same command the README gives,
+//! which verifies the package and swaps it in with rollback.
 
-use std::time::Duration;
+use std::{
+    path::Path,
+    process::Command,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +25,9 @@ const RELEASE_PAGE_PREFIX: &str = "https://github.com/gal064/muxflow/releases/";
 /// The manifest is a two-field object; anything larger is not it.
 const MANIFEST_LIMIT_BYTES: u64 = 16 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// Set once an update is installed: the next exit relaunches the new version.
+static RELAUNCH_ON_EXIT: AtomicBool = AtomicBool::new(false);
+const INSTALL_COMMAND: &str = "set -o pipefail; curl -fsSL https://github.com/gal064/muxflow/releases/latest/download/install.sh | bash";
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -46,6 +56,43 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<AvailableU
         .await
         .map_err(|error| error.to_string())??;
     evaluate(running, &body)
+}
+
+/// Installs the latest release. The caller then closes the window, so unsaved
+/// work goes through the normal close path, and the exit relaunches. Only a copy
+/// in the installer's default location is replaced; any other copy gets an error
+/// and the caller opens the release page.
+#[tauri::command]
+pub async fn install_update() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    if !is_default_install(&exe, Path::new(&home)) {
+        return Err("this copy of Muxflow is not in the default install location".into());
+    }
+    let output = tauri::async_runtime::spawn_blocking(|| {
+        Command::new("bash").args(["-c", INSTALL_COMMAND]).output()
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| format!("update failed: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("update failed: {}", detail.trim()));
+    }
+    RELAUNCH_ON_EXIT.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+pub fn relaunch_on_exit() -> bool {
+    RELAUNCH_ON_EXIT.load(Ordering::Relaxed)
+}
+
+fn is_default_install(exe: &Path, home: &Path) -> bool {
+    if cfg!(target_os = "macos") {
+        exe.starts_with("/Applications/Muxflow.app")
+    } else {
+        exe.starts_with(home.join(".local/lib/muxflow"))
+    }
 }
 
 fn fetch_manifest(url: &str) -> Result<String, String> {
@@ -103,6 +150,21 @@ mod tests {
     }
 
     const PAGE: &str = "https://github.com/gal064/muxflow/releases/tag/v0.2.0";
+
+    #[test]
+    fn only_a_copy_in_the_default_location_updates_itself() {
+        let home = Path::new("/home/user");
+        let installed = if cfg!(target_os = "macos") {
+            "/Applications/Muxflow.app/Contents/MacOS/Muxflow"
+        } else {
+            "/home/user/.local/lib/muxflow/muxflow"
+        };
+        assert!(is_default_install(Path::new(installed), home));
+        assert!(!is_default_install(
+            Path::new("/home/user/dev/muxflow/target/debug/muxflow"),
+            home
+        ));
+    }
 
     #[test]
     fn a_newer_release_links_to_latest_even_when_the_manifest_pins_a_tag() {
