@@ -40,7 +40,7 @@ import { GitRepositoryStore } from "../features/git/repositoryStore";
 import { DisconnectedStrip } from "../features/shell/DisconnectedStrip";
 import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
-import { useUpdateCheck } from "../features/shell/useUpdateCheck";
+import { installUpdate, tauriInstallDeps, useUpdateCheck } from "../features/shell/useUpdateCheck";
 import { openExternalUrl } from "../features/terminal/openExternalUrl";
 import { resetHostLatency, useHostLatency } from "../features/shell/hostLatency";
 import {
@@ -1620,7 +1620,7 @@ export function App() {
       onOpenSettings={() => void runCommand("settings.show")}
       onTogglePanel={() => void runCommand("view.togglePanel")}
       onToggleSidebar={() => void runCommand("view.toggleSidebar")}
-      onUpdate={() => { if (availableUpdate) void openExternalUrl(availableUpdate.url).catch((error) => setStatus(String(error))); }}
+      onUpdate={() => { if (availableUpdate) void installUpdate(availableUpdate, { ...tauriInstallDeps, openReleasePage: openExternalUrl, setStatus }).catch((error) => setStatus(String(error))); }}
       panelOpen={panelOpen}
       panelFits={panelFits}
       platform={platform}

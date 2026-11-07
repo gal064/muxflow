@@ -110,6 +110,8 @@ published. The installer uses the exact `tag`, including an iOS suffix;
 package filenames and the app's version keep the base `X.Y.Z`.
 The Android app downloads `releases/latest/download/muxflow-X.Y.Z-android.apk` when the
 pill is tapped and hands it to the system installer, so keep that asset name stable.
+On the desktop, the pill runs `install.sh` and relaunches; a copy outside the
+default install location opens the release page instead.
 Tags containing `-rc.N` build from a tree versioned `X.Y.Z` and are drafted as
 prereleases. RC tags, with or without an iOS suffix, may point to a branch commit without merging it to `main`.
 Other tags still require a commit on `main`; CI, version checks, signing,
