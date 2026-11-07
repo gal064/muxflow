@@ -45,6 +45,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHold
   let screenOff = false;
   const toasts: string[] = [];
   const logs: string[] = [];
+  const keepAlive = { begun: 0, ended: 0 };
   const controller = new VoiceController({
     serverIdentity: "server-a",
     tailHoldMs,
@@ -63,6 +64,10 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHold
     backgroundTimer,
     autoPlay,
     canSubmit: () => canSubmit,
+    keepAlive: () => {
+      keepAlive.begun += 1;
+      return () => { keepAlive.ended += 1; };
+    },
     haptics,
     tones,
     toast: (message) => toasts.push(message),
@@ -81,6 +86,7 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHold
     controller,
     toasts,
     logs,
+    keepAlive,
     setForeground: (value: boolean) => { foreground = value; },
     setScreenOff: (value: boolean) => { screenOff = value; },
     setCanSubmit: (value: boolean) => { canSubmit = value; },
@@ -1314,6 +1320,56 @@ describe("VoiceController recorder release races (QA fix review)", () => {
     await settle();
     expect(h.recorder.released).toBe(1);
     expect(h.recorder.prepared).toBe(0);
+  });
+});
+
+describe("VoiceController pending submission", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  async function hold(h: ReturnType<typeof harness>) {
+    h.controller.focus();
+    await settle();
+    h.controller.beginUtterance();
+    await settle();
+  }
+
+  it("is pending and held awake from release until the message lands", async () => {
+    const h = harness();
+    let answer: ((response: ReturnType<typeof transcriptResponse>) => void) | undefined;
+    h.connection.answer(Operation.VOICE_TRANSCRIBE, () => new Promise((resolve) => { answer = resolve; }));
+    await hold(h);
+    expect(h.controller.pendingSubmission).toBeUndefined();
+
+    const released = h.controller.endUtterance();
+    await settle();
+    expect(h.controller.pendingSubmission).toBeDefined();
+    expect(h.keepAlive).toEqual({ begun: 1, ended: 0 });
+
+    answer!(transcriptResponse("hello"));
+    await released;
+    await settle();
+    expect(h.controller.pendingSubmission).toBeUndefined();
+    expect(h.keepAlive).toEqual({ begun: 1, ended: 1 });
+    expect(h.connection.of(Operation.TERMINAL_INPUT)).toHaveLength(2);
+  });
+
+  it("ends the hold when the message fails", async () => {
+    const h = harness();
+    h.connection.answer(Operation.VOICE_TRANSCRIBE, () => Promise.reject(new Error("gone")));
+    await hold(h);
+    await h.controller.endUtterance();
+    await settle();
+    expect(h.controller.pendingSubmission).toBeUndefined();
+    expect(h.keepAlive).toEqual({ begun: 1, ended: 1 });
+  });
+
+  it("holds nothing for a release with no take", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    await h.controller.endUtterance();
+    expect(h.keepAlive).toEqual({ begun: 0, ended: 0 });
   });
 });
 
