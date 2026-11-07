@@ -5,7 +5,10 @@ appId: dev.muxflow.mobile
     clearKeychain: true
     permissions:
       notifications: allow
-- assertVisible: No hosts yet
+# A cold first launch on a busy simulator can outlast a plain assertion.
+- extendedWaitUntil:
+    visible: No hosts yet
+    timeout: 60000
 - tapOn: Your SSH key
 - assertVisible: This phone has no SSH key.*
 - assertNotVisible: This phone's SSH key could not be read.
@@ -13,3 +16,4 @@ appId: dev.muxflow.mobile
 - tapOn:
     id: BackButton
 - runFlow: setup-host.yaml
+- runFlow: files-and-resume.yaml
