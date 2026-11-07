@@ -43,7 +43,7 @@ export const VoiceMarkdown = memo(function VoiceMarkdown({ source, numberOfLines
         }
         const style: TextStyle = block.kind === "heading"
           ? block.level === 1 ? styles.heading1 : block.level === 2 ? styles.heading2 : styles.heading3
-          : block.kind === "quote" ? styles.quote : styles.paragraph;
+          : styles.paragraph;
         return <Text key={blockIndex}>{separator}<Text style={style}>{block.kind === "quote" ? "› " : ""}<Inline content={block.content} /></Text></Text>;
       })}
     </Text>
@@ -58,7 +58,6 @@ const styles = StyleSheet.create({
   heading3: { color: colors.chromeInkStrong, fontSize: typeScale.body, fontWeight: "700" },
   strong: { color: colors.chromeInkStrong, fontWeight: "700" },
   emphasis: { fontStyle: "italic" },
-  quote: { color: colors.chromeDim, fontStyle: "italic" },
   inlineCode: { backgroundColor: colors.chromeBg, color: colors.chromeInkStrong, fontFamily: "monospace", fontSize: 13 },
   codeBlock: { backgroundColor: colors.chromeBg, color: colors.chromeInkStrong, fontFamily: "monospace", fontSize: 13, lineHeight: 18 },
   link: { color: colors.accent, textDecorationLine: "underline" },
