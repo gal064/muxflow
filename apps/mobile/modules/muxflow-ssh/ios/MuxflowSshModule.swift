@@ -1,10 +1,13 @@
 import ExpoModulesCore
 import Foundation
+import UIKit
 
 public final class MuxflowSshModule: Module {
   private let registry = DispatchQueue(label: "dev.muxflow.ssh.registry")
   private var transports: [Target: MFSSHTransport] = [:]
   private var channels: [String: MFSSHTransport] = [:]
+  /// Main queue only. Lets iOS's expiration and a late JS end both finish a task safely.
+  private var backgroundTasks = Set<UIBackgroundTaskIdentifier>()
 
   private struct Target: Hashable {
     let host: String
@@ -91,11 +94,29 @@ public final class MuxflowSshModule: Module {
         promise.resolve()
       }
     }
+    // A finite grace for one pending user-initiated send, never a way to keep
+    // SSH alive. iOS decides how long it lasts; when it ends, the app suspends.
+    AsyncFunction("beginBackgroundTask") { () -> Int in
+      var task = UIBackgroundTaskIdentifier.invalid
+      task = UIApplication.shared.beginBackgroundTask(withName: "muxflow-voice-send") { [weak self] in
+        self?.finishBackgroundTask(task)
+      }
+      if task != .invalid { self.backgroundTasks.insert(task) }
+      return task.rawValue
+    }.runOnQueue(.main)
+    AsyncFunction("endBackgroundTask") { (rawValue: Int) in
+      self.finishBackgroundTask(UIBackgroundTaskIdentifier(rawValue: rawValue))
+    }.runOnQueue(.main)
     OnDestroy {
       self.registry.async {
         for (identifier, transport) in self.channels { transport.close(identifier) }
       }
     }
+  }
+
+  private func finishBackgroundTask(_ task: UIBackgroundTaskIdentifier) {
+    guard backgroundTasks.remove(task) != nil else { return }
+    UIApplication.shared.endBackgroundTask(task)
   }
 
   private func receive(_ event: [String: Any]) {

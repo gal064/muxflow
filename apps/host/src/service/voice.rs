@@ -328,9 +328,11 @@ impl VoiceService {
 
     // --- pushed replies -------------------------------------------------
 
-    /// Synthesizes the reply on a detached task and pushes it to the one
-    /// connection holding a session for the pane. Nothing is retained: a
-    /// pane without a session costs a map lookup.
+    /// Pushes the reply to the one connection holding a session for the pane,
+    /// on a detached task: its text at once, then the same reply with its
+    /// audio once synthesis settles. Synthesis runs one at a time and can
+    /// stall, so the text never waits for it. Nothing is retained: a pane
+    /// without a session costs a map lookup.
     pub(crate) fn push_reply(self: &Arc<Self>, reply: AgentReply) {
         let key = PaneKey {
             server_identity: reply.server_identity.clone(),
@@ -345,8 +347,21 @@ impl VoiceService {
             if spoken.text.is_empty() {
                 return;
             }
+            let speech = v1::VoiceSpeech {
+                display_markdown: reply.text,
+                speech_text: spoken.text,
+                truncated: spoken.truncated || reply.truncated,
+                voice: DEFAULT_VOICE.into(),
+                provider: v1::VoiceProvider::EdgeTts.into(),
+                pane_id: reply.pane_id,
+                state_generation: reply.state_generation,
+                reply_at_unix_millis: reply.occurred_at_unix_millis,
+                server_identity: reply.server_identity,
+                ..Default::default()
+            };
+            service.send_reply_event(&key, v1::EventKind::VoiceReplyText, None, speech.clone());
             let synthesized = service
-                .synthesize(&spoken.text, DEFAULT_VOICE, &AtomicBool::new(false))
+                .synthesize(&speech.speech_text, DEFAULT_VOICE, &AtomicBool::new(false))
                 .await;
             let (audio, status) = match synthesized {
                 Ok(audio) => (audio, None),
@@ -358,45 +373,52 @@ impl VoiceService {
                     }),
                 ),
             };
-            let Some(connection_id) = service.session_connection(&key) else {
-                return;
+            let audio_mime = if audio.is_empty() {
+                String::new()
+            } else {
+                "audio/mpeg".into()
             };
-            let event = v1::HostEvent {
-                kind: v1::EventKind::VoiceReply.into(),
-                scope: reply.pane_id.clone(),
-                voice: Some(v1::VoiceEvent {
-                    status,
-                    reply: Some(v1::VoiceSpeech {
-                        audio_mime: if audio.is_empty() {
-                            String::new()
-                        } else {
-                            "audio/mpeg".into()
-                        },
-                        audio,
-                        display_markdown: reply.text,
-                        speech_text: spoken.text,
-                        truncated: spoken.truncated || reply.truncated,
-                        voice: DEFAULT_VOICE.into(),
-                        provider: v1::VoiceProvider::EdgeTts.into(),
-                        pane_id: reply.pane_id.clone(),
-                        state_generation: reply.state_generation,
-                        reply_at_unix_millis: reply.occurred_at_unix_millis,
-                        server_identity: reply.server_identity.clone(),
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            // A full queue is a burst of terminal output, not a departed
-            // phone: only a connection that is gone loses its sessions.
-            if send_control_event_to(connection_id, event) == super::events::Delivery::Gone {
-                service
-                    .sessions
-                    .lock()
-                    .unwrap()
-                    .retain(|_, session| session.connection_id != connection_id);
-            }
+            service.send_reply_event(
+                &key,
+                v1::EventKind::VoiceReply,
+                status,
+                v1::VoiceSpeech {
+                    audio,
+                    audio_mime,
+                    ..speech
+                },
+            );
         });
+    }
+
+    fn send_reply_event(
+        &self,
+        key: &PaneKey,
+        kind: v1::EventKind,
+        status: Option<v1::VoiceStatus>,
+        reply: v1::VoiceSpeech,
+    ) {
+        let Some(connection_id) = self.session_connection(key) else {
+            return;
+        };
+        let event = v1::HostEvent {
+            kind: kind.into(),
+            scope: reply.pane_id.clone(),
+            voice: Some(v1::VoiceEvent {
+                status,
+                reply: Some(reply),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // A full queue is a burst of terminal output, not a departed
+        // phone: only a connection that is gone loses its sessions.
+        if send_control_event_to(connection_id, event) == super::events::Delivery::Gone {
+            self.sessions
+                .lock()
+                .unwrap()
+                .retain(|_, session| session.connection_id != connection_id);
+        }
     }
 
     // --- PROVISION ------------------------------------------------------

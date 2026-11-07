@@ -350,7 +350,12 @@ describe("ordered events (§7.4)", () => {
         reply: create(VoiceSpeechSchema, { serverIdentity: "server-a", paneId: "%1", displayMarkdown: "**Done.**", speechText: "Done.", audio: new Uint8Array([0xff, 0xfb]), audioMime: "audio/mpeg", stateGeneration: 4n }),
       }),
     }));
-    expect(received.map((e) => e.kind)).toEqual([EventKind.VOICE_PROVISION, EventKind.VOICE_REPLY]);
+    transport.feed(event(EventKind.VOICE_REPLY_TEXT, 3n, {
+      voice: create(VoiceEventSchema, {
+        reply: create(VoiceSpeechSchema, { serverIdentity: "server-a", paneId: "%1", displayMarkdown: "**Done.**", speechText: "Done." }),
+      }),
+    }));
+    expect(received.map((e) => e.kind)).toEqual([EventKind.VOICE_PROVISION, EventKind.VOICE_REPLY, EventKind.VOICE_REPLY_TEXT]);
     expect(received[0]?.voice?.provision?.phase).toBe("downloading");
     expect(received[0]?.voice?.provision?.totalBytes).toBe(671088640n);
     expect(received[1]?.voice?.reply?.paneId).toBe("%1");

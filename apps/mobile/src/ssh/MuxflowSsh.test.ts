@@ -95,6 +95,24 @@ function harness(options: { deferWrites?: boolean } = {}): Harness {
 
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
+describe("keepAlive", () => {
+  it("ends the native task it began", async () => {
+    const h = harness();
+    const begin = vi.fn(async () => 7);
+    const end = vi.fn(async () => undefined);
+    const stop = createMuxflowSsh({ ...h.native, beginBackgroundTask: begin, endBackgroundTask: end }).keepAlive();
+    expect(begin).toHaveBeenCalledTimes(1);
+    expect(end).not.toHaveBeenCalled();
+    stop();
+    await flush();
+    expect(end).toHaveBeenCalledWith(7);
+  });
+
+  it("is a no-op where the native side has no background tasks", () => {
+    expect(() => createMuxflowSsh(harness().native).keepAlive()()).not.toThrow();
+  });
+});
+
 function collect(h: Harness): { events: SshEvent[]; unsubscribe: () => void } {
   const events: SshEvent[] = [];
   const ssh = createMuxflowSsh(h.native);

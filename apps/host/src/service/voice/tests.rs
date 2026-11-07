@@ -358,6 +358,15 @@ async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection()
     // The sink registry is process-wide, so a sibling test's broadcast (a
     // filesystem or agent event) can land on either receiver: only reply
     // events count here.
+    let text = tokio::time::timeout(Duration::from_secs(5), next_reply_text(&mut voice_rx))
+        .await
+        .expect("the text never reached the session connection");
+    assert_eq!(text.scope, "%7");
+    let text = text.voice.unwrap().reply.unwrap();
+    assert!(text.audio.is_empty());
+    assert_eq!(text.display_markdown, "## Done\n\nAll **tests** pass.");
+    assert_eq!(text.speech_text, "Done. All tests pass.");
+    assert_eq!(text.reply_at_unix_millis, 1_700_000_000_000);
     let event = tokio::time::timeout(Duration::from_secs(5), next_reply(&mut voice_rx))
         .await
         .expect("the reply never reached the session connection");
@@ -370,6 +379,7 @@ async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection()
     assert_eq!(reply.pane_id, "%7");
     assert_eq!(reply.server_identity, "server-a");
     assert_eq!(reply.state_generation, 42);
+    assert_eq!(reply.reply_at_unix_millis, text.reply_at_unix_millis);
     assert_eq!(reply.reply_at_unix_millis, 1_700_000_000_000);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
@@ -384,11 +394,23 @@ async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection()
 
 /// The next VOICE_REPLY on `rx`, skipping unrelated broadcasts.
 async fn next_reply(rx: &mut mpsc::Receiver<SequencerControl>) -> v1::HostEvent {
+    next_event(rx, v1::EventKind::VoiceReply).await
+}
+
+/// The next VOICE_REPLY_TEXT on `rx`, skipping unrelated broadcasts.
+async fn next_reply_text(rx: &mut mpsc::Receiver<SequencerControl>) -> v1::HostEvent {
+    next_event(rx, v1::EventKind::VoiceReplyText).await
+}
+
+async fn next_event(
+    rx: &mut mpsc::Receiver<SequencerControl>,
+    kind: v1::EventKind,
+) -> v1::HostEvent {
     loop {
         let SequencerControl::OrderedEvent(event) = rx.recv().await.expect("sink closed") else {
             continue;
         };
-        if event.kind == v1::EventKind::VoiceReply as i32 {
+        if event.kind == kind as i32 {
             return event;
         }
     }
@@ -478,6 +500,10 @@ async fn a_failed_synthesis_still_pushes_the_text_with_the_error_in_status() {
         state_generation: 3,
         occurred_at_unix_millis: 9,
     });
+    // The text does not wait on the synthesis that is about to fail.
+    tokio::time::timeout(Duration::from_secs(5), next_reply_text(&mut voice_rx))
+        .await
+        .unwrap();
     let event = tokio::time::timeout(Duration::from_secs(5), next_reply(&mut voice_rx))
         .await
         .unwrap();
