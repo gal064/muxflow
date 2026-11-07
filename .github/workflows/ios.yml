@@ -69,9 +69,6 @@ jobs:
       MAESTRO_DRIVER_STARTUP_TIMEOUT: '300000'
       # Read by the generated Podfile. Xcode's compiles are most of the build.
       USE_CCACHE: '1'
-      CCACHE_DIR: ${{ github.workspace }}/tmp/ccache
-      CCACHE_BASEDIR: ${{ github.workspace }}
-      CCACHE_MAXSIZE: 1G
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -95,8 +92,6 @@ jobs:
             } | shasum -a 256 | cut -d ' ' -f 1
           )
           printf 'cache-key=%s\n' "$toolchain_key" >> "$GITHUB_OUTPUT"
-      - name: Boot simulator
-        run: bash tests/mobile/ios/boot-simulator.sh
       - name: Release versions
         run: release/check-version.sh
       - name: Distribution refusal checks
@@ -150,13 +145,17 @@ jobs:
         if: steps.simulator-app.outputs.cache-hit != 'true'
         uses: actions/cache/restore@v4
         with:
-          path: tmp/ccache
+          path: ~/Library/Caches/ccache
           key: ios-ccache-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: ios-ccache-${{ runner.arch }}-
       - name: Build standalone simulator app
         if: steps.simulator-app.outputs.cache-hit != 'true'
         run: |
           brew install ccache
+          # React Native's wrapper runs `$CCACHE_BINARY clang`, so without this
+          # in the environment it quietly compiles uncached. Xcode's compile
+          # tasks don't keep CCACHE_DIR either, so the cache stays in its default.
+          export CCACHE_BINARY=$(command -v ccache)
           ccache --zero-stats
           pnpm mobile:ios:simulator > "$RUNNER_TEMP/ios-build.log" 2>&1
           ccache --show-stats
@@ -165,7 +164,7 @@ jobs:
         if: steps.simulator-app.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
         uses: actions/cache/save@v4
         with:
-          path: tmp/ccache
+          path: ~/Library/Caches/ccache
           key: ios-ccache-${{ runner.arch }}-${{ github.run_id }}
       # Keep a successfully built app even when a later UI assertion fails.
       - name: Cache compiled simulator app
