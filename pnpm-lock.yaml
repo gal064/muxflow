@@ -167,6 +167,9 @@ importers:
       expo-haptics:
         specifier: ~57.0.2
         version: 57.0.2(expo@57.0.16)
+      expo-intent-launcher:
+        specifier: 57.0.1
+        version: 57.0.1(expo@57.0.16)
       expo-keep-awake:
         specifier: 57.0.1
         version: 57.0.1(expo@57.0.16)(react@19.2.3)
@@ -2456,6 +2459,11 @@ packages:
 
   expo-haptics@57.0.2:
     resolution: {integrity: sha512-vPths6zTxxaGaemC7D1GKbw1iOnOAAL5oAcCFVSgVNWnuLCBefL1LkhRBaJsepiMXRh2y3vwPiXkPaf6d16blA==}
+    peerDependencies:
+      expo: '*'
+
+  expo-intent-launcher@57.0.1:
+    resolution: {integrity: sha512-BYiPEOUeW3AkW/uxEESbS2UBw9LasJ8Heb6A8kF9Ueh6pqrXQHMNJFHzfrOP8qZfv9G2e8CTzrtzpN5p0vH5fA==}
     peerDependencies:
       expo: '*'
 
@@ -6480,6 +6488,10 @@ snapshots:
       react-native: 0.86.2(@babel/core@7.29.7(supports-color@8.1.1))(@react-native/metro-config@0.86.2(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.2.18)(react@19.2.3)(supports-color@8.1.1)
 
   expo-haptics@57.0.2(expo@57.0.16):
+    dependencies:
+      expo: 57.0.16(aac1ce22dd95f42101a7dfc80e0e58b4)
+
+  expo-intent-launcher@57.0.1(expo@57.0.16):
     dependencies:
       expo: 57.0.16(aac1ce22dd95f42101a7dfc80e0e58b4)
 
