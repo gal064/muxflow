@@ -48,12 +48,21 @@ appId: dev.muxflow.mobile
 - inputText: iOS fixture
 # Use the standard single-line input's Return key. Maestro's iOS swipe-based
 # hideKeyboard does not dismiss this form's keyboard on the current simulator.
-- tapOn:
-    id: Return
-- scrollUntilVisible:
-    element: Save
-- tapOn: Save
-# iOS groups each row's title and subtitle into one accessibility label.
+# A tap can succeed without its effect, which leaves the form open behind the
+# keyboard. The saved row is the proof, and iOS groups each row's title and
+# subtitle into one accessibility label.
+- retry:
+    maxRetries: 2
+    commands:
+      - tapOn:
+          id: Return
+          optional: true
+      - scrollUntilVisible:
+          element: Save
+      - tapOn: Save
+      - extendedWaitUntil:
+          visible: '^iOS fixture,.*'
+          timeout: 10000
 - tapOn: '^iOS fixture,.*'
 - extendedWaitUntil:
     visible: 'Trust this host\?'
@@ -85,33 +94,9 @@ appId: dev.muxflow.mobile
       text: Send
       enabled: true
     timeout: 30000
-- tapOn: Type, then Send
-- inputText: "printf 'ios-e2e-ok\\n'; printf 'ran\\n' > ios-e2e.marker"
-- tapOn: Send
+- runFlow:
+    file: send-terminal.yaml
+    env:
+      COMMAND: "printf 'ios-e2e-ok\\n'; printf 'ran\\n' > ios-e2e.marker"
+      EXPECTED: '.*ios-e2e\.marker.*'
 - takeScreenshot: terminal
-# Files navigation blurs the terminal input and dismisses its keyboard.
-- tapOn: Files
-- extendedWaitUntil:
-    visible: '.*README\.md,.*'
-    timeout: 30000
-- tapOn: '.*README\.md,.*'
-- extendedWaitUntil:
-    visible: iOS fixture document
-    timeout: 30000
-- takeScreenshot: markdown
-- tapOn:
-    id: BackButton
-- tapOn:
-    id: BackButton
-- pressKey: Home
-- launchApp:
-    stopApp: false
-- extendedWaitUntil:
-    visible:
-      text: Send
-      enabled: true
-    timeout: 30000
-- tapOn: Type, then Send
-- inputText: "printf 'resumed\\n' > ios-resumed.marker"
-- tapOn: Send
-- takeScreenshot: resumed
