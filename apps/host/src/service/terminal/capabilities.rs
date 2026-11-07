@@ -11,7 +11,12 @@ use crate::service::snapshot::tmux_command;
 pub(super) fn tmux_command_table() -> anyhow::Result<&'static [u8]> {
     static COMMAND_TABLE: OnceLock<Vec<u8>> = OnceLock::new();
     cache_successful_probe(&COMMAND_TABLE, || {
-        let output = tmux_command()?
+        let mut command = tmux_command()?;
+        // `list-commands` starts a server when there is none. In tests that
+        // would flip `server_identity()` under every parallel test.
+        #[cfg(test)]
+        command.args(["-L", &format!("ade-capabilities-{}", std::process::id())]);
+        let output = command
             .arg("list-commands")
             .output()
             .context("inspect tmux capabilities")?;

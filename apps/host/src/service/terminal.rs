@@ -1,13 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    process::{Child, ChildStdin},
+    process::{Child, ChildStdin, Output},
     sync::{
         Arc, LazyLock, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc as std_mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, bail};
@@ -59,6 +59,10 @@ const TERMINAL_CLIENT_CELL_BOUNDS: std::ops::RangeInclusive<u32> = 2..=500;
 // mirror the dark `--term-fg` and `--term-bg` in the shared palette;
 // `control_client_palette_matches_terminal_theme_tokens` guards that boundary.
 // They are what panes report until a desktop sends SET_TERMINAL_COLORS.
+/// How long a sizing claim waits for tmux to accept a just-started control
+/// client, and how often it asks. See [`run_once_client_registers`].
+const CLIENT_REGISTRATION_WAIT: Duration = Duration::from_secs(2);
+const CLIENT_REGISTRATION_POLL: Duration = Duration::from_millis(25);
 const TERMINAL_FOREGROUND_OSC_RGB: &str = "ffff/ffff/ffff";
 const TERMINAL_BACKGROUND_OSC_RGB: &str = "2828/2c2c/3434";
 
@@ -547,6 +551,9 @@ fn membership_delta(
 }
 
 pub(super) struct TerminalClients {
+    /// See [`TerminalClients::without_control_clients`].
+    #[cfg(test)]
+    forks_control_clients: bool,
     /// Opaque connection identity used only to correlate safe diagnostic lines.
     connection_epoch: u64,
     /// Daemon-unique twin of the client epoch, erased from ordinary builds.
@@ -630,6 +637,15 @@ impl TerminalClients {
         )
     }
 
+    /// For a test that drives reconciliation over a made-up snapshot. Attaching
+    /// would fork a real `tmux -C attach-session`, which starts a server on the
+    /// default socket and moves `server_identity()` under every parallel test.
+    #[cfg(test)]
+    pub(super) fn without_control_clients(mut self) -> Self {
+        self.forks_control_clients = false;
+        self
+    }
+
     pub(super) fn for_connection(
         output_credit: Arc<OutputCredit>,
         topology_trigger: TopologyOutputTrigger,
@@ -638,6 +654,8 @@ impl TerminalClients {
         colors: Arc<Mutex<TerminalColors>>,
     ) -> Self {
         Self {
+            #[cfg(test)]
+            forks_control_clients: true,
             connection_epoch,
             perf_connection_epoch,
             topology_trigger,
@@ -691,6 +709,10 @@ impl TerminalClients {
         event_tx: mpsc::Sender<SequencerControl>,
         overflowed: Arc<AtomicBool>,
     ) -> anyhow::Result<()> {
+        #[cfg(test)]
+        if !self.forks_control_clients {
+            return Ok(());
+        }
         let desired: HashSet<_> = pane_ids.iter().cloned().collect();
         let committed = self
             .clients
@@ -1038,6 +1060,7 @@ impl TerminalClients {
             .get(session_id)
             .context("window session control client is detached")?;
         let client_name = format!("client-{}", client.child.lock().unwrap().id());
+        let client_stopped = Arc::clone(&client.stopped);
         if let Some(previous) = self.visible_session.as_deref()
             && previous != session_id
             && let Some(client) = self.clients.get_mut(previous)
@@ -1054,16 +1077,18 @@ impl TerminalClients {
              refresh-client -t {client_name} -C {columns},{rows} ; \
              select-window -t {session_id}:#{{window_id}}"
         );
-        let output = super::snapshot::tmux_command()?
-            .args([
-                "run-shell",
-                "-C",
-                "-t",
-                &format!("{session_id}:"),
-                &commands,
-            ])
-            .output()
-            .context("apply terminal window sizing claim")?;
+        let output = run_once_client_registers(&client_stopped, CLIENT_REGISTRATION_WAIT, || {
+            super::snapshot::tmux_command()?
+                .args([
+                    "run-shell",
+                    "-C",
+                    "-t",
+                    &format!("{session_id}:"),
+                    &commands,
+                ])
+                .output()
+                .context("apply terminal window sizing claim")
+        })?;
         if !output.status.success() {
             if let Some(client) = self.clients.get_mut(session_id) {
                 let _ = set_scoped_sizing(client, false);
@@ -1403,6 +1428,30 @@ impl TerminalClients {
 
     pub(super) fn stop(&mut self) {
         drop(self.signal_stop());
+    }
+}
+
+/// Runs a tmux command that names a control client, waiting out the client's
+/// registration.
+///
+/// Attachments start during the snapshot subscribe and nothing waits for tmux
+/// to accept them, so a phone resuming into an open terminal can address
+/// `client-<pid>` before that process has connected. tmux then answers "can't
+/// find client" and runs nothing, which makes repeating the command safe.
+fn run_once_client_registers(
+    stopped: &AtomicBool,
+    wait: Duration,
+    mut run: impl FnMut() -> anyhow::Result<Output>,
+) -> anyhow::Result<Output> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let output = run()?;
+        let unregistered = !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("can't find client");
+        if !unregistered || stopped.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Ok(output);
+        }
+        std::thread::sleep(CLIENT_REGISTRATION_POLL);
     }
 }
 

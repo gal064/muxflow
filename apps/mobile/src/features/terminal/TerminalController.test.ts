@@ -5,7 +5,7 @@ import { EventKind, HostEventSchema, Operation, PaneResourceSchema, PaneResource
 import { FakeTransport, hostEnvelope, okResponse, serverHello, topologySnapshot } from "../../protocol/testing/fakeTransport";
 import { createSessionStore } from "../../store/sessionStore";
 import type { ToPageMessage } from "./bridgeMessages";
-import { ATTACH_RETRY_MS, SUBMIT_DELAY_MS, TAKE_INTERVAL_MS, TerminalController, type AppForeground, type TerminalControllerOptions, type TerminalSnapshot } from "./TerminalController";
+import { ATTACH_RETRY_LIMIT, ATTACH_RETRY_MS, SUBMIT_DELAY_MS, TAKE_INTERVAL_MS, TerminalController, type AppForeground, type TerminalControllerOptions, type TerminalSnapshot } from "./TerminalController";
 import { TerminalRegistry } from "./terminalRegistry";
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -658,13 +658,34 @@ describe("TerminalController attach failure", () => {
     const [select] = t.drain();
     t.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, { ok: false, errorCode: "terminal_resize_rejected", displayMessage: "no visible session control client" }) }, { requestId: select!.requestId }));
     await settle();
-    expect(h.controller.snapshot.lastError).toContain("no visible session control client");
+    expect(h.controller.snapshot.lastError).toBeUndefined();
     const [yielded] = t.drain().filter((frame) => frame.payload.case === "request");
     if (yielded?.payload.case !== "request") throw new Error("expected sizing yield");
     expect(yielded.payload.value.operation).toBe(Operation.YIELD_TERMINAL_SIZING);
     await vi.advanceTimersByTimeAsync(2_000);
     const ops = [await answerNext(t), await answerNext(t)].map((r) => r.operation);
     expect(ops).toEqual([Operation.RESIZE_TERMINAL_WINDOW, Operation.ATTACH_TERMINAL]);
+  });
+
+  it("reports a refused attach only once its retries have run out", async () => {
+    const h = harness();
+    const t = await h.connect();
+    h.controller.start();
+    h.controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
+    await settle();
+    for (let attempt = 1; attempt <= ATTACH_RETRY_LIMIT; attempt += 1) {
+      const claim = t.drain().find((frame) => frame.payload.case === "request" && frame.payload.value.operation === Operation.RESIZE_TERMINAL_WINDOW);
+      t.feed(hostEnvelope({ case: "response", value: create(ResponseSchema, {
+        ok: false, errorCode: "terminal_resize_rejected", displayMessage: "still refused",
+      }) }, { requestId: claim!.requestId }));
+      await settle();
+      if (attempt < ATTACH_RETRY_LIMIT) {
+        expect(h.controller.snapshot.lastError).toBeUndefined();
+        expect((await answerNext(t)).operation).toBe(Operation.YIELD_TERMINAL_SIZING);
+        await vi.advanceTimersByTimeAsync(ATTACH_RETRY_MS);
+      }
+    }
+    expect(h.controller.snapshot.lastError).toContain("still refused");
   });
 
   it("asks for a helper update instead of retrying an unsupported window claim", async () => {
