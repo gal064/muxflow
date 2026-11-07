@@ -51,7 +51,7 @@ interface TitleBarProps {
  * tab strip below it, since every pixel it gives up goes to the terminal.
  *
  * It carries seven controls, Settings first, plus an eighth while a newer
- * release is published: a red pill that opens the latest release page. It has no
+ * release is published: a red pill that installs the update. It has no
  * dismiss on purpose; it is gone once the app is updated. Back and Forward walk the focus history — through
  * terminals and document tabs alike — and are disabled when nothing that
  * still exists lies in that direction; ⌘[ and ⌘] run the same commands.
@@ -122,7 +122,7 @@ export function TitleBar(props: TitleBarProps) {
   const update = props.update && <button
     className="titlebar-update"
     onClick={props.onUpdate}
-    title={`Muxflow ${props.update.version} is available. Open the latest release page.`}
+    title={`Muxflow ${props.update.version} is available. Install the update.`}
     type="button"
   >↑ Update {props.update.version}</button>;
   const bell = <button
