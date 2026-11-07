@@ -151,6 +151,10 @@ acceptance requirement:
   five seconds. A finite iOS background task may protect completion of pending
   user-initiated writes and orderly cleanup; do not manufacture work or hold
   an idle task just to keep SSH alive. End the task when that work finishes.
+- A voice message on its way to the pane is the one exception to the five-second
+  limit, and ships in the first implementation: the connection stays until it
+  lands or fails, under a finite background task begun before the app leaves the
+  foreground. A message iOS cuts off fails as it would have without the task.
 - The native deadline, task expiration or failed task acquisition must lead
   to bounded cleanup; iOS does not guarantee all five seconds are given.
 - If the app returns before teardown and the transport is healthy, reuse it

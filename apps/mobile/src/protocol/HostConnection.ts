@@ -691,6 +691,7 @@ export class HostConnection {
         break;
       case EventKind.VOICE_PROVISION:
       case EventKind.VOICE_REPLY:
+      case EventKind.VOICE_REPLY_TEXT:
         this.options.onVoiceEvent?.(event);
         break;
       case EventKind.TERMINAL_CLIPBOARD_WRITE:
