@@ -1037,6 +1037,9 @@ enum AgentActionKind {
   AGENT_ACTION_KIND_RESUME = 3;
   reserved 4;
   reserved "AGENT_ACTION_KIND_RENAME";
+  // Continues a copy of the conversation in a new window of the source agent's
+  // own workspace, in its pane's folder. The original keeps running untouched.
+  AGENT_ACTION_KIND_BRANCH = 5;
 }
 
 enum AgentPlacementKind {

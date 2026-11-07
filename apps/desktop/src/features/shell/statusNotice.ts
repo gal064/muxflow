@@ -41,6 +41,7 @@ const ROUTINE_PREFIXES = [
   "Renaming ",
   "Launching ",
   "Resuming ",
+  "Branching ",
 ];
 
 /**

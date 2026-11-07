@@ -89,7 +89,8 @@ async function shell(profiles: HostProfile[], initialAppState = defaultAppState)
         ? { topologyGeneration: 2, sessionId: "$9", windowId: "@9", paneId: "%9" }
         : { topologyGeneration: 2 });
       case "agent_request": {
-        const { connectionEpoch } = request.command as { connectionEpoch: string };
+        const { connectionEpoch, operation } = request.command as { connectionEpoch: string; operation: string };
+        if (operation === "branch") return Promise.resolve({ sessionId: "$2", windowId: "@7", paneId: "%7" });
         return Promise.resolve({ snapshot: {
           generation: "1", acceptedGeneration: "1", authoritative: true, connectionEpoch,
           adapters: request.clientId === "client-2"
@@ -371,6 +372,114 @@ describe("the shell over several hosts", () => {
       action: expect.objectContaining({ kind: "renameWindow", window_id: "@1", name: "Release notes" }),
     })]);
     await app.unmount();
+  });
+
+  describe("branching an agent", () => {
+    /** On the agent's host, but in a workspace other than the agent's. */
+    const onBuild = async () => {
+      const app = await shell([LOCAL, REMOTE]);
+      await act(async () => {
+        app.bridgeFor("local").publish(connected);
+        app.bridgeFor("local").publish(world("srv-local", [["$0", "home"]]));
+        app.bridgeFor("remote-a").publish({ kind: "generationEpoch", epoch: 3, sequence: 0 });
+        app.bridgeFor("remote-a").publish(connected);
+        app.bridgeFor("remote-a").publish(world("srv-qa", [["$1", "build"], ["$2", "work"]]));
+      });
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { app.workspaceButton("build").props.onClick({ shiftKey: false }); });
+      invokeMock.mockClear();
+      return app;
+    };
+    const branch = (app: Awaited<ReturnType<typeof shell>>) => act(async () => {
+      app.renderer.root.findByProps({ "aria-label": "Branch conversation" }).props.onClick();
+    });
+
+    it("opens in the agent's own workspace and goes to the new pane once the host shows it", async () => {
+      const app = await onBuild();
+      await branch(app);
+      expect(calls("agent_request")).toEqual([expect.objectContaining({
+        clientId: "client-2",
+        command: expect.objectContaining({ operation: "branch", sessionId: "$2", paneId: "%1", nativeSessionId: "native-qa" }),
+      })]);
+      // The reply beat the snapshot: not gone, just not here yet.
+      expect(calls("tmux_action")).toEqual([]);
+
+      const next = world("srv-qa", [["$1", "build"], ["$2", "work"]]) as Extract<TerminalEvent, { kind: "snapshot" }>;
+      const { sessions, windows, panes } = next.snapshot!;
+      await act(async () => {
+        app.bridgeFor("remote-a").publish({
+          ...next,
+          generation: 2,
+          snapshot: {
+            sessions,
+            windows: [...windows, { ...windows[1], id: "@7", active: false }],
+            panes: [...panes, { ...panes[1], id: "%7", windowId: "@7" }],
+          },
+        });
+      });
+      await act(async () => { await Promise.resolve(); });
+      expect(calls("tmux_action")).toContainEqual(expect.objectContaining({
+        clientId: "client-2", action: expect.objectContaining({ session_id: "$2", window_id: "@7" }),
+      }));
+      await app.unmount();
+    });
+
+    it("sends one request for a double-click, even when the reply lands between the clicks", async () => {
+      const app = await onBuild();
+      await branch(app);
+      await branch(app);
+      expect(calls("agent_request").filter((request) => (request.command as { operation: string }).operation === "branch")).toHaveLength(1);
+      await app.unmount();
+    });
+
+    it("says so and stays put when the new pane never arrives", async () => {
+      const app = await onBuild();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      try {
+        await branch(app);
+        await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
+        expect(calls("tmux_action")).toEqual([]);
+        await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+        expect(calls("tmux_action")).toEqual([]);
+        expect(JSON.stringify(app.renderer.toJSON())).toContain("Branch of Codex on qa has not appeared.");
+      } finally {
+        vi.useRealTimers();
+      }
+      await app.unmount();
+    });
+
+    it("leaves the screen alone when the host refuses", async () => {
+      const app = await onBuild();
+      const respond = invokeMock.getMockImplementation()!;
+      invokeMock.mockImplementation((command: string, request: Record<string, unknown>) =>
+        command === "agent_request" && (request.command as { operation: string }).operation === "branch"
+          ? Promise.reject(new Error("tmux topology generation changed"))
+          : respond(command, request));
+      await branch(app);
+      await act(async () => { await Promise.resolve(); });
+      expect(calls("tmux_action")).toEqual([]);
+      expect(JSON.stringify(app.renderer.toJSON())).toContain("tmux topology generation changed");
+      await app.unmount();
+    });
+
+    it("does not pull someone back to a host they left while the reply was on its way", async () => {
+      const app = await onBuild();
+      const respond = invokeMock.getMockImplementation()!;
+      let reply!: (value: unknown) => void;
+      invokeMock.mockImplementation((command: string, request: Record<string, unknown>) =>
+        command === "agent_request" && (request.command as { operation: string }).operation === "branch"
+          ? new Promise((resolve) => { reply = resolve; })
+          : respond(command, request));
+      await branch(app);
+      await act(async () => { app.workspaceButton("home").props.onClick({ shiftKey: false }); });
+      expect(app.hostRow().props["aria-label"]).toContain("Host Local over local");
+      invokeMock.mockClear();
+      await act(async () => { reply({ sessionId: "$2", windowId: "@7", paneId: "%7" }); });
+      await act(async () => { await Promise.resolve(); });
+      expect(calls("set_last_profile_id")).toEqual([]);
+      expect(app.hostRow().props["aria-label"]).toContain("Host Local over local");
+      await app.unmount();
+    });
   });
 
   it("pins a peer's workspace on the peer's client", async () => {

@@ -98,7 +98,7 @@ fn main() -> Result<(), String> {
     let server_identity = initial.server_identity.clone();
 
     let registry = connection.agent_snapshot()?;
-    if registry.adapters.len() != 2
+    if registry.adapters.len() != 3
         || !registry.adapters.iter().all(|adapter| {
             adapter.supports_launch
                 && adapter.supports_resume
@@ -345,6 +345,21 @@ fn main() -> Result<(), String> {
     if resumed.pane_id.is_empty() || resumed.pane_id == codex_pane {
         return Err("resume did not create a distinct pane".into());
     }
+
+    let (branched, _) = agent_action_retry(
+        &mut connection,
+        v1::AgentActionKind::Branch,
+        "codex",
+        &codex_pane,
+        "codex-native-1",
+        v1::AgentPlacementKind::Unspecified,
+    )?;
+    if branched.pane_id.is_empty()
+        || branched.pane_id == codex_pane
+        || branched.pane_id == resumed.pane_id
+    {
+        return Err("branch did not create a distinct pane".into());
+    }
     drop(connection);
     std::thread::sleep(std::time::Duration::from_millis(600));
 
@@ -510,6 +525,12 @@ fn agent_action_retry(
             .find(|pane| pane.id == target_pane_id)
             .ok_or("agent launch target pane disappeared")?;
         let root = connection.active_root(&snapshot, target_pane_id)?;
+        // As the desktop sends it: a branch names no root of its own.
+        let (active_root, root_token) = if action == v1::AgentActionKind::Branch {
+            Default::default()
+        } else {
+            (root.root, root.root_token)
+        };
         let request = v1::Request {
             operation: v1::Operation::AgentAction.into(),
             agent: Some(v1::AgentRequest {
@@ -519,8 +540,8 @@ fn agent_action_retry(
                 session_id: pane.session_id.clone(),
                 window_id: pane.window_id.clone(),
                 pane_id: pane.id.clone(),
-                active_root: root.root,
-                root_token: root.root_token,
+                active_root,
+                root_token,
                 expected_server_identity: snapshot.server_identity.clone(),
                 expected_topology_generation: snapshot.generation,
                 placement: placement.into(),

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
 import type { CommandId } from "../../commands/registry";
 import { usePublishedRowCommands, type RowCommandSource } from "../../commands/rowCommands";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
@@ -10,6 +10,7 @@ import {
 } from "../agents/agentsList";
 import { AgentMark } from "../agents/AgentIdentity";
 import { agentSessionLabel } from "../agents/agentLabels";
+import { zeroGeneration } from "../agents/generation";
 import type { AgentAdapterDescriptor, AgentAdapterId, AgentDisplayState, AgentPlacement, AgentRecord } from "../agents/types";
 import type { ConnectionPhase } from "../../state/connectionReducer";
 import { AGENTS_SECTION_MAX_RATIO, AGENTS_SECTION_MIN_RATIO, SIDEBAR_MIN_WIDTH } from "../shell/types";
@@ -72,13 +73,13 @@ interface WorkspaceSidebarProps {
   onTogglePinnedOnly(): void;
   onSelectWorkspace(row: MergedWorkspaceRow): void;
   /**
-   * Shift-click, and the menu item beside it: pins the workspace to the top of
+   * Shift-click, the row's hover pin, and the menu item: pins the workspace to the top of
    * this list, or unpins one already there. The pin is the host's, so this
    * dispatches an action rather than writing app state.
    */
   onTogglePinnedWorkspace(row: MergedWorkspaceRow): void;
   /**
-   * Shift-click on an agent row, and its menu item: pins the agent's tab, or
+   * Shift-click on an agent row, its hover pin, and its menu item: pins the agent's tab, or
    * unpins one already pinned. The same host pin the tab strip toggles, reached
    * from here because the agent's tab is often not in the strip on screen.
    */
@@ -97,6 +98,7 @@ interface WorkspaceSidebarProps {
   onOpenSettings(): void;
   onLaunchAgent(adapter: AgentAdapterId, placement: AgentPlacement): void;
   onResumeAgent(agent: AgentRecord, placement: AgentPlacement, scope: HostScopeToken): void;
+  onBranchAgent(agent: AgentRecord, scope: HostScopeToken): void;
   onRenameAgentTab(agent: AgentRecord, scope: HostScopeToken): void;
   onReviewHooks(adapter: AgentAdapterId, action: "install" | "uninstall"): void;
   /**
@@ -207,12 +209,21 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
   // A resume opens a new pane beside the one on screen, under the active
   // root — both facts of the host on screen — so only its agents offer it.
   const canResume = (row: AgentListRow) => agentHost(row).canMutate && agentHost(row).active;
+  // A branch needs a live pane to open beside and a conversation to copy. The
+  // CLIs refuse an empty one, and they report a session before its first turn, so
+  // an ID alone is not enough: the first finished turn is what raises attention.
+  // `detectedManually` says nothing here, as an agent seen as a process first
+  // keeps it after its hooks report the session.
+  const canBranch = (row: AgentListRow) => canResume(row) && row.routable
+    && row.agent.nativeSessionId.trim() !== ""
+    && (row.agent.attentionGeneration !== zeroGeneration || row.agent.lifecycle === "working" || row.agent.lifecycle === "blocked");
   const rowActions = useMemo<readonly CommandId[]>(() => {
     if (!focusedAgent) return [];
     const ids: CommandId[] = [];
     if (focusedAgent.routable) ids.push("agents.focusRow");
     if (focusedAgentCanMutate && focusedAgent.routable) ids.push("agents.renameRow");
     if (canResume(focusedAgent) && focusedAgentResume) ids.push("agents.resumeRow");
+    if (canBranch(focusedAgent)) ids.push("agents.branchRow");
     return ids;
     // `canResume` reads the hosts: a switch that leaves the row's identity
     // alone must still take the resume away.
@@ -227,6 +238,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       // The palette is a single line, so it takes the adapter's first declared
       // placement rather than inventing a second prompt to ask which.
       case "agents.resumeRow": if (focusedAgentResume) props.onResumeAgent(focusedAgent.agent, focusedAgentResume, focusedAgentTarget!.scope); return;
+      case "agents.branchRow": props.onBranchAgent(focusedAgent.agent, focusedAgentTarget!.scope); return;
     }
   };
   const rowSource = useMemo<RowCommandSource | undefined>(() => rowActions.length === 0 || !focusedAgent ? undefined : {
@@ -289,6 +301,11 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     const selected = row.agent.id === selectedAgentId && row.agent.hostProfileId === activeHost.profileId;
     const sessionLabel = agentSessionLabel(row.agent, props.adapters);
     const scope = agentHost(row).scope;
+    const openMenu = (event: MouseEvent) => {
+      event.preventDefault();
+      setFocusedAgentTarget({ id: row.agent.id, scope });
+      setAgentMenu({ row, anchor: { x: event.clientX, y: event.clientY }, scope });
+    };
     return <div className="agent-row" key={key} role="listitem">
       <button
         aria-label={[
@@ -311,11 +328,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           if (event.shiftKey) props.onTogglePinnedAgentTab(row, scope);
           else if (row.routable) props.onSelectAgent(row, scope);
         }}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          setFocusedAgentTarget({ id: row.agent.id, scope });
-          setAgentMenu({ row, anchor: { x: event.clientX, y: event.clientY }, scope });
-        }}
+        onContextMenu={openMenu}
         onFocus={() => setFocusedAgentTarget({ id: row.agent.id, scope })}
         onPointerDown={(event) => {
           setFocusedAgentTarget({ id: row.agent.id, scope });
@@ -349,8 +362,35 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
           <span className="agent-detail">{row.location.workspaceName}</span>
         </span>
       </button>
-      {needsAttention(row.state) && <span aria-hidden="true" className="badge badge-row">1</span>}
+      {/* Beside the row's button, not in it: a button cannot hold another, and
+          a click here must not select the row or start its drag. Pointer only:
+          the row's menu is the keyboard's way to both. */}
+      <span className="row-actions" onContextMenu={openMenu}>
+        <button
+          aria-label={row.location.tabPinned ? "Unpin tab" : "Pin tab"}
+          className="row-action"
+          disabled={!row.routable}
+          onClick={() => props.onTogglePinnedAgentTab(row, scope)}
+          tabIndex={-1}
+          title={row.location.tabPinned ? "Unpin tab" : "Pin tab"}
+          type="button"
+        ><Icon name="pin" size={12} /></button>
+        <button
+          aria-label="Branch conversation"
+          className="row-action"
+          disabled={!canBranch(row)}
+          onClick={() => props.onBranchAgent(row.agent, scope)}
+          tabIndex={-1}
+          title="Branch conversation in new tab"
+          type="button"
+        ><Icon name="branch" size={12} /></button>
+      </span>
     </div>;
+  };
+
+  const openWorkspaceMenu = (event: MouseEvent, row: MergedWorkspaceRow, index: number) => {
+    event.preventDefault();
+    setMenu({ row, anchor: { x: event.clientX, y: event.clientY }, index });
   };
 
   const renderWorkspaceRow = (row: MergedWorkspaceRow, index: number) => <div className="workspace-row" key={row.key} role="listitem">
@@ -380,10 +420,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       onClick={(event) => event.shiftKey
         ? props.onTogglePinnedWorkspace(row)
         : props.onSelectWorkspace(row)}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        setMenu({ row, anchor: { x: event.clientX, y: event.clientY }, index });
-      }}
+      onContextMenu={(event) => openWorkspaceMenu(event, row, index)}
       onDoubleClick={() => row.canMutate && props.onWorkspaceCommand(row, "session.rename")}
       onKeyDown={(event) => {
         if (isContextMenuKey(event)) {
@@ -450,6 +487,16 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     </button>
     {!props.compactWorkspaces && row.unread > 0
       && <span aria-hidden="true" className="badge badge-row">{row.unread > 99 ? "99+" : row.unread}</span>}
+    <span className="row-actions" onContextMenu={(event) => openWorkspaceMenu(event, row, index)}>
+      <button
+        aria-label={row.pinned ? "Unpin workspace" : "Pin workspace"}
+        className="row-action"
+        onClick={() => props.onTogglePinnedWorkspace(row)}
+        tabIndex={-1}
+        title={row.pinned ? "Unpin workspace" : "Pin workspace"}
+        type="button"
+      ><Icon name="pin" size={12} /></button>
+    </span>
   </div>;
 
   /**
@@ -577,7 +624,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
     <div
       className="sidebar-section sidebar-agents"
       onContextMenu={(event) => {
-        if (!(event.target as HTMLElement).closest(".agent-button")) {
+        if (!(event.target as HTMLElement).closest(".agent-row")) {
           event.preventDefault();
           setAgentMenu({ anchor: { x: event.clientX, y: event.clientY }, scope: activeHost.scope });
         }
@@ -781,7 +828,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
       items={agentMenu.row
         ? [
           { id: "focus", label: "Focus this agent's pane", disabled: !agentMenu.row.routable, run: () => props.onSelectAgent(agentMenu.row!, agentMenu.scope) },
-          { id: "pin", label: agentMenu.row.location.tabPinned ? "Unpin tab" : "Pin tab", run: () => props.onTogglePinnedAgentTab(agentMenu.row!, agentMenu.scope) },
+          { id: "pin", label: agentMenu.row.location.tabPinned ? "Unpin tab" : "Pin tab", disabled: !agentMenu.row.routable, run: () => props.onTogglePinnedAgentTab(agentMenu.row!, agentMenu.scope) },
           { id: "rename", label: "Rename tab…", disabled: !agentHost(agentMenu.row).canMutate || !agentMenu.row.routable, run: () => props.onRenameAgentTab(agentMenu.row!.agent, agentMenu.scope) },
           ...agentMoveItems(agentMenu.row, agentMenu.anchor),
           ...resumePlacements(props.adapters, agentMenu.row.agent).map((placement) => ({
@@ -790,6 +837,7 @@ export function WorkspaceSidebar(props: WorkspaceSidebarProps) {
             disabled: !canResume(agentMenu.row!),
             run: () => props.onResumeAgent(agentMenu.row!.agent, placement, agentMenu.scope),
           })),
+          { id: "branch", label: agentHost(agentMenu.row).active ? "Branch conversation in new tab" : `Branch conversation in new tab (open ${agentHost(agentMenu.row).label} first)`, disabled: !canBranch(agentMenu.row), run: () => props.onBranchAgent(agentMenu.row!.agent, agentMenu.scope) },
         ]
         : launchItems(props.hostAdapters, activeHost.canMutate, props.onLaunchAgent, props.onReviewHooks, props.onSetUpHost)}
       label={agentMenu.row ? `Actions for ${agentMenu.row.agent.displayName}` : "Agent actions"}
