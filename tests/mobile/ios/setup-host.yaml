@@ -69,12 +69,18 @@ appId: dev.muxflow.mobile
     timeout: 30000
 - assertVisible: ${HOST_FINGERPRINT}
 - takeScreenshot: trust
-- tapOn: Trust
 # launchApp already declares notifications: allow. A second alert tap races
 # with that permission handler; continue once the application UI is available.
-- extendedWaitUntil:
-    visible: '^Workspaces.*'
-    timeout: 30000
+# A tap can reach the dialog without pressing Trust, so check that it closed.
+- retry:
+    maxRetries: 2
+    commands:
+      - tapOn:
+          text: Trust
+          optional: true
+      - extendedWaitUntil:
+          visible: '^Workspaces.*'
+          timeout: 10000
 - retry:
     maxRetries: 1
     commands:
