@@ -290,6 +290,7 @@ pub fn run() {
             connection::files::native_clipboard::write_native_terminal_clipboard,
             external_links::open_external_link,
             update_check::check_for_update,
+            update_check::install_update,
             perf_log::sink::perf_log_enabled,
             perf_log::sink::append_perf_log,
             perf_log::bridge::acknowledge_bridge_events,
@@ -301,6 +302,9 @@ pub fn run() {
             if matches!(event, tauri::RunEvent::Exit) {
                 app.state::<connection::ports::PortForwards>().stop_all();
                 connection::close_all_control_masters();
+                if update_check::relaunch_on_exit() {
+                    tauri::process::restart(&app.env());
+                }
             }
         });
 }
