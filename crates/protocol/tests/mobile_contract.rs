@@ -60,6 +60,13 @@ fn mobile_contract_matches_rust() {
                     }), ..Default::default()
                 }), ..Default::default()
             })),
+            "voiceText": frame(v1::envelope::Payload::Event(v1::HostEvent {
+                kind: v1::EventKind::VoiceReplyText.into(), voice: Some(v1::VoiceEvent {
+                    reply: Some(v1::VoiceSpeech {
+                        display_markdown: "Done.".into(), reply_at_unix_millis: (1 << 53) + 7, ..Default::default()
+                    }), ..Default::default()
+                }), ..Default::default()
+            })),
         },
     });
     for (file, value) in [
