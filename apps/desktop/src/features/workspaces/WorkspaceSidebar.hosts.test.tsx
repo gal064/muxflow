@@ -39,7 +39,7 @@ const row = (host: SidebarHost, id: string, name: string, letter = host.letter):
 
 const props = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}): Parameters<typeof WorkspaceSidebar>[0] => ({
   adapters: [], agents: [], hostAdapters: [], agentSort: "workspace", agentsRatio: 0.4, compactWorkspaces: false, hosts: [local, peer, hidden],
-  maxWidth: 426, onAgentsRatio: noop, onLaunchAgent: noop, onOpenSettings: noop, onRenameAgentTab: noop, onResumeAgent: noop,
+  maxWidth: 426, onAgentsRatio: noop, onLaunchAgent: noop, onOpenSettings: noop, onRenameAgentTab: noop, onResumeAgent: noop, onBranchAgent: noop,
   onReviewHooks: noop, onSelectAgent: noop, onSelectWorkspace: noop, onSortMode: noop, onTogglePinnedAgentTab: noop,
   onTogglePinnedOnly: noop, onTogglePinnedWorkspace: noop, onToggleShown: noop, onWidth: noop, onWorkspaceCommand: noop,
   pinnedOnly: false, rows: [row(local, "$0", "alpha"), row(peer, "$0", "delta")], stateGlyphs: false, width: 240,

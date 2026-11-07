@@ -8,7 +8,11 @@ use tmux_agent_protocol::v1;
 
 use super::super::{
     SequencerControl,
-    agents::{AgentRuntime, HookIngestFailure, HookManager, publish},
+    agents::{
+        AgentRuntime, HookIngestFailure, HookManager,
+        adapters::{AgentAdapter, LaunchSpec},
+        publish,
+    },
     filesystem::validate_root_token,
     snapshot::{server_identity, tmux_command},
 };
@@ -229,10 +233,16 @@ fn launch_agent(
         v1::AgentActionKind::LaunchWindow
             | v1::AgentActionKind::LaunchSplit
             | v1::AgentActionKind::Resume
+            | v1::AgentActionKind::Branch
     ) {
         bail!("launch action is required");
     }
-    validate_root_token(&request.active_root, &request.root_token)?;
+    let branch = action == v1::AgentActionKind::Branch;
+    // A branch opens in its source pane's folder, which tmux reports below. The
+    // caller names no root, so there is no capability to check.
+    if !branch {
+        validate_root_token(&request.active_root, &request.root_token)?;
+    }
     let identity = server_identity();
     if request.expected_server_identity != identity {
         bail!("tmux server identity changed; refresh before launching an agent");
@@ -243,13 +253,7 @@ fn launch_agent(
     }
     let adapter = super::super::agents::adapters::by_id(&request.adapter_id)
         .context("supported agent adapter is required")?;
-    let resume = (action == v1::AgentActionKind::Resume)
-        .then_some(request.native_session_id.as_str())
-        .filter(|id| !id.is_empty());
-    if action == v1::AgentActionKind::Resume && resume.is_none() {
-        bail!("resume requires a native session ID");
-    }
-    let launch = adapter.launch(resume);
+    let launch = launch_spec(adapter, action, &request.native_session_id)?;
     let agent_command = std::iter::once(launch.program.to_owned())
         .chain(launch.arguments)
         .map(|argument| shell_quote(&argument))
@@ -257,7 +261,7 @@ fn launch_agent(
         .join(" ");
     let shell_command = format!("exec {agent_command}");
     let placement = placement_for(request, action)?;
-    {
+    let root = {
         let baseline = topology_baseline.lock().unwrap();
         let (snapshot, baseline_identity) = baseline
             .as_ref()
@@ -266,7 +270,12 @@ fn launch_agent(
             bail!("tmux server identity changed; refresh before launching an agent");
         }
         validate_placement_target(request, placement, snapshot)?;
-    }
+        if branch {
+            branch_root(request, snapshot)?
+        } else {
+            request.active_root.clone()
+        }
+    };
     let split = placement == v1::AgentPlacementKind::Split;
     let output = if split {
         validate_tmux_id(&request.pane_id, '%')?;
@@ -275,7 +284,7 @@ fn launch_agent(
             .arg("-t")
             .arg(&request.pane_id)
             .arg("-c")
-            .arg(&request.active_root)
+            .arg(&root)
             .arg(shell_command)
             .output()
     } else {
@@ -285,7 +294,7 @@ fn launch_agent(
             .arg("-t")
             .arg(&request.session_id)
             .arg("-c")
-            .arg(&request.active_root)
+            .arg(&root)
             .arg(shell_command)
             .output()
     }
@@ -303,6 +312,20 @@ fn launch_agent(
     // authoritative post-launch snapshot and process detection result.
     *topology_baseline.lock().unwrap() = None;
     Ok(ids)
+}
+
+fn launch_spec(
+    adapter: &dyn AgentAdapter,
+    action: v1::AgentActionKind,
+    native_session_id: &str,
+) -> anyhow::Result<LaunchSpec> {
+    use v1::AgentActionKind::{Branch, Resume};
+    match (action, native_session_id) {
+        (Resume | Branch, "") => bail!("resume and branch require a native session ID"),
+        (Resume, id) => Ok(adapter.launch(Some(id))),
+        (Branch, id) => Ok(adapter.branch(id)),
+        _ => Ok(adapter.launch(None)),
+    }
 }
 
 fn parse_placement_ids(stdout: &str) -> anyhow::Result<(String, String, String)> {
@@ -358,6 +381,26 @@ fn validate_placement_target(
         }
     }
     Ok(())
+}
+
+/// The folder a branch opens in: its source agent's, whichever one is on screen.
+fn branch_root(
+    request: &v1::AgentRequest,
+    snapshot: &tmux_control::TmuxSnapshot,
+) -> anyhow::Result<String> {
+    validate_tmux_id(&request.pane_id, '%')?;
+    let root = snapshot
+        .panes
+        .iter()
+        .find(|pane| pane.id == request.pane_id && pane.session_id == request.session_id)
+        .map(|pane| pane.current_path.clone())
+        .context("branch source pane is no longer in its workspace")?;
+    // tmux falls back to another folder without complaint, and an agent must not
+    // quietly carry on somewhere its conversation knows nothing about.
+    if !std::path::Path::new(&root).is_dir() {
+        bail!("branch source folder no longer exists: {root}");
+    }
+    Ok(root)
 }
 
 fn validate_tmux_id(value: &str, prefix: char) -> anyhow::Result<()> {
@@ -424,8 +467,92 @@ mod tests {
     }
 
     #[test]
+    fn branch_always_opens_a_window_whatever_placement_it_names() {
+        let request = v1::AgentRequest {
+            placement: v1::AgentPlacementKind::Split.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            placement_for(&request, v1::AgentActionKind::Branch).unwrap(),
+            v1::AgentPlacementKind::Window
+        );
+    }
+
+    #[test]
+    fn branch_opens_in_its_source_panes_folder_and_only_within_its_workspace() {
+        let folder = std::env::temp_dir().to_string_lossy().into_owned();
+        let mut snapshot = one_pane_snapshot();
+        snapshot.panes[0].current_path = folder.clone();
+        let mut request = v1::AgentRequest {
+            session_id: "$1".into(),
+            pane_id: "%3".into(),
+            active_root: "/somewhere/else".into(),
+            ..Default::default()
+        };
+        assert_eq!(branch_root(&request, &snapshot).unwrap(), folder);
+        request.session_id = "$9".into();
+        assert!(branch_root(&request, &snapshot).is_err());
+        request.session_id = "$1".into();
+        request.pane_id = "active".into();
+        assert!(branch_root(&request, &snapshot).is_err());
+    }
+
+    #[test]
+    fn branch_refuses_a_folder_that_is_gone() {
+        let request = v1::AgentRequest {
+            session_id: "$1".into(),
+            pane_id: "%3".into(),
+            ..Default::default()
+        };
+        let mut snapshot = one_pane_snapshot();
+        snapshot.panes[0].current_path = "/nonexistent/muxflow-worktree".into();
+        assert!(branch_root(&request, &snapshot).is_err());
+        snapshot.panes[0].current_path = String::new();
+        assert!(branch_root(&request, &snapshot).is_err());
+    }
+
+    #[test]
+    fn resume_and_branch_need_a_session_and_launch_does_not() {
+        use v1::AgentActionKind::{Branch, LaunchWindow, Resume};
+        let adapter = crate::service::agents::adapters::by_id("codex").unwrap();
+        assert!(launch_spec(adapter, Resume, "").is_err());
+        assert!(launch_spec(adapter, Branch, "").is_err());
+        assert_eq!(
+            launch_spec(adapter, Resume, "id").unwrap().arguments,
+            ["resume", "id"]
+        );
+        assert_eq!(
+            launch_spec(adapter, Branch, "id").unwrap().arguments,
+            ["fork", "id"]
+        );
+        assert!(
+            launch_spec(adapter, LaunchWindow, "ignored")
+                .unwrap()
+                .arguments
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn split_placement_requires_the_full_exact_session_window_pane_tuple() {
-        let snapshot = tmux_control::TmuxSnapshot {
+        let snapshot = one_pane_snapshot();
+        let mut request = v1::AgentRequest {
+            session_id: "$1".into(),
+            window_id: "@2".into(),
+            pane_id: "%3".into(),
+            ..Default::default()
+        };
+        assert!(
+            validate_placement_target(&request, v1::AgentPlacementKind::Split, &snapshot).is_ok()
+        );
+        request.window_id = "@9".into();
+        assert!(
+            validate_placement_target(&request, v1::AgentPlacementKind::Split, &snapshot).is_err()
+        );
+    }
+
+    fn one_pane_snapshot() -> tmux_control::TmuxSnapshot {
+        tmux_control::TmuxSnapshot {
             sessions: vec![tmux_control::Session {
                 id: "$1".into(),
                 name: "work".into(),
@@ -451,19 +578,6 @@ mod tests {
                 title: String::new(),
             }],
             ..Default::default()
-        };
-        let mut request = v1::AgentRequest {
-            session_id: "$1".into(),
-            window_id: "@2".into(),
-            pane_id: "%3".into(),
-            ..Default::default()
-        };
-        assert!(
-            validate_placement_target(&request, v1::AgentPlacementKind::Split, &snapshot).is_ok()
-        );
-        request.window_id = "@9".into();
-        assert!(
-            validate_placement_target(&request, v1::AgentPlacementKind::Split, &snapshot).is_err()
-        );
+        }
     }
 }

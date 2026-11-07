@@ -40,7 +40,7 @@ const mergedRow = (row: WorkspaceRowModel): MergedWorkspaceRow => ({
 const sidebar = (overrides: Partial<Parameters<typeof WorkspaceSidebar>[0]> = {}) => renderToStaticMarkup(<WorkspaceSidebar
   adapters={[]} agents={[]} hostAdapters={[]} agentSort="status" agentsRatio={0.4} compactWorkspaces={false} hosts={[remoteHost]}
   maxWidth={426} onAgentsRatio={noop} onLaunchAgent={noop} onOpenSettings={noop}
-  onRenameAgentTab={noop} onResumeAgent={noop} onReviewHooks={noop} onSelectAgent={noop}
+  onRenameAgentTab={noop} onResumeAgent={noop} onBranchAgent={noop} onReviewHooks={noop} onSelectAgent={noop}
   onSelectWorkspace={noop} onTogglePinnedWorkspace={noop} onTogglePinnedAgentTab={noop} onToggleShown={noop} onSortMode={noop} onWidth={noop} onWorkspaceCommand={noop} pinnedOnly={false} onTogglePinnedOnly={noop}
   rows={[]} stateGlyphs={false} width={240}
   {...overrides}
@@ -215,7 +215,7 @@ describe("active agent row", () => {
 
   it("uses the active workspace's accent block without letting hover replace it", () => {
     expect(stylesCss).toContain(".agent-button.selected { background: var(--accent); }");
-    expect(stylesCss).toContain(".agent-button:hover:not(.selected):not(:disabled):not([data-unavailable])");
+    expect(stylesCss).toContain(".agent-row:hover > .agent-button:not(.selected):not(:disabled):not([data-unavailable])");
     expect(stylesCss).toContain(".agent-button.selected .agent-mark,\n.workspace-button.active .agent-mark { --badge-ring: var(--accent); }");
     const forcedColors = stylesCss.slice(stylesCss.indexOf("@media (forced-colors: active)"));
     expect(forcedColors).toContain(".agent-button.selected");
