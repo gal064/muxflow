@@ -52,6 +52,12 @@ export class VoiceRegistry {
     for (const survivor of this.controllers.values()) survivor.reregister();
   }
 
+  /** Settles when every utterance now on its way to a pane has landed or failed; undefined when none is. */
+  pendingSubmissions(): Promise<void> | undefined {
+    const pending = [...this.controllers.values()].flatMap((controller) => controller.pendingSubmission ?? []);
+    return pending.length > 0 ? Promise.allSettled(pending).then(() => undefined) : undefined;
+  }
+
   onVoiceEvent(event: HostEvent): void {
     if (event.kind === EventKind.VOICE_PROVISION) {
       const progress = event.voice?.provision;
