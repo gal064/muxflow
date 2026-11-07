@@ -283,6 +283,11 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     if (!scope) return Promise.reject(new Error("Agent resume requires a live authoritative host."));
     return optionsRef.current.client.resume(scope, agent.id, agent.nativeSessionId, request);
   }, []);
+  const branch = useCallback((agent: AgentRecord) => {
+    const scope = activeScope(optionsRef.current);
+    if (!scope) return Promise.reject(new Error("Agent branch requires a live authoritative host."));
+    return optionsRef.current.client.branch(scope, agent);
+  }, []);
   const reviewHooks = useCallback((adapter: AgentAdapterId, action: "install" | "uninstall", expectedHost: string): Promise<AgentHookReview> => {
     const scope = consentedScope(activeScope(optionsRef.current), expectedHost, "Hook review");
     if (scope instanceof Error) return Promise.reject(scope);
@@ -317,7 +322,7 @@ export function useAgentRuntime(options: AgentRuntimeOptions) {
     byHost: projection.byHost as ReadonlyMap<string, AgentHostProjection>,
     accept,
     acknowledgePane,
-    launch, resume, reviewHooks, applyHooks, applyHostNaming, removeHostNaming, refreshSnapshot,
+    launch, resume, branch, reviewHooks, applyHooks, applyHostNaming, removeHostNaming, refreshSnapshot,
   };
 }
 
