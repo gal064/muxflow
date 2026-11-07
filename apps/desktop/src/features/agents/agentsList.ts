@@ -196,7 +196,7 @@ export function groupAgentRowsByStatus(rows: readonly AgentListRow[]): AgentStat
 /**
  * True when the agent is asking for a human: blocked, or finished without its
  * pane having been looked at. These are the rows ⌘⇧U jumps to and the ones
- * that carry an unread badge.
+ * that are waiting on a human.
  */
 export function needsAttention(state: AgentDisplayState): boolean {
   return state === "blocked" || state === "done";
@@ -246,7 +246,7 @@ function priorityBucket(
   now: number,
 ): AgentPriorityBucket {
   if (state === "blocked" || state === "working") return state;
-  // Completion attention changes only the row's dot and badge. Keeping its
+  // Completion attention changes only the row's dot. Keeping its
   // bucket independent from acknowledgement is what lets a click clear those
   // visuals without moving the row out from under the pointer.
   if (state === "done") return "recent";

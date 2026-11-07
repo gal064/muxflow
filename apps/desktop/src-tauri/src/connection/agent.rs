@@ -120,6 +120,7 @@ fn operation_from_name(
             Hook::Unspecified,
         )),
         "resume" => Ok((Operation::AgentAction, Action::Resume, Hook::Unspecified)),
+        "branch" => Ok((Operation::AgentAction, Action::Branch, Hook::Unspecified)),
         "markSeen" => Ok((
             Operation::AgentMarkSeen,
             Action::Unspecified,
@@ -312,6 +313,13 @@ fn hook_action_name(value: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branch_is_an_agent_action_of_its_own() {
+        let (operation, action, _) = operation_from_name("branch").unwrap();
+        assert_eq!(operation, v1::Operation::AgentAction);
+        assert_eq!(action, v1::AgentActionKind::Branch);
+    }
 
     #[test]
     fn u64_values_are_lossless_json_strings_and_profile_is_enriched() {
