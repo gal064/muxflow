@@ -108,6 +108,8 @@ uploaded internally, use the distribution action instead of another release tag.
 pre-release. So the red "Update" pill appears only once a release is
 published. The installer uses the exact `tag`, including an iOS suffix;
 package filenames and the app's version keep the base `X.Y.Z`.
+The Android app downloads `releases/latest/download/muxflow-X.Y.Z-android.apk` when the
+pill is tapped and hands it to the system installer, so keep that asset name stable.
 On the desktop, the pill runs that same installer and relaunches; a copy outside the
 default install location opens the release page instead.
 Tags containing `-rc.N` build from a tree versioned `X.Y.Z` and are drafted as
