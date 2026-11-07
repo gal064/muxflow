@@ -88,8 +88,16 @@ function harness(agentId = "agent-a", paneId = "%3", submitDelayMs = 0, tailHold
   };
 }
 
+let nextReplyAt = 1_700_000_000_000n;
+
 function reply(paneId: string, displayMarkdown: string, audio: Uint8Array = MP3, generation = 0n, speechText = displayMarkdown): VoiceSpeech {
-  return create(VoiceSpeechSchema, { paneId, displayMarkdown, speechText, audio, audioMime: "audio/mpeg", stateGeneration: generation, replyAtUnixMillis: 1_700_000_000_000n });
+  nextReplyAt += 1n;
+  return create(VoiceSpeechSchema, { paneId, displayMarkdown, speechText, audio, audioMime: "audio/mpeg", stateGeneration: generation, replyAtUnixMillis: nextReplyAt });
+}
+
+/** The text-only event the host sends ahead of `speech`. */
+function textOf(speech: VoiceSpeech): VoiceSpeech {
+  return create(VoiceSpeechSchema, { ...speech, audio: new Uint8Array(), audioMime: "" });
 }
 
 describe("VoiceController", () => {
@@ -1306,6 +1314,112 @@ describe("VoiceController recorder release races (QA fix review)", () => {
     await settle();
     expect(h.recorder.released).toBe(1);
     expect(h.recorder.prepared).toBe(0);
+  });
+});
+
+describe("VoiceController text-first replies", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const messages = (h: ReturnType<typeof harness>) => h.store.getState().sessions["agent-a"]!.messages;
+
+  it("shows the text at once and plays only when the audio lands", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    const speech = reply("%1", "Done.");
+
+    h.controller.onVoiceReplyText(textOf(speech));
+    expect(messages(h)).toHaveLength(1);
+    expect(messages(h)[0]).toMatchObject({ displayText: "Done.", audioPending: true, fileUri: undefined, played: false });
+    expect(h.store.getState().playback).toBeUndefined();
+
+    h.controller.onVoiceReply(speech);
+    expect(messages(h)).toHaveLength(1);
+    expect(messages(h)[0]).toMatchObject({ audioPending: false, played: true });
+    expect(messages(h)[0]!.fileUri).toBeDefined();
+    expect(h.store.getState().playback?.state).toBe("playing");
+  });
+
+  it("keeps the text and offers Retry when synthesis fails", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    const speech = reply("%1", "Done.", new Uint8Array());
+
+    h.controller.onVoiceReplyText(textOf(speech));
+    h.controller.onVoiceReply(speech, "offline");
+    expect(messages(h)).toHaveLength(1);
+    expect(messages(h)[0]).toMatchObject({ audioPending: false, audioError: "offline" });
+  });
+
+  it("drops audio for a reply a newer one has replaced", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    const first = reply("%1", "First.");
+    const second = reply("%1", "Second.");
+
+    h.controller.onVoiceReplyText(textOf(first));
+    h.controller.onVoiceReplyText(textOf(second));
+    h.controller.onVoiceReply(first);
+    expect(messages(h).map((message) => message.fileUri)).toEqual([undefined, undefined]);
+    expect(h.store.getState().playback).toBeUndefined();
+
+    h.controller.onVoiceReply(second);
+    expect(messages(h)[1]!.fileUri).toBeDefined();
+    expect(h.store.getState().playback?.messageId).toBe(messages(h)[1]!.id);
+  });
+
+  it("takes a reply whose text never came as a complete reply", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReply(reply("%1", "Done."));
+    expect(messages(h)).toHaveLength(1);
+    expect(messages(h)[0]).toMatchObject({ displayText: "Done.", audioPending: false, played: true });
+  });
+
+  it("does not repeat a turn when the same generation comes as text again", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    h.controller.onVoiceReplyText(textOf(reply("%1", "Done.", MP3, 7n)));
+    h.controller.onVoiceReplyText(textOf(reply("%1", "Done.", MP3, 7n)));
+    expect(messages(h)).toHaveLength(1);
+  });
+
+  it("keeps audio that lands mid-take for a manual play", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    const speech = reply("%1", "Done.");
+    h.controller.onVoiceReplyText(textOf(speech));
+    h.controller.beginUtterance();
+    await settle();
+    h.controller.onVoiceReply(speech);
+    expect(messages(h)[0]!.fileUri).toBeDefined();
+    expect(messages(h)[0]!.played).toBe(false);
+    await h.controller.endUtterance();
+    await settle();
+    expect(h.store.getState().playback).toBeUndefined();
+  });
+
+  it("offers Retry after a reconnect instead of waiting forever, and a late arrival still lands", async () => {
+    const h = harness();
+    h.controller.focus();
+    await settle();
+    const speech = reply("%1", "Done.");
+    h.controller.onVoiceReplyText(textOf(speech));
+
+    h.controller.onConnected();
+    await settle();
+    expect(messages(h)[0]).toMatchObject({ audioPending: false });
+    expect(messages(h)[0]!.audioError).toBeDefined();
+
+    h.controller.onVoiceReply(speech);
+    expect(messages(h)[0]).toMatchObject({ audioError: undefined });
+    expect(messages(h)[0]!.fileUri).toBeDefined();
   });
 });
 

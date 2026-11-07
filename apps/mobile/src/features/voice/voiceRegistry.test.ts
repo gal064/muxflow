@@ -20,6 +20,18 @@ function harness() {
 }
 
 describe("VoiceRegistry", () => {
+  it("routes VOICE_REPLY_TEXT by pane and pairs it with the VOICE_REPLY that follows", () => {
+    const h = harness();
+    h.registry.open({ ...h.deps, paneId: "%1", sessionId: "$1" });
+    const speech = { serverIdentity: "server-a", paneId: "%1", displayMarkdown: "hi", speechText: "hi", replyAtUnixMillis: 5n };
+    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_REPLY_TEXT, voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, speech) }) }));
+    expect(h.store.getState().sessions["%1"]!.messages).toHaveLength(1);
+    expect(latestReply(h.store.getState().sessions["%1"])).toMatchObject({ audioPending: true });
+    h.registry.onVoiceEvent(create(HostEventSchema, { kind: EventKind.VOICE_REPLY, voice: create(VoiceEventSchema, { reply: create(VoiceSpeechSchema, { ...speech, audio: new Uint8Array([1]) }) }) }));
+    expect(h.store.getState().sessions["%1"]!.messages).toHaveLength(1);
+    expect(latestReply(h.store.getState().sessions["%1"])).toMatchObject({ audioPending: false });
+  });
+
   it("routes VOICE_REPLY by pane, drops it for an unknown pane, and applies VOICE_PROVISION", () => {
     const h = harness();
     const a = h.registry.open({ paneId: "%1", sessionId: "$1", ...h.deps });

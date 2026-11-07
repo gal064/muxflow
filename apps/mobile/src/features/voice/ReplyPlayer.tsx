@@ -50,6 +50,13 @@ export function ReplyPlayer({ message, controller }: { message: VoiceMessage; co
     seekTo(Math.round((Math.min(Math.max(x, 0), width.current) / Math.max(width.current, 1)) * durationMs));
   }, [durationMs, playback, seekTo]);
 
+  if (message.audioPending) {
+    return (
+      <View style={styles.row}>
+        <Text style={styles.unavailable}>Preparing audio…</Text>
+      </View>
+    );
+  }
   if (message.audioError) {
     return (
       <View style={styles.row}>
