@@ -1,6 +1,6 @@
 import Constants from "expo-constants";
 import { Stack } from "expo-router";
-import { Linking, Platform, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { Platform, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useStore } from "zustand";
 
 import { openAppUpdates, updateStore } from "../src/features/update";
@@ -13,6 +13,7 @@ export default function SettingsScreen() {
   const voiceKeepAwake = useStore(prefsStore, (state) => state.voiceKeepAwake);
   const voicePlayScreenOff = useStore(prefsStore, (state) => state.voicePlayScreenOff);
   const update = useStore(updateStore, (state) => state.update);
+  const downloading = useStore(updateStore, (state) => state.downloading);
   return (
     <View style={styles.root}>
       <Stack.Screen options={{ title: "Settings" }} />
@@ -64,8 +65,8 @@ export default function SettingsScreen() {
         {Platform.OS === "ios" ? (
           <Text accessibilityRole="link" onPress={() => void openAppUpdates()} style={styles.updateLink}>Open TestFlight</Text>
         ) : update && (
-          <Text accessibilityRole="link" onPress={() => void Linking.openURL(update.url)} style={styles.updateLink}>
-            {update.version} available
+          <Text accessibilityRole="link" onPress={() => void openAppUpdates()} style={styles.updateLink}>
+            {downloading ? "Downloading…" : `${update.version} available`}
           </Text>
         )}
       </View>

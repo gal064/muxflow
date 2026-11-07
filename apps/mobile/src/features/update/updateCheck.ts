@@ -1,22 +1,18 @@
-// Whether a newer Muxflow release has been published. There is no auto-update:
-// this reads the small manifest the release workflow attaches to every GitHub
-// release so the home app bar can say a newer version exists and link to its
-// latest release page. `releases/latest` never resolves to a draft or a pre-release,
-// so a version appears here only once it has been published. The desktop runs
-// the same check (apps/desktop/src-tauri/src/update_check.rs).
+// Whether a newer Muxflow release has been published. This reads the small
+// manifest the release workflow attaches to every GitHub release so the home app
+// bar can offer the update. `releases/latest` never resolves to a draft or a
+// pre-release, so a version appears here only once it has been published. The
+// desktop runs the same check (apps/desktop/src-tauri/src/update_check.rs).
 
 import { createStore, type StoreApi } from "zustand/vanilla";
 
 export const MANIFEST_URL = "https://github.com/gal064/muxflow/releases/latest/download/latest.json";
 export const LATEST_RELEASE_URL = "https://github.com/gal064/muxflow/releases/latest";
-/** The only links the pill may open, whatever the manifest says. */
-export const RELEASE_PAGE_PREFIX = "https://github.com/gal064/muxflow/releases/";
 /** At launch, then on return to the foreground once a day has passed. */
 export const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export interface AvailableUpdate {
   version: string;
-  url: string;
 }
 
 type Version = readonly [number, number, number];
@@ -44,18 +40,20 @@ export function evaluateManifest(runningVersion: string, manifest: unknown): Ava
   const fields = typeof manifest === "object" && manifest !== null ? (manifest as Record<string, unknown>) : {};
   const published = parseVersion(fields.version);
   if (!published) throw new Error("unreadable update version");
-  if (typeof fields.url !== "string" || !fields.url.startsWith(RELEASE_PAGE_PREFIX)) {
-    throw new Error("update manifest points outside the Muxflow releases");
-  }
-  // Keep the destination current even while the last observed version is stale.
-  return newer(published, running) ? { version: fields.version as string, url: LATEST_RELEASE_URL } : null;
+  return newer(published, running) ? { version: fields.version as string } : null;
+}
+
+/** The APK attached to the latest release; release.yml names it. */
+export function apkUrl(version: string): string {
+  return `${LATEST_RELEASE_URL}/download/muxflow-${version}-android.apk`;
 }
 
 export interface UpdateState {
   update: AvailableUpdate | null;
+  downloading: boolean;
 }
 
-export const updateStore: StoreApi<UpdateState> = createStore<UpdateState>(() => ({ update: null }));
+export const updateStore: StoreApi<UpdateState> = createStore<UpdateState>(() => ({ update: null, downloading: false }));
 
 export interface UpdateCheckDeps {
   runningVersion: string;
