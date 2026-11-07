@@ -62,6 +62,8 @@ export interface VoiceControllerOptions {
   submitDelayMs?: number;
   /** Rechecked after transcription and before Enter so an ordinary shell never receives a submission. */
   canSubmit?: (paneId: string) => boolean;
+  /** iOS: holds off suspension while an utterance is on its way to the pane. The answer ends the hold. */
+  keepAlive?: () => () => void;
 }
 
 export const SESSION_REFRESH_MS = 5 * 60_000;
@@ -137,6 +139,8 @@ export class VoiceController {
   private autoPlay: boolean;
   /** A reply that arrived while the microphone was listening stays manual-play only. */
   private autoPlaySuppressedMessageId: string | undefined;
+  /** The utterance on its way to the pane, from release until it lands or fails. */
+  private submission: Promise<void> | undefined;
   /** The agent lifecycle last reported by the screen; the working acknowledgement fires on the edge into `working`. */
   private lastLifecycle: AgentLifecycle | undefined;
   /** The "you" message whose pickup by the agent was already acknowledged. */
@@ -159,6 +163,10 @@ export class VoiceController {
 
   get isDisposed(): boolean {
     return this.disposed;
+  }
+
+  get pendingSubmission(): Promise<void> | undefined {
+    return this.submission;
   }
 
   get target(): { paneId: string; sessionId: string } {
@@ -236,6 +244,10 @@ export class VoiceController {
   /** Every reconnect is a new connection, and the host's registration is per connection (§4.3). */
   onConnected(): void {
     if (this.disposed) return;
+    // The audio may have been pushed to the connection that just went; Retry gets it, and a late arrival still lands.
+    const store = this.options.store.getState();
+    const reply = latestReply(store.sessions[this.sessionKey]);
+    if (reply?.audioPending) store.setMessageAudioError(this.sessionKey, reply.id, "The connection dropped before the audio arrived.");
     this.reregister();
     if (this.focused) void this.refreshStatus(true);
   }
@@ -416,9 +428,18 @@ export class VoiceController {
 
   /** Press-out: stop → read → VOICE_TRANSCRIBE → TERMINAL_INPUT of the transcript as a paste, then a CR on its own. */
   async endUtterance(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || this.recordingPhase() === undefined) return;
+    // Begun here, while the app is still in the foreground, so a user who leaves right after letting go is covered.
+    const endKeepAlive = this.options.keepAlive?.();
+    this.submission = this.submitUtterance().finally(() => {
+      this.submission = undefined;
+      endKeepAlive?.();
+    });
+    return this.submission;
+  }
+
+  private async submitUtterance(): Promise<void> {
     const store = this.options.store.getState();
-    if (this.recordingPhase() === undefined) return;
     this.clearAutoSend();
     store.setPhase(this.sessionKey, "transcribing");
     const { recorder, files } = this.options;
@@ -565,16 +586,54 @@ export class VoiceController {
 
   // ---- replies ----------------------------------------------------------------
 
+  /** A pushed EVENT_KIND_VOICE_REPLY_TEXT: the reply shows now, and plays once its audio lands. */
+  onVoiceReplyText(speech: VoiceSpeech): void {
+    if (this.disposed) return;
+    this.appendReplyMessage(speech, true);
+  }
+
   /**
-   * A pushed EVENT_KIND_VOICE_REPLY for this agent. `failureDetail` is set when
-   * the host could not synthesize (`audio` empty): the text still shows, with
-   * a Retry that calls VOICE_SPEAK.
+   * A pushed EVENT_KIND_VOICE_REPLY: the audio for a reply already on screen,
+   * or the whole reply if its text never came. `failureDetail` is set when the
+   * host could not synthesize (`audio` empty): the text still shows, with a
+   * Retry that calls VOICE_SPEAK.
    */
   onVoiceReply(speech: VoiceSpeech, failureDetail = ""): void {
     if (this.disposed) return;
+    const session = this.options.store.getState().sessions[this.sessionKey];
+    const replyAt = Number(speech.replyAtUnixMillis);
+    const shown = replyAt > 0 ? session?.messages.find((candidate) => candidate.kind === "agent" && candidate.at === replyAt) : undefined;
+    // Only the newest reply keeps audio, and a later reply's text got here first.
+    if (shown && latestReply(session)?.id !== shown.id) {
+      this.log(`reply.audio.stale message=${shown.id}`);
+      return;
+    }
+    const message = shown ?? this.appendReplyMessage(speech, false);
+    if (!message) return;
+    // Only a reply that lands on this screen mid-take is held back; one for a
+    // session in the background waits for its own screen, like any other.
+    this.autoPlaySuppressedMessageId = this.focused && this.options.recorderCoordinator.isListening ? message.id : undefined;
+    const store = this.options.store.getState();
+    let audioError: string | undefined;
+    if (speech.audio.byteLength > 0) {
+      try {
+        store.setMessageAudio(this.sessionKey, message.id, this.options.files.writeReply(this.sessionKey, speech.audio));
+      } catch (error) {
+        audioError = describe(error);
+      }
+    } else {
+      audioError = failureDetail || "The host couldn't synthesize this reply.";
+    }
+    if (audioError !== undefined) store.setMessageAudioError(this.sessionKey, message.id, audioError);
+    this.log(`reply message=${message.id} stateGeneration=${speech.stateGeneration} audioBytes=${speech.audio.byteLength} markdownChars=${speech.displayMarkdown.length} speechChars=${speech.speechText.length} truncated=${speech.truncated} audioError=${audioError !== undefined}`);
+    this.playUnplayedIfListening();
+  }
+
+  /** The next reply replaces the last one's audio. Answers undefined for a repeat of the same turn. */
+  private appendReplyMessage(speech: VoiceSpeech, audioPending: boolean): VoiceMessage | undefined {
     if (speech.stateGeneration !== 0n && speech.stateGeneration === this.lastReplyGeneration) {
       this.log(`reply.duplicate generation=${speech.stateGeneration}`);
-      return;
+      return undefined;
     }
     this.lastReplyGeneration = speech.stateGeneration;
     const store = this.options.store.getState();
@@ -594,22 +653,10 @@ export class VoiceController {
       speechText: speech.speechText,
       truncated: speech.truncated,
       played: false,
+      audioPending,
     });
-    // Only a reply that lands on this screen mid-take is held back; one for a
-    // session in the background waits for its own screen, like any other.
-    this.autoPlaySuppressedMessageId = this.focused && this.options.recorderCoordinator.isListening ? message.id : undefined;
-    if (speech.audio.byteLength > 0) {
-      try {
-        message.fileUri = this.options.files.writeReply(this.sessionKey, speech.audio);
-      } catch (error) {
-        message.audioError = describe(error);
-      }
-    } else {
-      message.audioError = failureDetail || "The host couldn't synthesize this reply.";
-    }
     store.appendReply(this.sessionKey, message);
-    this.log(`reply message=${message.id} stateGeneration=${speech.stateGeneration} audioBytes=${speech.audio.byteLength} markdownChars=${speech.displayMarkdown.length} speechChars=${speech.speechText.length} truncated=${speech.truncated} audioError=${message.audioError !== undefined}`);
-    this.playUnplayedIfListening();
+    return message;
   }
 
   /** The Retry on the newest reply whose pushed audio failed: synthesize it now and play. */
@@ -937,6 +984,7 @@ export class VoiceController {
       truncated: false,
       fileUri: undefined,
       audioError: undefined,
+      audioPending: false,
       played: true,
       ...overrides,
     };

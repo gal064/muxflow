@@ -52,13 +52,19 @@ export class VoiceRegistry {
     for (const survivor of this.controllers.values()) survivor.reregister();
   }
 
+  /** Settles when every utterance now on its way to a pane has landed or failed; undefined when none is. */
+  pendingSubmissions(): Promise<void> | undefined {
+    const pending = [...this.controllers.values()].flatMap((controller) => controller.pendingSubmission ?? []);
+    return pending.length > 0 ? Promise.allSettled(pending).then(() => undefined) : undefined;
+  }
+
   onVoiceEvent(event: HostEvent): void {
     if (event.kind === EventKind.VOICE_PROVISION) {
       const progress = event.voice?.provision;
       if (progress) this.store.getState().applyProvisionProgress(provisionFromProto(progress));
       return;
     }
-    if (event.kind !== EventKind.VOICE_REPLY) return;
+    if (event.kind !== EventKind.VOICE_REPLY && event.kind !== EventKind.VOICE_REPLY_TEXT) return;
     const reply = event.voice?.reply;
     if (!reply) return;
     const controller = this.controllers.get(this.key(reply.serverIdentity, reply.paneId));
@@ -66,7 +72,8 @@ export class VoiceRegistry {
       this.log?.(`[muxflow] voice reply server=${reply.serverIdentity.slice(0, 12)} pane=${reply.paneId} ignored (no session)`);
       return;
     }
-    controller.onVoiceReply(reply, event.voice?.status?.detail ?? "");
+    if (event.kind === EventKind.VOICE_REPLY_TEXT) controller.onVoiceReplyText(reply);
+    else controller.onVoiceReply(reply, event.voice?.status?.detail ?? "");
   }
 
   onConnected(serverIdentity: string): void {

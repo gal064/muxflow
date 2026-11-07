@@ -33,6 +33,7 @@ import { SpeedButton } from "./SpeedButton";
 import { createExpoTones } from "./tones";
 import type { VoiceController } from "./VoiceController";
 import { useVoice } from "./voiceHooks";
+import { muxflowSsh } from "../../ssh/MuxflowSsh";
 import { voiceRegistry } from "./voiceRegistry";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { VoiceStatusCard } from "./VoiceStatusCard";
@@ -70,6 +71,7 @@ export function VoiceScreen({ agentId, paneId, sessionId }: VoiceScreenProps) {
     canPlayScreenOff: () => Platform.OS === "android" && prefsStore.getState().voicePlayScreenOff && androidConnectionServices().isScreenOffOrLocked(),
     backgroundTimer: backgroundTimer(),
     canSubmit: (targetPaneId) => agentForPane(sessionStore.getState(), targetPaneId)?.present === true,
+    keepAlive: () => muxflowSsh().keepAlive(),
     playbackRate: prefsStore.getState().voicePlaybackRate,
     autoPlay: prefsStore.getState().voiceAutoPlay,
     toast,

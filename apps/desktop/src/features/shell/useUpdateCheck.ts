@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
+
+import { editorFlushRegistry } from "../files/editorFlushRegistry";
 
 /** A published release newer than the running app, as `check_for_update` returns it. */
 export interface AvailableUpdate {
@@ -40,6 +44,45 @@ export function startUpdateCheck(onResult: (update: AvailableUpdate | null) => v
     stopped = true;
     deps.clearInterval(handle);
   };
+}
+
+export interface InstallUpdateDeps {
+  confirm(message: string): Promise<boolean>;
+  /** Installs, then closes the window through its normal save path; the exit relaunches. */
+  install(): Promise<void>;
+  openReleasePage(url: string): Promise<void>;
+  setStatus(message: string): void;
+}
+
+export const tauriInstallDeps = {
+  confirm: (message: string) => ask(message, { title: "Update Muxflow", okLabel: "Update and restart" }),
+  install: async () => {
+    // Before anything is replaced: a save that fails here leaves the app as it was.
+    await editorFlushRegistry.flushAll();
+    await invoke<void>("install_update");
+    await getCurrentWindow().close();
+  },
+};
+
+let installing = false;
+
+/**
+ * Installs the offered release once the user agrees to the restart. On any
+ * failure the release page is the way to update.
+ */
+export async function installUpdate(update: AvailableUpdate, deps: InstallUpdateDeps): Promise<void> {
+  if (installing) return;
+  installing = true;
+  try {
+    if (!await deps.confirm(`Install Muxflow ${update.version} and restart? Port forwards and file transfers in progress will stop.`)) return;
+    deps.setStatus(`Updating to Muxflow ${update.version}…`);
+    await deps.install();
+  } catch (error) {
+    deps.setStatus(String(error));
+    await deps.openReleasePage(update.url);
+  } finally {
+    installing = false;
+  }
 }
 
 /** The release to point at, or null while the running app is the newest. */
