@@ -27,22 +27,10 @@ on:
         description: What to Test (blank uses release/ios/what-to-test.txt)
         type: string
         default: ''
-  push:
-    branches: [main]
-    paths:
-      - 'apps/mobile/**'
-      - 'packages/**'
-      - 'apps/host/**'
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'package.json'
-      - 'pnpm-workspace.yaml'
-      - 'patches/**'
-      - 'release/**'
-      - 'pnpm-lock.yaml'
-      - 'tests/mobile/ios/**'
-      - '.github/workflows/ios.yml'
+  # Pull requests carry the UI flows. Nightly covers direct pushes to main and
+  # seeds the caches pull requests read.
+  schedule:
+    - cron: '17 9 * * *'
   pull_request:
     paths:
       - 'apps/mobile/**'
@@ -76,6 +64,14 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=6144
       # The pinned pod supports prebuilt OpenSSL artifacts; libssh2 builds locally.
       OPENSSL_DOWNLOAD: '1'
+      # Each flow is its own Maestro run, and the first one installs the driver
+      # on a simulator that may still be settling.
+      MAESTRO_DRIVER_STARTUP_TIMEOUT: '300000'
+      # Read by the generated Podfile. Xcode's compiles are most of the build.
+      USE_CCACHE: '1'
+      CCACHE_DIR: ${{ github.workspace }}/tmp/ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 1G
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -99,6 +95,8 @@ jobs:
             } | shasum -a 256 | cut -d ' ' -f 1
           )
           printf 'cache-key=%s\n' "$toolchain_key" >> "$GITHUB_OUTPUT"
+      - name: Boot simulator
+        run: bash tests/mobile/ios/boot-simulator.sh
       - name: Release versions
         run: release/check-version.sh
       - name: Distribution refusal checks
@@ -113,9 +111,26 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
-          key: ios-simulator-app-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('apps/mobile/**', 'packages/**', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'patches/**', 'release/**', '.github/workflows/ios.yml') }}
+          key: ios-simulator-app-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('apps/mobile/**', 'packages/**', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'patches/**') }}
+      # The contract only depends on these inputs, so a pass on them stands.
+      - name: Restore native SSH contract pass
+        id: native-contract
+        uses: actions/cache/restore@v4
+        with:
+          path: tmp/ios-native-contract-passed
+          key: ios-native-contract-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('apps/mobile/modules/muxflow-ssh/**', 'tests/mobile/ios/check-native.sh', 'tests/mobile/ios/native-transport.m', 'tests/mobile/ios/ssh-spike.c', 'tests/mobile/ios/ssh-fixture.py') }}
       - name: Native SSH contract
-        run: bash tests/mobile/ios/check-native.sh 2>&1 | tee "$RUNNER_TEMP/ios-native.log"
+        if: steps.native-contract.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          bash tests/mobile/ios/check-native.sh 2>&1 | tee "$RUNNER_TEMP/ios-native.log"
+          touch tmp/ios-native-contract-passed
+      - name: Remember native SSH contract pass
+        if: steps.native-contract.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tmp/ios-native-contract-passed
+          key: ${{ steps.native-contract.outputs.cache-primary-key }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm mobile:check
       - name: Install simulator UI driver
@@ -124,13 +139,34 @@ jobs:
           unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/maestro/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/maestro/bin/maestro" --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Build fixture host
         run: |
           brew install tmux ripgrep
           cargo build --locked -p muxflow-host
+      - name: Restore compiler cache
+        if: steps.simulator-app.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: tmp/ccache
+          key: ios-ccache-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: ios-ccache-${{ runner.arch }}-
       - name: Build standalone simulator app
         if: steps.simulator-app.outputs.cache-hit != 'true'
-        run: pnpm mobile:ios:simulator > "$RUNNER_TEMP/ios-build.log" 2>&1
+        run: |
+          brew install ccache
+          ccache --zero-stats
+          pnpm mobile:ios:simulator > "$RUNNER_TEMP/ios-build.log" 2>&1
+          ccache --show-stats
+      # Pull requests read this but don't write it: the cache budget is shared.
+      - name: Save compiler cache
+        if: steps.simulator-app.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+        uses: actions/cache/save@v4
+        with:
+          path: tmp/ccache
+          key: ios-ccache-${{ runner.arch }}-${{ github.run_id }}
       # Keep a successfully built app even when a later UI assertion fails.
       - name: Cache compiled simulator app
         if: steps.simulator-app.outputs.cache-hit != 'true'

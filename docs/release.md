@@ -23,7 +23,9 @@ tag ending in `-ios` or `-ios-internal` uploads iOS, so it requires a fresh buil
 Ordinary tags skip iOS and can leave its build number unchanged. Reuse the exact existing artifact when retrying an upload. iOS
 marketing versions follow the shared version, but installed phones update
 independently through TestFlight. The unsigned simulator workflow proves
-neither signing nor availability to testers.
+neither signing nor availability to testers. It runs on pull requests that touch
+the mobile, host or release paths and nightly on `main`, not on every push, so a
+direct push to `main` reaches the iOS UI flows by the next nightly run.
 
 Before publishing a release that bumps the protocol major, verify that its
 matching iOS build is actually available in the selected Apple distribution
