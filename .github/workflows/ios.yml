@@ -67,8 +67,6 @@ jobs:
       # Each flow is its own Maestro run, and the first one installs the driver
       # on a simulator that may still be settling.
       MAESTRO_DRIVER_STARTUP_TIMEOUT: '300000'
-      # Read by the generated Podfile. Xcode's compiles are most of the build.
-      USE_CCACHE: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -141,31 +139,9 @@ jobs:
         run: |
           brew install tmux ripgrep
           cargo build --locked -p muxflow-host
-      - name: Restore compiler cache
-        if: steps.simulator-app.outputs.cache-hit != 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/Library/Caches/ccache
-          key: ios-ccache-${{ runner.arch }}-${{ github.run_id }}
-          restore-keys: ios-ccache-${{ runner.arch }}-
       - name: Build standalone simulator app
         if: steps.simulator-app.outputs.cache-hit != 'true'
-        run: |
-          brew install ccache
-          # React Native's wrapper runs `$CCACHE_BINARY clang`, so without this
-          # in the environment it quietly compiles uncached. Xcode's compile
-          # tasks don't keep CCACHE_DIR either, so the cache stays in its default.
-          export CCACHE_BINARY=$(command -v ccache)
-          ccache --zero-stats
-          pnpm mobile:ios:simulator > "$RUNNER_TEMP/ios-build.log" 2>&1
-          ccache --show-stats
-      # Pull requests read this but don't write it: the cache budget is shared.
-      - name: Save compiler cache
-        if: steps.simulator-app.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/Library/Caches/ccache
-          key: ios-ccache-${{ runner.arch }}-${{ github.run_id }}
+        run: pnpm mobile:ios:simulator > "$RUNNER_TEMP/ios-build.log" 2>&1
       # Keep a successfully built app even when a later UI assertion fails.
       - name: Cache compiled simulator app
         if: steps.simulator-app.outputs.cache-hit != 'true'
