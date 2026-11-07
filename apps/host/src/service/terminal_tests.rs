@@ -15,6 +15,65 @@ fn visibility_permit(
         .expect("visibility event queue should have capacity")
 }
 
+fn tmux_output(code: i32, stderr: &str) -> std::process::Output {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
+}
+
+#[test]
+fn a_sizing_claim_waits_for_tmux_to_register_a_just_started_client() {
+    let stopped = AtomicBool::new(false);
+    let mut attempts = 0;
+    let output = run_once_client_registers(&stopped, Duration::from_secs(5), || {
+        attempts += 1;
+        Ok(if attempts < 3 {
+            tmux_output(1, "can't find client: client-42")
+        } else {
+            tmux_output(0, "")
+        })
+    })
+    .unwrap();
+    assert!(output.status.success());
+    assert_eq!(attempts, 3);
+}
+
+#[test]
+fn a_sizing_claim_gives_up_on_a_stopped_client_and_on_other_errors() {
+    let mut attempts = 0;
+    let output = run_once_client_registers(&AtomicBool::new(true), Duration::from_secs(5), || {
+        attempts += 1;
+        Ok(tmux_output(1, "can't find client: client-42"))
+    })
+    .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(attempts, 1, "a stopped client never registers");
+
+    attempts = 0;
+    let output = run_once_client_registers(&AtomicBool::new(false), Duration::from_secs(5), || {
+        attempts += 1;
+        Ok(tmux_output(1, "can't find window: @9"))
+    })
+    .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        attempts, 1,
+        "only an unregistered client is worth repeating"
+    );
+}
+
+#[test]
+fn a_sizing_claim_stops_waiting_at_its_deadline() {
+    let output = run_once_client_registers(&AtomicBool::new(false), Duration::ZERO, || {
+        Ok(tmux_output(1, "can't find client: client-42"))
+    })
+    .unwrap();
+    assert!(!output.status.success());
+}
+
 fn long_lived_attachment_command() -> std::process::Command {
     let mut command = std::process::Command::new("sh");
     command.args(["-c", "exec sleep 30", "terminal-attachment-startup-fixture"]);
@@ -203,7 +262,8 @@ fn sizing_a_session_a_foreign_client_shares_reclaims_the_size_pointer() {
     clients.last_size = Some((120, 40));
 
     clients.select_session("$1").unwrap();
-    recorded.wait_for(1, "switch-client");
+    // The whole command: a partly flushed line already contains "switch-client".
+    recorded.wait_for(1, "switch-client -E -t $1");
 
     let written = recorded.written();
     let size = written.find("refresh-client -C 120,40").unwrap();
@@ -344,10 +404,10 @@ fn resizing_a_session_a_foreign_client_shares_reclaims_the_size_pointer() {
     clients.reconcile(&session_snapshot(2));
     clients.last_size = Some((120, 40));
     clients.select_session("$1").unwrap();
-    recorded.wait_for(1, "switch-client");
+    recorded.wait_for(1, "switch-client -E -t $1");
 
     clients.resize(100, 30).unwrap();
-    recorded.wait_for(2, "switch-client");
+    recorded.wait_for(2, "switch-client -E -t $1");
     let written = recorded.written();
     let size = written.find("refresh-client -C 100,30").unwrap();
     let claim = written.rfind("switch-client -E -t $1").unwrap();

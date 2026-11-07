@@ -802,7 +802,14 @@ mod tests {
         fixture.wait_until(|| !input.is_ready());
         assert!(input.fence().is_err());
 
-        fixture.successful(&["new-session", "-d", "-s", "three", "exec bash --norc"]);
+        // The last session's server is still exiting, and a client that reaches
+        // it now is told "server exited unexpectedly".
+        fixture.wait_until(|| {
+            fixture
+                .run(&["new-session", "-d", "-s", "three", "exec bash --norc"])
+                .status
+                .success()
+        });
         let session_three = fixture.id("session", "three");
         let pane_three = fixture.id("pane", "three");
         let mut replacement = start_fixture_client(&fixture, &session_three);
