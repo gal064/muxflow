@@ -28,6 +28,7 @@ function fakeSsh() {
     write: vi.fn(async (connectionId, base64) => {
       writes.push({ connectionId, base64 });
     }),
+    keepAlive: () => () => undefined,
     close: vi.fn(async (connectionId) => {
       closes.push(connectionId);
     }),

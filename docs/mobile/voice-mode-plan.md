@@ -196,7 +196,7 @@ enum Operation {
 message Request   { /* ... */ VoiceRequest voice = 19; }   // next free after 18
 message Response  { /* ... */ VoiceResponse voice = 13; }
 message HostEvent { /* ... */ VoiceEvent voice = 13; }
-enum EventKind    { /* ... */ EVENT_KIND_VOICE_PROVISION = 20; EVENT_KIND_VOICE_REPLY = 21; }
+enum EventKind    { /* ... */ EVENT_KIND_VOICE_PROVISION = 20; EVENT_KIND_VOICE_REPLY = 21; EVENT_KIND_VOICE_REPLY_TEXT = 23; }
 
 enum VoiceProvider { VOICE_PROVIDER_UNSPECIFIED = 0; VOICE_PROVIDER_EDGE_TTS = 1; } // ElevenLabs later
 
@@ -365,9 +365,12 @@ Network exceptions map to `class:"network"`.
   (every 5 min while the screen is open), dropped when the connection closes
   or the phone sends `agent_id = ""`. `on_agent_reply` ignores agents with no
   session, so nothing is retained for them. For a session agent it runs
-  `speech_text` + sidecar `speak` on a detached task (behind any user
-  request) and pushes `HostEvent { kind: VOICE_REPLY, voice.reply }` to that
-  connection via the events fan-out; the MP3 is dropped after the send.
+  `speech_text` on a detached task, pushes
+  `HostEvent { kind: VOICE_REPLY_TEXT, voice.reply }` to that connection at
+  once, then runs sidecar `speak` (behind any user request) and pushes
+  `HostEvent { kind: VOICE_REPLY, voice.reply }` the same way; the MP3 is
+  dropped after the send. The text never waits on synthesis, which is serial
+  and can stall.
   When one hook event replaces pane-derived agent IDs with a native ID, ingest
   moves the newest retired registration to the native ID after persisting the
   agent state and before dispatching a Stop reply. An existing native-ID
@@ -411,8 +414,9 @@ Network exceptions map to `class:"network"`.
   unspecified or `EDGE_TTS`; `voice` default `en-US-AvaNeural` else validated
   by regex → `speech_text()` (empty → `voice_nothing_to_say`) → sidecar →
   `VoiceSpeech`. The phone normally does not need it: replies arrive pushed.
-- **Pushed reply**: `Stop` for a session agent → `speech_text` → sidecar →
-  `EVENT_KIND_VOICE_REPLY` with `VoiceSpeech { audio, display_markdown, speech_text, truncated,
+- **Pushed reply**: `Stop` for a session agent → `speech_text` →
+  `EVENT_KIND_VOICE_REPLY_TEXT` (the same `VoiceSpeech` with empty `audio`) →
+  sidecar → `EVENT_KIND_VOICE_REPLY` with `VoiceSpeech { audio, display_markdown, speech_text, truncated,
   agent_id, state_generation, reply_at }` to the session's connection only.
   Failures (network, sidecar) push the same event with empty `audio` and
   the error in `VoiceStatus.detail` so the phone can show the text and offer
@@ -560,6 +564,12 @@ Follow the terminal feature's split: route file is param plumbing, screen in
     `terminalInput(paneId, …)` exactly as `TerminalScreen.sendText` does →
     append a "you" turn. `voice_empty_transcript` → toast "Didn't catch
     that", nothing sent. Recordings under 300 ms are discarded.
+  - `onVoiceReplyText(speech)`: from the pushed `EVENT_KIND_VOICE_REPLY_TEXT`,
+    appends the reply with `audioPending` and plays nothing. The
+    `EVENT_KIND_VOICE_REPLY` that follows finds it by `reply_at` and fills in
+    the audio; one for a reply a newer one replaced is dropped, and one with no
+    text before it is taken as a complete reply. A reconnect turns a reply still
+    pending into a Retry.
   - `onVoiceReply(speech)`: from the pushed `EVENT_KIND_VOICE_REPLY`, routed
     by `speech.agentId` to that agent's session (ignored if none). Stop
     playback if it is playing that agent's previous reply, delete the

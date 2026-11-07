@@ -18,7 +18,8 @@
       },
       "versionCode": 127,
       "backgroundColor": "#282c34",
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": ["android.permission.REQUEST_INSTALL_PACKAGES"]
     },
     "plugins": [
       [

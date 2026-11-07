@@ -34,6 +34,8 @@ let unwireService: (() => void) | undefined;
 let control: HostConnection | null = null;
 let controlHost: SavedHost | null = null;
 let resumeHost: SavedHost | null = null;
+/** Backgrounded with a voice message still being sent: the connection stays until it lands or fails. */
+let holdingForVoice = false;
 let suspended = false;
 let bulk: { epoch: bigint; connection: HostConnection; store: SessionStore; ready: Promise<HostConnection> } | null = null;
 const listeners = new Set<(transition: AgentTransition) => void>();
@@ -223,21 +225,39 @@ export function openBulkConnection(): Promise<HostConnection> {
   return ready;
 }
 
-/** iOS ships teardown first; a measured device gate decides whether grace is needed. */
+/**
+ * iOS tears down on background, except that a voice message on its way to the
+ * pane finishes first (the controller's `keepAlive` holds off suspension). If
+ * iOS suspends the app anyway, the request fails and the link recovers on return.
+ */
 export function setConnectionAppActive(active: boolean): void {
   if (active === !suspended) return;
   suspended = !active;
+  if (holdingForVoice) return;
   if (!active) {
-    // Fatal admission/auth outcomes remain visible and never become resume retries.
-    if (!control || control.state === "failed" || control.state === "incompatible" || control.state === "idle") {
-      resumeHost = null;
+    const pending = voiceRegistry.pendingSubmissions();
+    if (!pending) {
+      suspendConnection();
       return;
     }
-    closeHostConnection({ keepVoiceSessions: true, keepHostState: true });
+    holdingForVoice = true;
+    void pending.then(() => {
+      holdingForVoice = false;
+      if (suspended) suspendConnection();
+    });
     return;
   }
   const host = resumeHost;
   if (host) void connectHost(host).catch(() => { /* The connection store shows the outcome. */ });
+}
+
+function suspendConnection(): void {
+  // Fatal admission/auth outcomes remain visible and never become resume retries.
+  if (!control || control.state === "failed" || control.state === "incompatible" || control.state === "idle") {
+    resumeHost = null;
+    return;
+  }
+  closeHostConnection({ keepVoiceSessions: true, keepHostState: true });
 }
 
 export async function disconnectHost(options: { keepVoiceSessions?: boolean } = {}): Promise<void> {
