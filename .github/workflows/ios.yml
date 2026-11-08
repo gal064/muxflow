@@ -27,8 +27,23 @@ on:
         description: What to Test (blank uses release/ios/what-to-test.txt)
         type: string
         default: ''
-  # Pull requests carry the UI flows. Nightly covers direct pushes to main and
-  # seeds the caches pull requests read.
+  # Pull requests can only read caches saved on main, so a merge that changes
+  # what the app or the native contract is built from refreshes them. These are
+  # the inputs of the two cache keys below.
+  push:
+    branches: [main]
+    paths:
+      - 'apps/mobile/**'
+      - 'packages/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'patches/**'
+      - 'tests/mobile/ios/check-native.sh'
+      - 'tests/mobile/ios/native-transport.m'
+      - 'tests/mobile/ios/ssh-spike.c'
+      - 'tests/mobile/ios/ssh-fixture.py'
+  # Pull requests carry the UI flows. Nightly covers everything else on main.
   schedule:
     - cron: '17 9 * * *'
   pull_request:
@@ -114,11 +129,23 @@ jobs:
           path: tmp/ios-native-contract-passed
           key: ios-native-contract-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('apps/mobile/modules/muxflow-ssh/**', 'tests/mobile/ios/check-native.sh', 'tests/mobile/ios/native-transport.m', 'tests/mobile/ios/ssh-spike.c', 'tests/mobile/ios/ssh-fixture.py') }}
       - name: Native SSH contract
+        id: native-ssh
         if: steps.native-contract.outputs.cache-hit != 'true'
         run: |
           set -o pipefail
           bash tests/mobile/ios/check-native.sh 2>&1 | tee "$RUNNER_TEMP/ios-native.log"
           touch tmp/ios-native-contract-passed
+      # macOS writes the report shortly after the crash, so give it time to land.
+      - name: Collect native crash reports
+        if: failure() && steps.native-ssh.outcome == 'failure'
+        run: |
+          reports="$HOME/Library/Logs/DiagnosticReports"
+          for _ in $(seq 1 30); do
+            compgen -G "$reports/native-transport*" > /dev/null && break
+            sleep 1
+          done
+          mkdir -p "$RUNNER_TEMP/ios-native-crashes"
+          cp "$reports"/native-transport* "$RUNNER_TEMP/ios-native-crashes/" || echo 'No crash report found'
       - name: Remember native SSH contract pass
         if: steps.native-contract.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -160,6 +187,7 @@ jobs:
           name: ios-simulator-evidence
           path: |
             ${{ runner.temp }}/ios-native.log
+            ${{ runner.temp }}/ios-native-crashes/
             ${{ runner.temp }}/ios-build.log
             tmp/ios-evidence/
             tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
