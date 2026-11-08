@@ -67,6 +67,7 @@ describe("connectionManager", () => {
     setForegroundService(createAndroidConnectionServices(fake.native));
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await disconnectHost();
     setConnectionAppActive(true);
     setForegroundService(undefined);
@@ -91,6 +92,47 @@ describe("connectionManager", () => {
     expect(sessionStore.getState().connection).toMatchObject({ state: "connected", host: { label: "Dev box" } });
     expect(getConnection()?.connectionEpoch).toBe(epoch);
     expect(epoch).toBeGreaterThanOrEqual(1n);
+  });
+
+  it("keeps the connection through iOS background until a voice message lands, then tears down", async () => {
+    const { control } = await connectControl();
+    let landed = (): void => undefined;
+    vi.spyOn(voiceRegistry, "pendingSubmissions").mockReturnValueOnce(new Promise<void>((resolve) => { landed = resolve; }));
+
+    setConnectionAppActive(false);
+    expect(control.closed).toBe(false);
+
+    landed();
+    await settle();
+    expect(control.closed).toBe(true);
+  });
+
+  it("keeps the same connection when the app returns before the voice message lands", async () => {
+    const { control } = await connectControl();
+    let landed = (): void => undefined;
+    vi.spyOn(voiceRegistry, "pendingSubmissions").mockReturnValueOnce(new Promise<void>((resolve) => { landed = resolve; }));
+
+    setConnectionAppActive(false);
+    setConnectionAppActive(true);
+    landed();
+    await settle();
+    expect(control.closed).toBe(false);
+    expect(dials).toHaveLength(1);
+  });
+
+  it("tears down once when the app leaves, returns and leaves again before the message lands", async () => {
+    const { control } = await connectControl();
+    let landed = (): void => undefined;
+    const pending = vi.spyOn(voiceRegistry, "pendingSubmissions").mockReturnValueOnce(new Promise<void>((resolve) => { landed = resolve; }));
+
+    setConnectionAppActive(false);
+    setConnectionAppActive(true);
+    setConnectionAppActive(false);
+    expect(pending).toHaveBeenCalledTimes(1);
+    expect(control.closed).toBe(false);
+    landed();
+    await settle();
+    expect(control.closed).toBe(true);
   });
 
   it("tears down both lanes on iOS background and admits a fresh control epoch on resume", async () => {

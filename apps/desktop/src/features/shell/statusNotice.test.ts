@@ -19,6 +19,7 @@ describe("status notices", () => {
       "Connecting to remote-linux…",
       "Connection reconnecting…",
       "Opened README.md",
+      "Branching Codex in a new tab…",
       "Viewing the last known workspace. Writes remain frozen.",
       "   ",
     ]) expect(noticeForStatus(routine, 1), routine).toBeUndefined();

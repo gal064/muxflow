@@ -35,6 +35,7 @@ fn assigned_operation_and_enum_numbers_do_not_move() {
     assert_eq!(v1::EventKind::TerminalHistory as i32, 19);
     assert_eq!(v1::EventKind::VoiceProvision as i32, 20);
     assert_eq!(v1::EventKind::VoiceReply as i32, 21);
+    assert_eq!(v1::EventKind::VoiceReplyText as i32, 23);
     assert_eq!(v1::VoiceProvider::EdgeTts as i32, 1);
     assert_eq!(v1::VoiceReadiness::Ready as i32, 4);
 }

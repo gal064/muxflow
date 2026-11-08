@@ -1,41 +1,34 @@
 import { describe, expect, it, vi } from "vitest";
 import { createStore } from "zustand/vanilla";
 
-import { evaluateManifest, startUpdateCheck, UPDATE_CHECK_INTERVAL_MS, type UpdateState } from "./updateCheck";
+import { apkUrl, evaluateManifest, startUpdateCheck, UPDATE_CHECK_INTERVAL_MS, type UpdateState } from "./updateCheck";
 
-const PAGE = "https://github.com/gal064/muxflow/releases/tag/v0.2.0";
-const LATEST_PAGE = "https://github.com/gal064/muxflow/releases/latest";
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("evaluateManifest", () => {
-  it("links to latest even when the manifest pins a specific release", () => {
-    expect(evaluateManifest("0.1.0", { version: "0.2.0", url: PAGE })).toEqual({ version: "0.2.0", url: LATEST_PAGE });
-    expect(evaluateManifest("0.1.9", { version: "0.1.10", url: PAGE })).not.toBeNull();
-    expect(evaluateManifest("1.9.9", { version: "2.0.0", url: PAGE })).not.toBeNull();
+  it("offers a newer release", () => {
+    expect(evaluateManifest("0.1.0", { version: "0.2.0" })).toEqual({ version: "0.2.0" });
+    expect(evaluateManifest("0.1.9", { version: "0.1.10" })).not.toBeNull();
+    expect(evaluateManifest("1.9.9", { version: "2.0.0" })).not.toBeNull();
   });
 
   it("offers nothing for the same or an older release", () => {
-    expect(evaluateManifest("0.2.0", { version: "0.2.0", url: PAGE })).toBeNull();
-    expect(evaluateManifest("0.3.0", { version: "0.2.0", url: PAGE })).toBeNull();
-    expect(evaluateManifest("0.1.10", { version: "0.1.9", url: PAGE })).toBeNull();
-  });
-
-  it("refuses a link outside the Muxflow releases", () => {
-    for (const url of [
-      "https://example.com/muxflow",
-      "http://github.com/gal064/muxflow/releases/tag/v0.2.0",
-      "https://github.com/gal064/muxflow-evil/releases/tag/v0.2.0",
-      42,
-    ]) {
-      expect(() => evaluateManifest("0.1.0", { version: "0.2.0", url })).toThrow();
-    }
+    expect(evaluateManifest("0.2.0", { version: "0.2.0" })).toBeNull();
+    expect(evaluateManifest("0.3.0", { version: "0.2.0" })).toBeNull();
+    expect(evaluateManifest("0.1.10", { version: "0.1.9" })).toBeNull();
   });
 
   it("understands only a strict version", () => {
     for (const version of ["0.2", "0.2.0.1", "v0.2.0", "0.2.0-rc.1", "", 2]) {
-      expect(() => evaluateManifest("0.1.0", { version, url: PAGE })).toThrow();
+      expect(() => evaluateManifest("0.1.0", { version })).toThrow();
     }
     expect(() => evaluateManifest("0.1.0", null)).toThrow();
+  });
+});
+
+describe("apkUrl", () => {
+  it("names the APK release.yml attaches to the latest release", () => {
+    expect(apkUrl("0.2.0")).toBe("https://github.com/gal064/muxflow/releases/latest/download/muxflow-0.2.0-android.apk");
   });
 });
 
@@ -43,7 +36,7 @@ describe("startUpdateCheck", () => {
   function harness(answers: unknown[]) {
     let clock = 1_000;
     let foreground: (() => void) | undefined;
-    const store = createStore<UpdateState>(() => ({ update: null }));
+    const store = createStore<UpdateState>(() => ({ update: null, downloading: false }));
     const deps = {
       runningVersion: "0.1.0",
       fetchManifest: vi.fn(async () => {
@@ -59,7 +52,7 @@ describe("startUpdateCheck", () => {
   }
 
   it("checks at launch and again on a foreground a day later", async () => {
-    const { deps, store, advance, foreground } = harness([{ version: "0.1.0", url: PAGE }, { version: "0.2.0", url: PAGE }]);
+    const { deps, store, advance, foreground } = harness([{ version: "0.1.0" }, { version: "0.2.0" }]);
     startUpdateCheck(deps, store);
     await flush();
     expect(store.getState().update).toBeNull();
@@ -70,14 +63,14 @@ describe("startUpdateCheck", () => {
     foreground();
     await flush();
     expect(deps.fetchManifest).toHaveBeenCalledTimes(2);
-    expect(store.getState().update).toEqual({ version: "0.2.0", url: LATEST_PAGE });
+    expect(store.getState().update).toEqual({ version: "0.2.0" });
   });
 
   it("keeps the last answer when a check fails or the manifest is untrustworthy", async () => {
     const { deps, store, advance, foreground } = harness([
-      { version: "0.2.0", url: PAGE },
+      { version: "0.2.0" },
       new Error("offline"),
-      { version: "0.3.0", url: "https://example.com/" },
+      { version: "not-a-version" },
     ]);
     startUpdateCheck(deps, store);
     await flush();
@@ -86,7 +79,7 @@ describe("startUpdateCheck", () => {
       foreground();
       await flush();
     }
-    expect(store.getState().update).toEqual({ version: "0.2.0", url: LATEST_PAGE });
+    expect(store.getState().update).toEqual({ version: "0.2.0" });
     expect(deps.log).toHaveBeenCalledTimes(2);
   });
 });

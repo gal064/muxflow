@@ -79,7 +79,7 @@ export type RowCommandId =
   | "files.open" | "files.rename" | "files.move" | "files.duplicate" | "files.download"
   | "files.delete" | "files.newFile" | "files.newFolder" | "files.refresh"
   | "git.openDiff" | "git.stage" | "git.unstage" | "git.discard"
-  | "agents.focusRow" | "agents.renameRow" | "agents.resumeRow";
+  | "agents.focusRow" | "agents.renameRow" | "agents.resumeRow" | "agents.branchRow";
 
 export interface CommandDefinition {
   id: CommandId;
@@ -182,6 +182,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
   { id: "agents.focusRow", title: "Focus the selected agent's pane", group: "Agents", requires: "row" },
   { id: "agents.renameRow", title: "Rename the selected agent's tab…", group: "Agents", requires: "row" },
   { id: "agents.resumeRow", title: "Resume the selected agent", group: "Agents", requires: "row" },
+  { id: "agents.branchRow", title: "Branch the selected agent's conversation", group: "Agents", requires: "row" },
   { id: "session.new", title: "New workspace", group: "Workspace", defaults: { mac: "Meta+N", linux: "Ctrl+N" }, mutates: true },
   { id: "session.rename", title: "Rename workspace", group: "Workspace", mutates: true, requires: "session" },
   { id: "session.moveLeft", title: "Move workspace up", group: "Workspace", mutates: true, requires: "session" },

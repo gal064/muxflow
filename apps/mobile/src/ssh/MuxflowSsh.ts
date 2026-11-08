@@ -52,6 +52,8 @@ export interface MuxflowSsh {
   /** stdin bytes for the remote command. Writes on one connection are serialised. */
   write(connectionId: string, base64: string): Promise<void>;
   close(connectionId: string): Promise<void>;
+  /** iOS: asks for a short run in the background to finish a send. The answer ends it. A no-op where the app keeps running anyway. */
+  keepAlive(): () => void;
   addListener(listener: (event: SshEvent) => void): () => void;
 
 }
@@ -74,6 +76,10 @@ export interface NativeMuxflowSshModule {
   trustHostKey(connectionId: string, fingerprintSha256: string): Promise<void>;
   write(connectionId: string, base64: string): Promise<void>;
   close(connectionId: string): Promise<void>;
+  /** iOS only. */
+  beginBackgroundTask?(): Promise<number>;
+  /** iOS only. */
+  endBackgroundTask?(task: number): Promise<void>;
   addListener(
     eventName: string,
     listener: (payload: unknown) => void,
@@ -229,6 +235,12 @@ export function createMuxflowSsh(native: NativeMuxflowSshModule): MuxflowSsh {
       native.connect(connectionId, target, command, trustedHostKeyFingerprint),
     trustHostKey: (connectionId, fingerprintSha256) =>
       native.trustHostKey(connectionId, fingerprintSha256),
+    keepAlive: () => {
+      const task = native.beginBackgroundTask?.().catch(() => undefined);
+      return () => {
+        void task?.then((id) => (id === undefined ? undefined : native.endBackgroundTask?.(id))).catch(() => undefined);
+      };
+    },
     write: (connectionId, base64) =>
       enqueueWrite(connectionId, async () => {
         for (const chunk of chunkBase64(base64)) {

@@ -1,0 +1,16 @@
+appId: dev.muxflow.mobile
+---
+# A tap can report success without focusing the field; the text then goes
+# nowhere and Send submits an empty line. Check the field holds the command
+# before Send. Retyping is safe because nothing has been submitted yet.
+- retry:
+    maxRetries: 2
+    commands:
+      - tapOn:
+          id: terminal-input
+      - eraseText
+      - inputText: ${COMMAND}
+      - assertVisible:
+          id: terminal-input
+          text: ${EXPECTED}
+- tapOn: Send

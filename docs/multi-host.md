@@ -179,7 +179,7 @@ client) plus the active `focus`, requests one snapshot per scope, decides
 notifications and sounds for every host, and acknowledges seen only for the
 focused pane on the active host. It returns the active host's `agents`,
 `adapters`, `rollups` as today plus `byHost: ReadonlyMap<string, { agents; adapters; rollups }>`.
-Launch, resume and hook actions use the active host's scope.
+Launch, resume, branch and hook actions use the active host's scope.
 
 ## Cross-host actions
 
@@ -194,7 +194,14 @@ Launch, resume and hook actions use the active host's scope.
   `hostForScope(scope)`, and a close confirmation carries the scope it was
   opened for. An agent resume opens a new pane beside the one on screen under
   the explorer's active root — facts of the active host — so a peer's agent is
-  resumed after its host is activated; the row says so.
+  resumed after its host is activated; the row says so. A branch instead opens
+  in the agent's own workspace and in its pane's folder, which the host reads
+  from tmux. It still needs that host on screen, because it goes through the
+  active scope. Once the host replies, the shell selects the new pane through the
+  pending selection, which waits a few seconds for the pane to reach the
+  snapshot. If it never does, the shell says so and stays where it is. Branch is
+  offered once a turn has started, because the CLIs refuse to copy a conversation
+  with nothing in it and their window closes with the error.
 - Settings › Connection's "Letter" and "Show in sidebar" edit the picked saved
   host and save on change (`save_host_profile`), without Connect. The host on
   screen cannot be un-shown from either place. The picker follows a host

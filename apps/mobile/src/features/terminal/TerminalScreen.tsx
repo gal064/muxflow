@@ -330,6 +330,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
             returnKeyType="send"
             style={[styles.input, !inputEnabled && styles.disabled]}
             submitBehavior="submit"
+            testID="terminal-input"
             value={text}
           />
           <Pressable accessibilityRole="button" disabled={!inputEnabled} onPress={sendText} style={[styles.sendButton, !inputEnabled && styles.disabled]}>

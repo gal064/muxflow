@@ -62,6 +62,10 @@ pub(crate) trait AgentAdapter: Send + Sync {
     fn hook_trust_guidance(&self) -> &'static str;
     fn identifies_process(&self, command: &str) -> bool;
     fn launch(&self, native_session_id: Option<&str>) -> LaunchSpec;
+    /// Continues a copy of a conversation under a new native session. Required
+    /// rather than defaulted: the vendors share no spelling, and a new adapter
+    /// must say what its own is.
+    fn branch(&self, native_session_id: &str) -> LaunchSpec;
     fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str>;
 
     /// The whole file this adapter installs at [`Self::hook_path`], for an
@@ -203,6 +207,13 @@ impl AgentAdapter for CodexAdapter {
         }
     }
 
+    fn branch(&self, native_session_id: &str) -> LaunchSpec {
+        LaunchSpec {
+            program: self.executable(),
+            arguments: vec!["fork".to_owned(), native_session_id.to_owned()],
+        }
+    }
+
     fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str> {
         let event = hook_event_name(payload)?;
         if matches!(event, "SubagentStart" | "SubagentStop") {
@@ -301,6 +312,19 @@ impl AgentAdapter for ClaudeCodeAdapter {
             arguments: native_session_id
                 .map(|id| vec!["--resume".to_owned(), id.to_owned()])
                 .unwrap_or_default(),
+        }
+    }
+
+    /// `--fork-session` is what Claude's `/branch` is on the command line; its
+    /// `/fork` is a different thing, a background copy.
+    fn branch(&self, native_session_id: &str) -> LaunchSpec {
+        LaunchSpec {
+            program: self.executable(),
+            arguments: vec![
+                "--resume".to_owned(),
+                native_session_id.to_owned(),
+                "--fork-session".to_owned(),
+            ],
         }
     }
 
@@ -639,6 +663,14 @@ mod tests {
                 .all(|event| claude.hook_timeout_seconds(event) == 5)
         );
         assert!(claude.descriptor(home, &observed[1].1).supports_resume);
+        assert_eq!(
+            claude.branch("session-1").arguments,
+            ["--resume", "session-1", "--fork-session"]
+        );
+        assert_eq!(
+            by_id("codex").unwrap().branch("session-1").arguments,
+            ["fork", "session-1"]
+        );
         // Each descriptor carries its own adapter's observation and no other's,
         // and the host is what decides whether an install would act on it.
         assert_eq!(

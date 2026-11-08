@@ -23,7 +23,9 @@ tag ending in `-ios` or `-ios-internal` uploads iOS, so it requires a fresh buil
 Ordinary tags skip iOS and can leave its build number unchanged. Reuse the exact existing artifact when retrying an upload. iOS
 marketing versions follow the shared version, but installed phones update
 independently through TestFlight. The unsigned simulator workflow proves
-neither signing nor availability to testers.
+neither signing nor availability to testers. It runs on pull requests that touch
+the mobile, host or release paths and nightly on `main`, not on every push, so a
+direct push to `main` reaches the iOS UI flows by the next nightly run.
 
 Before publishing a release that bumps the protocol major, verify that its
 matching iOS build is actually available in the selected Apple distribution
@@ -108,6 +110,10 @@ uploaded internally, use the distribution action instead of another release tag.
 pre-release. So the red "Update" pill appears only once a release is
 published. The installer uses the exact `tag`, including an iOS suffix;
 package filenames and the app's version keep the base `X.Y.Z`.
+The Android app downloads `releases/latest/download/muxflow-X.Y.Z-android.apk` when the
+pill is tapped and hands it to the system installer, so keep that asset name stable.
+On the desktop, the pill runs `install.sh` and relaunches; a copy outside the
+default install location opens the release page instead.
 Tags containing `-rc.N` build from a tree versioned `X.Y.Z` and are drafted as
 prereleases. RC tags, with or without an iOS suffix, may point to a branch commit without merging it to `main`.
 Other tags still require a commit on `main`; CI, version checks, signing,

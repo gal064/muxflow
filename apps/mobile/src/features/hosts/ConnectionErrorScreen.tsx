@@ -1,7 +1,8 @@
 import { router } from "expo-router";
 import { StyleSheet, Text, View } from "react-native";
+import { useStore } from "zustand";
 
-import { openAppUpdates, openDesktopUpdates } from "../update";
+import { openAppUpdates, openDesktopUpdates, updateStore } from "../update";
 import { connectHost } from "../../session/connectionManager";
 import { findHost, hostsStore } from "../../store/hostsStore";
 import { Button } from "../../ui/components/Button";
@@ -24,6 +25,7 @@ export interface ConnectionErrorScreenProps {
 export function ConnectionErrorScreen({ failure, hostId, incompatible = false }: ConnectionErrorScreenProps) {
   const host = useHosts((state) => findHost(state, hostId));
   const sheet = useConnectionSheet();
+  const downloading = useStore(updateStore, (state) => state.downloading);
 
   const act = () => {
     switch (failure.action?.kind) {
@@ -47,7 +49,7 @@ export function ConnectionErrorScreen({ failure, hostId, incompatible = false }:
       <Text style={styles.glyph}>{"!"}</Text>
       <Text style={styles.message}>{failure.message}</Text>
       <View style={styles.actions}>
-        {incompatible ? <Button label="Update app" onPress={() => void openAppUpdates()} /> : null}
+        {incompatible ? <Button disabled={downloading} label={downloading ? "Downloading…" : "Update app"} onPress={() => void openAppUpdates()} /> : null}
         {incompatible ? <Button label="Update desktop" variant="text" onPress={() => void openDesktopUpdates()} /> : null}
         {failure.action ? (
           <Button label={failure.action.label} onPress={act} disabled={failure.action.kind !== "sshKey" && !host} />

@@ -1,7 +1,7 @@
-import { useCallback, useState, type ReactElement } from "react";
+import { useCallback, useRef, useState, type ReactElement } from "react";
 import type { ActiveRoot } from "../files/types";
 import { HookReviewDialog } from "./HookReviewDialog";
-import type { AgentAdapterId, AgentPlacement, AgentRecord } from "./types";
+import type { AgentAdapterId, AgentBranchPlacement, AgentPlacement, AgentRecord } from "./types";
 import type { AgentRuntime } from "./useAgentRuntime";
 
 export interface AgentLaunchContext {
@@ -44,9 +44,14 @@ interface AgentWorkflowOptions {
   onHooksChanged(action: "install" | "uninstall", hostProfileId: string, hostIdentity: string): void;
 }
 
+/** Clicks on one agent's Branch closer together than this are one click. */
+const BRANCH_REPEAT_MS = 1_000;
+
 export interface AgentWorkflow {
   launch(adapter: AgentAdapterId, placement: AgentPlacement): void;
   resume(agent: AgentRecord, placement: AgentPlacement): void;
+  /** Where the branch opened, or nothing when the host refused and the status line says why. */
+  branch(agent: AgentRecord): Promise<AgentBranchPlacement | undefined>;
   reviewHooks(adapter: AgentAdapterId, action: "install" | "uninstall"): void;
   /** Opens a review that was already loaded for the captured setup host. */
   openHookReview(
@@ -105,6 +110,22 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
       .catch((cause) => onStatus(String(cause)));
   }, [launchContext, onStatus, runtime]);
 
+  // Unlike a resume, nothing here reads the pane on screen: a branch opens in
+  // its source agent's own workspace and folder.
+  const lastBranchedAt = useRef(new Map<string, number>());
+  const branch = useCallback(async (agent: AgentRecord) => {
+    // Every request opens another tab, and the host can answer inside a
+    // double-click, so waiting for the reply would not stop the second click.
+    const now = Date.now();
+    if (now - (lastBranchedAt.current.get(agent.id) ?? 0) < BRANCH_REPEAT_MS) return undefined;
+    lastBranchedAt.current.set(agent.id, now);
+    onStatus(`Branching ${agent.displayName} in a new tab…`);
+    return runtime.branch(agent).catch((cause) => {
+      onStatus(String(cause));
+      return undefined;
+    });
+  }, [onStatus, runtime]);
+
   const reviewHooks = useCallback((adapter: AgentAdapterId, action: "install" | "uninstall") => {
     if (!host) {
       onStatus("Reviewing hook changes requires a live authoritative host.");
@@ -140,5 +161,5 @@ export function useAgentWorkflow(options: AgentWorkflowOptions): AgentWorkflow {
     }}
   /> : null;
 
-  return { launch, resume, reviewHooks, openHookReview, dialog };
+  return { launch, resume, branch, reviewHooks, openHookReview, dialog };
 }

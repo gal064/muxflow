@@ -605,12 +605,16 @@ export class TerminalController {
       this.log(`attached ${this.layoutSummary()}`);
       if (this.phase !== "seeded") this.startSeedTimers();
     } catch (error) {
-      this.lastError = sizingError(error);
       this.attachFailures += 1;
-      this.log(`attach.failed (${this.attachFailures}) ${this.lastError}`);
+      const message = sizingError(error);
+      const retry = !this.stopped && !helperUpdateRequired(error) && this.attachFailures < ATTACH_RETRY_LIMIT;
+      // iOS shows this as a modal alert over the input, so only a failure
+      // nothing will repair reaches it.
+      if (!retry) this.lastError = message;
+      this.log(`attach.failed (${this.attachFailures}) ${message}`);
       this.yieldSizing();
       this.emit();
-      if (!this.stopped && !helperUpdateRequired(error) && this.attachFailures < ATTACH_RETRY_LIMIT) {
+      if (retry) {
         this.attachRetryTimer = setTimeout(() => {
           this.attachRetryTimer = undefined;
           if (!this.attached) void this.attach();
@@ -744,13 +748,14 @@ export class TerminalController {
         interrupted = true;
         return;
       }
-      this.lastError = sizingError(error);
-      this.emit();
-      this.log(`sizing.reclaim.failed ${this.lastError}`);
+      const message = sizingError(error);
       this.attachFailures += 1;
       const retry = !this.stopped && this.foreground.inForeground() && this.liveConnection() === connection
         && sizingIntent === this.sizingIntent
         && !helperUpdateRequired(error) && this.attachFailures < ATTACH_RETRY_LIMIT;
+      if (!retry) this.lastError = message;
+      this.emit();
+      this.log(`sizing.reclaim.failed ${message}`);
       this.yieldSizing();
       if (retry) {
         this.attachRetryTimer = setTimeout(() => {
