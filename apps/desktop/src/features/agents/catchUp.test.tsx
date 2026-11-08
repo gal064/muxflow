@@ -42,7 +42,7 @@ function client(): AgentClient {
     snapshot: vi.fn<AgentClient["snapshot"]>()
       .mockResolvedValueOnce(emptySnapshot)
       .mockResolvedValue(afterTheGap),
-    launch: vi.fn(), resume: vi.fn(), markSeen: vi.fn(async () => undefined),
+    launch: vi.fn(), resume: vi.fn(), branch: vi.fn(), markSeen: vi.fn(async () => undefined),
     reviewHooks: vi.fn(), applyHooks: vi.fn(), applyHostNaming: vi.fn(async () => "alreadyCurrent" as const), publishWireEvent: vi.fn(), publishWireSnapshot: vi.fn(),
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
   };

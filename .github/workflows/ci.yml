@@ -26,6 +26,9 @@ env:
   # vite's production build of the desktop (Monaco included) can exceed
   # Node's default heap on the 7 GB macOS runners.
   NODE_OPTIONS: --max-old-space-size=6144
+  # `cargo test` spends minutes compiling and seconds running. Keep backtraces,
+  # drop the rest of the debug info. Opt level stays: at 0 test threads overflow.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   linux:
@@ -34,11 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install system packages
-        timeout-minutes: 15
-        run: |
-          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          sudo apt-get "${apt_options[@]}" update --error-on=any
-          sudo apt-get "${apt_options[@]}" install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev tmux
+        timeout-minutes: 14
+        run: .github/scripts/apt-install.sh libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev tmux
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -48,6 +48,9 @@ jobs:
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
+          # Only main saves: a pull request's copy can't be read by anything
+          # else, and 1.4 GB per pull request evicts the shared one.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             .
             tests/integration
@@ -57,14 +60,9 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: pnpm install --frozen-lockfile
 
-      - name: Repository hygiene
-        run: |
-          pnpm check:privacy
-          release/check-version.sh
-          bash tests/release/test-tags.sh
-          bash tests/release/test-build-apk.sh
-          cargo fmt --all -- --check
-
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      # The desktop crate embeds the built frontend.
       - name: Build the desktop frontend
         run: pnpm build
       - name: Rust lint
@@ -88,7 +86,37 @@ jobs:
           cargo test --locked --manifest-path tests/release/protocol-driver/Cargo.toml
       - name: Bounded tmux control parser fuzz smoke
         run: cargo run --locked --manifest-path tests/integration/fuzz-smoke/Cargo.toml -- 1000
+      - name: Voice sidecar
+        run: uv run --python 3.12 --no-project --no-config python -m unittest apps/host/src/service/voice/test_sidecar.py
 
+  # Apart from `linux` so the two run side by side. The live tests build and
+  # drive the host, which needs tmux and cargo but not the desktop's webkit.
+  typescript:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system packages
+        timeout-minutes: 14
+        run: .github/scripts/apt-install.sh tmux
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: astral-sh/setup-uv@v6
+      - run: pnpm install --frozen-lockfile
+
+      - name: Repository hygiene
+        run: |
+          pnpm check:privacy
+          release/check-version.sh
+          bash tests/release/test-tags.sh
+          bash tests/release/test-build-apk.sh
       - name: TypeScript
         run: |
           pnpm check
@@ -104,8 +132,6 @@ jobs:
         run: |
           pnpm --filter @muxflow/mobile protocol:check
           pnpm --filter @muxflow/mobile webview:check
-      - name: Voice sidecar
-        run: uv run --python 3.12 --no-project --no-config python -m unittest apps/host/src/service/voice/test_sidecar.py
 
   # The macOS-only code paths (notifications, NSWorkspace, /private/var and
   # socket-path limits) have no other coverage.
@@ -122,6 +148,8 @@ jobs:
           cache: pnpm
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: pnpm install --frozen-lockfile
       - name: Build the desktop frontend
         run: pnpm build

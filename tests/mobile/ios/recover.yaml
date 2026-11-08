@@ -5,7 +5,9 @@ appId: dev.muxflow.mobile
       text: Send
       enabled: true
     timeout: 30000
-- tapOn: Type, then Send
-- inputText: "printf 'recovered\\n' > ios-recovered.marker"
-- tapOn: Send
+- runFlow:
+    file: send-terminal.yaml
+    env:
+      COMMAND: "printf 'recovered\\n' > ios-recovered.marker"
+      EXPECTED: '.*ios-recovered\.marker.*'
 - takeScreenshot: recovered

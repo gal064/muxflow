@@ -24,7 +24,8 @@ beforeAll(async () => {
       .map((token, i) => ({ type: token.type.replace(/\.(python|ts)$/u, ""), text: text.slice(token.offset, line[i + 1]?.offset) }))
       .filter((token) => token.type !== "white" && token.text.trim() !== "");
   };
-});
+  // Importing Monaco alone can pass the default 10 s when every core is busy.
+}, 60_000);
 
 function kinds(text: string, languageId: string): Record<string, string> {
   return Object.fromEntries(tokenize(text, languageId).map((token) => [token.text, token.type]));

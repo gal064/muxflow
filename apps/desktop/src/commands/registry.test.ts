@@ -368,7 +368,7 @@ describe("command registry", () => {
     const rowCommands = commandRegistry.filter((command) => command.requires === "row");
     // Every removed per-row button, as a searchable command.
     expect(rowCommands.map((command) => command.id)).toEqual([
-      "agents.focusRow", "agents.renameRow", "agents.resumeRow",
+      "agents.focusRow", "agents.renameRow", "agents.resumeRow", "agents.branchRow",
       "files.open", "files.rename", "files.move", "files.duplicate", "files.download",
       "files.delete", "files.newFile", "files.newFolder", "files.refresh",
       "git.openDiff", "git.stage", "git.unstage", "git.discard",

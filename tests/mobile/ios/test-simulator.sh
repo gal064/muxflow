@@ -16,6 +16,10 @@ uv run --with paramiko==4.0.0 --no-project tests/mobile/ios/ssh-fixture.py \
   --directory "$fixture_root" --host-binary "$repo_root/target/debug/muxflow-host" > "$evidence/fixture.log" 2>&1 &
 fixture_pid=$!
 cleanup() {
+  # The fixture's directories go below, so keep what a failure needs first.
+  tmux -L "$ADE_TMUX_SOCKET_NAME" capture-pane -p -t primary > "$evidence/final-terminal.txt" 2>&1 || true
+  mkdir -p "$evidence/host"
+  find "$ADE_HOST_RUNTIME_DIR" -type f \( -name '*.log' -o -name '*.jsonl' \) -exec cp {} "$evidence/host/" \; 2>/dev/null || true
   if [ -n "${device_id:-}" ]; then
     xcrun simctl spawn "$device_id" log show --last 10m --style compact --info --debug \
       --predicate 'process == "Muxflow"' > "$evidence/app.log" || true
@@ -37,6 +41,17 @@ for attempt in $(seq 1 60); do
   if [ -f "$fixture_root/fixture.json" ]; then break; fi
   sleep 1
 done
+# Send returns when the app has taken the tap; the shell runs the command after
+# that, over SSH and tmux.
+wait_for_marker() {
+  local file="$fixture_root/work/$1"
+  for attempt in $(seq 1 75); do
+    if [ "$(cat "$file" 2>/dev/null)" = "$2" ]; then return 0; fi
+    sleep 0.2
+  done
+  echo "$1 never held '$2'; see final-terminal.txt and the flow's screenshots." >&2
+  return 1
+}
 fixture_value() { node -e 'process.stdout.write(String(require(process.argv[1])[process.argv[2]]))' "$fixture_root/fixture.json" "$1"; }
 # Maestro text selectors are regular expressions. Escape the base64 '+' so
 # this asserts the exact key even when a disposable fingerprint contains it.
@@ -46,15 +61,15 @@ maestro --device "$device_id" test --format junit --output "$evidence/none-auth.
   --test-output-dir "$evidence/none-auth" -e "SSH_PORT=$(fixture_value none)" -e "HOST_FINGERPRINT=$fingerprint" tests/mobile/ios/none-auth.yaml
 # xterm paints on a canvas. Confirm submitted commands independently at tmux,
 # alongside the terminal screenshot and real host file contents.
-test "$(cat "$fixture_root/work/ios-e2e.marker")" = ran
-test "$(cat "$fixture_root/work/ios-resumed.marker")" = resumed
+wait_for_marker ios-e2e.marker ran
+wait_for_marker ios-resumed.marker resumed
 tmux -L "$ADE_TMUX_SOCKET_NAME" capture-pane -p -t primary > "$evidence/none-terminal.txt"
 rg 'ios-e2e-ok' "$evidence/none-terminal.txt"
 touch "$fixture_root/drop-connections"
 maestro --device "$device_id" test --format junit --output "$evidence/recovery.xml" \
   --test-output-dir "$evidence/recovery" tests/mobile/ios/recover.yaml
-test "$(cat "$fixture_root/work/ios-recovered.marker")" = recovered
-rm "$fixture_root/work/ios-e2e.marker" "$fixture_root/work/ios-resumed.marker"
+wait_for_marker ios-recovered.marker recovered
+rm "$fixture_root/work/ios-e2e.marker"
 maestro --device "$device_id" test --format junit --output "$evidence/key-generation.xml" \
   --test-output-dir "$evidence/key-generation" tests/mobile/ios/generate-key.yaml
 # Copy exports only the public key through the product UI.
@@ -74,8 +89,7 @@ fi
 cp "$evidence/public-key.txt" "$fixture_root/authorized_keys"
 maestro --device "$device_id" test --format junit --output "$evidence/key-auth.xml" \
   --test-output-dir "$evidence/key-auth" -e "SSH_PORT=$(fixture_value publickey)" -e "HOST_FINGERPRINT=$fingerprint" tests/mobile/ios/key-auth.yaml
-test "$(cat "$fixture_root/work/ios-e2e.marker")" = ran
-test "$(cat "$fixture_root/work/ios-resumed.marker")" = resumed
+wait_for_marker ios-e2e.marker ran
 tmux -L "$ADE_TMUX_SOCKET_NAME" capture-pane -p -t primary > "$evidence/key-terminal.txt"
 rg 'ios-e2e-ok' "$evidence/key-terminal.txt"
 xcrun simctl io "$device_id" screenshot "$evidence/final.png"

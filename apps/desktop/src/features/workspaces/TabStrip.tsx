@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { Icon } from "../../ui/Icon";
 import { anchorForElement, ContextMenu, isContextMenuKey, type ContextMenuAnchor } from "../../ui/ContextMenu";
 import { AgentStateIndicator } from "../../ui/AgentStateIndicator";
@@ -288,6 +288,23 @@ export function TabStrip(props: TabStripProps) {
         // "tab 3 of 5".
         const dropClass = dropMarker === `${tab.key}|before` ? " drop-before" : dropMarker === `${tab.key}|after` ? " drop-after" : "";
         const docked = tab.key === props.dockedKey ? " docked" : "";
+        // Shared with the hover pin, which takes the tab's trailing edge.
+        const onTabAuxClick = (event: MouseEvent) => {
+          // Middle-click closes, the way every tabbed app does. Terminal
+          // tabs still route through the confirmation contract.
+          if (event.button === 1) { event.preventDefault(); props.onClose(tab, props.commandScope); }
+        };
+        const onTabContextMenu = (event: MouseEvent) => {
+          // Opening a menu is not a selection: selecting first would make a
+          // right-click on a terminal tab issue a real tmux select-window.
+          event.preventDefault();
+          setMenu({
+            tab,
+            anchor: { x: event.clientX, y: event.clientY },
+            scope: props.commandScope,
+            focusedPaneId: tab.kind === "terminal" && tab.key === props.activeKey ? props.activePaneId : undefined,
+          });
+        };
         return <div className={`${active ? "tab active" : "tab"}${docked}${dropClass}`} data-drop-tab={tab.key} key={tab.key} role="presentation">
           <button
             // Only the selected tab's panel exists in the DOM, so only the
@@ -296,11 +313,7 @@ export function TabStrip(props: TabStripProps) {
             aria-selected={active}
             className="tab-select"
             id={workspaceTabDomId(tab.key)}
-            onAuxClick={(event) => {
-              // Middle-click closes, the way every tabbed app does. Terminal
-              // tabs still route through the confirmation contract.
-              if (event.button === 1) { event.preventDefault(); props.onClose(tab, props.commandScope); }
-            }}
+            onAuxClick={onTabAuxClick}
             // Shift-click pins rather than selects. Nothing else in the strip
             // claims the modifier, and pinning without selecting is the point:
             // pinning a background tab must not pull the terminal out from
@@ -314,17 +327,7 @@ export function TabStrip(props: TabStripProps) {
               }
               props.onSelect(tab);
             }}
-            onContextMenu={(event) => {
-              // Opening a menu is not a selection: selecting first would make a
-              // right-click on a terminal tab issue a real tmux select-window.
-              event.preventDefault();
-              setMenu({
-                tab,
-                anchor: { x: event.clientX, y: event.clientY },
-                scope: props.commandScope,
-                focusedPaneId: tab.kind === "terminal" && tab.key === props.activeKey ? props.activePaneId : undefined,
-              });
-            }}
+            onContextMenu={onTabContextMenu}
             onDoubleClick={(event) => {
               // Shift is the pin gesture and nothing else: without this, a
               // shift-double-click pinned and unpinned on the two clicks and
@@ -370,6 +373,18 @@ export function TabStrip(props: TabStripProps) {
               state={tab.attention}
             />}
           </button>
+          {/* Keeps its slot while hidden, so showing it cannot change the tab's
+              width under the pointer. */}
+          {tab.kind === "terminal" && <button
+            aria-label={tab.pinned ? `Unpin ${tab.title}` : `Pin ${tab.title}`}
+            className="tab-pin-toggle"
+            onAuxClick={onTabAuxClick}
+            onClick={() => props.onTogglePinned(tab)}
+            onContextMenu={onTabContextMenu}
+            tabIndex={-1}
+            title={tab.pinned ? "Unpin tab" : "Pin tab"}
+            type="button"
+          ><Icon name="pin" size={11} /></button>}
           {tab.kind === "app" && <button
             aria-label={`Close ${tab.title}`}
             className="tab-close"
