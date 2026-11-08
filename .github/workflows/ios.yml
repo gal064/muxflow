@@ -27,22 +27,10 @@ on:
         description: What to Test (blank uses release/ios/what-to-test.txt)
         type: string
         default: ''
-  push:
-    branches: [main]
-    paths:
-      - 'apps/mobile/**'
-      - 'packages/**'
-      - 'apps/host/**'
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'package.json'
-      - 'pnpm-workspace.yaml'
-      - 'patches/**'
-      - 'release/**'
-      - 'pnpm-lock.yaml'
-      - 'tests/mobile/ios/**'
-      - '.github/workflows/ios.yml'
+  # Pull requests carry the UI flows. Nightly covers direct pushes to main and
+  # seeds the caches pull requests read.
+  schedule:
+    - cron: '17 9 * * *'
   pull_request:
     paths:
       - 'apps/mobile/**'
@@ -76,6 +64,9 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=6144
       # The pinned pod supports prebuilt OpenSSL artifacts; libssh2 builds locally.
       OPENSSL_DOWNLOAD: '1'
+      # Each flow is its own Maestro run, and the first one installs the driver
+      # on a simulator that may still be settling.
+      MAESTRO_DRIVER_STARTUP_TIMEOUT: '300000'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -90,11 +81,12 @@ jobs:
           xcodebuild -version
           xcrun simctl list devices available
           pod --version
+          # Only what shapes the build. GitHub rolls runner images out gradually,
+          # so the image version or Node's patch would split one app across keys.
           toolchain_key=$(
             {
-              printf '%s\n' "${ImageVersion:?Missing runner image version}"
               xcodebuild -version
-              node --version
+              node --version | cut -d . -f 1
               pod --version
             } | shasum -a 256 | cut -d ' ' -f 1
           )
@@ -113,9 +105,26 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: tmp/work/ios/Build/Products/Release-iphonesimulator/Muxflow.app
-          key: ios-simulator-app-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('apps/mobile/**', 'packages/**', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'patches/**', 'release/**', '.github/workflows/ios.yml') }}
+          key: ios-simulator-app-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('apps/mobile/**', 'packages/**', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'patches/**') }}
+      # The contract only depends on these inputs, so a pass on them stands.
+      - name: Restore native SSH contract pass
+        id: native-contract
+        uses: actions/cache/restore@v4
+        with:
+          path: tmp/ios-native-contract-passed
+          key: ios-native-contract-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('apps/mobile/modules/muxflow-ssh/**', 'tests/mobile/ios/check-native.sh', 'tests/mobile/ios/native-transport.m', 'tests/mobile/ios/ssh-spike.c', 'tests/mobile/ios/ssh-fixture.py') }}
       - name: Native SSH contract
-        run: bash tests/mobile/ios/check-native.sh 2>&1 | tee "$RUNNER_TEMP/ios-native.log"
+        if: steps.native-contract.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          bash tests/mobile/ios/check-native.sh 2>&1 | tee "$RUNNER_TEMP/ios-native.log"
+          touch tmp/ios-native-contract-passed
+      - name: Remember native SSH contract pass
+        if: steps.native-contract.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tmp/ios-native-contract-passed
+          key: ${{ steps.native-contract.outputs.cache-primary-key }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm mobile:check
       - name: Install simulator UI driver
@@ -124,6 +133,9 @@ jobs:
           unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/maestro/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/maestro/bin/maestro" --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Build fixture host
         run: |
           brew install tmux ripgrep

@@ -78,6 +78,13 @@ impl AgentAdapter for PiAdapter {
         }
     }
 
+    fn branch(&self, native_session_id: &str) -> LaunchSpec {
+        LaunchSpec {
+            program: self.executable(),
+            arguments: vec!["--fork".to_owned(), native_session_id.to_owned()],
+        }
+    }
+
     /// `PermissionRequest` is an extension dialog open while a run is active,
     /// and `PostToolUse` is the last such dialog closing with the run still
     /// active. `Stop` is pi's `agent_settled`: no retry, compaction or queued
@@ -161,6 +168,10 @@ mod tests {
     #[test]
     fn pi_resumes_by_session() {
         assert!(PiAdapter.launch(None).arguments.is_empty());
+        assert_eq!(
+            PiAdapter.branch("0193-abc").arguments,
+            ["--fork", "0193-abc"]
+        );
         assert_eq!(
             PiAdapter.launch(Some("0193-abc")).arguments,
             ["--session", "0193-abc"]

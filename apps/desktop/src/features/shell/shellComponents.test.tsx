@@ -56,7 +56,7 @@ const pendingTab = { key: "pending:create", kind: "pending", title: "Creating" }
 
 type TabStripOverrides = Partial<Pick<
   ComponentProps<typeof TabStrip>,
-  "activeKey" | "canMutate" | "dropWorkspace" | "onCloseNonAgent" | "onCloseOthers" | "onSelect" | "onTogglePinned" | "platform" | "shortcuts"
+  "activeKey" | "canMutate" | "dropWorkspace" | "onCloseNonAgent" | "onCloseOthers" | "onSelect" | "onClose" | "onTogglePinned" | "platform" | "shortcuts"
 >>;
 
 /** One TabStrip with every handler stubbed, so a test names only what it means. */
@@ -137,6 +137,10 @@ function fiveAgentRows(): MergedWorkspaceRow[] {
     agent({ id: "a4", sessionId: "$1", displayName: "quiet one", lifecycle: "idle", updatedAt: 2 }),
     agent({ id: "a5", sessionId: "$1", displayName: "quiet two", lifecycle: "idle", updatedAt: 1 }),
   ];
+  return sidebarRows(agents);
+}
+
+function sidebarRows(agents: readonly AgentRecord[]): MergedWorkspaceRow[] {
   return merged(workspaceRows({
     snapshot: { sessions: [session], windows: [], panes: [] },
     activeSessionId: session.id,
@@ -161,6 +165,7 @@ const sidebarProps = (overrides: Partial<SidebarProps> = {}): SidebarProps => ({
   onOpenSettings: noop,
   onRenameAgentTab: noop,
   onResumeAgent: noop,
+  onBranchAgent: noop,
   onReviewHooks: noop,
   onSelectAgent: noop,
   onSelectWorkspace: noop,
@@ -534,10 +539,83 @@ describe("application shell accessibility contracts", () => {
     expect(document.activeElement).toBe(workspaceRowNodes[1]);
   });
 
+  it("shows a waiting agent by its dot alone, and keeps the workspace's count", () => {
+    const rows = buildAgentRows([agent({ lifecycle: "blocked" })], () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => true, "workspace");
+    const countOn = (html: string) => (html.match(/badge badge-row/g) ?? []).length;
+    expect(countOn(renderToStaticMarkup(<WorkspaceSidebar {...sidebarProps({ agents: rows, rows: [] })} />))).toBe(0);
+    const [workspace] = sidebarRows(rows.map((row) => row.agent));
+    expect(workspace.unread).toBe(1);
+    expect(countOn(renderToStaticMarkup(<WorkspaceSidebar {...sidebarProps({ agents: [], rows: [workspace] })} />))).toBe(1);
+  });
+
+  it("pins a row from its hover button without selecting the row", async () => {
+    const onSelectAgent = vi.fn();
+    const onSelectWorkspace = vi.fn();
+    const onTogglePinnedAgentTab = vi.fn();
+    const onTogglePinnedWorkspace = vi.fn();
+    const rows = buildAgentRows([agent()], () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => true, "workspace");
+    const [workspace] = sidebarRows(rows.map((row) => row.agent));
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<WorkspaceSidebar {...sidebarProps({ agents: rows, onSelectAgent, onSelectWorkspace, onTogglePinnedAgentTab, onTogglePinnedWorkspace, rows: [workspace] })} />);
+    });
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Pin tab" }).props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Pin workspace" }).props.onClick(); });
+    expect(onTogglePinnedAgentTab).toHaveBeenCalledWith(rows[0], commandScope);
+    expect(onTogglePinnedWorkspace).toHaveBeenCalledWith(workspace);
+    expect(onSelectAgent).not.toHaveBeenCalled();
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+    // Out of the tab order: arrow keys walk these lists.
+    expect(renderer.root.findByProps({ "aria-label": "Pin tab" }).props.tabIndex).toBe(-1);
+  });
+
+  it("offers a branch only for a live pane holding a real conversation", async () => {
+    const rowsFor = (overrides: Parameters<typeof agent>[0], routable = true) => buildAgentRows(
+      [agent(overrides)], () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => routable, "workspace",
+    );
+    const disabledFor = async (rows: ReturnType<typeof rowsFor>, hosts = [remoteHost]) => {
+      let renderer!: ReturnType<typeof create>;
+      await act(async () => { renderer = create(<WorkspaceSidebar {...sidebarProps({ agents: rows, hosts, rows: [] })} />); });
+      return renderer.root.findByProps({ "aria-label": "Branch conversation" }).props.disabled;
+    };
+    expect(await disabledFor(rowsFor({}))).toBe(false);
+    expect(await disabledFor(rowsFor({ nativeSessionId: " " }))).toBe(true);
+    // Every real agent: seen as a process first, then reporting its session.
+    expect(await disabledFor(rowsFor({ detectedManually: true }))).toBe(false);
+    expect(await disabledFor(rowsFor({ detectedManually: true, nativeSessionId: "" }))).toBe(true);
+    // Reporting a session is not having a conversation: the CLIs refuse an empty one.
+    expect(await disabledFor(rowsFor({ lifecycle: "idle" }))).toBe(true);
+    expect(await disabledFor(rowsFor({ lifecycle: "idle", attentionGeneration: 1 }))).toBe(false);
+    expect(await disabledFor(rowsFor({ lifecycle: "blocked" }))).toBe(false);
+    expect(await disabledFor(rowsFor({}, false))).toBe(true);
+    expect(await disabledFor(rowsFor({}), [{ ...remoteHost, canMutate: false }])).toBe(true);
+    expect(await disabledFor(rowsFor({}), [{ ...remoteHost, active: false }])).toBe(true);
+  });
+
+  it("pins a terminal tab from its hover button without selecting it, and offers none on a document", async () => {
+    const onSelect = vi.fn();
+    const onTogglePinned = vi.fn();
+    const terminal = { key: "terminal:@1", kind: "terminal", id: "@1", title: "shell", index: 1, activeInTmux: true, zoomed: false, canMoveLeft: false, canMoveRight: false, attention: "none", agentPresence: "absent", pinned: false } as CombinedTab;
+    const document_ = { key: "app:file", kind: "app", id: "file", title: "README.md", appKind: "markdown", resource: "/r/README.md", order: 0, preview: false, canMoveLeft: false, canMoveRight: false } as CombinedTab;
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(tabStripOver([terminal, document_], { onSelect, onTogglePinned })); });
+    const toggles = renderer.root.findAllByProps({ className: "tab-pin-toggle" });
+    expect(toggles.map((toggle) => toggle.props["aria-label"])).toEqual(["Pin shell"]);
+    await act(async () => { toggles[0].props.onClick(); });
+    expect(onTogglePinned).toHaveBeenCalledWith(terminal);
+    expect(onSelect).not.toHaveBeenCalled();
+    // It sits on the tab's trailing edge, so that edge still behaves as the tab.
+    const onClose = vi.fn();
+    await act(async () => { renderer.update(tabStripOver([terminal, document_], { onClose, onSelect, onTogglePinned })); });
+    await act(async () => { renderer.root.findByProps({ className: "tab-pin-toggle" }).props.onAuxClick({ button: 1, preventDefault() {} }); });
+    expect(onClose).toHaveBeenCalledWith(terminal, commandScope);
+  });
+
   it("reaches the agent row actions from the command registry, on the last agent focused", async () => {
     const onSelectAgent = vi.fn();
     const onRenameAgentTab = vi.fn();
     const onResumeAgent = vi.fn();
+    const onBranchAgent = vi.fn();
     const agents = buildAgentRows(
       [agent({ id: "a1", displayName: "Codex one", lifecycle: "blocked" })],
       () => ({ workspaceOrder: 0, workspaceName: "work", tabIndex: 1 }), () => true, "workspace",
@@ -549,7 +627,7 @@ describe("application shell accessibility contracts", () => {
     }];
     let renderer!: ReturnType<typeof create>;
     const element = (rows: typeof agents) => <WorkspaceSidebar
-      {...sidebarProps({ adapters, agents: rows, onRenameAgentTab, onResumeAgent, onSelectAgent, rows: [] })}
+      {...sidebarProps({ adapters, agents: rows, onBranchAgent, onRenameAgentTab, onResumeAgent, onSelectAgent, rows: [] })}
     />;
     await act(async () => { renderer = create(element(agents)); });
     // No agent focused: nothing to act on.
@@ -557,7 +635,9 @@ describe("application shell accessibility contracts", () => {
 
     const row = renderer.root.findAllByProps({ className: "agent-button" })[0];
     await act(async () => { row.props.onFocus(); });
-    expect(rowCommandRegistry.available()).toEqual(["agents.focusRow", "agents.renameRow", "agents.resumeRow"]);
+    expect(rowCommandRegistry.available()).toEqual(["agents.focusRow", "agents.renameRow", "agents.resumeRow", "agents.branchRow"]);
+    await act(async () => { rowCommandRegistry.run("agents.branchRow"); });
+    expect(onBranchAgent).toHaveBeenCalledWith(expect.objectContaining({ id: "a1" }), commandScope);
     await act(async () => { rowCommandRegistry.run("agents.resumeRow"); });
     // One line in the palette takes the adapter's first declared placement; the
     // context menu is where a choice between placements belongs.
@@ -1351,7 +1431,7 @@ describe("application shell accessibility contracts", () => {
     />);
     expect([...html.matchAll(/<button/gu)]).toHaveLength(8);
     expect(html).toContain(">↑ Update 0.2.0</button>");
-    expect(html).toContain('title="Muxflow 0.2.0 is available. Open the latest release page."');
+    expect(html).toContain('title="Muxflow 0.2.0 is available. Install the update."');
     expect(html.indexOf("titlebar-update")).toBeLessThan(html.indexOf("bar-button-badged"));
   });
 

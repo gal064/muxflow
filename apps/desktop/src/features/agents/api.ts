@@ -11,6 +11,7 @@ import type {
   AgentHostNamingOutcome,
   AgentLaunchRequest,
   AgentLifecycle,
+  AgentBranchPlacement,
   AgentRecord,
   AgentRequestScope,
   AgentSnapshot,
@@ -111,6 +112,7 @@ export interface AgentClient {
   snapshot(scope: AgentRequestScope): Promise<AgentSnapshot>;
   launch(scope: AgentRequestScope, request: AgentLaunchRequest): Promise<void>;
   resume(scope: AgentRequestScope, agentId: string, nativeSessionId: string, request: AgentLaunchRequest): Promise<void>;
+  branch(scope: AgentRequestScope, agent: AgentRecord): Promise<AgentBranchPlacement>;
   markSeen(scope: AgentRequestScope, agentId: string, attentionGeneration: AgentGeneration): Promise<void | AgentRecord>;
   reviewHooks(scope: AgentRequestScope, adapter: AgentAdapterId, action?: "install" | "uninstall"): Promise<AgentHookReview>;
   applyHooks(scope: AgentRequestScope, review: AgentHookReview): Promise<void>;
@@ -149,6 +151,15 @@ export class TauriAgentClient implements AgentClient {
       paneId: request.placement === "split" ? request.paneId : "",
       activeRoot: request.activeRoot, rootToken: request.rootToken,
     });
+  }
+
+  async branch(scope: AgentRequestScope, agent: AgentRecord): Promise<AgentBranchPlacement> {
+    const { sessionId, paneId } = await this.#request(scope, {
+      operation: "branch", agentId: agent.id, nativeSessionId: agent.nativeSessionId,
+      adapterId: agent.adapterId, sessionId: agent.sessionId, paneId: agent.paneId,
+    });
+    if (!sessionId || !paneId) throw new Error("The host did not say where the branch opened.");
+    return { sessionId, paneId };
   }
 
   async markSeen(scope: AgentRequestScope, agentId: string, attentionGeneration: AgentGeneration): Promise<void | AgentRecord> {

@@ -342,6 +342,11 @@ enum EventKind {
   EVENT_KIND_VOICE_REPLY = 21;
   // Automations changed; sent only to connections that listed them.
   EVENT_KIND_AUTOMATION = 22;
+  // An agent reply's text in `voice.reply`, audio empty, sent the moment the turn
+  // ends. EVENT_KIND_VOICE_REPLY with the same `reply_at_unix_millis` follows
+  // once synthesis settles, and is complete on its own for a phone that ignores
+  // this kind. Goes only to the connection holding the session.
+  EVENT_KIND_VOICE_REPLY_TEXT = 23;
 }
 
 message HostEvent {
@@ -1037,6 +1042,9 @@ enum AgentActionKind {
   AGENT_ACTION_KIND_RESUME = 3;
   reserved 4;
   reserved "AGENT_ACTION_KIND_RENAME";
+  // Continues a copy of the conversation in a new window of the source agent's
+  // own workspace, in its pane's folder. The original keeps running untouched.
+  AGENT_ACTION_KIND_BRANCH = 5;
 }
 
 enum AgentPlacementKind {
@@ -1364,7 +1372,7 @@ message VoiceEvent {
   VoiceProvisionProgress provision = 1;
   // Readiness at the time of the event, when the host has it to hand.
   VoiceStatus status = 2;
-  // EVENT_KIND_VOICE_REPLY.
+  // EVENT_KIND_VOICE_REPLY and EVENT_KIND_VOICE_REPLY_TEXT.
   VoiceSpeech reply = 3;
 }
 

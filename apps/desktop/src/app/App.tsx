@@ -40,7 +40,7 @@ import { GitRepositoryStore } from "../features/git/repositoryStore";
 import { DisconnectedStrip } from "../features/shell/DisconnectedStrip";
 import { SettingsDialog } from "../features/shell/SettingsDialog";
 import { TitleBar } from "../features/shell/TitleBar";
-import { useUpdateCheck } from "../features/shell/useUpdateCheck";
+import { installUpdate, tauriInstallDeps, useUpdateCheck } from "../features/shell/useUpdateCheck";
 import { openExternalUrl } from "../features/terminal/openExternalUrl";
 import { resetHostLatency, useHostLatency } from "../features/shell/hostLatency";
 import {
@@ -198,7 +198,16 @@ interface PendingHostSelection {
   paneId?: string;
   /** Who asked, for the announcement once the pane is on screen. */
   source: string;
+  /**
+   * Set for a pane the host has just made, which the host's reply can beat into
+   * the snapshot. Until this time a missing pane means "not yet"; after it, the
+   * screen stays where it is and says so.
+   */
+  paneExpectedBy?: number;
 }
+
+/** How long a just-opened branch's pane has to reach the snapshot. */
+const BRANCH_PANE_WAIT_MS = 5_000;
 
 /**
  * The tab's frame, drawn while its chunk is still being fetched.
@@ -1015,9 +1024,16 @@ export function App() {
     // A host activated before it has spoken has nothing to select on yet;
     // its snapshot lands the link on a session, and this runs again then.
     if (!hostState.serverIdentity) return;
-    setPendingHostSelection(undefined);
-    const { paneId, sessionId, source } = pendingHostSelection;
+    const { paneId, paneExpectedBy, sessionId, source } = pendingHostSelection;
     const destination = paneId ? resolveTerminalDestination(snapshot.panes, paneId) : undefined;
+    if (destination?.kind === "unavailable" && paneExpectedBy !== undefined) {
+      const timer = setTimeout(() => {
+        setPendingHostSelection(undefined);
+        setStatus(`${source} has not appeared. The agent may have no saved conversation yet.`);
+      }, Math.max(0, paneExpectedBy - Date.now()));
+      return () => clearTimeout(timer);
+    }
+    setPendingHostSelection(undefined);
     if (destination?.kind === "target") {
       void surfacePaneDestination(destination.pane, source).then((result) => reportAnnouncedPaneResult(result, setStatus));
       return;
@@ -1620,7 +1636,7 @@ export function App() {
       onOpenSettings={() => void runCommand("settings.show")}
       onTogglePanel={() => void runCommand("view.togglePanel")}
       onToggleSidebar={() => void runCommand("view.toggleSidebar")}
-      onUpdate={() => { if (availableUpdate) void openExternalUrl(availableUpdate.url).catch((error) => setStatus(String(error))); }}
+      onUpdate={() => { if (availableUpdate) void installUpdate(availableUpdate, { ...tauriInstallDeps, openReleasePage: openExternalUrl, setStatus }).catch((error) => setStatus(String(error))); }}
       panelOpen={panelOpen}
       panelFits={panelFits}
       platform={platform}
@@ -1676,6 +1692,19 @@ export function App() {
             return setStatus(`Resume opens a pane on the host on screen; select a workspace on ${label} first.`);
           }
           agentWorkflow.resume(agent, placement);
+        }}
+        onBranchAgent={(agent, scope) => {
+          if (!scopeIsLive(scope) || agent.hostProfileId !== currentHostProfileId) return;
+          void agentWorkflow.branch(agent).then((placement) => {
+            // Someone who has moved to another host is not pulled back for this.
+            if (!placement || hostScopeRef.current.hostProfileId !== agent.hostProfileId) return;
+            selectOnHost({
+              profileId: agent.hostProfileId,
+              ...placement,
+              source: `Branch of ${agent.displayName}`,
+              paneExpectedBy: Date.now() + BRANCH_PANE_WAIT_MS,
+            });
+          });
         }}
         onReviewHooks={agentWorkflow.reviewHooks}
         onSelectAgent={selectAgentRow}
