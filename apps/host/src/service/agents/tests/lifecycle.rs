@@ -3766,3 +3766,197 @@ fn a_new_session_start_is_never_held_by_an_open_prompt() {
     fixture.parent("restart", "SessionStart");
     assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Idle);
 }
+
+fn claude_wakeup_turn(
+    runtime: &AgentRuntime,
+    topology: &tmux_control::TmuxSnapshot,
+    id: &str,
+) -> v1::AgentEvent {
+    claude_hook(
+        runtime,
+        topology,
+        id,
+        serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            adapters::CLAUDE_IS_TASK_WAKEUP_FIELD: true
+        }),
+    )
+}
+
+fn claude_stop_with_work_left(
+    runtime: &AgentRuntime,
+    topology: &tmux_control::TmuxSnapshot,
+    id: &str,
+) -> v1::AgentEvent {
+    claude_hook(
+        runtime,
+        topology,
+        id,
+        serde_json::json!({
+            "hook_event_name": "Stop",
+            adapters::CLAUDE_HAS_BACKGROUND_WORK_FIELD: true
+        }),
+    )
+}
+
+#[test]
+fn only_wakeup_turns_stay_quiet_and_the_last_one_notifies_once() {
+    let runtime = runtime("quiet-wakeups");
+    let topology = topology("claude");
+    claude_hook(
+        &runtime,
+        &topology,
+        "user-prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    let user_turn_end = claude_stop_with_work_left(&runtime, &topology, "user-stop");
+    assert!(user_turn_end.notify);
+    assert_eq!(
+        user_turn_end.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+
+    claude_wakeup_turn(&runtime, &topology, "wake-1");
+    let held = claude_stop_with_work_left(&runtime, &topology, "wake-1-stop");
+    assert!(!held.notify);
+    assert_eq!(
+        held.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+
+    claude_wakeup_turn(&runtime, &topology, "wake-2");
+    let last = claude_hook(
+        &runtime,
+        &topology,
+        "wake-2-stop",
+        serde_json::json!({"hook_event_name": "Stop"}),
+    );
+    assert!(last.notify);
+    let agent = last.agent.unwrap();
+    assert_eq!(agent.lifecycle, v1::AgentLifecycleState::Idle as i32);
+    assert_eq!(agent.attention_kind, "completed");
+}
+
+#[test]
+fn an_idle_notice_during_an_open_wakeup_turn_is_not_a_block() {
+    let runtime = runtime("quiet-wakeup-open-idle");
+    let topology = topology("claude");
+    claude_hook(
+        &runtime,
+        &topology,
+        "prompt",
+        serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+    );
+    claude_stop_with_work_left(&runtime, &topology, "user-stop");
+    claude_wakeup_turn(&runtime, &topology, "wake");
+
+    let idle = claude_hook(
+        &runtime,
+        &topology,
+        "idle",
+        serde_json::json!({"hook_event_name": "Notification", "notification_type": "idle_prompt"}),
+    );
+    assert!(!idle.notify);
+    assert_eq!(
+        idle.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+}
+
+#[test]
+fn an_idle_notice_after_a_finished_wakeup_turn_stays_idle() {
+    let runtime = runtime("quiet-wakeup-finished-idle");
+    let topology = topology("claude");
+    claude_wakeup_turn(&runtime, &topology, "wake");
+    let stop = claude_hook(
+        &runtime,
+        &topology,
+        "wake-stop",
+        serde_json::json!({"hook_event_name": "Stop"}),
+    );
+    assert!(stop.notify);
+
+    let idle = claude_hook(
+        &runtime,
+        &topology,
+        "idle",
+        serde_json::json!({"hook_event_name": "Notification", "notification_type": "idle_prompt"}),
+    );
+    assert!(!idle.notify);
+    assert_eq!(
+        idle.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn a_wakeup_turn_stays_quiet_across_a_daemon_restart() {
+    let path = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("claude-wakeup-restart-{}", uuid::Uuid::new_v4()))
+        .join("agents.json");
+    let topology = topology("claude");
+    {
+        let runtime = AgentRuntime::isolated(path.clone());
+        claude_wakeup_turn(&runtime, &topology, "wake");
+    }
+
+    let restarted = AgentRuntime::isolated(path);
+    let held = claude_stop_with_work_left(&restarted, &topology, "stop-after-restart");
+    assert!(!held.notify);
+    assert_eq!(
+        held.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+}
+
+#[test]
+fn a_stop_after_a_block_on_a_wakeup_turn_is_not_held() {
+    let runtime = runtime("quiet-wakeup-after-block");
+    let topology = topology("claude");
+    claude_wakeup_turn(&runtime, &topology, "wake");
+    claude_hook(
+        &runtime,
+        &topology,
+        "permission",
+        serde_json::json!({"hook_event_name": "PermissionRequest"}),
+    );
+    let stopped = claude_stop_with_work_left(&runtime, &topology, "stop");
+    assert_eq!(
+        stopped.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Idle as i32
+    );
+}
+
+#[test]
+fn a_held_wakeup_turn_is_not_blocked_by_idle_but_is_by_a_permission() {
+    let runtime = runtime("quiet-wakeup-attention");
+    let topology = topology("claude");
+    claude_wakeup_turn(&runtime, &topology, "wake");
+    claude_stop_with_work_left(&runtime, &topology, "wake-stop");
+
+    let idle = claude_hook(
+        &runtime,
+        &topology,
+        "idle",
+        serde_json::json!({"hook_event_name": "Notification", "notification_type": "idle_prompt"}),
+    );
+    assert!(!idle.notify);
+    assert_eq!(
+        idle.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Working as i32
+    );
+
+    let permission = claude_hook(
+        &runtime,
+        &topology,
+        "permission",
+        serde_json::json!({"hook_event_name": "PermissionRequest"}),
+    );
+    assert!(permission.notify);
+    assert_eq!(
+        permission.agent.unwrap().lifecycle,
+        v1::AgentLifecycleState::Blocked as i32
+    );
+}

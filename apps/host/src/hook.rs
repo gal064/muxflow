@@ -31,6 +31,8 @@ const MAX_NORMALIZED_HOOK_BYTES: usize = 256 * 1024;
 /// How much of `last_assistant_message` a `Stop` forwards for voice mode.
 /// Cut rather than rejected: a long reply must never cost the `Stop` itself.
 const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
+/// How Claude Code opens the synthetic user turn that reports background work.
+const CLAUDE_TASK_NOTIFICATION_MARKER: &str = "<task-notification>";
 
 #[derive(Debug)]
 struct VendorHookPayload {
@@ -43,6 +45,8 @@ struct VendorHookPayload {
     turn_id: Option<String>,
     transcript_path: Option<String>,
     has_running_subagent: bool,
+    has_background_work: bool,
+    is_task_wakeup: bool,
     last_assistant_message: Option<TruncatedString>,
 }
 
@@ -67,6 +71,7 @@ enum HookField {
     TranscriptPath,
     TranscriptPathCamel,
     BackgroundTasks,
+    Prompt,
     LastAssistantMessage,
     LastAssistantMessageCamel,
     Unknown,
@@ -114,6 +119,7 @@ impl Visitor<'_> for HookFieldVisitor {
             "transcript_path" => HookField::TranscriptPath,
             "transcriptPath" => HookField::TranscriptPathCamel,
             "background_tasks" => HookField::BackgroundTasks,
+            "prompt" => HookField::Prompt,
             "last_assistant_message" => HookField::LastAssistantMessage,
             "lastAssistantMessage" => HookField::LastAssistantMessageCamel,
             _ => HookField::Unknown,
@@ -345,7 +351,8 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
         let mut turn_id_camel = None;
         let mut transcript_path = None;
         let mut transcript_path_camel = None;
-        let mut has_running_subagent = false;
+        let mut background_work = BackgroundWork::default();
+        let mut is_task_wakeup = false;
         let mut last_assistant_message = None;
         let mut last_assistant_message_camel = None;
 
@@ -379,9 +386,8 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
                 HookField::TranscriptPathCamel => {
                     transcript_path_camel = map.next_value::<BoundedString>()?.0
                 }
-                HookField::BackgroundTasks => {
-                    has_running_subagent = map.next_value::<RunningSubagent>()?.0
-                }
+                HookField::BackgroundTasks => background_work = map.next_value()?,
+                HookField::Prompt => is_task_wakeup = map.next_value::<TaskWakeupPrompt>()?.0,
                 HookField::LastAssistantMessage => {
                     last_assistant_message = map.next_value::<OptionalTruncatedString>()?.0
                 }
@@ -403,27 +409,52 @@ impl<'de> Visitor<'de> for VendorHookPayloadVisitor {
             tool_name: tool_name.or(tool_name_camel),
             turn_id: turn_id.or(turn_id_camel),
             transcript_path: transcript_path.or(transcript_path_camel),
-            has_running_subagent,
+            has_running_subagent: background_work.subagent,
+            has_background_work: background_work.shell_or_monitor,
+            is_task_wakeup,
             last_assistant_message: last_assistant_message.or(last_assistant_message_camel),
         })
     }
 }
 
-struct RunningSubagent(bool);
+/// Only the yes/no leaves this process. The prompt is user text of any size and
+/// may hold an unpaired surrogate, so it stays raw: decoding it would reject the
+/// whole hook.
+struct TaskWakeupPrompt(bool);
 
-impl<'de> Deserialize<'de> for RunningSubagent {
+impl<'de> Deserialize<'de> for TaskWakeupPrompt {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(RunningSubagentVisitor)
+        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+        Ok(Self(raw.get().strip_prefix('"').is_some_and(|text| {
+            text.starts_with(CLAUDE_TASK_NOTIFICATION_MARKER)
+        })))
     }
 }
 
-struct RunningSubagentVisitor;
+/// `shell_or_monitor` is an allowlist on purpose. Claude also lists internal
+/// work, such as memory saves, that never wakes the agent again.
+#[derive(Clone, Copy, Default)]
+struct BackgroundWork {
+    subagent: bool,
+    shell_or_monitor: bool,
+}
 
-impl<'de> Visitor<'de> for RunningSubagentVisitor {
-    type Value = RunningSubagent;
+impl<'de> Deserialize<'de> for BackgroundWork {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(BackgroundWorkVisitor)
+    }
+}
+
+struct BackgroundWorkVisitor;
+
+impl<'de> Visitor<'de> for BackgroundWorkVisitor {
+    type Value = BackgroundWork;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("a background task list or an ignored malformed value")
@@ -433,11 +464,12 @@ impl<'de> Visitor<'de> for RunningSubagentVisitor {
     where
         A: SeqAccess<'de>,
     {
-        let mut running = false;
+        let mut work = BackgroundWork::default();
         while let Some(task) = sequence.next_element::<BackgroundTaskMatch>()? {
-            running |= task.0;
+            work.subagent |= task.0.subagent;
+            work.shell_or_monitor |= task.0.shell_or_monitor;
         }
-        Ok(RunningSubagent(running))
+        Ok(work)
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -445,39 +477,39 @@ impl<'de> Visitor<'de> for RunningSubagentVisitor {
         A: MapAccess<'de>,
     {
         while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-        Ok(RunningSubagent(false))
+        Ok(BackgroundWork::default())
     }
 
     fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
-        Ok(RunningSubagent(false))
+        Ok(BackgroundWork::default())
     }
 
     fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
-        Ok(RunningSubagent(false))
+        Ok(BackgroundWork::default())
     }
 
     fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
-        Ok(RunningSubagent(false))
+        Ok(BackgroundWork::default())
     }
 
     fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
-        Ok(RunningSubagent(false))
+        Ok(BackgroundWork::default())
     }
 
     fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
-        Ok(RunningSubagent(false))
+        Ok(BackgroundWork::default())
     }
 
     fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
-        Ok(RunningSubagent(false))
+        Ok(BackgroundWork::default())
     }
 
     fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(RunningSubagent(false))
+        Ok(BackgroundWork::default())
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(RunningSubagent(false))
+        Ok(BackgroundWork::default())
     }
 }
 
@@ -515,7 +547,7 @@ impl Visitor<'_> for TaskFieldVisitor {
     }
 }
 
-struct BackgroundTaskMatch(bool);
+struct BackgroundTaskMatch(BackgroundWork);
 
 impl<'de> Deserialize<'de> for BackgroundTaskMatch {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -550,9 +582,11 @@ impl<'de> Visitor<'de> for BackgroundTaskMatchVisitor {
                 }
             }
         }
-        Ok(BackgroundTaskMatch(
-            task_type == TaskToken::Subagent && status == TaskToken::Running,
-        ))
+        Ok(BackgroundTaskMatch(BackgroundWork {
+            subagent: task_type == TaskToken::Subagent && status == TaskToken::Running,
+            shell_or_monitor: matches!(task_type, TaskToken::Shell | TaskToken::Monitor)
+                && matches!(status, TaskToken::Running | TaskToken::Pending),
+        }))
     }
 
     fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
@@ -560,46 +594,49 @@ impl<'de> Visitor<'de> for BackgroundTaskMatchVisitor {
         A: SeqAccess<'de>,
     {
         while sequence.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(BackgroundTaskMatch(false))
+        Ok(BackgroundTaskMatch(BackgroundWork::default()))
     }
 
     fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
-        Ok(BackgroundTaskMatch(false))
+        Ok(BackgroundTaskMatch(BackgroundWork::default()))
     }
 
     fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
-        Ok(BackgroundTaskMatch(false))
+        Ok(BackgroundTaskMatch(BackgroundWork::default()))
     }
 
     fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
-        Ok(BackgroundTaskMatch(false))
+        Ok(BackgroundTaskMatch(BackgroundWork::default()))
     }
 
     fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
-        Ok(BackgroundTaskMatch(false))
+        Ok(BackgroundTaskMatch(BackgroundWork::default()))
     }
 
     fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
-        Ok(BackgroundTaskMatch(false))
+        Ok(BackgroundTaskMatch(BackgroundWork::default()))
     }
 
     fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
-        Ok(BackgroundTaskMatch(false))
+        Ok(BackgroundTaskMatch(BackgroundWork::default()))
     }
 
     fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(BackgroundTaskMatch(false))
+        Ok(BackgroundTaskMatch(BackgroundWork::default()))
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(BackgroundTaskMatch(false))
+        Ok(BackgroundTaskMatch(BackgroundWork::default()))
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TaskToken {
     Subagent,
+    Shell,
+    Monitor,
     Running,
+    Pending,
     Other,
 }
 
@@ -624,7 +661,10 @@ impl<'de> Visitor<'de> for TaskTokenVisitor {
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
         Ok(match value {
             "subagent" => TaskToken::Subagent,
+            "shell" => TaskToken::Shell,
+            "monitor" => TaskToken::Monitor,
             "running" => TaskToken::Running,
+            "pending" => TaskToken::Pending,
             _ => TaskToken::Other,
         })
     }
@@ -1009,6 +1049,7 @@ fn build_event_from_payload(
     let codex_pre_tool = adapter == v1::AgentAdapterKind::Codex && event_name == "PreToolUse";
     let codex_child_event = adapter == v1::AgentAdapterKind::Codex && payload.agent_id.is_some();
     let claude_stop = adapter == v1::AgentAdapterKind::ClaudeCode && event_name == "Stop";
+    let event_name_is_turn_start = event_name == "UserPromptSubmit";
     // Both adapters send the final message on `Stop`; nothing else forwards
     // it, and `StopFailure` forwards nothing. The daemon hands it to voice mode
     // and keeps nothing (docs/mobile/voice-mode-plan.md §4.5).
@@ -1042,6 +1083,21 @@ fn build_event_from_payload(
         normalized.insert(
             crate::service::agents::adapters::CLAUDE_HAS_RUNNING_SUBAGENT_FIELD.into(),
             payload.has_running_subagent.into(),
+        );
+    }
+    if claude_stop && payload.has_background_work {
+        normalized.insert(
+            crate::service::agents::adapters::CLAUDE_HAS_BACKGROUND_WORK_FIELD.into(),
+            true.into(),
+        );
+    }
+    if adapter == v1::AgentAdapterKind::ClaudeCode
+        && event_name_is_turn_start
+        && payload.is_task_wakeup
+    {
+        normalized.insert(
+            crate::service::agents::adapters::CLAUDE_IS_TASK_WAKEUP_FIELD.into(),
+            true.into(),
         );
     }
     if stop
@@ -2057,11 +2113,92 @@ mod tests {
         }
     }
 
-    #[test]
-    fn claude_stop_ignores_non_subagent_background_work() {
+    fn normalized_claude_hook(raw: Vec<u8>) -> serde_json::Value {
         let event = build_event(
             v1::AgentAdapterKind::ClaudeCode,
-            br#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[{"id":"shell-private","type":"local_bash","status":"running","command":"sleep 300"}],"session_crons":[{"prompt":"private cron"}]}"#.to_vec(),
+            raw,
+            "%12",
+            "tmux:server-a",
+            7,
+            None,
+        )
+        .unwrap();
+        serde_json::from_slice(&event.payload_json).unwrap()
+    }
+
+    #[test]
+    fn claude_stop_counts_only_live_shells_and_monitors_as_background_work() {
+        for (task_type, status, expected) in [
+            ("shell", "running", true),
+            ("shell", "pending", true),
+            ("monitor", "running", true),
+            ("shell", "completed", false),
+            ("memory save", "running", false),
+            ("teammate", "running", false),
+        ] {
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": "Stop",
+                "background_tasks": [{"type": task_type, "status": status}],
+            }))
+            .unwrap();
+            assert_eq!(
+                normalized_claude_hook(raw)
+                    .get(crate::service::agents::adapters::CLAUDE_HAS_BACKGROUND_WORK_FIELD)
+                    .is_some(),
+                expected,
+                "{task_type} {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_wakeup_prompt_is_reduced_to_a_boolean() {
+        let field = crate::service::agents::adapters::CLAUDE_IS_TASK_WAKEUP_FIELD;
+        let long_report = format!(
+            "<task-notification>{}",
+            "x".repeat(MAX_LIFECYCLE_FIELD_BYTES * 2)
+        );
+        let wakeup = normalized_claude_hook(
+            serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": long_report,
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            wakeup,
+            serde_json::json!({"hook_event_name": "UserPromptSubmit", field: true})
+        );
+
+        let surrogate =
+            br#"{"hook_event_name":"UserPromptSubmit","prompt":"<task-notification>cut \ud83d"}"#;
+        assert_eq!(
+            normalized_claude_hook(surrogate.to_vec()),
+            serde_json::json!({"hook_event_name": "UserPromptSubmit", field: true})
+        );
+
+        for prompt in [
+            serde_json::json!("please explain <task-notification> to me"),
+            serde_json::json!(7),
+            serde_json::Value::Null,
+        ] {
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": prompt,
+            }))
+            .unwrap();
+            assert_eq!(
+                normalized_claude_hook(raw),
+                serde_json::json!({"hook_event_name": "UserPromptSubmit"})
+            );
+        }
+    }
+
+    #[test]
+    fn claude_stop_keeps_no_background_task_details() {
+        let event = build_event(
+            v1::AgentAdapterKind::ClaudeCode,
+            br#"{"hook_event_name":"Stop","session_id":"s","background_tasks":[{"id":"shell-private","type":"shell","status":"running","command":"sleep 300"}],"session_crons":[{"prompt":"private cron"}]}"#.to_vec(),
             "%12",
             "tmux:server-a",
             7,
@@ -2075,6 +2212,7 @@ mod tests {
                 "hook_event_name": "Stop",
                 "session_id": "s",
                 "has_running_subagent": false,
+                "has_background_work": true,
             })
         );
     }

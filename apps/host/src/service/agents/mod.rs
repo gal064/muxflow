@@ -19,6 +19,7 @@ mod hooks;
 mod identity;
 mod ingest;
 mod process;
+mod quiet_wakeups;
 mod reconcile;
 mod snapshot;
 mod store;

@@ -19,6 +19,9 @@ pub(crate) const CODEX_CHILD_TRANSITIONS_FIELD: &str = "child_transitions";
 pub(crate) const CODEX_SUBAGENT_ID_FIELD: &str = "agent_id";
 pub(crate) const MAX_CODEX_SUBAGENT_ID_BYTES: usize = 1024;
 pub(crate) const CLAUDE_HAS_RUNNING_SUBAGENT_FIELD: &str = "has_running_subagent";
+/// Inputs to the `quiet_wakeups` experiment. Read them only there.
+pub(crate) const CLAUDE_HAS_BACKGROUND_WORK_FIELD: &str = "has_background_work";
+pub(crate) const CLAUDE_IS_TASK_WAKEUP_FIELD: &str = "is_task_wakeup";
 /// Claude Code fires a subagent's tool hooks under its parent's session. The
 /// hook CLI reduces the subagent's ID to this boolean so ingest can tell that
 /// activity from the parent's own.
@@ -392,6 +395,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 // still running. The hook CLI reduces the raw task list to one
                 // privacy-safe boolean. Only this kind of background work
                 // extends the user's turn; commands and session crons do not.
+                // Ingest may also hold a wakeup turn; see `quiet_wakeups`.
                 ("Stop", stop_lifecycle),
                 // A failed turn is over. It is the case most worth surfacing
                 // and the one that used to leave the row working forever.
