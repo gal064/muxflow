@@ -8,7 +8,7 @@ export interface GridFence extends Grid { offset: number }
 
 /** RN → page. */
 export type ToPageMessage =
-  | { t: "init" }
+  | { t: "init"; fontSize: number }
   | { t: "seed"; b64: string; grid?: Grid }
   | { t: "grid"; cols: number; rows: number }
   | { t: "out"; b64: string }

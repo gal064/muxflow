@@ -13,6 +13,7 @@ import { AgentMark } from "../agents/ui/AgentMark";
 import { toRouteParam } from "../../navigation/routeParams";
 import { getConnection, toast } from "../../session/connectionManager";
 import { log } from "../../session/log";
+import { prefsStore } from "../../store/prefsStore";
 import { sessionStore } from "../../store/sessionStore";
 import { ConnectionStrip } from "../hosts/ConnectionStrip";
 import { BackIcon, FolderIcon, MicIcon, ShiftIcon } from "../../ui/components/MediaIcons";
@@ -128,6 +129,7 @@ export function TerminalScreen({ paneId, sessionId }: TerminalScreenProps) {
       registry: terminalRegistry,
       getConnection,
       page: { send: (message) => webview.current?.send(message) },
+      fontSize: prefsStore.getState().terminalFontSize,
       onChange: setSnapshot,
       log,
       foreground: appForeground,

@@ -33,7 +33,7 @@ describe("parsePersistedPrefs", () => {
     ['{"agentListMode":"Pinned"}', "priority"],
     ['{"agentListMode":"priority"}', "priority"],
   ])("%j → %s", (raw, mode) => {
-    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true });
+    expect(parsePersistedPrefs(raw)).toEqual({ agentListMode: mode, agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: 13 });
   });
 
   it.each<[string, number, boolean]>([
@@ -57,6 +57,12 @@ describe("parsePersistedPrefs", () => {
     expect(parsePersistedPrefs('{"voicePlayScreenOff":false}').voicePlayScreenOff).toBe(false);
     expect(parsePersistedPrefs('{"voicePlayScreenOff":"false"}').voicePlayScreenOff).toBe(true);
   });
+
+  it("accepts only an offered terminal font size and defaults to 13", () => {
+    expect(parsePersistedPrefs('{"terminalFontSize":15}').terminalFontSize).toBe(15);
+    expect(parsePersistedPrefs('{"terminalFontSize":14}').terminalFontSize).toBe(13);
+    expect(parsePersistedPrefs('{"terminalFontSize":"15"}').terminalFontSize).toBe(13);
+  });
 });
 
 describe("prefsStore", () => {
@@ -75,7 +81,7 @@ describe("prefsStore", () => {
     store.getState().setAgentListMode("workspace");
     expect(store.getState().agentListMode).toBe("workspace");
     await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(1));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true });
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "workspace", agentCommand: "codex", voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: 13 });
 
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
@@ -100,10 +106,21 @@ describe("prefsStore", () => {
     // Setting the value already held writes nothing.
     store.getState().setVoiceBigPane(true);
     await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(5));
-    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", agentCommand: "codex", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true, voicePlayScreenOff: false });
+    expect(JSON.parse(values.get(PREFS_STORAGE_KEY)!)).toEqual({ agentListMode: "pinned", agentCommand: "codex", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true, voicePlayScreenOff: false, terminalFontSize: 13 });
     const restarted = createPrefsStore(storage);
     await restarted.getState().hydrate();
     expect(restarted.getState()).toMatchObject({ agentListMode: "pinned", voicePlaybackRate: 2, voiceAutoPlay: false, voiceBigPane: true, voiceKeepAwake: true, voicePlayScreenOff: false });
+  });
+
+  it("restores the terminal font size after a restart", async () => {
+    const { storage, setItem } = fakeStore({});
+    const store = createPrefsStore(storage);
+    await store.getState().hydrate();
+    store.getState().setTerminalFontSize(17);
+    await vi.waitFor(() => expect(setItem).toHaveBeenCalledTimes(1));
+    const restarted = createPrefsStore(storage);
+    await restarted.getState().hydrate();
+    expect(restarted.getState().terminalFontSize).toBe(17);
   });
 
   it("persists the command used by the New agent shortcut", async () => {
