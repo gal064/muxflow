@@ -11,6 +11,7 @@ use tmux_agent_protocol::v1;
 use super::{broadcast_control_event, snapshot::server_identity};
 
 pub(crate) mod adapters;
+mod claude_session;
 mod codex_authority;
 pub(crate) mod codex_config;
 mod fallback;
@@ -50,6 +51,11 @@ const STALE_WORKING_TTL_MILLIS: i64 = 15 * 60 * 1_000;
 const STALE_SUBAGENT_WORKING_TTL_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 /** Three daemon maintenance passes (normally six seconds) make process absence conclusive. */
 const DEPARTURE_MISSES_REQUIRED: u8 = 3;
+/// How long Claude's session file may trail the hook that raised a block: it
+/// says `waiting` about 200ms after the hook fires.
+const CLAUDE_SESSION_LAG_MILLIS: i64 = 1_500;
+/// A block this old that Claude's session file no longer shows was dismissed.
+const CLAUDE_DISMISSED_BLOCK_MILLIS: i64 = 3_000;
 const MAX_PENDING_CODEX_PERMISSIONS: usize = 64;
 const PENDING_CODEX_PERMISSION_TTL_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 pub(crate) const MAX_CODEX_CHILDREN: usize = 64;
@@ -109,6 +115,8 @@ pub(crate) struct AgentRuntime {
     /// One exact-turn transcript descriptor per active Codex child. Paths and
     /// transcript contents never enter persisted state.
     codex_child_monitors: Mutex<BTreeMap<(String, String), CodexChildMonitor>>,
+    /// `~/.claude/sessions`, or `None` where the hooks alone decide.
+    claude_sessions_dir: Option<PathBuf>,
     /// Where a `Stop` hands the agent's final message: the host plugins, then
     /// voice mode, in production; a recorder in tests, so no test needs either.
     reply_sink: ReplySink,
@@ -120,11 +128,13 @@ static GLOBAL: OnceLock<Arc<AgentRuntime>> = OnceLock::new();
 
 impl AgentRuntime {
     pub(crate) fn global() -> Arc<Self> {
-        Arc::clone(
-            GLOBAL.get_or_init(|| {
-                Arc::new(Self::load(crate::paths::state_dir().join("agents.json")))
-            }),
-        )
+        Arc::clone(GLOBAL.get_or_init(|| {
+            let mut runtime = Self::load(crate::paths::state_dir().join("agents.json"));
+            runtime.claude_sessions_dir = crate::paths::account_home()
+                .ok()
+                .map(|home| home.join(".claude/sessions"));
+            Arc::new(runtime)
+        }))
     }
 
     fn load(state_path: PathBuf) -> Self {
@@ -147,6 +157,7 @@ impl AgentRuntime {
             departure_misses: Mutex::new(BTreeMap::new()),
             pending_codex_permissions: Mutex::new(BTreeMap::new()),
             codex_child_monitors: Mutex::new(BTreeMap::new()),
+            claude_sessions_dir: None,
             reply_sink,
         }
     }
@@ -154,6 +165,13 @@ impl AgentRuntime {
     #[cfg(test)]
     fn isolated(state_path: PathBuf) -> Self {
         Self::load(state_path)
+    }
+
+    #[cfg(test)]
+    fn isolated_with_claude_sessions(state_path: PathBuf, sessions_dir: PathBuf) -> Self {
+        let mut runtime = Self::load(state_path);
+        runtime.claude_sessions_dir = Some(sessions_dir);
+        runtime
     }
 
     #[cfg(test)]
@@ -687,6 +705,122 @@ impl AgentRuntime {
         events
     }
 
+    /// Whether Claude still shows the prompt behind this block.
+    fn claude_block_still_open(&self, record: &StoredAgent, now: i64) -> bool {
+        let Some(directory) = self.claude_sessions_dir.as_deref() else {
+            return false;
+        };
+        match claude_session::read_status(directory, &record.native_session_id) {
+            Some(claude_session::ClaudeSessionStatus::Waiting) => true,
+            Some(claude_session::ClaudeSessionStatus::Busy) => {
+                now.saturating_sub(record.lifecycle_changed_at_unix_millis)
+                    < CLAUDE_SESSION_LAG_MILLIS
+            }
+            _ => false,
+        }
+    }
+
+    /// Clear Claude blocks whose prompt is gone. Denying or cancelling a prompt
+    /// fires no hook, so without this the row stays blocked until the next
+    /// prompt. Resolving a block is not a completion and earns no attention.
+    fn sweep_claude_dismissed_blocks(&self) -> Vec<v1::AgentEvent> {
+        use claude_session::ClaudeSessionStatus as Status;
+        let Some(directory) = self.claude_sessions_dir.as_deref() else {
+            return Vec::new();
+        };
+        let now = now_millis();
+        let blocked = v1::AgentLifecycleState::Blocked as i32;
+        let candidates: Vec<(String, String)> = self
+            .state
+            .lock()
+            .unwrap()
+            .agents
+            .values()
+            .filter(|record| {
+                record.adapter == v1::AgentAdapterKind::ClaudeCode as i32
+                    && record.lifecycle == blocked
+                    && !record.native_session_id.is_empty()
+                    && now.saturating_sub(record.lifecycle_changed_at_unix_millis)
+                        >= CLAUDE_DISMISSED_BLOCK_MILLIS
+            })
+            .map(|record| (record.agent_id.clone(), record.native_session_id.clone()))
+            .collect();
+        let dismissed: Vec<(String, v1::AgentLifecycleState)> = candidates
+            .into_iter()
+            .filter_map(|(agent_id, session_id)| {
+                match claude_session::read_status(directory, &session_id)? {
+                    Status::Waiting => None,
+                    Status::Busy => Some((agent_id, v1::AgentLifecycleState::Working)),
+                    Status::Idle => Some((agent_id, v1::AgentLifecycleState::Idle)),
+                }
+            })
+            .collect();
+        if dismissed.is_empty() {
+            return Vec::new();
+        }
+        let mut state = self.state.lock().unwrap();
+        let original = state.clone();
+        let mut events = Vec::new();
+        for (agent_id, lifecycle) in dismissed {
+            if state
+                .agents
+                .get(&agent_id)
+                .is_none_or(|record| record.lifecycle != blocked)
+            {
+                continue;
+            }
+            state.generation = state.generation.saturating_add(1);
+            let generation = state.generation;
+            let record = state.agents.get_mut(&agent_id).expect("checked above");
+            let idle = lifecycle == v1::AgentLifecycleState::Idle;
+            record.lifecycle = lifecycle as i32;
+            record.claude_parent_blocked = false;
+            // The turn is over: a late idle notification must not re-block it.
+            record.hook_terminal = idle;
+            if idle {
+                record.claude_has_running_subagent = false;
+                record.subagent_evidence_observed_at_unix_millis = 0;
+                if record.attention_kind == "blocked"
+                    && record.seen_generation >= record.attention_generation
+                {
+                    record.attention_kind.clear();
+                }
+            }
+            record.lifecycle_observed_at_unix_millis = now;
+            record.lifecycle_changed_at_unix_millis = now;
+            record.updated_at_unix_millis = now;
+            record.state_generation = generation;
+            crate::diagnostics::record_lifecycle_decision(crate::diagnostics::LifecycleDecision {
+                input_origin: "unknown",
+                pane_id: &record.route.pane_id,
+                agent_id: &record.agent_id,
+                event: "ClaudeSessionFile",
+                child: false,
+                has_session_id: true,
+                has_turn_id: false,
+                session_relation: "current",
+                turn_relation: "current",
+                authority: "accepted",
+                lifecycle_before: "blocked",
+                lifecycle_after: lifecycle_label(record.lifecycle),
+                reason: "claude_prompt_dismissed",
+                active_children: usize::from(record.claude_has_running_subagent),
+            });
+            events.push(v1::AgentEvent {
+                agent: Some(snapshot::record(record)),
+                generation,
+                notify: false,
+                reason: "claude_prompt_dismissed".into(),
+                retired_agent_ids: Vec::new(),
+            });
+        }
+        if !events.is_empty() && self.persist_locked(&state).is_err() {
+            *state = original;
+            return Vec::new();
+        }
+        events
+    }
+
     /// Withdraw Working from agents that have gone silent past
     /// [`STALE_WORKING_TTL_MILLIS`], returning the events to publish.
     ///
@@ -1134,6 +1268,9 @@ pub(crate) fn maintain() {
             publish(event);
         }
         for event in runtime.sweep_codex_child_terminals() {
+            publish(event);
+        }
+        for event in runtime.sweep_claude_dismissed_blocks() {
             publish(event);
         }
     }
