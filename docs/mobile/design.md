@@ -1164,8 +1164,9 @@ States (shown as a centred overlay on the terminal area, 14 sp `--chrome-dim`):
 - pane no longer in topology (window closed elsewhere): replace the
   terminal with `"This terminal no longer exists."` and a `"Back"` button.
 
-Sizing rule (D6): the terminal uses JetBrains Mono at 13 px with
-line-height 1.2 (glyph cell ≈ 7.8 × 15.6 px). The WebView measures its
+Sizing rule (D6): the terminal uses JetBrains Mono at the size chosen in
+Settings (11, 13, 15 or 17 px, default 13) with line-height 1.2 (glyph cell
+≈ 7.8 × 15.6 px at 13 px). The WebView measures its
 own width and height, computes `cols = floor(width / cellWidth)`,
 `rows = floor(height / cellHeight)` (≈ 46 × 40 on a 390 dp phone in
 portrait with the keyboard hidden), posts `{ t: "size", cols, rows }` to
@@ -1508,7 +1509,7 @@ Bridge protocol (JSON via `postMessage` / `window.ReactNativeWebView.postMessage
 
 | direction | message |
 | --- | --- |
-| RN → page | `{ t: "init" }` → create the terminal at the measured size, 13 px font |
+| RN → page | `{ t: "init", fontSize }` → create the terminal at the measured size and that font size, or apply the size to the existing terminal and re-measure |
 | RN → page | `{ t: "seed", b64 }` → `term.reset(); term.write(bytes)` |
 | RN → page | `{ t: "out", b64 }` → `term.write(bytes)` |
 | RN → page | `{ t: "measure" }` → page re-measures and answers `size` |

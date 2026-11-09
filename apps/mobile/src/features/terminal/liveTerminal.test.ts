@@ -76,7 +76,7 @@ describe.skipIf(!availability.available)(`live terminal (${availability.reason ?
       log: (line) => log.push(line),
     });
     controller.start();
-    expect(page).toEqual([{ t: "init" }]);
+    expect(page).toEqual([{ t: "init", fontSize: 13 }]);
     controller.onPageMessage({ t: "ready" });
     controller.onPageMessage({ t: "size", cols: 46, rows: 40 });
     await waitFor("seed", () => page.find((m) => m.t === "seed"));
