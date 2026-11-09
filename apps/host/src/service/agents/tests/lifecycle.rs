@@ -3510,3 +3510,259 @@ fn a_pi_session_takes_the_generic_lifecycle_path() {
     );
     assert_eq!(runtime.snapshot_for("server-a").agents.len(), 1);
 }
+
+struct ClaudeSessionFixture {
+    runtime: AgentRuntime,
+    topology: tmux_control::TmuxSnapshot,
+    sessions: std::path::PathBuf,
+}
+
+/// A runtime reading a real session file, driven in the orders measured from
+/// Claude Code 2.1.319.
+fn claude_session_fixture(name: &str) -> ClaudeSessionFixture {
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("tmp")
+        .join(format!("phase6-agent-{name}-{}", uuid::Uuid::new_v4()));
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    ClaudeSessionFixture {
+        runtime: AgentRuntime::isolated_with_claude_sessions(
+            root.join("agents.json"),
+            sessions.clone(),
+        ),
+        topology: topology("claude"),
+        sessions,
+    }
+}
+
+impl ClaudeSessionFixture {
+    fn file_says(&self, status: &str) {
+        std::fs::write(
+            self.sessions.join(format!("{}.json", std::process::id())),
+            format!(r#"{{"sessionId":"native-1","status":"{status}"}}"#),
+        )
+        .unwrap();
+    }
+
+    fn hook(&self, id: &str, payload: serde_json::Value) -> v1::AgentEvent {
+        claude_hook(&self.runtime, &self.topology, id, payload)
+    }
+
+    fn subagent(&self, id: &str, event_name: &str) -> v1::AgentEvent {
+        self.hook(
+            id,
+            serde_json::json!({"hook_event_name": event_name, "from_subagent": true}),
+        )
+    }
+
+    fn parent(&self, id: &str, event_name: &str) -> v1::AgentEvent {
+        self.hook(id, serde_json::json!({"hook_event_name": event_name}))
+    }
+
+    fn parent_stop(&self, id: &str, running: bool) -> v1::AgentEvent {
+        self.hook(
+            id,
+            serde_json::json!({"hook_event_name": "Stop", "has_running_subagent": running}),
+        )
+    }
+
+    fn age_lifecycle(&self, millis: i64) {
+        for record in self.runtime.state.lock().unwrap().agents.values_mut() {
+            record.lifecycle_changed_at_unix_millis -= millis;
+        }
+    }
+
+    fn lifecycle(&self) -> v1::AgentLifecycleState {
+        let state = self.runtime.state.lock().unwrap();
+        v1::AgentLifecycleState::try_from(state.agents.values().next().unwrap().lifecycle).unwrap()
+    }
+
+    fn attention(&self) -> (u64, String) {
+        let state = self.runtime.state.lock().unwrap();
+        let record = state.agents.values().next().unwrap();
+        (record.attention_generation, record.attention_kind.clone())
+    }
+}
+
+/// The reported bug: a background subagent's prompt, with a sibling still
+/// running. It must read Blocked until answered, and alert exactly once.
+#[test]
+fn a_subagent_prompt_stays_blocked_through_sibling_activity() {
+    let fixture = claude_session_fixture("subagent-prompt-siblings");
+    fixture.file_says("busy");
+    fixture.parent("prompt", "UserPromptSubmit");
+    fixture.parent_stop("parent-stop", true);
+
+    let raised = fixture.subagent("permission", "PermissionRequest");
+    assert!(raised.notify);
+    let attention = fixture.attention();
+    assert_eq!(attention.1, "blocked");
+
+    // The file says `waiting` about 200ms after the hook. A sibling inside
+    // that gap is the race that lost the block in one of six live runs.
+    let inside_lag = fixture.subagent("sibling-in-gap", "PostToolUse");
+    assert!(!inside_lag.notify);
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Blocked);
+
+    fixture.file_says("waiting");
+    fixture.age_lifecycle(10_000);
+    for (id, event_name) in [
+        ("sibling-post", "PostToolUse"),
+        ("sibling-pre", "PreToolUse"),
+        ("sibling-stop", "SubagentStop"),
+    ] {
+        assert!(!fixture.subagent(id, event_name).notify, "{event_name}");
+        assert_eq!(
+            fixture.lifecycle(),
+            v1::AgentLifecycleState::Blocked,
+            "{event_name}"
+        );
+    }
+    // Claude's own notification for the same dialog, six seconds in.
+    let notification = fixture.hook(
+        "permission-notification",
+        serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt"
+        }),
+    );
+    assert!(!notification.notify, "one prompt, one alert");
+    // The parent waking for a finished sibling is not the prompt being answered.
+    fixture.parent("task-notification", "UserPromptSubmit");
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Blocked);
+    fixture.parent_stop("parent-stop-again", true);
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Blocked);
+    assert_eq!(fixture.attention(), attention);
+
+    fixture.file_says("busy");
+    fixture.subagent("approved", "PostToolUse");
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Working);
+    let done = fixture.parent_stop("final-stop", false);
+    assert!(done.notify, "the finished alert survives");
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Idle);
+    assert_eq!(fixture.attention().1, "completed");
+}
+
+#[test]
+fn answering_one_of_two_prompts_leaves_the_row_blocked() {
+    let fixture = claude_session_fixture("two-subagent-prompts");
+    fixture.file_says("waiting");
+    fixture.parent("prompt", "UserPromptSubmit");
+    assert!(fixture.subagent("first", "PermissionRequest").notify);
+    assert!(!fixture.subagent("second", "PermissionRequest").notify);
+    fixture.age_lifecycle(10_000);
+
+    // Claude keeps saying `waiting` until the last prompt is answered.
+    fixture.subagent("first-approved", "PostToolUse");
+    fixture.subagent("first-stopped", "SubagentStop");
+    fixture.parent("wake", "UserPromptSubmit");
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Blocked);
+
+    fixture.file_says("busy");
+    assert_eq!(fixture.runtime.sweep_claude_dismissed_blocks().len(), 1);
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Working);
+}
+
+/// The parent's `PostToolUse` arrives about 100ms before the file stops saying
+/// `waiting`. Holding it would turn a quick finish into Blocked to Idle, which
+/// earns no finished alert.
+#[test]
+fn a_parent_prompt_resolves_on_the_parents_own_event_despite_the_file() {
+    let fixture = claude_session_fixture("parent-prompt-file-lag");
+    fixture.file_says("waiting");
+    fixture.parent("prompt", "UserPromptSubmit");
+    assert!(fixture.parent("permission", "PermissionRequest").notify);
+    fixture.parent("approved", "PostToolUse");
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Working);
+    assert!(fixture.parent_stop("stop", false).notify);
+    assert_eq!(fixture.attention().1, "completed");
+}
+
+/// Denying or cancelling a prompt fires no hook. The row settles without an
+/// alert, and Claude's later idle notification cannot block it again.
+#[test]
+fn a_dismissed_prompt_clears_without_an_alert() {
+    let fixture = claude_session_fixture("dismissed-prompt");
+    fixture.file_says("waiting");
+    fixture.parent("prompt", "UserPromptSubmit");
+    fixture.parent("permission", "PermissionRequest");
+    let attention = fixture.attention();
+    fixture.age_lifecycle(10_000);
+    assert!(fixture.runtime.sweep_claude_dismissed_blocks().is_empty());
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Blocked);
+
+    fixture.file_says("idle");
+    let events = fixture.runtime.sweep_claude_dismissed_blocks();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].notify);
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Idle);
+    assert_eq!(fixture.attention(), attention);
+
+    let idle = fixture.hook(
+        "idle-notification",
+        serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "idle_prompt"
+        }),
+    );
+    assert!(!idle.notify);
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Idle);
+}
+
+#[test]
+fn a_dismissed_subagent_prompt_returns_to_working_while_work_remains() {
+    let fixture = claude_session_fixture("dismissed-subagent-prompt");
+    fixture.file_says("waiting");
+    fixture.parent("prompt", "UserPromptSubmit");
+    fixture.parent_stop("parent-stop", true);
+    fixture.subagent("permission", "PermissionRequest");
+    fixture.age_lifecycle(10_000);
+
+    fixture.file_says("busy");
+    assert!(!fixture.runtime.sweep_claude_dismissed_blocks()[0].notify);
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Working);
+    let state = fixture.runtime.state.lock().unwrap();
+    assert!(
+        state
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .claude_has_running_subagent
+    );
+}
+
+/// The file trails the hook, so a young block is not evidence of dismissal.
+#[test]
+fn a_fresh_block_is_not_dismissed_by_a_file_that_has_not_caught_up() {
+    let fixture = claude_session_fixture("fresh-block");
+    fixture.file_says("busy");
+    fixture.parent("prompt", "UserPromptSubmit");
+    fixture.parent("permission", "PermissionRequest");
+    assert!(fixture.runtime.sweep_claude_dismissed_blocks().is_empty());
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Blocked);
+}
+
+/// Without the file, or with one for another session, hooks decide alone.
+#[test]
+fn without_a_session_file_the_hooks_decide_alone() {
+    let fixture = claude_session_fixture("no-session-file");
+    fixture.parent("prompt", "UserPromptSubmit");
+    fixture.subagent("permission", "PermissionRequest");
+    fixture.age_lifecycle(10_000);
+    assert!(fixture.runtime.sweep_claude_dismissed_blocks().is_empty());
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Blocked);
+    fixture.subagent("next-event", "PostToolUse");
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Working);
+}
+
+#[test]
+fn a_new_session_start_is_never_held_by_an_open_prompt() {
+    let fixture = claude_session_fixture("session-start-during-prompt");
+    fixture.file_says("waiting");
+    fixture.parent("prompt", "UserPromptSubmit");
+    fixture.subagent("permission", "PermissionRequest");
+    fixture.parent("restart", "SessionStart");
+    assert_eq!(fixture.lifecycle(), v1::AgentLifecycleState::Idle);
+}
