@@ -71,6 +71,10 @@ pub fn runtime_dir() -> PathBuf {
         .unwrap_or_else(default_runtime_dir)
 }
 
+pub fn account_home() -> anyhow::Result<PathBuf> {
+    account_home_dir(unsafe { libc::geteuid() })
+}
+
 pub fn default_state_dir() -> anyhow::Result<PathBuf> {
     if let Some(path) = environment("ADE_HOST_RUNTIME_DIR") {
         return Ok(PathBuf::from(path));

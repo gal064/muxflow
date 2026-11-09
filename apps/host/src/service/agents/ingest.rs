@@ -1080,9 +1080,21 @@ impl AgentRuntime {
                 .get("notification_type")
                 .and_then(serde_json::Value::as_str)
                 == Some("idle_prompt");
-        let subagent_bookkeeping_during_block = previous_lifecycle
-            == v1::AgentLifecycleState::Blocked
-            && (codex_child_event
+        // A subagent's prompt says nothing about the next event: siblings fire
+        // tool hooks under this session, and the parent wakes when one ends. A
+        // block the parent raised is left to the parent's own events, whose
+        // `PostToolUse` beats the file and must still lead to a completion.
+        let claude_subagent_block_open = adapter.id() == "claude-code"
+            && previous_lifecycle == v1::AgentLifecycleState::Blocked
+            && !previous_claude_parent_blocked
+            && parsed.lifecycle != v1::AgentLifecycleState::Blocked
+            && parsed.event_name != "SessionStart"
+            && previous
+                .as_ref()
+                .is_some_and(|record| self.claude_block_still_open(record, observed_now));
+        let subagent_bookkeeping_during_block = claude_subagent_block_open
+            || previous_lifecycle == v1::AgentLifecycleState::Blocked
+                && (codex_child_event
                 || transcript_child_event
                 || adapter.id() == "claude-code" && parsed.event_name == "SubagentStop"
                 || codex_parent_stop_during_subagents

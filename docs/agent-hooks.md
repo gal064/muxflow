@@ -14,6 +14,15 @@ Process detection proves an agent is there, and its absence retires the row
 when the process exits; neither ever decides whether the agent is working,
 blocked, or idle.
 
+Claude Code hooks cannot say whether a prompt is still open, so the daemon also
+reads the `status` field of Claude's own `~/.claude/sessions/<pid>.json` for
+blocked sessions. While it says `waiting`, events from sibling subagents or the
+parent waking up do not clear a block a subagent raised. When a block older than
+three seconds is no longer `waiting`, it was dismissed, which fires no hook, and
+it clears without a notification. The file is undocumented, so if it is absent
+or unreadable (including under a custom `CLAUDE_CONFIG_DIR`), hooks decide
+alone. Only the session ID and status are read from it.
+
 Hook installation is always a separate, reviewable action from remote-helper
 installation. The review shows every touched file, before/after hashes, a
 redacted diff, the exact managed command, and adapter trust guidance. Confirming
