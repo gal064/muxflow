@@ -686,6 +686,13 @@ pub(crate) async fn run(arguments: Vec<String>) -> anyhow::Result<()> {
     let Some(pane_id) = pane_for_hook(std::env::var_os("TMUX_PANE"))? else {
         return Ok(());
     };
+    // The pane belongs to the outer agent; a Claude it launched only inherited
+    // the pane ID. Codex keeps its own nested-session authority in the daemon.
+    if adapter == v1::AgentAdapterKind::ClaudeCode
+        && crate::service::agents::runs_beneath_another_agent()
+    {
+        return Ok(());
+    }
     let origin_server_identity =
         crate::service::snapshot::inherited_server_identity().unwrap_or_default();
     let now = now_millis();
