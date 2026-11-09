@@ -311,6 +311,7 @@ fn persist_failure_rolls_back_runtime_mutations() {
         departure_misses: Mutex::new(BTreeMap::new()),
         pending_codex_permissions: Mutex::new(BTreeMap::new()),
         codex_child_monitors: Mutex::new(BTreeMap::new()),
+        claude_sessions_dir: None,
         reply_sink: Box::new(|_| {}),
     };
     let agent_id = baseline_state.agents.keys().next().unwrap().clone();

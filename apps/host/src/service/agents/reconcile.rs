@@ -159,6 +159,7 @@ pub(super) fn topology(
                 codex_latest_subagent_turns: Default::default(),
                 codex_terminal_subagent_turns: Default::default(),
                 claude_has_running_subagent: false,
+                claude_wakeup_turn: false,
                 claude_parent_blocked: false,
                 codex_running_subagents: Default::default(),
                 codex_subagent_capacity_exceeded: false,

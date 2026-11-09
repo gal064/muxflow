@@ -19,7 +19,7 @@ fn temporary_runtime() -> PathBuf {
     let root = if cfg!(target_os = "macos") {
         PathBuf::from("/private/tmp")
     } else {
-        std::env::current_dir().unwrap().join("tmp")
+        PathBuf::from("/tmp")
     };
     let runtime = root.join(format!("bridge-cli-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&runtime).unwrap();

@@ -124,6 +124,10 @@ pub(super) struct StoredAgent {
     /// notification cannot turn that live work into a false blocked state.
     #[serde(default)]
     pub claude_has_running_subagent: bool,
+    /// The current Claude turn was started by a background task reporting in.
+    /// Used only by the `quiet_wakeups` experiment.
+    #[serde(default)]
+    pub claude_wakeup_turn: bool,
     /// Claude's parent raised the current block itself (a question or its own
     /// permission prompt). Its subagents keep firing tool hooks while it waits,
     /// so only the parent's own next event may resolve the block.
@@ -870,6 +874,7 @@ mod tests {
                 codex_latest_subagent_turns: VecDeque::new(),
                 codex_terminal_subagent_turns: VecDeque::new(),
                 claude_has_running_subagent: false,
+                claude_wakeup_turn: false,
                 claude_parent_blocked: false,
                 codex_running_subagents: BTreeMap::new(),
                 codex_subagent_capacity_exceeded: false,
