@@ -253,9 +253,8 @@ fn launch_agent(
     }
     let adapter = super::super::agents::adapters::by_id(&request.adapter_id)
         .context("supported agent adapter is required")?;
-    let launch_argv = agent_launch_argv(launch_spec(adapter, action, &request.native_session_id)?);
     let placement = placement_for(request, action)?;
-    let root = {
+    let (root, source_title) = {
         let baseline = topology_baseline.lock().unwrap();
         let (snapshot, baseline_identity) = baseline
             .as_ref()
@@ -265,11 +264,29 @@ fn launch_agent(
         }
         validate_placement_target(request, placement, snapshot)?;
         if branch {
-            branch_root(request, snapshot)?
+            let source = branch_source(request, snapshot)?;
+            // A tab with a locked name publishes no pane title: that name is
+            // the one its agent goes by.
+            let title = if source.title.is_empty() {
+                snapshot
+                    .windows
+                    .iter()
+                    .find(|window| window.id == source.window_id)
+                    .map_or("", |window| window.name.as_str())
+            } else {
+                source.title.as_str()
+            };
+            (source.current_path.clone(), title.to_owned())
         } else {
-            request.active_root.clone()
+            (request.active_root.clone(), String::new())
         }
     };
+    let launch_argv = agent_launch_argv(launch_spec(
+        adapter,
+        action,
+        &request.native_session_id,
+        &source_title,
+    )?);
     let split = placement == v1::AgentPlacementKind::Split;
     let output = if split {
         validate_tmux_id(&request.pane_id, '%')?;
@@ -312,12 +329,13 @@ fn launch_spec(
     adapter: &dyn AgentAdapter,
     action: v1::AgentActionKind,
     native_session_id: &str,
+    source_title: &str,
 ) -> anyhow::Result<LaunchSpec> {
     use v1::AgentActionKind::{Branch, Resume};
     match (action, native_session_id) {
         (Resume | Branch, "") => bail!("resume and branch require a native session ID"),
         (Resume, id) => Ok(adapter.launch(Some(id))),
-        (Branch, id) => Ok(adapter.branch(id)),
+        (Branch, id) => Ok(adapter.branch(id, source_title)),
         _ => Ok(adapter.launch(None)),
     }
 }
@@ -377,24 +395,24 @@ fn validate_placement_target(
     Ok(())
 }
 
-/// The folder a branch opens in: its source agent's, whichever one is on screen.
-fn branch_root(
+/// The pane a branch copies, whose folder it opens in whichever one is on screen.
+fn branch_source<'a>(
     request: &v1::AgentRequest,
-    snapshot: &tmux_control::TmuxSnapshot,
-) -> anyhow::Result<String> {
+    snapshot: &'a tmux_control::TmuxSnapshot,
+) -> anyhow::Result<&'a tmux_control::Pane> {
     validate_tmux_id(&request.pane_id, '%')?;
-    let root = snapshot
+    let source = snapshot
         .panes
         .iter()
         .find(|pane| pane.id == request.pane_id && pane.session_id == request.session_id)
-        .map(|pane| pane.current_path.clone())
         .context("branch source pane is no longer in its workspace")?;
+    let root = &source.current_path;
     // tmux falls back to another folder without complaint, and an agent must not
     // quietly carry on somewhere its conversation knows nothing about.
-    if !std::path::Path::new(&root).is_dir() {
+    if !std::path::Path::new(root).is_dir() {
         bail!("branch source folder no longer exists: {root}");
     }
-    Ok(root)
+    Ok(source)
 }
 
 fn validate_tmux_id(value: &str, prefix: char) -> anyhow::Result<()> {
@@ -570,12 +588,15 @@ mod tests {
             active_root: "/somewhere/else".into(),
             ..Default::default()
         };
-        assert_eq!(branch_root(&request, &snapshot).unwrap(), folder);
+        assert_eq!(
+            branch_source(&request, &snapshot).unwrap().current_path,
+            folder
+        );
         request.session_id = "$9".into();
-        assert!(branch_root(&request, &snapshot).is_err());
+        assert!(branch_source(&request, &snapshot).is_err());
         request.session_id = "$1".into();
         request.pane_id = "active".into();
-        assert!(branch_root(&request, &snapshot).is_err());
+        assert!(branch_source(&request, &snapshot).is_err());
     }
 
     #[test]
@@ -587,27 +608,27 @@ mod tests {
         };
         let mut snapshot = one_pane_snapshot();
         snapshot.panes[0].current_path = "/nonexistent/muxflow-worktree".into();
-        assert!(branch_root(&request, &snapshot).is_err());
+        assert!(branch_source(&request, &snapshot).is_err());
         snapshot.panes[0].current_path = String::new();
-        assert!(branch_root(&request, &snapshot).is_err());
+        assert!(branch_source(&request, &snapshot).is_err());
     }
 
     #[test]
     fn resume_and_branch_need_a_session_and_launch_does_not() {
         use v1::AgentActionKind::{Branch, LaunchWindow, Resume};
         let adapter = crate::service::agents::adapters::by_id("codex").unwrap();
-        assert!(launch_spec(adapter, Resume, "").is_err());
-        assert!(launch_spec(adapter, Branch, "").is_err());
+        assert!(launch_spec(adapter, Resume, "", "").is_err());
+        assert!(launch_spec(adapter, Branch, "", "").is_err());
         assert_eq!(
-            launch_spec(adapter, Resume, "id").unwrap().arguments,
+            launch_spec(adapter, Resume, "id", "").unwrap().arguments,
             ["resume", "id"]
         );
         assert_eq!(
-            launch_spec(adapter, Branch, "id").unwrap().arguments,
+            launch_spec(adapter, Branch, "id", "").unwrap().arguments,
             ["fork", "id"]
         );
         assert!(
-            launch_spec(adapter, LaunchWindow, "ignored")
+            launch_spec(adapter, LaunchWindow, "ignored", "")
                 .unwrap()
                 .arguments
                 .is_empty()
