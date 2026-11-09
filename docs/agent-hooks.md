@@ -14,6 +14,15 @@ Process detection proves an agent is there, and its absence retires the row
 when the process exits; neither ever decides whether the agent is working,
 blocked, or idle.
 
+Claude Code hooks cannot say whether a prompt is still open, so the daemon also
+reads the `status` field of Claude's own `~/.claude/sessions/<pid>.json` for
+blocked sessions. While it says `waiting`, events from sibling subagents or the
+parent waking up do not clear a block a subagent raised. When a block older than
+three seconds is no longer `waiting`, it was dismissed, which fires no hook, and
+it clears without a notification. The file is undocumented, so if it is absent
+or unreadable (including under a custom `CLAUDE_CONFIG_DIR`), hooks decide
+alone. Only the session ID and status are read from it.
+
 Hook installation is always a separate, reviewable action from remote-helper
 installation. The review shows every touched file, before/after hashes, a
 redacted diff, the exact managed command, and adapter trust guidance. Confirming
@@ -259,12 +268,24 @@ matching older child without clearing the same child ID after a known resume
 under a newer root.
 A parent `Stop` remains Working until that map is empty,
 including across daemon restarts, while a real Blocked state remains Blocked
-until its own question or permission resolves. A Claude `Stop` retains only a boolean
-saying whether a subagent is still running; task descriptions, commands, IDs,
-and the rest of Claude's background-task payload are discarded. The daemon
-retains that boolean until the final `Stop`, including across restarts, so
-Claude's routine idle notification cannot misreport a long-running subagent as
-blocked. Malformed or stale events are rejected. A real permission request
+until its own question or permission resolves. A Claude `Stop` retains only two
+booleans: whether a subagent is still running, and whether a background shell or
+monitor is. Task descriptions, commands, IDs, and the rest of Claude's
+background-task payload are discarded. The daemon retains the subagent boolean
+until the final `Stop`, including across restarts, so Claude's routine idle
+notification cannot misreport a long-running subagent as blocked.
+
+An experiment, being evaluated, holds notifications on Claude turns started by
+a background task: such a turn stays Working while a shell or monitor is still
+running, and the turn that ends with none left sends the completion. Turns the
+user started notify as usual. `UserPromptSubmit` retains only a boolean saying
+whether the prompt was Claude's background-task report, and never the prompt.
+Claude's routine idle notice does not read as blocked during such a turn.
+Each held turn is recorded in the diagnostics as `quiet_wakeup_held`. The
+reasoning, known costs and off switch are in
+`apps/host/src/service/agents/quiet_wakeups.rs`.
+
+Malformed or stale events are rejected. A real permission request
 remains blocked even if an idle notification follows it. The 24-hour recovery
 bound uses a separate child-evidence clock, so unrelated hooks cannot keep stale
 evidence alive. A temporarily unavailable daemon retains only bounded, atomic

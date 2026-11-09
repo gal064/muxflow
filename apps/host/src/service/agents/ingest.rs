@@ -182,7 +182,7 @@ impl AgentRuntime {
         let payload: serde_json::Value = serde_json::from_slice(&event.payload_json)
             .context("parse hook JSON")
             .map_err(HookIngestFailure::Permanent)?;
-        let parsed = adapter
+        let mut parsed = adapter
             .parse_hook(&payload)
             .map_err(anyhow::Error::msg)
             .map_err(HookIngestFailure::Permanent)?;
@@ -1072,17 +1072,46 @@ impl AgentRuntime {
             && previous_lifecycle != v1::AgentLifecycleState::Blocked
             && codex_running_subagents.is_empty()
             && !codex_subagent_capacity_exceeded;
+        let previous_claude_wakeup_turn = previous
+            .as_ref()
+            .is_some_and(|record| record.claude_wakeup_turn);
+        let claude_quiet_wakeup_stop = adapter.id() == "claude-code"
+            && parsed.event_name == "Stop"
+            && previous_lifecycle != v1::AgentLifecycleState::Blocked
+            && super::quiet_wakeups::stay_working(
+                previous_claude_wakeup_turn,
+                payload
+                    .get(adapters::CLAUDE_HAS_BACKGROUND_WORK_FIELD)
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true),
+            );
+        if claude_quiet_wakeup_stop {
+            parsed.lifecycle = v1::AgentLifecycleState::Working;
+        }
         let claude_idle_prompt_during_subagent = adapter.id() == "claude-code"
-            && previous_claude_has_running_subagent
+            && (previous_claude_has_running_subagent
+                || super::quiet_wakeups::ignore_idle_notice(previous_claude_wakeup_turn))
             && previous_lifecycle != v1::AgentLifecycleState::Blocked
             && parsed.event_name == "Notification"
             && payload
                 .get("notification_type")
                 .and_then(serde_json::Value::as_str)
                 == Some("idle_prompt");
-        let subagent_bookkeeping_during_block = previous_lifecycle
-            == v1::AgentLifecycleState::Blocked
-            && (codex_child_event
+        // A subagent's prompt says nothing about the next event: siblings fire
+        // tool hooks under this session, and the parent wakes when one ends. A
+        // block the parent raised is left to the parent's own events, whose
+        // `PostToolUse` beats the file and must still lead to a completion.
+        let claude_subagent_block_open = adapter.id() == "claude-code"
+            && previous_lifecycle == v1::AgentLifecycleState::Blocked
+            && !previous_claude_parent_blocked
+            && parsed.lifecycle != v1::AgentLifecycleState::Blocked
+            && parsed.event_name != "SessionStart"
+            && previous
+                .as_ref()
+                .is_some_and(|record| self.claude_block_still_open(record, observed_now));
+        let subagent_bookkeeping_during_block = claude_subagent_block_open
+            || previous_lifecycle == v1::AgentLifecycleState::Blocked
+                && (codex_child_event
                 || transcript_child_event
                 || adapter.id() == "claude-code" && parsed.event_name == "SubagentStop"
                 || codex_parent_stop_during_subagents
@@ -1272,16 +1301,28 @@ impl AgentRuntime {
             if terminal_late {
                 previous_claude_has_running_subagent
             } else {
-                payload
-                    .get(adapters::CLAUDE_HAS_RUNNING_SUBAGENT_FIELD)
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
+                claude_quiet_wakeup_stop
+                    || payload
+                        .get(adapters::CLAUDE_HAS_RUNNING_SUBAGENT_FIELD)
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
             }
         } else if matches!(parsed.event_name.as_str(), "SessionStart" | "StopFailure") {
             false
         } else {
             previous_claude_has_running_subagent
         };
+        let claude_wakeup_turn = adapter.id() == "claude-code"
+            && match parsed.event_name.as_str() {
+                "UserPromptSubmit" => {
+                    payload
+                        .get(adapters::CLAUDE_IS_TASK_WAKEUP_FIELD)
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                }
+                "SessionStart" | "StopFailure" => false,
+                _ => previous_claude_wakeup_turn,
+            };
         // Only a parent event that raises the block itself claims it. One that
         // merely keeps a block (a `Stop` with live subagents) or cannot be
         // attributed (`Notification` never carries the subagent's identity)
@@ -1405,6 +1446,7 @@ impl AgentRuntime {
             codex_latest_subagent_turns,
             codex_terminal_subagent_turns,
             claude_has_running_subagent,
+            claude_wakeup_turn,
             claude_parent_blocked,
             codex_running_subagents,
             codex_subagent_capacity_exceeded,
@@ -1554,6 +1596,9 @@ impl AgentRuntime {
                 lifecycle_after: lifecycle_enum_name(lifecycle),
                 reason: if codex_ignored_root_event {
                     "root_authority_ignored"
+                } else if claude_quiet_wakeup_stop && lifecycle == v1::AgentLifecycleState::Working
+                {
+                    "quiet_wakeup_held"
                 } else {
                     reason
                 },
