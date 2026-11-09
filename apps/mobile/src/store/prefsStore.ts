@@ -7,6 +7,7 @@
 import { createStore, type StoreApi } from "zustand/vanilla";
 
 import { isAgentListMode, type AgentListMode } from "../features/agents/agentListModel";
+import { DEFAULT_TERMINAL_FONT_SIZE, isTerminalFontSize, type TerminalFontSize } from "../features/terminal/sizing";
 import { secureStoreStorage, type KeyValueStorage } from "./secureStorage";
 
 export const PREFS_STORAGE_KEY = "muxflow.prefs.v1";
@@ -32,6 +33,7 @@ export interface PrefsPersisted {
   voiceKeepAwake: boolean;
   /** Android: keep playing voice replies when the phone is turned off on the Voice screen. */
   voicePlayScreenOff: boolean;
+  terminalFontSize: TerminalFontSize;
 }
 
 export interface PrefsState extends PrefsPersisted {
@@ -49,11 +51,12 @@ export interface PrefsActions {
   setVoiceBigPane(big: boolean): void;
   setVoiceKeepAwake(keepAwake: boolean): void;
   setVoicePlayScreenOff(playScreenOff: boolean): void;
+  setTerminalFontSize(size: TerminalFontSize): void;
 }
 
 export type PrefsStore = StoreApi<PrefsState & PrefsActions>;
 
-export const DEFAULT_PREFS: PrefsPersisted = { agentListMode: "priority", agentCommand: DEFAULT_AGENT_COMMAND, voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true };
+export const DEFAULT_PREFS: PrefsPersisted = { agentListMode: "priority", agentCommand: DEFAULT_AGENT_COMMAND, voicePlaybackRate: 1, voiceAutoPlay: true, voiceBigPane: false, voiceKeepAwake: false, voicePlayScreenOff: true, terminalFontSize: DEFAULT_TERMINAL_FONT_SIZE };
 
 /** Tolerates anything on disk: an unknown or missing field falls back to its default. */
 export function parsePersistedPrefs(raw: string | null): PrefsPersisted {
@@ -69,6 +72,7 @@ export function parsePersistedPrefs(raw: string | null): PrefsPersisted {
       voiceBigPane: typeof fields.voiceBigPane === "boolean" ? fields.voiceBigPane : DEFAULT_PREFS.voiceBigPane,
       voiceKeepAwake: typeof fields.voiceKeepAwake === "boolean" ? fields.voiceKeepAwake : DEFAULT_PREFS.voiceKeepAwake,
       voicePlayScreenOff: typeof fields.voicePlayScreenOff === "boolean" ? fields.voicePlayScreenOff : DEFAULT_PREFS.voicePlayScreenOff,
+      terminalFontSize: isTerminalFontSize(fields.terminalFontSize) ? fields.terminalFontSize : DEFAULT_PREFS.terminalFontSize,
     };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -81,8 +85,8 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
 
   return createStore<PrefsState & PrefsActions>((set, get) => {
     const persist = (): void => {
-      const { agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake, voicePlayScreenOff } = get();
-      const value = JSON.stringify({ agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake, voicePlayScreenOff } satisfies PrefsPersisted);
+      const { agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake, voicePlayScreenOff, terminalFontSize } = get();
+      const value = JSON.stringify({ agentListMode, agentCommand, voicePlaybackRate, voiceAutoPlay, voiceBigPane, voiceKeepAwake, voicePlayScreenOff, terminalFontSize } satisfies PrefsPersisted);
       writes = writes.then(
         () =>
           storage.setItem(PREFS_STORAGE_KEY, value).catch((error: unknown) => {
@@ -150,6 +154,12 @@ export function createPrefsStore(storage: KeyValueStorage): PrefsStore {
       setVoicePlayScreenOff(playScreenOff) {
         if (get().voicePlayScreenOff === playScreenOff && get().hydrated) return;
         set({ voicePlayScreenOff: playScreenOff, hydrated: true });
+        persist();
+      },
+
+      setTerminalFontSize(size) {
+        if (get().terminalFontSize === size && get().hydrated) return;
+        set({ terminalFontSize: size, hydrated: true });
         persist();
       },
     };
