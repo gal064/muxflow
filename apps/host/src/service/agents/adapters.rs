@@ -2,6 +2,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tmux_agent_protocol::v1;
 
+use crate::service::topology::agent_title_suffix;
+
 mod pi;
 
 const HOOK_AUTHORITY_MILLIS: i64 = 30_000;
@@ -47,6 +49,22 @@ pub(crate) struct LaunchSpec {
     pub(crate) arguments: Vec<String>,
 }
 
+/// The display name for a copy of the conversation named `source`. A name that
+/// is already a fork is not marked twice, and leading dashes are dropped so a
+/// terminal title can never be read as a command-line flag.
+fn fork_name(source: &str) -> String {
+    let source = source
+        .trim_start_matches(|c: char| c == '-' || c.is_whitespace())
+        .trim_end();
+    if source.is_empty() || source == "fork" {
+        "fork".to_owned()
+    } else if source.ends_with(" (fork)") {
+        source.to_owned()
+    } else {
+        format!("{source} (fork)")
+    }
+}
+
 pub(crate) trait AgentAdapter: Send + Sync {
     fn kind(&self) -> &'static str;
     fn legacy_kind(&self) -> v1::AgentAdapterKind;
@@ -64,8 +82,11 @@ pub(crate) trait AgentAdapter: Send + Sync {
     fn launch(&self, native_session_id: Option<&str>) -> LaunchSpec;
     /// Continues a copy of a conversation under a new native session. Required
     /// rather than defaulted: the vendors share no spelling, and a new adapter
-    /// must say what its own is.
-    fn branch(&self, native_session_id: &str) -> LaunchSpec;
+    /// must say what its own is. `source_title` is the source pane's terminal
+    /// title, or its tab's name if that is locked; a vendor with a display-name
+    /// option uses it to tell the copy from its original, which otherwise looks
+    /// identical.
+    fn branch(&self, native_session_id: &str, source_title: &str) -> LaunchSpec;
     fn parse_hook(&self, payload: &Value) -> Result<ParsedHook, &'static str>;
 
     /// The whole file this adapter installs at [`Self::hook_path`], for an
@@ -207,7 +228,8 @@ impl AgentAdapter for CodexAdapter {
         }
     }
 
-    fn branch(&self, native_session_id: &str) -> LaunchSpec {
+    // `codex fork` has no display-name option.
+    fn branch(&self, native_session_id: &str, _source_title: &str) -> LaunchSpec {
         LaunchSpec {
             program: self.executable(),
             arguments: vec!["fork".to_owned(), native_session_id.to_owned()],
@@ -317,13 +339,16 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
     /// `--fork-session` is what Claude's `/branch` is on the command line; its
     /// `/fork` is a different thing, a background copy.
-    fn branch(&self, native_session_id: &str) -> LaunchSpec {
+    fn branch(&self, native_session_id: &str, source_title: &str) -> LaunchSpec {
+        let source_name = agent_title_suffix(source_title).unwrap_or(source_title);
         LaunchSpec {
             program: self.executable(),
             arguments: vec![
                 "--resume".to_owned(),
                 native_session_id.to_owned(),
                 "--fork-session".to_owned(),
+                "--name".to_owned(),
+                fork_name(source_name),
             ],
         }
     }
@@ -497,6 +522,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fork_names_mark_the_copy_once_and_cannot_become_a_flag() {
+        assert_eq!(fork_name("Fix tests"), "Fix tests (fork)");
+        assert_eq!(fork_name("Fix tests (fork)"), "Fix tests (fork)");
+        assert_eq!(fork_name("--dangerous"), "dangerous (fork)");
+        assert_eq!(fork_name(" - "), "fork");
+        assert_eq!(fork_name(""), "fork");
+        assert_eq!(fork_name("fork"), "fork");
+    }
+
+    #[test]
     fn process_detection_uses_exact_executable_basename() {
         assert_eq!(
             detect("/usr/local/bin/codex").unwrap().display_name(),
@@ -664,11 +699,20 @@ mod tests {
         );
         assert!(claude.descriptor(home, &observed[1].1).supports_resume);
         assert_eq!(
-            claude.branch("session-1").arguments,
-            ["--resume", "session-1", "--fork-session"]
+            claude.branch("session-1", "✳ Fix tests").arguments,
+            [
+                "--resume",
+                "session-1",
+                "--fork-session",
+                "--name",
+                "Fix tests (fork)"
+            ]
         );
         assert_eq!(
-            by_id("codex").unwrap().branch("session-1").arguments,
+            by_id("codex")
+                .unwrap()
+                .branch("session-1", "Fix tests")
+                .arguments,
             ["fork", "session-1"]
         );
         // Each descriptor carries its own adapter's observation and no other's,

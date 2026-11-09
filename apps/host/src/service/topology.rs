@@ -63,7 +63,7 @@ pub(super) fn equivalent_agent_title(previous: &str, current: &str) -> bool {
 
 /// Returns the meaningful suffix of a title beginning with one or more known
 /// Claude Code or Codex status markers.
-fn agent_title_suffix(title: &str) -> Option<&str> {
+pub(crate) fn agent_title_suffix(title: &str) -> Option<&str> {
     let mut remaining = title;
     let mut marked = false;
 
