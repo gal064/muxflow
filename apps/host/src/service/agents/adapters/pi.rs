@@ -3,7 +3,7 @@ use std::path::Path;
 use serde_json::Value;
 use tmux_agent_protocol::v1;
 
-use super::{AgentAdapter, LaunchSpec, MANAGED_OWNER, MANAGED_VERSION, ParsedHook};
+use super::{AgentAdapter, LaunchSpec, MANAGED_OWNER, MANAGED_VERSION, ParsedHook, fork_name};
 
 /// The first line of the installed extension. Ownership is decided by this
 /// line alone: a file at the same path without it belongs to the user.
@@ -78,10 +78,21 @@ impl AgentAdapter for PiAdapter {
         }
     }
 
-    fn branch(&self, native_session_id: &str) -> LaunchSpec {
+    fn branch(&self, native_session_id: &str, source_title: &str) -> LaunchSpec {
+        // pi titles a named session "π - name - folder", an unnamed one "π - folder".
+        // Anything else is a locked tab's own name.
+        let source_name = match source_title.strip_prefix("π - ") {
+            Some(rest) => rest.rsplit_once(" - ").map_or("", |(name, _folder)| name),
+            None => source_title,
+        };
         LaunchSpec {
             program: self.executable(),
-            arguments: vec!["--fork".to_owned(), native_session_id.to_owned()],
+            arguments: vec![
+                "--fork".to_owned(),
+                native_session_id.to_owned(),
+                "--name".to_owned(),
+                fork_name(source_name),
+            ],
         }
     }
 
@@ -169,8 +180,18 @@ mod tests {
     fn pi_resumes_by_session() {
         assert!(PiAdapter.launch(None).arguments.is_empty());
         assert_eq!(
-            PiAdapter.branch("0193-abc").arguments,
-            ["--fork", "0193-abc"]
+            PiAdapter
+                .branch("0193-abc", "π - Fix tests - muxflow")
+                .arguments,
+            ["--fork", "0193-abc", "--name", "Fix tests (fork)"]
+        );
+        assert_eq!(
+            PiAdapter.branch("0193-abc", "π - muxflow").arguments,
+            ["--fork", "0193-abc", "--name", "fork"]
+        );
+        assert_eq!(
+            PiAdapter.branch("0193-abc", "Nightly triage").arguments,
+            ["--fork", "0193-abc", "--name", "Nightly triage (fork)"]
         );
         assert_eq!(
             PiAdapter.launch(Some("0193-abc")).arguments,
