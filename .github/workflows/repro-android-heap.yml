@@ -1,0 +1,40 @@
+name: repro-android-heap
+on:
+  push:
+    branches: [repro/android-heap]
+permissions:
+  contents: read
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        heap: [2048, 4096]
+        n: [1, 2, 3, 4, 5, 6]
+    env:
+      TEST_HEAP: ${{ matrix.heap }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build release APK with a throwaway key
+        run: |
+          ( while sleep 5; do free -m | awk '/^Mem:/{print $7}'; done > "$RUNNER_TEMP/avail" ) &
+          export MUXFLOW_ANDROID_KEYSTORE=$RUNNER_TEMP/throwaway.keystore
+          export MUXFLOW_ANDROID_KEYSTORE_PASSWORD=throwaway MUXFLOW_ANDROID_KEY_PASSWORD=throwaway MUXFLOW_ANDROID_KEY_ALIAS=throwaway
+          keytool -genkeypair -keystore "$MUXFLOW_ANDROID_KEYSTORE" -storepass throwaway -keypass throwaway -alias throwaway -keyalg RSA -keysize 2048 -validity 2 -dname CN=throwaway
+          export MUXFLOW_ANDROID_CERT_SHA256=$(keytool -list -v -keystore "$MUXFLOW_ANDROID_KEYSTORE" -storepass throwaway -alias throwaway | sed -n 's/^.*SHA256: //p')
+          export MUXFLOW_JAVA_HOME=$JAVA_HOME MUXFLOW_ANDROID_HOME=$ANDROID_HOME
+          rc=0; SECONDS=0; pnpm mobile:apk:release || rc=$?
+          echo "RESULT heap=$TEST_HEAP rc=$rc seconds=$SECONDS min_avail_mb=$(sort -n "$RUNNER_TEMP/avail" | head -1)"
+          exit $rc

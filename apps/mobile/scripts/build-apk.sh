@@ -22,7 +22,7 @@ if [[ "${CI:-}" == true ]]; then
   # Expo's generated 512 MiB metadata limit was exhausted on hosted runners,
   # and 2 GiB of heap ran out while merging dex. Out of memory has to end the
   # JVM: otherwise Gradle hangs waiting for its dead workers until the timeout.
-  gradle_args+=(--no-daemon --max-workers=2 "-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m -XX:+ExitOnOutOfMemoryError")
+  gradle_args+=(--no-daemon --max-workers=2 "-Dorg.gradle.jvmargs=-Xmx${TEST_HEAP}m -XX:MaxMetaspaceSize=1024m -XX:+ExitOnOutOfMemoryError")
 fi
 (cd android && ./gradlew "${gradle_args[@]}")
 
