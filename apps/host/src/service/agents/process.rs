@@ -7,6 +7,7 @@ use super::adapters;
 const MAX_PROCESSES: usize = 32;
 const MAX_DEPTH: usize = 4;
 const MAX_ARGV_BYTES: usize = 16 * 1024;
+const MAX_ANCESTORS: usize = 16;
 
 pub(super) fn detect(pane: &tmux_control::Pane) -> Option<&'static dyn adapters::AgentAdapter> {
     adapters::detect(&pane.current_command)
@@ -69,15 +70,10 @@ fn detect_proc_tree(
         if visited.len() >= MAX_PROCESSES || !visited.insert(pid) {
             continue;
         }
-        if let Ok(bytes) = fs::read(proc_root.join(pid.to_string()).join("cmdline")) {
-            let argv = bytes[..bytes.len().min(MAX_ARGV_BYTES)]
-                .split(|byte| *byte == 0)
-                .filter(|arg| !arg.is_empty())
-                .map(|arg| String::from_utf8_lossy(arg).into_owned())
-                .collect::<Vec<_>>();
-            if let Some(adapter) = adapters::detect_argv(&argv) {
-                return Some(adapter);
-            }
+        if let Some(argv) = proc_argv(proc_root, pid)
+            && let Some(adapter) = adapters::detect_argv(&argv)
+        {
+            return Some(adapter);
         }
         if depth >= MAX_DEPTH {
             continue;
@@ -97,6 +93,119 @@ fn detect_proc_tree(
         }
     }
     None
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn proc_argv(proc_root: &Path, pid: u32) -> Option<Vec<String>> {
+    let bytes = fs::read(proc_root.join(pid.to_string()).join("cmdline")).ok()?;
+    Some(
+        bytes[..bytes.len().min(MAX_ARGV_BYTES)]
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+    )
+}
+
+/// Whether the agent that spawned this process was itself started, through a
+/// shell or another tool, by a second agent.
+///
+/// A nested agent inherits `TMUX_PANE`, so its hooks would otherwise report its
+/// own turn as the state of the agent that owns the pane. Session IDs cannot
+/// tell the two apart: a nested run and a real `/branch` or new session look the
+/// same in the payload. An unreadable chain answers false, leaving the hook to
+/// report as usual.
+pub(crate) fn runs_beneath_another_agent() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        beneath_another_agent(proc_ancestors(Path::new("/proc"), std::process::id()))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        beneath_another_agent(darwin_ancestors(std::process::id()))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
+
+/// `ancestors` runs nearest first. A same-adapter process directly above the
+/// emitter is its own launcher or shim, so that adapter only counts as a second
+/// agent once a non-agent process separates them. A different adapter is always
+/// a second agent, even when adjacent: `bash -c` with a single command replaces
+/// itself, leaving no shell between an agent and what it launched.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn beneath_another_agent(ancestors: Vec<Vec<String>>) -> bool {
+    let mut emitter = None;
+    let mut left_emitter = false;
+    for argv in ancestors {
+        let agent = adapters::detect_argv(&argv).map(|adapter| adapter.id());
+        if let (Some(agent), Some(emitter)) = (agent, emitter)
+            && (left_emitter || agent != emitter)
+        {
+            return true;
+        }
+        emitter = emitter.or(agent);
+        left_emitter |= emitter.is_some() && agent.is_none();
+    }
+    false
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn proc_ancestors(proc_root: &Path, start_pid: u32) -> Vec<Vec<String>> {
+    let mut chain = Vec::new();
+    let mut pid = start_pid;
+    while pid > 1 && chain.len() < MAX_ANCESTORS {
+        let Some(argv) = proc_argv(proc_root, pid) else {
+            break;
+        };
+        chain.push(argv);
+        let Some(parent) = proc_parent_pid(proc_root, pid) else {
+            break;
+        };
+        pid = parent;
+    }
+    chain
+}
+
+/// The parent is the second field after `comm`, which is parenthesized and may
+/// itself contain spaces and `)`.
+#[cfg(any(test, target_os = "linux"))]
+fn proc_parent_pid(proc_root: &Path, pid: u32) -> Option<u32> {
+    let bytes = fs::read(proc_root.join(pid.to_string()).join("stat")).ok()?;
+    let stat = String::from_utf8_lossy(&bytes);
+    let (_, after_comm) = stat.rsplit_once(')')?;
+    after_comm.split_ascii_whitespace().nth(1)?.parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_ancestors(start_pid: u32) -> Vec<Vec<String>> {
+    let mut chain = Vec::new();
+    let mut pid = start_pid;
+    while pid > 1 && chain.len() < MAX_ANCESTORS {
+        let Some(argv) = darwin_process_argv(pid) else {
+            break;
+        };
+        chain.push(argv);
+        let Some(parent) = darwin_parent_pid(pid) else {
+            break;
+        };
+        pid = parent;
+    }
+    chain
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_parent_pid(pid: u32) -> Option<u32> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: an all-zero `proc_bsdinfo` is a valid value of this plain C struct.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` owns `size` writable bytes for this read-only query.
+    let written =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    (written == size).then_some(info.pbi_ppid)
 }
 
 #[cfg(target_os = "macos")]
@@ -242,6 +351,115 @@ mod tests {
         .unwrap();
         assert_eq!(detect_proc_tree(&root, 10).unwrap().id(), "claude-code");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Writes a fake `/proc` chain: each entry's parent is the next entry.
+    fn fake_chain(argvs: &[&[u8]]) -> std::path::PathBuf {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("tmp")
+            .join(format!("nested-proc-{}", uuid::Uuid::new_v4()));
+        for (index, argv) in argvs.iter().enumerate() {
+            let pid = 10 + index;
+            fs::create_dir_all(root.join(pid.to_string())).unwrap();
+            fs::write(root.join(format!("{pid}/cmdline")), argv).unwrap();
+            fs::write(
+                root.join(format!("{pid}/stat")),
+                format!("{pid} (proc) S {} 0 0", pid + 1),
+            )
+            .unwrap();
+        }
+        root
+    }
+
+    fn chain_is_nested(argvs: &[&[u8]]) -> bool {
+        let root = fake_chain(argvs);
+        let nested = beneath_another_agent(proc_ancestors(&root, 10));
+        fs::remove_dir_all(root).unwrap();
+        nested
+    }
+
+    const HOOK: &[u8] = b"/home/u/.local/bin/muxflow-host\0hook\0ingest\0";
+    const CLAUDE: &[u8] = b"claude\0-p\0ok\0";
+    const NODE_CLAUDE: &[u8] = b"node\0/usr/lib/claude-code/cli.js\0";
+    const SHELL: &[u8] = b"/usr/bin/bash\0";
+
+    #[test]
+    fn an_agent_started_from_another_agents_shell_is_nested() {
+        assert!(chain_is_nested(&[HOOK, CLAUDE, SHELL, CLAUDE, SHELL]));
+        assert!(chain_is_nested(&[HOOK, CLAUDE, SHELL, NODE_CLAUDE, SHELL]));
+        assert!(chain_is_nested(&[
+            HOOK,
+            CLAUDE,
+            b"timeout\08\0claude\0",
+            SHELL,
+            b"codex\0",
+            SHELL,
+        ]));
+    }
+
+    #[test]
+    fn a_top_level_agent_is_not_nested() {
+        assert!(!chain_is_nested(&[
+            HOOK,
+            b"/bin/sh\0-c\0hook\0",
+            CLAUDE,
+            SHELL,
+            b"tmux: server\0",
+        ]));
+    }
+
+    #[test]
+    fn a_launcher_directly_above_the_agent_is_not_a_second_agent() {
+        assert!(!chain_is_nested(&[HOOK, NODE_CLAUDE, CLAUDE, SHELL]));
+    }
+
+    #[test]
+    fn a_different_agent_directly_above_is_a_second_agent() {
+        assert!(chain_is_nested(&[HOOK, CLAUDE, b"pi\0", SHELL]));
+        assert!(chain_is_nested(&[HOOK, CLAUDE, b"codex\0", SHELL]));
+    }
+
+    #[test]
+    fn a_shell_whose_script_mentions_an_agent_is_not_an_agent() {
+        assert!(!chain_is_nested(&[
+            HOOK,
+            CLAUDE,
+            b"/usr/bin/bash\0-c\0claude -p ok\0",
+            SHELL,
+        ]));
+    }
+
+    #[test]
+    fn an_unreadable_chain_is_not_nested() {
+        let root = fake_chain(&[HOOK, CLAUDE, SHELL, CLAUDE]);
+        fs::remove_dir_all(root.join("12")).unwrap();
+        assert!(!beneath_another_agent(proc_ancestors(&root, 10)));
+        fs::write(root.join("11/stat"), b"11 (claude no close paren").unwrap();
+        assert!(!beneath_another_agent(proc_ancestors(&root, 10)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parent_pid_survives_a_command_name_with_spaces_and_parens() {
+        let root = fake_chain(&[HOOK]);
+        fs::write(root.join("10/stat"), b"10 (we ird) (x) S 4242 0 0").unwrap();
+        assert_eq!(proc_parent_pid(&root, 10), Some(4242));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_ancestor_walk_is_bounded() {
+        let root = fake_chain(&vec![SHELL; MAX_ANCESTORS + 4]);
+        assert_eq!(proc_ancestors(&root, 10).len(), MAX_ANCESTORS);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_parent_pid_matches_the_kernel() {
+        let parent = u32::try_from(unsafe { libc::getppid() }).unwrap();
+        assert_eq!(darwin_parent_pid(std::process::id()), Some(parent));
     }
 
     #[cfg(target_os = "macos")]

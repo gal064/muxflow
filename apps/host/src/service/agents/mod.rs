@@ -23,6 +23,7 @@ mod snapshot;
 mod store;
 pub(crate) use hooks::HookManager;
 pub(crate) use ingest::HookIngestFailure;
+pub(crate) use process::runs_beneath_another_agent;
 use store::{CodexReviewer, CodexTurnKey, CodexTurnReview, StoredAgent, StoredRoute, StoredState};
 
 /// How long a Working agent may go without a single lifecycle event before the
