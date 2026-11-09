@@ -1,8 +1,9 @@
 import Constants from "expo-constants";
 import { Stack } from "expo-router";
-import { Platform, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useStore } from "zustand";
 
+import { TERMINAL_FONT_SIZES } from "../src/features/terminal/sizing";
 import { openAppUpdates, updateStore } from "../src/features/update";
 import { prefsStore } from "../src/store/prefsStore";
 import { colors, fixedChromeText, radii, typeScale } from "../src/ui/tokens";
@@ -10,6 +11,7 @@ import { colors, fixedChromeText, radii, typeScale } from "../src/ui/tokens";
 /** App preferences that belong to this phone. */
 export default function SettingsScreen() {
   const agentCommand = useStore(prefsStore, (state) => state.agentCommand);
+  const terminalFontSize = useStore(prefsStore, (state) => state.terminalFontSize);
   const voiceKeepAwake = useStore(prefsStore, (state) => state.voiceKeepAwake);
   const voicePlayScreenOff = useStore(prefsStore, (state) => state.voicePlayScreenOff);
   const update = useStore(updateStore, (state) => state.update);
@@ -31,6 +33,26 @@ export default function SettingsScreen() {
           value={agentCommand}
         />
         <Text style={styles.help}>New agent starts this command in a new terminal window. Shell options and arguments are allowed.</Text>
+      </View>
+      <View style={styles.settingRow}>
+        <View style={styles.settingCopy}>
+          <Text {...fixedChromeText} style={styles.label}>Terminal font size</Text>
+          <Text style={styles.help}>Larger text fits fewer columns.</Text>
+        </View>
+        <View style={styles.sizeOptions}>
+          {TERMINAL_FONT_SIZES.map((size) => (
+            <Pressable
+              accessibilityLabel={`Terminal font size ${size}`}
+              accessibilityRole="button"
+              accessibilityState={{ selected: size === terminalFontSize }}
+              key={size}
+              onPress={() => prefsStore.getState().setTerminalFontSize(size)}
+              style={[styles.sizeOption, size === terminalFontSize && styles.sizeOptionSelected]}
+            >
+              <Text {...fixedChromeText} style={styles.sizeLabel}>{size}</Text>
+            </Pressable>
+          ))}
+        </View>
       </View>
       <View style={styles.settingRow}>
         <View style={styles.settingCopy}>
@@ -91,5 +113,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   help: { color: colors.chromeDim, fontSize: typeScale.rowSecondary, lineHeight: 18 },
+  sizeOptions: { flexDirection: "row", gap: 4 },
+  sizeOption: { alignItems: "center", borderColor: colors.chromeBorder, borderRadius: radii.pill, borderWidth: StyleSheet.hairlineWidth, justifyContent: "center", minHeight: 44, minWidth: 40 },
+  sizeOptionSelected: { backgroundColor: colors.accentWash, borderColor: colors.accent },
+  sizeLabel: { color: colors.chromeInkStrong, fontSize: typeScale.body },
   updateLink: { color: colors.danger, fontSize: typeScale.rowSecondary, fontWeight: "600" },
 });
