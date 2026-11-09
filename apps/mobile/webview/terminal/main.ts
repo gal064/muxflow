@@ -13,7 +13,7 @@ import {
   terminalLinksForBufferLine,
 } from "@muxflow/terminal-interactions";
 import { PAGE_RECEIVE_FUNCTION, type FromPageMessage, type ToPageMessage } from "../../src/features/terminal/bridgeMessages";
-import { computeGrid, NOMINAL_CELL, TERMINAL_FONT_SIZE_PX, TERMINAL_LINE_HEIGHT, sameGrid, type Grid } from "../../src/features/terminal/sizing";
+import { computeGrid, NOMINAL_CELL, TERMINAL_LINE_HEIGHT, sameGrid, type Grid } from "../../src/features/terminal/sizing";
 import {
   selectionEdgeScrollDirection,
   selectionForTerminalRange,
@@ -95,14 +95,15 @@ function scheduleMeasure(): void {
   }, RESIZE_DEBOUNCE_MS);
 }
 
-async function init(): Promise<void> {
+async function init(fontSize: number): Promise<void> {
   if (term) {
+    term.options.fontSize = fontSize;
     measure(true);
     return;
   }
   // Measure with the real face: a fallback font would give a different cell.
   try {
-    await document.fonts.load(`${TERMINAL_FONT_SIZE_PX}px "JetBrains Mono"`);
+    await document.fonts.load(`${fontSize}px "JetBrains Mono"`);
   } catch {
     // Fall through: xterm measures whatever is available.
   }
@@ -118,7 +119,7 @@ async function init(): Promise<void> {
     cursorBlink: true,
     cursorStyle: "block",
     fontFamily: '"JetBrains Mono", monospace',
-    fontSize: TERMINAL_FONT_SIZE_PX,
+    fontSize,
     lineHeight: TERMINAL_LINE_HEIGHT,
     // The host clamps history at 10,000 rows and the controller stops paging
     // there (`HISTORY_MAX_SKIP_LINES`); a smaller buffer would trim its top
@@ -602,7 +603,7 @@ async function init(): Promise<void> {
 function receive(message: ToPageMessage): void {
   switch (message.t) {
     case "init":
-      void init();
+      void init(message.fontSize);
       return;
     case "measure":
       measure(true);

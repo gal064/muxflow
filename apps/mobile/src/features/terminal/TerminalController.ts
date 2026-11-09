@@ -17,7 +17,7 @@ import type { SessionStore } from "../../store/sessionStore";
 import type { FromPageMessage, GridFence, ToPageMessage } from "./bridgeMessages";
 import { fromBase64, toBase64, utf8Encode } from "./bytes";
 import { CR } from "./chips";
-import { sameGrid, windowGrid, type Grid } from "./sizing";
+import { DEFAULT_TERMINAL_FONT_SIZE, sameGrid, windowGrid, type Grid } from "./sizing";
 import type { RegisteredTerminal, TerminalRegistry } from "./terminalRegistry";
 
 /** §9.5 states, as the screen renders them. */
@@ -70,6 +70,7 @@ export interface TerminalControllerOptions {
   registry: TerminalRegistry;
   getConnection: () => HostConnection | null;
   page: TerminalPage;
+  fontSize?: number;
   onChange?: (snapshot: TerminalSnapshot) => void;
   log?: (line: string) => void;
   /** §7.6 step 3: 5 s to the seed retry, another 5 s to the hint. */
@@ -209,7 +210,7 @@ export class TerminalController {
         void this.reclaimSizing();
       }
     });
-    this.options.page.send({ t: "init" });
+    this.options.page.send({ t: "init", fontSize: this.options.fontSize ?? DEFAULT_TERMINAL_FONT_SIZE });
   }
 
   /** The WebView page reported something (§10.2). */

@@ -319,12 +319,18 @@ describe("TerminalController attach lifecycle (§7.6)", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it("inits the page with the chosen font size", () => {
+    const h = harness({ fontSize: 17 });
+    h.controller.start();
+    expect(h.page).toEqual([{ t: "init", fontSize: 17 }]);
+  });
+
   it("takes focus, inits the page, and after the first size sends claim window size → attach in that order", async () => {
     const h = harness();
     const t = await h.connect();
     h.controller.start();
     expect(h.store.getState().focusedPaneId).toBe("%1");
-    expect(h.page).toEqual([{ t: "init" }]);
+    expect(h.page).toEqual([{ t: "init", fontSize: 13 }]);
     expect(t.drain()).toHaveLength(0); // nothing before the page measured
 
     h.controller.onPageMessage({ t: "ready" });
