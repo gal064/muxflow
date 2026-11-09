@@ -52,7 +52,7 @@ grep -Fxq -- --stacktrace "$QA_GRADLE_ARGS"
 grep -Fxq -- --console=plain "$QA_GRADLE_ARGS"
 grep -Fxq -- --no-daemon "$QA_GRADLE_ARGS"
 grep -Fxq -- --max-workers=2 "$QA_GRADLE_ARGS"
-grep -Fxq -- '-Dorg.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=1024m' "$QA_GRADLE_ARGS"
+grep -Fxq -- '-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m -XX:+ExitOnOutOfMemoryError' "$QA_GRADLE_ARGS"
 [[ -f "$QA_SIGNER_CALLED" ]]
 grep -q 'Signed by the pinned release certificate' "$work/release.out"
 echo 'CI release: bounded Gradle settings and pinned certificate verified'

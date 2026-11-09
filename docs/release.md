@@ -146,7 +146,8 @@ connection/data timeouts, and have a 15-minute step limit. Failed package-index
 updates stop the job rather than continue with incomplete indexes.
 
 Android builds always print Gradle stack traces. CI uses two Gradle workers,
-a 2 GiB heap and 1 GiB metadata budget; generated local project settings remain
+a 4 GiB heap and 1 GiB metadata budget, and running out of memory ends the
+build instead of hanging it; generated local project settings remain
 unchanged. Release logs include build resource usage and, on failure, disk,
 RAM, Gradle daemon output and kernel diagnostics. Build and certificate-check
 failures stop publication; the keystore is removed even when the build fails.
