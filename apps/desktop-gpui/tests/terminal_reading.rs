@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
-use desktop_core::app_state::ThemePreference;
+use desktop_core::app_state::{PersistedAppState, ThemePreference};
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use gpui_kit::{
@@ -88,6 +88,26 @@ impl muxflow_gpui::connection_ui::backend::TerminalBackend for Fake {
     }
 
     fn record_incident(&self, _: &str, _: Value) {}
+
+    fn set_terminal_colors(&self, _: String, _: String) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn tmux_action(&self, _: String, _: Value) -> BoxFuture<'static, Result<Value, String>> {
+        async { Ok(Value::Null) }.boxed()
+    }
+
+    fn start_upload(
+        &self,
+        _: muxflow_gpui::terminal::integration::transfers::UploadRequest,
+        _: Arc<dyn desktop_core::platform::EventSink>,
+    ) -> Result<String, String> {
+        Err("no uploads here".into())
+    }
+
+    fn cancel_upload(&self, _: String) -> Result<Value, String> {
+        Ok(Value::Null)
+    }
 }
 
 fn frame(kind: u8, label: &str, sequence: u64, payload: &[u8]) -> Vec<u8> {
@@ -103,6 +123,13 @@ fn seed_frame(sequence: u64, text: &[u8]) -> Vec<u8> {
     let mut payload = 1_u64.to_be_bytes().to_vec();
     payload.extend_from_slice(text);
     frame(1, "%1", sequence, &payload)
+}
+
+/// Output after the seed: each frame carries the generation it makes.
+fn output_frame(sequence: u64, text: &[u8]) -> Vec<u8> {
+    let mut payload = sequence.to_be_bytes().to_vec();
+    payload.extend_from_slice(text);
+    frame(2, "%1", sequence, &payload)
 }
 
 /// tmux's answer to a history request: rows above the screen, and how many
@@ -146,11 +173,25 @@ struct Mounted {
 
 /// A pane on a 40x6 grid, seeded with `screen`, painted once.
 fn mounted<'a>(cx: &'a mut TestAppContext, screen: &[u8]) -> (Mounted, &'a mut VisualTestContext) {
+    mounted_with(cx, screen, None)
+}
+
+/// The same, with saved settings. Without them the state file is never
+/// written, and settings read their defaults.
+fn mounted_with<'a>(
+    cx: &'a mut TestAppContext,
+    screen: &[u8],
+    saved: Option<&PersistedAppState>,
+) -> (Mounted, &'a mut VisualTestContext) {
     let state = std::env::temp_dir().join(format!(
-        "muxflow-reading-test-{}-{:?}.json",
+        "muxflow-reading-test-{}-{:?}{}.json",
         std::process::id(),
-        std::thread::current().id()
+        std::thread::current().id(),
+        if saved.is_some() { "-saved" } else { "" }
     ));
+    if let Some(saved) = saved {
+        std::fs::write(&state, serde_json::to_vec(saved).unwrap()).unwrap();
+    }
     cx.update(|cx| {
         gpui_kit::init(cx);
         theme::apply(
@@ -159,8 +200,11 @@ fn mounted<'a>(cx: &'a mut TestAppContext, screen: &[u8]) -> (Mounted, &'a mut V
             gpui_kit::WindowAppearance::Dark,
             cx,
         );
-        // The state file is never written: copy settings read their defaults.
         cx.set_global(Core::at(&state));
+        // The store has read it.
+        if saved.is_some() {
+            std::fs::remove_file(&state).unwrap();
+        }
         commands::init(cx);
         reading::init(cx);
     });
@@ -254,10 +298,16 @@ fn a_drag_selects_and_copies_and_a_double_click_takes_the_word(cx: &mut TestAppC
 
     // Typing drops the selection, as xterm does: on Linux that makes the next
     // Ctrl+C the interrupt.
-    pane.update(visual, |pane, cx| pane.send_input(b"x".to_vec(), cx))
-        .unwrap();
+    visual.simulate_input("x");
+    visual.run_until_parked();
     assert_eq!(fake.0.lock().unwrap().input, [b"x".to_vec()]);
     assert!(!selected(&pane, visual));
+
+    // A focus report is not the user's input: it leaves the selection alone.
+    select_first_word(&pane, visual);
+    pane.update(visual, |pane, cx| pane.send_input(b"\x1b[O".to_vec(), cx))
+        .unwrap();
+    assert!(selected(&pane, visual));
 }
 
 fn select_first_word(pane: &Entity<TerminalPane>, cx: &mut VisualTestContext) {
@@ -435,4 +485,84 @@ fn find_walks_matches_in_the_history_and_highlights_them(cx: &mut TestAppContext
     });
     assert!(focused, "focus returns to the terminal");
     assert_eq!(highlighted, 0, "closing find clears its highlights");
+}
+
+#[gpui_kit::test]
+fn a_selection_output_drops_is_unpainted_from_rows_the_output_did_not_touch(
+    cx: &mut TestAppContext,
+) {
+    let (Mounted { link, pane, .. }, visual) = mounted(cx, b"one\r\ntwo\r\nthree");
+    let row = |visual: &VisualTestContext| pane.read_with(visual, |pane, _| pane.row_spec(0));
+    let plain = row(visual);
+    pane.update(visual, |pane, cx| {
+        let mut selection = Selection::new(
+            SelectionType::Simple,
+            alacritty_terminal::index::Point::new(Line(0), Column(0)),
+            Side::Left,
+        );
+        selection.update(
+            alacritty_terminal::index::Point::new(Line(2), Column(2)),
+            Side::Right,
+        );
+        pane.terminal().unwrap().lock().selection = Some(selection);
+        pane.repaint_all(cx);
+    });
+    visual.run_until_parked();
+    assert_ne!(row(visual), plain, "the selection is painted");
+    // Erasing the cursor's line drops the selection and damages only that line.
+    link.read_with(visual, |link, _| {
+        link.forward_frame(output_frame(2, b"\r\x1b[K"))
+    });
+    wait_until(visual, |cx| !selected(&pane, cx));
+    wait_until(visual, |visual| row(visual) == plain);
+}
+
+#[gpui_kit::test]
+fn the_link_modifier_opens_links_in_a_mouse_program_and_otherwise_selects_nothing(
+    cx: &mut TestAppContext,
+) {
+    // `?1000h`: the program reads mouse clicks.
+    let (Mounted { fake, pane, .. }, visual) =
+        mounted(cx, b"\x1b[?1000hplain https://example.com/x");
+    let found = |column: usize, visual: &mut VisualTestContext| {
+        let position = at(&pane, visual, 0, column, false);
+        pane.read_with(visual, |pane, _| reading::link_at(pane, position))
+    };
+    assert!(found(10, visual), "a link under the pointer");
+    assert!(!found(1, visual));
+
+    // Off a link, the press is the pane grab's: no selection, no report.
+    let link_modifier = if cfg!(target_os = "macos") {
+        Modifiers::command()
+    } else {
+        Modifiers::control()
+    };
+    let off = at(&pane, visual, 0, 1, false);
+    let further = at(&pane, visual, 0, 4, true);
+    visual.simulate_mouse_down(off, MouseButton::Left, link_modifier);
+    visual.simulate_mouse_move(further, MouseButton::Left, link_modifier);
+    visual.simulate_mouse_up(further, MouseButton::Left, link_modifier);
+    visual.run_until_parked();
+    assert!(!selected(&pane, visual));
+    assert!(fake.0.lock().unwrap().input.is_empty());
+}
+
+#[gpui_kit::test]
+fn with_copy_on_select_off_a_selection_waits_for_the_copy_command(cx: &mut TestAppContext) {
+    let mut saved = PersistedAppState::default();
+    saved.shell.copy_on_select = Some(false);
+    let (Mounted { pane, .. }, visual) = mounted_with(cx, b"hello world", Some(&saved));
+    visual.write_to_clipboard(gpui_kit::ClipboardItem::new_string("old".into()));
+    let none = Modifiers::default();
+    let (from, to) = (
+        at(&pane, visual, 0, 0, false),
+        at(&pane, visual, 0, 4, true),
+    );
+    visual.simulate_mouse_down(from, MouseButton::Left, none);
+    visual.simulate_mouse_move(to, MouseButton::Left, none);
+    visual.simulate_mouse_up(to, MouseButton::Left, none);
+    visual.run_until_parked();
+    assert_eq!(clipboard(visual).as_deref(), Some("old"));
+    copy(&pane, Platform::Mac, visual);
+    assert_eq!(clipboard(visual).as_deref(), Some("hello"));
 }

@@ -7,8 +7,9 @@
 //! scrollbar, the new-output button) is an [`Overlay`] view per pane: a pane
 //! cannot be read while it renders, and the overlay renders just after it.
 //!
-//! The mouse is this feature's while the program does not read it, and on a
-//! Shift press when it does (see [`super`]). The scrollbar sits in the strip the
+//! The mouse is this feature's while the program does not read it, on a press
+//! that forces a local selection when it does, and on a link-modifier press
+//! over a link either way (see [`super`]). The scrollbar sits in the strip the
 //! client size already leaves free, `CellMetrics::scrollbar_width`.
 
 mod buffer;
@@ -17,7 +18,7 @@ mod links;
 mod scroll;
 mod selection;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -55,6 +56,7 @@ use crate::theme::{
 };
 
 use super::grid::{CellHighlight, Rgb24};
+use super::input;
 use super::pane::TerminalPane;
 use find::Find;
 use links::Link;
@@ -123,6 +125,10 @@ pub struct PaneReading {
     colors: Cell<Colors>,
     /// The pane's box at its last paint, for the scrollbar.
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// What the last paint highlighted. Rows keep their highlights until they
+    /// are rebuilt, and output that drops the selection or moves a match
+    /// damages only the rows it wrote.
+    painted: RefCell<Vec<CellHighlight>>,
 }
 
 /// Every pane's overlay, and the pane commands go to when none has focus.
@@ -154,21 +160,13 @@ fn with_target(
     }
 }
 
-/// Only what changed is written: every write notifies the palette.
-fn set_context(cx: &mut App, has_pane: Option<bool>, has_selection: Option<bool>) {
-    if !cx.has_global::<Commands>() {
-        return;
-    }
-    let context = cx.global::<Commands>().context();
-    let pane_changed = has_pane.is_some_and(|value| value != context.has_pane);
-    let selection_changed =
-        has_selection.is_some_and(|value| value != context.has_terminal_selection);
-    if pane_changed || selection_changed {
-        commands::update_context(cx, |context| {
-            context.has_pane = has_pane.unwrap_or(context.has_pane);
-            context.has_terminal_selection =
-                has_selection.unwrap_or(context.has_terminal_selection);
-        });
+/// Only a change is written: every write notifies the palette.
+fn set_has_selection(cx: &mut App, selected: bool) {
+    let changed = cx
+        .try_global::<Commands>()
+        .is_some_and(|commands| commands.context().has_terminal_selection != selected);
+    if changed {
+        commands::update_context(cx, |context| context.has_terminal_selection = selected);
     }
 }
 
@@ -243,6 +241,11 @@ pub fn highlights(pane: &TerminalPane, term: &Term<Listener>) -> Vec<CellHighlig
             false,
         );
     }
+    // Called before the paint decides which rows to rebuild.
+    if *reading.painted.borrow() != out {
+        reading.painted.replace(out.clone());
+        pane.repaint_all.set(true);
+    }
     out
 }
 
@@ -287,27 +290,45 @@ pub fn children(
             .overlays
             .insert(id, overlay.clone());
         cx.observe_release(pane, move |_, cx| {
-            let panes = cx.default_global::<Panes>();
-            panes.overlays.remove(&id);
-            let any = !panes.overlays.is_empty();
-            set_context(cx, Some(any), None);
+            cx.default_global::<Panes>().overlays.remove(&id);
         })
         .detach();
-        cx.defer(|cx| set_context(cx, Some(true), None));
         overlay
     });
     vec![AnyView::from(overlay).into_any_element()]
 }
 
-/// Input this pane sends returns it to live output, as xterm's
-/// `scrollOnUserInput` does, and drops the selection, as xterm does on user
+/// Keys and pastes the user sends return the pane to live output, as xterm's
+/// `scrollOnUserInput` does, and drop the selection, as xterm does on user
 /// input. On Linux that is also what makes the next Ctrl+C the interrupt the
-/// user is typing towards rather than a copy.
-pub fn before_input(pane: &TerminalPane, cx: &mut Context<TerminalPane>) {
+/// user is typing towards rather than a copy. Focus and mouse reports are not
+/// the user's input and do neither.
+pub fn before_user_input(pane: &TerminalPane, cx: &mut Context<TerminalPane>) {
     clear_selection(pane, cx);
-    if pane.reading_state() != TerminalReadingState::Live {
+    // The view itself, not the mirrored state: a wheel scroll the engine has
+    // not answered yet still leaves the bottom.
+    let scrolled = pane
+        .terminal()
+        .is_some_and(|terminal| terminal.lock().grid().display_offset() != 0);
+    if scrolled || pane.reading_state() != TerminalReadingState::Live {
         return_to_live(pane, TO_HISTORY, cx);
     }
+}
+
+/// The modifier that opens a terminal link, and grabs a pane anywhere else.
+pub fn is_link_activation(modifiers: &Modifiers) -> bool {
+    links::is_link_activation(modifiers, Platform::current())
+}
+
+/// Whether a link is under `position`: a press there with the link modifier
+/// opens it rather than grabbing the pane.
+pub fn link_at(pane: &TerminalPane, position: gpui_kit::Point<Pixels>) -> bool {
+    link_under(pane, position).is_some()
+}
+
+fn link_under(pane: &TerminalPane, position: gpui_kit::Point<Pixels>) -> Option<Link> {
+    let (point, _) = cell_at(pane, position)?;
+    links::link_at(&*pane.terminal()?.lock(), point)
 }
 
 fn return_to_live(pane: &TerminalPane, reason: &str, cx: &mut Context<TerminalPane>) {
@@ -362,12 +383,10 @@ fn grid_cell(
     Some((row, column, side))
 }
 
-/// Whether this feature owns a press: the program does not read the mouse,
-/// or the press forces a local selection anyway. Shift does on both platforms;
-/// on the Mac Option does too, as xterm's `macOptionClickForcesSelection`.
+/// Whether this feature owns a press: the program does not read the mouse, or
+/// the press forces a local selection anyway (Shift, or Option on the Mac).
 fn owns_press(pane: &TerminalPane, modifiers: &Modifiers) -> bool {
-    let option = Platform::current() == Platform::Mac && modifiers.alt;
-    !pane.mouse_reporting() || modifiers.shift || option
+    !pane.mouse_reporting() || input::forces_local_selection(modifiers)
 }
 
 fn word_selection(start: Point, end: Point) -> Selection {
@@ -382,17 +401,23 @@ fn press(
     _: &mut Window,
     cx: &mut Context<TerminalPane>,
 ) {
-    if !owns_press(pane, &event.modifiers) {
+    // A link-modifier press opens the link under it, and is otherwise the
+    // pane grab's (`surface.rs`), so it never also starts a selection.
+    let link = if is_link_activation(&event.modifiers) {
+        let Some(link) = link_under(pane, event.position) else {
+            return;
+        };
+        Some(link)
+    } else if owns_press(pane, &event.modifiers) {
+        None
+    } else {
         return;
-    }
+    };
     let (Some((point, side)), Some(terminal)) = (cell_at(pane, event.position), pane.terminal())
     else {
         return;
     };
     let mut term = terminal.lock();
-    let link = links::is_link_activation(&event.modifiers, Platform::current())
-        .then(|| links::link_at(&*term, point))
-        .flatten();
     let grow = match event.click_count {
         2 => {
             let word = selection::word_at(&*term, point);
@@ -464,20 +489,21 @@ fn hover(
     if pane.reading.drag.is_some() {
         return;
     }
-    let point = (!pane.mouse_reporting())
-        .then(|| cell_at(pane, event.position))
-        .flatten();
-    let (Some((point, _)), Some(terminal)) = (point, pane.terminal().cloned()) else {
+    // Links show even while the program reads the mouse: the link modifier
+    // still opens them there.
+    let (Some((point, _)), Some(terminal)) =
+        (cell_at(pane, event.position), pane.terminal().cloned())
+    else {
         set_hover(pane, None, cx);
         return;
     };
-    // A row's links are found once; moving along it costs nothing more.
+    // Moving within the link already found costs nothing more.
     if let Some(current) = &pane.reading.hover
         && current.line == point.line
         && current
             .link
             .as_ref()
-            .is_none_or(|link| link.contains(point))
+            .is_some_and(|link| link.contains(point))
     {
         return;
     }
@@ -1025,13 +1051,18 @@ impl Render for Overlay {
         };
         let palette = theme::palette(cx);
         let frame = self.frame(pane.read(cx), &palette, window, cx);
-        if frame.focused {
-            let (pane, selected) = (self.pane.clone(), frame.selected);
-            cx.defer(move |cx| {
-                cx.default_global::<Panes>().last_focused = Some(pane);
-                set_context(cx, None, Some(selected));
-            });
-        }
+        // The Linux Ctrl+C rule reads the focused pane's selection. A pane
+        // that lost focus to something other than a pane leaves none behind.
+        let (pane, focused, selected) = (self.pane.clone(), frame.focused, frame.selected);
+        cx.defer(move |cx| {
+            let panes = cx.default_global::<Panes>();
+            if focused {
+                panes.last_focused = Some(pane);
+                set_has_selection(cx, selected);
+            } else if panes.last_focused.as_ref() == Some(&pane) {
+                set_has_selection(cx, false);
+            }
+        });
         let bounds = frame.bounds.clone();
         root.when_some(frame.cursor, |root, cursor| root.cursor(cursor))
             .child(

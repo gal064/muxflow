@@ -8,8 +8,10 @@ use std::sync::mpsc::Sender;
 use desktop_core::{
     app_state::{AppStateStore, PersistedAppState, save_app_state},
     connection::{
-        self, ConnectionSpec, TerminalClients, delivery_ack,
+        self, ConnectionSpec, ProfileStore, TerminalClients, delivery_ack,
+        files::upload_manager::{self, UploadManager},
         helper::{self, HelperInstallReport},
+        tmux_action,
     },
     incidents::{IncidentJournal, record_incident},
     platform::{self, EventSink},
@@ -18,6 +20,8 @@ use futures::future::{BoxFuture, FutureExt};
 use serde_json::{Map, Value};
 use terminal_engine::{Command, EngineHandle, EngineOutput, HubLimits};
 use uuid::Uuid;
+
+use crate::terminal::integration::transfers::UploadRequest;
 
 use super::{
     helper_upgrade::RemoteHelperProbe,
@@ -73,6 +77,30 @@ pub trait TerminalBackend: Send + Sync {
     ) -> BoxFuture<'static, Result<(), String>>;
     fn send_input(&self, client_id: String, pane_id: String, bytes: Vec<u8>) -> Result<(), String>;
     fn record_incident(&self, kind: &str, detail: Value);
+    /// The link's delivery state, as `terminal_link_stats` reports it.
+    fn link_stats(&self, _client_id: &str) -> Option<Value> {
+        None
+    }
+    /// Drains the input queue's latency window: `bucketCounts` and `maxMs`.
+    fn input_latency_stats(&self, _client_id: &str) -> Option<Value> {
+        None
+    }
+    /// Tells every host the terminal's colors (`TerminalColors`); also kept for hosts
+    /// that connect later.
+    fn set_terminal_colors(&self, foreground: String, background: String) -> Result<(), String>;
+    /// One tmux action, in `desktop-core`'s wire shape, answered with its result.
+    fn tmux_action(
+        &self,
+        client_id: String,
+        action: Value,
+    ) -> BoxFuture<'static, Result<Value, String>>;
+    /// Starts a terminal upload, or its preflight, reporting to `events`.
+    fn start_upload(
+        &self,
+        request: UploadRequest,
+        events: Arc<dyn EventSink>,
+    ) -> Result<String, String>;
+    fn cancel_upload(&self, transfer_id: String) -> Result<Value, String>;
 }
 
 pub trait ConnectionBackend: TerminalBackend {
@@ -113,15 +141,22 @@ pub trait ConnectionBackend: TerminalBackend {
 pub struct NativeBackend {
     app_state: Arc<AppStateStore>,
     clients: Arc<TerminalClients>,
+    /// Uploads open their own connection to the profile's host.
+    profiles: Arc<ProfileStore>,
     journal: Arc<IncidentJournal>,
     launch: String,
 }
 
 impl NativeBackend {
-    pub fn new(app_state: Arc<AppStateStore>, journal: IncidentJournal) -> Self {
+    pub fn new(
+        app_state: Arc<AppStateStore>,
+        profiles: Arc<ProfileStore>,
+        journal: IncidentJournal,
+    ) -> Self {
         Self {
             app_state,
             clients: Arc::default(),
+            profiles,
             journal: Arc::new(journal),
             launch: Uuid::new_v4().simple().to_string()[..8].to_owned(),
         }
@@ -217,6 +252,65 @@ impl TerminalBackend for NativeBackend {
         // Must stay harmless: a journal that cannot be written is never a
         // reason the app misbehaves.
         let _ = record_incident(&self.journal, Value::Object(record).to_string());
+    }
+
+    fn link_stats(&self, client_id: &str) -> Option<Value> {
+        let stats = connection::terminal_link_stats(client_id.to_owned(), &self.clients).ok()?;
+        serde_json::to_value(stats).ok()
+    }
+
+    fn input_latency_stats(&self, client_id: &str) -> Option<Value> {
+        let stats = connection::input_latency_stats(client_id.to_owned(), &self.clients)?;
+        serde_json::to_value(stats).ok()
+    }
+
+    fn set_terminal_colors(&self, foreground: String, background: String) -> Result<(), String> {
+        connection::set_terminal_colors(foreground, background, &self.clients)
+    }
+
+    fn tmux_action(
+        &self,
+        client_id: String,
+        action: Value,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let clients = self.clients.clone();
+        spawned(async move {
+            let action = serde_json::from_value(action).map_err(|error| error.to_string())?;
+            let result = tmux_action::tmux_action(client_id, action, &clients).await?;
+            serde_json::to_value(result).map_err(|error| error.to_string())
+        })
+    }
+
+    fn start_upload(
+        &self,
+        request: UploadRequest,
+        events: Arc<dyn EventSink>,
+    ) -> Result<String, String> {
+        let start = if request.preflight {
+            upload_manager::start_terminal_upload_preflight
+        } else {
+            upload_manager::start_terminal_upload
+        };
+        let scope = request.scope;
+        start(
+            scope.client_id,
+            scope.profile_id,
+            scope.server_identity,
+            scope.terminal_epoch.to_string(),
+            request.source_path,
+            request.destination_name,
+            request.collision,
+            request.large_upload_confirmed,
+            request.image_png,
+            events,
+            &self.profiles,
+            &self.clients,
+            &UploadManager,
+        )
+    }
+
+    fn cancel_upload(&self, transfer_id: String) -> Result<Value, String> {
+        upload_manager::cancel_terminal_upload(transfer_id, &UploadManager)
     }
 }
 

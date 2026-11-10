@@ -28,12 +28,27 @@ const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
 
 /// `%output` carries the pane's raw bytes and tmux has already answered their
 /// queries as the pane's terminal. Replying again would inject a duplicate into
-/// the program's stdin, so the terminal's events go nowhere.
+/// the program's stdin, so the terminal's events go nowhere, except an OSC 52
+/// clipboard write: tmux keeps that from a program only when its own
+/// `set-clipboard` is `on`, so otherwise the desktop is the one to honor it.
 #[derive(Clone, Copy, Default)]
 pub struct Listener;
 
+thread_local! {
+    /// Where [`Listener`] leaves OSC 52 writes until [`PaneWriter::write`]
+    /// collects them. Per thread rather than per terminal, so `Listener` stays a
+    /// plain value; the engine parses on one thread and collects right after
+    /// each write, so a write is never credited to another pane.
+    static CLIPBOARD_WRITES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl EventListener for Listener {
-    fn send_event(&self, _event: Event) {}
+    fn send_event(&self, event: Event) {
+        if let Event::ClipboardStore(_, text) = event {
+            CLIPBOARD_WRITES.with_borrow_mut(|writes| writes.push(text));
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +217,8 @@ pub(crate) struct PaneWriter {
     wake: bool,
     /// The start of a UTF-8 sequence the last write ended inside.
     partial_utf8: Vec<u8>,
+    /// OSC 52 writes the program made, oldest first.
+    clipboard_writes: Vec<String>,
 }
 
 /// How many bytes at the end of `bytes` are an unfinished UTF-8 sequence.
@@ -232,7 +249,13 @@ impl PaneWriter {
             processor: Processor::new(),
             wake: false,
             partial_utf8: Vec::new(),
+            clipboard_writes: Vec::new(),
         }
+    }
+
+    /// The OSC 52 writes since the last call.
+    pub(crate) fn take_clipboard_writes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.clipboard_writes)
     }
 
     pub(crate) fn terminal(&self) -> &Arc<PaneTerminal> {
@@ -278,6 +301,8 @@ impl PaneWriter {
         if ready.is_empty() {
             return;
         }
+        // Anything a scratch parse left behind is not this pane's.
+        CLIPBOARD_WRITES.with_borrow_mut(Vec::clear);
         while !ready.is_empty() {
             let end = ready.len().min(WRITE_SLICE_BYTES);
             let (slice, rest) = ready.split_at(end - incomplete_utf8_tail(&ready[..end]));
@@ -286,6 +311,7 @@ impl PaneWriter {
             drop(term);
             ready = rest;
         }
+        CLIPBOARD_WRITES.with_borrow_mut(|writes| self.clipboard_writes.append(writes));
         self.mark_dirty();
     }
 
@@ -315,9 +341,13 @@ impl PaneWriter {
         if self.processor.sync_bytes_count() == 0 && self.sync_deadline().is_none() {
             return;
         }
+        // The held bytes may hold an OSC 52 write; it is this pane's as much
+        // as one `write` parses.
+        CLIPBOARD_WRITES.with_borrow_mut(Vec::clear);
         let mut term = self.shared.term.lock();
         self.processor.stop_sync(&mut *term);
         drop(term);
+        CLIPBOARD_WRITES.with_borrow_mut(|writes| self.clipboard_writes.append(writes));
         self.mark_dirty();
     }
 

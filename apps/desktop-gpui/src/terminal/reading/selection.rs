@@ -96,7 +96,12 @@ fn is_word_cell<T>(term: &Term<T>, point: Point) -> bool {
 
 /// The word under `point`, following soft wraps, as xterm's double-click
 /// finds it. A separator is a word of its own; a blank is no word.
-pub fn word_at<T>(term: &Term<T>, point: Point) -> Option<(Point, Point)> {
+pub fn word_at<T>(term: &Term<T>, mut point: Point) -> Option<(Point, Point)> {
+    // A wide glyph's second cell is a blank spacer: the glyph is the cell
+    // before it.
+    if point.column.0 > 0 && term.grid()[point].flags.contains(Flags::WIDE_CHAR_SPACER) {
+        point.column -= 1;
+    }
     let cell = &term.grid()[point];
     if cell.c == ' ' || cell.c == '\0' {
         return None;
@@ -279,6 +284,15 @@ mod tests {
             Some((point(0, 4), point(0, 19))),
             "a colon does not end a word, as in xterm"
         );
+    }
+
+    #[test]
+    fn a_double_click_on_either_half_of_a_wide_glyph_takes_its_word() {
+        let term = term(10, 2, "a \u{4f60}\u{597d} b".as_bytes());
+        let word = Some((point(0, 2), point(0, 5)));
+        assert_eq!(word_at(&term, point(0, 2)), word);
+        assert_eq!(word_at(&term, point(0, 3)), word);
+        assert_eq!(word_at(&term, point(0, 5)), word);
     }
 
     #[test]

@@ -991,3 +991,40 @@ fn charges_an_alternate_screen_pane_for_the_history_it_may_be_hiding() {
         (SCROLLBACK_LIMIT + SIZE.rows) * SIZE.columns * size_of::<Cell>()
     );
 }
+
+#[test]
+fn hands_up_an_osc52_write_cut_across_outputs_and_ignores_a_read() {
+    let mut host = Host::connected();
+    host.shown_pane(1, "SHELL");
+    // "copied" in base64, split across two outputs as tmux may cut it; then a
+    // read request, which tmux answered already and nothing here may answer.
+    host.output(2, "\x1b]52;c;Y29w");
+    host.output(3, "aWVk\x07\x1b]52;c;?\x07");
+    let writes: Vec<_> = host
+        .log
+        .iter()
+        .filter_map(|output| match output {
+            Out::ClipboardWrite { pane_id, text } => Some((pane_id.clone(), text.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(writes, [(PANE.to_owned(), "copied".to_owned())]);
+}
+
+#[test]
+fn hands_up_an_osc52_write_a_timed_out_synchronized_update_was_holding() {
+    let mut host = Host::connected();
+    host.shown_pane(1, "SHELL");
+    // The update never ends: the timeout lands it, write and all.
+    host.output(2, "\x1b[?2026h\x1b]52;c;Y29waWVk\x07");
+    host.advance(Duration::from_secs(1));
+    let writes: Vec<_> = host
+        .log
+        .iter()
+        .filter_map(|output| match output {
+            Out::ClipboardWrite { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(writes, ["copied"]);
+}

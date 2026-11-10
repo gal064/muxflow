@@ -1,11 +1,12 @@
-//! Web and file links in terminal text. Detection is `terminal-interactions`'
-//! (shared with mobile); this maps it onto the grid and decides what a click
-//! opens. Port of `terminalLinkActivation.ts`, `activatedTerminalUrl` and the
-//! link provider in `TerminalRenderer.ts`.
+//! Web and file links in terminal text, and OSC 8 hyperlinks a program wrote.
+//! Text detection is `terminal-interactions`' (shared with mobile); this maps it
+//! onto the grid and decides what a click opens. Port of
+//! `terminalLinkActivation.ts`, `activatedTerminalUrl`, and the link provider
+//! and OSC 8 `linkHandler` in `TerminalRenderer.ts`.
 
 use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Point};
+use alacritty_terminal::index::{Boundary, Column, Point};
 use gpui_kit::Modifiers;
 use terminal_interactions::{LinkKind, terminal_links_for_buffer_line};
 
@@ -33,8 +34,41 @@ impl Link {
     }
 }
 
-/// The link under `point`, if any.
+/// The link under `point`, if any. A hyperlink the program wrote wins over
+/// text that looks like one, as in xterm.
 pub fn link_at<T>(term: &Term<T>, point: Point) -> Option<Link> {
+    hyperlink_at(term, point).or_else(|| text_link_at(term, point))
+}
+
+/// The OSC 8 hyperlink under `point`: the run of cells around it that carry
+/// the same one. It opens like a web link, so only `http(s)` targets leave.
+fn hyperlink_at<T>(term: &Term<T>, point: Point) -> Option<Link> {
+    let hyperlink = term.grid()[point].hyperlink()?;
+    let same = |at: Point| term.grid()[at].hyperlink().as_ref() == Some(&hyperlink);
+    let (mut start, mut end) = (point, point);
+    loop {
+        let previous = start.sub(term, Boundary::Grid, 1);
+        if previous == start || !same(previous) {
+            break;
+        }
+        start = previous;
+    }
+    loop {
+        let next = end.add(term, Boundary::Grid, 1);
+        if next == end || !same(next) {
+            break;
+        }
+        end = next;
+    }
+    Some(Link {
+        kind: LinkKind::Web,
+        text: hyperlink.uri().to_owned(),
+        start,
+        end,
+    })
+}
+
+fn text_link_at<T>(term: &Term<T>, point: Point) -> Option<Link> {
     let row = buffer_row(term, point.line);
     let buffer = GridBuffer::new(term, row.saturating_sub(LINK_WINDOW)..=row + LINK_WINDOW);
     terminal_links_for_buffer_line(&buffer, term.columns(), row + 1)
@@ -163,6 +197,17 @@ mod tests {
         );
         let relative = link_at(&term, point(0, 30)).unwrap();
         assert_eq!(relative.text, "src/lib.rs");
+    }
+
+    #[test]
+    fn an_osc8_hyperlink_spans_its_text_and_carries_its_target() {
+        let screen = "see \x1b]8;;https://example.com/pr/1\x1b\\PR #1\x1b]8;;\x1b\\ ok";
+        let term = term(40, 2, screen.as_bytes());
+        let link = link_at(&term, point(0, 6)).unwrap();
+        assert_eq!(link.kind, LinkKind::Web);
+        assert_eq!(link.text, "https://example.com/pr/1");
+        assert_eq!((link.start, link.end), (point(0, 4), point(0, 8)));
+        assert!(link_at(&term, point(0, 10)).is_none());
     }
 
     #[test]
