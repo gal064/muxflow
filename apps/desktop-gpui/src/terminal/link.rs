@@ -44,6 +44,9 @@ pub enum LinkEvent {
     EchoLag {
         lag_ms: u64,
     },
+    /// A program in a pane wrote the clipboard with OSC 52. Whether it may is
+    /// the controller's call, which knows the host on screen.
+    ClipboardWrite(String),
 }
 
 impl EventEmitter<LinkEvent> for TerminalLink {}
@@ -247,6 +250,7 @@ impl TerminalLink {
             }
             EngineOutput::Diagnostic { message, .. } => cx.emit(LinkEvent::Status(message)),
             EngineOutput::Incident { kind, detail } => self.backend.record_incident(kind, detail),
+            EngineOutput::ClipboardWrite { text, .. } => cx.emit(LinkEvent::ClipboardWrite(text)),
             EngineOutput::FlowStalled { pane_id, epoch } => {
                 cx.emit(LinkEvent::FlowStalled { pane_id, epoch });
             }
