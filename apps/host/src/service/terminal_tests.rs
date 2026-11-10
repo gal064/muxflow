@@ -2160,7 +2160,7 @@ fn an_evicted_pane_is_reported_to_the_desktop_as_requiring_a_seed() {
 fn screen_seed_erases_trailing_cells_before_it_paints_the_text() {
     let text = "\u{1f469}\u{200d}\u{1f4bb} tail".as_bytes().to_vec();
     let mut captured_cell_row = text.clone();
-    captured_cell_row.extend_from_slice(&[b' '; 70]);
+    captured_cell_row.extend_from_slice(&[b' '; 73]);
     let seed = build_seed_with_cell_captures(
         "%1",
         vec![text.clone()],
@@ -2177,4 +2177,115 @@ fn screen_seed_erases_trailing_cells_before_it_paints_the_text() {
             .unwrap()
     };
     assert!(position(b"\x1b[K") < position(&text));
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Rows of a 20-column pane as tmux 3.8 returned them for `capture-pane -e -J`
+/// and `capture-pane -e -N`. `-N` pads a row only to the end of the chunk tmux
+/// stored for it (a quarter, half or all of the width), never to the pane
+/// width, so a row's trailing cells are placed from its left edge.
+#[test]
+fn screen_seed_places_trailing_cells_after_the_text_on_rows_shorter_than_the_pane() {
+    let logical: Vec<Vec<u8>> = [
+        &b"ab\x1b[44m      \x1b[49m cd"[..],
+        b"short",
+        b"\x1b[44m      ",
+        b"\x1b[41mred",
+        "\x1b[49m\u{4f60}\u{597d} \x1b[42m  ".as_bytes(),
+        "\x1b[49m\u{1f469}\u{200d}\u{1f4bb} \x1b[44m  ".as_bytes(),
+    ]
+    .map(<[u8]>::to_vec)
+    .to_vec();
+    let physical: Vec<Vec<u8>> = [
+        &b"ab\x1b[44m      \x1b[49m cd         "[..],
+        b"short     ",
+        b"\x1b[44m      \x1b[49m    ",
+        b"\x1b[41mred                 ",
+        "\x1b[49m\u{4f60}\u{597d} \x1b[42m  \x1b[49m   ".as_bytes(),
+        "\u{1f469}\u{200d}\u{1f4bb} \x1b[44m  ".as_bytes(),
+    ]
+    .map(<[u8]>::to_vec)
+    .to_vec();
+    let seed = build_seed_with_cell_captures(
+        "%1",
+        logical,
+        physical,
+        vec![],
+        vec![],
+        &[b"__ADE_META__:%1:0:0:0:0:0:0:0:0:0:1:0:0:1:20:0".to_vec()],
+    )
+    .unwrap();
+    // The blank tail of each row starts right after what tmux holds in it.
+    for expected in [
+        &b"\x1b[1;12H\x1b[K"[..],
+        b"\x1b[2;6H\x1b[5X",
+        b"\x1b[44m\x1b[3;1H\x1b[6X\x1b[49m\x1b[3;7H\x1b[4X",
+        b"\x1b[41m\x1b[4;4H\x1b[K",
+        // Two double-width characters and a space are five cells.
+        b"\x1b[42m\x1b[5;6H\x1b[2X\x1b[49m\x1b[5;8H\x1b[3X",
+        // A joined emoji is two cells in tmux, not the four its code points suggest.
+        b"\x1b[44m\x1b[6;4H\x1b[2X",
+    ] {
+        assert!(
+            contains(&seed.bytes, expected),
+            "missing {:?} in {:?}",
+            String::from_utf8_lossy(expected),
+            String::from_utf8_lossy(&seed.bytes)
+        );
+    }
+    // The old right-edge placement put a copy of the background run at column 11.
+    assert!(!contains(&seed.bytes, b"\x1b[3;11H"));
+}
+
+#[test]
+fn screen_seed_skips_the_overlay_of_a_row_wider_than_the_pane() {
+    let seed = build_seed_with_cell_captures(
+        "%1",
+        vec![b"\x1b[44mab".to_vec()],
+        vec![b"\x1b[44mab                   ".to_vec()],
+        vec![],
+        vec![],
+        &[b"__ADE_META__:%1:0:0:0:0:0:0:0:0:0:1:0:0:1:20:0".to_vec()],
+    )
+    .unwrap();
+    assert!(!contains(&seed.bytes, b"\x1b[1;3H"));
+}
+
+/// tmux keeps a single mouse mode, and every mouse flag line below is what it
+/// returned after the app asked for `?1000`, `?1002` or `?1003` together with
+/// `?1006`. `mouse_any_flag` is on in all three.
+#[test]
+fn screen_seed_restores_the_mouse_mode_the_app_asked_for() {
+    for (flags, enabled, disabled) in [
+        // standard:button:any
+        (
+            "1:0:1",
+            &b"\x1b[?1000h"[..],
+            [&b"\x1b[?1002h"[..], b"\x1b[?1003h"],
+        ),
+        ("0:1:1", b"\x1b[?1002h", [b"\x1b[?1000h", b"\x1b[?1003h"]),
+        ("0:0:1", b"\x1b[?1003h", [b"\x1b[?1000h", b"\x1b[?1002h"]),
+    ] {
+        let meta = format!("__ADE_META__:%1:0:0:0:0:{flags}:1:0:1:0:0:1:80:0");
+        let seed = build_seed("%1", vec![], vec![], &[meta.into_bytes()]).unwrap();
+        assert!(contains(&seed.bytes, enabled), "{flags}");
+        for mode in disabled {
+            assert!(!contains(&seed.bytes, mode), "{flags}");
+        }
+    }
+    let none = build_seed(
+        "%1",
+        vec![],
+        vec![],
+        &[b"__ADE_META__:%1:0:0:0:0:0:0:0:0:0:1:0:0:1:80:0".to_vec()],
+    )
+    .unwrap();
+    for mode in [&b"\x1b[?1000h"[..], b"\x1b[?1002h", b"\x1b[?1003h"] {
+        assert!(!contains(&none.bytes, mode));
+    }
 }
