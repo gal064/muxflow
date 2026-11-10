@@ -33,12 +33,16 @@ env:
 jobs:
   linux:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install system packages
         timeout-minutes: 14
-        run: .github/scripts/apt-install.sh libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev tmux
+        # The X11, xkb and Wayland development files are for the GPUI app. Mesa's
+        # software Vulkan (lavapipe) is for its offscreen frame test.
+        run: >-
+          .github/scripts/apt-install.sh libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev tmux
+          libxkbcommon-x11-dev libwayland-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -67,6 +71,8 @@ jobs:
         run: pnpm build
       - name: Rust lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Point Vulkan at lavapipe only
+        run: echo "VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)" >> "$GITHUB_ENV"
       - name: Rust tests
         run: cargo test --locked --workspace --all-targets
 
@@ -150,7 +156,7 @@ jobs:
   # socket-path limits) have no other coverage.
   macos:
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - run: brew install tmux

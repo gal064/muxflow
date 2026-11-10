@@ -156,6 +156,21 @@ T2.1 must publish the module seams and a single feature-registration point, so w
 tasks do not collide in the app root. It also sets the AccessKit baseline every later
 UI task follows, because the packaged `cua-driver` journeys read the accessibility tree.
 
+**Module ownership in `apps/desktop-gpui/src`:**
+
+| Task | Owns | Joins the app through |
+|---|---|---|
+| T2.1 | `app.rs`, `features.rs`, `theme/**`, `fonts.rs`, `paths.rs`, `ui/mod.rs`, `ui/shell.rs` | |
+| T2.2 | `ui/chrome/**`, and `ui/title_bar.rs` for its height and control placement (tabs in the title bar) | `chrome::Chrome` (rendered by the shell) and `Chrome::title_bar_content` |
+| T2.3 | `commands/**` | `commands::init` |
+| T2.4 | `connection_ui/**` | `connection_ui::init` |
+| T2.5 | Linux decoration selection and macOS details in `ui/title_bar.rs`, window options in `app.rs` | Its own new modules, each added with one line in `features.rs` |
+
+`features::init` in `features.rs` is the single feature-registration point. Wave 2 tasks
+fill their own module and need no change in the app root. Later phases add one line there.
+The accessibility baseline is the module comment in `ui/mod.rs`: every control has a
+stable id, an AccessKit role and a name.
+
 **Tests and QA:** each task runs `cargo test -p muxflow-gpui` on its module. Worker QA
 is headless, driving GPUI's test context and capturing frames.
 
