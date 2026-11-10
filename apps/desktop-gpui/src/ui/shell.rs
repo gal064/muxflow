@@ -40,13 +40,17 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let title: AnyElement = self.chrome.read(cx).title_bar_content().into_any_element();
+        let chrome = self.chrome.read(cx);
+        let (title, tabs_in_bar): (AnyElement, bool) = (
+            chrome.title_bar_content().into_any_element(),
+            chrome.tabs_in_title_bar(),
+        );
         v_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .text_size(ui(TYPE_ROW))
-            .child(TitleBar::new(title))
+            .child(TitleBar::new(title, tabs_in_bar))
             .child(div().flex_1().min_h_0().child(self.chrome.clone()))
     }
 }
