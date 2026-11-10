@@ -10,7 +10,9 @@
 
 use std::process::Command;
 
-use crate::{platform::AppPaths, tauri_adapters::TauriApp};
+use desktop_core::platform::AppPaths;
+
+use crate::tauri_adapters::TauriApp;
 
 const IDENTIFIER: &str = "dev.muxflow.desktop";
 

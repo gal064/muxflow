@@ -1000,7 +1000,7 @@ fn codex_hook_superseded_line(
 // runtime directory (`/tmp/muxflow-<uid>/timing.log`). Nothing reads it but a
 // human with `jq`, and nothing in the daemon branches on it.
 //
-// Compile-out scheme, mirroring `apps/desktop/src-tauri/src/perf_log.rs`: the
+// Compile-out scheme, mirroring `crates/desktop-core/src/perf_log.rs`: the
 // real implementation is compiled whenever `debug_assertions` is on (plain
 // `cargo build` / `cargo test`) or the non-default `perf-log` cargo feature is
 // enabled. A plain release build therefore carries only the inert stubs below,

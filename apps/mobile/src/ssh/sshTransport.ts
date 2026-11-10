@@ -3,7 +3,7 @@
 // `connectionId` per lane (§11.1 opens a second one for file bodies).
 //
 // The remote command is the desktop's, byte for byte — see
-// `apps/desktop/src-tauri/src/connection/transport.rs`, which passes
+// `crates/desktop-core/src/connection/transport.rs`, which passes
 // `$HOME/.local/bin/muxflow-host bridge --stdio` to ssh as a single argument
 // and lets the login shell expand `$HOME`. sshj's `exec` hands the string to
 // sshd the same way, so no `sh -lc` wrapper is added here.

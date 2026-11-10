@@ -1,13 +1,12 @@
 //! Inert replacement for the measurement modules, compiled only when perf
 //! logging is excluded from the binary (release without the `perf-log`
 //! feature). Module paths and signatures mirror the real implementation so
-//! every call site and the command registration in `lib.rs` stay
-//! unconditional. The commands answer exactly like the real implementation
-//! does when `ADE_PERF_LOG` is unset.
+//! every call site and the Tauri command shims stay unconditional. The commands
+//! answer exactly like the real implementation does when `ADE_PERF_LOG` is unset.
 
 const DISABLED: &str = "performance logging is not enabled for this process";
 
-pub(crate) mod bridge {
+pub mod bridge {
     use crate::platform::EventSink;
     use serde::Serialize;
     use std::sync::Arc;
@@ -15,7 +14,7 @@ pub(crate) mod bridge {
 
     #[derive(Debug, Clone, Copy, Default, Serialize)]
     #[serde(rename_all = "camelCase")]
-    pub(crate) struct BridgeFinalTotals {
+    pub struct BridgeFinalTotals {
         pub(crate) cumulative_frame_count: u64,
         pub(crate) cumulative_byte_length: u64,
         pub(crate) quiesced: bool,
@@ -61,7 +60,7 @@ pub(crate) mod bridge {
     }
 }
 
-pub(crate) mod operations {
+pub mod operations {
     #[cfg(test)]
     #[derive(Clone, Default)]
     pub(crate) struct TransferMeasurementSnapshot {
@@ -152,7 +151,7 @@ pub(crate) mod operations {
 
 /// Zero-cost twin of the native input timeline. The real type owns the pane
 /// label and clock stamps only in an opted-in measurement build.
-pub(crate) mod input_timing {
+pub mod input_timing {
     use std::time::Instant;
 
     #[derive(Debug, Clone, Copy)]
@@ -218,7 +217,7 @@ pub(crate) mod input_timing {
     }
 }
 
-pub(crate) mod sink {
+pub mod sink {
     pub fn perf_log_enabled() -> bool {
         false
     }
@@ -233,7 +232,7 @@ pub(crate) mod sink {
 /// signatures, no clocks, no counters, and `finish` never produces a record —
 /// so `tmux_action` answers without a `timing` object and the renderer writes
 /// no `perf.timeline` line.
-pub(crate) mod switch_timing {
+pub mod switch_timing {
     use std::io::Read;
 
     #[derive(Clone, Copy)]

@@ -176,7 +176,7 @@ use socket::{
 
 #[path = "control_master/orphans.rs"]
 mod orphans;
-pub(crate) use orphans::spawn_orphan_reaper;
+pub use orphans::spawn_orphan_reaper;
 
 pub(in crate::connection) fn acquire_control_master_for_socket(
     target: &str,
@@ -946,7 +946,7 @@ fn discard_owned_master(master: &SshMaster) {
     finish_in_flight(master);
 }
 
-pub(crate) fn close_all_control_masters() {
+pub fn close_all_control_masters() {
     let masters: Vec<_> = {
         let mut registry = ssh_masters().lock().unwrap();
         registry.closing = true;

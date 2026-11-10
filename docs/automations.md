@@ -462,7 +462,7 @@ client id, connected), the active host, `onOpenPane` and `onMessage`.
 
 The built-in places read this list:
 
-- **Saved settings.** `src-tauri/src/app_state.rs` stored the panel as
+- **Saved settings.** `crates/desktop-core/src/app_state.rs` stored the panel as
   `enum PanelSurface { Files, Git, Ports }`, where an unknown value failed the
   whole load. It is now a string defaulting to `"files"`, plus
   `enabled_panel_extensions`. The contract (`persistedAppState.contract.json`)
@@ -538,7 +538,7 @@ Compatibility:
 
 ### Desktop
 
-- Bridge: `src-tauri/src/connection/automation.rs`, an `automation_request`
+- Bridge: `crates/desktop-core/src/connection/automation.rs`, an `automation_request`
   command modeled on `connection/agent.rs`. The event goes through `bridge.rs`
   and `event_frame.rs` (kind byte 19, no payload), is decoded in
   `features/terminal/api.ts`, and `useAppConnectionController.ts` hands it to
@@ -586,7 +586,7 @@ If the feature isn't used:
    `crates/protocol/build.rs`. In `envelope.proto`, remove the import and the
    five additions, and reserve their numbers. Remove the `operation_policy`
    entry and the `dispatcher` arm.
-4. Delete `src-tauri/src/connection/automation.rs`, its shim in `commands/connection.rs`, its `generate_handler!`
+4. Delete `crates/desktop-core/src/connection/automation.rs`, its shim in `commands/connection.rs`, its `generate_handler!`
    entry, the event mapping in `bridge.rs` and `event_frame.rs`, the decode in
    `features/terminal/api.ts` and its test, and the `automationChanged`
    branch in `useAppConnectionController.ts`.
