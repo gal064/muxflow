@@ -120,9 +120,11 @@ fn pin_to_cells(line: &mut ShapedLine, cell: Pixels) {
             glyph.position.x = base_is + (x - base_was);
         }
     }
+    // GPUI ends a trailing underline at the line's width, so it must match the
+    // pinned cells or the last cell is left without one.
     let pinned = LineLayout {
         font_size: line.font_size,
-        width: line.width,
+        width: cell * next as f32,
         ascent: line.ascent,
         descent: line.descent,
         runs,
@@ -578,5 +580,6 @@ mod tests {
             .map(|glyph| f32::from(glyph.position.x))
             .collect();
         assert_eq!(xs, [0., 8., 16., 16.4, 24., 32.]);
+        assert_eq!(line.width, px(40.));
     }
 }
