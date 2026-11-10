@@ -83,10 +83,9 @@ pub fn paste_text(
 }
 
 /// Whether a press with the link modifier is on a link, which that modifier
-/// opens rather than grabbing the pane. Links are the reading module's
-/// (T3.5): until the two branches meet, a terminal shows none.
-pub fn link_at(_pane: &TerminalPane, _position: Point<Pixels>) -> bool {
-    false
+/// opens rather than grabbing the pane.
+pub fn link_at(pane: &TerminalPane, position: Point<Pixels>) -> bool {
+    super::reading::link_at(pane, position)
 }
 
 /// Adds drop and paste listeners to a pane's root.
