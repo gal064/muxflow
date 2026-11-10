@@ -180,7 +180,7 @@ impl TerminalPane {
     /// Sends bytes to the program in this pane, returning the pane to its live
     /// screen. Fails while the pane has no live client.
     pub fn send_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) -> Result<(), String> {
-        input::send(self, bytes, cx)
+        input::send(self, bytes, false, cx)
     }
 
     /// Asks the next paint to rebuild every row: for changes the grid's damage

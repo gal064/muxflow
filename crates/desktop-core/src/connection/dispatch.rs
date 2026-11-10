@@ -223,6 +223,9 @@ pub(super) enum ClientInputDispatch {
         /// When `enqueue_input` accepted these bytes, so the pump can journal
         /// how long they waited for the writer. Journal-only.
         enqueued_at: Instant,
+        /// Delivered through tmux's paste path, which brackets it iff the
+        /// pane's program asked. Never merged with the keys around it.
+        paste: bool,
     },
     Barrier(mpsc::SyncSender<Result<(), String>>),
     Stop,
@@ -248,19 +251,26 @@ pub(super) fn run_client_input_dispatch(
                 mut data,
                 epoch,
                 enqueued_at,
+                paste,
             } => {
                 let mut message_count = 1;
                 // Every keystroke folded into this write waited its own time,
                 // and the histogram is about keystrokes, not writes. Empty for
                 // the common uncoalesced batch, so it costs no allocation.
                 let mut coalesced_at: Vec<Instant> = Vec::new();
-                while data.len() < DESKTOP_INPUT_COALESCE_BYTES {
+                // Only keys merge with keys. A paste is one request on its own,
+                // as the host keeps it one batch: merged into keys it would
+                // arrive unbracketed, and a key merged into it would arrive
+                // inside the paste. Anything that cannot merge is deferred, so
+                // it is the next request written and order is kept.
+                while !paste && data.len() < DESKTOP_INPUT_COALESCE_BYTES {
                     match receiver.try_recv() {
                         Ok(ClientInputDispatch::Bytes {
                             pane_id: next_pane,
                             data: next_data,
                             epoch: next_epoch,
                             enqueued_at: next_enqueued_at,
+                            paste: false,
                         }) if next_pane == pane_id
                             && next_epoch == epoch
                             && data.len().saturating_add(next_data.len())
@@ -293,6 +303,7 @@ pub(super) fn run_client_input_dispatch(
                         operation: v1::Operation::TerminalInput.into(),
                         scope: pane_id,
                         data,
+                        terminal_input_paste: paste,
                         ..Default::default()
                     });
                     match result {
@@ -381,12 +392,12 @@ mod tests {
 
         for marker in 0..4_u8 {
             assert_eq!(
-                client.enqueue_input("%1".into(), vec![marker; MAX_INPUT_REQUEST_BYTES]),
+                client.enqueue_input("%1".into(), vec![marker; MAX_INPUT_REQUEST_BYTES], false),
                 Ok(())
             );
         }
         let error = client
-            .enqueue_input("%1".into(), vec![9])
+            .enqueue_input("%1".into(), vec![9], false)
             .expect_err("the byte budget must refuse excess synchronously");
         assert!(error.contains("retry without dropping bytes"), "{error}");
         for marker in 0..4_u8 {
@@ -408,12 +419,12 @@ mod tests {
 
         for marker in 0..INPUT_MESSAGE_BUDGET {
             assert_eq!(
-                client.enqueue_input("%1".into(), marker.to_be_bytes().to_vec()),
+                client.enqueue_input("%1".into(), marker.to_be_bytes().to_vec(), false),
                 Ok(())
             );
         }
         let error = client
-            .enqueue_input("%1".into(), b"refused".to_vec())
+            .enqueue_input("%1".into(), b"refused".to_vec(), false)
             .expect_err("the message budget must be explicit");
         assert!(error.contains("retry without dropping bytes"), "{error}");
         for marker in 0..INPUT_MESSAGE_BUDGET {
@@ -431,7 +442,7 @@ mod tests {
         client.lane_ready();
         let oversized = vec![b'x'; MAX_INPUT_REQUEST_BYTES + 1];
         let error = client
-            .enqueue_input("%1".into(), oversized)
+            .enqueue_input("%1".into(), oversized, false)
             .expect_err("all callers must share the same atomic limit");
         assert!(error.contains("retry with a smaller batch"), "{error}");
     }
@@ -601,11 +612,92 @@ mod tests {
         // No writer is attached, so the dispatch fails: those bytes never
         // reached the bridge and have no queue time to report.
         client
-            .enqueue_input("%1".into(), b"typed".to_vec())
+            .enqueue_input("%1".into(), b"typed".to_vec(), false)
             .unwrap();
         assert!(client.flush_input().is_err());
         let stats = client.drain_input_latency();
         assert_eq!(stats.bucket_counts.iter().sum::<u64>(), 0);
+
+        sender.send(ClientInputDispatch::Stop).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_paste_is_its_own_request_in_order_with_the_keys_around_it() {
+        use super::super::writer::ControlWriterHandle;
+        use std::{fs::File, os::fd::FromRawFd};
+
+        let mut fds = [0; 2];
+        // SAFETY: pipe initializes both descriptors on success, and each is
+        // moved into exactly one File below.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let mut read_end = unsafe { File::from_raw_fd(fds[0]) };
+        let write_end = unsafe { File::from_raw_fd(fds[1]) };
+
+        let client = Arc::new(TerminalClient::new());
+        let (sender, receiver) = mpsc::sync_channel(INPUT_MESSAGE_BUDGET);
+        client.input_queue.lock().unwrap().sender = Some(sender.clone());
+        mark_input_reconnected(&client);
+        client.lane_ready();
+        *client.writer.lock().unwrap() =
+            Some(ControlWriterHandle::start_with(write_end, "paste-order").unwrap());
+
+        // All queued before the pump starts, so every key that may merge with
+        // its neighbour does.
+        let queued = [
+            ("a", false),
+            ("b", false),
+            ("one\ntwo", true),
+            ("\r", false),
+            ("c", false),
+            ("x", true),
+            ("y", true),
+            ("d", false),
+        ];
+        for (data, paste) in queued {
+            client
+                .enqueue_input("%1".into(), data.into(), paste)
+                .unwrap();
+        }
+        let worker = thread::spawn({
+            let client = Arc::clone(&client);
+            move || run_client_input_dispatch(client, receiver)
+        });
+
+        let expected = [
+            ("ab", false),
+            ("one\ntwo", true),
+            ("\rc", false),
+            ("x", true),
+            ("y", true),
+            ("d", false),
+        ];
+        let (written_tx, written) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(Some(envelope)) = tmux_agent_protocol::read_frame_sync(&mut read_end) {
+                let Some(v1::envelope::Payload::Request(request)) = envelope.payload else {
+                    continue;
+                };
+                assert_eq!(request.operation, i32::from(v1::Operation::TerminalInput));
+                let data = String::from_utf8(request.data).unwrap();
+                if written_tx
+                    .send((data, request.terminal_input_paste))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        let requests: Vec<(String, bool)> = expected
+            .iter()
+            .map(|_| written.recv_timeout(Duration::from_secs(10)).unwrap())
+            .collect();
+        let expected: Vec<(String, bool)> = expected
+            .iter()
+            .map(|(data, paste)| ((*data).to_owned(), *paste))
+            .collect();
+        assert_eq!(requests, expected);
+        assert_eq!(client.flush_input(), Ok(()));
 
         sender.send(ClientInputDispatch::Stop).unwrap();
         worker.join().unwrap();
