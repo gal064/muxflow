@@ -42,6 +42,11 @@ pub fn search<T>(
     active: Option<&Match>,
     forward: bool,
 ) -> Option<Match> {
+    // A match from before a reseed or a resize may name lines the grid no
+    // longer holds: the search starts over.
+    let held = term.topmost_line()..=term.bottommost_line();
+    let active = active
+        .filter(|found| held.contains(&found.start().line) && held.contains(&found.end().line));
     let (origin, direction, side) = match (active, forward) {
         (Some(found), true) => (
             found.end().add(term, Boundary::None, 1),
@@ -123,6 +128,17 @@ mod tests {
         assert_eq!(find("cdgh"), Some(point(0, 2)..=point(1, 0)));
         assert_eq!(find("\u{6f22}\u{5b57}"), Some(point(2, 0)..=point(2, 3)));
         assert_eq!(find("e\u{301}"), Some(point(3, 0)..=point(3, 0)));
+    }
+
+    #[test]
+    fn a_match_on_lines_the_grid_no_longer_holds_starts_the_search_over() {
+        let term = term(20, 3, b"foo\r\nbar");
+        let mut regex = compile("foo").unwrap();
+        let gone = point(-50, 0)..=point(-50, 2);
+        assert_eq!(
+            search(&term, &mut regex, Some(&gone), true),
+            Some(point(0, 0)..=point(0, 2))
+        );
     }
 
     #[test]
