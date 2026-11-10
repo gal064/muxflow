@@ -211,9 +211,9 @@ Exit: a written go or no-go with the measurements, and decisions 1 to 4 recorded
 3. Move `connection/**`, `app_state`, `incidents`, `notifications`, `update_check`,
    `power_events`, `external_links` and the perf-log sink into `crates/desktop-core`.
    Tauri commands stay as thin shims until cutover.
-4. Move `muxflow.theme`, `muxflow.uiScale` and `muxflow.agent-sounds.v1` from
-   `localStorage` into `app_state`, and ship that release before cutover. WebKit
-   storage is not readable from the native app afterwards.
+4. Done: `muxflow.theme`, `muxflow.uiScale` and `muxflow.agent-sounds.v1` no longer
+   live in `localStorage`. Ship that release before cutover, because WebKit storage is
+   not readable from the native app afterwards.
 5. Repoint scripts that name moved code or the `muxflow` package, including the
    `cargo test -p muxflow` fixtures in `tests/performance/optimization/run-before.sh`
    and the file list in `tests/integration/transfers/source-tree-evidence.sh`.
