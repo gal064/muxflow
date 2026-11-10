@@ -22,7 +22,7 @@ A new session can resume from [Status](#status).
   TestFlight are always the owner's call.
 - **CI:** `ci.yml` and `gpui-spike.yml` run on pushes to `gpui/**`, on Linux and macOS.
 - **Privacy:** this repository is public. Do not commit IP addresses, machine names, user
-  names, home paths, container IDs or raw measurement output. Root checks each push for these.
+  names, home paths, container IDs or raw measurement output. Root runs `pnpm check:privacy` before each push.
 - **Binding on every task:**
   - The license rules in `docs/gpui-migration.md`. Workers must not open Zed's GPL
     crates, `termua` or `rterminal`.
@@ -294,7 +294,7 @@ Phase 0 are not in the published history.
 
 | Task | Agent | Branch | State | Commit | Notes |
 |---|---|---|---|---|---|
-| T1.1 `golden-paths` | sonnet, medium, full cycle | `gpui/golden-paths` | Dispatched | | |
+| T1.1 `golden-paths` | sonnet, medium, full cycle | `gpui/golden-paths` | Merged | `7a4f66c` | Root fixed a shared `HOME` race by moving the checks to a child process. Passes on macOS CI |
 | T1.2 `prefs-to-app-state` | sonnet, high, full cycle | `gpui/prefs-to-app-state` | Dispatched | | |
 | T0.1 `license-gate` | sonnet, medium, full cycle | `gpui/license-gate` | Merged | `c025ace`, merge `259e207` | MPL-2.0, BSL-1.0, CDLA-Permissive-2.0 and LLVM-exception crates allowed per crate. Owner to confirm |
 | T0.2 `ledger` | sonnet, medium, impl only, reviewed in T0.7 | `gpui/ledger` | Merged, review pending in T0.7 | `68f33c9` | S8: no drag has to reach the OS. 402 files: 336 port, 31 replace, 35 retire |
