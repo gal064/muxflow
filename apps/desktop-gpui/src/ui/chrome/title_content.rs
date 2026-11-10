@@ -13,6 +13,7 @@ use crate::{
         self,
         metrics::{TYPE_TITLEBAR, ui},
     },
+    tooltips::with_shortcut,
     ui::{
         chrome::{Chrome, tab_strip::TabStrip},
         title_bar::{WindowControls, bar_button, disabled_ink, should_show_window_controls},
@@ -43,7 +44,21 @@ impl RenderOnce for TitleContent {
             bar_button(id, icon, label, disabled_ink(palette.chrome_faint)).disabled(true)
         };
 
-        let settings = || disabled_button("title-settings", IconName::Settings, "Settings");
+        let tip = |label: &str, command| with_shortcut(label, command, cx);
+        let (settings_tip, back_tip, forward_tip, new_workspace_tip) = (
+            tip("Settings", "settings.show"),
+            tip("Back", "focus.back"),
+            tip("Forward", "focus.forward"),
+            tip("New workspace", "session.new"),
+        );
+        let (sidebar_tip, panel_tip) = (
+            tip("Toggle sidebar", "view.toggleSidebar"),
+            tip("Toggle right panel", "view.togglePanel"),
+        );
+        let settings = || {
+            disabled_button("title-settings", IconName::Settings, "Settings")
+                .tooltip(settings_tip.clone())
+        };
         // `aria-disabled` in Tauri: faint, without the disabled dimming.
         let bell = || {
             bar_button(
@@ -52,12 +67,19 @@ impl RenderOnce for TitleContent {
                 "No agents waiting",
                 palette.chrome_faint,
             )
+            .tooltip("No agents waiting")
             .disabled(true)
         };
-        let back = || disabled_button("title-back", IconName::ArrowLeft, "Back");
-        let forward = || disabled_button("title-forward", IconName::ArrowRight, "Forward");
-        let new_workspace =
-            || disabled_button("title-new-workspace", IconName::Plus, "New workspace");
+        let back =
+            || disabled_button("title-back", IconName::ArrowLeft, "Back").tooltip(back_tip.clone());
+        let forward = || {
+            disabled_button("title-forward", IconName::ArrowRight, "Forward")
+                .tooltip(forward_tip.clone())
+        };
+        let new_workspace = || {
+            disabled_button("title-new-workspace", IconName::Plus, "New workspace")
+                .tooltip(new_workspace_tip.clone())
+        };
 
         let rail_ink = move |open: bool, fits: bool| {
             if !fits {
@@ -80,6 +102,11 @@ impl RenderOnce for TitleContent {
                     rail_ink(rails.sidebar_open, rails.sidebar_fits),
                 )
                 .toggled(rails.sidebar_open)
+                .tooltip(if rails.sidebar_fits {
+                    sidebar_tip.clone()
+                } else {
+                    "Widen the window to show the sidebar".into()
+                })
                 .disabled(!rails.sidebar_fits)
                 .on_click(move |_, _, cx| {
                     weak.update(cx, |chrome, cx| chrome.toggle_sidebar(cx)).ok();
@@ -97,6 +124,11 @@ impl RenderOnce for TitleContent {
                     rail_ink(rails.panel_open, rails.panel_fits),
                 )
                 .toggled(rails.panel_open)
+                .tooltip(if rails.panel_fits {
+                    panel_tip.clone()
+                } else {
+                    "Widen the window to show Files and Git".into()
+                })
                 .disabled(!rails.panel_fits)
                 .on_click(move |_, _, cx| {
                     weak.update(cx, |chrome, cx| chrome.toggle_panel(cx)).ok();

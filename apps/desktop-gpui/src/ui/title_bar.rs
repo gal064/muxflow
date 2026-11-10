@@ -7,13 +7,15 @@
 //! Kit's `TitleBar` is not used because its window controls carry no AccessKit
 //! role. T2.5 owns Linux decoration selection and the macOS window details.
 
+use std::{mem, sync::OnceLock};
+
 use gpui_kit::{
-    AnyElement, App, Decorations, DefiniteLength, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, Rgba, Role, SharedString, StatefulInteractiveElement, Styled,
-    Window,
+    AnyElement, App, Decorations, DefiniteLength, Entity, Hsla, InteractiveElement, IntoElement,
+    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, RenderOnce, Rgba, Role, SharedString,
+    StatefulInteractiveElement, Styled, Window, canvas,
     component::{
         ActiveTheme, Icon, IconName, InteractiveElementExt, Sizable,
-        button::{Button, ButtonVariants},
+        button::{Button, ButtonCustomVariant, ButtonVariants},
         h_flex,
     },
     div,
@@ -21,6 +23,7 @@ use gpui_kit::{
     px,
 };
 
+use crate::menus::menu_button;
 use crate::theme::{
     self,
     metrics::{BAR_HEIGHT, TITLEBAR_HEIGHT, ui},
@@ -53,20 +56,75 @@ impl TitleBar {
     }
 }
 
-/// Whether this window gets its own minimize, maximize and close.
-pub fn should_show_window_controls(window: &Window) -> bool {
-    // A tiled window is the compositor's to manage. GPUI also reports a
-    // maximized window as tiled, and that one keeps its controls.
-    cfg!(target_os = "linux")
-        && matches!(
-            window.window_decorations(),
-            Decorations::Client { tiling } if window.is_maximized() || !tiling.is_tiled()
-        )
+/// Who draws the window buttons on Linux. Port of `linux_window.rs`, minus its
+/// two environment overrides, which the owner removed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChromeMode {
+    /// The bar carries minimize, maximize and close.
+    Buttons,
+    /// No buttons: a tiling compositor manages the window, and a close button
+    /// there is noise.
+    Bare,
 }
 
-/// Starts a window move on the first drag after a press on the bar.
+/// Desktops whose compositor tiles windows, matched against each
+/// colon-separated entry of `XDG_CURRENT_DESKTOP`.
+const TILING_DESKTOPS: &[&str] = &[
+    "hyprland", "sway", "niri", "river", "i3", "qtile", "bspwm", "dwm",
+];
+
+/// The decision from `XDG_CURRENT_DESKTOP`. Unknown desktops get buttons.
+pub fn classify(desktop: Option<&str>) -> ChromeMode {
+    let tiling = desktop
+        .unwrap_or_default()
+        .split(':')
+        .any(|entry| TILING_DESKTOPS.contains(&entry.trim().to_ascii_lowercase().as_str()));
+    if tiling {
+        ChromeMode::Bare
+    } else {
+        ChromeMode::Buttons
+    }
+}
+
+fn chrome_mode() -> ChromeMode {
+    static MODE: OnceLock<ChromeMode> = OnceLock::new();
+    *MODE.get_or_init(|| classify(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref()))
+}
+
+/// Whether this window gets its own minimize, maximize and close. A window the
+/// compositor decorates already has its own.
+pub fn should_show_window_controls(window: &Window) -> bool {
+    cfg!(target_os = "linux")
+        && chrome_mode() == ChromeMode::Buttons
+        && matches!(window.window_decorations(), Decorations::Client { .. })
+}
+
+/// Starts a window move on the first pointer move after a press on the bar.
 struct DragState {
     should_move: bool,
+}
+
+/// Listens for the move and the release on the whole window. A listener on the
+/// bar only hears moves while the pointer is over it, so a quick drag that left
+/// the bar before its first move event never started the move, and a release
+/// outside the bar was never seen.
+fn drag_tracker(drag: Entity<DragState>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let moved = drag.clone();
+            window.on_mouse_event(move |_: &MouseMoveEvent, _, window, cx| {
+                if moved.update(cx, |drag, _| mem::take(&mut drag.should_move)) {
+                    window.start_window_move();
+                }
+            });
+            let released = drag.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, _, _, cx| {
+                released.update(cx, |drag, _| drag.should_move = false);
+            });
+        },
+    )
+    .absolute()
 }
 
 impl RenderOnce for TitleBar {
@@ -100,23 +158,14 @@ impl RenderOnce for TitleBar {
             .when(cfg!(target_os = "linux"), |this| {
                 this.on_double_click(|_, window, _| window.zoom_window())
             })
-            .on_mouse_down_out(window.listener_for(&drag, |drag, _, _, _| {
-                drag.should_move = false;
-            }))
             .on_mouse_down(
                 MouseButton::Left,
-                window.listener_for(&drag, |drag, _, _, _| drag.should_move = true),
+                // A button on the bar prevents the default of its press, and a click on it is not a drag.
+                window.listener_for(&drag, |drag, _, window, _| {
+                    drag.should_move = !window.default_prevented();
+                }),
             )
-            .on_mouse_up(
-                MouseButton::Left,
-                window.listener_for(&drag, |drag, _, _, _| drag.should_move = false),
-            )
-            .on_mouse_move(window.listener_for(&drag, |drag, _, window, _| {
-                if drag.should_move {
-                    drag.should_move = false;
-                    window.start_window_move();
-                }
-            }))
+            .child(drag_tracker(drag))
             .child(
                 div()
                     .flex_1()
@@ -125,6 +174,9 @@ impl RenderOnce for TitleBar {
                     .overflow_hidden()
                     .child(self.content),
             )
+            .when(cfg!(target_os = "linux"), |this| {
+                this.child(menu_button(cx))
+            })
             .when(show_controls && !tabs_in_bar, |this| {
                 this.child(WindowControls::trailing())
             })
@@ -192,7 +244,29 @@ impl RenderOnce for WindowControls {
         .on_click(|_, window, _| window.minimize_window());
         let maximize = control("window-maximize", maximize_icon, maximize_label)
             .on_click(|_, window, _| window.zoom_window());
+        // Close is the one control that answers hover with the danger color, and its
+        // icon brightens with it.
+        let palette = theme::palette(cx);
+        let close_hovered = window.use_state(cx, |_, _| false);
+        let danger = Hsla::from(palette.danger);
+        let close_ink = if *close_hovered.read(cx) {
+            palette.chrome_ink_strong
+        } else {
+            ink
+        };
         let close = control("window-close", IconName::WindowClose, "Close window")
+            .icon(
+                Icon::new(IconName::WindowClose)
+                    .size(ui(14.))
+                    .text_color(close_ink),
+            )
+            .custom(ButtonCustomVariant::new(cx).hover(danger).active(danger))
+            .on_hover(move |hovered, _, cx| {
+                close_hovered.update(cx, |state, cx| {
+                    *state = *hovered;
+                    cx.notify();
+                })
+            })
             .on_click(|_, window, _| window.remove_window());
         h_flex()
             .id("window-controls")
@@ -211,5 +285,41 @@ impl RenderOnce for WindowControls {
                     this.child(minimize).child(maximize).child(close)
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floating_and_unknown_desktops_get_buttons() {
+        for desktop in [
+            None,
+            Some(""),
+            Some("GNOME"),
+            Some("KDE"),
+            Some("X-Cinnamon"),
+        ] {
+            assert_eq!(classify(desktop), ChromeMode::Buttons, "{desktop:?}");
+        }
+    }
+
+    #[test]
+    fn tiling_desktops_are_bare_however_they_are_listed() {
+        for desktop in [
+            "Hyprland",
+            "sway",
+            "ubuntu:i3",
+            "Niri",
+            "something:Sway:else",
+        ] {
+            assert_eq!(classify(Some(desktop)), ChromeMode::Bare, "{desktop}");
+        }
+    }
+
+    #[test]
+    fn a_desktop_that_merely_contains_a_tiling_name_is_not_one() {
+        assert_eq!(classify(Some("swayfx-fork")), ChromeMode::Buttons);
     }
 }

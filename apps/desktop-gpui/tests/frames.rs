@@ -169,6 +169,166 @@ mod frames {
         println!("{label}: ok, {} colors", colors.len());
     }
 
+    /// A window with one row that has a context menu, to draw the menu on its own.
+    struct Demo;
+
+    impl gpui_kit::Render for Demo {
+        fn render(
+            &mut self,
+            window: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::{
+                InteractiveElement, ParentElement, Styled, TestSupportExt,
+                component::menu::ContextMenuExt, div,
+            };
+            use muxflow_gpui::{
+                context_menu::{self, Entry, Item},
+                theme::palette,
+            };
+            let palette = palette(cx);
+            let entries = std::rc::Rc::new(vec![
+                Entry::from(Item::new("Open", |_, _| {}).command("commands.show")),
+                Entry::from(Item::new("Rename…", |_, _| {}).disabled(true)),
+                Entry::Separator,
+                Entry::from(Item::new("Sort by name", |_, _| {}).checked(true)),
+                Entry::from(Item::new("Sort by date", |_, _| {}).checked(false)),
+                Entry::Separator,
+                Entry::from(Item::new("Delete…", |_, _| {}).destructive()),
+            ]);
+            let tooltip = gpui_kit::component::tooltip::Tooltip::new("Toggle sidebar (Ctrl+B)")
+                .build(window, cx);
+            div()
+                .size_full()
+                .bg(palette.chrome_bg)
+                .p(gpui_kit::px(24.))
+                .child(
+                    div()
+                        .id("row")
+                        .w(gpui_kit::px(220.))
+                        .h(gpui_kit::px(28.))
+                        .text_color(palette.chrome_ink)
+                        .child("src/main.rs")
+                        .test_support()
+                        .context_menu(move |menu, _, _| context_menu::fill(menu, &entries)),
+                )
+                // How a tooltip looks: the card the app builds on hover.
+                .child(div().mt(gpui_kit::px(160.)).child(tooltip))
+        }
+    }
+
+    // Macros, because the frame type belongs to a crate this one does not name.
+    macro_rules! save {
+        ($frame:expr, $label:expr) => {
+            if let Ok(out) = std::env::var("MUXFLOW_GPUI_FRAME_DIR") {
+                std::fs::create_dir_all(&out).unwrap();
+                $frame
+                    .save(format!("{out}/{}.png", $label))
+                    .expect("save the frame");
+            }
+        };
+    }
+
+    macro_rules! differing_pixels {
+        ($a:expr, $b:expr) => {
+            $a.pixels().zip($b.pixels()).filter(|(a, b)| a != b).count()
+        };
+    }
+
+    /// Menus, notices, tooltips and context menus, each against the same window
+    /// without them, so a surface that never drew fails here.
+    fn render_surfaces(theme: &str) {
+        use gpui_kit::{
+            component::WindowExt as _,
+            test::{TestQueryExt, TestWindowExt},
+        };
+        use muxflow_gpui::notices;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = write_state(dir.path(), theme, 1.0);
+        let mut cx = context(&state);
+        let handle = open(&mut cx, 1000., 400.);
+        cx.update_window(handle, |_, window, _| window.activate_window())
+            .unwrap();
+        let rest = cx.capture_screenshot(handle).expect("offscreen rendering");
+        save!(rest, format!("surface-{theme}-rest"));
+
+        let shoot = |cx: &mut HeadlessAppContext, name: &str| {
+            // Past the animations that bring a surface in.
+            cx.advance_clock(std::time::Duration::from_millis(400));
+            cx.run_until_parked();
+            // The screenshot is of the last frame drawn, and a timer does not draw one.
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .unwrap();
+            let frame = cx.capture_screenshot(handle).expect("offscreen rendering");
+            save!(frame, format!("surface-{theme}-{name}"));
+            let changed = differing_pixels!(rest, frame);
+            assert!(
+                changed > 400,
+                "{theme} {name}: nothing was drawn ({changed})"
+            );
+        };
+
+        // The main menu, with its View submenu open.
+        cx.update_window(handle, |_, window, cx| window.click("app-menu", cx))
+            .unwrap();
+        shoot(&mut cx, "menu");
+        cx.update_window(handle, |_, window, cx| {
+            let id = window.find_by_label("View").path().last().cloned().unwrap();
+            window.hover(id, cx)
+        })
+        .unwrap();
+        shoot(&mut cx, "menu-view");
+        cx.update_window(handle, |_, window, cx| window.press("escape", cx))
+            .unwrap();
+        cx.update_window(handle, |_, window, cx| window.press("escape", cx))
+            .unwrap();
+
+        // An information notice, then a problem that replaces it.
+        cx.update_window(handle, |_, window, cx| {
+            notices::notify("Copied the path to the clipboard", window, cx)
+        })
+        .unwrap();
+        shoot(&mut cx, "notice");
+        cx.update_window(handle, |_, window, cx| {
+            notices::notify("Could not save shortcuts: the disk is full", window, cx)
+        })
+        .unwrap();
+        shoot(&mut cx, "notice-problem");
+        cx.update_window(handle, |_, window, cx| window.clear_notifications(cx))
+            .unwrap();
+    }
+
+    fn render_context_menu(theme: &str) {
+        use gpui_kit::{AppContext, test::TestWindowExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = write_state(dir.path(), theme, 1.0);
+        let mut cx = context(&state);
+        let handle = cx.update(|cx| {
+            let mut options = app::main_window_options(cx);
+            options.window_bounds = Some(WindowBounds::Windowed(Bounds {
+                origin: Default::default(),
+                size: size(px(420.), px(300.)),
+            }));
+            options.focus = false;
+            options.show = false;
+            gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| Demo))
+                .expect("open the headless window")
+                .0
+        });
+        let rest = cx.capture_screenshot(handle).expect("offscreen rendering");
+        cx.update_window(handle, |_, window, cx| window.right_click("row", cx))
+            .unwrap();
+        cx.run_until_parked();
+        let frame = cx.capture_screenshot(handle).expect("offscreen rendering");
+        save!(frame, format!("surface-{theme}-context-menu"));
+        assert!(
+            differing_pixels!(rest, frame) > 400,
+            "{theme}: the context menu did not draw"
+        );
+    }
+
     pub fn run() {
         for (theme, palette) in [("dark", theme::dark()), ("light", theme::light())] {
             for scale in [1.0, 1.2] {
@@ -176,6 +336,8 @@ mod frames {
                 render_case(theme, scale, 1280, 800, &palette);
                 render_case(theme, scale, 320, 240, &palette);
             }
+            render_surfaces(theme);
+            render_context_menu(theme);
         }
     }
 }

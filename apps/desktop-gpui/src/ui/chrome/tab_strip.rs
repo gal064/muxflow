@@ -176,7 +176,9 @@ impl RenderOnce for TabStrip {
         });
 
         let tool = |id: &'static str, icon: IconName, label: &'static str| {
-            bar_button(id, icon, label, disabled_ink(palette.chrome_faint)).disabled(true)
+            bar_button(id, icon, label, disabled_ink(palette.chrome_faint))
+                .tooltip(label)
+                .disabled(true)
         };
 
         // `clipped` comes from the last layout; this runs after the new one, so

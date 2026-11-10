@@ -176,7 +176,7 @@ font row covers them).
 | `app/App.multiHost.test.tsx` | 593 | port | 2 | multi-host shell behavior | open |
 | `app/App.tsx` | 2129 | port | 2 | app root entity; split into per-domain entities | open |
 | `app/AppDialogLayer.tsx` | 122 | port | 2 | dialog layer over Kit dialogs | open |
-| `app/AppNoticeLayer.tsx` | 52 | port | 2 | notice and transfer-toast layer | open |
+| `app/AppNoticeLayer.tsx` | 52 | port | 2 | Kit notifications through `notices.rs`. One status notice at a time, a problem stays. The transfer toast is not here yet; it comes with transfers | open |
 | `app/AppRightPanel.tsx` | 89 | port | 2 | right panel host (Explorer, Git, Ports rails) | open |
 | `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | tests of TerminalWorkspaceSurface.tsx | open |
 | `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | workspace terminal surface entity | open |
@@ -464,8 +464,8 @@ font row covers them).
 | `features/shell/responsiveShell.test.ts` | 86 | port | 2 | tests of responsiveShell.ts | open |
 | `features/shell/responsiveShell.ts` | 67 | port | 2 | responsive rail layout | open |
 | `features/shell/shellComponents.test.tsx` | 2301 | port | 4 | shell component behavior; React render mechanics cases dropped while porting | open |
-| `features/shell/statusNotice.test.ts` | 94 | port | 2 | tests in connection_ui/status_notice.rs | done (T2.4) |
-| `features/shell/statusNotice.ts` | 96 | port | 2 | connection_ui/status_notice.rs; surface.rs shows one notice at a time, dismissed on the Kit's own timer | done (T2.4) |
+| `features/shell/statusNotice.test.ts` | 94 | port | 2 | `notices.rs` unit tests | done (T2.4, T2.5) |
+| `features/shell/statusNotice.ts` | 96 | port | 2 | `notices.rs`; one notice at a time, a problem stays until dismissed | done (T2.4, T2.5) |
 | `features/shell/types.ts` | 458 | port | 4 | shell and persisted app-state types with normalization | open |
 | `features/shell/useAppearance.ts` | 33 | port | 2 | applies saved theme once state is ready | open |
 | `features/shell/useDesktopResumeRecovery.test.ts` | 81 | port | 2 | tests in connection_ui/resume_recovery.rs | done (T2.4) |
@@ -476,10 +476,10 @@ font row covers them).
 | `features/shell/useShellCommands.ts` | 443 | port | 2 | `commands/mod.rs` `run` and `on_command`: each command body lands with its feature (Phases 3 to 5) | open |
 | `features/shell/useUpdateCheck.test.ts` | 95 | port | 2 | tests of useUpdateCheck.ts | open |
 | `features/shell/useUpdateCheck.ts` | 97 | port | 2 | update check notice over kept update_check.rs | open |
-| `features/shell/useWindowChrome.test.tsx` | 85 | port | 2 | behavior assertions move to the replacement of useWindowChrome.ts | open |
-| `features/shell/useWindowChrome.ts` | 81 | replace | 2 | Linux window chrome mode from linux_window.rs becomes GPUI client decorations | open |
-| `features/shell/windowGeometry.test.ts` | 40 | port | 2 | tests of windowGeometry.ts | open |
-| `features/shell/windowGeometry.ts` | 85 | port | 2 | window geometry restore | open |
+| `features/shell/useWindowChrome.test.tsx` | 85 | port | 2 | `ui/title_bar.rs` unit tests of `classify`. Window-controls presence is read from the window's decorations | open |
+| `features/shell/useWindowChrome.ts` | 81 | replace | 2 | `ui/title_bar.rs`: automatic selection, bare on a tiling desktop. The two environment overrides are removed | open |
+| `features/shell/windowGeometry.test.ts` | 40 | port | 2 | `window_state.rs` unit tests, `tests/native.rs` round trip | open |
+| `features/shell/windowGeometry.ts` | 85 | port | 2 | `window_state.rs`: saved through `update_app_state`, in the format Tauri wrote | open |
 
 ### `features/terminal`
 
@@ -655,7 +655,7 @@ font row covers them).
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
 | `ui/AgentStateIndicator.tsx` | 39 | port | 2 | agent state indicator | open |
-| `ui/ContextMenu.tsx` | 211 | replace | 2 | Kit context menu | open |
+| `ui/ContextMenu.tsx` | 211 | replace | 2 | Kit `PopupMenu` through `context_menu.rs`. Not carried over: opening from the keyboard, which Kit lacks | open |
 | `ui/DelayedLoading.tsx` | 19 | port | 2 | loading text shown after 150 ms (the delay is a CSS animation in styles.css) | open |
 | `ui/Icon.tsx` | 244 | port | 2 | icon path data becomes embedded SVG assets | open |
 | `ui/SetupProgress.tsx` | 6 | port | 2 | setup progress line | open |
