@@ -259,6 +259,9 @@ fn on_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
         commands.context.has_terminal_selection,
         |command| commands.is_available(command),
     );
+    if commands.platform == Platform::Linux {
+        crate::diagnostics::note_copy_chord(&disposition, window, cx);
+    }
     match disposition {
         ShortcutDisposition::Ignore | ShortcutDisposition::Yield(_) => {}
         ShortcutDisposition::Swallow => cx.stop_propagation(),
