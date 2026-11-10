@@ -340,8 +340,8 @@ pub struct AppStateStore {
     path: PathBuf,
     value: Mutex<PersistedAppState>,
     recovery_error: Mutex<Option<String>>,
-    /// Serialises `save_app_state`, whose file write and cache update are now
-    /// separated by an await.
+    /// Serialises `save_app_state` and `update_app_state`, whose file write and
+    /// cache update are now separated by an await.
     write_lock: tokio::sync::Mutex<()>,
 }
 
@@ -640,16 +640,34 @@ pub fn load_app_state(store: &AppStateStore) -> Result<PersistedAppState, String
 /// and an atomic write plus fsync on the WebView's main thread stalls the whole
 /// UI for the length of that disk round trip.
 pub async fn save_app_state(state: PersistedAppState, store: &AppStateStore) -> Result<(), String> {
-    if store.recovery_error.lock().unwrap().is_some() {
-        return Err("saved shell state is write-frozen until explicit reset".into());
-    }
-    validate(&state)?;
     // One save at a time. The await between writing the file and updating the
     // cache is a window two concurrent saves could interleave in, leaving the
     // file holding one state and the cache another — and shell state is saved
     // on ordinary interactions, so concurrent saves are the normal case, not an
     // exotic one.
     let _serialized = store.write_lock.lock().await;
+    write_app_state(state, store).await
+}
+
+/// Changes part of the saved state. A separate load and save lets another
+/// writer's update land in between and be overwritten; this holds the write
+/// lock across both.
+pub async fn update_app_state(
+    store: &AppStateStore,
+    apply: impl FnOnce(&mut PersistedAppState),
+) -> Result<(), String> {
+    let _serialized = store.write_lock.lock().await;
+    let mut state = load_app_state(store)?;
+    apply(&mut state);
+    write_app_state(state, store).await
+}
+
+/// The caller holds `write_lock`.
+async fn write_app_state(state: PersistedAppState, store: &AppStateStore) -> Result<(), String> {
+    if store.recovery_error.lock().unwrap().is_some() {
+        return Err("saved shell state is write-frozen until explicit reset".into());
+    }
+    validate(&state)?;
     let path = store.path.clone();
     let persisted = state.clone();
     crate::platform::spawn_blocking(move || write_private_atomic(&path, &persisted))
@@ -1120,6 +1138,46 @@ mod tests {
             serde_json::to_value(AgentSortMode::Status).unwrap(),
             serde_json::json!("status")
         );
+    }
+
+    #[test]
+    fn concurrent_updates_all_land() {
+        let root = std::env::temp_dir().join(format!("ade-app-state-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("app-state.json");
+        let store = std::sync::Arc::new(AppStateStore::load(path.clone()));
+
+        let tasks: Vec<_> = (0..16)
+            .map(|index| {
+                let store = store.clone();
+                crate::platform::spawn(async move {
+                    update_app_state(&store, |state| {
+                        let mut seen = state
+                            .shell
+                            .enabled_panel_extensions
+                            .take()
+                            .unwrap_or_default();
+                        seen.push(format!("extension-{index}"));
+                        state.shell.enabled_panel_extensions = Some(seen);
+                    })
+                    .await
+                })
+            })
+            .collect();
+        crate::platform::runtime_handle().block_on(async {
+            for task in tasks {
+                task.await.unwrap().unwrap();
+            }
+        });
+
+        let reloaded = AppStateStore::load(path);
+        let seen = load_app_state(&reloaded)
+            .unwrap()
+            .shell
+            .enabled_panel_extensions
+            .unwrap();
+        assert_eq!(seen.len(), 16, "an update was lost: {seen:?}");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -7,6 +7,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window,
     assets::IconName,
     base::{Disableable, Tab, Tabs},
+    canvas,
     component::{
         Icon, Sizable,
         button::{Button, ButtonVariants},
@@ -55,16 +56,17 @@ impl RenderOnce for TabStrip {
             .clone();
         let clipped = scroll.max_offset().x > px(1.);
         // The active tab may be scrolled out; reveal it only when selection moves.
-        let revealed = window.use_keyed_state("tab-strip-revealed", cx, |_, _| None::<usize>);
+        let revealed =
+            window.use_keyed_state("tab-strip-revealed", cx, |_, _| None::<SharedString>);
         let active_index = self
             .tabs
             .iter()
             .position(|tab| Some(&tab.key) == self.active.as_ref());
-        if *revealed.read(cx) != active_index {
+        if *revealed.read(cx) != self.active {
             if let Some(index) = active_index {
                 scroll.scroll_to_item(index);
             }
-            revealed.update(cx, |revealed, _| *revealed = active_index);
+            revealed.update(cx, |revealed, _| *revealed = self.active.clone());
         }
         let count = self.tabs.len();
         let key_of = |key: &SharedString| format!("workspace-tab-{key}");
@@ -177,6 +179,21 @@ impl RenderOnce for TabStrip {
             bar_button(id, icon, label, disabled_ink(palette.chrome_faint)).disabled(true)
         };
 
+        // `clipped` comes from the last layout; this runs after the new one, so
+        // a resize does not leave the "All tabs" button a frame behind.
+        let recheck = {
+            let scroll = scroll.clone();
+            canvas(
+                move |_, window, cx| {
+                    if (scroll.max_offset().x > px(1.)) != clipped {
+                        window.defer(cx, |window, _| window.refresh());
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+        };
+
         h_flex()
             .id("tab-strip")
             .when(!in_title_bar, |this| {
@@ -256,5 +273,6 @@ impl RenderOnce for TabStrip {
                         )
                     }),
             )
+            .child(recheck)
     }
 }

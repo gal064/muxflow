@@ -27,7 +27,7 @@ pub mod shortcut_editor;
 use std::{collections::HashMap, future::Future, rc::Rc};
 
 use desktop_core::{
-    app_state::{load_app_state, save_app_state},
+    app_state::{load_app_state, update_app_state},
     platform,
 };
 use gpui_kit::{
@@ -209,9 +209,10 @@ fn store_overrides(
     let store = cx.global::<Core>().app_state.clone();
     let overrides = overrides.clone();
     let save = platform::spawn(async move {
-        let mut state = load_app_state(&store)?;
-        state.commands.shortcut_overrides = overrides;
-        save_app_state(state, &store).await
+        update_app_state(&store, move |state| {
+            state.commands.shortcut_overrides = overrides;
+        })
+        .await
     });
     async move { save.await.map_err(|error| error.to_string())? }
 }
