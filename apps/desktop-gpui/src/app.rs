@@ -8,7 +8,7 @@ use gpui_kit::{
     WindowDecorations, WindowOptions, point, px, size,
 };
 
-use crate::{features, fonts, paths::NativePaths, theme, ui::shell::Shell};
+use crate::{features, fonts, paths::NativePaths, theme, ui::shell::Shell, window_state};
 
 /// The app's minimum window size, as Tauri's `minWidth` and `minHeight`.
 pub const MIN_WINDOW_WIDTH: f32 = 320.;
@@ -66,18 +66,17 @@ pub fn init(core: Core, cx: &mut App) {
 
 pub fn main_window_options(cx: &App) -> WindowOptions {
     WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-            None,
-            size(px(1280.), px(800.)),
-            cx,
-        ))),
+        window_bounds: Some(window_state::saved_bounds(cx).unwrap_or_else(|| {
+            WindowBounds::Windowed(Bounds::centered(None, size(px(1280.), px(800.)), cx))
+        })),
         window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
         titlebar: Some(TitlebarOptions {
             title: Some("Muxflow".into()),
             appears_transparent: true,
-            // Vertically centered in the 38px macOS bar: GPUI centers the 14px lights
-            // in a container of height `button + 2y`.
-            traffic_light_position: Some(point(px(12.), px(12.))),
+            // Tauri's `trafficLightPosition`. GPUI centers the 14px lights in a
+            // container of height `button + 2y`, so they sit at y + 7 from the top
+            // of the 38px bar.
+            traffic_light_position: Some(point(px(12.), px(13.))),
         }),
         app_owns_titlebar_drag: true,
         window_decorations: Some(WindowDecorations::Client),

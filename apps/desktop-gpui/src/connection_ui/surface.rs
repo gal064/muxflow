@@ -11,14 +11,13 @@ use gpui_kit::{
     component::{
         ActiveTheme, Sizable, WindowExt,
         button::{Button, ButtonVariants},
-        h_flex,
-        notification::Notification,
-        v_flex,
+        h_flex, v_flex,
     },
     div,
     prelude::*,
 };
 
+use crate::notices;
 use crate::theme::{
     self,
     metrics::{TITLEBAR_HEIGHT, TYPE_META, TYPE_ROW, TYPE_SECONDARY, ui},
@@ -34,7 +33,6 @@ use super::{
         open_helper_dialog,
     },
     helper_upgrade::HelperUpgradeState,
-    status_notice::{NoticeSeverity, notice_for_status},
 };
 
 /// Sub-400ms blips are self-healing repairs whose strip would only be a flash.
@@ -58,9 +56,6 @@ fn phase_word(phase: ConnectionPhase) -> &'static str {
         ConnectionPhase::Disconnected => "Disconnected",
     }
 }
-
-/// The status channel has one notice at a time; a new one replaces it.
-struct StatusNoticeSlot;
 
 pub struct ConnectionSurface {
     controller: Option<Entity<ConnectionController>>,
@@ -87,19 +82,7 @@ impl ConnectionSurface {
                 window,
                 |_, _, event: &ConnectionEvent, window, cx| {
                     let ConnectionEvent::Status(message) = event;
-                    let Some(notice) = notice_for_status(message) else {
-                        return;
-                    };
-                    let note = match notice.severity {
-                        NoticeSeverity::Info => {
-                            Notification::info(notice.message).id::<StatusNoticeSlot>()
-                        }
-                        // Something the app refused is the user's to acknowledge.
-                        NoticeSeverity::Problem => Notification::error(notice.message)
-                            .id::<StatusNoticeSlot>()
-                            .autohide(false),
-                    };
-                    window.push_notification(note, cx);
+                    notices::notify(message, window, cx);
                 },
             ));
         }
