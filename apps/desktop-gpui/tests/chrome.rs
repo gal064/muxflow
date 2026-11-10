@@ -13,6 +13,7 @@ use gpui_kit::{
 };
 use muxflow_gpui::{
     app::{self, Core},
+    commands,
     ui::shell::Shell,
 };
 use serde_json::{Value, json};
@@ -238,6 +239,77 @@ fn tabs_are_named_tabs_and_selecting_one_changes_no_widths(cx: &mut TestAppConte
         assert_eq!(window.find_by_label("lib.rs").selected(), Some(true));
     });
     assert_eq!(before, width(window_cx));
+}
+
+#[gpui_kit::test]
+fn the_all_tabs_button_follows_the_window_without_lagging(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({ "tabsInTitleBar": false }));
+    let window_cx = open(&state, cx);
+    assert!(!shows(window_cx, "All tabs"));
+
+    window_cx.simulate_resize(size(px(200.), px(600.)));
+    assert!(shows(window_cx, "All tabs"), "the tabs no longer fit");
+
+    window_cx.simulate_resize(size(px(1280.), px(800.)));
+    assert!(!shows(window_cx, "All tabs"), "they fit again");
+}
+
+#[gpui_kit::test]
+fn selecting_with_a_dock_open_follows_the_dock_rules(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({ "tabsInTitleBar": false }));
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    value["workspaceUi"][0]["dockedAppTabId"] = json!("b");
+    std::fs::write(&state, serde_json::to_vec(&value).unwrap()).unwrap();
+    let window_cx = open(&state, cx);
+
+    click(window_cx, "workspace-tab-b");
+    window_cx.update(|window, _| {
+        assert_eq!(window.find_by_label("main.rs").selected(), Some(true));
+        assert_eq!(window.find_by_label("lib.rs").selected(), Some(false));
+    });
+
+    click(window_cx, "workspace-tab-a");
+    window_cx.update(|window, _| {
+        assert_eq!(window.find_by_label("main.rs").selected(), Some(false));
+        assert_eq!(window.find_by_label("main.rs").role(), Some(Role::Tab));
+        assert_eq!(window.find_by_label("lib.rs").selected(), Some(false));
+    });
+    assert!(shows(window_cx, "Resize the docked document"));
+}
+
+#[gpui_kit::test]
+fn a_rail_stays_at_its_exact_breakpoint_when_scaled(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({ "panelOpen": true }));
+    let window_cx = open(&state, cx);
+    window_cx.update(|window, _| window.set_rem_size(px(19.2)));
+
+    window_cx.simulate_resize(size(px(1224.), px(800.)));
+    assert!(shows(window_cx, SIDEBAR) && shows(window_cx, PANEL));
+
+    window_cx.simulate_resize(size(px(1223.), px(800.)));
+    assert!(!shows(window_cx, SIDEBAR), "one pixel under the breakpoint");
+}
+
+#[gpui_kit::test]
+fn the_view_commands_drive_the_rails(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({}));
+    let window_cx = open(&state, cx);
+
+    window_cx.update(|window, cx| commands::run("view.toggleSidebar", window, cx));
+    assert!(!shows(window_cx, SIDEBAR));
+
+    window_cx.update(|window, cx| commands::run("view.showGit", window, cx));
+    assert!(shows(window_cx, PANEL));
+    window_cx.update(|window, _| {
+        assert_eq!(window.find_by_label("Git").selected(), Some(true));
+    });
+
+    window_cx.update(|window, cx| commands::run("view.togglePanel", window, cx));
+    assert!(!shows(window_cx, PANEL));
 }
 
 #[gpui_kit::test]
