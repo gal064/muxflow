@@ -88,7 +88,10 @@ impl TerminalPane {
         let subscriptions = vec![
             cx.on_focus(&focus, window, Self::focus_changed),
             cx.on_blur(&focus, window, Self::focus_changed),
-            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+            cx.observe_window_activation(window, |pane, window, cx| {
+                input::report_focus(pane, window, cx);
+                cx.notify();
+            }),
             // A row's colors are resolved when it is built.
             cx.observe_global::<theme::Appearance>(|pane, cx| pane.repaint_all(cx)),
         ];
@@ -175,20 +178,10 @@ impl TerminalPane {
     }
 
     /// Sends bytes to the program in this pane. Fails while the pane has no
-    /// live client.
-    pub fn send_input(&self, bytes: Vec<u8>, cx: &mut Context<Self>) -> Result<(), String> {
-        reading::before_input(self, cx);
-        let link = self.link.clone();
-        let pane_id = self.pane_id.clone();
-        link.update(cx, |link, _| {
-            link.note_input();
-            let client_id = link
-                .client_id()
-                .ok_or("this terminal has no live client")?
-                .to_owned();
-            link.backend()
-                .send_input(client_id, pane_id.to_string(), bytes)
-        })
+    /// live client. Keys and pastes also return it to its live screen
+    /// (`reading::before_user_input`).
+    pub fn send_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) -> Result<(), String> {
+        input::send(self, bytes, cx)
     }
 
     /// Asks the next paint to rebuild every row: for changes the grid's damage
@@ -280,6 +273,7 @@ impl TerminalPane {
     }
 
     fn focus_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        input::report_focus(self, window, cx);
         self.cursor_on = true;
         self._blink = self.focus.is_focused(window).then(|| {
             cx.spawn_in(window, async move |this, cx| {

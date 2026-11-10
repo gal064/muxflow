@@ -40,6 +40,13 @@ pub enum LinkEvent {
         epoch: Option<u64>,
     },
     Status(String),
+    /// A keystroke echoed slowly enough to be journalled.
+    EchoLag {
+        lag_ms: u64,
+    },
+    /// A program in a pane wrote the clipboard with OSC 52. Whether it may is
+    /// the controller's call, which knows the host on screen.
+    ClipboardWrite(String),
 }
 
 impl EventEmitter<LinkEvent> for TerminalLink {}
@@ -224,9 +231,12 @@ impl TerminalLink {
                 sequence,
                 generation,
             } => {
-                self.with_pane(&pane_id, cx, |pane, _| {
-                    pane.input.note_output(sequence, generation);
+                let echo_lag = self.pane(&pane_id).and_then(|pane| {
+                    pane.update(cx, |pane, _| pane.input.note_output(sequence, generation))
                 });
+                if let Some(lag_ms) = echo_lag {
+                    cx.emit(LinkEvent::EchoLag { lag_ms });
+                }
             }
             EngineOutput::RendererDiagnostic { pane_id, message } => {
                 self.with_pane(&pane_id, cx, |pane, cx| {
@@ -240,6 +250,7 @@ impl TerminalLink {
             }
             EngineOutput::Diagnostic { message, .. } => cx.emit(LinkEvent::Status(message)),
             EngineOutput::Incident { kind, detail } => self.backend.record_incident(kind, detail),
+            EngineOutput::ClipboardWrite { text, .. } => cx.emit(LinkEvent::ClipboardWrite(text)),
             EngineOutput::FlowStalled { pane_id, epoch } => {
                 cx.emit(LinkEvent::FlowStalled { pane_id, epoch });
             }
