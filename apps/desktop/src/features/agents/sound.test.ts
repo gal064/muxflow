@@ -1,18 +1,30 @@
 import { describe, expect, it, vi } from "vitest";
-import { loadAgentSoundPreferences, playAgentSound, saveAgentSoundPreferences } from "./sound";
+import { clearLegacyAgentSoundPreferences, legacyAgentSoundPreferences, normalizeAgentSoundPreferences, playAgentSound } from "./sound";
 import { defaultAgentSoundPreferences } from "./types";
 
 describe("agent sound preferences", () => {
-  it("normalizes corrupt or out-of-range persisted values", () => {
-    expect(loadAgentSoundPreferences({ getItem: () => "not json" })).toEqual(defaultAgentSoundPreferences);
-    expect(loadAgentSoundPreferences({ getItem: () => JSON.stringify({ enabled: true, blocked: "loud", completed: "none", volume: 7 }) })).toMatchObject({ blocked: "subtle", completed: "none", volume: 1 });
+  it("normalizes out-of-range saved values and ignores anything that is not an object", () => {
+    expect(normalizeAgentSoundPreferences({ enabled: true, blocked: "loud", completed: "none", volume: 7 }))
+      .toEqual({ enabled: true, blocked: "subtle", completed: "none", volume: 1 });
+    expect(normalizeAgentSoundPreferences({ enabled: false, volume: Number.NaN }))
+      .toEqual({ ...defaultAgentSoundPreferences, enabled: false });
+    expect(normalizeAgentSoundPreferences(undefined)).toBeUndefined();
+    expect(normalizeAgentSoundPreferences("loud")).toBeUndefined();
   });
 
-  it("persists only bounded sound configuration", () => {
-    const setItem = vi.fn();
-    saveAgentSoundPreferences({ ...defaultAgentSoundPreferences, volume: 0.2 }, { setItem });
-    expect(setItem.mock.calls[0][0]).toContain("agent-sounds.v1");
-    expect(JSON.parse(setItem.mock.calls[0][1])).toMatchObject({ enabled: true, volume: 0.2 });
+  it("reads the localStorage copy once and clears it", () => {
+    const store = new Map([["muxflow.agent-sounds.v1", JSON.stringify({ enabled: false, blocked: "none", completed: "subtle", volume: 0.2 })]]);
+    const storage = { getItem: (key: string) => store.get(key) ?? null, removeItem: (key: string) => { store.delete(key); } };
+    expect(legacyAgentSoundPreferences(storage)).toEqual({ enabled: false, blocked: "none", completed: "subtle", volume: 0.2 });
+    clearLegacyAgentSoundPreferences(storage);
+    expect(legacyAgentSoundPreferences(storage)).toBeUndefined();
+  });
+
+  it("has nothing to import from missing, corrupt or unavailable storage", () => {
+    expect(legacyAgentSoundPreferences({ getItem: () => null })).toBeUndefined();
+    expect(legacyAgentSoundPreferences({ getItem: () => "not json" })).toBeUndefined();
+    expect(legacyAgentSoundPreferences({ getItem: () => { throw new Error("denied"); } })).toBeUndefined();
+    expect(() => clearLegacyAgentSoundPreferences({ removeItem: () => { throw new Error("denied"); } })).not.toThrow();
   });
 
   it("instruments disabled playback without touching an audio device", async () => {

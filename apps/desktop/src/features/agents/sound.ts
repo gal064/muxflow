@@ -1,29 +1,39 @@
 import { defaultAgentSoundPreferences, type AgentSoundPreferences } from "./types";
 
-const STORAGE_KEY = "muxflow.agent-sounds.v1";
+const LEGACY_STORAGE_KEY = "muxflow.agent-sounds.v1";
 
-export function loadAgentSoundPreferences(storage: Pick<Storage, "getItem"> | undefined = globalThis.localStorage): AgentSoundPreferences {
-  if (!storage) return defaultAgentSoundPreferences;
+/** A saved value made safe to use: unknown modes and out-of-range volumes fall back. `undefined` when there is nothing to read. */
+export function normalizeAgentSoundPreferences(value: unknown): AgentSoundPreferences | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const saved = value as Partial<AgentSoundPreferences>;
+  return {
+    enabled: saved.enabled !== false,
+    blocked: saved.blocked === "none" ? "none" : "subtle",
+    completed: saved.completed === "none" ? "none" : "subtle",
+    volume: typeof saved.volume === "number" && Number.isFinite(saved.volume)
+      ? Math.max(0, Math.min(1, saved.volume)) : defaultAgentSoundPreferences.volume,
+  };
+}
+
+/**
+ * The sounds `localStorage` held before they moved into app state, which the
+ * native app cannot read. Read once, when app state has none of its own.
+ */
+export function legacyAgentSoundPreferences(storage: Pick<Storage, "getItem"> | undefined = globalThis.localStorage): AgentSoundPreferences | undefined {
   try {
-    const value = JSON.parse(storage.getItem(STORAGE_KEY) ?? "null") as Partial<AgentSoundPreferences> | null;
-    if (!value) return defaultAgentSoundPreferences;
-    return {
-      enabled: value.enabled !== false,
-      blocked: value.blocked === "none" ? "none" : "subtle",
-      completed: value.completed === "none" ? "none" : "subtle",
-      volume: typeof value.volume === "number" && Number.isFinite(value.volume)
-        ? Math.max(0, Math.min(1, value.volume)) : defaultAgentSoundPreferences.volume,
-    };
+    return normalizeAgentSoundPreferences(JSON.parse(storage?.getItem(LEGACY_STORAGE_KEY) ?? "null"));
   } catch {
-    return defaultAgentSoundPreferences;
+    return undefined;
   }
 }
 
-export function saveAgentSoundPreferences(
-  preferences: AgentSoundPreferences,
-  storage: Pick<Storage, "setItem"> | undefined = globalThis.localStorage,
-): void {
-  storage?.setItem(STORAGE_KEY, JSON.stringify(preferences));
+/** Dropped once app state has the value, so a reset of app state is not undone by a stale copy. */
+export function clearLegacyAgentSoundPreferences(storage: Pick<Storage, "removeItem"> | undefined = globalThis.localStorage): void {
+  try {
+    storage?.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    // Nothing to clear if storage is unavailable.
+  }
 }
 
 export interface SoundInstrumentation {

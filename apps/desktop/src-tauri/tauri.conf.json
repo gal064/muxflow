@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "create": false,
         "title": "Muxflow",
         "width": 1280,
         "height": 800,

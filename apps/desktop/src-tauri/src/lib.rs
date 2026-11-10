@@ -210,6 +210,20 @@ pub fn run() {
             let prompt = notifications.clone();
             tauri::async_runtime::spawn_blocking(move || prompt.request_authorization());
             app.manage(notifications);
+            // Created here rather than from the config alone so the page can be
+            // handed the saved theme and zoom before its first script runs:
+            // `public/theme.js` reads them to paint the right palette on the
+            // first frame. A user script is not subject to the page's CSP.
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .first()
+                .ok_or("tauri.conf.json declares no window")?
+                .clone();
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                .initialization_script(app_state::boot_script(theme, ui_scale))
+                .build()?;
             for window in app.webview_windows().values() {
                 // The page sets its own colors only once its script runs; until then
                 // the platform paints its default, which is dark on a dark OS. Painting

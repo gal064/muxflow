@@ -60,6 +60,25 @@ pub enum ThemePreference {
     Dark,
 }
 
+/// Whether an agent event plays its cue.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentSoundMode {
+    Subtle,
+    None,
+}
+
+/// The agent notification sounds: one switch, a cue per event, and a volume.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSoundPreferences {
+    pub enabled: bool,
+    pub blocked: AgentSoundMode,
+    pub completed: AgentSoundMode,
+    /// 0 to 1.
+    pub volume: f64,
+}
+
 /// Markdown's own palette, beside the app's theme.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -194,6 +213,9 @@ pub struct ShellPreferences {
     /// `None` is a save from before the setting: Markdown follows the theme.
     #[serde(default)]
     pub markdown_appearance: Option<MarkdownAppearance>,
+    /// `None` is "never set": the frontend's defaults apply.
+    #[serde(default)]
+    pub agent_sounds: Option<AgentSoundPreferences>,
     /// The host most recently picked in the New workspace dialog.
     #[serde(default)]
     pub new_workspace_host_profile_id: Option<String>,
@@ -417,6 +439,11 @@ fn validate(value: &PersistedAppState) -> Result<(), String> {
     {
         return Err("invalid saved window geometry".into());
     }
+    if let Some(sounds) = value.shell.agent_sounds
+        && !(0.0..=1.0).contains(&sounds.volume)
+    {
+        return Err("agent sound volume must be between 0 and 1".into());
+    }
     if value.commands.shortcut_overrides.len() > 256 {
         return Err("too many keyboard shortcut overrides".into());
     }
@@ -579,6 +606,15 @@ fn validate_tmux_session_id(value: &str) -> Result<(), String> {
     }
 }
 
+/// Handed to the page before its first script, so `public/theme.js` can paint
+/// the saved theme and zoom on the first frame without a copy in storage.
+pub fn boot_script(theme: ThemePreference, ui_scale: f64) -> String {
+    format!(
+        "window.__muxflowBoot = {};",
+        serde_json::json!({ "theme": theme, "uiScale": ui_scale })
+    )
+}
+
 /// What Settings offers; mirrors `UI_SCALES` in `features/shell/types.ts`.
 const UI_SCALES: [f64; 5] = [0.9, 1.0, 1.1, 1.2, 1.3];
 
@@ -718,6 +754,12 @@ mod tests {
                 theme: Some(ThemePreference::Light),
                 ui_scale: Some(1.2),
                 markdown_appearance: Some(MarkdownAppearance::Dark),
+                agent_sounds: Some(AgentSoundPreferences {
+                    enabled: true,
+                    blocked: AgentSoundMode::Subtle,
+                    completed: AgentSoundMode::None,
+                    volume: 0.45,
+                }),
                 new_workspace_host_profile_id: Some("ssh-remote-linux".into()),
                 default_markdown_view: Some(AppTabViewMode::Preview),
                 window_geometry: Some(WindowGeometry {
@@ -863,6 +905,33 @@ mod tests {
         assert_eq!(restored.scale_factor_milli, None);
     }
 
+    #[test]
+    fn the_page_is_handed_the_saved_theme_and_zoom_before_it_runs() {
+        assert_eq!(
+            boot_script(ThemePreference::Light, 1.2),
+            r#"window.__muxflowBoot = {"theme":"light","uiScale":1.2};"#
+        );
+        assert_eq!(
+            boot_script(ThemePreference::System, 1.0),
+            r#"window.__muxflowBoot = {"theme":"system","uiScale":1.0};"#
+        );
+    }
+
+    #[test]
+    fn agent_sounds_survive_a_save_and_reject_an_impossible_volume() {
+        let mut value = sample_state();
+        validate(&value).unwrap();
+        value.shell.agent_sounds.as_mut().unwrap().volume = 1.5;
+        assert!(validate(&value).unwrap_err().contains("sound volume"));
+
+        let unset: ShellPreferences = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(unset.agent_sounds, None);
+        let refused = serde_json::from_value::<ShellPreferences>(serde_json::json!({
+            "agentSounds": { "enabled": true, "blocked": "loud", "completed": "none", "volume": 0.5 }
+        }));
+        assert!(refused.is_err());
+    }
+
     /// The storage end of the `save_app_state` contract.
     ///
     /// `PersistedAppState` is declared twice — here and in
@@ -901,6 +970,15 @@ mod tests {
         assert_eq!(value.shell.terminal_font_size, Some(17));
         assert_eq!(value.shell.theme, Some(ThemePreference::Dark));
         assert_eq!(value.shell.ui_scale, Some(1.1));
+        assert_eq!(
+            value.shell.agent_sounds,
+            Some(AgentSoundPreferences {
+                enabled: false,
+                blocked: AgentSoundMode::None,
+                completed: AgentSoundMode::Subtle,
+                volume: 0.3,
+            })
+        );
         assert_eq!(
             value.shell.markdown_appearance,
             Some(MarkdownAppearance::Light)
