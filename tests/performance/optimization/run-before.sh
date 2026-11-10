@@ -47,10 +47,8 @@ run_fixture terminal-frontend desktop_exec vitest run src/features/terminal/Term
 run_fixture explorer-wide desktop_exec vitest run src/features/files/ExplorerTree.test.tsx src/features/files/api.test.ts
 run_fixture pane-resource cargo test -p tmux-control phase14_pane_resource_scaling_and_reveal_parity -- --ignored --nocapture
 run_fixture desktop-frontend-build desktop_build
-# This is a Rust unit fixture, not a bundle test. Avoid requiring or copying a
-# target-specific sidecar while still giving generate_context! its real dist.
-run_fixture transfer-admission env TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test -p muxflow phase14_full_queue_reports_admission_and_exact_terminal_outcomes -- --ignored --nocapture
-run_fixture ssh-master-coordination env TAURI_CONFIG='{"bundle":{"externalBin":[]}}' cargo test -p muxflow phase14_fake_delayed_ssh_master_coordination_counts -- --ignored --nocapture --test-threads=1
+run_fixture transfer-admission cargo test -p desktop-core phase14_full_queue_reports_admission_and_exact_terminal_outcomes -- --ignored --nocapture
+run_fixture ssh-master-coordination cargo test -p desktop-core phase14_fake_delayed_ssh_master_coordination_counts -- --ignored --nocapture --test-threads=1
 run_fixture git-consumers cargo test -p muxflow-host phase14_thirty_two_consumers_report_native_watchers_and_status_processes -- --ignored --nocapture --test-threads=1
 run_fixture git-processes cargo test -p muxflow-host phase14_warm_diff_and_mutation_process_counts -- --ignored --nocapture --test-threads=1
 

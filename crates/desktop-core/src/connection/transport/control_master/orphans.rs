@@ -8,7 +8,7 @@ use super::*;
 /// under the temporary root. Nothing in the dead process can clean that up, so
 /// the next launch does it — once, in the background, and only for namespaces
 /// whose owning pid is provably gone.
-pub(crate) fn spawn_orphan_reaper() {
+pub fn spawn_orphan_reaper() {
     let _ = thread::Builder::new()
         .name("ssh-orphan-reaper".into())
         .spawn(|| sweep_orphan_namespaces(&mut shutdown_orphaned_master));

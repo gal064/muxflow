@@ -109,7 +109,7 @@ That is the whole product for v1.
 
 Facts about the host side the engineer must not re-derive (read
 `apps/host/src/main.rs`, `apps/host/src/bridge.rs`,
-`apps/desktop/src-tauri/src/connection/transport.rs` to confirm):
+`crates/desktop-core/src/connection/transport.rs` to confirm):
 
 - The desktop runs, over SSH, exactly the command string
   `$HOME/.local/bin/muxflow-host bridge --stdio`. The bridge connects to the
@@ -424,7 +424,7 @@ where a connection that stays up for 60 s has to count as stable, or a phone
 flapping in the background climbs to the 30 s cap and never comes down. The
 request timers stay on `setTimeout`: not worth a bridge call per request.
 
-### 7.3 Handshake (copied from `apps/desktop/src-tauri/src/connection/bridge.rs::handshake_and_snapshot`)
+### 7.3 Handshake (copied from `crates/desktop-core/src/connection/bridge.rs::handshake_and_snapshot`)
 
 Immediately after the SSH `connected` event, send two frames without
 waiting between them:
@@ -550,7 +550,7 @@ refusal is retried once after waiting up to 1 s for the newer snapshot
 root itself, which is `activeRoot.root`).
 
 Verify each request shape against the desktop's Rust bridge before
-implementing (`apps/desktop/src-tauri/src/connection/{bridge,agent,files}.rs`)
+implementing (`crates/desktop-core/src/connection/{bridge,agent,files}.rs`)
 — they are the working reference for field usage.
 
 ### 7.6 Terminal attach lifecycle

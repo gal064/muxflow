@@ -838,6 +838,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "block2",
+ "clipboard-rs",
+ "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-user-notifications",
+ "phase0-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tmux-agent-protocol",
+ "tmux-control",
+ "tokio",
+ "ureq",
+ "uuid",
+ "wl-clipboard-rs",
+ "zbus",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2378,30 +2405,15 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 name = "muxflow"
 version = "0.1.31"
 dependencies = [
- "base64 0.22.1",
- "blake3",
- "block2",
- "clipboard-rs",
- "libc",
- "objc2",
+ "desktop-core",
  "objc2-app-kit",
- "objc2-foundation",
- "objc2-user-notifications",
  "phase0-core",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
- "tempfile",
- "tmux-agent-protocol",
- "tmux-control",
  "tokio",
- "ureq",
- "uuid",
- "wl-clipboard-rs",
- "zbus",
 ]
 
 [[package]]

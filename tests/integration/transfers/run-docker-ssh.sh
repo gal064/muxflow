@@ -49,7 +49,7 @@ cd "$repo_root"
 cargo build --bin muxflow-host >"$evidence/host-build.log" 2>&1 & host_pid=$!
 cargo build --manifest-path tests/integration/transfers/protocol-driver/Cargo.toml \
   >"$evidence/driver-build.log" 2>&1 & protocol_pid=$!
-cargo test -p muxflow \
+cargo test -p desktop-core \
   connection::files::manager_acceptance::production_desktop_managers_transfer_exact_bytes_through_canonical_engine \
   --no-run >"$evidence/manager-build.log" 2>&1 & manager_build_pid=$!
 target_arch=$(phase8_linux_target_arch)
@@ -134,7 +134,7 @@ ADE_PHASE7_MANAGER_UPLOAD_SOURCE="$manager_source" \
 ADE_PHASE7_MANAGER_DOWNLOAD_DESTINATION="$manager_download" \
 ADE_PHASE7_MANAGER_DOWNLOAD_FILE=phase7-five-gib-source.bin \
 ADE_PHASE7_MANAGER_RESULT="$evidence/result-manager.json" \
-  cargo test -p muxflow \
+  cargo test -p desktop-core \
     connection::files::manager_acceptance::production_desktop_managers_transfer_exact_bytes_through_canonical_engine \
     -- --exact --nocapture --test-threads=1 \
     >"$evidence/manager-test.log" 2>&1 & driver_pid=$!

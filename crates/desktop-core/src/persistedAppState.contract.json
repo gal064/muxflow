@@ -2,7 +2,7 @@
   "_comment": [
     "The shape `save_app_state` carries across the WebView boundary, written",
     "once and asserted from both ends: `appStateContract.test.ts` on the",
-    "TypeScript side and `app_state_contract` in `src-tauri/src/app_state.rs`",
+    "TypeScript side and `app_state_contract` in `crates/desktop-core/src/app_state.rs`",
     "on the Rust side.",
     "",
     "It exists because the two `PersistedAppState` declarations are hand-written",

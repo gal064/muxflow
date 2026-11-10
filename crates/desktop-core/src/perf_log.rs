@@ -9,24 +9,24 @@
 //! non-default `perf-log` cargo feature is enabled. A plain release build
 //! (`cargo build --release`, `tauri build`) therefore contains only the inert
 //! stubs in `stub.rs`; a measurement campaign re-enables the real code with
-//! `cargo build --release --features perf-log`. Call sites stay unconditional
-//! because the stubs keep identical module paths and signatures.
+//! `cargo build --release -p muxflow --features perf-log`. Call sites stay
+//! unconditional because the stubs keep identical module paths and signatures.
 
 #[cfg(any(debug_assertions, feature = "perf-log"))]
-pub(crate) mod bridge;
+pub mod bridge;
 #[cfg(any(debug_assertions, feature = "perf-log"))]
-pub(crate) mod input_timing;
+pub mod input_timing;
 #[cfg(any(debug_assertions, feature = "perf-log"))]
-pub(crate) mod operations;
+pub mod operations;
 #[cfg(any(debug_assertions, feature = "perf-log"))]
-pub(crate) mod sink;
+pub mod sink;
 #[cfg(any(debug_assertions, feature = "perf-log"))]
-pub(crate) mod switch_timing;
+pub mod switch_timing;
 
 #[cfg(not(any(debug_assertions, feature = "perf-log")))]
 mod stub;
 #[cfg(not(any(debug_assertions, feature = "perf-log")))]
-pub(crate) use stub::{bridge, input_timing, operations, sink, switch_timing};
+pub use stub::{bridge, input_timing, operations, sink, switch_timing};
 
 pub(crate) use bridge::{quiesce_bridge_measurement, send_bridge_frame};
 pub(crate) use operations::{

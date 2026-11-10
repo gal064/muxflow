@@ -22,8 +22,8 @@ trap cleanup EXIT
 cargo test -p muxflow-host diagnostics -- --nocapture > "$run_root/diagnostics-tests.log" 2>&1
 cargo test -p muxflow-host symlink -- --nocapture > "$run_root/host-symlink-tests.log" 2>&1
 cargo test -p tmux-control malformed -- --nocapture > "$run_root/parser-malformed-tests.log" 2>&1
-cargo test -p muxflow reused_id -- --nocapture > "$run_root/notification-id-tests.log" 2>&1
-cargo test -p muxflow schema -- --nocapture > "$run_root/schema-tests.log" 2>&1
+cargo test -p desktop-core reused_id -- --nocapture > "$run_root/notification-id-tests.log" 2>&1
+cargo test -p desktop-core schema -- --nocapture > "$run_root/schema-tests.log" 2>&1
 cargo run --manifest-path tests/integration/fuzz-smoke/Cargo.toml -- 10000 > "$run_root/fuzz-smoke.log" 2>&1
 
 cargo build -p muxflow-host > "$run_root/host-build.log" 2>&1

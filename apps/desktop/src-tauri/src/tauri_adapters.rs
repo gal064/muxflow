@@ -7,7 +7,7 @@ use tauri::{
     ipc::{Channel, InvokeResponseBody},
 };
 
-use crate::{
+use desktop_core::{
     notifications::ActivationSink,
     platform::{AppPaths, EventBody, EventSink},
 };

@@ -23,8 +23,8 @@ mkdir -p "$runtime" "$work/repo" "$TMUX_TMPDIR"
 chmod 0700 "$work" "$runtime" "$TMUX_TMPDIR"
 cd "$repo"
 cargo build --locked -p muxflow-host
-cargo test --locked -p muxflow --lib connection::files::local_destination
-cargo test --locked -p muxflow --lib connection::files::clipboard_staging
+cargo test --locked -p desktop-core --lib connection::files::local_destination
+cargo test --locked -p desktop-core --lib connection::files::clipboard_staging
 cargo test --locked -p muxflow-host service::agents::process::tests
 
 tmux -L "$socket" -f /dev/null new-session -d -s "ade-phase10-$run_id" -c "$work/repo"
