@@ -28,14 +28,18 @@ use desktop_core::{
     platform,
 };
 use gpui_kit::{
-    App, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Point, Render, SharedString, Styled, WeakEntity, Window, div, prelude::FluentBuilder,
+    AnyView, App, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement,
+    ParentElement, Pixels, Point, Render, SharedString, Styled, WeakEntity, Window, div,
+    prelude::FluentBuilder,
 };
 pub use tab_strip::TabEntry;
 
 use crate::{
     app::Core,
-    commands, theme,
+    commands,
+    connection_ui::ConnectionUi,
+    terminal::surface::TerminalSurface,
+    theme,
     ui::chrome::{
         divider::{Divider, DividerDrag},
         layout::{Prefs, Rails},
@@ -105,6 +109,8 @@ pub struct Chrome {
     workspaces: Vec<WorkspacePlaceholder>,
     active_workspace: usize,
     saves: Arc<Mutex<SaveQueue>>,
+    /// Set once a real connection is running; tests keep the placeholder.
+    terminal: Option<Entity<TerminalSurface>>,
 }
 
 /// The newest preferences waiting to be written, and whether a writer runs.
@@ -115,7 +121,7 @@ struct SaveQueue {
 }
 
 impl Chrome {
-    pub fn new(_window: &mut Window, cx: &mut App) -> Entity<Self> {
+    pub fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
         let store = cx.global::<Core>().app_state.clone();
         // A broken file shows defaults; `app_state` keeps it write-frozen.
         let state = app_state::load_app_state(&store).unwrap_or_default();
@@ -128,7 +134,16 @@ impl Chrome {
             workspaces: saved_workspaces(&state),
             active_workspace: 0,
             saves: Arc::default(),
+            terminal: None,
         });
+        if let Some(controller) = cx.try_global::<ConnectionUi>().map(|ui| ui.0.clone()) {
+            let surface = TerminalSurface::new(controller, window, cx);
+            chrome.update(cx, |chrome, cx| {
+                chrome.terminal = Some(surface);
+                chrome.sync_terminal_visible(cx);
+                cx.observe_self(Self::sync_terminal_visible).detach();
+            });
+        }
         register_commands(&chrome.downgrade(), cx);
         chrome
     }
@@ -234,6 +249,14 @@ impl Chrome {
             None => workspace.active_tab = Some(key),
         }
         cx.notify();
+    }
+
+    /// An app tab covers the terminal: the surface stops sizing the client.
+    fn sync_terminal_visible(&mut self, cx: &mut Context<Self>) {
+        let visible = self.workspace().is_none_or(|w| w.active_tab.is_none());
+        if let Some(terminal) = self.terminal.clone() {
+            terminal.update(cx, |surface, cx| surface.set_terminal_visible(visible, cx));
+        }
     }
 
     /// Closes a placeholder tab for now; the saved tab returns next launch.
@@ -444,6 +467,7 @@ impl Render for Chrome {
                 workspace: self.workspace().cloned(),
                 dock_fraction: displayed.dock_fraction,
                 tabs_in_title_bar: self.tabs_in_title_bar,
+                terminal: self.terminal.clone().map(AnyView::from),
             })
             .when(rails.panel_open, |this| {
                 this.child(RightPanel {

@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use std::sync::mpsc::Sender;
+
 use desktop_core::{
     app_state::{AppStateStore, PersistedAppState, save_app_state},
     connection::{
@@ -14,6 +16,7 @@ use desktop_core::{
 };
 use futures::future::{BoxFuture, FutureExt};
 use serde_json::{Map, Value};
+use terminal_engine::{Command, EngineHandle, EngineOutput, HubLimits};
 use uuid::Uuid;
 
 use super::{
@@ -21,7 +24,58 @@ use super::{
     resume_recovery::{network_online, suspend_aware_now_ms},
 };
 
-pub trait ConnectionBackend: Send + Sync {
+/// What the engine thread is reached through: the real thread, or in tests an
+/// engine driven on the caller.
+pub trait EngineChannel: Send + Sync {
+    /// False once the engine has gone.
+    fn send(&self, command: Command) -> bool;
+}
+
+impl EngineChannel for EngineHandle {
+    fn send(&self, command: Command) -> bool {
+        EngineHandle::send(self, command)
+    }
+}
+
+/// The terminal path's half of the backend, split out so a terminal test needs
+/// no connection flows.
+pub trait TerminalBackend: Send + Sync {
+    /// Starts one host's engine, reporting to `outputs`.
+    fn spawn_engine(&self, outputs: Sender<EngineOutput>) -> Box<dyn EngineChannel>;
+    fn request_seed(
+        &self,
+        client_id: String,
+        pane_id: String,
+    ) -> BoxFuture<'static, Result<(), String>>;
+    fn request_history(
+        &self,
+        client_id: String,
+        pane_id: String,
+        lines: u32,
+        skip_lines: u32,
+    ) -> BoxFuture<'static, Result<(), String>>;
+    fn set_pane_visibility(
+        &self,
+        client_id: String,
+        pane_id: String,
+        visible: bool,
+        holds_snapshot: bool,
+        terminal_epoch: u64,
+        output_generation: u64,
+    ) -> BoxFuture<'static, Result<(), String>>;
+    fn resize_client(
+        &self,
+        client_id: String,
+        columns: u16,
+        rows: u16,
+        session_id: String,
+        window_id: String,
+    ) -> BoxFuture<'static, Result<(), String>>;
+    fn send_input(&self, client_id: String, pane_id: String, bytes: Vec<u8>) -> Result<(), String>;
+    fn record_incident(&self, kind: &str, detail: Value);
+}
+
+pub trait ConnectionBackend: TerminalBackend {
     fn start_terminal(
         &self,
         session_id: String,
@@ -51,7 +105,6 @@ pub trait ConnectionBackend: Send + Sync {
     fn save_app_state(&self, state: PersistedAppState) -> BoxFuture<'static, Result<(), String>>;
     /// `None` when the client has not read a host frame yet.
     fn late_requests(&self, client_id: &str) -> Option<u32>;
-    fn record_incident(&self, kind: &str, detail: Value);
     /// Milliseconds on one clock that keeps counting through a suspend.
     fn now_ms(&self) -> u64;
     fn network_online(&self) -> bool;
@@ -72,6 +125,98 @@ impl NativeBackend {
             journal: Arc::new(journal),
             launch: Uuid::new_v4().simple().to_string()[..8].to_owned(),
         }
+    }
+}
+
+impl TerminalBackend for NativeBackend {
+    fn spawn_engine(&self, outputs: Sender<EngineOutput>) -> Box<dyn EngineChannel> {
+        Box::new(terminal_engine::spawn(HubLimits::default(), outputs))
+    }
+
+    fn request_seed(
+        &self,
+        client_id: String,
+        pane_id: String,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let clients = self.clients.clone();
+        spawned(
+            async move { connection::request_terminal_seed(client_id, pane_id, &clients).await },
+        )
+    }
+
+    fn request_history(
+        &self,
+        client_id: String,
+        pane_id: String,
+        lines: u32,
+        skip_lines: u32,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let clients = self.clients.clone();
+        spawned(async move {
+            connection::request_terminal_history(client_id, pane_id, lines, skip_lines, &clients)
+                .await
+        })
+    }
+
+    fn set_pane_visibility(
+        &self,
+        client_id: String,
+        pane_id: String,
+        visible: bool,
+        holds_snapshot: bool,
+        terminal_epoch: u64,
+        output_generation: u64,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let clients = self.clients.clone();
+        spawned(async move {
+            let body = visibility_frame(
+                &client_id,
+                &pane_id,
+                visible,
+                holds_snapshot,
+                terminal_epoch,
+                output_generation,
+            );
+            connection::set_terminal_visibility(&body, &clients).await
+        })
+    }
+
+    fn resize_client(
+        &self,
+        client_id: String,
+        columns: u16,
+        rows: u16,
+        session_id: String,
+        window_id: String,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let clients = self.clients.clone();
+        spawned(async move {
+            connection::resize_terminal_client(
+                client_id, columns, rows, session_id, window_id, &clients,
+            )
+            .await
+        })
+    }
+
+    fn send_input(&self, client_id: String, pane_id: String, bytes: Vec<u8>) -> Result<(), String> {
+        let body = input_frame(&client_id, &pane_id, &bytes);
+        connection::send_terminal_input_bytes(&body, &self.clients)
+    }
+
+    fn record_incident(&self, kind: &str, detail: Value) {
+        let mut record = Map::new();
+        record.insert(
+            "t".into(),
+            Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        );
+        record.insert("launch".into(), Value::String(self.launch.clone()));
+        record.insert("kind".into(), Value::String(kind.to_owned()));
+        if let Value::Object(fields) = detail {
+            record.extend(fields);
+        }
+        // Must stay harmless: a journal that cannot be written is never a
+        // reason the app misbehaves.
+        let _ = record_incident(&self.journal, Value::Object(record).to_string());
     }
 }
 
@@ -151,22 +296,6 @@ impl ConnectionBackend for NativeBackend {
             .map(|stats| stats.late_requests_total)
     }
 
-    fn record_incident(&self, kind: &str, detail: Value) {
-        let mut record = Map::new();
-        record.insert(
-            "t".into(),
-            Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
-        );
-        record.insert("launch".into(), Value::String(self.launch.clone()));
-        record.insert("kind".into(), Value::String(kind.to_owned()));
-        if let Value::Object(fields) = detail {
-            record.extend(fields);
-        }
-        // Must stay harmless: a journal that cannot be written is never a
-        // reason the app misbehaves.
-        let _ = record_incident(&self.journal, Value::Object(record).to_string());
-    }
-
     fn now_ms(&self) -> u64 {
         suspend_aware_now_ms()
     }
@@ -186,4 +315,96 @@ fn spawned<T: Send + 'static>(
             .map_err(|error| format!("connection task failed: {error}"))?
     }
     .boxed()
+}
+
+fn length_prefixed(body: &mut Vec<u8>, value: &str) {
+    body.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    body.extend_from_slice(value.as_bytes());
+}
+
+/// The raw-body shape `set_terminal_visibility` decodes.
+fn visibility_frame(
+    client_id: &str,
+    pane_id: &str,
+    visible: bool,
+    holds_snapshot: bool,
+    terminal_epoch: u64,
+    output_generation: u64,
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(client_id.len() + pane_id.len() + 22);
+    length_prefixed(&mut body, client_id);
+    length_prefixed(&mut body, pane_id);
+    body.push(u8::from(visible));
+    body.push(u8::from(holds_snapshot));
+    body.extend_from_slice(&terminal_epoch.to_be_bytes());
+    body.extend_from_slice(&output_generation.to_be_bytes());
+    body
+}
+
+/// The raw-body shape `send_terminal_input_bytes` decodes.
+fn input_frame(client_id: &str, pane_id: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(client_id.len() + pane_id.len() + bytes.len() + 4);
+    length_prefixed(&mut body, client_id);
+    length_prefixed(&mut body, pane_id);
+    body.extend_from_slice(bytes);
+    body
+}
+
+#[cfg(test)]
+pub(crate) mod inline {
+    //! The engine, driven on the caller's thread: frames apply before `send`
+    //! returns, and outputs wait in the channel for the link's next drain.
+
+    use std::sync::{Mutex, mpsc::Sender};
+    use std::time::Instant;
+
+    use terminal_engine::{Command, Engine, EngineOutput, HubLimits};
+
+    use super::EngineChannel;
+
+    pub(crate) struct InlineEngine {
+        pub(crate) engine: Mutex<Engine>,
+        pub(crate) outputs: Sender<EngineOutput>,
+    }
+
+    impl InlineEngine {
+        pub(crate) fn new(outputs: Sender<EngineOutput>) -> Self {
+            Self {
+                engine: Mutex::new(Engine::new(HubLimits::default())),
+                outputs,
+            }
+        }
+    }
+
+    impl EngineChannel for InlineEngine {
+        fn send(&self, command: Command) -> bool {
+            for output in self.engine.lock().unwrap().handle(command, Instant::now()) {
+                let _ = self.outputs.send(output);
+            }
+            true
+        }
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    #[test]
+    fn a_visibility_frame_has_the_shape_the_core_decodes() {
+        let body = visibility_frame("cli", "%7", true, true, 5, 9);
+        assert_eq!(
+            body,
+            [
+                0, 3, b'c', b'l', b'i', 0, 2, b'%', b'7', 1, 1, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0,
+                0, 0, 0, 9,
+            ]
+        );
+    }
+
+    #[test]
+    fn an_input_frame_ends_with_the_bytes() {
+        let body = input_frame("c", "%1", b"ab");
+        assert_eq!(body, [0, 1, b'c', 0, 2, b'%', b'1', b'a', b'b']);
+    }
 }

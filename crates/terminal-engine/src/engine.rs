@@ -379,10 +379,12 @@ impl Engine {
         if let Some(pane_id) = finished {
             let handoff = self.shared.handoffs.remove(&pane_id).expect("just found");
             if let Err(error) = &result {
-                self.shared.out.push(EngineOutput::Diagnostic {
-                    pane_id: pane_id.clone(),
-                    message: format!("Could not mark {pane_id} hidden: {error}"),
-                });
+                if self.panes.contains_key(&pane_id) {
+                    self.shared.out.push(EngineOutput::Diagnostic {
+                        pane_id: pane_id.clone(),
+                        message: format!("Could not mark {pane_id} hidden: {error}"),
+                    });
+                }
                 // A rejected cutoff is never adjusted or guessed.
                 if self.shared.client_id.as_deref() == Some(handoff.client_id.as_str())
                     && self.shared.hub.generation_epoch() == Some(handoff.terminal_epoch)
@@ -412,7 +414,8 @@ impl Engine {
             }),
         });
         // A transport still coming up is journal material: the watchdog retries.
-        if !is_quiet_reveal_error(&error) {
+        // A pane no longer shown has nobody to tell; tmux may have killed it.
+        if self.panes.contains_key(&pane_id) && !is_quiet_reveal_error(&error) {
             self.shared.out.push(EngineOutput::Diagnostic {
                 message: format!("{reason}; fresh seed request failed: {error}"),
                 pane_id,
@@ -438,7 +441,10 @@ impl Engine {
                     if let Some(pane) = self.panes.get_mut(&pane_id) {
                         pane.held = None;
                     }
-                    self.shared.out.push(EngineOutput::FlowStalled { pane_id });
+                    let epoch = self.shared.hub.generation_epoch();
+                    self.shared
+                        .out
+                        .push(EngineOutput::FlowStalled { pane_id, epoch });
                 }
             }
             HubOutput::Epoch(epoch) => {

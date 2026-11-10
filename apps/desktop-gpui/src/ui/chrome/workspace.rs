@@ -5,8 +5,8 @@
 
 use desktop_core::app_state::DockSide;
 use gpui_kit::{
-    App, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role, SharedString,
-    StatefulInteractiveElement, Styled, WeakEntity, Window,
+    AnyElement, AnyView, App, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role,
+    SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window,
     base::{HandleEdge, TestSupportExt},
     component::{h_flex, v_flex},
     div,
@@ -29,6 +29,8 @@ pub struct WorkspaceArea {
     pub workspace: Option<WorkspacePlaceholder>,
     pub dock_fraction: f32,
     pub tabs_in_title_bar: bool,
+    /// The terminal surface, when a real connection is running.
+    pub terminal: Option<AnyView>,
 }
 
 impl RenderOnce for WorkspaceArea {
@@ -66,6 +68,15 @@ impl RenderOnce for WorkspaceArea {
                 .justify_center()
                 .text_color(palette.chrome_faint)
                 .child(label)
+        };
+        let terminal = self
+            .terminal
+            .filter(|_| workspace.as_ref().is_none_or(|w| w.active_tab.is_none()));
+        let body = |label: SharedString| -> AnyElement {
+            match terminal.clone() {
+                Some(view) => view.into_any_element(),
+                None => placeholder(label).into_any_element(),
+            }
         };
 
         let tabs_strip = (!self.tabs_in_title_bar).then(|| TabStrip {
@@ -159,7 +170,7 @@ impl RenderOnce for WorkspaceArea {
                                         .flex_1()
                                         .min_w_0()
                                         .h_full()
-                                        .child(placeholder(body_label.clone())),
+                                        .child(body(body_label.clone())),
                                 )
                                 .child(doc),
                             DockSide::Left => this.child(doc).child(
@@ -167,11 +178,11 @@ impl RenderOnce for WorkspaceArea {
                                     .flex_1()
                                     .min_w_0()
                                     .h_full()
-                                    .child(placeholder(body_label.clone())),
+                                    .child(body(body_label.clone())),
                             ),
                         }
                     })
-                    .when(no_dock, |this| this.child(placeholder(body_label.clone()))),
+                    .when(no_dock, |this| this.child(body(body_label.clone()))),
             )
     }
 }

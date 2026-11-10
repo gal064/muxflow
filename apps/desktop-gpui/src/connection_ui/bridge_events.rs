@@ -238,9 +238,11 @@ impl DeliveryAcks {
         self.submitted_bytes = 0;
     }
 
-    /// Frames before the first epoch belong to no generation and are not owed.
-    pub fn record(&mut self, byte_length: usize) {
-        if self.epoch.is_some() {
+    /// A frame the engine has applied, credited under the epoch it applied in.
+    /// Frames before the first epoch belong to no generation and are not owed,
+    /// and a straggler from an epoch since replaced counts for nothing.
+    pub fn record_applied(&mut self, byte_length: usize, epoch: Option<u64>) {
+        if self.epoch.is_some() && self.epoch == epoch {
             self.frames += 1;
             self.bytes += byte_length as u64;
         }
@@ -389,7 +391,7 @@ mod tests {
     #[test]
     fn owes_nothing_before_the_first_epoch() {
         let mut acks = DeliveryAcks::default();
-        acks.record(10);
+        acks.record_applied(10, None);
         assert_eq!(acks.take_boundary(), None);
         acks.begin_epoch(1);
         assert_eq!(acks.take_boundary(), None);
@@ -399,7 +401,7 @@ mod tests {
     fn folds_a_burst_into_the_boundary_after_the_one_in_flight() {
         let mut acks = DeliveryAcks::default();
         acks.begin_epoch(1);
-        acks.record(10);
+        acks.record_applied(10, Some(1));
         let first = acks.take_boundary().unwrap();
         assert_eq!(
             first,
@@ -409,8 +411,8 @@ mod tests {
                 bytes: 10
             }
         );
-        acks.record(5);
-        acks.record(5);
+        acks.record_applied(5, Some(1));
+        acks.record_applied(5, Some(1));
         assert_eq!(acks.take_boundary(), None);
         assert!(acks.settle(first, true));
         let second = acks.take_boundary().unwrap();
@@ -427,18 +429,28 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_applied_under_a_replaced_epoch_earns_nothing() {
+        let mut acks = DeliveryAcks::default();
+        acks.begin_epoch(2);
+        acks.record_applied(7, Some(1));
+        assert_eq!(acks.take_boundary(), None);
+        acks.record_applied(7, Some(2));
+        assert_eq!(acks.take_boundary().unwrap().bytes, 7);
+    }
+
+    #[test]
     fn never_retries_a_failed_boundary_on_its_own_epoch_but_a_new_epoch_wakes_it() {
         let mut acks = DeliveryAcks::default();
         acks.begin_epoch(1);
-        acks.record(10);
+        acks.record_applied(10, Some(1));
         let failed = acks.take_boundary().unwrap();
         assert!(!acks.settle(failed, false));
 
         acks.begin_epoch(2);
-        acks.record(3);
+        acks.record_applied(3, Some(2));
         let in_flight = acks.take_boundary().unwrap();
         acks.begin_epoch(3);
-        acks.record(1);
+        acks.record_applied(1, Some(3));
         assert!(acks.settle(in_flight, false));
         assert_eq!(
             acks.take_boundary().unwrap(),

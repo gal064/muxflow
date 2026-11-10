@@ -98,9 +98,12 @@ pub enum EngineOutput {
         generation: u64,
     },
     Epoch(u64),
-    /// The host gave up resuming this pane's stream; reconnect the link.
+    /// The host gave up resuming this pane's stream; reconnect the link. Names
+    /// the epoch it was admitted under, so a stall an earlier bridge left in the
+    /// queue is not taken for this one.
     FlowStalled {
         pane_id: String,
+        epoch: Option<u64>,
     },
     /// Acknowledge this frame to the host. Emitted after it has been applied.
     FrameConsumed {

@@ -152,7 +152,7 @@ ordering stays.
 | `features/files/liveTable.ts` | Depends on S4. Inline editable table; the cell-replace logic ports, the widget does not. `liveTable.test.ts` follows |
 | `features/shell/MarkdownPreview.test.tsx` | Preview keeps the user's selection while content updates, using DOM selection events. Does the Kit Markdown view need the same behavior |
 | `features/shell/appStateContract.test.ts` | Shared fixture moved to `crates/desktop-core/src/persistedAppState.contract.json` in Phase 1; which half of the test survives |
-| `features/terminal/rendererResizeOrdering.test.ts` | Does the engine serialize a queued history rewrite and a resize by construction, or does the ordering need its own test |
+| `features/terminal/rendererResizeOrdering.test.ts` | Does the engine serialize a queued history rewrite and a resize by construction, or does the ordering need its own test. Answered in T3.3: by construction, one engine command loop |
 | `features/terminal/rendererDrainBound.test.ts` | Does the engine keep a bounded hide drain with an honest checkpoint watermark? If hiding no longer serializes anything, three xterm-timed cases drop, but the frozen-pane contract still needs a test |
 | `features/files/markdownPreview.ts` | `useSanitizedMarkdown` holds a refresh while the user is selecting in the preview, and `CLICK_SLOP_PX` separates a link click from a selection drag. Does the Kit Markdown view need either (same question as `MarkdownPreview.test.tsx`) |
 
@@ -185,8 +185,8 @@ font row covers them).
 | `app/AppDialogLayer.tsx` | 122 | port | 2 | dialog layer over Kit dialogs | open |
 | `app/AppNoticeLayer.tsx` | 52 | port | 2 | Kit notifications through `notices.rs`. One status notice at a time, a problem stays. The transfer toast is not here yet; it comes with transfers | open |
 | `app/AppRightPanel.tsx` | 89 | port | 2 | right panel host (Explorer, Git, Ports rails) | open |
-| `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | tests of TerminalWorkspaceSurface.tsx | open |
-| `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | workspace terminal surface entity | open |
+| `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | separator rule and naming in terminal/layout.rs and surface.rs; link-modifier grab and activity forwarding go with T3.6 | open |
+| `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | terminal/surface.rs: pane frames, resting dividers, empty state, region name. Divider drag and arrow-key resize, pane grab, hover focus and selecting a pane in tmux on focus go to T3.6 | open |
 | `app/WorkspaceDock.test.tsx` | 131 | port | 2 | tests of WorkspaceDock.tsx | open |
 | `app/WorkspaceDock.tsx` | 232 | port | 2 | dock layout on Kit dock; also a drop target, not a drag source (see S8) | open |
 | `app/appRecovery.test.ts` | 43 | port | 2 | tests in connection_ui/app_recovery.rs | done (T2.4) |
@@ -221,8 +221,8 @@ font row covers them).
 | `app/useAppShellChrome.ts` | 59 | port | 2 | rail layout and status-to-notice lifecycle | open |
 | `app/useBulkTabClose.test.tsx` | 117 | port | 4 | tests of useBulkTabClose.ts | open |
 | `app/useBulkTabClose.ts` | 145 | port | 4 | bulk tab close | open |
-| `app/useClientResize.test.tsx` | 421 | port | 3 | tests of useClientResize.ts | open |
-| `app/useClientResize.ts` | 320 | port | 3 | client_resize; keeps tmux client size exact | open |
+| `app/useClientResize.test.tsx` | 421 | port | 3 | tests in terminal/client_size.rs | done (T3.3) |
+| `app/useClientResize.ts` | 320 | port | 3 | terminal/client_size.rs (ClientResize) driven by terminal/surface.rs | done (T3.3) |
 | `app/useFocusHistoryNavigation.test.tsx` | 190 | port | 4 | tests of useFocusHistoryNavigation.ts | open |
 | `app/useFocusHistoryNavigation.ts` | 135 | port | 4 | focus history navigation | open |
 | `app/useMissingHelperRecovery.ts` | 176 | port | 2 | connection_ui/helper_recovery.rs | done (T2.4) |
@@ -506,12 +506,12 @@ font row covers them).
 | `features/terminal/TerminalEventHub.ts` | 844 | port | 3 | crates/terminal-engine/src/hub.rs | done (T3.1) |
 | `features/terminal/TerminalGenerationWatermark.ts` | 40 | port | 3 | applied_generation in crates/terminal-engine/src/pane.rs; writes are synchronous, so no version guard is needed | done (T3.1) |
 | `features/terminal/TerminalPane.test.tsx` | 1810 | port | 3 | tests of TerminalPane.tsx | open |
-| `features/terminal/TerminalPane.tsx` | 1621 | port | 3 | event consumer and reveal driver in crates/terminal-engine/src/pane.rs and engine.rs (T3.1); terminal view entity and TerminalElement host still to do | open |
+| `features/terminal/TerminalPane.tsx` | 1621 | port | 3 | event consumer and reveal driver in crates/terminal-engine/src/pane.rs and engine.rs (T3.1); pane entity in terminal/pane.rs and terminal/link.rs, element in terminal/element.rs (T3.3); reconcilePaneGrid in terminal/surface.rs (T3.3); input, reading and integration behavior go to T3.4, T3.5, T3.6 | open |
 | `features/terminal/TerminalPaneHostHandshake.test.tsx` | 810 | port | 3 | crates/terminal-engine/src/engine_tests.rs (T3.1); the grid-mismatch and double-mount cases go with the terminal view | open |
 | `features/terminal/TerminalReadingState.test.ts` | 71 | port | 3 | tests in crates/terminal-engine/src/reading.rs | done (T3.1) |
 | `features/terminal/TerminalReadingState.ts` | 57 | port | 3 | crates/terminal-engine/src/reading.rs | done (T3.1) |
-| `features/terminal/TerminalRenderer.test.ts` | 915 | port | 3 | split: scheduler, xterm callbacks, search addon, paste interception retire; restoreDecision, pane grid reconciliation, resource recovery, link activation port | open |
-| `features/terminal/TerminalRenderer.ts` | 1453 | replace | 3 | XtermRenderer becomes TerminalElement; restoreDecision, pane grid reconciliation, resource recovery and link activation must be carried over | open |
+| `features/terminal/TerminalRenderer.test.ts` | 915 | port | 3 | split: scheduler, xterm callbacks, search addon, paste interception retire; pane grid reconciliation ported to terminal/surface.rs (T3.3); restoreDecision is in terminal-engine (T3.1); seed recovery is in terminal-engine (T3.1) and no GPU resource recovery is needed; link activation goes to T3.5 | open |
+| `features/terminal/TerminalRenderer.ts` | 1453 | replace | 3 | XtermRenderer becomes TerminalElement (T3.3); restoreDecision is in terminal-engine (T3.1); pane grid reconciliation in terminal/surface.rs (T3.3); link activation goes to T3.5; no GPU resource recovery is needed in a GPUI element | open |
 | `features/terminal/TerminalStateCache.test.ts` | 140 | retire | 3 | tests TerminalStateCache.ts, which retires | done (T3.1) |
 | `features/terminal/TerminalStateCache.ts` | 191 | retire | 3 | xterm serialize cache; hidden panes keep their live grids in crates/terminal-engine/src/engine.rs, bounded at 64 screens and 128 MiB, with the pager flags carried alongside | done (T3.1) |
 | `features/terminal/TerminalTransferSurface.test.tsx` | 906 | port | 3 | tests of TerminalTransferSurface.tsx | open |
@@ -525,35 +525,35 @@ font row covers them).
 | `features/terminal/atlasModelInvalidation.test.ts` | 147 | retire | 3 | tests the shared xterm WebGL atlas model invalidation | open |
 | `features/terminal/atlasStaleProbe.test.ts` | 180 | retire | 3 | tests atlasStaleProbe.ts, which retires | open |
 | `features/terminal/atlasStaleProbe.ts` | 176 | retire | 3 | detects a stale xterm WebGL shared atlas | open |
-| `features/terminal/cellMetrics.ts` | 213 | replace | 3 | reads xterm render-service cell size; TerminalElement measures shaped font cells, snapping rules carry over | open |
-| `features/terminal/clientSize.test.ts` | 208 | port | 3 | tests of clientSize.ts | open |
-| `features/terminal/clientSize.ts` | 112 | port | 3 | client size from surface and topology | open |
-| `features/terminal/echoLagProbe.test.ts` | 334 | port | 3 | tests of echoLagProbe.ts | open |
-| `features/terminal/echoLagProbe.ts` | 272 | port | 3 | echo lag probe (the S1 measurement method) | open |
-| `features/terminal/glyphWeight.test.ts` | 231 | port | 3 | atlas canvas hook, xterm option tripwires and bundle-regex cases drop; port the cell-width snapping cases (13 px face is an 8 CSS px cell at every ratio, never narrower than the face, under one device pixel wider) with cellMetrics | open |
-| `features/terminal/gridMismatchProbe.test.ts` | 165 | port | 3 | tests of gridMismatchProbe.ts | open |
-| `features/terminal/gridMismatchProbe.ts` | 160 | port | 3 | grid mismatch probe | open |
+| `features/terminal/cellMetrics.ts` | 213 | replace | 3 | terminal/cell_metrics.rs: measures the shaped font; snapping rules and `cellsForBox` carried over | done (T3.3) |
+| `features/terminal/clientSize.test.ts` | 208 | port | 3 | tests in terminal/client_size.rs | done (T3.3) |
+| `features/terminal/clientSize.ts` | 112 | port | 3 | terminal/client_size.rs | done (T3.3) |
+| `features/terminal/echoLagProbe.test.ts` | 334 | port | 3 | tests of echoLagProbe.ts; assigned to T3.4 | open |
+| `features/terminal/echoLagProbe.ts` | 272 | port | 3 | echo lag probe (the S1 measurement method); needs the input path, assigned to T3.4 | open |
+| `features/terminal/glyphWeight.test.ts` | 231 | port | 3 | atlas canvas hook, xterm option tripwires and bundle-regex cases drop; cell-width snapping cases in terminal/cell_metrics.rs | done (T3.3) |
+| `features/terminal/gridMismatchProbe.test.ts` | 165 | port | 3 | tests in terminal/probes.rs | done (T3.3) |
+| `features/terminal/gridMismatchProbe.ts` | 160 | port | 3 | terminal/probes.rs (GridMismatchProbe) | done (T3.3) |
 | `features/terminal/historyPage.test.ts` | 139 | port | 3 | tests in crates/terminal-engine/src/history_page.rs | done (T3.1) |
 | `features/terminal/historyPage.ts` | 170 | port | 3 | crates/terminal-engine/src/history_page.rs | done (T3.1) |
 | `features/terminal/hostColors.ts` | 17 | port | 3 | TerminalColors report to host | open |
-| `features/terminal/inputLatencyStats.test.ts` | 159 | port | 3 | tests of inputLatencyStats.ts | open |
-| `features/terminal/inputLatencyStats.ts` | 192 | port | 3 | input latency histograms | open |
+| `features/terminal/inputLatencyStats.test.ts` | 159 | port | 3 | tests of inputLatencyStats.ts; assigned to T3.4 | open |
+| `features/terminal/inputLatencyStats.ts` | 192 | port | 3 | input latency histograms; needs the input path, assigned to T3.4 | open |
 | `features/terminal/internalPathDrag.test.ts` | 168 | port | 3 | tests of internalPathDrag.ts | open |
 | `features/terminal/internalPathDrag.ts` | 213 | port | 3 | in-app path drag state and validation; DataTransfer MIME and native-lane bridging retire | open |
-| `features/terminal/layout.test.ts` | 66 | port | 3 | tests of layout.ts | open |
-| `features/terminal/layout.ts` | 67 | port | 3 | pane geometry and zoom | open |
-| `features/terminal/measureBox.test.ts` | 174 | port | 3 | xterm internal-field canary and FitAddon comparison drop; port the `deviceSafeLineHeight` sweep (row whole in both pixel spaces, at most 1 CSS px of pitch lost) and the `cellsForBox` chrome arithmetic (123 by 47 case) that size the tmux client | open |
+| `features/terminal/layout.test.ts` | 66 | port | 3 | tests in terminal/layout.rs | done (T3.3) |
+| `features/terminal/layout.ts` | 67 | port | 3 | terminal/layout.rs | done (T3.3) |
+| `features/terminal/measureBox.test.ts` | 174 | port | 3 | xterm internal-field canary and FitAddon comparison drop; `deviceSafeLineHeight` sweep and `cellsForBox` chrome arithmetic in terminal/cell_metrics.rs | done (T3.3) |
 | `features/terminal/nativeDragDropCoordinator.ts` | 112 | replace | 3 | Tauri webview drag-drop router becomes GPUI file-drop events; DOM plus native dual lane disappears | open |
 | `features/terminal/openExternalUrl.test.ts` | 31 | port | 3 | behavior assertions move to the replacement of openExternalUrl.ts | open |
 | `features/terminal/openExternalUrl.ts` | 19 | replace | 3 | direct call into desktop-core external_links | open |
 | `features/terminal/osc52Clipboard.ts` | 52 | port | 3 | OSC 52 write decode with bounds | open |
-| `features/terminal/paintTailProbe.test.ts` | 384 | retire | 3 | tests the xterm write-backlog fingerprints of paintTailProbe.ts; the replacement gets its own tests | open |
-| `features/terminal/paintTailProbe.ts` | 368 | replace | 3 | keep the main-thread block and stopped frame clock fingerprints and the `render.paintSlow` incident in the GPUI paint loop; the xterm write-backlog fingerprints go | open |
-| `features/terminal/panePaintGate.test.ts` | 118 | port | 3 | behavior assertions move to the replacement of panePaintGate.ts | open |
-| `features/terminal/panePaintGate.ts` | 127 | replace | 3 | app-level ordering gate: keep the idea (explorer waits for the pane's first paint), replace the DOM-paint trigger | open |
+| `features/terminal/paintTailProbe.test.ts` | 384 | retire | 3 | tests the xterm write-backlog fingerprints of paintTailProbe.ts; the replacement has its own tests in terminal/probes.rs | done (T3.3) |
+| `features/terminal/paintTailProbe.ts` | 368 | replace | 3 | terminal/probes.rs (PaintTail): main-thread block and stopped frame clock fingerprints and the `render.paintSlow` incident; the xterm write-backlog fingerprints go | done (T3.3) |
+| `features/terminal/panePaintGate.test.ts` | 118 | port | 3 | tests in terminal/paint_gate.rs | done (T3.3) |
+| `features/terminal/panePaintGate.ts` | 127 | replace | 3 | terminal/paint_gate.rs: the explorer waits for the pane's first paint, armed once per mount; released from TerminalElement. Phase 5 is the caller | done (T3.3) |
 | `features/terminal/panePaintOrdering.test.tsx` | 274 | port | 3 | explorer ordered behind pane paint | open |
 | `features/terminal/rendererDrainBound.test.ts` | 129 | port | 3 | ? xterm write callbacks drop; if the engine keeps a hide drain, port: a drain that never completes is answered by a bound with only the generation actually applied, a late completion cannot advance the published watermark, a sealed writer refuses writes and says so (frozen-pane failure) | open |
-| `features/terminal/rendererResizeOrdering.test.ts` | 140 | port | 3 | ? ordering of queued history rewrite versus resize; does the engine serialize these by construction | open |
+| `features/terminal/rendererResizeOrdering.test.ts` | 140 | retire | 3 | answered: the engine serializes a history rewrite and a resize by construction (one command loop), so this test retires with xterm's write queue | done (T3.3) |
 | `features/terminal/revealPayloadBudget.test.ts` | 112 | port | 3 | reveal payload cost over the Rust contract; reuses tmux-control directly | open |
 | `features/terminal/revealRetry.test.ts` | 91 | port | 3 | tests in crates/terminal-engine/src/reveal_retry.rs | done (T3.1) |
 | `features/terminal/revealRetry.ts` | 123 | port | 3 | crates/terminal-engine/src/reveal_retry.rs | done (T3.1) |
@@ -563,8 +563,8 @@ font row covers them).
 | `features/terminal/terminalInputPolicy.ts` | 117 | port | 3 | terminal input translation | open |
 | `features/terminal/terminalLinkActivation.test.ts` | 13 | port | 3 | tests of terminalLinkActivation.ts | open |
 | `features/terminal/terminalLinkActivation.ts` | 9 | port | 3 | link activation modifier | open |
-| `features/terminal/terminalPanePerf.test.ts` | 154 | port | 3 | tests of terminalPanePerf.ts | open |
-| `features/terminal/terminalPanePerf.ts` | 202 | port | 3 | per-pane perf accounting | open |
+| `features/terminal/terminalPanePerf.test.ts` | 154 | port | 3 | tests in terminal/probes.rs | done (T3.3) |
+| `features/terminal/terminalPanePerf.ts` | 202 | port | 3 | terminal/probes.rs (PanePerf) | done (T3.3) |
 | `features/terminal/terminalSeedOverlay.test.ts` | 59 | port | 3 | re-assert on the alacritty_terminal grid the seed overlay's erase cases: attributed erase fills through the right edge, erase keeps soft-wrap metadata, adjacent blank spans keep their own backgrounds (the S9 lane does not assert them by name) | open |
 | `features/terminal/terminalTransferApi.test.ts` | 231 | port | 3 | behavior assertions move to the replacement of terminalTransferApi.ts | open |
 | `features/terminal/terminalTransferApi.ts` | 346 | replace | 3 | Tauri transfer client becomes direct desktop-core calls | open |
@@ -572,13 +572,13 @@ font row covers them).
 | `features/terminal/terminalTransferRegistry.ts` | 101 | port | 3 | transfer registry | open |
 | `features/terminal/terminalTransfers.test.ts` | 208 | port | 3 | tests of terminalTransfers.ts | open |
 | `features/terminal/terminalTransfers.ts` | 367 | port | 3 | path preparation and shell escaping | open |
-| `features/terminal/terminalViewport.ts` | 66 | port | 3 | viewport anchor across reflow | open |
+| `features/terminal/terminalViewport.ts` | 66 | port | 3 | ViewportAnchor in crates/terminal-engine/src/terminal.rs | done (T3.3) |
 | `features/terminal/theme.test.ts` | 107 | port | 3 | behavior assertions move to the replacement of theme.ts | open |
 | `features/terminal/theme.ts` | 223 | replace | 3 | reads --term-* CSS properties; becomes the Rust theme and generated palette | open |
 | `features/terminal/timeBound.test.ts` | 63 | retire | 3 | tests timeBound.ts, which retires | done (T3.1) |
 | `features/terminal/timeBound.ts` | 63 | retire | 3 | a promise race around calls that could wedge; the engine runs on deadlines and its writes cannot wedge | done (T3.1) |
 | `features/terminal/topologyNotification.test.ts` | 29 | port | 3 | topology notification decode: cases in the shared `topology.json` fixture, run by `crates/terminal-interactions` and vitest | done (T3.2) |
-| `features/terminal/viewportPreservation.test.ts` | 79 | port | 3 | viewport anchor through reflow, asserted on the engine grid | open |
+| `features/terminal/viewportPreservation.test.ts` | 79 | port | 3 | tests in crates/terminal-engine/src/terminal.rs, on the engine grid | done (T3.3) |
 
 ### `features/terminal/testing`
 
