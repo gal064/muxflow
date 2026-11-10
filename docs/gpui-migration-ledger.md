@@ -239,26 +239,26 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `commands/CommandPalette.tsx` | 126 | port | 2 | command palette view on Kit | open |
-| `commands/ConfirmationDialog.tsx` | 49 | replace | 2 | Kit dialog | open |
+| `commands/CommandPalette.tsx` | 126 | port | 2 | `commands/palette.rs`: own list, not Kit `Command`, whose virtualized rows leave offscreen commands out of the accessibility tree | open |
+| `commands/ConfirmationDialog.tsx` | 49 | replace | 2 | Kit alert dialog, `commands/dialogs.rs`. Cancel holds focus, so Enter cancels. Non-tmux `busy` state is not needed yet | open |
 | `commands/NewWorkspaceDialog.test.tsx` | 118 | port | 4 | tests of NewWorkspaceDialog.tsx | open |
 | `commands/NewWorkspaceDialog.tsx` | 113 | port | 4 | new workspace dialog | open |
-| `commands/ShortcutEditorDialog.test.tsx` | 43 | port | 4 | tests of ShortcutEditorDialog.tsx | open |
-| `commands/ShortcutEditorDialog.tsx` | 53 | port | 4 | shortcut editor dialog (Settings) | open |
-| `commands/TextInputDialog.tsx` | 34 | replace | 2 | Kit text-input dialog; Enter does not submit while composing | open |
-| `commands/destructiveConfirmation.test.ts` | 84 | port | 2 | tests of destructiveConfirmation.ts | open |
-| `commands/destructiveConfirmation.ts` | 45 | port | 2 | destructive confirmation state | open |
-| `commands/fuzzy.test.ts` | 43 | port | 2 | tests of fuzzy.ts | open |
-| `commands/fuzzy.ts` | 61 | port | 2 | fuzzy subsequence scorer | open |
-| `commands/registry.test.ts` | 524 | port | 2 | tests of registry.ts | open |
-| `commands/registry.ts` | 583 | port | 2 | command registry (64 commands) and keymaps | open |
-| `commands/rowCommands.test.ts` | 54 | port | 2 | tests of rowCommands.ts | open |
-| `commands/rowCommands.ts` | 99 | port | 2 | row commands for the palette | open |
-| `commands/shortcutGlyphs.test.ts` | 47 | port | 2 | tests of shortcutGlyphs.ts | open |
-| `commands/shortcutGlyphs.ts` | 106 | port | 2 | shortcut glyph rendering per platform | open |
+| `commands/ShortcutEditorDialog.test.tsx` | 43 | port | 2 | `tests/commands.rs` | open |
+| `commands/ShortcutEditorDialog.tsx` | 53 | port | 2 | `commands/shortcut_editor.rs` | open |
+| `commands/TextInputDialog.tsx` | 34 | replace | 2 | Kit dialog, `commands/dialogs.rs`; Enter does not submit while composing | open |
+| `commands/destructiveConfirmation.test.ts` | 84 | port | 2 | title and detail in `tests/commands.rs`; the action checks land in Phase 4 | open |
+| `commands/destructiveConfirmation.ts` | 45 | port | 2 | title and detail in `commands/dialogs.rs`; the action checks need `TmuxAction`, so they land with `features/tmux/actions.ts` in Phase 4 | open |
+| `commands/fuzzy.test.ts` | 43 | port | 2 | `commands/fuzzy.rs` | open |
+| `commands/fuzzy.ts` | 61 | port | 2 | `commands/fuzzy.rs` | open |
+| `commands/registry.test.ts` | 524 | port | 2 | `commands/{registry,keymap}.rs`, `tests/commands.rs` | open |
+| `commands/registry.ts` | 583 | port | 2 | `commands/registry.rs`, `commands/keymap.rs`; keys matched against the portable form through `intercept_keystrokes`, no GPUI bindings. Editor fallback and the docked-document chords wait for Phase 5; the terminal's IME check for Phase 3. GPUI reports no physical key, so digit selectors on layouts with shifted digits (AZERTY) do not resolve | open |
+| `commands/rowCommands.test.ts` | 54 | port | 2 | `tests/commands.rs` | open |
+| `commands/rowCommands.ts` | 99 | port | 2 | `commands/mod.rs` `publish_row_commands` | open |
+| `commands/shortcutGlyphs.test.ts` | 47 | port | 2 | `commands/glyphs.rs` | open |
+| `commands/shortcutGlyphs.ts` | 106 | port | 2 | `commands/glyphs.rs` | open |
 | `commands/useCommittedRef.ts` | 29 | retire | 2 | React stale-closure workaround; entities read live state | open |
-| `commands/useModalDialog.test.tsx` | 67 | port | 2 | focus trap and inert-background cases drop (Kit dialog); port: Escape during IME composition does not cancel a dialog, and a text dialog does not submit while its value is being composed (S5) | open |
-| `commands/useModalDialog.ts` | 92 | replace | 2 | Kit dialog focus trap, Escape (ignored during IME composition) and focus return | open |
+| `commands/useModalDialog.test.tsx` | 67 | port | 2 | focus trap and inert-background cases drop (Kit dialog); Escape and Enter during IME composition ported to `tests/commands.rs` | open |
+| `commands/useModalDialog.ts` | 92 | replace | 2 | Kit dialog focus trap and focus return; `dialogs::escape_ends_composition` covers Escape during IME composition | open |
 
 ### `diagnostics`
 
@@ -472,8 +472,8 @@ font row covers them).
 | `features/shell/useDesktopResumeRecovery.ts` | 151 | port | 2 | resume-from-sleep recovery | open |
 | `features/shell/usePersistedAppState.test.tsx` | 89 | port | 4 | tests of usePersistedAppState.ts | open |
 | `features/shell/usePersistedAppState.ts` | 123 | port | 2 | persisted app state loader | open |
-| `features/shell/useShellCommands.test.tsx` | 384 | port | 2 | tests of useShellCommands.ts | open |
-| `features/shell/useShellCommands.ts` | 443 | port | 2 | shell command wiring | open |
+| `features/shell/useShellCommands.test.tsx` | 384 | port | 2 | dispatch in `tests/commands.rs`; each command body tested with its feature | open |
+| `features/shell/useShellCommands.ts` | 443 | port | 2 | `commands/mod.rs` `run` and `on_command`: each command body lands with its feature (Phases 3 to 5) | open |
 | `features/shell/useUpdateCheck.test.ts` | 95 | port | 2 | tests of useUpdateCheck.ts | open |
 | `features/shell/useUpdateCheck.ts` | 97 | port | 2 | update check notice over kept update_check.rs | open |
 | `features/shell/useWindowChrome.test.tsx` | 85 | port | 2 | behavior assertions move to the replacement of useWindowChrome.ts | open |
@@ -602,14 +602,14 @@ font row covers them).
 | `features/workspaces/TabStrip.tsx` | 548 | port | 2 | tab strip on Kit tab; pointer-drag source, in-app | open |
 | `features/workspaces/WorkspaceSidebar.hosts.test.tsx` | 234 | port | 2 | multi-host sidebar rows | open |
 | `features/workspaces/WorkspaceSidebar.tsx` | 973 | port | 2 | workspace sidebar on Kit sidebar; pointer-drag source, in-app | open |
-| `features/workspaces/WorkspaceSwitcher.test.tsx` | 158 | port | 2 | tests of WorkspaceSwitcher.tsx | open |
-| `features/workspaces/WorkspaceSwitcher.tsx` | 144 | port | 2 | workspace switcher | open |
+| `features/workspaces/WorkspaceSwitcher.test.tsx` | 158 | port | 2 | `tests/commands.rs` | open |
+| `features/workspaces/WorkspaceSwitcher.tsx` | 144 | port | 2 | `commands/quick_open.rs`; row and agent-state glyph and file-type icon land with Phases 4 and 5 | open |
 | `features/workspaces/mergedWorkspaceRows.test.ts` | 109 | port | 4 | tests of mergedWorkspaceRows.ts | open |
 | `features/workspaces/mergedWorkspaceRows.ts` | 103 | port | 4 | merged multi-host workspace rows | open |
-| `features/workspaces/quickOpen.ts` | 53 | port | 2 | Quick Open items | open |
+| `features/workspaces/quickOpen.ts` | 53 | port | 2 | `commands/quick_open.rs` | open |
 | `features/workspaces/transientDrag.test.tsx` | 101 | port | 2 | tests of transientDrag.ts | open |
 | `features/workspaces/transientDrag.ts` | 71 | port | 2 | captured-pointer divider drag | open |
-| `features/workspaces/useQuickOpenSearch.ts` | 48 | port | 2 | Quick Open cancellable search | open |
+| `features/workspaces/useQuickOpenSearch.ts` | 48 | port | 2 | `commands/quick_open.rs` `sync_search`; root resolution belongs to the file-search source | open |
 | `features/workspaces/workspaceRows.test.ts` | 223 | port | 4 | tests of workspaceRows.ts | open |
 | `features/workspaces/workspaceRows.ts` | 215 | port | 4 | workspace rows | open |
 
