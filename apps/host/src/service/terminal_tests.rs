@@ -2152,3 +2152,29 @@ fn an_evicted_pane_is_reported_to_the_desktop_as_requiring_a_seed() {
     };
     assert_eq!(output.terminal.unwrap().pane_id, "%1");
 }
+
+/// tmux and a terminal can disagree about how wide a joined emoji is, and the
+/// erase is placed by tmux's count. After the text, it would remove what the
+/// wider terminal put in those cells.
+#[test]
+fn screen_seed_erases_trailing_cells_before_it_paints_the_text() {
+    let text = "\u{1f469}\u{200d}\u{1f4bb} tail".as_bytes().to_vec();
+    let mut captured_cell_row = text.clone();
+    captured_cell_row.extend_from_slice(&[b' '; 70]);
+    let seed = build_seed_with_cell_captures(
+        "%1",
+        vec![text.clone()],
+        vec![captured_cell_row],
+        vec![],
+        vec![],
+        &[b"__ADE_META__:%1:0:0:0:1:0:0:0:0:0:1:0:0:1:80:".to_vec()],
+    )
+    .unwrap();
+    let position = |needle: &[u8]| {
+        seed.bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap()
+    };
+    assert!(position(b"\x1b[K") < position(&text));
+}

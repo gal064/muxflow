@@ -27,16 +27,16 @@ so a task may change a view test's row to retire, with a reason.
 
 | Scope | port | replace | retire | Total |
 |---|---|---|---|---|
-| All | 345 files / 74,554 lines | 34 files / 9,835 lines | 24 files / 2,395 lines | 403 files / 86,784 lines |
-| Production | 178 files / 36,261 lines | 34 files / 9,835 lines | 13 files / 966 lines | 225 files / 47,062 lines |
-| Tests | 167 files / 38,293 lines | 0 files / 0 lines | 11 files / 1,429 lines | 178 files / 39,722 lines |
+| All | 343 files / 74,428 lines | 34 files / 9,835 lines | 26 files / 2,521 lines | 403 files / 86,784 lines |
+| Production | 177 files / 36,198 lines | 34 files / 9,835 lines | 14 files / 1,029 lines | 225 files / 47,062 lines |
+| Tests | 166 files / 38,230 lines | 0 files / 0 lines | 12 files / 1,492 lines | 178 files / 39,722 lines |
 
 By target phase:
 
 | Target phase | port | replace | retire | Total files |
 |---|---|---|---|---|
 | 2 | 89 | 10 | 5 | 104 |
-| 3 | 90 | 11 | 9 | 110 |
+| 3 | 88 | 11 | 11 | 110 |
 | 4 | 91 | 5 | 0 | 96 |
 | 5 | 75 | 8 | 8 | 91 |
 | 8 | 0 | 0 | 1 | 1 |
@@ -485,32 +485,32 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/terminal/DeferredTerminalOutputQueue.test.ts` | 29 | port | 3 | tests of DeferredTerminalOutputQueue.ts | open |
-| `features/terminal/DeferredTerminalOutputQueue.ts` | 57 | port | 3 | deferred output queue in terminal-engine | open |
-| `features/terminal/PaneDegradedWatchdog.test.ts` | 102 | port | 3 | tests of PaneDegradedWatchdog.ts | open |
-| `features/terminal/PaneDegradedWatchdog.ts` | 185 | port | 3 | pane degraded watchdog in terminal-engine | open |
-| `features/terminal/PaneHistoryPager.test.ts` | 358 | port | 3 | tests of PaneHistoryPager.ts | open |
-| `features/terminal/PaneHistoryPager.ts` | 500 | port | 3 | history pager in terminal-engine | open |
-| `features/terminal/PaneRecovery.ts` | 35 | port | 3 | pane recovery plan | open |
-| `features/terminal/PaneRevealState.test.ts` | 161 | port | 3 | tests of PaneRevealState.ts | open |
-| `features/terminal/PaneRevealState.ts` | 154 | port | 3 | pane reveal state | open |
+| `features/terminal/DeferredTerminalOutputQueue.test.ts` | 29 | port | 3 | tests in crates/terminal-engine/src/deferred.rs | done (T3.1) |
+| `features/terminal/DeferredTerminalOutputQueue.ts` | 57 | port | 3 | crates/terminal-engine/src/deferred.rs | done (T3.1) |
+| `features/terminal/PaneDegradedWatchdog.test.ts` | 102 | port | 3 | tests in crates/terminal-engine/src/watchdog.rs | done (T3.1) |
+| `features/terminal/PaneDegradedWatchdog.ts` | 185 | port | 3 | crates/terminal-engine/src/watchdog.rs | done (T3.1) |
+| `features/terminal/PaneHistoryPager.test.ts` | 358 | port | 3 | tests in crates/terminal-engine/src/pager.rs; the held-through-splice case retires because the splice is synchronous | done (T3.1) |
+| `features/terminal/PaneHistoryPager.ts` | 500 | port | 3 | crates/terminal-engine/src/pager.rs; also refuses the clamped row tmux answers for a pane with no history | done (T3.1) |
+| `features/terminal/PaneRecovery.ts` | 35 | port | 3 | crates/terminal-engine/src/reveal.rs | done (T3.1) |
+| `features/terminal/PaneRevealState.test.ts` | 161 | port | 3 | tests in crates/terminal-engine/src/reveal.rs | done (T3.1) |
+| `features/terminal/PaneRevealState.ts` | 154 | port | 3 | crates/terminal-engine/src/reveal.rs | done (T3.1) |
 | `features/terminal/TerminalBytes.ts` | 18 | retire | 3 | branded owned-bytes type for a JS copy boundary; Rust ownership makes it a language fact | open |
-| `features/terminal/TerminalEventHub.test.ts` | 812 | port | 3 | tests of TerminalEventHub.ts | open |
-| `features/terminal/TerminalEventHub.ts` | 844 | port | 3 | TerminalEventHub in terminal-engine | open |
-| `features/terminal/TerminalGenerationWatermark.ts` | 40 | port | 3 | generation watermark | open |
+| `features/terminal/TerminalEventHub.test.ts` | 812 | port | 3 | crates/terminal-engine/src/hub_tests.rs; consumer rejection becomes catch_unwind in engine.rs, which has no injection point for a test; observer failures have no equivalent | done (T3.1) |
+| `features/terminal/TerminalEventHub.ts` | 844 | port | 3 | crates/terminal-engine/src/hub.rs | done (T3.1) |
+| `features/terminal/TerminalGenerationWatermark.ts` | 40 | port | 3 | applied_generation in crates/terminal-engine/src/pane.rs; writes are synchronous, so no version guard is needed | done (T3.1) |
 | `features/terminal/TerminalPane.test.tsx` | 1810 | port | 3 | tests of TerminalPane.tsx | open |
-| `features/terminal/TerminalPane.tsx` | 1621 | port | 3 | terminal view entity and TerminalElement host | open |
-| `features/terminal/TerminalPaneHostHandshake.test.tsx` | 810 | port | 3 | host handshake reveal | open |
-| `features/terminal/TerminalReadingState.test.ts` | 71 | port | 3 | tests of TerminalReadingState.ts | open |
-| `features/terminal/TerminalReadingState.ts` | 57 | port | 3 | reading state | open |
+| `features/terminal/TerminalPane.tsx` | 1621 | port | 3 | event consumer and reveal driver in crates/terminal-engine/src/pane.rs and engine.rs (T3.1); terminal view entity and TerminalElement host still to do | open |
+| `features/terminal/TerminalPaneHostHandshake.test.tsx` | 810 | port | 3 | crates/terminal-engine/src/engine_tests.rs (T3.1); the grid-mismatch and double-mount cases go with the terminal view | open |
+| `features/terminal/TerminalReadingState.test.ts` | 71 | port | 3 | tests in crates/terminal-engine/src/reading.rs | done (T3.1) |
+| `features/terminal/TerminalReadingState.ts` | 57 | port | 3 | crates/terminal-engine/src/reading.rs | done (T3.1) |
 | `features/terminal/TerminalRenderer.test.ts` | 915 | port | 3 | split: scheduler, xterm callbacks, search addon, paste interception retire; restoreDecision, pane grid reconciliation, resource recovery, link activation port | open |
 | `features/terminal/TerminalRenderer.ts` | 1453 | replace | 3 | XtermRenderer becomes TerminalElement; restoreDecision, pane grid reconciliation, resource recovery and link activation must be carried over | open |
-| `features/terminal/TerminalStateCache.test.ts` | 140 | retire | 3 | tests TerminalStateCache.ts, which retires | open |
-| `features/terminal/TerminalStateCache.ts` | 191 | retire | 3 | xterm serialize cache; hidden panes keep their grids in memory, which needs a byte bound like today's 64 entries and 24 MiB (`terminalCacheKey` and the `screenSeeded`, `historyExhausted` and `historyNextPageLines` flags carry over as pane state) | open |
+| `features/terminal/TerminalStateCache.test.ts` | 140 | retire | 3 | tests TerminalStateCache.ts, which retires | done (T3.1) |
+| `features/terminal/TerminalStateCache.ts` | 191 | retire | 3 | xterm serialize cache; hidden panes keep their live grids in crates/terminal-engine/src/engine.rs, bounded at 64 screens and 128 MiB, with the pager flags carried alongside | done (T3.1) |
 | `features/terminal/TerminalTransferSurface.test.tsx` | 906 | port | 3 | tests of TerminalTransferSurface.tsx | open |
 | `features/terminal/TerminalTransferSurface.tsx` | 638 | port | 3 | transfer surface (paste, file and image drop in, upload) | open |
-| `features/terminal/TerminalWriteScheduler.test.ts` | 499 | port | 3 | behavior assertions move to the replacement of TerminalWriteScheduler.ts | open |
-| `features/terminal/TerminalWriteScheduler.ts` | 613 | replace | 3 | frame pacing retires; bounded queue, overflow-to-reseed and rendered-checkpoint contract move into terminal-engine admission | open |
+| `features/terminal/TerminalWriteScheduler.test.ts` | 499 | port | 3 | write and acknowledgement tests in crates/terminal-engine/src/terminal.rs and engine_tests.rs; fences, partial records and frame pacing have no equivalent | done (T3.1) |
+| `features/terminal/TerminalWriteScheduler.ts` | 613 | replace | 3 | synchronous parse in stream order in crates/terminal-engine/src/terminal.rs; a frame is acknowledged after it is applied, so the host's delivery window is the bound and nothing can overflow | done (T3.1) |
 | `features/terminal/accessibilityPreference.ts` | 25 | retire | 3 | owner exception: the screen-reader terminal mirror and its setting are not built | open |
 | `features/terminal/api.test.ts` | 748 | port | 3 | behavior assertions move to the replacement of api.ts | open |
 | `features/terminal/api.ts` | 1004 | replace | 3 | 27 invokes and binary event decode become the in-process desktop-core bridge | open |
@@ -526,8 +526,8 @@ font row covers them).
 | `features/terminal/glyphWeight.test.ts` | 231 | port | 3 | atlas canvas hook, xterm option tripwires and bundle-regex cases drop; port the cell-width snapping cases (13 px face is an 8 CSS px cell at every ratio, never narrower than the face, under one device pixel wider) with cellMetrics | open |
 | `features/terminal/gridMismatchProbe.test.ts` | 165 | port | 3 | tests of gridMismatchProbe.ts | open |
 | `features/terminal/gridMismatchProbe.ts` | 160 | port | 3 | grid mismatch probe | open |
-| `features/terminal/historyPage.test.ts` | 139 | port | 3 | tests of historyPage.ts | open |
-| `features/terminal/historyPage.ts` | 170 | port | 3 | history page composition and autowrap contract (S9) | open |
+| `features/terminal/historyPage.test.ts` | 139 | port | 3 | tests in crates/terminal-engine/src/history_page.rs | done (T3.1) |
+| `features/terminal/historyPage.ts` | 170 | port | 3 | crates/terminal-engine/src/history_page.rs | done (T3.1) |
 | `features/terminal/hostColors.ts` | 17 | port | 3 | TerminalColors report to host | open |
 | `features/terminal/inputLatencyStats.test.ts` | 159 | port | 3 | tests of inputLatencyStats.ts | open |
 | `features/terminal/inputLatencyStats.ts` | 192 | port | 3 | input latency histograms | open |
@@ -548,8 +548,8 @@ font row covers them).
 | `features/terminal/rendererDrainBound.test.ts` | 129 | port | 3 | ? xterm write callbacks drop; if the engine keeps a hide drain, port: a drain that never completes is answered by a bound with only the generation actually applied, a late completion cannot advance the published watermark, a sealed writer refuses writes and says so (frozen-pane failure) | open |
 | `features/terminal/rendererResizeOrdering.test.ts` | 140 | port | 3 | ? ordering of queued history rewrite versus resize; does the engine serialize these by construction | open |
 | `features/terminal/revealPayloadBudget.test.ts` | 112 | port | 3 | reveal payload cost over the Rust contract; reuses tmux-control directly | open |
-| `features/terminal/revealRetry.test.ts` | 91 | port | 3 | tests of revealRetry.ts | open |
-| `features/terminal/revealRetry.ts` | 123 | port | 3 | reveal retry classification | open |
+| `features/terminal/revealRetry.test.ts` | 91 | port | 3 | tests in crates/terminal-engine/src/reveal_retry.rs | done (T3.1) |
+| `features/terminal/revealRetry.ts` | 123 | port | 3 | crates/terminal-engine/src/reveal_retry.rs | done (T3.1) |
 | `features/terminal/staleRestoreSilence.test.ts` | 533 | port | 3 | restore admission and splice refusal decisions | open |
 | `features/terminal/terminalClientLifecycle.test.ts` | 162 | port | 3 | native client ownership | open |
 | `features/terminal/terminalInputPolicy.test.ts` | 327 | port | 3 | tests of terminalInputPolicy.ts | open |
@@ -568,8 +568,8 @@ font row covers them).
 | `features/terminal/terminalViewport.ts` | 66 | port | 3 | viewport anchor across reflow | open |
 | `features/terminal/theme.test.ts` | 107 | port | 3 | behavior assertions move to the replacement of theme.ts | open |
 | `features/terminal/theme.ts` | 223 | replace | 3 | reads --term-* CSS properties; becomes the Rust theme and generated palette | open |
-| `features/terminal/timeBound.test.ts` | 63 | port | 3 | tests of timeBound.ts | open |
-| `features/terminal/timeBound.ts` | 63 | port | 3 | settleWithin time bound | open |
+| `features/terminal/timeBound.test.ts` | 63 | retire | 3 | tests timeBound.ts, which retires | done (T3.1) |
+| `features/terminal/timeBound.ts` | 63 | retire | 3 | a promise race around calls that could wedge; the engine runs on deadlines and its writes cannot wedge | done (T3.1) |
 | `features/terminal/topologyNotification.test.ts` | 29 | port | 3 | topology notification decode | open |
 | `features/terminal/viewportPreservation.test.ts` | 79 | port | 3 | viewport anchor through reflow, asserted on the engine grid | open |
 
