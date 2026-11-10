@@ -58,7 +58,7 @@ class App:
   (cfg/'profiles.json').write_text(json.dumps(dict(schemaVersion=1,profiles=[dict(id=profile_id,label='S11 fixture',shown=True,connection=connection)],lastProfileId=profile_id)))
   # Keep the app's chrome from making the terminal area incomparable.
   state=cfg/'app-state.json'
-  template=ROOT/'apps/desktop/src/features/shell/persistedAppState.contract.json'
+  template=ROOT/'crates/desktop-core/src/persistedAppState.contract.json'
   if not state.exists():
    initial=json.loads(template.read_text());initial.update(appTabs=[],workspaceUi=[],hostSetup={},workspaceDefaults={},commands={'shortcutOverrides':{}})
    initial['shell'].update(panelOpen=False,windowGeometry=None,terminalFontSize=13,uiScale=1.0,focusFollowsMouse=False)

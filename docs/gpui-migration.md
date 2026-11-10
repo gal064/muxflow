@@ -466,7 +466,6 @@ These describe the old desktop in code that otherwise stays. Reword them at cuto
 
 | File | Line |
 |---|---|
-| `apps/host/src/diagnostics.rs` | 1003, path to `perf_log.rs` |
 | `apps/host/src/service/git/diff.rs` | 14, Monaco |
 | `apps/host/src/service/terminal.rs` | 505, 1707, 1708, xterm and `composeHistoryPage` |
 | `apps/host/src/service/terminal_tests.rs` | 1660, xterm |

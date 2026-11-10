@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import contract from "./persistedAppState.contract.json";
+import contract from "../../../../../crates/desktop-core/src/persistedAppState.contract.json";
 import {
   clampedPanelWidth, clampedTerminalFontSize, defaultAppState, defaultShellState, normalizePersistedAppState,
   panelWidthForWindow, PANEL_MIN_WIDTH,
@@ -10,7 +10,7 @@ import {
  * The TypeScript end of the `save_app_state` contract.
  *
  * `PersistedAppState` is declared twice — here and in
- * `src-tauri/src/app_state.rs` — and nothing generates one from the other, so
+ * `crates/desktop-core/src/app_state.rs` — and nothing generates one from the other, so
  * the only thing that can keep them together is a fixture both ends read. The
  * Rust end is `app_state_contract` in that file; it deserializes this same
  * file and fails if any field here is one it does not accept.

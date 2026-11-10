@@ -21,15 +21,15 @@ cargo test -p muxflow-host terminal_upload::tests -- --test-threads=1 \
   >"$evidence/host-upload.log" 2>&1 & host_pid=$!
 cargo test -p muxflow-host terminal_upload::staging::tests \
   >"$evidence/host-staging-security.log" 2>&1 & host_staging_pid=$!
-cargo test -p muxflow upload_manager::tests \
+cargo test -p desktop-core upload_manager::tests \
   >"$evidence/desktop-upload.log" 2>&1 & desktop_pid=$!
-cargo test -p muxflow clipboard_staging::tests \
+cargo test -p desktop-core clipboard_staging::tests \
   >"$evidence/desktop-clipboard.log" 2>&1 & clipboard_pid=$!
-cargo test -p muxflow local_destination::tests \
+cargo test -p desktop-core local_destination::tests \
   >"$evidence/desktop-destination-security.log" 2>&1 & destination_pid=$!
-cargo test -p muxflow transfer_event::tests \
+cargo test -p desktop-core transfer_event::tests \
   >"$evidence/typed-transfer-contract.log" 2>&1 & event_pid=$!
-cargo test -p muxflow scheduler::tests -- --test-threads=1 \
+cargo test -p desktop-core scheduler::tests -- --test-threads=1 \
   >"$evidence/canonical-engine.log" 2>&1 & engine_pid=$!
 pnpm --dir apps/desktop test -- \
   src/features/terminal/terminalTransfers.test.ts \
@@ -58,7 +58,7 @@ else
   expected_upload_tests=24
 fi
 rg -Fq "test result: ok. $expected_upload_tests passed; 0 failed" "$evidence/host-upload.log"
-cargo clippy -p tmux-agent-protocol -p muxflow-host -p muxflow \
+cargo clippy -p tmux-agent-protocol -p muxflow-host -p desktop-core -p muxflow \
   --all-targets -- -D warnings >"$evidence/clippy.log" 2>&1 & clippy_pid=$!
 cargo clippy --manifest-path tests/integration/Cargo.toml --workspace -- -D warnings \
   >"$evidence/driver-clippy.log" 2>&1 & driver_clippy_pid=$!

@@ -1,11 +1,4 @@
-use serde_json::Value;
-use std::sync::Arc;
-use tauri::{
-    AppHandle, State,
-    ipc::{Channel, InvokeBody, InvokeResponseBody, Request},
-};
-
-use crate::connection::{
+use desktop_core::connection::{
     ProfileStore, TerminalClients,
     files::{
         FileCommand, FileIoManager,
@@ -13,6 +6,13 @@ use crate::connection::{
         upload_manager::{InspectedLocalTerminalPath, UploadCollisionPolicy, UploadManager},
     },
 };
+use serde_json::Value;
+use std::sync::Arc;
+use tauri::{
+    AppHandle, State,
+    ipc::{Channel, InvokeBody, InvokeResponseBody, Request},
+};
+
 use crate::tauri_adapters::{ChannelSink, TauriApp};
 
 #[tauri::command]
@@ -21,7 +21,7 @@ pub async fn file_request(
     command: FileCommand,
     clients: State<'_, TerminalClients>,
 ) -> Result<Value, String> {
-    crate::connection::files::file_request(client_id, command, &clients).await
+    desktop_core::connection::files::file_request(client_id, command, &clients).await
 }
 
 #[tauri::command]
@@ -30,7 +30,7 @@ pub async fn cancel_file_request(
     operation_id: String,
     clients: State<'_, TerminalClients>,
 ) -> Result<(), String> {
-    crate::connection::files::cancel_file_request(client_id, operation_id, &clients).await
+    desktop_core::connection::files::cancel_file_request(client_id, operation_id, &clients).await
 }
 
 #[tauri::command]
@@ -51,7 +51,7 @@ pub fn start_download(
     clients: State<'_, TerminalClients>,
     transfers: State<'_, DownloadManager>,
 ) -> Result<String, String> {
-    crate::connection::files::download_manager::start_download(
+    desktop_core::connection::files::download_manager::start_download(
         client_id,
         profile_id,
         expected_server_identity,
@@ -71,17 +71,17 @@ pub fn start_download(
 
 #[tauri::command]
 pub fn cancel_download(transfer_id: String) -> Result<(), String> {
-    crate::connection::files::download_manager::cancel_download(transfer_id)
+    desktop_core::connection::files::download_manager::cancel_download(transfer_id)
 }
 
 #[tauri::command]
 pub fn open_download(path: String, transfers: State<'_, DownloadManager>) -> Result<(), String> {
-    crate::connection::files::download_opener::open_download(path, &transfers)
+    desktop_core::connection::files::download_opener::open_download(path, &transfers)
 }
 
 #[tauri::command]
 pub fn reveal_download(path: String, transfers: State<'_, DownloadManager>) -> Result<(), String> {
-    crate::connection::files::download_opener::reveal_download(path, &transfers)
+    desktop_core::connection::files::download_opener::reveal_download(path, &transfers)
 }
 
 #[tauri::command]
@@ -99,7 +99,7 @@ pub fn start_file_read(
     clients: State<'_, TerminalClients>,
     file_io: State<'_, FileIoManager>,
 ) -> Result<String, String> {
-    crate::connection::files::editor_manager::start_file_read(
+    desktop_core::connection::files::editor_manager::start_file_read(
         client_id,
         profile_id,
         expected_server_identity,
@@ -132,7 +132,7 @@ pub fn start_file_write(
     clients: State<'_, TerminalClients>,
     file_io: State<'_, FileIoManager>,
 ) -> Result<String, String> {
-    crate::connection::files::editor_manager::start_file_write(
+    desktop_core::connection::files::editor_manager::start_file_write(
         client_id,
         profile_id,
         expected_server_identity,
@@ -155,14 +155,14 @@ pub fn cancel_file_io(
     transfer_id: String,
     file_io: State<'_, FileIoManager>,
 ) -> Result<(), String> {
-    crate::connection::files::editor_manager::cancel_file_io(transfer_id, &file_io)
+    desktop_core::connection::files::editor_manager::cancel_file_io(transfer_id, &file_io)
 }
 
 #[tauri::command]
 pub fn inspect_local_terminal_paths(
     paths: Vec<String>,
 ) -> Result<Vec<InspectedLocalTerminalPath>, String> {
-    crate::connection::files::upload_manager::inspect_local_terminal_paths(paths)
+    desktop_core::connection::files::upload_manager::inspect_local_terminal_paths(paths)
 }
 
 #[tauri::command]
@@ -182,7 +182,7 @@ pub fn start_terminal_upload_preflight(
     clients: State<'_, TerminalClients>,
     uploads: State<'_, UploadManager>,
 ) -> Result<String, String> {
-    crate::connection::files::upload_manager::start_terminal_upload_preflight(
+    desktop_core::connection::files::upload_manager::start_terminal_upload_preflight(
         client_id,
         profile_id,
         expected_server_identity,
@@ -204,7 +204,7 @@ pub fn cancel_terminal_upload_preflight(
     preflight_id: String,
     _uploads: State<'_, UploadManager>,
 ) -> Result<Value, String> {
-    crate::connection::files::upload_manager::cancel_terminal_upload_preflight(
+    desktop_core::connection::files::upload_manager::cancel_terminal_upload_preflight(
         preflight_id,
         &_uploads,
     )
@@ -227,7 +227,7 @@ pub fn start_terminal_upload(
     clients: State<'_, TerminalClients>,
     uploads: State<'_, UploadManager>,
 ) -> Result<String, String> {
-    crate::connection::files::upload_manager::start_terminal_upload(
+    desktop_core::connection::files::upload_manager::start_terminal_upload(
         client_id,
         profile_id,
         expected_server_identity,
@@ -249,12 +249,12 @@ pub fn cancel_terminal_upload(
     transfer_id: String,
     uploads: State<'_, UploadManager>,
 ) -> Result<Value, String> {
-    crate::connection::files::upload_manager::cancel_terminal_upload(transfer_id, &uploads)
+    desktop_core::connection::files::upload_manager::cancel_terminal_upload(transfer_id, &uploads)
 }
 
 #[tauri::command]
 pub async fn read_native_terminal_clipboard() -> Result<Option<Value>, String> {
-    crate::connection::files::native_clipboard::read_native_terminal_clipboard().await
+    desktop_core::connection::files::native_clipboard::read_native_terminal_clipboard().await
 }
 
 #[tauri::command]
@@ -263,7 +263,7 @@ pub fn suggest_download_destination(
     app: AppHandle,
     transfers: State<'_, DownloadManager>,
 ) -> Result<String, String> {
-    crate::connection::files::download_manager::suggest_download_destination(
+    desktop_core::connection::files::download_manager::suggest_download_destination(
         file_name,
         &TauriApp(app),
         &transfers,
@@ -275,19 +275,19 @@ pub fn stage_clipboard_png(request: Request<'_>) -> Result<Value, String> {
     let InvokeBody::Raw(png_bytes) = request.body() else {
         return Err("clipboard PNG IPC body must be raw binary".into());
     };
-    crate::connection::files::upload_manager::stage_clipboard_png(png_bytes)
+    desktop_core::connection::files::upload_manager::stage_clipboard_png(png_bytes)
 }
 
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
 pub async fn write_native_terminal_clipboard(text: String) -> Result<(), String> {
-    crate::connection::files::native_clipboard::write_native_terminal_clipboard(text).await
+    desktop_core::connection::files::native_clipboard::write_native_terminal_clipboard(text).await
 }
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn write_native_terminal_clipboard(app: AppHandle, text: String) -> Result<(), String> {
-    use crate::connection::files::native_clipboard::write_macos_clipboard_on_main_thread;
+    use desktop_core::connection::files::native_clipboard::write_macos_clipboard_on_main_thread;
 
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {

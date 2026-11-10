@@ -10,13 +10,12 @@ use std::{
 use super::ConnectionSpec;
 
 mod control_master;
+pub(crate) use control_master::discard_owned_control_masters;
 pub(super) use control_master::{
     SshLease, acquire_control_master, acquire_control_master_cancellable,
     acquire_control_master_for_socket, ssh_profile_control_socket,
 };
-pub(crate) use control_master::{
-    close_all_control_masters, discard_owned_control_masters, spawn_orphan_reaper,
-};
+pub use control_master::{close_all_control_masters, spawn_orphan_reaper};
 
 pub(super) fn spawn_bridge(
     connection: &ConnectionSpec,
@@ -213,7 +212,7 @@ pub(super) fn host_helper_path() -> Result<PathBuf, String> {
     {
         for profile in ["debug", "release"] {
             let candidate = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../target")
+                .join("../../target")
                 .join(profile)
                 .join("muxflow-host");
             if candidate.is_file() {

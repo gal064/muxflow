@@ -619,7 +619,7 @@ const UI_SCALES: [f64; 5] = [0.9, 1.0, 1.1, 1.2, 1.3];
 
 /// The zooms the interface may take: Settings offers 90% to 130%, and this
 /// leaves room around them without letting a bad value make the window unusable.
-pub(crate) fn valid_ui_scale(scale: f64) -> Result<f64, String> {
+pub fn valid_ui_scale(scale: f64) -> Result<f64, String> {
     if (0.5..=2.0).contains(&scale) {
         Ok(scale)
     } else {
@@ -932,8 +932,7 @@ mod tests {
     /// shortcut overrides and window geometry all silently stopped persisting.
     #[test]
     fn app_state_contract_matches_the_frontend_shape() {
-        const CONTRACT: &str =
-            include_str!("../../src/features/shell/persistedAppState.contract.json");
+        const CONTRACT: &str = include_str!("persistedAppState.contract.json");
         let value: PersistedAppState =
             serde_json::from_str(CONTRACT).expect("the frontend's own payload must deserialize");
         assert_eq!(value.shell.panel_surface.0, "automations");

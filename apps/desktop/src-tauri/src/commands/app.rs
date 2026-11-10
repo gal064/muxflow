@@ -1,7 +1,4 @@
-use phase0_core::SyntheticTopology;
-use tauri::{AppHandle, State, WebviewWindow};
-
-use crate::{
+use desktop_core::{
     app_state::{AppStateStore, PersistedAppState},
     incidents::IncidentJournal,
     notifications::{
@@ -11,10 +8,12 @@ use crate::{
     perf_log::bridge::BridgeFinalTotals,
     update_check::AvailableUpdate,
 };
+use phase0_core::SyntheticTopology;
+use tauri::{AppHandle, State, WebviewWindow};
 
 #[tauri::command]
 pub fn load_app_state(store: State<'_, AppStateStore>) -> Result<PersistedAppState, String> {
-    crate::app_state::load_app_state(&store)
+    desktop_core::app_state::load_app_state(&store)
 }
 
 #[tauri::command]
@@ -22,27 +21,27 @@ pub async fn save_app_state(
     state: PersistedAppState,
     store: State<'_, AppStateStore>,
 ) -> Result<(), String> {
-    crate::app_state::save_app_state(state, &store).await
+    desktop_core::app_state::save_app_state(state, &store).await
 }
 
 #[tauri::command]
 pub fn reset_app_state(store: State<'_, AppStateStore>) -> Result<PersistedAppState, String> {
-    crate::app_state::reset_app_state(&store)
+    desktop_core::app_state::reset_app_state(&store)
 }
 
 #[tauri::command]
 pub fn record_incident(journal: State<'_, IncidentJournal>, line: String) -> Result<(), String> {
-    crate::incidents::record_incident(&journal, line)
+    desktop_core::incidents::record_incident(&journal, line)
 }
 
 #[tauri::command]
 pub fn open_external_link(url: String, confirmed: bool) -> Result<(), String> {
-    crate::external_links::open_external_link(url, confirmed)
+    desktop_core::external_links::open_external_link(url, confirmed)
 }
 
 #[tauri::command]
 pub async fn install_update() -> Result<(), String> {
-    crate::update_check::install_update().await
+    desktop_core::update_check::install_update().await
 }
 
 #[tauri::command]
@@ -51,7 +50,7 @@ pub fn acknowledge_bridge_events(
     cumulative_frame_count: u64,
     cumulative_byte_length: u64,
 ) -> Result<(), String> {
-    crate::perf_log::bridge::acknowledge_bridge_events(
+    desktop_core::perf_log::bridge::acknowledge_bridge_events(
         measurement_id,
         cumulative_frame_count,
         cumulative_byte_length,
@@ -60,27 +59,27 @@ pub fn acknowledge_bridge_events(
 
 #[tauri::command]
 pub fn bridge_final_totals(measurement_id: String) -> Result<BridgeFinalTotals, String> {
-    crate::perf_log::bridge::bridge_final_totals(measurement_id)
+    desktop_core::perf_log::bridge::bridge_final_totals(measurement_id)
 }
 
 #[tauri::command]
 pub fn finalize_bridge_measurement(measurement_id: String) -> Result<(), String> {
-    crate::perf_log::bridge::finalize_bridge_measurement(measurement_id)
+    desktop_core::perf_log::bridge::finalize_bridge_measurement(measurement_id)
 }
 
 #[tauri::command]
 pub fn sample_native_measurements() -> Result<(), String> {
-    crate::perf_log::operations::sample_native_measurements()
+    desktop_core::perf_log::operations::sample_native_measurements()
 }
 
 #[tauri::command]
 pub fn perf_log_enabled() -> bool {
-    crate::perf_log::sink::perf_log_enabled()
+    desktop_core::perf_log::sink::perf_log_enabled()
 }
 
 #[tauri::command]
 pub async fn append_perf_log(lines: Vec<String>) -> Result<(), String> {
-    crate::perf_log::sink::append_perf_log(lines).await
+    desktop_core::perf_log::sink::append_perf_log(lines).await
 }
 
 /// Zooms the whole page, terminals included, the way a browser's zoom does:
@@ -88,14 +87,15 @@ pub async fn append_perf_log(lines: Vec<String>) -> Result<(), String> {
 #[tauri::command]
 pub fn set_ui_scale(window: WebviewWindow, scale: f64) -> Result<(), String> {
     window
-        .set_zoom(crate::app_state::valid_ui_scale(scale)?)
+        .set_zoom(desktop_core::app_state::valid_ui_scale(scale)?)
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> Result<Option<AvailableUpdate>, String> {
     let running = app.package_info().version.clone();
-    crate::update_check::check_for_update((running.major, running.minor, running.patch)).await
+    desktop_core::update_check::check_for_update((running.major, running.minor, running.patch))
+        .await
 }
 
 #[tauri::command]
@@ -103,7 +103,7 @@ pub fn resolve_notification_route(
     route: AgentNotificationRouteContent,
     topology: SyntheticTopology,
 ) -> Result<serde_json::Value, String> {
-    crate::notifications::resolve_notification_route(route, topology)
+    desktop_core::notifications::resolve_notification_route(route, topology)
 }
 
 #[tauri::command]
@@ -111,19 +111,19 @@ pub async fn emit_agent_notification(
     notification: AgentNotificationContent,
     notifications: State<'_, NativeNotifications>,
 ) -> Result<NotificationReceipt, String> {
-    crate::notifications::emit_agent_notification(notification, &notifications).await
+    desktop_core::notifications::emit_agent_notification(notification, &notifications).await
 }
 
 #[tauri::command]
 pub async fn notification_permission_status(
     notifications: State<'_, NativeNotifications>,
 ) -> Result<String, String> {
-    crate::notifications::notification_permission_status(&notifications).await
+    desktop_core::notifications::notification_permission_status(&notifications).await
 }
 
 #[tauri::command]
 pub async fn emit_test_notification(
     notifications: State<'_, NativeNotifications>,
 ) -> Result<NotificationReceipt, String> {
-    crate::notifications::emit_test_notification(&notifications).await
+    desktop_core::notifications::emit_test_notification(&notifications).await
 }

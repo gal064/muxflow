@@ -39,7 +39,7 @@ is untouched and `PROTOCOL_MAJOR` does not move.
 
 ## Forwarding (Rust)
 
-New module `apps/desktop/src-tauri/src/connection/ports.rs`.
+New module `crates/desktop-core/src/connection/ports.rs`.
 
 One process per forward, built from `ssh_base` so it shares keepalives,
 `BatchMode` and `ConnectTimeout` with every other lane:

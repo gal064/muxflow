@@ -9,7 +9,7 @@ import { revealDownloadLabel } from "./downloadFlow";
  * error it has since recovered from.
  *
  * Both commands refuse any path the app did not itself just write; see
- * `src-tauri/src/connection/files/download_opener.rs`.
+ * `crates/desktop-core/src/connection/files/download_opener.rs`.
  */
 export function DownloadActions({ destination, onResult }: {
   destination: string;

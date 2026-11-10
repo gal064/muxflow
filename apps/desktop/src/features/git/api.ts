@@ -53,7 +53,7 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
  */
 const MAX_DEFERRED_BODY_BYTES = 10 * 1024 * 1024;
 
-/** Frame kinds, matching `apps/desktop/src-tauri/src/connection/git_content.rs`. */
+/** Frame kinds, matching `crates/desktop-core/src/connection/git_content.rs`. */
 const FRAME_CHUNK = 1;
 const FRAME_COMPLETE = 2;
 const GIT_CANCELLED = "Git request was cancelled.";

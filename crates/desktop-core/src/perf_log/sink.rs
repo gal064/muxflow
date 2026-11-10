@@ -21,8 +21,10 @@ struct PerfLogContract {
 fn contract() -> &'static PerfLogContract {
     static CONTRACT: OnceLock<PerfLogContract> = OnceLock::new();
     CONTRACT.get_or_init(|| {
-        serde_json::from_str(include_str!("../../../perf-log-contract.json"))
-            .expect("perf-log-contract.json must remain valid")
+        serde_json::from_str(include_str!(
+            "../../../../apps/desktop/perf-log-contract.json"
+        ))
+        .expect("perf-log-contract.json must remain valid")
     })
 }
 

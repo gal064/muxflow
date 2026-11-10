@@ -42,7 +42,7 @@ struct ClosedBridge {
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct BridgeFinalTotals {
+pub struct BridgeFinalTotals {
     pub(crate) cumulative_frame_count: u64,
     pub(crate) cumulative_byte_length: u64,
     pub(crate) quiesced: bool,

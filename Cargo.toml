@@ -2,6 +2,7 @@
 members = [
   "apps/desktop/src-tauri",
   "apps/host",
+  "crates/desktop-core",
   "crates/protocol",
   "crates/tmux-control",
   "crates/phase0-core",

@@ -23,7 +23,7 @@ mod event_frame;
 use event_frame::{TerminalEvent, encode_event};
 mod delivery_window;
 use delivery_window::{DeliveryWindow, HostCharge};
-pub(crate) mod delivery_ack;
+pub mod delivery_ack;
 use delivery_ack::{flush_delivery_ack, forfeit_delivery_charge};
 mod dispatch;
 mod operations;
@@ -35,14 +35,14 @@ use dispatch::{
 use operations::{Bound, OperationClaim, OperationLane, OperationRegistry};
 mod writer;
 use writer::ControlWriterHandle;
-pub(crate) mod agent;
-pub(crate) mod automation;
-pub(crate) mod files;
-pub(crate) mod git;
-pub(crate) mod git_content;
+pub mod agent;
+pub mod automation;
+pub mod files;
+pub mod git;
+pub mod git_content;
 use git_content::GitContentReads;
-pub(crate) mod ports;
-pub(crate) mod tmux_action;
+pub mod ports;
+pub mod tmux_action;
 // Switch-timeline instrumentation. Compiled out of a plain release build with
 // the rest of `perf_log`; see `perf_log/switch_timing.rs` for what each stamp
 // means and why the counters are relaxed.
@@ -101,15 +101,15 @@ impl ConnectionSpec {
     }
 }
 
-pub(crate) mod profiles;
+pub mod profiles;
 pub use profiles::ProfileStore;
-pub(crate) mod helper;
+pub mod helper;
 mod transport;
 use transport::{
     SshLease, acquire_control_master, acquire_control_master_for_socket,
     discard_owned_control_masters, host_helper_path, ssh_profile_control_socket,
 };
-pub(crate) use transport::{close_all_control_masters, spawn_orphan_reaper};
+pub use transport::{close_all_control_masters, spawn_orphan_reaper};
 
 /// One answer, as the reader delivers it to the thread that is waiting.
 ///

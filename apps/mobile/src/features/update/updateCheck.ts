@@ -2,7 +2,7 @@
 // manifest the release workflow attaches to every GitHub release so the home app
 // bar can offer the update. `releases/latest` never resolves to a draft or a
 // pre-release, so a version appears here only once it has been published. The
-// desktop runs the same check (apps/desktop/src-tauri/src/update_check.rs).
+// desktop runs the same check (crates/desktop-core/src/update_check.rs).
 
 import { createStore, type StoreApi } from "zustand/vanilla";
 

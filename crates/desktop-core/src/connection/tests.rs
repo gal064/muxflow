@@ -103,6 +103,52 @@ fn a_late_answer_keeps_the_bridge_and_a_run_of_them_does_not() {
     drop(read_end);
 }
 
+/// `set_terminal_colors` is reached from a sync Tauri command, on a thread with
+/// no tokio runtime, and hands its send to the blocking pool. A bare
+/// `tokio::task::spawn_blocking` panics there, so this goes through to the bytes
+/// the host would read.
+#[test]
+fn terminal_colors_reach_the_host_from_a_thread_without_a_runtime() {
+    use std::{fs::File, io::Read, os::fd::FromRawFd};
+
+    let mut fds = [0; 2];
+    // SAFETY: pipe initializes both descriptors on success, and each is moved
+    // into exactly one File below.
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let mut read_end = unsafe { File::from_raw_fd(fds[0]) };
+    let write_end = unsafe { File::from_raw_fd(fds[1]) };
+
+    let client = Arc::new(TerminalClient::new());
+    client.ready.store(true, Ordering::Release);
+    *client.writer.lock().unwrap() =
+        Some(ControlWriterHandle::start_with(write_end, "colors-no-runtime").unwrap());
+    let clients = TerminalClients::default();
+    clients.0.lock().unwrap().insert("client".into(), client);
+
+    std::thread::spawn(move || {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        set_terminal_colors("#123456".into(), "#654321".into(), &clients).unwrap();
+    })
+    .join()
+    .unwrap();
+
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut received = Vec::new();
+        let mut chunk = [0; 4096];
+        while let Ok(read @ 1..) = read_end.read(&mut chunk) {
+            received.extend_from_slice(&chunk[..read]);
+            if received.windows(7).any(|bytes| bytes == b"#654321") {
+                let _ = sender.send(());
+                return;
+            }
+        }
+    });
+    receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the colors never reached the host side of the pipe");
+}
+
 #[test]
 fn a_failed_fire_and_forget_input_write_reconnects_the_transport() {
     use std::{fs::File, os::fd::FromRawFd};

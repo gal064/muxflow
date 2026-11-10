@@ -19,7 +19,7 @@
  * Upper bounds, in milliseconds, of every latency bucket.
  *
  * SHARED WITH RUST: `INPUT_LATENCY_BUCKET_BOUNDS_MS` in
- * `src-tauri/src/connection/dispatch.rs` is the same list in the same order, so
+ * `crates/desktop-core/src/connection/dispatch.rs` is the same list in the same order, so
  * the native queue histogram and these read as one distribution. Changing
  * either side without the other silently mislabels the native buckets.
  */

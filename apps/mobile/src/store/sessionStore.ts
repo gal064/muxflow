@@ -278,7 +278,7 @@ export function createSessionStore(): SessionStore {
 /** The app-wide instance. Tests create their own with `createSessionStore()`. */
 export const sessionStore: SessionStore = createSessionStore();
 
-/** Mirrors `lifecycle_label` in apps/desktop/src-tauri/src/connection/agent.rs. */
+/** Mirrors `lifecycle_label` in crates/desktop-core/src/connection/agent.rs. */
 export function lifecycleFromProto(value: AgentLifecycleState): AgentLifecycle {
   switch (value) {
     case AgentLifecycleState.WORKING:
