@@ -21,7 +21,6 @@ pub mod host_profiles;
 pub mod host_scope;
 pub mod link_quality;
 pub mod resume_recovery;
-pub mod status_notice;
 pub mod surface;
 
 use std::sync::Arc;
