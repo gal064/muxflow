@@ -241,7 +241,7 @@ fn disconnected_input_is_rejected_and_reconnect_starts_a_fresh_epoch() {
 
     assert!(
         client
-            .enqueue_input("%1".into(), b"offline".to_vec())
+            .enqueue_input("%1".into(), b"offline".to_vec(), false)
             .is_err()
     );
     assert!(
@@ -256,7 +256,7 @@ fn disconnected_input_is_rejected_and_reconnect_starts_a_fresh_epoch() {
     // path never waits for the host, so this must return before anything
     // drains the queue.
     assert_eq!(
-        client.enqueue_input("%1".into(), b"connected".to_vec()),
+        client.enqueue_input("%1".into(), b"connected".to_vec(), false),
         Ok(())
     );
     let ClientInputDispatch::Bytes { epoch, data, .. } = receiver.recv().unwrap() else {
@@ -327,9 +327,12 @@ fn queue_backpressure_is_still_refused_synchronously_without_dropping_bytes() {
     mark_input_reconnected(&client);
     client.ready.store(true, Ordering::Release);
 
-    assert_eq!(client.enqueue_input("%1".into(), b"first".to_vec()), Ok(()));
+    assert_eq!(
+        client.enqueue_input("%1".into(), b"first".to_vec(), false),
+        Ok(())
+    );
     let error = client
-        .enqueue_input("%1".into(), b"second".to_vec())
+        .enqueue_input("%1".into(), b"second".to_vec(), false)
         .unwrap_err();
     assert!(error.contains("retry without dropping bytes"));
     let ClientInputDispatch::Bytes { data, .. } = receiver.recv().unwrap() else {
@@ -745,6 +748,7 @@ fn full_input_channel_does_not_block_shutdown_while_resize_flush_waits() {
             data: vec![1],
             epoch: 0,
             enqueued_at: std::time::Instant::now(),
+            paste: false,
         })
         .unwrap();
     client.input_queue.lock().unwrap().sender = Some(dispatcher);
@@ -774,7 +778,7 @@ fn input_flush_reports_the_first_failed_write() {
     let worker = thread::spawn(move || run_client_input_dispatch(worker_client, receiver));
 
     client
-        .enqueue_input("%1".into(), b"accepted".to_vec())
+        .enqueue_input("%1".into(), b"accepted".to_vec(), false)
         .unwrap();
     let error = client.flush_input().unwrap_err();
     assert!(error.contains("host bridge is disconnected"), "{error}");
@@ -795,6 +799,7 @@ fn abandoned_input_barrier_cannot_consume_a_failed_write() {
             data: b"accepted".to_vec(),
             epoch: 0,
             enqueued_at: std::time::Instant::now(),
+            paste: false,
         })
         .unwrap();
     let (abandoned_tx, abandoned_rx) = mpsc::sync_channel(1);
@@ -822,7 +827,7 @@ fn input_flush_reports_bytes_accepted_by_a_replaced_connection() {
     client.ready.store(true, Ordering::Release);
 
     client
-        .enqueue_input("%1".into(), b"accepted-before-reconnect".to_vec())
+        .enqueue_input("%1".into(), b"accepted-before-reconnect".to_vec(), false)
         .unwrap();
     mark_input_reconnected(&client);
     let worker_client = Arc::clone(&client);
