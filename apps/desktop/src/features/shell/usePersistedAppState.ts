@@ -7,6 +7,7 @@ import { editorFlushRegistry } from "../files/editorFlushRegistry";
 import { defaultAppState, normalizePersistedAppState, type PersistedAppState } from "./types";
 import { captureWindowGeometry, restoredWindowGeometry } from "./windowGeometry";
 import { repairShortcutCollisions, type Platform } from "../../commands/registry";
+import { clearLegacyAgentSoundPreferences, legacyAgentSoundPreferences } from "../agents/sound";
 
 export function usePersistedAppState(
   report: (message: string) => void,
@@ -39,10 +40,18 @@ export function usePersistedAppState(
         (displaced) => report(`Disabled conflicting saved shortcuts: ${displaced
           .map(({ commandId, shortcut }) => `${commandId} (${shortcut})`).join(", ")}.`),
       );
-      setState(shortcutOverrides === restored.commands.shortcutOverrides ? restored : {
+      let next = shortcutOverrides === restored.commands.shortcutOverrides ? restored : {
         ...restored,
         commands: { shortcutOverrides },
-      });
+      };
+      // The sounds used to live in localStorage. Carry them over once, and drop
+      // the old copy only after app state has them on disk.
+      const agentSounds = next.shell.agentSounds ? undefined : legacyAgentSoundPreferences();
+      if (agentSounds) {
+        next = { ...next, shell: { ...next.shell, agentSounds } };
+        void persistence.flush(next).then(() => clearLegacyAgentSoundPreferences()).catch(() => undefined);
+      }
+      setState(next);
       loaded.current = true;
       const geometry = restored.shell.windowGeometry;
       if (geometry) {
@@ -62,7 +71,7 @@ export function usePersistedAppState(
       setRecovery(message);
       report(message);
     });
-  }, [platform, report]);
+  }, [persistence, platform, report]);
 
   useEffect(() => {
     if (loaded.current) persistence.schedule(state);

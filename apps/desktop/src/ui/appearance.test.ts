@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import paletteCss from "@muxflow/client-core/palette.css?raw";
 import indexHtml from "../../index.html?raw";
-import { applyInterfaceScale, applyTheme, currentTheme, interfaceScale, onAppearanceChange, rememberedTheme, rememberTheme, resolvedTheme } from "./appearance";
+import { applyInterfaceScale, applyTheme, currentTheme, interfaceScale, bootTheme, onAppearanceChange, resolvedTheme } from "./appearance";
 
 function block(selector: string): Map<string, string> {
   const start = paletteCss.indexOf(`${selector} {`);
@@ -37,14 +37,12 @@ describe("appearance", () => {
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
-  it("remembers the last choice and ignores anything it did not write", () => {
-    const store = new Map<string, string>();
-    const storage = { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value); } };
-    expect(rememberedTheme(storage)).toBeUndefined();
-    rememberTheme("light", storage);
-    expect(rememberedTheme(storage)).toBe("light");
-    store.set("muxflow.theme", "sepia");
-    expect(rememberedTheme(storage)).toBeUndefined();
+  it("takes the saved choice the backend injected, and ignores anything else", () => {
+    expect(bootTheme({ theme: "light" })).toBe("light");
+    expect(bootTheme({ theme: "system" })).toBe("system");
+    expect(bootTheme({ theme: "sepia" })).toBeUndefined();
+    expect(bootTheme({})).toBeUndefined();
+    expect(bootTheme(undefined)).toBeUndefined();
   });
 
   it("gives the light theme every color the dark one has, as hex", () => {
@@ -61,10 +59,8 @@ describe("interface scale", () => {
   it("reads back what was applied, and 100% before anything was", () => {
     const root = document.createElement("html");
     expect(interfaceScale(root)).toBe(1);
-    const storage = new Map<string, string>();
-    applyInterfaceScale(1.2, root, { setItem: (key, value) => storage.set(key, value) });
+    applyInterfaceScale(1.2, root);
     expect(interfaceScale(root)).toBe(1.2);
-    expect(storage.get("muxflow.uiScale")).toBe("1.2");
   });
 });
 

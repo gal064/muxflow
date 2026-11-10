@@ -199,6 +199,18 @@ describe("per-host workspace defaults", () => {
     expect(shell({}).theme).toBe("system");
   });
 
+  it("restores the agent sounds, and leaves them unset for saves without them", () => {
+    const shell = (value: Record<string, unknown>) => normalizePersistedAppState({
+      schemaVersion: 1, appTabs: [], workspaceUi: [], shell: value,
+    }).shell;
+    expect(shell({ agentSounds: { enabled: false, blocked: "none", completed: "subtle", volume: 0.3 } }).agentSounds)
+      .toEqual({ enabled: false, blocked: "none", completed: "subtle", volume: 0.3 });
+    expect(shell({ agentSounds: { blocked: "loud", volume: 9 } }).agentSounds)
+      .toEqual({ enabled: true, blocked: "subtle", completed: "subtle", volume: 1 });
+    expect(shell({ agentSounds: null }).agentSounds).toBeUndefined();
+    expect(shell({}).agentSounds).toBeUndefined();
+  });
+
   it("restores the Markdown appearance and follows the theme for saves from before it", () => {
     const shell = (value: Record<string, unknown>) => normalizePersistedAppState({
       schemaVersion: 1, appTabs: [], workspaceUi: [], shell: value,
