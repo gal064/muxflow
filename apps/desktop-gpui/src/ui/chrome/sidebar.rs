@@ -301,32 +301,15 @@ impl RenderOnce for Sidebar {
                     ))
                     .child(agents_list),
             )
+            // Phase 4 puts the host menu in this row. Until then the
+            // connection status pill sits over it.
             .child(
-                h_flex()
+                div()
                     .id("host-row")
-                    .test_support()
-                    .role(Role::Button)
-                    .aria_label("Host Local over local, disconnected. Open the host menu.")
                     .flex_none()
-                    .items_center()
-                    .gap(ui(7.))
-                    .px(ui(8.))
-                    .pt(ui(8.))
-                    .pb(ui(7.))
+                    .h(ui(32.))
                     .border_t_1()
-                    .border_color(palette.chrome_hairline)
-                    .font_family(fonts::MONO)
-                    .text_size(ui(TYPE_META))
-                    .text_color(palette.chrome_dim)
-                    .child(
-                        div()
-                            .size(ui(7.))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(palette.danger),
-                    )
-                    .child(div().truncate().child("Local"))
-                    .child(div().text_color(palette.chrome_faint).child("local")),
+                    .border_color(palette.chrome_hairline),
             )
             .child(divider(
                 self.chrome,
