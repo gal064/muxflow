@@ -310,8 +310,14 @@ fn the_palette_lists_every_command_with_role_and_name(cx: &mut TestAppContext) {
     with_window(handle, cx, |window, _| {
         assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 64);
         for command in palette_commands() {
-            let row = window.find_by_label(command.title);
-            assert_eq!(row.role(), Some(Role::ListBoxOption), "{}", command.id);
+            // The title bar may name a control the same as a command.
+            let rows = window.find_all_by_label(command.title);
+            assert!(
+                rows.iter()
+                    .any(|row| row.role() == Some(Role::ListBoxOption)),
+                "{}",
+                command.id
+            );
         }
         assert_eq!(
             window.find_by_label("Search commands").role(),
@@ -324,7 +330,7 @@ fn the_palette_lists_every_command_with_role_and_name(cx: &mut TestAppContext) {
 fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestAppContext) {
     let (_dir, handle) = no_state(cx);
     press(handle, "secondary-k", cx);
-    type_text(handle, "Toggle sidebar", cx);
+    type_text(handle, "Toggle file beside the terminal", cx);
     press(handle, "enter", cx);
     assert!(
         dialog_open(handle, cx),
@@ -338,11 +344,20 @@ fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestApp
             .map(|command| command.id)
             .collect::<Vec<_>>()
     });
-    // The pinned filter's "show pinned only" has no handler yet, so only the
-    // three commands this module implements are available.
+    // The pinned filter's "show pinned only" has no handler yet, so only what
+    // this module and the window chrome implement is available.
     assert_eq!(
         available,
-        ["commands.show", "workspaces.switch", "shortcuts.configure"]
+        [
+            "commands.show",
+            "workspaces.switch",
+            "shortcuts.configure",
+            "view.toggleSidebar",
+            "view.togglePanel",
+            "view.showFiles",
+            "view.showGit",
+            "view.showPorts",
+        ]
     );
 }
 

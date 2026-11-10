@@ -155,7 +155,14 @@ impl RenderOnce for TitleContent {
                 .min_w_0()
                 .items_center()
                 .child(lead)
-                .child(div().flex_1().h_full().min_w_0().child(strip))
+                .child(
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(strip),
+                )
                 // Fixed, so a window full of tabs still leaves room to drag it.
                 .child(div().flex_none().w(ui(32.)).h_full())
                 .child(
