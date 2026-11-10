@@ -283,7 +283,7 @@ final sweep command returning only justified hits.
 | Phase | State | Commits | Next step |
 |---|---|---|---|
 | 0 | Done on Linux, stopped as agreed. Conditional go recommended | | Linux only, complete. Report: `docs/gpui-phase0-report.md`. Waiting for the owner's decision |
-| 1 | Running, wave 2 merged | `7a4f66c`, `9c13af4`, `1b7df0a` | T1.4, after macOS CI confirms T1.3 |
+| 1 | Running, wave 2 merged | `7a4f66c`, `9c13af4`, `1b7df0a` | T1.4 dispatched. macOS CI confirmed T1.3 |
 | 2 to 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
@@ -297,6 +297,7 @@ Phase 0 are not in the published history.
 | T1.1 `golden-paths` | sonnet, medium, full cycle | `gpui/golden-paths` | Merged | `7a4f66c` | Root fixed a shared `HOME` race by moving the checks to a child process. Passes on macOS CI |
 | T1.2 `prefs-to-app-state` | sonnet, high, full cycle | `gpui/prefs-to-app-state` | Merged | `9c13af4` | Sounds import once. Theme and zoom reach first paint through an injected boot script, so the window is created in `setup`. QA passed on Linux |
 | T1.3 `core-traits` | opus, high, full cycle, large, invariant | `gpui/core-traits` | Merged | `1b7df0a` | 2 review rounds, 5 GiB transfer QA passed. No dialog trait, because Rust has no dialog call. T1.4 must replace the Tauri spawn re-export in `platform.rs` |
+| T1.4 `core-crate` | opus, high, full cycle, large, invariant | `gpui/core-crate` | Dispatched | | |
 | T0.1 `license-gate` | sonnet, medium, full cycle | `gpui/license-gate` | Merged | `c025ace`, merge `259e207` | MPL-2.0, BSL-1.0, CDLA-Permissive-2.0 and LLVM-exception crates allowed per crate. Owner to confirm |
 | T0.2 `ledger` | sonnet, medium, impl only, reviewed in T0.7 | `gpui/ledger` | Merged, review pending in T0.7 | `68f33c9` | S8: no drag has to reach the OS. 402 files: 336 port, 31 replace, 35 retire |
 | T0.3 `spike-scaffold` | sonnet, high, full cycle | `gpui/spike-scaffold` | Merged | `9a7bdb0` | S6 builds on 1.99.1, license clean, 1.97.1 unproven. `.ttf` required. AccessKit works. Variable Inter weights not honored. |
