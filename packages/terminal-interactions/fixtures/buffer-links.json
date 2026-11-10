@@ -1,0 +1,490 @@
+[
+  {
+    "name": "attached-wrappers-balanced",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Update(docs/history/14-ui-feedback-2026-10-08.md)",
+    "rows": [{"text":"Update(docs/history/14-ui-feedback-2026-10-08.md)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"docs/history/14-ui-feedback-2026-10-08.md","range":{"start":{"x":8,"y":1},"end":{"x":48,"y":1}}}]}]
+  },
+  {
+    "name": "attached-wrappers-unmatched-brace",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Update(docs/history/14-ui-feedback-2026-10{-08[.md)",
+    "rows": [{"text":"Update(docs/history/14-ui-feedback-2026-10{-08[.md)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"docs/history/14-ui-feedback-2026-10","range":{"start":{"x":8,"y":1},"end":{"x":42,"y":1}}}]}]
+  },
+  {
+    "name": "attached-label-soft-wrap",
+    "columns": 30,
+    "bufferRows": 6,
+    "input": "Update(docs/history/14-ui-feedback-2026-10-08.md)",
+    "rows": [{"text":"Update(docs/history/14-ui-feed","wrapped":false},{"text":"back-2026-10-08.md)","wrapped":true}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"docs/history/14-ui-feedback-2026-10-08.md","range":{"start":{"x":8,"y":1},"end":{"x":18,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"docs/history/14-ui-feedback-2026-10-08.md","range":{"start":{"x":8,"y":1},"end":{"x":18,"y":2}}}]}]
+  },
+  {
+    "name": "attached-label-hard-rows",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Update(docs/history/14-ui-feedback-2026-\r\n  10-08.md)",
+    "rows": [{"text":"Update(docs/history/14-ui-feedback-2026-","wrapped":false},{"text":"  10-08.md)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"docs/history/14-ui-feedback-2026-10-08.md","range":{"start":{"x":8,"y":1},"end":{"x":10,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"docs/history/14-ui-feedback-2026-10-08.md","range":{"start":{"x":8,"y":1},"end":{"x":10,"y":2}}}]}]
+  },
+  {
+    "name": "parenthesized-first-row-not-a-path",
+    "columns": 200,
+    "bufferRows": 6,
+    "input": "PowerPoint (sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/output/Sampleco-Partnerco-2026-09-10.pptx) · PDF (sampleco-projectx-strategic-\r\n  mapping/slides/partnerco-september-2026/tmp/Sampleco-Partnerco-2026-09-10.pdf)",
+    "rows": [{"text":"PowerPoint (sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/output/Sampleco-Partnerco-2026-09-10.pptx) · PDF (sampleco-projectx-strategic-","wrapped":false},{"text":"  mapping/slides/partnerco-september-2026/tmp/Sampleco-Partnerco-2026-09-10.pdf)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/output/Sampleco-Partnerco-2026-09-10.pptx","range":{"start":{"x":13,"y":1},"end":{"x":121,"y":1}}},{"kind":"file","text":"sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/tmp/Sampleco-Partnerco-2026-09-10.pdf","range":{"start":{"x":131,"y":1},"end":{"x":79,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"sampleco-projectx-strategic-mapping/slides/partnerco-september-2026/tmp/Sampleco-Partnerco-2026-09-10.pdf","range":{"start":{"x":131,"y":1},"end":{"x":79,"y":2}}}]}]
+  },
+  {
+    "name": "unparenthesized-wrap-before-first-slash",
+    "columns": 100,
+    "bufferRows": 6,
+    "input": "• Added >> responses beneath every comment in sampleco-projectx-strategic-\r\n  mapping/meetings/2026-09-10-partnerco/DECK-PLAN.md.",
+    "rows": [{"text":"• Added >> responses beneath every comment in sampleco-projectx-strategic-","wrapped":false},{"text":"  mapping/meetings/2026-09-10-partnerco/DECK-PLAN.md.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"sampleco-projectx-strategic-mapping/meetings/2026-09-10-partnerco/DECK-PLAN.md","range":{"start":{"x":47,"y":1},"end":{"x":52,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"sampleco-projectx-strategic-mapping/meetings/2026-09-10-partnerco/DECK-PLAN.md","range":{"start":{"x":47,"y":1},"end":{"x":52,"y":2}}}]}]
+  },
+  {
+    "name": "list-marker-indentation",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "● Saved report-\r\n    output/final.md.",
+    "rows": [{"text":"● Saved report-","wrapped":false},{"text":"    output/final.md.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"report-output/final.md","range":{"start":{"x":9,"y":1},"end":{"x":19,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"report-output/final.md","range":{"start":{"x":9,"y":1},"end":{"x":19,"y":2}}}]}]
+  },
+  {
+    "name": "hard-rows-in-ordinary-prose",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Stored at /home/dev/report-\r\n  final.ts:11.",
+    "rows": [{"text":"Stored at /home/dev/report-","wrapped":false},{"text":"  final.ts:11.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/report-final.ts","range":{"start":{"x":11,"y":1},"end":{"x":10,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/report-final.ts","range":{"start":{"x":11,"y":1},"end":{"x":10,"y":2}}}]}]
+  },
+  {
+    "name": "hard-rows-in-bullet",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "• Stored ~/reports/report-\r\n  final.ts:11.",
+    "rows": [{"text":"• Stored ~/reports/report-","wrapped":false},{"text":"  final.ts:11.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"~/reports/report-final.ts","range":{"start":{"x":10,"y":1},"end":{"x":10,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"~/reports/report-final.ts","range":{"start":{"x":10,"y":1},"end":{"x":10,"y":2}}}]}]
+  },
+  {
+    "name": "hard-rows-in-indented-list-item",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "    - Stored src/report-\r\n      final.ts:11.",
+    "rows": [{"text":"    - Stored src/report-","wrapped":false},{"text":"      final.ts:11.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"src/report-final.ts","range":{"start":{"x":14,"y":1},"end":{"x":14,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"src/report-final.ts","range":{"start":{"x":14,"y":1},"end":{"x":14,"y":2}}}]}]
+  },
+  {
+    "name": "hard-rows-in-numbered-item",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "  1. Stored /home/dev/report-\r\n     final.ts:11.",
+    "rows": [{"text":"  1. Stored /home/dev/report-","wrapped":false},{"text":"     final.ts:11.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/report-final.ts","range":{"start":{"x":13,"y":1},"end":{"x":13,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/report-final.ts","range":{"start":{"x":13,"y":1},"end":{"x":13,"y":2}}}]}]
+  },
+  {
+    "name": "hard-rows-in-standalone-target",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "  /home/dev/report-\r\n  final.ts:11.",
+    "rows": [{"text":"  /home/dev/report-","wrapped":false},{"text":"  final.ts:11.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/report-final.ts","range":{"start":{"x":3,"y":1},"end":{"x":10,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/report-final.ts","range":{"start":{"x":3,"y":1},"end":{"x":10,"y":2}}}]}]
+  },
+  {
+    "name": "migration-path-in-paragraph",
+    "columns": 200,
+    "bufferRows": 6,
+    "input": "  The new attempt table stores requested/accepted/running/completed/failed/unavailable state, result stage, candidate identity, verification, inferred-\r\n  unavailable state and recovery deadlines at /home/dev/dev/sampleco-demo-repo-pr4807-integration-v2/packages/core-services/src/migrations/1803020000000-\r\n  CreateTestRunHealingAttempts.ts:11.",
+    "rows": [{"text":"  The new attempt table stores requested/accepted/running/completed/failed/unavailable state, result stage, candidate identity, verification, inferred-","wrapped":false},{"text":"  unavailable state and recovery deadlines at /home/dev/dev/sampleco-demo-repo-pr4807-integration-v2/packages/core-services/src/migrations/1803020000000-","wrapped":false},{"text":"  CreateTestRunHealingAttempts.ts:11.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"requested/accepted/running/completed/failed/unavailable","range":{"start":{"x":32,"y":1},"end":{"x":86,"y":1}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/dev/sampleco-demo-repo-pr4807-integration-v2/packages/core-services/src/migrations/1803020000000-CreateTestRunHealingAttempts.ts","range":{"start":{"x":47,"y":2},"end":{"x":33,"y":3}}}]},{"row":3,"links":[{"kind":"file","text":"/home/dev/dev/sampleco-demo-repo-pr4807-integration-v2/packages/core-services/src/migrations/1803020000000-CreateTestRunHealingAttempts.ts","range":{"start":{"x":47,"y":2},"end":{"x":33,"y":3}}}]}]
+  },
+  {
+    "name": "standalone-directory-then-prose",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "  /home/dev/reports/\r\n  Read the summary next.",
+    "rows": [{"text":"  /home/dev/reports/","wrapped":false},{"text":"  Read the summary next.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/reports/","range":{"start":{"x":3,"y":1},"end":{"x":20,"y":1}}}]},{"row":2,"links":[]}]
+  },
+  {
+    "name": "adjacent-hard-wrapped-targets",
+    "columns": 160,
+    "bufferRows": 6,
+    "input": "• PowerPoint (sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-Projectx-Update-\r\n  2026-08-11.pptx) · PDF (sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-\r\n  Projectx-Update-2026-08-11.pdf)",
+    "rows": [{"text":"• PowerPoint (sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-Projectx-Update-","wrapped":false},{"text":"  2026-08-11.pptx) · PDF (sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-","wrapped":false},{"text":"  Projectx-Update-2026-08-11.pdf)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-Projectx-Update-2026-08-11.pptx","range":{"start":{"x":15,"y":1},"end":{"x":17,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-Projectx-Update-2026-08-11.pptx","range":{"start":{"x":15,"y":1},"end":{"x":17,"y":2}}},{"kind":"file","text":"sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-Projectx-Update-2026-08-11.pdf","range":{"start":{"x":27,"y":2},"end":{"x":32,"y":3}}}]},{"row":3,"links":[{"kind":"file","text":"sampleco-projectx-strategic-mapping/slides/projectx-update/output/2026-08-11/Sampleco-Strategic-Projectx-Update-2026-08-11.pdf","range":{"start":{"x":27,"y":2},"end":{"x":32,"y":3}}}]}]
+  },
+  {
+    "name": "codex-85-columns",
+    "columns": 85,
+    "bufferRows": 6,
+    "input": "• Or manually transfer and install /home/dev/dev/dev-app-mobile-layout-scroll-\r\n  diagnostics/apps/mobile/android/app/build/outputs/apk/release/app-\r\n  release.apk.",
+    "rows": [{"text":"• Or manually transfer and install /home/dev/dev/dev-app-mobile-layout-scroll-","wrapped":false},{"text":"  diagnostics/apps/mobile/android/app/build/outputs/apk/release/app-","wrapped":false},{"text":"  release.apk.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/dev/dev-app-mobile-layout-scroll-diagnostics/apps/mobile/android/app/build/outputs/apk/release/app-release.apk","range":{"start":{"x":36,"y":1},"end":{"x":13,"y":3}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/dev/dev-app-mobile-layout-scroll-diagnostics/apps/mobile/android/app/build/outputs/apk/release/app-release.apk","range":{"start":{"x":36,"y":1},"end":{"x":13,"y":3}}}]},{"row":3,"links":[{"kind":"file","text":"/home/dev/dev/dev-app-mobile-layout-scroll-diagnostics/apps/mobile/android/app/build/outputs/apk/release/app-release.apk","range":{"start":{"x":36,"y":1},"end":{"x":13,"y":3}}}]}]
+  },
+  {
+    "name": "travelclick-url",
+    "columns": 160,
+    "bufferRows": 6,
+    "input": "   Property       Lake Natoma Inn (https://bookings.travelclick.com/13381?\r\n                  adults=2&children=1&DateIn=09/05/2026&DateOut=09/06/2026&HotelId=13381&languageid=1&rooms=1#/accommodation/room)",
+    "rows": [{"text":"   Property       Lake Natoma Inn (https://bookings.travelclick.com/13381?","wrapped":false},{"text":"                  adults=2&children=1&DateIn=09/05/2026&DateOut=09/06/2026&HotelId=13381&languageid=1&rooms=1#/accommodation/room)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://bookings.travelclick.com/13381?adults=2&children=1&DateIn=09/05/2026&DateOut=09/06/2026&HotelId=13381&languageid=1&rooms=1#/accommodation/room","range":{"start":{"x":36,"y":1},"end":{"x":129,"y":2}}}]},{"row":2,"links":[{"kind":"web","text":"https://bookings.travelclick.com/13381?adults=2&children=1&DateIn=09/05/2026&DateOut=09/06/2026&HotelId=13381&languageid=1&rooms=1#/accommodation/room","range":{"start":{"x":36,"y":1},"end":{"x":129,"y":2}}}]}]
+  },
+  {
+    "name": "url-after-question-separator",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Open https://example.com/path?\r\n  continuation",
+    "rows": [{"text":"Open https://example.com/path?","wrapped":false},{"text":"  continuation","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path?continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/path?continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]}]
+  },
+  {
+    "name": "url-after-slash-separator",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Open https://example.com/path/\r\n  continuation",
+    "rows": [{"text":"Open https://example.com/path/","wrapped":false},{"text":"  continuation","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path/continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/path/continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]}]
+  },
+  {
+    "name": "url-after-hash-separator",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Open https://example.com/path#\r\n  continuation",
+    "rows": [{"text":"Open https://example.com/path#","wrapped":false},{"text":"  continuation","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path#continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/path#continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]}]
+  },
+  {
+    "name": "url-after-equals-separator",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Open https://example.com/path=\r\n  continuation",
+    "rows": [{"text":"Open https://example.com/path=","wrapped":false},{"text":"  continuation","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path=continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/path=continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]}]
+  },
+  {
+    "name": "url-after-percent-separator",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Open https://example.com/path%\r\n  continuation",
+    "rows": [{"text":"Open https://example.com/path%","wrapped":false},{"text":"  continuation","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path%continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/path%continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]}]
+  },
+  {
+    "name": "url-after-hyphen-separator",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Open https://example.com/path-\r\n  continuation",
+    "rows": [{"text":"Open https://example.com/path-","wrapped":false},{"text":"  continuation","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path-continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/path-continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]}]
+  },
+  {
+    "name": "url-after-dot-separator",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Open https://example.com/path.\r\n  continuation",
+    "rows": [{"text":"Open https://example.com/path.","wrapped":false},{"text":"  continuation","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path.continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/path.continuation","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]}]
+  },
+  {
+    "name": "url-punctuation-across-intermediate-row",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Open https://example.com/path/\r\n  item?\r\n  query=value",
+    "rows": [{"text":"Open https://example.com/path/","wrapped":false},{"text":"  item?","wrapped":false},{"text":"  query=value","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path/item?query=value","range":{"start":{"x":6,"y":1},"end":{"x":13,"y":3}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/path/item?query=value","range":{"start":{"x":6,"y":1},"end":{"x":13,"y":3}}}]},{"row":3,"links":[{"kind":"web","text":"https://example.com/path/item?query=value","range":{"start":{"x":6,"y":1},"end":{"x":13,"y":3}}}]}]
+  },
+  {
+    "name": "completed-url-then-prose",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "https://example.com/path\r\n  This is a new paragraph.",
+    "rows": [{"text":"https://example.com/path","wrapped":false},{"text":"  This is a new paragraph.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path","range":{"start":{"x":1,"y":1},"end":{"x":24,"y":1}}}]},{"row":2,"links":[]}]
+  },
+  {
+    "name": "url-after-closing-delimiter",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "(https://example.com/path)\r\n  query=value",
+    "rows": [{"text":"(https://example.com/path)","wrapped":false},{"text":"  query=value","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path","range":{"start":{"x":2,"y":1},"end":{"x":25,"y":1}}}]},{"row":2,"links":[]}]
+  },
+  {
+    "name": "url-closing-paren-then-sentence-punctuation",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "https://example.com/path).\r\n  query=value",
+    "rows": [{"text":"https://example.com/path).","wrapped":false},{"text":"  query=value","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path","range":{"start":{"x":1,"y":1},"end":{"x":24,"y":1}}}]},{"row":2,"links":[]}]
+  },
+  {
+    "name": "url-closing-bracket-then-sentence-punctuation",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "https://example.com/path].\r\n  query=value",
+    "rows": [{"text":"https://example.com/path].","wrapped":false},{"text":"  query=value","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path","range":{"start":{"x":1,"y":1},"end":{"x":24,"y":1}}}]},{"row":2,"links":[]}]
+  },
+  {
+    "name": "url-closing-brace-then-sentence-punctuation",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "https://example.com/path}.\r\n  query=value",
+    "rows": [{"text":"https://example.com/path}.","wrapped":false},{"text":"  query=value","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/path","range":{"start":{"x":1,"y":1},"end":{"x":24,"y":1}}}]},{"row":2,"links":[]}]
+  },
+  {
+    "name": "file-soft-wrap",
+    "columns": 32,
+    "bufferRows": 6,
+    "input": "  /home/dev/dev/dev-app/apps/mobile/android/app-release.apk",
+    "rows": [{"text":"  /home/dev/dev/dev-app/apps/mob","wrapped":false},{"text":"ile/android/app-release.apk","wrapped":true}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/dev/dev-app/apps/mobile/android/app-release.apk","range":{"start":{"x":3,"y":1},"end":{"x":27,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/dev/dev-app/apps/mobile/android/app-release.apk","range":{"start":{"x":3,"y":1},"end":{"x":27,"y":2}}}]}]
+  },
+  {
+    "name": "url-soft-wrap",
+    "columns": 30,
+    "bufferRows": 6,
+    "input": "Open https://example.com/releases/a-very-long-build-artifact.apk?download=1",
+    "rows": [{"text":"Open https://example.com/relea","wrapped":false},{"text":"ses/a-very-long-build-artifact","wrapped":true},{"text":".apk?download=1","wrapped":true}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/releases/a-very-long-build-artifact.apk?download=1","range":{"start":{"x":6,"y":1},"end":{"x":15,"y":3}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/releases/a-very-long-build-artifact.apk?download=1","range":{"start":{"x":6,"y":1},"end":{"x":15,"y":3}}}]},{"row":3,"links":[{"kind":"web","text":"https://example.com/releases/a-very-long-build-artifact.apk?download=1","range":{"start":{"x":6,"y":1},"end":{"x":15,"y":3}}}]}]
+  },
+  {
+    "name": "real-newline-not-joined",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "/home/dev/dev/dev-app/apps/mobile/android/app-re\r\nlease.apk",
+    "rows": [{"text":"/home/dev/dev/dev-app/apps/mobile/android/app-re","wrapped":false},{"text":"lease.apk","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/dev/dev-app/apps/mobile/android/app-re","range":{"start":{"x":1,"y":1},"end":{"x":48,"y":1}}}]},{"row":2,"links":[]}]
+  },
+  {
+    "name": "recognized-path-continuation",
+    "columns": 85,
+    "bufferRows": 6,
+    "input": "/tmp/app-\r\n  release.apk",
+    "rows": [{"text":"/tmp/app-","wrapped":false},{"text":"  release.apk","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/tmp/app-release.apk","range":{"start":{"x":1,"y":1},"end":{"x":13,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"/tmp/app-release.apk","range":{"start":{"x":1,"y":1},"end":{"x":13,"y":2}}}]}]
+  },
+  {
+    "name": "parenthesized-without-closing",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "See (sampleco-projectx-strategic-\r\n  mapping/slides/report.pdf",
+    "rows": [{"text":"See (sampleco-projectx-strategic-","wrapped":false},{"text":"  mapping/slides/report.pdf","wrapped":false}],
+    "queries": [{"row":1,"links":[]},{"row":2,"links":[{"kind":"file","text":"mapping/slides/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":27,"y":2}}}]}]
+  },
+  {
+    "name": "outer-wrapper-inner-pair-on-continuation",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "See (assets/foo-\r\n  image_(dark).pdf)",
+    "rows": [{"text":"See (assets/foo-","wrapped":false},{"text":"  image_(dark).pdf)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"assets/foo-image_(dark).pdf","range":{"start":{"x":6,"y":1},"end":{"x":18,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"assets/foo-image_(dark).pdf","range":{"start":{"x":6,"y":1},"end":{"x":18,"y":2}}}]}]
+  },
+  {
+    "name": "outer-wrapper-inner-opening-on-origin",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "See (docs/release_(final-\r\n  candidate)/report.pdf)",
+    "rows": [{"text":"See (docs/release_(final-","wrapped":false},{"text":"  candidate)/report.pdf)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"docs/release_(final-candidate)/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":23,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"docs/release_(final-candidate)/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":23,"y":2}}}]}]
+  },
+  {
+    "name": "outer-wrapper-inner-pair-at-end",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "See (assets/foo-\r\n  image_(dark))",
+    "rows": [{"text":"See (assets/foo-","wrapped":false},{"text":"  image_(dark))","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"assets/foo-image_(dark)","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"assets/foo-image_(dark)","range":{"start":{"x":6,"y":1},"end":{"x":14,"y":2}}}]}]
+  },
+  {
+    "name": "outer-wrapper-alphanumeric-boundary",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "See (workspacepro\r\n  ject/report.pdf)",
+    "rows": [{"text":"See (workspacepro","wrapped":false},{"text":"  ject/report.pdf)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"workspaceproject/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":17,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"workspaceproject/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":17,"y":2}}}]}]
+  },
+  {
+    "name": "hard-rows-each-soft-wrapped",
+    "columns": 20,
+    "bufferRows": 10,
+    "input": "See (workspace/a-very-long-project-\r\n  name/with/a-very-long-directory/report.pdf)",
+    "rows": [{"text":"See (workspace/a-ver","wrapped":false},{"text":"y-long-project-","wrapped":true},{"text":"  name/with/a-very-l","wrapped":false},{"text":"ong-directory/report","wrapped":true},{"text":".pdf)","wrapped":true}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":4,"y":5}}}]},{"row":2,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":4,"y":5}}}]},{"row":3,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":4,"y":5}}}]},{"row":4,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":4,"y":5}}}]},{"row":5,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":4,"y":5}}}]}]
+  },
+  {
+    "name": "hard-wrapped-url-each-soft-wrapped",
+    "columns": 20,
+    "bufferRows": 10,
+    "input": "Open https://example.com/a-very-long-\r\n  path/with/a-very-long-query?value=one",
+    "rows": [{"text":"Open https://example","wrapped":false},{"text":".com/a-very-long-","wrapped":true},{"text":"  path/with/a-very-l","wrapped":false},{"text":"ong-query?value=one","wrapped":true}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/a-very-long-path/with/a-very-long-query?value=one","range":{"start":{"x":6,"y":1},"end":{"x":19,"y":4}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/a-very-long-path/with/a-very-long-query?value=one","range":{"start":{"x":6,"y":1},"end":{"x":19,"y":4}}}]},{"row":3,"links":[{"kind":"web","text":"https://example.com/a-very-long-path/with/a-very-long-query?value=one","range":{"start":{"x":6,"y":1},"end":{"x":19,"y":4}}}]},{"row":4,"links":[{"kind":"web","text":"https://example.com/a-very-long-path/with/a-very-long-query?value=one","range":{"start":{"x":6,"y":1},"end":{"x":19,"y":4}}}]}]
+  },
+  {
+    "name": "parenthesized-url-alphanumeric-boundary",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "Open (https://example.com/relea\r\n  ses/file.pdf)",
+    "rows": [{"text":"Open (https://example.com/relea","wrapped":false},{"text":"  ses/file.pdf)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/releases/file.pdf","range":{"start":{"x":7,"y":1},"end":{"x":14,"y":2}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/releases/file.pdf","range":{"start":{"x":7,"y":1},"end":{"x":14,"y":2}}}]}]
+  },
+  {
+    "name": "trailing-prose-file-target",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "See (docs/re-\r\n  port.pdf.)",
+    "rows": [{"text":"See (docs/re-","wrapped":false},{"text":"  port.pdf.)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"docs/re-port.pdf","range":{"start":{"x":6,"y":1},"end":{"x":10,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"docs/re-port.pdf","range":{"start":{"x":6,"y":1},"end":{"x":10,"y":2}}}]}]
+  },
+  {
+    "name": "trailing-prose-web-target",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "See (https://example.com/re-\r\n  port.)",
+    "rows": [{"text":"See (https://example.com/re-","wrapped":false},{"text":"  port.)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/re-port","range":{"start":{"x":6,"y":1},"end":{"x":6,"y":2}}}]},{"row":2,"links":[{"kind":"web","text":"https://example.com/re-port","range":{"start":{"x":6,"y":1},"end":{"x":6,"y":2}}}]}]
+  },
+  {
+    "name": "application-rows-counted-apart-from-physical-rows",
+    "columns": 3,
+    "bufferRows": 50,
+    "input": "See (workspace/a-very-long-project-\r\n  name/with/a-very-long-directory/report.pdf)",
+    "rows": [{"text":"See","wrapped":false},{"text":" (w","wrapped":true},{"text":"ork","wrapped":true},{"text":"spa","wrapped":true},{"text":"ce/","wrapped":true},{"text":"a-v","wrapped":true},{"text":"ery","wrapped":true},{"text":"-lo","wrapped":true},{"text":"ng-","wrapped":true},{"text":"pro","wrapped":true},{"text":"jec","wrapped":true},{"text":"t-","wrapped":true},{"text":"  n","wrapped":false},{"text":"ame","wrapped":true},{"text":"/wi","wrapped":true},{"text":"th/","wrapped":true},{"text":"a-v","wrapped":true},{"text":"ery","wrapped":true},{"text":"-lo","wrapped":true},{"text":"ng-","wrapped":true},{"text":"dir","wrapped":true},{"text":"ect","wrapped":true},{"text":"ory","wrapped":true},{"text":"/re","wrapped":true},{"text":"por","wrapped":true},{"text":"t.p","wrapped":true},{"text":"df)","wrapped":true}],
+    "queries": [{"row":1,"links":[]},{"row":2,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":3,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":4,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":5,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":6,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":7,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":8,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":9,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":10,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":11,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":12,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":13,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":14,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":15,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":16,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":17,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":18,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":19,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":20,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":21,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":22,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":23,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":24,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":25,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":26,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]},{"row":27,"links":[{"kind":"file","text":"workspace/a-very-long-project-name/with/a-very-long-directory/report.pdf","range":{"start":{"x":3,"y":2},"end":{"x":2,"y":27}}}]}]
+  },
+  {
+    "name": "bounded-parenthesized-scan",
+    "columns": 80,
+    "bufferRows": 23,
+    "input": "See (sampleco-projectx-strategic-\r\n  part0-\r\n  part1-\r\n  part2-\r\n  part3-\r\n  part4-\r\n  part5-\r\n  part6-\r\n  part7-\r\n  part8-\r\n  part9-\r\n  part10-\r\n  part11-\r\n  part12-\r\n  part13-\r\n  part14-\r\n  part15-\r\n  part16-\r\n  part17-\r\n  part18-\r\n  part19-\r\n  mapping/slides/report.pdf)",
+    "rows": [{"text":"See (sampleco-projectx-strategic-","wrapped":false},{"text":"  part0-","wrapped":false},{"text":"  part1-","wrapped":false},{"text":"  part2-","wrapped":false},{"text":"  part3-","wrapped":false},{"text":"  part4-","wrapped":false},{"text":"  part5-","wrapped":false},{"text":"  part6-","wrapped":false},{"text":"  part7-","wrapped":false},{"text":"  part8-","wrapped":false},{"text":"  part9-","wrapped":false},{"text":"  part10-","wrapped":false},{"text":"  part11-","wrapped":false},{"text":"  part12-","wrapped":false},{"text":"  part13-","wrapped":false},{"text":"  part14-","wrapped":false},{"text":"  part15-","wrapped":false},{"text":"  part16-","wrapped":false},{"text":"  part17-","wrapped":false},{"text":"  part18-","wrapped":false},{"text":"  part19-","wrapped":false},{"text":"  mapping/slides/report.pdf)","wrapped":false}],
+    "queries": [{"row":1,"links":[]},{"row":2,"links":[]},{"row":3,"links":[]},{"row":4,"links":[]},{"row":5,"links":[]},{"row":6,"links":[]},{"row":7,"links":[]},{"row":8,"links":[]},{"row":9,"links":[]},{"row":10,"links":[]},{"row":11,"links":[]},{"row":12,"links":[]},{"row":13,"links":[]},{"row":14,"links":[]},{"row":15,"links":[]},{"row":16,"links":[]},{"row":17,"links":[]},{"row":18,"links":[]},{"row":19,"links":[]},{"row":20,"links":[]},{"row":21,"links":[]},{"row":22,"links":[{"kind":"file","text":"mapping/slides/report.pdf","range":{"start":{"x":3,"y":22},"end":{"x":27,"y":22}}}]}]
+  },
+  {
+    "name": "closing-on-twentieth-application-row",
+    "columns": 80,
+    "bufferRows": 21,
+    "input": "See (workspace/\r\n  part0/\r\n  part1/\r\n  part2/\r\n  part3/\r\n  part4/\r\n  part5/\r\n  part6/\r\n  part7/\r\n  part8/\r\n  part9/\r\n  part10/\r\n  part11/\r\n  part12/\r\n  part13/\r\n  part14/\r\n  part15/\r\n  part16/\r\n  part17/\r\n  report.pdf)",
+    "rows": [{"text":"See (workspace/","wrapped":false},{"text":"  part0/","wrapped":false},{"text":"  part1/","wrapped":false},{"text":"  part2/","wrapped":false},{"text":"  part3/","wrapped":false},{"text":"  part4/","wrapped":false},{"text":"  part5/","wrapped":false},{"text":"  part6/","wrapped":false},{"text":"  part7/","wrapped":false},{"text":"  part8/","wrapped":false},{"text":"  part9/","wrapped":false},{"text":"  part10/","wrapped":false},{"text":"  part11/","wrapped":false},{"text":"  part12/","wrapped":false},{"text":"  part13/","wrapped":false},{"text":"  part14/","wrapped":false},{"text":"  part15/","wrapped":false},{"text":"  part16/","wrapped":false},{"text":"  part17/","wrapped":false},{"text":"  report.pdf)","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":2,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":3,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":4,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":5,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":6,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":7,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":8,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":9,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":10,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":11,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":12,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":13,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":14,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":15,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":16,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":17,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":18,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":19,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]},{"row":20,"links":[{"kind":"file","text":"workspace/part0/part1/part2/part3/part4/part5/part6/part7/part8/part9/part10/part11/part12/part13/part14/part15/part16/part17/report.pdf","range":{"start":{"x":6,"y":1},"end":{"x":12,"y":20}}}]}]
+  },
+  {
+    "name": "indented-dash-item-after-slash",
+    "columns": 200,
+    "bufferRows": 6,
+    "input": "    - /home/dev/dev/ai-projects/sampleco-projectx-strategic-mapping/meetings/2026-09-10-partnerco/\r\n      RUNBOOK.md is the concise operator checklist.",
+    "rows": [{"text":"    - /home/dev/dev/ai-projects/sampleco-projectx-strategic-mapping/meetings/2026-09-10-partnerco/","wrapped":false},{"text":"      RUNBOOK.md is the concise operator checklist.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/dev/ai-projects/sampleco-projectx-strategic-mapping/meetings/2026-09-10-partnerco/RUNBOOK.md","range":{"start":{"x":7,"y":1},"end":{"x":16,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/dev/ai-projects/sampleco-projectx-strategic-mapping/meetings/2026-09-10-partnerco/RUNBOOK.md","range":{"start":{"x":7,"y":1},"end":{"x":16,"y":2}}}]}]
+  },
+  {
+    "name": "sibling-list-items-absolute",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "  - /home/dev/dev/one/\r\n  - /home/dev/dev/two/",
+    "rows": [{"text":"  - /home/dev/dev/one/","wrapped":false},{"text":"  - /home/dev/dev/two/","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/dev/one/","range":{"start":{"x":5,"y":1},"end":{"x":22,"y":1}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/dev/two/","range":{"start":{"x":5,"y":2},"end":{"x":22,"y":2}}}]}]
+  },
+  {
+    "name": "sibling-list-items-relative",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "  - src/components/\r\n  - src/features/",
+    "rows": [{"text":"  - src/components/","wrapped":false},{"text":"  - src/features/","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"src/components/","range":{"start":{"x":5,"y":1},"end":{"x":19,"y":1}}}]},{"row":2,"links":[{"kind":"file","text":"src/features/","range":{"start":{"x":5,"y":2},"end":{"x":17,"y":2}}}]}]
+  },
+  {
+    "name": "sentence-next-word-not-joined",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "  - the files live in src/components/\r\n    more text here",
+    "rows": [{"text":"  - the files live in src/components/","wrapped":false},{"text":"    more text here","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"src/components/","range":{"start":{"x":23,"y":1},"end":{"x":37,"y":1}}}]},{"row":2,"links":[]}]
+  },
+  {
+    "name": "hops-without-separator-or-extension",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "● /home/dev/a-\r\n  b-\r\n  c.md",
+    "rows": [{"text":"● /home/dev/a-","wrapped":false},{"text":"  b-","wrapped":false},{"text":"  c.md","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/a-b-c.md","range":{"start":{"x":3,"y":1},"end":{"x":6,"y":3}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/a-b-c.md","range":{"start":{"x":3,"y":1},"end":{"x":6,"y":3}}}]},{"row":3,"links":[{"kind":"file","text":"/home/dev/a-b-c.md","range":{"start":{"x":3,"y":1},"end":{"x":6,"y":3}}}]}]
+  },
+  {
+    "name": "extensionless-tail-inside-token",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "● Saved /home/dev/dev/my-\r\n  project",
+    "rows": [{"text":"● Saved /home/dev/dev/my-","wrapped":false},{"text":"  project","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/dev/my-project","range":{"start":{"x":9,"y":1},"end":{"x":9,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/dev/my-project","range":{"start":{"x":9,"y":1},"end":{"x":9,"y":2}}}]}]
+  },
+  {
+    "name": "sibling-items-with-plus",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "  + /home/dev/dev/one/\r\n  + /home/dev/dev/two/",
+    "rows": [{"text":"  + /home/dev/dev/one/","wrapped":false},{"text":"  + /home/dev/dev/two/","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/dev/one/","range":{"start":{"x":5,"y":1},"end":{"x":22,"y":1}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/dev/two/","range":{"start":{"x":5,"y":2},"end":{"x":22,"y":2}}}]}]
+  },
+  {
+    "name": "multi-level-numbered-item",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "  1.1. Open /home/dev/dev/notes-\r\n       archive/today.md.",
+    "rows": [{"text":"  1.1. Open /home/dev/dev/notes-","wrapped":false},{"text":"       archive/today.md.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/dev/notes-archive/today.md","range":{"start":{"x":13,"y":1},"end":{"x":23,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/dev/notes-archive/today.md","range":{"start":{"x":13,"y":1},"end":{"x":23,"y":2}}}]}]
+  },
+  {
+    "name": "wide-glyphs-across-wrapped-rows",
+    "columns": 12,
+    "bufferRows": 6,
+    "input": "界界 /tmp/this-path-wraps",
+    "rows": [{"text":"界界 /tmp/th","wrapped":false,"wide":[0,1]},{"text":"is-path-wrap","wrapped":true},{"text":"s","wrapped":true}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/tmp/this-path-wraps","range":{"start":{"x":6,"y":1},"end":{"x":1,"y":3}}}]},{"row":2,"links":[{"kind":"file","text":"/tmp/this-path-wraps","range":{"start":{"x":6,"y":1},"end":{"x":1,"y":3}}}]},{"row":3,"links":[{"kind":"file","text":"/tmp/this-path-wraps","range":{"start":{"x":6,"y":1},"end":{"x":1,"y":3}}}]}]
+  },
+  {
+    "name": "multibyte-prose-around-links",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "界 see (docs/日本語/файл.md), then https://例え.test/x.",
+    "rows": [{"text":"界 see (docs/日本語/файл.md), then https://例え.test/x.","wrapped":false,"wide":[0,12,13,14,39,40]}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://例え.test/x","range":{"start":{"x":36,"y":1},"end":{"x":54,"y":1}}},{"kind":"file","text":"docs/日本語/файл.md","range":{"start":{"x":9,"y":1},"end":{"x":27,"y":1}}}]}]
+  },
+  {
+    "name": "emoji-before-path",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "🚀 /tmp/a.txt and 🚀 https://example.com/🚀.",
+    "rows": [{"text":"🚀 /tmp/a.txt and 🚀 https://example.com/🚀.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"web","text":"https://example.com/🚀","range":{"start":{"x":20,"y":1},"end":{"x":40,"y":1}}},{"kind":"file","text":"/tmp/a.txt","range":{"start":{"x":3,"y":1},"end":{"x":12,"y":1}}}]}]
+  },
+  {
+    "name": "multibyte-hard-wrapped-path",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "  ссылка /home/dev/отчёт-\r\n  итог.md.",
+    "rows": [{"text":"  ссылка /home/dev/отчёт-","wrapped":false},{"text":"  итог.md.","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/отчёт-итог.md","range":{"start":{"x":10,"y":1},"end":{"x":9,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"/home/dev/отчёт-итог.md","range":{"start":{"x":10,"y":1},"end":{"x":9,"y":2}}}]}]
+  },
+  {
+    "name": "tab-and-location-suffix",
+    "columns": 80,
+    "bufferRows": 6,
+    "input": "at\t/home/dev/a.ts:12:4 and src/b.ts:7",
+    "rows": [{"text":"at      /home/dev/a.ts:12:4 and src/b.ts:7","wrapped":false}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/home/dev/a.ts","range":{"start":{"x":9,"y":1},"end":{"x":22,"y":1}}},{"kind":"file","text":"src/b.ts","range":{"start":{"x":33,"y":1},"end":{"x":40,"y":1}}}]}]
+  },
+  {
+    "name": "wide-glyph-wrapped-from-last-column",
+    "columns": 8,
+    "bufferRows": 6,
+    "input": "/tmp/ab界x",
+    "rows": [{"text":"/tmp/ab","wrapped":false},{"text":"界x","wrapped":true,"wide":[0]}],
+    "queries": [{"row":1,"links":[{"kind":"file","text":"/tmp/ab界x","range":{"start":{"x":1,"y":1},"end":{"x":3,"y":2}}}]},{"row":2,"links":[{"kind":"file","text":"/tmp/ab界x","range":{"start":{"x":1,"y":1},"end":{"x":3,"y":2}}}]}]
+  }
+]
