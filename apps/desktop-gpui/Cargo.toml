@@ -28,6 +28,8 @@ regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+alacritty_terminal = { version = "=0.26.0", default-features = false }
+terminal-engine = { path = "../../crates/terminal-engine" }
 tmux-control = { path = "../../crates/tmux-control" }
 uuid.workspace = true
 

@@ -10,11 +10,11 @@ use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Row, Scroll};
-use alacritty_terminal::index::Line;
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::cell::Cell;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, Processor, StdSyncHandler};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, Processor, StdSyncHandler};
 
 use crate::event::GridSize;
 use crate::history_page::{compose_history_page, split_history_rows};
@@ -105,6 +105,11 @@ impl PaneTerminal {
 fn new_term(columns: usize, rows: usize) -> Term<Listener> {
     let config = Config {
         scrolling_history: SCROLLBACK_LIMIT,
+        // The desktop's xterm blinks a block cursor until a program says otherwise.
+        default_cursor_style: CursorStyle {
+            shape: CursorShape::Block,
+            blinking: true,
+        },
         ..Config::default()
     };
     Term::new(config, &GridSize { columns, rows }, Listener)
@@ -125,6 +130,69 @@ fn page_rows(page: &[u8], columns: usize, rows: usize) -> Vec<Row<Cell>> {
     (oldest..=last)
         .map(|line| std::mem::replace(&mut grid[Line(line)], Row::new(1)))
         .collect()
+}
+
+/// Where a reader's viewport is, as something a reflow cannot move: how many
+/// hard line ends sit between the top of the screen and the cursor, and how far
+/// into its logical line the top row was. Reflow keeps both true, and a row
+/// number would not. Port of `resizeTerminalPreservingViewport`.
+struct ViewportAnchor {
+    hard_ends: usize,
+    columns_into_line: usize,
+}
+
+fn row_is_wrapped(term: &Term<Listener>, line: i32) -> bool {
+    let row = &term.grid()[Line(line)];
+    row[Column(term.columns() - 1)]
+        .flags
+        .contains(Flags::WRAPLINE)
+}
+
+impl ViewportAnchor {
+    fn capture(term: &Term<Listener>) -> Option<Self> {
+        let display_offset = term.grid().display_offset() as i32;
+        if display_offset == 0 || term.mode().contains(TermMode::ALT_SCREEN) {
+            return None;
+        }
+        let top = -display_offset;
+        let cursor = term.grid().cursor.point.line.0;
+        let hard_ends = (top..cursor)
+            .filter(|line| !row_is_wrapped(term, *line))
+            .count();
+        let oldest = -(term.grid().history_size() as i32);
+        let mut columns_into_line = 0;
+        let mut line = top - 1;
+        while line >= oldest && row_is_wrapped(term, line) {
+            columns_into_line += term.columns();
+            line -= 1;
+        }
+        Some(Self {
+            hard_ends,
+            columns_into_line,
+        })
+    }
+
+    fn restore(self, term: &mut Term<Listener>) {
+        let cursor = term.grid().cursor.point.line.0;
+        let oldest = -(term.grid().history_size() as i32);
+        let mut hard_ends = 0;
+        let mut top = cursor;
+        while top > oldest && hard_ends <= self.hard_ends {
+            top -= 1;
+            if !row_is_wrapped(term, top) {
+                hard_ends += 1;
+            }
+        }
+        // `top` is the last row before the logical line the reader was in, or
+        // the oldest row when the reflow pushed the line off the history.
+        if hard_ends > self.hard_ends {
+            top += 1;
+        }
+        let target = top + (self.columns_into_line / term.columns()) as i32;
+        let target_offset = (-target).max(0);
+        let current = term.grid().display_offset() as i32;
+        term.scroll_display(Scroll::Delta(target_offset - current));
+    }
 }
 
 /// The engine's side of a pane: the parser, which the UI never needs.
@@ -265,7 +333,14 @@ impl PaneWriter {
         }
         // Bytes a synchronized update is holding were written for the old grid.
         self.flush_sync();
-        self.shared.term.lock().resize(size);
+        {
+            let mut term = self.shared.term.lock();
+            let anchor = ViewportAnchor::capture(&term);
+            term.resize(size);
+            if let Some(anchor) = anchor {
+                anchor.restore(&mut term);
+            }
+        }
         self.mark_dirty();
         GridOutcome::Applied(size)
     }
@@ -332,9 +407,6 @@ impl PaneWriter {
 
 #[cfg(test)]
 mod tests {
-    use alacritty_terminal::index::Column;
-    use alacritty_terminal::term::cell::Flags;
-
     use super::*;
 
     const SIZE: GridSize = GridSize {
@@ -536,6 +608,101 @@ mod tests {
             rows.iter().any(|row| row.contains("xy")),
             "the pair was split across rows: {rows:?}"
         );
+    }
+
+    fn reading_writer(columns: usize, rows: usize, lines: usize) -> PaneWriter {
+        let mut writer = PaneWriter::new(GridSize { columns, rows });
+        // Thirty printable cells fit at 40 columns and wrap at 20, so every row
+        // before the viewport moves during the resize.
+        let text: Vec<String> = (0..lines)
+            .map(|index| format!("row-{index:02}-{}", "x".repeat(23)))
+            .collect();
+        writer.seed(text.join("\r\n").as_bytes());
+        writer
+    }
+
+    fn top_line(writer: &PaneWriter) -> String {
+        let term = writer.terminal().lock();
+        line_text(&term, -(term.grid().display_offset() as i32))
+    }
+
+    #[test]
+    fn a_reader_stays_on_their_row_through_a_reflow_and_back() {
+        let mut writer = reading_writer(40, 5, 40);
+        {
+            let mut term = writer.terminal().lock();
+            let history = term.grid().history_size() as i32;
+            term.scroll_display(Scroll::Delta(history - 15));
+        }
+        assert!(top_line(&writer).starts_with("row-15"));
+        writer.set_grid(GridSize {
+            columns: 20,
+            rows: 5,
+        });
+        assert!(
+            top_line(&writer).starts_with("row-15"),
+            "{}",
+            top_line(&writer)
+        );
+        assert_ne!(writer.terminal().lock().grid().display_offset(), 0);
+        writer.set_grid(GridSize {
+            columns: 40,
+            rows: 5,
+        });
+        assert!(
+            top_line(&writer).starts_with("row-15"),
+            "{}",
+            top_line(&writer)
+        );
+    }
+
+    #[test]
+    fn a_reader_mid_wrap_keeps_their_share_of_the_line() {
+        let mut writer = reading_writer(20, 5, 40);
+        {
+            let mut term = writer.terminal().lock();
+            let target = 30 * 2 + 1;
+            let history = term.grid().history_size() as i32;
+            term.scroll_display(Scroll::Delta(history - target));
+        }
+        assert!(
+            top_line(&writer).starts_with("xxx"),
+            "{}",
+            top_line(&writer)
+        );
+        writer.set_grid(GridSize {
+            columns: 10,
+            rows: 5,
+        });
+        // A logical line is 30 cells: its second 20-column row started at cell 20,
+        // which is the third row at 10 columns.
+        assert!(
+            top_line(&writer).starts_with("xxx"),
+            "{}",
+            top_line(&writer)
+        );
+    }
+
+    #[test]
+    fn a_bottom_following_pane_stays_at_the_bottom_through_a_reflow() {
+        let mut writer = reading_writer(40, 5, 40);
+        writer.set_grid(GridSize {
+            columns: 20,
+            rows: 8,
+        });
+        let term = writer.terminal().lock();
+        assert_eq!(term.grid().display_offset(), 0);
+    }
+
+    #[test]
+    fn a_resize_on_the_alternate_screen_never_touches_the_viewport() {
+        let mut writer = reading_writer(40, 5, 40);
+        writer.write(b"\x1b[?1049h");
+        writer.set_grid(GridSize {
+            columns: 20,
+            rows: 5,
+        });
+        assert_eq!(writer.terminal().lock().grid().display_offset(), 0);
     }
 
     #[test]

@@ -25,11 +25,14 @@ use desktop_core::{
     platform::EventBody,
 };
 use futures::{StreamExt, channel::mpsc};
-use gpui_kit::{Context, EventEmitter, Task};
+use gpui_kit::{App, AppContext, Context, Entity, EventEmitter, Subscription, Task};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use terminal_engine::Command;
 use tmux_control::Session;
+
+use crate::terminal::{TerminalLink, link::LinkEvent};
 
 use super::{
     app_recovery::{
@@ -131,6 +134,12 @@ struct LinkRuntime {
     bridge: Option<RunningBridge>,
     phase: ConnectionPhase,
     degraded_since: Option<u64>,
+    /// The host's terminal engine, created with its first bridge. It outlives
+    /// any one bridge, as the panes it holds do.
+    terminal: Option<Entity<TerminalLink>>,
+    terminal_events: Option<Subscription>,
+    /// The tmux server the engine's screens describe.
+    server_identity: Option<String>,
 }
 
 pub struct ConnectionController {
@@ -311,6 +320,16 @@ impl ConnectionController {
 
     pub fn active_link(&self) -> Option<&HostLink> {
         self.links.link(&self.active_profile_id())
+    }
+
+    /// The terminal link of a host, once it has had a bridge.
+    pub fn terminal_link(&self, profile_id: &str) -> Option<Entity<TerminalLink>> {
+        self.runtimes.get(profile_id)?.terminal.clone()
+    }
+
+    /// A message for the status bar from outside this module.
+    pub fn report_status(&mut self, message: String, cx: &mut Context<Self>) {
+        self.set_status(message, cx);
     }
 
     pub fn active_host_state(&self) -> Option<&NormalizedHostState> {
@@ -1127,7 +1146,8 @@ impl ConnectionController {
             self.dispatch(HostLinksAction::Sync(hosts));
         }
         self.reconcile_bridges(cx);
-        self.observe_transitions();
+        self.sync_terminal_clients(cx);
+        self.observe_transitions(cx);
         if let Some(link) = self.active_link() {
             let epoch = link.connection_epoch;
             let connection = self.connection.clone();
@@ -1208,6 +1228,114 @@ impl ConnectionController {
         }
     }
 
+    /// A bridge starting or stopping changes the client every terminal link
+    /// names in its requests.
+    fn sync_terminal_clients(&mut self, cx: &mut Context<Self>) {
+        let terminals: Vec<(String, Entity<TerminalLink>)> = self
+            .runtimes
+            .iter()
+            .filter_map(|(id, runtime)| Some((id.clone(), runtime.terminal.clone()?)))
+            .collect();
+        for (profile_id, terminal) in terminals {
+            let link = self.links.link(&profile_id);
+            let client_id = link.and_then(|link| link.client_id.clone());
+            let epoch = link.map_or(0, |link| link.connection_epoch);
+            if terminal.read(cx).client_id() != client_id.as_deref() {
+                terminal.update(cx, |terminal, _| terminal.set_client(client_id, epoch));
+            }
+        }
+    }
+
+    /// One host's terminal engine and what it owes this controller.
+    fn ensure_terminal_link(&mut self, profile_id: &str, cx: &mut Context<Self>) {
+        let runtime = self.runtimes.entry(profile_id.to_owned()).or_default();
+        if runtime.terminal.is_some() {
+            return;
+        }
+        let backend: Arc<dyn crate::connection_ui::backend::TerminalBackend> = self.backend.clone();
+        let id = profile_id.to_owned();
+        let terminal = cx.new(|cx| TerminalLink::new(id, backend, cx));
+        let owner = profile_id.to_owned();
+        let events = cx.subscribe(&terminal, move |this, _, event, cx| {
+            this.on_terminal_event(&owner, event, cx);
+        });
+        let runtime = self.runtimes.entry(profile_id.to_owned()).or_default();
+        runtime.terminal = Some(terminal);
+        runtime.terminal_events = Some(events);
+    }
+
+    fn on_terminal_event(&mut self, profile_id: &str, event: &LinkEvent, cx: &mut Context<Self>) {
+        match event {
+            LinkEvent::FramesConsumed(frames) => {
+                let Some(runtime) = self.runtimes.get_mut(profile_id) else {
+                    return;
+                };
+                let Some(bridge) = runtime.bridge.as_mut() else {
+                    return;
+                };
+                for (byte_length, epoch) in frames {
+                    bridge.acks.record_applied(*byte_length, *epoch);
+                }
+                let token = bridge.token;
+                self.send_acknowledgement(profile_id, token, cx);
+            }
+            LinkEvent::FlowStalled { pane_id, epoch } => {
+                self.flow_stalled(profile_id, pane_id, *epoch, cx);
+            }
+            LinkEvent::Status(message) => self.announce(profile_id, message.clone(), cx),
+        }
+    }
+
+    fn flow_stalled(
+        &mut self,
+        profile_id: &str,
+        pane_id: &str,
+        epoch: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bridge) = self
+            .runtimes
+            .get(profile_id)
+            .and_then(|runtime| runtime.bridge.as_ref())
+        else {
+            return;
+        };
+        // A stall the old bridge left queued is not this bridge's to answer.
+        if epoch != Some(bridge.terminal_epoch) {
+            return;
+        }
+        let token = bridge.token;
+        // The host used up its in-place resumes. One bridge may report several
+        // panes; they collapse into one reconnect.
+        let first = self
+            .bridge_mut(profile_id, token)
+            .is_some_and(|bridge| !std::mem::replace(&mut bridge.recovering_flow_stall, true));
+        if first {
+            self.incident(
+                "reconnect.flowStall",
+                json!({ "hostProfileId": profile_id, "paneId": pane_id }),
+            );
+            self.dispatch(HostLinksAction::Detail {
+                profile_id: profile_id.to_owned(),
+                detail: "A terminal output stream stalled; reconnecting it now.".to_owned(),
+            });
+            self.dispatch(HostLinksAction::Reconnect {
+                profile_id: profile_id.to_owned(),
+            });
+            self.settle(cx);
+        }
+    }
+
+    fn terminal_command(&self, profile_id: &str, command: Command, cx: &App) {
+        if let Some(terminal) = self
+            .runtimes
+            .get(profile_id)
+            .and_then(|r| r.terminal.as_ref())
+        {
+            terminal.read(cx).send(command);
+        }
+    }
+
     /// One host's bridge: every event it reports, handled the same way for
     /// every host, with the profile id deciding which link the answer belongs
     /// to and whether it is the one on screen.
@@ -1215,6 +1343,7 @@ impl ConnectionController {
         let Some(link) = self.links.link(profile_id).cloned() else {
             return;
         };
+        self.ensure_terminal_link(profile_id, cx);
         let (sender, mut frames) = mpsc::unbounded();
         // Only the host on screen attaches a terminal. A host shown beside it
         // relays topology and agents until it is activated.
@@ -1293,9 +1422,9 @@ impl ConnectionController {
             .filter(|bridge| bridge.token == token)
     }
 
-    /// One batch from a bridge's channel, then one settle and one
-    /// acknowledgement for all of it. A frame's credit is spent once it has
-    /// been admitted, whatever came of decoding it.
+    /// One batch from a bridge's channel, then one settle for all of it. Every
+    /// frame goes on to the terminal engine, whatever came of decoding it here:
+    /// the engine is what spends its credit, once applied.
     fn on_frames(
         &mut self,
         profile_id: &str,
@@ -1324,15 +1453,20 @@ impl ConnectionController {
                 }
                 Err(message) => self.incident("link.decodeFailure", json!({ "message": message })),
             }
-            if let Some(bridge) = self.bridge_mut(profile_id, token) {
-                bridge.acks.record(frame.len());
+            // Credit is spent when the engine has applied the frame, so the
+            // host cannot outrun a parser that is behind.
+            if let Some(terminal) = self
+                .runtimes
+                .get(profile_id)
+                .and_then(|runtime| runtime.terminal.as_ref())
+            {
+                terminal.read(cx).forward_frame(frame);
             }
         }
         // Terminal output passes through here and is no state of this module's.
         if changed {
             self.settle(cx);
         }
-        self.send_acknowledgement(profile_id, token, cx);
     }
 
     fn send_acknowledgement(&mut self, profile_id: &str, token: u64, cx: &mut Context<Self>) {
@@ -1412,26 +1546,8 @@ impl ConnectionController {
                 // Journal only: the host resumes the pane itself.
                 self.incident("flow.paused", json!({ "paneId": pane_id }));
             }
-            BridgeEvent::FlowStalled { pane_id } => {
-                // The host used up its in-place resumes. One bridge may report
-                // several panes; they collapse into one reconnect.
-                let first = self.bridge_mut(profile_id, token).is_some_and(|bridge| {
-                    !std::mem::replace(&mut bridge.recovering_flow_stall, true)
-                });
-                if first {
-                    self.incident(
-                        "reconnect.flowStall",
-                        json!({ "hostProfileId": profile_id, "paneId": pane_id }),
-                    );
-                    self.dispatch(HostLinksAction::Detail {
-                        profile_id: profile_id.to_owned(),
-                        detail: "A terminal output stream stalled; reconnecting it now.".to_owned(),
-                    });
-                    self.dispatch(HostLinksAction::Reconnect {
-                        profile_id: profile_id.to_owned(),
-                    });
-                }
-            }
+            // Spoken by the engine, which knows whether this frame was admitted.
+            BridgeEvent::FlowStalled { .. } => {}
             BridgeEvent::Error { message } => {
                 self.bridge_down(profile_id, "error", message.clone(), Some(&message), cx);
             }
@@ -1442,6 +1558,7 @@ impl ConnectionController {
                 self.connection_state(profile_id, phase, detail, cx);
             }
             BridgeEvent::Snapshot(event) => {
+                self.note_server_identity(profile_id, &event.server_identity, cx);
                 let now = self.backend.now_ms();
                 let burst = self
                     .bridge_mut(profile_id, token)
@@ -1470,6 +1587,17 @@ impl ConnectionController {
                 self.announce(profile_id, "Live".to_owned(), cx);
             }
             BridgeEvent::Ignored => {}
+        }
+    }
+
+    /// A different tmux server: no screen the engine kept describes it.
+    fn note_server_identity(&mut self, profile_id: &str, identity: &str, cx: &App) {
+        let Some(runtime) = self.runtimes.get_mut(profile_id) else {
+            return;
+        };
+        let previous = runtime.server_identity.replace(identity.to_owned());
+        if previous.is_some_and(|previous| previous != identity) {
+            self.terminal_command(profile_id, Command::ClearTerminalState, cx);
         }
     }
 
@@ -1558,7 +1686,7 @@ impl ConnectionController {
             action: HostAction::Connection { phase },
         });
         // Per event: a batch can hold `resyncing` and `connected` together.
-        self.observe_transitions();
+        self.observe_transitions(cx);
         if phase == ConnectionPhase::Connected {
             self.dispatch(HostLinksAction::Detail {
                 profile_id: profile_id.to_owned(),
@@ -1575,7 +1703,7 @@ impl ConnectionController {
 
     /// What a host's phase change means: the journal's record of what the user
     /// saw, per link.
-    fn observe_transitions(&mut self) {
+    fn observe_transitions(&mut self, cx: &App) {
         let now = self.backend.now_ms();
         for profile_id in self.links.order.clone() {
             let Some(link) = self.links.link(&profile_id) else {
@@ -1600,6 +1728,11 @@ impl ConnectionController {
             }
             if before == ConnectionPhase::Resyncing && phase == ConnectionPhase::Connected {
                 self.incident("link.resynced", json!({ "hostProfileId": profile_id }));
+                self.terminal_command(
+                    &profile_id,
+                    Command::ReseedMounted("post-resync reseed".to_owned()),
+                    cx,
+                );
             }
             if newly_degraded {
                 self.incident(
