@@ -16,7 +16,7 @@
 //! | Seam | Reaches the pane through | Owner |
 //! |---|---|---|
 //! | [`input`] | `PaneInput`, `input::attach`, `input::paint`, `input::report_focus` (on focus and window activation), the pane's `send_input` | T3.4 |
-//! | [`reading`] | `PaneReading`, `reading::attach`, `reading::children`, `reading::highlights` | T3.5 |
+//! | [`reading`] | `PaneReading`, `reading::attach`, `reading::children`, `reading::highlights`, `reading::before_user_input` (keys and pastes), `reading::link_at` (the pane grab) | T3.5 |
 //! | [`integration`] | `PaneIntegration`, `integration::attach`, `integration::children` | T3.6 |
 //!
 //! Mouse and wheel events are claimed by mode, so `input` and `reading` never
