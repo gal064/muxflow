@@ -102,17 +102,10 @@ pub(super) fn build_seed_with_metadata(
     // wrapped. Re-enable wrapping while repainting at the authoritative pane
     // width, then restore the child's current wrap mode below.
     set_private_mode(&mut seed, 7, true);
-    paint_capture(&mut seed, normal_lines);
-    paint_cell_overlays(&mut seed, normal_cell_lines, metadata);
-    // `capture-pane -e` ends wherever the last cell's attributes left off, so
-    // without this the erases below run with that attribute still active and
-    // paint it into every cleared cell.
-    seed.extend_from_slice(b"\x1b[m");
+    paint_screen(&mut seed, normal_lines, normal_cell_lines, metadata);
     if let Some((alternate_lines, alternate_cell_lines)) = alternate_lines {
         seed.extend_from_slice(b"\x1b[?1049h\x1b[2J\x1b[H");
-        paint_capture(&mut seed, alternate_lines);
-        paint_cell_overlays(&mut seed, alternate_cell_lines, metadata);
-        seed.extend_from_slice(b"\x1b[m");
+        paint_screen(&mut seed, alternate_lines, alternate_cell_lines, metadata);
     }
     let mut diagnostics = Vec::new();
     if let Some(bracketed_paste) = metadata.bracketed_paste {
@@ -165,6 +158,22 @@ pub(super) fn build_seed_with_metadata(
         bytes: seed,
         diagnostics,
     }
+}
+
+/// Trailing cells go first. They are placed by tmux's cell count, and a terminal
+/// that measures an emoji wider than tmux has text in those cells; written after
+/// the text, the erase would remove it.
+fn paint_screen(
+    seed: &mut Vec<u8>,
+    lines: &[Vec<u8>],
+    cell_lines: &[Vec<u8>],
+    metadata: CaptureMetadata,
+) {
+    paint_cell_overlays(seed, cell_lines, metadata);
+    seed.extend_from_slice(b"\x1b[H");
+    paint_capture(seed, lines);
+    // `capture-pane -e` ends wherever the last cell's attributes left off.
+    seed.extend_from_slice(b"\x1b[m");
 }
 
 fn paint_capture(seed: &mut Vec<u8>, lines: &[Vec<u8>]) {
