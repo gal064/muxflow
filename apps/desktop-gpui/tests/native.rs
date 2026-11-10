@@ -536,3 +536,18 @@ fn wait_for_geometry(path: &Path) -> WindowGeometry {
     }
     panic!("the geometry did not reach app-state.json");
 }
+
+#[gpui_kit::test]
+fn a_problem_notice_can_be_dismissed_without_hovering_it(cx: &mut TestAppContext) {
+    let (_dir, handle) = app_window(cx);
+    with_window(handle, cx, |window, cx| {
+        notices::notify("Could not save shortcuts: disk full", window, cx)
+    });
+    cx.run_until_parked();
+    with_window(handle, cx, |window, cx| click_label(window, "Dismiss", cx));
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    let left = with_window(handle, cx, |window, cx| window.notifications(cx).len());
+    assert_eq!(left, 0);
+}
