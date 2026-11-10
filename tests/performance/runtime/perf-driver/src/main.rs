@@ -28,6 +28,7 @@ use tmux_agent_protocol::{
 };
 
 mod quick_open;
+mod vt_engine;
 
 #[derive(Clone)]
 enum Transport {
@@ -153,6 +154,9 @@ struct Observations {
     /// desktop would have.
     full_log_panes: BTreeSet<String>,
     pane_full_logs: BTreeMap<String, Vec<u8>>,
+    /// The latest `TerminalHistory` answer per pane. Kept apart from the logs
+    /// above because a history page is not part of the output stream.
+    history_pages: BTreeMap<String, Vec<u8>>,
     /// Highest terminal generation delivered per pane. A hide has to declare
     /// the generation the client has actually applied, or the host replays
     /// output the client already has.
@@ -206,6 +210,11 @@ impl Observations {
             }
         }
         if let Some(terminal) = &event.terminal {
+            if kind == v1::EventKind::TerminalHistory {
+                self.history_pages
+                    .insert(terminal.pane_id.clone(), terminal.data.clone());
+                return;
+            }
             *self
                 .pane_output_bytes
                 .entry(terminal.pane_id.clone())
@@ -2514,6 +2523,10 @@ struct PaneParity {
     styled_cells_tmux: usize,
     text_diffs: Vec<serde_json::Value>,
     attribute_diffs: Vec<String>,
+    /// The same delivered bytes through `alacritty_terminal`, against tmux's
+    /// capture read without a parser. Reported beside the vt100 result, and
+    /// gated separately by the lane script.
+    engine: vt_engine::EngineParity,
 }
 
 impl PaneParity {
@@ -2535,6 +2548,7 @@ impl PaneParity {
             "styledCellsTmux": self.styled_cells_tmux,
             "textDiffs": self.text_diffs,
             "attributeDiffs": self.attribute_diffs,
+            "alacritty": self.engine.to_json(),
         })
     }
 }
@@ -2750,6 +2764,21 @@ struct ParityLane {
     quiet: Duration,
     panes: Vec<String>,
     points: BTreeMap<String, serde_json::Value>,
+    width: WidthLane,
+}
+
+/// The alacritty side of the lane's verdicts, for the width-fixture pane and
+/// the roll-ups the report is written from. It sits apart from `points`, whose
+/// shape and meaning belong to the vt100 gate.
+#[derive(Default)]
+struct WidthLane {
+    pane: String,
+    /// `point -> { delivered, live }`, each a width-pane comparison.
+    results: BTreeMap<String, serde_json::Value>,
+    /// `class -> row verdicts`, one per fixture row per comparison.
+    classes: BTreeMap<String, Vec<serde_json::Value>>,
+    /// Every disagreement, deduplicated, with where it was seen.
+    divergences: BTreeMap<String, serde_json::Value>,
 }
 
 impl ParityLane {
@@ -2777,6 +2806,186 @@ impl ParityLane {
         Ok(())
     }
 
+    /// The width pane at one quiesce point, twice: as the recovery left it
+    /// (a seed, built from tmux's capture), and after a repaint the pane writes
+    /// live (the fixture's own bytes). The engine receives different bytes in
+    /// each, and only the first can hide a width disagreement in its text.
+    fn record_width(&mut self, client: &mut PerfClient, point: &str) -> Result<()> {
+        let delivered = self.compare_width(client, point, "delivered")?;
+        let width = self.width.pane.clone();
+        let before = client.obs.output_bytes(&width);
+        client.input(&width, b"r")?;
+        let repainted = client.pump_until(Instant::now() + Duration::from_secs(5), |obs, _| {
+            obs.output_bytes(&width) > before
+        })?;
+        ensure!(repainted, "width fixture never repainted at {point}");
+        let live = self.compare_width(client, point, "live")?;
+        self.width.results.insert(
+            point.into(),
+            json!({ "delivered": delivered, "live": live }),
+        );
+        Ok(())
+    }
+
+    fn compare_width(
+        &mut self,
+        client: &mut PerfClient,
+        point: &str,
+        path: &str,
+    ) -> Result<serde_json::Value> {
+        let pane = self.width.pane.clone();
+        let quiesced = quiesce(client, &pane, self.quiet, Duration::from_secs(20))?;
+        let (delivered, capture) = self.stable_sides(client, &pane, point)?;
+        let (rows, columns) = tmux_pane_size(&self.tmux_socket, &pane)?;
+        let term = vt_engine::replay(&delivered, rows as usize, columns as usize);
+        let truth = vt_engine::parse_capture(&capture, rows as usize);
+        let comparison_parser = render_screen(&delivered, rows, columns);
+        let parity = vt_engine::compare_screen(&term, &truth, Some(comparison_parser.screen()));
+
+        let stem = format!("{point}-width-{path}");
+        fs::write(
+            self.artifacts.join(format!("{stem}-delivered.bin")),
+            &delivered,
+        )?;
+        fs::write(self.artifacts.join(format!("{stem}-capture.bin")), &capture)?;
+
+        let seen_at = format!("{point}/{path}");
+        for verdict in &parity.fixture_rows {
+            self.width
+                .classes
+                .entry(verdict.class.to_owned())
+                .or_default()
+                .push(json!({
+                    "seenAt": seen_at,
+                    "row": verdict.row,
+                    "alacrittyPass": verdict.engine_pass,
+                    "vt100Pass": verdict.vt100_pass,
+                }));
+        }
+        for diff in &parity.diffs {
+            let key = format!(
+                "{} {} {}",
+                diff["row"], diff["engine"], diff["anchorColumnEngine"]
+            );
+            let entry = self.width.divergences.entry(key).or_insert_with(|| {
+                let mut entry = diff.clone();
+                entry["seenAt"] = json!([]);
+                entry
+            });
+            entry["seenAt"]
+                .as_array_mut()
+                .expect("seenAt is created as an array")
+                .push(json!(seen_at));
+        }
+
+        let mut result = parity.to_json();
+        result["quiesced"] = json!(quiesced);
+        result["rows"] = json!(rows);
+        result["columns"] = json!(columns);
+        result["deliveredBytes"] = json!(delivered.len());
+        Ok(result)
+    }
+
+    /// The two sides of a comparison, proven to describe the same moment: take
+    /// the delivered log, ask tmux, then check nothing arrived in between; if
+    /// something did, wait for quiet and take both again.
+    fn stable_sides(
+        &self,
+        client: &mut PerfClient,
+        pane_id: &str,
+        point: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        let mut attempt = 0;
+        loop {
+            let before = client.obs.output_bytes(pane_id);
+            let delivered = client
+                .obs
+                .pane_full_logs
+                .get(pane_id)
+                .cloned()
+                .unwrap_or_default();
+            let capture = capture_screen(&self.tmux_socket, pane_id)?;
+            // Bytes tmux had already emitted are still in flight; give them a
+            // moment to land before believing the pane held still.
+            client.pump_until(Instant::now() + Duration::from_millis(150), |_, _| false)?;
+            if client.obs.output_bytes(pane_id) == before {
+                return Ok((delivered, capture));
+            }
+            attempt += 1;
+            ensure!(
+                attempt < 6,
+                "pane {pane_id} never held still long enough to compare at {point}"
+            );
+            quiesce(client, pane_id, self.quiet, Duration::from_secs(20))?;
+        }
+    }
+
+    /// The alacritty verdict for one quiesce point, over every comparison taken
+    /// there: the shell and agent panes, and both width-pane passes.
+    fn engine_point(&self, point: &str) -> serde_json::Value {
+        let mut comparisons: Vec<(String, serde_json::Value)> = self.points[point]["panes"]
+            .as_array()
+            .map(|panes| {
+                panes
+                    .iter()
+                    .map(|pane| {
+                        (
+                            pane["pane"].as_str().unwrap_or_default().to_owned(),
+                            pane["alacritty"].clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(width) = self.width.results.get(point) {
+            comparisons.push(("widthDelivered".into(), width["delivered"].clone()));
+            comparisons.push(("widthLive".into(), width["live"].clone()));
+        }
+        let total = |key: &str| {
+            comparisons
+                .iter()
+                .map(|(_, comparison)| comparison[key].as_u64().unwrap_or_default())
+                .sum::<u64>()
+        };
+        json!({
+            "pass": comparisons.len() == 4
+                && comparisons.iter().all(|(_, comparison)| comparison["pass"] == true),
+            "textMismatchRows": total("textMismatchRows"),
+            "attributeMismatchCells": total("attributeMismatchCells"),
+            "anchorMismatchRows": total("anchorMismatchRows"),
+            "comparisons": comparisons
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+        })
+    }
+
+    /// One line per fixture class, the table the report is written from.
+    fn class_summary(&self) -> serde_json::Value {
+        self.width
+            .classes
+            .iter()
+            .map(|(class, rows)| {
+                let passing = |key: &str| rows.iter().filter(|row| row[key] == true).count();
+                let failed_at = rows
+                    .iter()
+                    .filter(|row| row["alacrittyPass"] != true)
+                    .filter_map(|row| row["seenAt"].as_str())
+                    .collect::<BTreeSet<_>>();
+                (
+                    class.clone(),
+                    json!({
+                        "comparisons": rows.len(),
+                        "alacrittyPass": passing("alacrittyPass"),
+                        "vt100Pass": passing("vt100Pass"),
+                        "pass": passing("alacrittyPass") == rows.len(),
+                        "alacrittyFailedAt": failed_at,
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    }
+
     fn compare_pane(
         &self,
         client: &mut PerfClient,
@@ -2797,32 +3006,7 @@ impl ParityLane {
             })
             .unwrap_or((0, 0));
 
-        // The two sides must describe the same moment. Take the delivered log,
-        // ask tmux, then prove nothing arrived in between; if something did,
-        // wait for quiet and take both again.
-        let mut attempt = 0;
-        let (delivered, capture) = loop {
-            let before = client.obs.output_bytes(pane_id);
-            let delivered = client
-                .obs
-                .pane_full_logs
-                .get(pane_id)
-                .cloned()
-                .unwrap_or_default();
-            let capture = capture_screen(&self.tmux_socket, pane_id)?;
-            // Bytes tmux had already emitted are still in flight; give them a
-            // moment to land before believing the pane held still.
-            client.pump_until(Instant::now() + Duration::from_millis(150), |_, _| false)?;
-            if client.obs.output_bytes(pane_id) == before {
-                break (delivered, capture);
-            }
-            attempt += 1;
-            ensure!(
-                attempt < 6,
-                "pane {pane_id} never held still long enough to compare at {point}"
-            );
-            quiesce(client, pane_id, self.quiet, Duration::from_secs(20))?;
-        };
+        let (delivered, capture) = self.stable_sides(client, pane_id, point)?;
 
         let delivered_parser = render_screen(&delivered, rows, columns);
         let delivered_screen = delivered_parser.screen();
@@ -2872,6 +3056,12 @@ impl ParityLane {
             truth_rows.push(truth_text);
         }
 
+        let engine = vt_engine::compare_screen(
+            &vt_engine::replay(&delivered, rows as usize, columns as usize),
+            &vt_engine::parse_capture(&capture, rows as usize),
+            None,
+        );
+
         let stem = format!("{point}-{}", pane_id.trim_start_matches('%'));
         fs::write(
             self.artifacts.join(format!("{stem}-delivered.bin")),
@@ -2902,13 +3092,17 @@ impl ParityLane {
             styled_cells_tmux,
             text_diffs,
             attribute_diffs,
+            engine,
         })
     }
 }
 
-/// Attaches, and waits until every watched pane has content the desktop could
-/// paint. The full byte log is armed before the attach, because the attach is
-/// what produces the seeds it has to capture.
+/// Attaches, and asks for every watched pane's screen the way the desktop's
+/// `TerminalPane` does when it mounts. The explicit request is required: the
+/// host mounts a subscribed connection's panes hidden before this attach
+/// arrives, a hidden pane's seed is stored rather than emitted, and an attach
+/// of panes already mounted captures nothing new. The full byte log is armed
+/// first, because the seeds are what it has to capture.
 fn attach_and_seed(
     client: &mut PerfClient,
     snapshot: &v1::Snapshot,
@@ -2919,11 +3113,9 @@ fn attach_and_seed(
         client.obs.full_log_panes.insert(pane.clone());
     }
     client.attach(snapshot, session_id)?;
-    let wanted = panes.to_vec();
-    let seeded = client.pump_until(Instant::now() + Duration::from_secs(15), |obs, _| {
-        wanted.iter().all(|pane| obs.paintable_panes.contains(pane))
-    })?;
-    ensure!(seeded, "fixture panes were never seeded after attach");
+    for pane in panes {
+        request_seed(client, pane)?;
+    }
     Ok(())
 }
 
@@ -2974,10 +3166,11 @@ fn run_vt_parity(
         .collect();
     panes.sort_by_key(|pane| pane[1..].parse::<u64>().unwrap_or(u64::MAX));
     ensure!(
-        panes.len() >= 2,
-        "fixture needs a shell pane and an agent pane"
+        panes.len() >= 3,
+        "fixture needs a shell pane, an agent pane and a width pane"
     );
-    let (shell, agent) = (panes[0].clone(), panes[1].clone());
+    let (shell, agent, width) = (panes[0].clone(), panes[1].clone(), panes[2].clone());
+    let all_panes = panes.clone();
 
     let mut lane = ParityLane {
         tmux_socket,
@@ -2985,6 +3178,10 @@ fn run_vt_parity(
         quiet: Duration::from_millis(quiet_millis),
         panes: vec![shell.clone(), agent.clone()],
         points: BTreeMap::new(),
+        width: WidthLane {
+            pane: width.clone(),
+            ..Default::default()
+        },
     };
 
     // The agent fixture is held still for every recovery and the comparison
@@ -2995,9 +3192,12 @@ fn run_vt_parity(
     let mut writer = FixtureHold::new(hold_file);
     writer.hold()?;
 
-    // 1. seed — the screens the attach itself produced.
-    attach_and_seed(&mut client, &initial, &target.id, &lane.panes)?;
+    // 1. seed — the first screens after the attach, asked for the way the
+    //    desktop asks when a pane mounts (see `attach_and_seed`).
+    attach_and_seed(&mut client, &initial, &target.id, &all_panes)?;
     lane.record(&mut client, "seed")?;
+    lane.record_width(&mut client, "seed")?;
+    let wrap_check = history_wrap_check(&mut client, &lane.tmux_socket, &width)?;
 
     // 2. hideReveal — the pane repaints several times while the host is not
     //    delivering it, then the reveal has to hand back a current screen.
@@ -3017,6 +3217,7 @@ fn run_vt_parity(
         );
     }
     ensure!(hidden, "hide of {agent} was never acknowledged");
+    hide_width_and_repaint(&mut client, &lane.tmux_socket, &width)?;
     // Repaint several times while hidden, then go idle again before the reveal.
     writer.release()?;
     client.pump_until(Instant::now() + Duration::from_millis(3500), |_, _| false)?;
@@ -3024,7 +3225,9 @@ fn run_vt_parity(
     // in wall-clock time, the same as before the attach.
     writer.hold()?;
     client.reveal_and_await_seed(&agent, Instant::now() + Duration::from_secs(15))?;
+    reveal_width(&mut client, &width)?;
     lane.record(&mut client, "hideReveal")?;
+    lane.record_width(&mut client, "hideReveal")?;
 
     // 3. pauseContinue — the P12-U001 shape: flood the shell pane and freeze the
     //    daemon until tmux's pause-after engages, then let both panes resume.
@@ -3044,39 +3247,48 @@ fn run_vt_parity(
     // Nothing may reach the client while the daemon is frozen. If this is not
     // ~0 the stall did not take, and the pause round proved nothing.
     let stall_delivered = client.obs.output_bytes(&shell) - flood_started_at;
+    // Armed before the daemon runs again, so a recovery that lands in the first
+    // moments after the restore still counts.
+    let paused_before = client.obs.event_count(v1::EventKind::TerminalFlowPaused);
+    client.obs.seeded_panes.remove(&shell);
+    client.obs.seeded_panes.remove(&agent);
     run_script(restore_script)?;
     let shell_before = client.obs.output_bytes(&shell);
     let flood_resumed = client.pump_until(Instant::now() + Duration::from_secs(15), |obs, _| {
         obs.output_bytes(&shell) > shell_before
     })?;
     let interrupt_error = client.input(&shell, b"\x03").err().map(|e| e.to_string());
+    // Waits for the recovery itself: "no new bytes" is also what a pane looks
+    // like before the host has heard about the pause. Measured in two steps.
+    // First with nothing else printing, the state an idle user is in; on tmux
+    // 3.8 that recovery has been seen not to arrive. Then after a repaint of
+    // the width pane, which is output on the same control client and a pane
+    // this round does not compare until afterwards. The lane script gates
+    // each answer separately.
+    let (recovered_shell, recovered_agent) = (shell.clone(), agent.clone());
+    let recovered = |obs: &Observations| {
+        obs.seeded_panes.contains(&recovered_shell) && obs.seeded_panes.contains(&recovered_agent)
+    };
+    let recovered_without_output = client
+        .pump_until(Instant::now() + Duration::from_secs(5), |obs, _| {
+            recovered(obs)
+        })?;
+    client.input(&width, b"r")?;
+    let pause_recovered = client
+        .pump_until(Instant::now() + Duration::from_secs(15), |obs, _| {
+            recovered(obs)
+        })?;
+    let paused_after_restore =
+        client.obs.event_count(v1::EventKind::TerminalFlowPaused) - paused_before;
     lane.record(&mut client, "pauseContinue")?;
+    lane.record_width(&mut client, "pauseContinue")?;
 
     // 4. recovery — the pane-scoped reseed the desktop asks for when it has lost
     //    confidence in a pane. The fresh seed must land on a current screen.
-    client.obs.seeded_panes.remove(&agent);
-    let seed_request = client.send(
-        v1::Operation::RequestTerminalSeed,
-        v1::Request {
-            scope: agent.clone(),
-            ..Default::default()
-        },
-    )?;
-    let reseeded = client.pump_until(
-        Instant::now() + Duration::from_secs(15),
-        |obs, responses| obs.seeded_panes.contains(&agent) && responses.contains_key(&seed_request),
-    )?;
-    let seed_response = client.responses.remove(&seed_request);
-    if let Some(response) = seed_response {
-        ensure!(
-            response.ok,
-            "seed request rejected: {} {}",
-            response.error_code,
-            response.display_message
-        );
-    }
-    ensure!(reseeded, "pane {agent} was never reseeded on request");
+    request_seed(&mut client, &agent)?;
+    request_seed(&mut client, &width)?;
     lane.record(&mut client, "recovery")?;
+    lane.record_width(&mut client, "recovery")?;
 
     // 5. reconnect — drop the bridge and rebuild the whole client view from a
     //    fresh subscribe + attach, which is what the desktop does after a
@@ -3089,8 +3301,9 @@ fn run_vt_parity(
     drop(client);
     let mut client = PerfClient::connect(&transport, Duration::from_secs(2))?;
     let reconnected = client.subscribe()?;
-    attach_and_seed(&mut client, &reconnected, &target.id, &lane.panes)?;
+    attach_and_seed(&mut client, &reconnected, &target.id, &all_panes)?;
     lane.record(&mut client, "reconnect")?;
+    lane.record_width(&mut client, "reconnect")?;
 
     let mut resync_details = carried_details;
     resync_details.extend(client.obs.resync_details.clone());
@@ -3105,6 +3318,17 @@ fn run_vt_parity(
         .map(|point| point["attributeMismatchCells"].as_u64().unwrap_or_default())
         .sum();
 
+    let engine_points = [
+        "seed",
+        "hideReveal",
+        "pauseContinue",
+        "recovery",
+        "reconnect",
+    ]
+    .into_iter()
+    .map(|point| (point.to_owned(), lane.engine_point(point)))
+    .collect::<serde_json::Map<_, _>>();
+
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -3114,6 +3338,9 @@ fn run_vt_parity(
             "shellPane": shell,
             "agentPane": agent,
             "floodResumedAfterPause": flood_resumed,
+            "pauseRecoveredWithoutOtherOutput": recovered_without_output,
+            "pauseRecoverySeeded": pause_recovered,
+            "panesPausedAfterRestore": paused_after_restore,
             "bytesDeliveredDuringStall": stall_delivered,
             "interruptError": interrupt_error,
             "eventCounts": client.obs.event_counts.clone(),
@@ -3126,9 +3353,118 @@ fn run_vt_parity(
             "resyncDetails": resync_details,
             "sequenceGapObserved": carried_gap || client.obs.gap,
             "artifacts": artifacts.display().to_string(),
+            "alacritty": {
+                "engine": "alacritty_terminal 0.26.0",
+                "widthPane": width,
+                "quiescePoints": engine_points,
+                "fixtureClasses": lane.class_summary(),
+                "divergences": lane.width.divergences.values().cloned().collect::<Vec<_>>(),
+                "wrapCheck": wrap_check,
+            },
         }))?
     );
     Ok(())
+}
+
+/// Hides the width pane and repaints it while hidden, so the reveal has to hand
+/// back a current screen rather than the one the renderer still holds.
+fn hide_width_and_repaint(client: &mut PerfClient, tmux_socket: &str, width: &str) -> Result<()> {
+    let (rows, columns) = tmux_pane_size(tmux_socket, width)?;
+    let screen = serialized_screen(client, width, rows, columns);
+    let hide_id = client.hide_with_screen(width, screen)?;
+    let hidden = client.pump_until(Instant::now() + Duration::from_secs(5), |_, responses| {
+        responses.contains_key(&hide_id)
+    })?;
+    if let Some(response) = client.responses.remove(&hide_id) {
+        ensure!(
+            response.ok,
+            "hide rejected: {} {}",
+            response.error_code,
+            response.display_message
+        );
+    }
+    ensure!(hidden, "hide of {width} was never acknowledged");
+    client.input(width, b"r")
+}
+
+/// Reveals the width pane and waits for the resource to say it is visible:
+/// the pane was seeded long ago, so "paintable" alone does not cover this one.
+fn reveal_width(client: &mut PerfClient, width: &str) -> Result<()> {
+    client.obs.visible_resources.remove(width);
+    client.reveal_and_await_seed(width, Instant::now() + Duration::from_secs(15))?;
+    let visible = client.pump_until(Instant::now() + Duration::from_secs(15), |obs, _| {
+        obs.visible_resources.contains(width)
+    })?;
+    ensure!(visible, "width pane {width} never became visible again");
+    Ok(())
+}
+
+/// The pane-scoped reseed the desktop asks for when it has lost confidence in
+/// a pane.
+fn request_seed(client: &mut PerfClient, pane: &str) -> Result<()> {
+    client.obs.seeded_panes.remove(pane);
+    let seed_request = client.send(
+        v1::Operation::RequestTerminalSeed,
+        v1::Request {
+            scope: pane.to_owned(),
+            ..Default::default()
+        },
+    )?;
+    let reseeded = client.pump_until(
+        Instant::now() + Duration::from_secs(15),
+        |obs, responses| obs.seeded_panes.contains(pane) && responses.contains_key(&seed_request),
+    )?;
+    let seed_response = client.responses.remove(&seed_request);
+    if let Some(response) = seed_response {
+        ensure!(
+            response.ok,
+            "seed request rejected: {} {}",
+            response.error_code,
+            response.display_message
+        );
+    }
+    ensure!(reseeded, "pane {pane} was never reseeded on request");
+    Ok(())
+}
+
+/// Asks the host for the rows above the width pane's screen, the same request
+/// the desktop's pager makes, and runs the wrap check on the real answer.
+fn history_wrap_check(
+    client: &mut PerfClient,
+    tmux_socket: &str,
+    width: &str,
+) -> Result<serde_json::Value> {
+    let (_, columns) = tmux_pane_size(tmux_socket, width)?;
+    client.obs.history_pages.remove(width);
+    let request = client.send(
+        v1::Operation::RequestTerminalHistory,
+        v1::Request {
+            scope: width.to_owned(),
+            terminal_history_lines: 200,
+            terminal_history_skip_lines: 0,
+            ..Default::default()
+        },
+    )?;
+    let answered = client.pump_until(
+        Instant::now() + Duration::from_secs(10),
+        |obs, responses| obs.history_pages.contains_key(width) && responses.contains_key(&request),
+    )?;
+    let response = client.responses.remove(&request);
+    if let Some(response) = response {
+        ensure!(
+            response.ok,
+            "history request rejected: {} {}",
+            response.error_code,
+            response.display_message
+        );
+    }
+    ensure!(answered, "history page for {width} never arrived");
+    let page = client.obs.history_pages.remove(width).unwrap_or_default();
+    Ok(vt_engine::wrap_check(
+        &page,
+        &vt_engine::history_block(columns as usize),
+        columns as usize,
+    ))
 }
 
 /// How long the flood probe should run. The exit criteria ask for a 60 s flood
@@ -3152,6 +3488,10 @@ fn value_after(arguments: &[String], name: &str) -> Result<String> {
 fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let scenario = arguments.first().cloned().unwrap_or_default();
+    // A pane program rather than a probe: it talks to its tty, not to a host.
+    if scenario == "vt-width-fixture" {
+        return vt_engine::run_width_fixture();
+    }
     let transport = match value_after(&arguments, "--transport")?.as_str() {
         "local" => Transport::Local {
             host_binary: value_after(&arguments, "--host-binary")?,

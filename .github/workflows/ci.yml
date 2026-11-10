@@ -8,7 +8,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'gpui/**']
   workflow_call:
 
 permissions:
@@ -132,6 +132,19 @@ jobs:
         run: |
           pnpm --filter @muxflow/mobile protocol:check
           pnpm --filter @muxflow/mobile webview:check
+
+  # Keeps GPL and AGPL code out of the app; see deny.toml. Only the license
+  # check runs. It reads Cargo.lock and the registry, so no build is needed.
+  licenses:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny --locked check licenses
 
   # The macOS-only code paths (notifications, NSWorkspace, /private/var and
   # socket-path limits) have no other coverage.
