@@ -1,0 +1,99 @@
+# CI for the disposable GPUI feasibility spike (spikes/gpui, docs/gpui-migration.md
+# S6 and S7). Kept apart from ci.yml so the shipping checks are untouched and
+# this file can be deleted together with the spike.
+name: gpui-spike
+
+on:
+  pull_request:
+    paths:
+      - spikes/gpui/**
+      - .github/workflows/gpui-spike.yml
+      - crates/tmux-control/**
+      - deny.toml
+      - rust-toolchain.toml
+  push:
+    branches: [main, 'gpui/**']
+    paths:
+      - spikes/gpui/**
+      - .github/workflows/gpui-spike.yml
+      - crates/tmux-control/**
+      - deny.toml
+      - rust-toolchain.toml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpui-spike-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # Build: the X11 and xkb development files. Run: Xvfb, ImageMagick for the
+      # capture, and Mesa's software Vulkan (lavapipe), since the runner has no GPU.
+      - name: Install system packages
+        timeout-minutes: 14
+        run: >-
+          .github/scripts/apt-install.sh pkg-config libxkbcommon-x11-dev libwayland-dev
+          libfontconfig-dev libvulkan1 mesa-vulkan-drivers xvfb imagemagick
+      # Installs the toolchain pinned in rust-toolchain.toml (1.97.1).
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: spikes/gpui
+      - name: Point Vulkan at lavapipe only
+        run: echo "VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)" >> "$GITHUB_ENV"
+
+      - name: Build the spike workspace
+        working-directory: spikes/gpui
+        run: cargo build --locked --workspace --all-targets
+      # Includes the headless GPUI test (shared/tests/headless.rs): a real
+      # offscreen render, no display, that fails if the frame is blank.
+      - name: Test
+        working-directory: spikes/gpui
+        env:
+          SPIKE_FRAME_OUT: ${{ github.workspace }}/spike-frames/headless.png
+        run: |
+          mkdir -p "$(dirname "$SPIKE_FRAME_OUT")"
+          cargo test --locked --workspace
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: Licenses
+        run: cargo deny --manifest-path spikes/gpui/Cargo.toml --locked --config deny.toml check licenses
+      # The window path: a real X11 window under Xvfb, drawn by lavapipe.
+      - name: Capture a frame under Xvfb
+        run: >-
+          xvfb-run -a -s "-screen 0 1280x800x24"
+          bash spikes/gpui/ci-frame.sh spike-frames/xvfb.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-frames
+          path: spike-frames/
+          if-no-files-found: warn
+
+  # Compile check only: macOS is deferred in Phase 0 (docs/gpui-migration-agents.md).
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: spikes/gpui
+      - name: Build the spike workspace
+        working-directory: spikes/gpui
+        run: cargo build --locked --workspace

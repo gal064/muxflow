@@ -1,6 +1,8 @@
 mod app_state;
 mod connection;
 mod external_links;
+#[cfg(test)]
+mod golden_paths;
 mod incidents;
 mod linux_window;
 mod macos_window;
