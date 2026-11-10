@@ -370,7 +370,7 @@ impl TerminalClient {
         }
     }
 
-    /// Queues a keystroke and returns.
+    /// Queues keystrokes, or a paste when `paste` is set, and returns.
     ///
     /// Waiting for the host's ack put a full round trip — an entire RTT over
     /// SSH — on the main thread of every keypress, and the ack carried no
@@ -379,7 +379,7 @@ impl TerminalClient {
     /// the queue is local and its answer is immediate, while a host-side
     /// rejection arrives as a pane-scoped recovery event on the event stream
     /// and a transport failure tears down the bridge visibly.
-    fn enqueue_input(&self, pane_id: String, data: Vec<u8>) -> Result<(), String> {
+    fn enqueue_input(&self, pane_id: String, data: Vec<u8>, paste: bool) -> Result<(), String> {
         if self.stop_signal.is_stopped() || !self.ready.load(Ordering::Acquire) {
             return Err(
                 "terminal bridge is disconnected or reconciling; input was not queued".into(),
@@ -413,6 +413,7 @@ impl TerminalClient {
                         // The accepted path only: refused bytes never queued,
                         // so they have no queue time to measure.
                         enqueued_at: Instant::now(),
+                        paste,
                     })
                     .map_err(|error| match error {
                         mpsc::TrySendError::Full(_) => {
@@ -1008,7 +1009,7 @@ pub fn send_terminal_input(
         return Err("terminal input batch exceeds 1 MiB; retry with a smaller batch".into());
     }
     let client = get_client(clients, &client_id)?;
-    client.enqueue_input(pane_id, data.into_bytes())
+    client.enqueue_input(pane_id, data.into_bytes(), false)
 }
 
 /// Binary terminal input, carried as a raw IPC body.
@@ -1024,7 +1025,22 @@ pub fn send_terminal_input_bytes(body: &[u8], clients: &TerminalClients) -> Resu
         return Err("terminal input batch exceeds 1 MiB".into());
     }
     let client = get_client(clients, client_id)?;
-    client.enqueue_input(pane_id.to_owned(), data.to_vec())
+    client.enqueue_input(pane_id.to_owned(), data.to_vec(), false)
+}
+
+/// A paste, in order with the keys around it. The host delivers it through
+/// tmux's paste path, which brackets it iff the pane's program asked: tmux
+/// tracks that mode itself, where a client's copy of it can be stale (tmux 3.4
+/// and older cannot report it in a seed).
+pub fn send_terminal_paste(
+    client_id: &str,
+    pane_id: &str,
+    data: Vec<u8>,
+    clients: &TerminalClients,
+) -> Result<(), String> {
+    validate_tmux_id(pane_id, '%')?;
+    let client = get_client(clients, client_id)?;
+    client.enqueue_input(pane_id.to_owned(), data, true)
 }
 
 /// `u16` client-id length, client id, `u16` pane-id length, pane id, payload.
