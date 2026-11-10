@@ -44,7 +44,9 @@ Root continues through Phases 1 to 6, and stops and notifies the owner only if:
 
 ## Machine limits
 
-- At most **3 agents building Rust at once**, each with `CARGO_BUILD_JOBS=5`.
+- **One cargo command at a time** across all agents: put `~/dev/muxflow-gpui-tools/locked` first
+  on `PATH`. Its `cargo` waits on a shared lock and builds with line tables only. Three parallel
+  builds ran the machine out of memory. Run built binaries directly, never through `cargo run`.
 - Each worktree has its own `target`. Root deletes it after merging.
 - A parallel task's QA must be headless and isolated: its own tmux socket
   (`tmux -L muxflow-qa-<task>`) and its own `XDG_RUNTIME_DIR`. Workers must not touch
