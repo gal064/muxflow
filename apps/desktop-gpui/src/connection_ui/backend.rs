@@ -73,6 +73,14 @@ pub trait TerminalBackend: Send + Sync {
     ) -> BoxFuture<'static, Result<(), String>>;
     fn send_input(&self, client_id: String, pane_id: String, bytes: Vec<u8>) -> Result<(), String>;
     fn record_incident(&self, kind: &str, detail: Value);
+    /// The link's delivery state, as `terminal_link_stats` reports it.
+    fn link_stats(&self, _client_id: &str) -> Option<Value> {
+        None
+    }
+    /// Drains the input queue's latency window: `bucketCounts` and `maxMs`.
+    fn input_latency_stats(&self, _client_id: &str) -> Option<Value> {
+        None
+    }
 }
 
 pub trait ConnectionBackend: TerminalBackend {
@@ -217,6 +225,16 @@ impl TerminalBackend for NativeBackend {
         // Must stay harmless: a journal that cannot be written is never a
         // reason the app misbehaves.
         let _ = record_incident(&self.journal, Value::Object(record).to_string());
+    }
+
+    fn link_stats(&self, client_id: &str) -> Option<Value> {
+        let stats = connection::terminal_link_stats(client_id.to_owned(), &self.clients).ok()?;
+        serde_json::to_value(stats).ok()
+    }
+
+    fn input_latency_stats(&self, client_id: &str) -> Option<Value> {
+        let stats = connection::input_latency_stats(client_id.to_owned(), &self.clients)?;
+        serde_json::to_value(stats).ok()
     }
 }
 
