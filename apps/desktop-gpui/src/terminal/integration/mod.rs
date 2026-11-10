@@ -71,10 +71,8 @@ pub struct PaneIntegration {
 /// Text into the pane as a paste. Every paste here, text, paths or a staged
 /// image, leaves through this one call.
 ///
-/// How text becomes bytes, bracketed paste included, belongs to the input
-/// module (T3.4), and reaches the program through the pane's `send_input`.
-/// Until the two branches meet, the text goes as typed, which shells and
-/// agents accept for a path.
+/// The input module sends it through the host's paste path, which brackets
+/// it iff the program asked.
 pub fn paste_text(
     pane: &mut TerminalPane,
     text: String,
