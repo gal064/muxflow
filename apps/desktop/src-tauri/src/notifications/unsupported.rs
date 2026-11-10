@@ -1,6 +1,8 @@
 use phase0_core::NotificationRoute;
 use serde::Serialize;
-use tauri::AppHandle;
+use std::{path::PathBuf, sync::Arc};
+
+use super::ActivationSink;
 
 #[derive(Clone)]
 pub struct NativeNotifications;
@@ -13,7 +15,7 @@ pub struct NotificationReceipt {
 }
 
 impl NativeNotifications {
-    pub fn new(_app: AppHandle) -> Self {
+    pub fn new(_activation: Arc<dyn ActivationSink>, _data_dir: Option<PathBuf>) -> Self {
         Self
     }
 

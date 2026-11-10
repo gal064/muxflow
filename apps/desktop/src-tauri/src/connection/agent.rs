@@ -2,7 +2,6 @@ use std::sync::atomic::Ordering;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tauri::State;
 use tmux_agent_protocol::v1;
 
 use super::{TerminalClients, get_client};
@@ -47,14 +46,13 @@ pub struct AgentCommand {
 
 /// Async so an agent launch or hook review never freezes the WebView's main
 /// thread for the length of the host round trip.
-#[tauri::command]
 pub async fn agent_request(
     client_id: String,
     command: AgentCommand,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<Value, String> {
     let (operation, action, hook_management) = operation_from_name(&command.operation)?;
-    let client = get_client(&clients, &client_id)?;
+    let client = get_client(clients, &client_id)?;
     let requested_epoch = parse_u64("connectionEpoch", &command.connection_epoch)?;
     let current_epoch = client.terminal_epoch.load(Ordering::Acquire);
     if requested_epoch == 0 || requested_epoch != current_epoch {
@@ -89,7 +87,7 @@ pub async fn agent_request(
         }),
         ..Default::default()
     };
-    let response = tauri::async_runtime::spawn_blocking(move || client.request(request))
+    let response = crate::platform::spawn_blocking(move || client.request(request))
         .await
         .map_err(|error| format!("agent request task failed: {error}"))??;
     response

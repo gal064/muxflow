@@ -22,12 +22,10 @@ use std::{
 };
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+
+use crate::platform::EventSink;
 
 use super::{ConnectionSpec, acquire_control_master, transport::ssh_base};
-
-/// Tells the renderer to re-read [`ports_list`]; the payload is the profile id.
-const CHANGED_EVENT: &str = "port-forwards-changed";
 
 /// How `ssh -v` reports our listener, bound or not. Only our own port counts:
 /// the host's ssh config may add `LocalForward`s that ssh also binds (or fails
@@ -447,31 +445,33 @@ fn detect_ports(connection: &ConnectionSpec) -> Result<Vec<DetectedPort>, String
     )))
 }
 
-fn emitter(app: AppHandle) -> Notify {
+fn emitter(changed: Arc<dyn EventSink>) -> Notify {
     Arc::new(move |profile_id: &str| {
-        let _ = app.emit(CHANGED_EVENT, profile_id);
+        let _ = changed.send_json(&profile_id);
     })
 }
 
-#[tauri::command]
 pub fn ports_forward(
-    app: AppHandle,
-    forwards: State<'_, PortForwards>,
+    changed: Arc<dyn EventSink>,
+    forwards: &PortForwards,
     connection: ConnectionSpec,
     remote_port: u16,
     local_port: u16,
 ) -> Result<(), String> {
     let (profile_id, target, config_path) = ssh_parts(&connection)?;
     let command = forward_command(target, config_path, remote_port, local_port);
-    forwards
-        .0
-        .start(profile_id, remote_port, local_port, command, emitter(app))
+    forwards.0.start(
+        profile_id,
+        remote_port,
+        local_port,
+        command,
+        emitter(changed),
+    )
 }
 
-#[tauri::command]
 pub fn ports_stop(
-    app: AppHandle,
-    forwards: State<'_, PortForwards>,
+    changed: Arc<dyn EventSink>,
+    forwards: &PortForwards,
     profile_id: String,
     remote_port: u16,
 ) {
@@ -479,25 +479,22 @@ pub fn ports_stop(
         .0
         .stop(|forward| forward.profile_id == profile_id && forward.remote_port == remote_port)
     {
-        emitter(app)(&profile_id);
+        emitter(changed)(&profile_id);
     }
 }
 
-#[tauri::command]
-pub fn ports_stop_host(app: AppHandle, forwards: State<'_, PortForwards>, profile_id: String) {
+pub fn ports_stop_host(changed: Arc<dyn EventSink>, forwards: &PortForwards, profile_id: String) {
     if forwards.0.stop(|forward| forward.profile_id == profile_id) {
-        emitter(app)(&profile_id);
+        emitter(changed)(&profile_id);
     }
 }
 
-#[tauri::command]
-pub fn ports_list(forwards: State<'_, PortForwards>) -> Vec<PortForward> {
+pub fn ports_list(forwards: &PortForwards) -> Vec<PortForward> {
     forwards.0.list()
 }
 
-#[tauri::command]
 pub async fn ports_detect(connection: ConnectionSpec) -> Result<Vec<DetectedPort>, String> {
-    tauri::async_runtime::spawn_blocking(move || detect_ports(&connection))
+    crate::platform::spawn_blocking(move || detect_ports(&connection))
         .await
         .map_err(|error| format!("port detection task failed: {error}"))?
 }
