@@ -1299,7 +1299,7 @@ pub struct TerminalLinkStats {
     acked_records: u64,
     ms_since_last_host_event: u64,
     /// Requests given up on after the response deadline, since this client started.
-    late_requests_total: u32,
+    pub late_requests_total: u32,
     /// Bytes and frames this link's reader has taken off the ssh stream since
     /// the connection started. Null unless the process is running a measured
     /// build with `ADE_PERF_LOG` set. The renderer's echo probe samples these

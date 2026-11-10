@@ -47,6 +47,7 @@ pub fn run() {
             gpui_kit::init(cx);
             fonts::register(cx);
             init(Core::load(), cx);
+            crate::connection_ui::start(cx).expect("load the saved host profiles");
             open_main_window(cx).expect("open the main window");
             cx.activate(true);
         });
