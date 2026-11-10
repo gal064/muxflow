@@ -1,30 +1,26 @@
-mod app_state;
 mod commands;
-mod connection;
-mod external_links;
 #[cfg(test)]
 mod golden_paths;
-mod incidents;
 mod linux_window;
 mod macos_window;
 #[cfg(target_os = "macos")]
 mod menu;
-mod notifications;
-mod perf_log;
-mod platform;
-mod power_events;
 mod tauri_adapters;
-mod update_check;
 
 use std::sync::Arc;
 
+use desktop_core::{
+    app_state, connection, incidents, notifications, platform, platform::AppPaths, power_events,
+    update_check,
+};
 use tauri::Manager;
 
-use platform::AppPaths;
 use tauri_adapters::{AppEvent, DESKTOP_RESUMED, TauriApp};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // One pool for the commands and the backend they call into.
+    tauri::async_runtime::set(platform::runtime_handle());
     let builder = tauri::Builder::default();
     // Only macOS: Tauri's default menu is itself macOS-gated, so replacing it
     // anywhere else would add a menu bar to a window that never had one.
