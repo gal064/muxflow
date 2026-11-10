@@ -109,9 +109,23 @@ enum Drag {
     Scrollbar,
 }
 
+/// The line under the pointer and its links, found once per line.
 struct Hover {
     line: Line,
+    /// What the line showed then. Output that changes it makes the links
+    /// stale, and the next move finds them again.
+    text: String,
+    links: Vec<Link>,
+    /// The link under the pointer: one of `links`, or an OSC 8 hyperlink.
     link: Option<Link>,
+}
+
+impl Hover {
+    /// The link under the pointer, unless output has changed its line since.
+    fn link<T>(&self, term: &Term<T>) -> Option<&Link> {
+        let current = links::line_text(term, self.line) == self.text;
+        self.link.as_ref().filter(|_| current)
+    }
 }
 
 /// This feature's state on a pane.
@@ -212,7 +226,7 @@ pub fn highlights(pane: &TerminalPane, term: &Term<Listener>) -> Vec<CellHighlig
             }
         }
     };
-    if let Some(link) = reading.hover.as_ref().and_then(|hover| hover.link.as_ref()) {
+    if let Some(link) = reading.hover.as_ref().and_then(|hover| hover.link(term)) {
         add(
             &SelectionRange::new(link.start, link.end, false),
             None,
@@ -497,25 +511,34 @@ fn hover(
         set_hover(pane, None, cx);
         return;
     };
-    // Moving within the link already found costs nothing more.
-    if let Some(current) = &pane.reading.hover
-        && current.line == point.line
-        && current
-            .link
-            .as_ref()
-            .is_some_and(|link| link.contains(point))
-    {
-        return;
-    }
-    let link = links::link_at(&*terminal.lock(), point);
-    set_hover(
-        pane,
-        Some(Hover {
+    let term = terminal.lock();
+    let text = links::line_text(&*term, point.line);
+    // Moving along a line reuses its links, found when the pointer arrived.
+    let mut hover = pane
+        .reading
+        .hover
+        .take()
+        .filter(|hover| hover.line == point.line && hover.text == text)
+        .unwrap_or_else(|| Hover {
             line: point.line,
-            link,
-        }),
-        cx,
-    );
+            links: links::text_links(&*term, point.line),
+            text,
+            link: None,
+        });
+    let previous = hover.link.take();
+    hover.link = links::hyperlink_at(&*term, point).or_else(|| {
+        hover
+            .links
+            .iter()
+            .find(|link| link.contains(point))
+            .cloned()
+    });
+    drop(term);
+    let changed = previous != hover.link;
+    pane.reading.hover = Some(hover);
+    if changed {
+        pane.repaint_all(cx);
+    }
 }
 
 fn set_hover(pane: &mut TerminalPane, hover: Option<Hover>, cx: &mut Context<TerminalPane>) {
@@ -840,7 +863,12 @@ impl Overlay {
     fn frame(&self, pane: &TerminalPane, palette: &Palette, window: &Window, cx: &App) -> Frame {
         let term_bg = rgb24(palette.term_bg);
         pane.reading.colors.set(Colors {
-            selection_bg: rgb24(palette.term_selection_bg),
+            // The light theme's is a translucent wash; a row has no alpha.
+            selection_bg: blend(
+                term_bg,
+                rgb24(palette.term_selection_bg),
+                palette.term_selection_bg.a,
+            ),
             selection_fg: rgb24(palette.term_selection_fg),
             // `searchDecorations`: translucent, so the glyph stays legible.
             found: blend(term_bg, rgb24(palette.chrome_dim), 0x66 as f32 / 255.),
@@ -862,11 +890,10 @@ impl Overlay {
                     .map(|(top, height)| (top, height, pane.metrics().scrollbar_width));
             }
         }
-        let on_link = pane
-            .reading
-            .hover
-            .as_ref()
-            .is_some_and(|hover| hover.link.is_some());
+        let on_link = match (pane.reading.hover.as_ref(), pane.terminal()) {
+            (Some(hover), Some(terminal)) => hover.link(&*terminal.lock()).is_some(),
+            _ => false,
+        };
         Frame {
             cursor: if on_link {
                 Some(CursorStyle::PointingHand)

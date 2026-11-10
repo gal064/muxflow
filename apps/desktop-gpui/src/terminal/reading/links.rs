@@ -6,7 +6,7 @@
 
 use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Boundary, Column, Point};
+use alacritty_terminal::index::{Boundary, Column, Line, Point};
 use gpui_kit::Modifiers;
 use terminal_interactions::{LinkKind, terminal_links_for_buffer_line};
 
@@ -37,12 +37,16 @@ impl Link {
 /// The link under `point`, if any. A hyperlink the program wrote wins over
 /// text that looks like one, as in xterm.
 pub fn link_at<T>(term: &Term<T>, point: Point) -> Option<Link> {
-    hyperlink_at(term, point).or_else(|| text_link_at(term, point))
+    hyperlink_at(term, point).or_else(|| {
+        text_links(term, point.line)
+            .into_iter()
+            .find(|link| link.contains(point))
+    })
 }
 
 /// The OSC 8 hyperlink under `point`: the run of cells around it that carry
 /// the same one. It opens like a web link, so only `http(s)` targets leave.
-fn hyperlink_at<T>(term: &Term<T>, point: Point) -> Option<Link> {
+pub fn hyperlink_at<T>(term: &Term<T>, point: Point) -> Option<Link> {
     let hyperlink = term.grid()[point].hyperlink()?;
     let same = |at: Point| term.grid()[at].hyperlink().as_ref() == Some(&hyperlink);
     let (mut start, mut end) = (point, point);
@@ -68,8 +72,9 @@ fn hyperlink_at<T>(term: &Term<T>, point: Point) -> Option<Link> {
     })
 }
 
-fn text_link_at<T>(term: &Term<T>, point: Point) -> Option<Link> {
-    let row = buffer_row(term, point.line);
+/// The links in the text of one line, which may begin or end on another.
+pub fn text_links<T>(term: &Term<T>, line: Line) -> Vec<Link> {
+    let row = buffer_row(term, line);
     let buffer = GridBuffer::new(term, row.saturating_sub(LINK_WINDOW)..=row + LINK_WINDOW);
     terminal_links_for_buffer_line(&buffer, term.columns(), row + 1)
         .into_iter()
@@ -88,7 +93,15 @@ fn text_link_at<T>(term: &Term<T>, point: Point) -> Option<Link> {
                 end: at(link.range.end),
             }
         })
-        .find(|link| link.contains(point))
+        .collect()
+}
+
+/// What a line shows, to tell whether output changed it.
+pub fn line_text<T>(term: &Term<T>, line: Line) -> String {
+    let row = &term.grid()[line];
+    (0..term.columns())
+        .map(|column| row[Column(column)].c)
+        .collect()
 }
 
 /// The deliberate modifier that opens a terminal link on each platform: a
