@@ -7,7 +7,6 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use uuid::Uuid;
 
 const APP_STATE_SCHEMA_VERSION: u32 = 1;
@@ -343,7 +342,7 @@ pub struct AppStateStore {
     recovery_error: Mutex<Option<String>>,
     /// Serialises `save_app_state`, whose file write and cache update are now
     /// separated by an await.
-    write_lock: tauri::async_runtime::Mutex<()>,
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl AppStateStore {
@@ -383,7 +382,7 @@ impl AppStateStore {
             path,
             value: Mutex::new(value),
             recovery_error: Mutex::new(recovery_error),
-            write_lock: tauri::async_runtime::Mutex::new(()),
+            write_lock: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -620,7 +619,7 @@ const UI_SCALES: [f64; 5] = [0.9, 1.0, 1.1, 1.2, 1.3];
 
 /// The zooms the interface may take: Settings offers 90% to 130%, and this
 /// leaves room around them without letting a bad value make the window unusable.
-fn valid_ui_scale(scale: f64) -> Result<f64, String> {
+pub(crate) fn valid_ui_scale(scale: f64) -> Result<f64, String> {
     if (0.5..=2.0).contains(&scale) {
         Ok(scale)
     } else {
@@ -630,17 +629,7 @@ fn valid_ui_scale(scale: f64) -> Result<f64, String> {
     }
 }
 
-/// Zooms the whole page, terminals included, the way a browser's zoom does:
-/// every length scales together, so fixed-height rows never clip their text.
-#[tauri::command]
-pub fn set_ui_scale(window: tauri::WebviewWindow, scale: f64) -> Result<(), String> {
-    window
-        .set_zoom(valid_ui_scale(scale)?)
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub fn load_app_state(store: State<'_, AppStateStore>) -> Result<PersistedAppState, String> {
+pub fn load_app_state(store: &AppStateStore) -> Result<PersistedAppState, String> {
     if let Some(error) = store.recovery_error.lock().unwrap().as_ref() {
         return Err(format!("Saved shell state requires recovery: {error}"));
     }
@@ -650,11 +639,7 @@ pub fn load_app_state(store: State<'_, AppStateStore>) -> Result<PersistedAppSta
 /// Async: shell state is saved on ordinary interactions such as opening a tab,
 /// and an atomic write plus fsync on the WebView's main thread stalls the whole
 /// UI for the length of that disk round trip.
-#[tauri::command]
-pub async fn save_app_state(
-    state: PersistedAppState,
-    store: State<'_, AppStateStore>,
-) -> Result<(), String> {
+pub async fn save_app_state(state: PersistedAppState, store: &AppStateStore) -> Result<(), String> {
     if store.recovery_error.lock().unwrap().is_some() {
         return Err("saved shell state is write-frozen until explicit reset".into());
     }
@@ -667,15 +652,14 @@ pub async fn save_app_state(
     let _serialized = store.write_lock.lock().await;
     let path = store.path.clone();
     let persisted = state.clone();
-    tauri::async_runtime::spawn_blocking(move || write_private_atomic(&path, &persisted))
+    crate::platform::spawn_blocking(move || write_private_atomic(&path, &persisted))
         .await
         .map_err(|error| format!("shell state write task failed: {error}"))??;
     *store.value.lock().unwrap() = state;
     Ok(())
 }
 
-#[tauri::command]
-pub fn reset_app_state(store: State<'_, AppStateStore>) -> Result<PersistedAppState, String> {
+pub fn reset_app_state(store: &AppStateStore) -> Result<PersistedAppState, String> {
     let default = PersistedAppState::default();
     if store.path.exists() {
         let backup = store

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use tmux_agent_protocol::v1;
 
 use super::{TerminalClients, get_client};
@@ -173,13 +172,12 @@ pub struct TmuxActionResultWire {
 /// Async so a create, split, or tab switch never freezes the WebView's main
 /// thread for the length of the host round trip. The user's report that creates
 /// take seconds was mostly this: the UI could not repaint while it waited.
-#[tauri::command]
 pub async fn tmux_action(
     client_id: String,
     action: TmuxActionWire,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<TmuxActionResultWire, String> {
-    let client = get_client(&clients, &client_id)?;
+    let client = get_client(clients, &client_id)?;
     let request = v1::Request {
         operation: v1::Operation::TmuxAction.into(),
         tmux_action: Some(v1::TmuxAction {
@@ -208,7 +206,7 @@ pub async fn tmux_action(
     // D2: the invoke reached native. Everything before it is the renderer's
     // own hop, which `perf.timeline` measures as d1 to d2.
     let mut timing = RequestTiming::begin();
-    let (response, timing) = tauri::async_runtime::spawn_blocking(move || {
+    let (response, timing) = crate::platform::spawn_blocking(move || {
         let result = client
             .flush_input()
             .and_then(|_| client.request_timed(request, &mut timing));

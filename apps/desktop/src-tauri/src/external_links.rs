@@ -9,7 +9,6 @@
 
 const MAX_URL_BYTES: usize = 8192;
 
-#[tauri::command]
 pub fn open_external_link(url: String, confirmed: bool) -> Result<(), String> {
     validate_external_url(&url)?;
     if !confirmed {

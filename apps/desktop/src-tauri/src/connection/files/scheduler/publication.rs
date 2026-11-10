@@ -1,11 +1,12 @@
 //! Bounded publication of the queued transition.
 //!
-//! Tauri channel handlers are supplied by the runtime and can execute
+//! Event sinks are supplied by the application and can execute
 //! arbitrary platform work.  A wedged handler must not retain a transfer job,
 //! destination reservation, or scheduler slot indefinitely.  The publisher
 //! therefore owns at most one lightweight queued event while the admitting
 //! caller retains (and can boundedly drop) all transfer resources.
 
+use crate::platform::EventSink;
 use std::{
     sync::{
         Arc, Mutex, OnceLock,
@@ -17,7 +18,6 @@ use std::{
 };
 
 use serde_json::Value;
-use tauri::ipc::{Channel, InvokeResponseBody};
 
 const PUBLICATION_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -28,7 +28,7 @@ pub(crate) struct QueuedPublication {
 
 impl QueuedPublication {
     pub(crate) fn json(
-        channel: Channel<Value>,
+        channel: Arc<dyn EventSink>,
         value: Value,
         late_rollback: Value,
         context: &'static str,
@@ -37,19 +37,19 @@ impl QueuedPublication {
         Self {
             queued: Box::new(move || {
                 channel
-                    .send(value)
+                    .send_json(&value)
                     .map_err(|error| format!("{context}: {error}"))
             }),
             late_rollback: Box::new(move || {
                 rollback_channel
-                    .send(late_rollback)
+                    .send_json(&late_rollback)
                     .map_err(|error| format!("{context} rollback: {error}"))
             }),
         }
     }
 
     pub(crate) fn raw(
-        channel: Channel<InvokeResponseBody>,
+        channel: Arc<dyn EventSink>,
         frame: Vec<u8>,
         late_rollback: Vec<u8>,
         context: &'static str,
@@ -58,12 +58,12 @@ impl QueuedPublication {
         Self {
             queued: Box::new(move || {
                 channel
-                    .send(InvokeResponseBody::Raw(frame))
+                    .send_raw(frame)
                     .map_err(|error| format!("{context}: {error}"))
             }),
             late_rollback: Box::new(move || {
                 rollback_channel
-                    .send(InvokeResponseBody::Raw(late_rollback))
+                    .send_raw(late_rollback)
                     .map_err(|error| format!("{context} rollback: {error}"))
             }),
         }

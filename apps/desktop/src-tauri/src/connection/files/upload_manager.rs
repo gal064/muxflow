@@ -1,3 +1,4 @@
+use crate::platform::EventSink;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek},
@@ -9,7 +10,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tauri::{State, ipc::Channel};
 use tmux_agent_protocol::v1;
 use uuid::Uuid;
 
@@ -68,7 +68,6 @@ pub struct InspectedLocalTerminalPath {
     name: String,
 }
 
-#[tauri::command]
 pub fn inspect_local_terminal_paths(
     paths: Vec<String>,
 ) -> Result<Vec<InspectedLocalTerminalPath>, String> {
@@ -104,7 +103,7 @@ struct UploadJob {
     image_png: bool,
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
-    channel: Channel<Value>,
+    channel: Arc<dyn EventSink>,
 }
 
 #[derive(Clone)]
@@ -119,14 +118,13 @@ struct UploadPreflightJob {
     image_png: bool,
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
-    channel: Channel<Value>,
+    channel: Arc<dyn EventSink>,
 }
 
 #[derive(Clone, Default)]
 pub struct UploadManager;
 
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
 pub fn start_terminal_upload_preflight(
     client_id: String,
     profile_id: String,
@@ -137,10 +135,10 @@ pub fn start_terminal_upload_preflight(
     collision: UploadCollisionPolicy,
     large_upload_confirmed: bool,
     image_png: bool,
-    on_event: Channel<Value>,
-    profiles: State<'_, ProfileStore>,
-    clients: State<'_, TerminalClients>,
-    uploads: State<'_, UploadManager>,
+    on_event: Arc<dyn EventSink>,
+    profiles: &ProfileStore,
+    clients: &TerminalClients,
+    uploads: &UploadManager,
 ) -> Result<String, String> {
     let (mut source, identity) = open_regular_source(Path::new(&source_path))?;
     let destination_name = upload_basename(Path::new(&source_path), &destination_name)?;
@@ -151,7 +149,7 @@ pub fn start_terminal_upload_preflight(
         );
     }
     let binding = BulkBinding::capture(
-        get_client(&clients, &client_id)?,
+        get_client(clients, &client_id)?,
         expected_server_identity,
         parse_required_u64("connectionEpoch", &connection_epoch)?,
     )?;
@@ -173,16 +171,14 @@ pub fn start_terminal_upload_preflight(
     Ok(transfer_id)
 }
 
-#[tauri::command]
 pub fn cancel_terminal_upload_preflight(
     preflight_id: String,
-    _uploads: State<'_, UploadManager>,
+    _uploads: &UploadManager,
 ) -> Result<Value, String> {
     cancel_transfer(&preflight_id).map(|response| json!(response))
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
 pub fn start_terminal_upload(
     client_id: String,
     profile_id: String,
@@ -193,10 +189,10 @@ pub fn start_terminal_upload(
     collision: UploadCollisionPolicy,
     large_upload_confirmed: bool,
     image_png: bool,
-    on_event: Channel<Value>,
-    profiles: State<'_, ProfileStore>,
-    clients: State<'_, TerminalClients>,
-    uploads: State<'_, UploadManager>,
+    on_event: Arc<dyn EventSink>,
+    profiles: &ProfileStore,
+    clients: &TerminalClients,
+    uploads: &UploadManager,
 ) -> Result<String, String> {
     let source_path = PathBuf::from(source_path);
     let (mut source, source_identity) = open_regular_source(&source_path)?;
@@ -207,7 +203,7 @@ pub fn start_terminal_upload(
         return Err("large_upload_confirmation_required: uploads above 500 MiB require explicit confirmation".into());
     }
     let binding = BulkBinding::capture(
-        get_client(&clients, &client_id)?,
+        get_client(clients, &client_id)?,
         expected_server_identity,
         parse_required_u64("connectionEpoch", &connection_epoch)?,
     )?;
@@ -231,19 +227,14 @@ pub fn start_terminal_upload(
     Ok(transfer_id)
 }
 
-#[tauri::command]
 pub fn cancel_terminal_upload(
     transfer_id: String,
-    uploads: State<'_, UploadManager>,
+    uploads: &UploadManager,
 ) -> Result<Value, String> {
     uploads.cancel(&transfer_id)
 }
 
-#[tauri::command]
-pub fn stage_clipboard_png(request: tauri::ipc::Request<'_>) -> Result<Value, String> {
-    let tauri::ipc::InvokeBody::Raw(png_bytes) = request.body() else {
-        return Err("clipboard PNG IPC body must be raw binary".into());
-    };
+pub fn stage_clipboard_png(png_bytes: &[u8]) -> Result<Value, String> {
     super::clipboard_staging::stage_clipboard_png(png_bytes)
 }
 
@@ -284,7 +275,7 @@ impl UploadManager {
                     "sizeBytes": started.source_identity.size.to_string(),
                 }))
                 .value();
-                let _ = started.channel.send(event);
+                let _ = started.channel.send_json(&event);
             },
             move || {
                 run_upload_preflight(&work).map_err(|error| {
@@ -326,7 +317,7 @@ impl UploadManager {
                         "sizeBytes": job.source_identity.size.to_string(),
                     }))
                     .value();
-                    let _ = job.channel.send(event);
+                    let _ = job.channel.send_json(&event);
                 }
             },
         )
@@ -366,7 +357,7 @@ pub(super) fn enqueue_acceptance_upload(
     binding: BulkBinding,
     source_path: PathBuf,
     destination_name: String,
-    channel: Channel<Value>,
+    channel: Arc<dyn EventSink>,
 ) -> Result<String, String> {
     let (source, source_identity) = open_regular_source(&source_path)?;
     let transfer_id = Uuid::new_v4().to_string();
@@ -447,7 +438,7 @@ fn run_upload_preflight(job: &UploadPreflightJob) -> Result<(), String> {
                 .unwrap_or_else(|| "remote preflight cleanup failed".into()),
         );
     }
-    let _ = job.channel.send(event.value());
+    let _ = job.channel.send_json(&event.value());
     Ok(())
 }
 
@@ -469,7 +460,7 @@ fn finish_upload_job(job: &UploadJob, result: TransferResult) {
         event.failure(failure.failure_kind, failure.error)
     };
     let value = event.fields(upload_fields(job, json!({}))).value();
-    let _ = job.channel.send(value);
+    let _ = job.channel.send_json(&value);
 }
 
 fn run_upload(job: &UploadJob) -> TransferResult {
@@ -797,13 +788,13 @@ fn emit_verified_upload(
             .cleanup(cleanup_status, None)
             .fields(upload_fields(job, fields))
             .value();
-        let _ = job.channel.send(value);
+        let _ = job.channel.send_json(&value);
     } else {
         let value = TransferEvent::new(&job.transfer_id, &job.binding, TransferState::Completed)
             .outcome(TransferOutcome::Published)
             .fields(upload_fields(job, fields))
             .value();
-        let _ = job.channel.send(value);
+        let _ = job.channel.send_json(&value);
     }
     Ok(())
 }
@@ -949,7 +940,7 @@ fn send_upload_state(job: &UploadJob, state: TransferState, extra: Value) -> Res
         .fields(upload_fields(job, extra))
         .value();
     job.channel
-        .send(value)
+        .send_json(&value)
         .map_err(|error| format!("could not deliver upload state: {error}"))
 }
 
