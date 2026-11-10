@@ -144,7 +144,7 @@ ordering stays.
 | `features/files/liveMarkdown.ts` | Depends on S4. CodeMirror decoration extension; the pure helpers port, the hiding mechanism may not. Its tests (`liveMarkdown.test.ts`, `LiveMarkdownEditor.test.tsx`) follow the answer |
 | `features/files/liveTable.ts` | Depends on S4. Inline editable table; the cell-replace logic ports, the widget does not. `liveTable.test.ts` follows |
 | `features/shell/MarkdownPreview.test.tsx` | Preview keeps the user's selection while content updates, using DOM selection events. Does the Kit Markdown view need the same behavior |
-| `features/shell/appStateContract.test.ts` | Shared fixture `features/shell/persistedAppState.contract.json` (not a ledger file) must move with `app_state.rs` in Phase 1; which half of the test survives |
+| `features/shell/appStateContract.test.ts` | Shared fixture moved to `crates/desktop-core/src/persistedAppState.contract.json` in Phase 1; which half of the test survives |
 | `features/terminal/rendererResizeOrdering.test.ts` | Does the engine serialize a queued history rewrite and a resize by construction, or does the ordering need its own test |
 | `features/terminal/rendererDrainBound.test.ts` | Does the engine keep a bounded hide drain with an honest checkpoint watermark? If hiding no longer serializes anything, three xterm-timed cases drop, but the frozen-pane contract still needs a test |
 | `features/files/markdownPreview.ts` | `useSanitizedMarkdown` holds a refresh while the user is selecting in the preview, and `CLICK_SLOP_PX` separates a link click from a selection drag. Does the Kit Markdown view need either (same question as `MarkdownPreview.test.tsx`) |
@@ -152,7 +152,7 @@ ordering stays.
 ## Not in the ledger
 
 Tracked files under `apps/desktop/src` that are not `.ts`, `.tsx` or `.css` have no row
-and need a decision in the phase that touches them: `features/shell/persistedAppState.contract.json`
+and need a decision in the phase that touches them: `crates/desktop-core/src/persistedAppState.contract.json`
 (see above) and `assets/fonts/` (six `.woff2` files and two license texts; the plan's
 font row covers them).
 
