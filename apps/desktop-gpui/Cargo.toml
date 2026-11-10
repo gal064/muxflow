@@ -16,12 +16,19 @@ name = "muxflow-gpui"
 path = "src/main.rs"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 desktop-core = { path = "../../crates/desktop-core" }
 dirs = "6"
+futures = "0.3"
 # Exact pin: gpui-kit pins the matching gpui-pre snapshot (0.3.11). `gpui-fast`
 # stays off (see docs/gpui-migration.md).
 gpui-kit = { version = "=0.9.0", default-features = true }
+libc.workspace = true
+regex = "1"
+serde.workspace = true
 serde_json.workspace = true
+tmux-control = { path = "../../crates/tmux-control" }
+uuid.workspace = true
 
 [dev-dependencies]
 gpui-kit = { version = "=0.9.0", default-features = true, features = ["test-support"] }
