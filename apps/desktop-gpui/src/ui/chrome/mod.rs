@@ -35,7 +35,7 @@ pub use tab_strip::TabEntry;
 
 use crate::{
     app::Core,
-    theme,
+    commands, theme,
     ui::chrome::{
         divider::{Divider, DividerDrag},
         layout::{Prefs, Rails},
@@ -119,7 +119,7 @@ impl Chrome {
         let store = cx.global::<Core>().app_state.clone();
         // A broken file shows defaults; `app_state` keeps it write-frozen.
         let state = app_state::load_app_state(&store).unwrap_or_default();
-        cx.new(|cx| Self {
+        let chrome = cx.new(|cx| Self {
             this: cx.entity().downgrade(),
             prefs: Prefs::from_shell(&state.shell),
             drag: None,
@@ -128,7 +128,9 @@ impl Chrome {
             workspaces: saved_workspaces(&state),
             active_workspace: 0,
             saves: Arc::default(),
-        })
+        });
+        register_commands(&chrome.downgrade(), cx);
+        chrome
     }
 
     /// The title bar's content. A press that reaches the bar starts a window
@@ -157,7 +159,9 @@ impl Chrome {
     }
 
     fn window_width(window: &Window) -> f32 {
-        window.viewport_size().width.as_f32() / Self::css_unit(window)
+        // Rounded: at a scale like 1.2 the division lands a hair under an exact
+        // breakpoint, and a rail would hide one pixel early.
+        (window.viewport_size().width.as_f32() / Self::css_unit(window) * 100.).round() / 100.
     }
 
     /// What the rails do right now, drag preview included.
@@ -214,11 +218,22 @@ impl Chrome {
         cx.notify();
     }
 
+    /// As Tauri's `selectAppTab`: the docked tab is already showing, and with a
+    /// dock open the chosen tab takes the dock and the terminal fills the main
+    /// column.
     fn select_tab(&mut self, key: SharedString, cx: &mut Context<Self>) {
-        if let Some(workspace) = self.workspaces.get_mut(self.active_workspace) {
-            workspace.active_tab = Some(key);
-            cx.notify();
+        let Some(workspace) = self.workspaces.get_mut(self.active_workspace) else {
+            return;
+        };
+        match &mut workspace.docked {
+            Some((docked, _)) if *docked == key => return,
+            Some((docked, _)) => {
+                *docked = key;
+                workspace.active_tab = None;
+            }
+            None => workspace.active_tab = Some(key),
         }
+        cx.notify();
     }
 
     /// Closes a placeholder tab for now; the saved tab returns next launch.
@@ -331,16 +346,40 @@ impl Chrome {
                 let Some(prefs) = next else {
                     return;
                 };
-                let result = async {
-                    let mut state = app_state::load_app_state(&store)?;
+                let result = app_state::update_app_state(&store, |state| {
                     prefs.apply_to(&mut state.shell);
-                    app_state::save_app_state(state, &store).await
-                }
+                })
                 .await;
                 if let Err(error) = result {
                     eprintln!("muxflow: could not save the shell layout: {error}");
                 }
             }
+        });
+    }
+}
+
+/// Gives the registry's view commands, and so their shortcuts, this chrome.
+fn register_commands(chrome: &WeakEntity<Chrome>, cx: &mut App) {
+    fn bind(
+        id: &'static str,
+        chrome: &WeakEntity<Chrome>,
+        cx: &mut App,
+        action: impl Fn(&mut Chrome, &mut Context<Chrome>) + 'static,
+    ) {
+        let chrome = chrome.clone();
+        commands::on_command(id, cx, move |_, cx| {
+            chrome.update(cx, |chrome, cx| action(chrome, cx)).ok();
+        });
+    }
+    bind("view.toggleSidebar", chrome, cx, Chrome::toggle_sidebar);
+    bind("view.togglePanel", chrome, cx, Chrome::toggle_panel);
+    for (id, surface) in [
+        ("view.showFiles", "files"),
+        ("view.showGit", "git"),
+        ("view.showPorts", "ports"),
+    ] {
+        bind(id, chrome, cx, move |chrome, cx| {
+            chrome.show_surface(surface, cx)
         });
     }
 }
