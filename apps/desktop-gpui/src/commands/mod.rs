@@ -232,12 +232,14 @@ fn on_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
     if window.root::<Root>().flatten().is_none() {
         return;
     }
-    // A key press inside an IME composition belongs to the composition. The
-    // terminal, which is not a Kit input, adds its own check in Phase 3.
+    // A key press inside an IME composition belongs to the composition, in a
+    // Kit input or in a terminal pane.
     let focused_input = window
         .focused_input(cx)
         .and_then(|input| input.as_input().cloned());
-    if focused_input.is_some_and(|input| dialogs::is_composing(&input, window, cx)) {
+    if focused_input.is_some_and(|input| dialogs::is_composing(&input, window, cx))
+        || crate::terminal::input::is_composing(window, cx)
+    {
         return;
     }
     let overlay_open = window.has_active_dialog(cx)
