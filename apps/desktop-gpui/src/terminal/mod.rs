@@ -16,7 +16,7 @@
 //! | Seam | Reaches the pane through | Owner |
 //! |---|---|---|
 //! | [`input`] | `PaneInput`, `input::attach`, `input::paint`, the pane's `send_input` | T3.4 |
-//! | [`reading`] | `PaneReading`, `reading::attach`, `reading::children`, `reading::highlights` | T3.5 |
+//! | [`reading`] | `PaneReading`, `reading::attach`, `reading::children`, `reading::highlights`, `reading::before_input` (from `send_input`) | T3.5 |
 //! | [`integration`] | `PaneIntegration`, `integration::attach`, `integration::children` | T3.6 |
 //!
 //! Mouse and wheel events are claimed by mode, so `input` and `reading` never
