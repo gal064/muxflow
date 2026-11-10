@@ -4,10 +4,7 @@
 
 use std::time::Duration;
 
-use gpui_kit::Modifiers;
 use serde_json::{Value, json};
-
-use crate::commands::registry::Platform;
 
 /// How long the pointer rests on a pane before it takes focus: long enough
 /// that sweeping across a split on the way somewhere else focuses nothing.
@@ -61,15 +58,6 @@ pub fn divider_key(axis: Axis, key: &str) -> Option<bool> {
         (Axis::Horizontal, "right") | (Axis::Vertical, "down") => Some(true),
         (Axis::Horizontal, "left") | (Axis::Vertical, "up") => Some(false),
         _ => None,
-    }
-}
-
-/// The modifier that opens a terminal link, and grabs a pane anywhere else:
-/// Command on macOS, Ctrl elsewhere. Port of `isTerminalLinkActivation`.
-pub fn is_link_activation(modifiers: &Modifiers) -> bool {
-    match Platform::current() {
-        Platform::Mac => modifiers.platform,
-        Platform::Linux => modifiers.control,
     }
 }
 

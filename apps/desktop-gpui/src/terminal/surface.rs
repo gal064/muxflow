@@ -34,13 +34,13 @@ use super::integration::{
     agents::PaneAttention,
     frames::{
         AFTER_GRAB_QUIET, Axis, DRAG_THRESHOLD_PX, HOVER_FOCUS_DELAY, KEY_RESIZE_CELLS, PaneEdge,
-        divider_key, is_link_activation, join_action, pane_edge_at, resize_action,
-        resize_cells_from_pixels,
+        divider_key, join_action, pane_edge_at, resize_action, resize_cells_from_pixels,
     },
 };
 use super::layout::{PaneRect, WindowGrid, mounted_panes, pane_rect, separators, window_grid};
 use super::link::{TerminalLink, lock};
 use super::pane::TerminalPane;
+use super::reading::is_link_activation;
 
 /// A pane's box and grid, the last time tmux described it.
 struct Mounted {

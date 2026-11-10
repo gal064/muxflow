@@ -232,7 +232,7 @@ font row covers them).
 | `app/usePerHostMemo.ts` | 56 | retire | 2 | React hook that memoizes a list per host; entities hold per-host state directly | open |
 | `app/useShellNavigation.test.tsx` | 1378 | port | 4 | tests of useShellNavigation.ts | open |
 | `app/useShellNavigation.ts` | 735 | port | 4 | shell navigation | open |
-| `app/useTerminalFileOpen.ts` | 108 | port | 3 | terminal file open | open |
+| `app/useTerminalFileOpen.ts` | 108 | port | 3 | terminal file open; needs file tabs (Phase 4 and 5): until then a file link click says it is not available (terminal/reading/mod.rs) | open |
 | `app/useTmuxActionPerformer.test.tsx` | 187 | port | 4 | tests of useTmuxActionPerformer.ts | open |
 | `app/useTmuxActionPerformer.ts` | 146 | port | 4 | tmux action performer | open |
 | `app/useWorkspaceCreate.test.tsx` | 142 | port | 4 | tests of useWorkspaceCreate.ts | open |
@@ -505,13 +505,13 @@ font row covers them).
 | `features/terminal/TerminalEventHub.test.ts` | 812 | port | 3 | crates/terminal-engine/src/hub_tests.rs; consumer rejection becomes catch_unwind in engine.rs, which has no injection point for a test; observer failures have no equivalent | done (T3.1) |
 | `features/terminal/TerminalEventHub.ts` | 844 | port | 3 | crates/terminal-engine/src/hub.rs | done (T3.1) |
 | `features/terminal/TerminalGenerationWatermark.ts` | 40 | port | 3 | applied_generation in crates/terminal-engine/src/pane.rs; writes are synchronous, so no version guard is needed | done (T3.1) |
-| `features/terminal/TerminalPane.test.tsx` | 1810 | port | 3 | tests of TerminalPane.tsx | open |
-| `features/terminal/TerminalPane.tsx` | 1621 | port | 3 | event consumer and reveal driver in crates/terminal-engine/src/pane.rs and engine.rs (T3.1); pane entity in terminal/pane.rs and terminal/link.rs, element in terminal/element.rs (T3.3); reconcilePaneGrid in terminal/surface.rs (T3.3); input, reading and integration behavior go to T3.4, T3.5, T3.6 | open |
+| `features/terminal/TerminalPane.test.tsx` | 1810 | port | 3 | tests of TerminalPane.tsx; the clipboard chord cases (copy then drop the selection, Mac Super+C) are in tests/terminal_reading.rs (T3.5) | open |
+| `features/terminal/TerminalPane.tsx` | 1621 | port | 3 | event consumer and reveal driver in crates/terminal-engine/src/pane.rs and engine.rs (T3.1); pane entity in terminal/pane.rs and terminal/link.rs, element in terminal/element.rs (T3.3); reconcilePaneGrid in terminal/surface.rs (T3.3); copy, find, the new-output button and return to live in terminal/reading (T3.5); input and integration behavior go to T3.4, T3.6 | open |
 | `features/terminal/TerminalPaneHostHandshake.test.tsx` | 810 | port | 3 | crates/terminal-engine/src/engine_tests.rs (T3.1); the grid-mismatch and double-mount cases go with the terminal view | open |
 | `features/terminal/TerminalReadingState.test.ts` | 71 | port | 3 | tests in crates/terminal-engine/src/reading.rs | done (T3.1) |
 | `features/terminal/TerminalReadingState.ts` | 57 | port | 3 | crates/terminal-engine/src/reading.rs | done (T3.1) |
-| `features/terminal/TerminalRenderer.test.ts` | 915 | port | 3 | split: scheduler, xterm callbacks, search addon, paste interception retire; pane grid reconciliation ported to terminal/surface.rs (T3.3); restoreDecision is in terminal-engine (T3.1); seed recovery is in terminal-engine (T3.1) and no GPU resource recovery is needed; link activation goes to T3.5 | open |
-| `features/terminal/TerminalRenderer.ts` | 1453 | replace | 3 | XtermRenderer becomes TerminalElement (T3.3); restoreDecision is in terminal-engine (T3.1); pane grid reconciliation in terminal/surface.rs (T3.3); link activation goes to T3.5; no GPU resource recovery is needed in a GPUI element; a paste goes through the host's tmux paste path, which brackets it, instead of xterm's client bracketing (T3.8) | open |
+| `features/terminal/TerminalRenderer.test.ts` | 915 | port | 3 | split: scheduler, xterm callbacks, paste interception retire; pane grid reconciliation ported to terminal/surface.rs (T3.3); restoreDecision is in terminal-engine (T3.1); seed recovery is in terminal-engine (T3.1) and no GPU resource recovery is needed; the search and `activatedTerminalUrl` cases are in terminal/reading/find.rs and links.rs (T3.5) | open |
+| `features/terminal/TerminalRenderer.ts` | 1453 | replace | 3 | XtermRenderer becomes TerminalElement (T3.3); restoreDecision is in terminal-engine (T3.1); pane grid reconciliation in terminal/surface.rs (T3.3); selection, search, the link provider, the OSC 8 `linkHandler` and their activation, the scrollbar and top-of-history detection in terminal/reading (T3.5); no GPU resource recovery is needed in a GPUI element; a paste goes through the host's tmux paste path, which brackets it, instead of xterm's client bracketing (T3.8) | open |
 | `features/terminal/TerminalStateCache.test.ts` | 140 | retire | 3 | tests TerminalStateCache.ts, which retires | done (T3.1) |
 | `features/terminal/TerminalStateCache.ts` | 191 | retire | 3 | xterm serialize cache; hidden panes keep their live grids in crates/terminal-engine/src/engine.rs, bounded at 64 screens and 128 MiB, with the pager flags carried alongside | done (T3.1) |
 | `features/terminal/TerminalTransferSurface.test.tsx` | 906 | port | 3 | batch tests in apps/desktop-gpui/tests/terminal_integration.rs; DOM paste events, the WebView image encoder and point hit-testing retire with the WebView | done (T3.6) |
@@ -544,8 +544,8 @@ font row covers them).
 | `features/terminal/layout.ts` | 67 | port | 3 | terminal/layout.rs | done (T3.3) |
 | `features/terminal/measureBox.test.ts` | 174 | port | 3 | xterm internal-field canary and FitAddon comparison drop; `deviceSafeLineHeight` sweep and `cellsForBox` chrome arithmetic in terminal/cell_metrics.rs | done (T3.3) |
 | `features/terminal/nativeDragDropCoordinator.ts` | 112 | replace | 3 | GPUI's `ExternalPaths` drop on each pane in terminal/integration/mod.rs | done (T3.6) |
-| `features/terminal/openExternalUrl.test.ts` | 31 | port | 3 | behavior assertions move to the replacement of openExternalUrl.ts | open |
-| `features/terminal/openExternalUrl.ts` | 19 | replace | 3 | direct call into desktop-core external_links | open |
+| `features/terminal/openExternalUrl.test.ts` | 31 | port | 3 | the Tauri and browser-tab split has no equivalent; the http(s) admission `activatedTerminalUrl` adds is tested in terminal/reading/links.rs, and desktop-core tests its own validation | done (T3.5) |
+| `features/terminal/openExternalUrl.ts` | 19 | replace | 3 | direct call into desktop-core external_links from terminal/reading/mod.rs; the browser-tab fallback for the dev harness goes | done (T3.5) |
 | `features/terminal/osc52Clipboard.ts` | 52 | port | 3 | decoded by the engine's listener (crates/terminal-engine/src/terminal.rs), bounded and gated by the setting in terminal/integration/clipboard.rs, and written only for the host on screen | done (T3.6) |
 | `features/terminal/paintTailProbe.test.ts` | 384 | retire | 3 | tests the xterm write-backlog fingerprints of paintTailProbe.ts; the replacement has its own tests in terminal/probes.rs | done (T3.3) |
 | `features/terminal/paintTailProbe.ts` | 368 | replace | 3 | terminal/probes.rs (PaintTail): main-thread block and stopped frame clock fingerprints and the `render.paintSlow` incident; the xterm write-backlog fingerprints go | done (T3.3) |
@@ -559,10 +559,10 @@ font row covers them).
 | `features/terminal/revealRetry.ts` | 123 | port | 3 | crates/terminal-engine/src/reveal_retry.rs | done (T3.1) |
 | `features/terminal/staleRestoreSilence.test.ts` | 533 | port | 3 | restore admission and splice refusal decisions | open |
 | `features/terminal/terminalClientLifecycle.test.ts` | 162 | port | 3 | native client ownership | open |
-| `features/terminal/terminalInputPolicy.test.ts` | 327 | port | 3 | translation and clipboard-alias cases in terminal/input/policy.rs (T3.4); copy-on-select cases with T3.5, OSC 52 cases with T3.6 | partial (T3.4) |
-| `features/terminal/terminalInputPolicy.ts` | 117 | port | 3 | terminal/input/policy.rs, with the keyboard encoding xterm.js did in terminal/input/keys.rs, mouse reports in mouse.rs and IME in ime.rs; copy of a finished selection goes to T3.5 | partial (T3.4) |
-| `features/terminal/terminalLinkActivation.test.ts` | 13 | port | 3 | tests of terminalLinkActivation.ts | open |
-| `features/terminal/terminalLinkActivation.ts` | 9 | port | 3 | link activation modifier | open |
+| `features/terminal/terminalInputPolicy.test.ts` | 327 | port | 3 | translation and clipboard-alias cases in terminal/input/policy.rs (T3.4); copy-on-select cases in tests/terminal_reading.rs (T3.5), OSC 52 cases with T3.6 | partial (T3.4) |
+| `features/terminal/terminalInputPolicy.ts` | 117 | port | 3 | terminal/input/policy.rs, with the keyboard encoding xterm.js did in terminal/input/keys.rs, mouse reports in mouse.rs and IME in ime.rs; `copyCompletedTerminalSelection` and `installTerminalCopyOnSelect` in terminal/reading/selection.rs and mod.rs (T3.5) | partial (T3.4) |
+| `features/terminal/terminalLinkActivation.test.ts` | 13 | port | 3 | tests in terminal/reading/links.rs | done (T3.5) |
+| `features/terminal/terminalLinkActivation.ts` | 9 | port | 3 | terminal/reading/links.rs (`is_link_activation`) | done (T3.5) |
 | `features/terminal/terminalPanePerf.test.ts` | 154 | port | 3 | tests in terminal/probes.rs | done (T3.3) |
 | `features/terminal/terminalPanePerf.ts` | 202 | port | 3 | terminal/probes.rs (PanePerf) | done (T3.3) |
 | `features/terminal/terminalSeedOverlay.test.ts` | 59 | port | 3 | re-assert on the alacritty_terminal grid the seed overlay's erase cases: attributed erase fills through the right edge, erase keeps soft-wrap metadata, adjacent blank spans keep their own backgrounds (the S9 lane does not assert them by name) | open |

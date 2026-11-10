@@ -177,8 +177,9 @@ impl TerminalPane {
             .is_some_and(|terminal| terminal.lock().mode().intersects(TermMode::MOUSE_MODE))
     }
 
-    /// Sends bytes to the program in this pane, returning the pane to its live
-    /// screen. Fails while the pane has no live client.
+    /// Sends bytes to the program in this pane. Fails while the pane has no
+    /// live client. Keys and pastes also return it to its live screen
+    /// (`reading::before_user_input`).
     pub fn send_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) -> Result<(), String> {
         input::send(self, bytes, false, cx)
     }

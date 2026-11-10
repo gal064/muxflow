@@ -34,7 +34,6 @@ use gpui_kit::{
     Pixels, Point, ScrollDelta, SharedString, Stateful, Task, Window,
 };
 use serde_json::json;
-use terminal_engine::{Command, TerminalReadingState};
 
 use crate::commands::{self, registry::Platform};
 use crate::connection_ui::backend::TerminalBackend;
@@ -177,13 +176,6 @@ pub(super) fn send(
     cx: &mut Context<TerminalPane>,
 ) -> Result<(), String> {
     let now = Instant::now();
-    // Input is for the live screen, as xterm scrolled to the bottom on it.
-    if pane.reading_state() != TerminalReadingState::Live {
-        pane.link().read(cx).send(Command::ReturnToLive {
-            pane_id: pane.pane_id().to_string(),
-            reason: "Returning from terminal history requires a current screen".into(),
-        });
-    }
     let (backend, client_id, connection_epoch) = pane.link().update(cx, |link, _| {
         link.note_input();
         (
@@ -256,6 +248,7 @@ fn send_user_input(
 /// Typing, by key or by IME commit: the input the echo probe measures.
 fn send_typed(pane: &mut TerminalPane, bytes: Vec<u8>, cx: &mut Context<TerminalPane>) {
     pane.input.echo.note_key(Instant::now());
+    super::reading::before_user_input(pane, cx);
     send_user_input(pane, bytes, false, cx);
 }
 
@@ -273,6 +266,7 @@ pub fn paste(pane: &mut TerminalPane, text: &str, cx: &mut Context<TerminalPane>
     while text.contains(END) {
         text = text.replace(END, "");
     }
+    super::reading::before_user_input(pane, cx);
     send_user_input(pane, text.replace("\r\n", "\n").into_bytes(), true, cx);
 }
 
@@ -341,7 +335,10 @@ fn on_key_down(
         return;
     };
     cx.stop_propagation();
-    pane.update(cx, |pane, cx| send_user_input(pane, bytes, false, cx));
+    pane.update(cx, |pane, cx| {
+        super::reading::before_user_input(pane, cx);
+        send_user_input(pane, bytes, false, cx);
+    });
 }
 
 /// Shift, and Option on macOS, select text even while the program reads the
