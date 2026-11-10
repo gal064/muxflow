@@ -1,0 +1,50 @@
+# License gate (docs/gpui-migration.md, "License rules"): permissive licenses
+# only. GPL, AGPL and unlicensed crates fail `cargo deny check licenses`.
+# Only the license check is enabled in CI; advisories, bans and sources are not.
+# CI covers the root Cargo workspace. The GPUI spike workspace (spikes/gpui) is
+# checked by .github/workflows/gpui-spike.yml with --manifest-path spikes/gpui/Cargo.toml.
+# Neither covers the separate test-driver workspaces under tests/.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "CC0-1.0",
+  "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+# Per-crate exceptions: each is the only license that crate offers, and is not
+# permissive in the plain sense. Keep this list short and add a reason.
+exceptions = [
+  # Mozilla Public License 2.0: file-level copyleft, used unmodified.
+  { crate = "cssparser", allow = ["MPL-2.0"] },        # via tauri-utils
+  { crate = "cssparser-macros", allow = ["MPL-2.0"] }, # via cssparser
+  { crate = "dtoa-short", allow = ["MPL-2.0"] },       # via cssparser
+  { crate = "selectors", allow = ["MPL-2.0"] },        # via tauri-utils
+  { crate = "option-ext", allow = ["MPL-2.0"] },       # via dirs-sys
+  { crate = "symphonia", allow = ["MPL-2.0"] },        # voice audio decode
+  { crate = "symphonia-codec-aac", allow = ["MPL-2.0"] },
+  { crate = "symphonia-common", allow = ["MPL-2.0"] },
+  { crate = "symphonia-core", allow = ["MPL-2.0"] },
+  { crate = "symphonia-format-isomp4", allow = ["MPL-2.0"] },
+  { crate = "symphonia-metadata", allow = ["MPL-2.0"] },
+  { crate = "cbindgen", allow = ["MPL-2.0"] },         # GPUI spike: build-script tool of gpui-pre-apple (macOS)
+  { crate = "dwrote", allow = ["MPL-2.0"] },           # GPUI spike: Windows font backend of zed-font-kit
+  # Boost Software License 1.0: permissive, pulled in by clipboard-rs on Windows.
+  { crate = "clipboard-win", allow = ["BSL-1.0"] },
+  { crate = "error-code", allow = ["BSL-1.0"] },
+  { crate = "windows-win", allow = ["BSL-1.0"] },
+  # CDLA-Permissive-2.0: permissive license for the bundled root CA data.
+  { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+  # Apache-2.0 with the LLVM exception: Apache-2.0 plus extra permission.
+  { crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
+]
