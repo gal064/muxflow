@@ -14,7 +14,7 @@
 //! 4. The platform's text input ([`ime`]), for everything that types text.
 //!
 //! Every byte for the program, typed, pasted or reported, leaves through
-//! [`TerminalPane::send_input`].
+//! `send`.
 
 pub mod ime;
 pub mod keys;
@@ -167,11 +167,12 @@ fn mode(pane: &TerminalPane) -> TermMode {
         .map_or(TermMode::empty(), |terminal| *terminal.lock().mode())
 }
 
-/// The one path every byte for the program takes. See
-/// [`TerminalPane::send_input`].
+/// The one path every byte for the program takes. A `paste` is delivered
+/// through tmux's paste path; see [`paste`].
 pub(super) fn send(
     pane: &mut TerminalPane,
     bytes: Vec<u8>,
+    paste: bool,
     cx: &mut Context<TerminalPane>,
 ) -> Result<(), String> {
     let now = Instant::now();
@@ -202,7 +203,12 @@ pub(super) fn send(
     pane.input.journal = Some(journal);
 
     let sent_at = Instant::now();
-    backend.send_input(client_id, pane.pane_id().to_string(), bytes)?;
+    let pane_id = pane.pane_id().to_string();
+    if paste {
+        backend.send_paste(client_id, pane_id, bytes)?;
+    } else {
+        backend.send_input(client_id, pane_id, bytes)?;
+    }
     // How long the input took to leave the app: the `send` segment of the
     // keystroke's wait, and a slow one says the stall is on this side.
     let took = sent_at.elapsed();
@@ -224,12 +230,16 @@ pub(super) fn send(
 
 /// Input the user produced. With no live client there is nothing to send to
 /// and nothing to say; a failed send is said in the status line.
-fn send_user_input(pane: &mut TerminalPane, bytes: Vec<u8>, cx: &mut Context<TerminalPane>) {
+fn send_user_input(
+    pane: &mut TerminalPane,
+    bytes: Vec<u8>,
+    paste: bool,
+    cx: &mut Context<TerminalPane>,
+) {
     if pane.link().read(cx).client_id().is_none() {
         return;
     }
-    super::reading::before_user_input(pane, cx);
-    if let Err(error) = pane.send_input(bytes, cx) {
+    if let Err(error) = send(pane, bytes, paste, cx) {
         pane.link()
             .update(cx, |_, cx| cx.emit(LinkEvent::Status(error)));
     }
@@ -238,28 +248,26 @@ fn send_user_input(pane: &mut TerminalPane, bytes: Vec<u8>, cx: &mut Context<Ter
 /// Typing, by key or by IME commit: the input the echo probe measures.
 fn send_typed(pane: &mut TerminalPane, bytes: Vec<u8>, cx: &mut Context<TerminalPane>) {
     pane.input.echo.note_key(Instant::now());
-    send_user_input(pane, bytes, cx);
+    super::reading::before_user_input(pane, cx);
+    send_user_input(pane, bytes, false, cx);
 }
 
-/// What a paste sends. Bracketed when the program asked (DEC 2004), with any
-/// end marker inside the text removed so the text cannot end the paste early.
-/// Line ends become carriage returns, which is how a terminal types Enter.
-pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    let mut text = text.replace("\r\n", "\r").replace('\n', "\r");
-    if !bracketed {
-        return text.into_bytes();
-    }
+/// Pastes `text` into the program, as mobile does: the host pastes it through
+/// tmux, which brackets it iff the program asked (DEC 2004). Only tmux knows
+/// that reliably; this pane's copy of the mode can be stale, as after a seed
+/// from tmux 3.4 or older, which cannot report it.
+///
+/// tmux turns each LF into the CR a terminal types for Enter, so a CRLF line
+/// end becomes one LF first, or it would arrive as two Enters. An end marker
+/// inside the text is removed, so the text cannot end the paste early.
+pub fn paste(pane: &mut TerminalPane, text: &str, cx: &mut Context<TerminalPane>) {
     const END: &str = "\x1b[201~";
+    let mut text = text.to_owned();
     while text.contains(END) {
         text = text.replace(END, "");
     }
-    format!("\x1b[200~{text}{END}").into_bytes()
-}
-
-/// Pastes `text` into the program, bracketed if it asked.
-pub fn paste(pane: &mut TerminalPane, text: &str, cx: &mut Context<TerminalPane>) {
-    let bracketed = mode(pane).contains(TermMode::BRACKETED_PASTE);
-    send_user_input(pane, paste_bytes(text, bracketed), cx);
+    super::reading::before_user_input(pane, cx);
+    send_user_input(pane, text.replace("\r\n", "\n").into_bytes(), true, cx);
 }
 
 /// Tells a program that asked (DEC 1004) when the pane gains or loses focus,
@@ -278,7 +286,7 @@ pub fn report_focus(pane: &mut TerminalPane, window: &Window, cx: &mut Context<T
         return;
     }
     let report = if focused { b"\x1b[I" } else { b"\x1b[O" };
-    send_user_input(pane, report.to_vec(), cx);
+    send_user_input(pane, report.to_vec(), false, cx);
 }
 
 fn on_key_down(
@@ -327,7 +335,10 @@ fn on_key_down(
         return;
     };
     cx.stop_propagation();
-    pane.update(cx, |pane, cx| send_user_input(pane, bytes, cx));
+    pane.update(cx, |pane, cx| {
+        super::reading::before_user_input(pane, cx);
+        send_user_input(pane, bytes, false, cx);
+    });
 }
 
 /// Shift, and Option on macOS, select text even while the program reads the
@@ -403,7 +414,7 @@ fn report_mouse(
         control: modifiers.control,
     };
     if let Some(bytes) = encode_mouse(report, mode(pane)) {
-        send_user_input(pane, bytes, cx);
+        send_user_input(pane, bytes, false, cx);
     }
 }
 

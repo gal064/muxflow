@@ -62,6 +62,9 @@ fn read_line<T>(term: &Term<T>, row: usize) -> GridLine {
     let line = grid_line(term, row);
     let last = term.last_column();
     let wrapped = row > 0 && grid[Line(line.0 - 1)][last].flags.contains(Flags::WRAPLINE);
+    // Text ran past the end of a row that wraps, so every cell on it was
+    // written, spaces included.
+    let wraps = grid[line][last].flags.contains(Flags::WRAPLINE);
     let mut text = String::new();
     let mut cells = Vec::with_capacity(term.columns());
     for column in 0..term.columns() {
@@ -71,9 +74,10 @@ fn read_line<T>(term: &Term<T>, row: usize) -> GridLine {
         let spacer = cell
             .flags
             .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
-        // alacritty does not tell a written space from an untouched cell, and
-        // xterm reads both as blank: an empty cell is what trims a row.
-        let blank = spacer || ((cell.c == ' ' || cell.c == '\0') && zerowidth.is_none());
+        // alacritty does not tell a written space from an untouched cell, while
+        // xterm keeps a written one: an empty cell is what trims a row. Only a
+        // row that wraps is known to be written to its end.
+        let blank = spacer || (!wraps && (cell.c == ' ' || cell.c == '\0') && zerowidth.is_none());
         if !blank {
             text.push(cell.c);
             text.extend(zerowidth.into_iter().flatten());

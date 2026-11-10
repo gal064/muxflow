@@ -192,6 +192,13 @@ mod tests {
     }
 
     #[test]
+    fn a_space_in_the_last_column_of_a_wrapped_row_is_copied() {
+        let mut term = term(10, 3, b"abcdefghi jkl");
+        select(&mut term, point(0, 0), point(1, 2));
+        assert_eq!(copy_text(&term, false).unwrap(), "abcdefghi jkl");
+    }
+
+    #[test]
     fn an_empty_selection_copies_nothing() {
         let mut term = term(10, 2, b"text");
         term.selection = Some(Selection::new(

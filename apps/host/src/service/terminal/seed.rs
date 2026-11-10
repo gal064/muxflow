@@ -1,3 +1,5 @@
+use unicode_width::UnicodeWidthStr;
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct SeedBuild {
     pub bytes: Vec<u8>,
@@ -120,12 +122,15 @@ pub(super) fn build_seed_with_metadata(
     for mode in [1000, 1002, 1003, 1005, 1006] {
         set_private_mode(&mut seed, mode, false);
     }
-    let mouse_mode = if metadata.mouse_any {
-        Some(1003)
-    } else if metadata.mouse_button {
+    // tmux keeps one mouse mode at a time and `mouse_any_flag` is true for all
+    // three (`mouse_all_flag` is only the motion one, and is not in every
+    // supported release), so it means ?1003 only when the others are off.
+    let mouse_mode = if metadata.mouse_button {
         Some(1002)
     } else if metadata.mouse_standard {
         Some(1000)
+    } else if metadata.mouse_any {
+        Some(1003)
     } else {
         None
     };
@@ -192,6 +197,11 @@ fn paint_capture(seed: &mut Vec<u8>, lines: &[Vec<u8>]) {
 /// current tmux releases. Replaying only its SGR state and an erase-to-end
 /// overlays the missing background without duplicating the text or entering
 /// pending-wrap at the right edge.
+///
+/// `-N` does not pad a line to the pane width: tmux stores a row's cells in
+/// chunks of a quarter, a half or all of the width, so a short row ends
+/// wherever its chunk does. Trailing cells are therefore placed from the left,
+/// after the width of the content, never from the right edge.
 fn paint_cell_overlays(seed: &mut Vec<u8>, lines: &[Vec<u8>], metadata: CaptureMetadata) {
     seed.extend_from_slice(b"\x1b[m");
     for (row, line) in lines.iter().enumerate() {
@@ -205,26 +215,34 @@ enum CaptureToken<'a> {
     Sgr(&'a [u8]),
     Control,
     Space,
-    Content,
+    /// A run of text with no space or escape in it, so a joined emoji stays whole.
+    Content(&'a [u8]),
 }
 
 fn paint_cell_overlay(output: &mut Vec<u8>, row: usize, pane_width: u16, line: &[u8]) {
     let tokens = capture_tokens(line);
     let suffix_start = tokens
         .iter()
-        .rposition(|token| matches!(token, CaptureToken::Content))
+        .rposition(|token| matches!(token, CaptureToken::Content(_)))
         .map_or(0, |index| index + 1);
     let trailing_cells = tokens[suffix_start..]
         .iter()
         .filter(|token| matches!(token, CaptureToken::Space))
         .count();
-    let valid_overlay = trailing_cells > 0 && trailing_cells <= usize::from(pane_width);
-    let mut column = usize::from(pane_width).saturating_sub(trailing_cells) + 1;
+    // A line this code cannot measure, or one wider than the pane, would
+    // misplace the overlay; leaving the cells default is the safe failure.
+    let Some(content_cells) = content_width(&tokens[..suffix_start]) else {
+        return;
+    };
+    if trailing_cells == 0 || content_cells + trailing_cells > usize::from(pane_width) {
+        return;
+    }
+    let mut column = content_cells + 1;
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
             CaptureToken::Sgr(sequence) => output.extend_from_slice(sequence),
-            CaptureToken::Space if valid_overlay && index >= suffix_start => {
+            CaptureToken::Space if index >= suffix_start => {
                 let span = tokens[index..]
                     .iter()
                     .take_while(|token| matches!(token, CaptureToken::Space))
@@ -239,10 +257,20 @@ fn paint_cell_overlay(output: &mut Vec<u8>, row: usize, pane_width: u16, line: &
                 index += span;
                 continue;
             }
-            CaptureToken::Control | CaptureToken::Space | CaptureToken::Content => {}
+            CaptureToken::Control | CaptureToken::Space | CaptureToken::Content(_) => {}
         }
         index += 1;
     }
+}
+
+/// Cells tmux gave the text before the trailing blanks, or `None` when it is
+/// not valid UTF-8.
+fn content_width(tokens: &[CaptureToken<'_>]) -> Option<usize> {
+    tokens.iter().try_fold(0, |cells, token| match token {
+        CaptureToken::Space => Some(cells + 1),
+        CaptureToken::Content(text) => Some(cells + std::str::from_utf8(text).ok()?.width()),
+        CaptureToken::Sgr(_) | CaptureToken::Control => Some(cells),
+    })
 }
 
 fn capture_tokens(line: &[u8]) -> Vec<CaptureToken<'_>> {
@@ -282,12 +310,18 @@ fn capture_tokens(line: &[u8]) -> Vec<CaptureToken<'_>> {
             tokens.push(CaptureToken::Control);
             continue;
         }
-        tokens.push(if line[offset] == b' ' {
-            CaptureToken::Space
-        } else {
-            CaptureToken::Content
-        });
-        offset += 1;
+        if line[offset] == b' ' {
+            tokens.push(CaptureToken::Space);
+            offset += 1;
+            continue;
+        }
+        // The first byte is part of the run even if it is a stray escape.
+        let end = line[offset + 1..]
+            .iter()
+            .position(|byte| matches!(byte, b' ' | 0x1b))
+            .map_or(line.len(), |relative| offset + 1 + relative);
+        tokens.push(CaptureToken::Content(&line[offset..end]));
+        offset = end;
     }
     tokens
 }
