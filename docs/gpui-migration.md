@@ -240,7 +240,7 @@ and every command appears in the palette.
 Port the state machines first, in `terminal-engine`, along with their tests:
 `TerminalEventHub`, `PaneHistoryPager`, `historyPage`, `TerminalGenerationWatermark`,
 `TerminalReadingState`, `PaneDegradedWatchdog`, `PaneRecovery`, `PaneRevealState`,
-`revealRetry`, `DeferredTerminalOutputQueue`, `timeBound`.
+`revealRetry`, `DeferredTerminalOutputQueue`.
 
 Then build the view:
 
