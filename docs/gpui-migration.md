@@ -206,8 +206,8 @@ Exit: a written go or no-go with the measurements, and decisions 1 to 4 recorded
 1. Record the paths Tauri resolves (`app_config_dir`, `app_log_dir`, `app_data_dir`)
    on both platforms as golden tests. The native app must use the same directories,
    so profiles, app state and logs carry over.
-2. Introduce `EventSink`, `AppPaths` and dialog traits in place of `Channel`, `emit`,
-   `AppHandle` and `State`.
+2. Introduce `EventSink` and `AppPaths` in place of `Channel`, `emit`, `AppHandle` and
+   `State`. Rust makes no dialog calls today, so a dialog trait waits until Phase 2 needs one.
 3. Move `connection/**`, `app_state`, `incidents`, `notifications`, `update_check`,
    `power_events`, `external_links` and the perf-log sink into `crates/desktop-core`.
    Tauri commands stay as thin shims until cutover.
