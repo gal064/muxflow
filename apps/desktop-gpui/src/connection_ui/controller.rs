@@ -1283,6 +1283,17 @@ impl ConnectionController {
                 self.flow_stalled(profile_id, pane_id, *epoch, cx);
             }
             LinkEvent::Status(message) => self.announce(profile_id, message.clone(), cx),
+            // An echo the journal recorded as slow is one occasion of the host
+            // answering late, for a remote host the user is typing on.
+            LinkEvent::EchoLag { lag_ms } => {
+                if profile_id == self.active_profile_id() && self.link_quality_host().is_some() {
+                    let change = self
+                        .link_quality
+                        .note_echo_lag(self.backend.now_ms(), *lag_ms);
+                    self.apply_link_quality(change, cx);
+                    cx.notify();
+                }
+            }
         }
     }
 
