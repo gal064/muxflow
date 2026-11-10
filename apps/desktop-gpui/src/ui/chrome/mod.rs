@@ -1,44 +1,418 @@
-//! Owned by T2.2 `chrome-layout`: the window body (dock, sidebar, tabs, right
-//! panel) and what the title bar shows. Everything goes under `ui/chrome/`.
+//! The window body under the title bar: sidebar, workspace and right panel,
+//! their widths and how they collapse. [`Chrome`] is the seam the shell renders.
 //!
-//! [`Chrome`] is the seam [`crate::ui::shell::Shell`] renders; replace its
-//! contents, not the `Shell`.
+//! Saved preferences are read once from `app_state` and written back through
+//! `Chrome::save`, which never overlaps itself and always ends with the newest
+//! value: a save started while one runs just replaces what the runner picks up
+//! next. It runs on the backend's runtime, so a save outlives this entity.
+//!
+//! Layout notes: the rails are plain flex children with Kit `resize_handle`
+//! bands. Kit's `DockArea` sizes docks in `Pixels` only, so it could not follow
+//! UI scale and would bring tab-group chrome Muxflow does not have; Kit's
+//! `Sidebar` is one scrolling list, and Muxflow's sidebar is two independently
+//! scrolling sections split by a divider. Tabs use Kit's unstyled base `Tabs`,
+//! because Kit's `TabBar` sizes tabs in fixed `Pixels`.
 
-use gpui_kit::{
-    App, Context, Entity, FontWeight, IntoElement, Render, Role, Window, component::ActiveTheme,
-    div, prelude::*,
+pub mod divider;
+pub mod layout;
+mod right_panel;
+mod sidebar;
+mod tab_strip;
+mod title_content;
+mod workspace;
+
+use std::sync::{Arc, Mutex};
+
+use desktop_core::{
+    app_state::{self, DockSide, PersistedAppState},
+    platform,
 };
+use gpui_kit::{
+    App, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    Pixels, Point, Render, SharedString, Styled, WeakEntity, Window, div, prelude::FluentBuilder,
+};
+pub use tab_strip::TabEntry;
 
-use crate::theme::metrics::{TYPE_TITLEBAR, ui};
+use crate::{
+    app::Core,
+    theme,
+    ui::chrome::{
+        divider::{Divider, DividerDrag},
+        layout::{Prefs, Rails},
+        right_panel::RightPanel,
+        sidebar::Sidebar,
+        title_content::TitleContent,
+        workspace::WorkspaceArea,
+    },
+};
 
 /// Called once from [`crate::features::init`].
 pub fn init(_cx: &mut App) {}
 
-pub struct Chrome;
+/// One workspace's saved tabs, until live sessions replace them.
+#[derive(Clone)]
+pub struct WorkspacePlaceholder {
+    pub name: SharedString,
+    pub tabs: Vec<TabEntry>,
+    pub active_tab: Option<SharedString>,
+    pub docked: Option<(SharedString, DockSide)>,
+}
+
+/// Saved tabs per workspace, in saved order. Live data replaces this later.
+fn saved_workspaces(state: &PersistedAppState) -> Vec<WorkspacePlaceholder> {
+    state
+        .workspace_ui
+        .iter()
+        .map(|record| {
+            let mut records: Vec<_> = state
+                .app_tabs
+                .iter()
+                .filter(|tab| {
+                    tab.host_profile_id == record.host_profile_id
+                        && tab.server_identity == record.server_identity
+                        && tab.session_id == record.session_id
+                })
+                .collect();
+            records.sort_by_key(|tab| tab.order);
+            WorkspacePlaceholder {
+                name: record.session_name.clone().into(),
+                tabs: records
+                    .iter()
+                    .map(|tab| TabEntry {
+                        key: tab.id.clone().into(),
+                        title: tab.title.clone().into(),
+                        preview: tab.preview == Some(true),
+                    })
+                    .collect(),
+                active_tab: record.selected_app_tab_id.clone().map(Into::into),
+                docked: record
+                    .docked_app_tab_id
+                    .clone()
+                    .map(|id| (id.into(), record.dock_side.unwrap_or(DockSide::Right))),
+            }
+        })
+        .collect()
+}
+
+pub struct Chrome {
+    this: WeakEntity<Self>,
+    prefs: Prefs,
+    drag: Option<(Divider, f32)>,
+    /// `shell.tabsInTitleBar`, which Settings sets. Read at start.
+    tabs_in_title_bar: bool,
+    /// (id, label) of each right-panel segment, built-ins first.
+    surfaces: Vec<(String, String)>,
+    workspaces: Vec<WorkspacePlaceholder>,
+    active_workspace: usize,
+    saves: Arc<Mutex<SaveQueue>>,
+}
+
+/// The newest preferences waiting to be written, and whether a writer runs.
+#[derive(Default)]
+struct SaveQueue {
+    pending: Option<Prefs>,
+    running: bool,
+}
 
 impl Chrome {
     pub fn new(_window: &mut Window, cx: &mut App) -> Entity<Self> {
-        cx.new(|_| Self)
+        let store = cx.global::<Core>().app_state.clone();
+        // A broken file shows defaults; `app_state` keeps it write-frozen.
+        let state = app_state::load_app_state(&store).unwrap_or_default();
+        cx.new(|cx| Self {
+            this: cx.entity().downgrade(),
+            prefs: Prefs::from_shell(&state.shell),
+            drag: None,
+            tabs_in_title_bar: state.shell.tabs_in_title_bar.unwrap_or(true),
+            surfaces: layout::panel_surfaces(state.shell.enabled_panel_extensions.as_deref()),
+            workspaces: saved_workspaces(&state),
+            active_workspace: 0,
+            saves: Arc::default(),
+        })
     }
 
-    /// The title bar's content, to the left of the window controls. A press
-    /// that reaches the bar starts a window drag, so an interactive child calls
-    /// `cx.stop_propagation()` on left mouse-down, as `WindowControls` does.
-    pub fn title_bar_content(&self) -> impl IntoElement {
-        div()
-            .text_size(ui(TYPE_TITLEBAR))
-            .font_weight(FontWeight(550.))
-            .child("Muxflow")
+    /// The title bar's content. A press that reaches the bar starts a window
+    /// drag, so an interactive child calls `cx.stop_propagation()` on left
+    /// mouse-down, as `WindowControls` does.
+    pub fn title_bar_content(&self) -> impl IntoElement + use<> {
+        TitleContent(self.this.clone())
+    }
+
+    pub fn tabs_in_title_bar(&self) -> bool {
+        self.tabs_in_title_bar
+    }
+
+    /// The committed preferences, or a drag's preview of them.
+    fn displayed(&self) -> Prefs {
+        let mut prefs = self.prefs.clone();
+        if let Some((divider, value)) = self.drag {
+            set_divider(&mut prefs, divider, value);
+        }
+        prefs
+    }
+
+    /// A CSS pixel in this window's `Pixels`, which is the UI scale.
+    fn css_unit(window: &Window) -> f32 {
+        window.rem_size().as_f32() / 16.
+    }
+
+    fn window_width(window: &Window) -> f32 {
+        window.viewport_size().width.as_f32() / Self::css_unit(window)
+    }
+
+    /// What the rails do right now, drag preview included.
+    pub fn rails(&self, window: &Window) -> Rails {
+        layout::rails(&self.displayed(), Self::window_width(window))
+    }
+
+    fn committed_rails(&self, window: &Window) -> Rails {
+        layout::rails(&self.prefs, Self::window_width(window))
+    }
+
+    fn workspace(&self) -> Option<&WorkspacePlaceholder> {
+        self.workspaces.get(self.active_workspace)
+    }
+
+    fn dock_side(&self) -> DockSide {
+        self.workspace()
+            .and_then(|workspace| workspace.docked.as_ref())
+            .map_or(DockSide::Right, |(_, side)| *side)
+    }
+
+    /// The command behind the sidebar button and `view.toggleSidebar`.
+    pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.prefs.sidebar_collapsed = !self.prefs.sidebar_collapsed;
+        self.save(cx);
+    }
+
+    /// The command behind the panel button and `view.togglePanel`.
+    pub fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        self.prefs.panel_open = !self.prefs.panel_open;
+        self.save(cx);
+    }
+
+    /// Asks for a surface: opens the panel on it, as `view.showFiles` and its
+    /// siblings do. Not a toggle.
+    pub fn show_surface(&mut self, surface: &str, cx: &mut Context<Self>) {
+        self.prefs.panel_open = true;
+        self.prefs.panel_surface = surface.to_owned();
+        self.save(cx);
+    }
+
+    fn toggle_pinned_only(&mut self, cx: &mut Context<Self>) {
+        self.prefs.pinned_only = !self.prefs.pinned_only;
+        self.save(cx);
+    }
+
+    fn next_agent_sort(&mut self, cx: &mut Context<Self>) {
+        self.prefs.agent_sort = layout::next_sort_mode(self.prefs.agent_sort);
+        self.save(cx);
+    }
+
+    fn select_workspace(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.active_workspace = index;
+        cx.notify();
+    }
+
+    fn select_tab(&mut self, key: SharedString, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.workspaces.get_mut(self.active_workspace) {
+            workspace.active_tab = Some(key);
+            cx.notify();
+        }
+    }
+
+    /// Closes a placeholder tab for now; the saved tab returns next launch.
+    /// The real close arrives with document tabs.
+    fn close_tab(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.workspaces.get_mut(self.active_workspace) {
+            workspace.tabs.retain(|tab| tab.key != key);
+            if workspace.active_tab.as_deref() == Some(key) {
+                workspace.active_tab = None;
+            }
+            if workspace
+                .docked
+                .as_ref()
+                .is_some_and(|(docked, _)| docked == key)
+            {
+                workspace.docked = None;
+            }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn drag_to(
+        &mut self,
+        divider: Divider,
+        pointer: Point<Pixels>,
+        bounds: Bounds<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let unit = Self::css_unit(window);
+        let rails = self.committed_rails(window);
+        let value = match divider {
+            Divider::Sidebar => ((pointer.x - bounds.left()).as_f32() / unit)
+                .clamp(layout::SIDEBAR_MIN_WIDTH, rails.sidebar_max),
+            Divider::Panel => ((bounds.right() - pointer.x).as_f32() / unit)
+                .clamp(layout::PANEL_MIN_WIDTH, rails.panel_max),
+            Divider::Agents => ((bounds.bottom() - pointer.y) / bounds.size.height)
+                .clamp(layout::AGENTS_RATIO_MIN, layout::AGENTS_RATIO_MAX),
+            Divider::Dock => layout::dock_fraction_at(
+                bounds.size.width.as_f32() / unit,
+                (pointer.x - bounds.left()).as_f32() / unit,
+                self.dock_side(),
+            ),
+        };
+        self.drag = Some((divider, value));
+        cx.notify();
+    }
+
+    pub(crate) fn end_drag(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if let Some((divider, value)) = self.drag.take() {
+            self.commit(divider, value, window, cx);
+        }
+    }
+
+    pub(crate) fn nudge(
+        &mut self,
+        divider: Divider,
+        delta: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        // From the width on screen, which the window may have capped.
+        let rails = self.committed_rails(window);
+        let current = match divider {
+            Divider::Sidebar => rails.sidebar_width,
+            Divider::Panel => rails.panel_width,
+            Divider::Agents => self.prefs.agents_ratio,
+            Divider::Dock => self.prefs.dock_fraction,
+        };
+        self.commit(divider, current + delta, window, cx);
+    }
+
+    /// Stores a divider's value through the same caps a drag gets.
+    fn commit(&mut self, divider: Divider, value: f32, window: &Window, cx: &mut Context<Self>) {
+        let width = Self::window_width(window);
+        let rails = self.committed_rails(window);
+        let value = match divider {
+            Divider::Sidebar => {
+                layout::sidebar_width_for_window(value.min(rails.sidebar_max), width)
+            }
+            Divider::Panel => layout::panel_width_for_window(value.min(rails.panel_max), width),
+            Divider::Agents => layout::clamped_agents_ratio(Some(value)),
+            Divider::Dock => layout::clamped_dock_fraction(Some(value)),
+        };
+        set_divider(&mut self.prefs, divider, value);
+        self.save(cx);
+    }
+
+    /// Writes [`Prefs`] over the saved state, one write at a time.
+    fn save(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
+        {
+            let mut queue = self.saves.lock().unwrap();
+            queue.pending = Some(self.prefs.clone());
+            if queue.running {
+                return;
+            }
+            queue.running = true;
+        }
+        let saves = self.saves.clone();
+        let store = cx.global::<Core>().app_state.clone();
+        platform::spawn(async move {
+            loop {
+                let next = {
+                    let mut queue = saves.lock().unwrap();
+                    let next = queue.pending.take();
+                    queue.running = next.is_some();
+                    next
+                };
+                let Some(prefs) = next else {
+                    return;
+                };
+                let result = async {
+                    let mut state = app_state::load_app_state(&store)?;
+                    prefs.apply_to(&mut state.shell);
+                    app_state::save_app_state(state, &store).await
+                }
+                .await;
+                if let Err(error) = result {
+                    eprintln!("muxflow: could not save the shell layout: {error}");
+                }
+            }
+        });
+    }
+}
+
+fn set_divider(prefs: &mut Prefs, divider: Divider, value: f32) {
+    match divider {
+        Divider::Sidebar => prefs.sidebar_width = value,
+        Divider::Panel => prefs.panel_width = value,
+        Divider::Agents => prefs.agents_ratio = value,
+        Divider::Dock => prefs.dock_fraction = value,
     }
 }
 
 impl Render for Chrome {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rails = self.rails(window);
+        let displayed = self.displayed();
+        let chrome = self.this.clone();
+        let surface = layout::resolved_surface(&self.surfaces, &displayed.panel_surface).to_owned();
         div()
-            .id("workspace")
-            .role(Role::Main)
-            .aria_label("Workspace")
+            .id("workspace-shell")
+            .relative()
+            .flex()
             .size_full()
-            .bg(cx.theme().background)
+            .overflow_hidden()
+            .bg(theme::palette(cx).chrome_bg)
+            .on_drag_move::<DividerDrag>({
+                let chrome = chrome.clone();
+                move |event, window, cx| {
+                    let DividerDrag(divider) = *event.drag(cx);
+                    if divider == Divider::Dock {
+                        return;
+                    }
+                    chrome
+                        .update(cx, |chrome, cx| {
+                            chrome.drag_to(divider, event.event.position, event.bounds, window, cx)
+                        })
+                        .ok();
+                }
+            })
+            .when(self.drag.is_some(), |this| {
+                this.child(divider::drag_release(chrome.clone()))
+            })
+            .when(rails.sidebar_open, |this| {
+                this.child(Sidebar {
+                    chrome: chrome.clone(),
+                    width: rails.sidebar_width,
+                    agents_ratio: displayed.agents_ratio,
+                    new_workspace_here: self.tabs_in_title_bar,
+                    pinned_only: displayed.pinned_only,
+                    agent_sort: displayed.agent_sort,
+                    workspaces: self
+                        .workspaces
+                        .iter()
+                        .map(|workspace| workspace.name.clone())
+                        .collect(),
+                    active_workspace: self.active_workspace,
+                })
+            })
+            .child(WorkspaceArea {
+                chrome: chrome.clone(),
+                workspace: self.workspace().cloned(),
+                dock_fraction: displayed.dock_fraction,
+                tabs_in_title_bar: self.tabs_in_title_bar,
+            })
+            .when(rails.panel_open, |this| {
+                this.child(RightPanel {
+                    chrome,
+                    width: rails.panel_width,
+                    surfaces: self.surfaces.clone(),
+                    surface,
+                })
+            })
     }
 }

@@ -1,5 +1,5 @@
 //! Real offscreen renders of the window: light and dark at UI scale 1.0 and
-//! 1.2, at the default and the minimum size, with the embedded fonts. Set
+//! 1.2, at the minimum, default and a large size, with the embedded fonts. Set
 //! `MUXFLOW_GPUI_FRAME_DIR` to keep the PNGs. The renders are Linux only,
 //! because hosted macOS has no reliable offscreen GPU path; the font check runs
 //! everywhere.
@@ -73,13 +73,28 @@ mod frames {
 
     fn write_state(dir: &Path, theme: &str, ui_scale: f64) -> std::path::PathBuf {
         let path = dir.join("app-state.json");
+        let tab = |id: &str, title: &str, order: u32| {
+            serde_json::json!({
+                "id": id, "hostProfileId": "local", "serverIdentity": "tmux",
+                "sessionId": "$1", "sessionName": "main", "kind": "file",
+                "resource": format!("/repo/{title}"), "title": title, "order": order,
+            })
+        };
         std::fs::write(
             &path,
             serde_json::to_vec(&serde_json::json!({
                 "schemaVersion": 1,
-                "appTabs": [],
-                "workspaceUi": [],
-                "shell": { "theme": theme, "uiScale": ui_scale },
+                "appTabs": [
+                    tab("a", "src/main.rs", 0),
+                    tab("b", "README.md", 1),
+                ],
+                "workspaceUi": [{
+                    "hostProfileId": "local", "serverIdentity": "tmux",
+                    "sessionId": "$1", "sessionName": "main",
+                    "selectedAppTabId": "a",
+                    "dockedAppTabId": "b", "dockSide": "right",
+                }],
+                "shell": { "theme": theme, "uiScale": ui_scale, "panelOpen": true },
             }))
             .unwrap(),
         )
@@ -130,14 +145,15 @@ mod frames {
             let p = frame.get_pixel(x * 2, y * 2).0;
             [p[0], p[1], p[2]]
         };
-        // The window is themed: the body below the title bar is the chrome ground.
+        // The window is themed: the work area below the title bar is the terminal ground.
         assert_eq!(
             at(width / 2, height - 8),
-            rgb(palette.chrome_bg),
+            rgb(palette.term_bg),
             "{label} body"
         );
-        // The title bar's hairline sits at its scaled height.
-        let line = (28.0 * scale).round() as u32;
+        // The title bar's hairline sits at its scaled height: with tabs in the
+        // bar, the height of the tab strip it replaces.
+        let line = (34.0 * scale).round() as u32;
         let hairline = rgb(palette.chrome_hairline);
         assert!(
             (line.saturating_sub(2)..=line + 1).any(|y| at(width / 2, y) == hairline),
@@ -156,6 +172,7 @@ mod frames {
     pub fn run() {
         for (theme, palette) in [("dark", theme::dark()), ("light", theme::light())] {
             for scale in [1.0, 1.2] {
+                render_case(theme, scale, 1920, 1200, &palette);
                 render_case(theme, scale, 1280, 800, &palette);
                 render_case(theme, scale, 320, 240, &palette);
             }
