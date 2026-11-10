@@ -3037,7 +3037,7 @@ mod tests {
         }
         assert_same_json(
             serialized,
-            r#"{"errorClass":"host_connection_ended","subsystem":"host_daemon"}"#
+            r#"{"errorClass":"host_connection_ended","subsystem":"host_daemon"}"#,
         );
     }
 
@@ -3059,7 +3059,7 @@ mod tests {
         }
         assert_same_json(
             serialized,
-            r#"{"atUnixMillis":1700000000000,"event":"bridgeExit","lifetimeMs":42,"reason":"daemon-eof","subsystem":"host_bridge"}"#
+            r#"{"atUnixMillis":1700000000000,"event":"bridgeExit","lifetimeMs":42,"reason":"daemon-eof","subsystem":"host_bridge"}"#,
         );
     }
 
@@ -3087,7 +3087,7 @@ mod tests {
         }
         assert_same_json(
             serialized,
-            r#"{"atUnixMillis":1700000000000,"event":"connectionEnded","lifetimeMs":9000,"msSinceLastClientFrame":120,"msSinceLastHostFrame":7,"reason":"writer-deadline","subsystem":"host_daemon"}"#
+            r#"{"atUnixMillis":1700000000000,"event":"connectionEnded","lifetimeMs":9000,"msSinceLastClientFrame":120,"msSinceLastHostFrame":7,"reason":"writer-deadline","subsystem":"host_daemon"}"#,
         );
     }
 
@@ -3110,7 +3110,7 @@ mod tests {
         }
         assert_same_json(
             serialized,
-            r#"{"event":"codexHookSuperseded","hookEvent":"SessionEnd","incomingAgentId":"codex:incominghash","ownerAgentId":"codex:ownerhash","paneId":"%7","subsystem":"host_daemon"}"#
+            r#"{"event":"codexHookSuperseded","hookEvent":"SessionEnd","incomingAgentId":"codex:incominghash","ownerAgentId":"codex:ownerhash","paneId":"%7","subsystem":"host_daemon"}"#,
         );
         let unknown = codex_hook_superseded_line(
             "%7",
