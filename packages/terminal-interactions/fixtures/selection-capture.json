@@ -1,0 +1,92 @@
+[
+  {
+    "name": "ssh-command-hard-rows",
+    "columns": 80,
+    "bufferRows": 5,
+    "input": "\u001b[38;5;6mssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\u001b[39m\r\n  \u001b[38;5;6m-L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\u001b[39m\r\n  \u001b[38;5;6m55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost\u001b[39m",
+    "rows": [{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","wrapped":false,"styled":true},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","wrapped":false,"styled":true},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","wrapped":false,"styled":true}],
+    "selection": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\n  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\n  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","start":{"x":0,"y":0},"end":{"x":56,"y":2}},
+    "expected": {"columns":80,"metadataComplete":true,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":56,"textCells":51,"styledTextCells":51}]},
+    "cleaned": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200 -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L 55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost"
+  },
+  {
+    "name": "hyphen-split-word",
+    "columns": 135,
+    "bufferRows": 3,
+    "input": "\u001b[36mscp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-\u001b[0m\r\n  \u001b[36mdebug.apk\u001b[0m",
+    "rows": [{"text":"scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-","wrapped":false,"styled":true},{"text":"  debug.apk","wrapped":false,"styled":true}],
+    "selection": {"text":"scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-\n  debug.apk","start":{"x":0,"y":0},"end":{"x":11,"y":1}},
+    "expected": {"columns":135,"metadataComplete":true,"rows":[{"text":"scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-","isWrapped":false,"occupiedEndCell":130,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":135,"textCells":128,"styledTextCells":128},{"text":"  debug.apk","isWrapped":false,"occupiedEndCell":11,"firstTextCell":2,"firstTokenCells":9,"selectedEndCell":11,"textCells":9,"styledTextCells":9}]},
+    "cleaned": "scp dev@192.0.2.42:/home/dev/dev/dev-app-mobile/apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk ~/Downloads/muxflow-debug.apk"
+  },
+  {
+    "name": "native-soft-wrap",
+    "columns": 12,
+    "bufferRows": 4,
+    "input": "\u001b[36mcommand --first value --second value\u001b[0m",
+    "rows": [{"text":"command --fi","wrapped":false,"styled":true},{"text":"rst value --","wrapped":true,"styled":true},{"text":"second value","wrapped":true,"styled":true}],
+    "selection": {"text":"command --first value --second value","start":{"x":0,"y":0},"end":{"x":8,"y":2}},
+    "expected": {"columns":12,"metadataComplete":false,"rows":[{"text":"command --fi","isWrapped":false,"occupiedEndCell":12,"firstTextCell":0,"firstTokenCells":7,"selectedEndCell":12,"textCells":11,"styledTextCells":11},{"text":"rst value --","isWrapped":true,"occupiedEndCell":12,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":12,"textCells":10,"styledTextCells":10},{"text":"second v","isWrapped":true,"occupiedEndCell":12,"firstTextCell":0,"firstTokenCells":6,"selectedEndCell":8,"textCells":7,"styledTextCells":7}]},
+    "cleaned": "command --first value --second value"
+  },
+  {
+    "name": "unselected-trailing-cells",
+    "columns": 46,
+    "bufferRows": 3,
+    "input": "\u001b[36mssh -N --first value --second\u001b[0m\r\n\u001b[36m  destination.example trailing-text\u001b[0m",
+    "rows": [{"text":"ssh -N --first value --second","wrapped":false,"styled":true},{"text":"  destination.example trailing-text","wrapped":false,"styled":true}],
+    "selection": {"text":"ssh -N --first value --second\n  destination.example","start":{"x":0,"y":0},"end":{"x":21,"y":1}},
+    "expected": {"columns":46,"metadataComplete":true,"rows":[{"text":"ssh -N --first value --second","isWrapped":false,"occupiedEndCell":29,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":46,"textCells":25,"styledTextCells":25},{"text":"  destination.example","isWrapped":false,"occupiedEndCell":35,"firstTextCell":2,"firstTokenCells":19,"selectedEndCell":21,"textCells":19,"styledTextCells":19}]},
+    "cleaned": "ssh -N --first value --second\n  destination.example"
+  },
+  {
+    "name": "cjk-and-emoji-widths",
+    "columns": 60,
+    "bufferRows": 3,
+    "input": "\u001b[36mcurl --silent --header 'X-City: 東京' --url\u001b[0m\r\n  \u001b[36mhttps://例え.test/🚀\u001b[0m",
+    "rows": [{"text":"curl --silent --header 'X-City: 東京' --url","wrapped":false,"wide":[32,33],"styled":true},{"text":"  https://例え.test/🚀","wrapped":false,"wide":[10,11],"styled":true}],
+    "selection": {"text":"curl --silent --header 'X-City: 東京' --url\n  https://例え.test/🚀","start":{"x":0,"y":0},"end":{"x":60,"y":1}},
+    "expected": {"columns":60,"metadataComplete":true,"rows":[{"text":"curl --silent --header 'X-City: 東京' --url","isWrapped":false,"occupiedEndCell":43,"firstTextCell":0,"firstTokenCells":4,"selectedEndCell":60,"textCells":36,"styledTextCells":36},{"text":"  https://例え.test/🚀","isWrapped":false,"occupiedEndCell":21,"firstTextCell":2,"firstTokenCells":19,"selectedEndCell":60,"textCells":17,"styledTextCells":17}]},
+    "cleaned": "curl --silent --header 'X-City: 東京' --url https://例え.test/🚀"
+  },
+  {
+    "name": "rectangular-selection-text-mismatch",
+    "columns": 80,
+    "bufferRows": 5,
+    "input": "\u001b[38;5;6mssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\u001b[39m\r\n  \u001b[38;5;6m-L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L\u001b[39m\r\n  \u001b[38;5;6m55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost\u001b[39m",
+    "rows": [{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","wrapped":false,"styled":true},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","wrapped":false,"styled":true},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","wrapped":false,"styled":true}],
+    "selection": {"text":"-N -L 18080\n-L 4443\n-L 55433","start":{"x":0,"y":0},"end":{"x":56,"y":2}},
+    "expected": {"columns":80,"metadataComplete":false,"rows":[{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","isWrapped":false,"occupiedEndCell":77,"firstTextCell":0,"firstTokenCells":3,"selectedEndCell":80,"textCells":70,"styledTextCells":70},{"text":"  -L 4443:127.0.0.1:4443 -L 19001:127.0.0.1:19001 -L 5434:127.0.0.1:5434 -L","isWrapped":false,"occupiedEndCell":75,"firstTextCell":2,"firstTokenCells":2,"selectedEndCell":80,"textCells":67,"styledTextCells":67},{"text":"  55433:127.0.0.1:55433 -L 56379:127.0.0.1:56379 devhost","isWrapped":false,"occupiedEndCell":56,"firstTextCell":2,"firstTokenCells":21,"selectedEndCell":56,"textCells":51,"styledTextCells":51}]},
+    "cleaned": "-N -L 18080\n-L 4443\n-L 55433"
+  },
+  {
+    "name": "inverted-range",
+    "columns": 80,
+    "bufferRows": 5,
+    "input": "\u001b[38;5;6mssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\u001b[39m",
+    "rows": [{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","wrapped":false,"styled":true}],
+    "selection": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","start":{"x":5,"y":1},"end":{"x":2,"y":0}},
+    "expected": {"columns":80,"metadataComplete":false,"rows":[]},
+    "cleaned": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200"
+  },
+  {
+    "name": "range-past-buffer",
+    "columns": 80,
+    "bufferRows": 2,
+    "input": "\u001b[38;5;6mssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200\u001b[39m",
+    "rows": [{"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","wrapped":false,"styled":true}],
+    "selection": {"text":"ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200","start":{"x":0,"y":0},"end":{"x":5,"y":9}},
+    "expected": {"columns":80,"metadataComplete":false,"rows":[]},
+    "cleaned": "ssh -N -L 18080:127.0.0.1:18080 -L 8100:127.0.0.1:8100 -L 8200:127.0.0.1:8200"
+  },
+  {
+    "name": "no-selection",
+    "columns": 80,
+    "bufferRows": 2,
+    "input": "plain",
+    "rows": [{"text":"plain","wrapped":false,"styled":false}],
+    "selection": {"text":""},
+    "expected": {"columns":80,"metadataComplete":false,"rows":[]},
+    "cleaned": ""
+  }
+]
