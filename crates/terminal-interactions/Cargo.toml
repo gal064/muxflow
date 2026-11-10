@@ -1,0 +1,14 @@
+[package]
+name = "terminal-interactions"
+version = "0.1.0"
+license = "MIT"
+description = "Pure terminal interaction logic shared in shape with the mobile TypeScript package"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+regex = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
