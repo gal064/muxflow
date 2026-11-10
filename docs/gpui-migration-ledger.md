@@ -185,8 +185,8 @@ font row covers them).
 | `app/AppDialogLayer.tsx` | 122 | port | 2 | dialog layer over Kit dialogs | open |
 | `app/AppNoticeLayer.tsx` | 52 | port | 2 | Kit notifications through `notices.rs`. One status notice at a time, a problem stays. The transfer toast is not here yet; it comes with transfers | open |
 | `app/AppRightPanel.tsx` | 89 | port | 2 | right panel host (Explorer, Git, Ports rails) | open |
-| `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | separator rule and naming in terminal/layout.rs and surface.rs; link-modifier grab and activity forwarding go with T3.6 | open |
-| `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | terminal/surface.rs: pane frames, resting dividers, empty state, region name. Divider drag and arrow-key resize, pane grab, hover focus and selecting a pane in tmux on focus go to T3.6 | open |
+| `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | separator rule and naming in terminal/layout.rs and surface.rs; divider, grab and join rules in terminal/integration/frames.rs (T3.6); activity forwarding goes with the agents runtime in Phase 4 | open |
+| `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | terminal/surface.rs: pane frames, resting dividers, empty state, region name, and (T3.6) divider drag and arrow-key resize, the attention ring (fed by the agents runtime in Phase 4), hover focus, selecting a pane in tmux on focus, and the link-modifier pane grab, which joins a pane beside another; the grab yields to a link once T3.5's link test is wired into `integration::link_at` | done (T3.6) |
 | `app/WorkspaceDock.test.tsx` | 131 | port | 2 | tests of WorkspaceDock.tsx | open |
 | `app/WorkspaceDock.tsx` | 232 | port | 2 | dock layout on Kit dock; also a drop target, not a drag source (see S8) | open |
 | `app/appRecovery.test.ts` | 43 | port | 2 | tests in connection_ui/app_recovery.rs | done (T2.4) |
@@ -200,10 +200,10 @@ font row covers them).
 | `app/linkQuality.ts` | 161 | port | 2 | connection_ui/link_quality.rs | done (T2.4) |
 | `app/missingHelperRecovery.test.tsx` | 420 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
 | `app/multiHostBridges.test.tsx` | 412 | port | 2 | connection_ui/controller/tests.rs; prewarm, hub, reseed, clipboard, file, git and agent-stamping cases move with Phase 3/4 owners | done (T2.4) |
-| `app/paneHoverFocus.test.tsx` | 160 | port | 3 | tests of paneHoverFocus.ts | open |
-| `app/paneHoverFocus.ts` | 91 | port | 3 | pane hover focus | open |
-| `app/paneRouting.test.ts` | 44 | port | 3 | tests of paneRouting.ts | open |
-| `app/paneRouting.ts` | 60 | port | 3 | pane_routing notification route resolution | open |
+| `app/paneHoverFocus.test.tsx` | 160 | port | 3 | the delay and the after-drop quiet are in terminal/integration/frames.rs; the timer, field and window checks are view behavior in surface.rs, checked in T3.6 QA | done (T3.6) |
+| `app/paneHoverFocus.ts` | 91 | port | 3 | hover focus in terminal/surface.rs: one decision per entry, rechecked when the timer fires, never taken from anything but another pane | done (T3.6) |
+| `app/paneRouting.test.ts` | 44 | port | 3 | tests in terminal/integration/routing.rs | done (T3.6) |
+| `app/paneRouting.ts` | 60 | port | 3 | terminal/integration/routing.rs; its callers are the agents and notifications in Phase 4 | done (T3.6) |
 | `app/postResyncReseed.test.tsx` | 93 | port | 3 | reseed after resync | open |
 | `app/reconnectNoticeDedupe.test.tsx` | 129 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
 | `app/shellNavigationCoordinator.ts` | 165 | port | 4 | shell navigation coordinator | open |
@@ -226,8 +226,8 @@ font row covers them).
 | `app/useFocusHistoryNavigation.test.tsx` | 190 | port | 4 | tests of useFocusHistoryNavigation.ts | open |
 | `app/useFocusHistoryNavigation.ts` | 135 | port | 4 | focus history navigation | open |
 | `app/useMissingHelperRecovery.ts` | 176 | port | 2 | connection_ui/helper_recovery.rs | done (T2.4) |
-| `app/usePaneMoves.test.tsx` | 160 | port | 3 | tests of usePaneMoves.ts | open |
-| `app/usePaneMoves.ts` | 201 | port | 3 | pane moves via drop_rules | open |
+| `app/usePaneMoves.test.tsx` | 160 | port | 3 | tests of usePaneMoves.ts; the pane-onto-pane join is tested in terminal/integration/frames.rs (T3.6) | open |
+| `app/usePaneMoves.ts` | 201 | port | 3 | pane moves via drop_rules; the pane grab joining a pane beside another is in terminal/surface.rs (T3.6), tab and workspace drops come with drop_rules in Phase 4 | open |
 | `app/usePerHostMemo.test.tsx` | 61 | retire | 2 | tests usePerHostMemo.ts, which retires | open |
 | `app/usePerHostMemo.ts` | 56 | retire | 2 | React hook that memoizes a list per host; entities hold per-host state directly | open |
 | `app/useShellNavigation.test.tsx` | 1378 | port | 4 | tests of useShellNavigation.ts | open |
@@ -258,7 +258,7 @@ font row covers them).
 | `commands/fuzzy.test.ts` | 43 | port | 2 | `commands/fuzzy.rs` | open |
 | `commands/fuzzy.ts` | 61 | port | 2 | `commands/fuzzy.rs` | open |
 | `commands/registry.test.ts` | 524 | port | 2 | `commands/{registry,keymap}.rs`, `tests/commands.rs` | open |
-| `commands/registry.ts` | 583 | port | 2 | `commands/registry.rs`, `commands/keymap.rs`; keys matched against the portable form through `intercept_keystrokes`, no GPUI bindings. Editor fallback and the docked-document chords wait for Phase 5; the terminal's IME check for Phase 3. GPUI reports no physical key, so digit selectors on layouts with shifted digits (AZERTY) do not resolve | open |
+| `commands/registry.ts` | 583 | port | 2 | `commands/registry.rs`, `commands/keymap.rs`; keys matched against the portable form through `intercept_keystrokes`, no GPUI bindings. Editor fallback and the docked-document chords wait for Phase 5; the terminal's IME check is `terminal::input::is_composing` (T3.4). GPUI reports no physical key, so digit selectors on layouts with shifted digits (AZERTY) do not resolve | open |
 | `commands/rowCommands.test.ts` | 54 | port | 2 | `tests/commands.rs` | open |
 | `commands/rowCommands.ts` | 99 | port | 2 | `commands/mod.rs` `publish_row_commands` | open |
 | `commands/shortcutGlyphs.test.ts` | 47 | port | 2 | `commands/glyphs.rs` | open |
@@ -511,11 +511,11 @@ font row covers them).
 | `features/terminal/TerminalReadingState.test.ts` | 71 | port | 3 | tests in crates/terminal-engine/src/reading.rs | done (T3.1) |
 | `features/terminal/TerminalReadingState.ts` | 57 | port | 3 | crates/terminal-engine/src/reading.rs | done (T3.1) |
 | `features/terminal/TerminalRenderer.test.ts` | 915 | port | 3 | split: scheduler, xterm callbacks, paste interception retire; pane grid reconciliation ported to terminal/surface.rs (T3.3); restoreDecision is in terminal-engine (T3.1); seed recovery is in terminal-engine (T3.1) and no GPU resource recovery is needed; the search and `activatedTerminalUrl` cases are in terminal/reading/find.rs and links.rs (T3.5) | open |
-| `features/terminal/TerminalRenderer.ts` | 1453 | replace | 3 | XtermRenderer becomes TerminalElement (T3.3); restoreDecision is in terminal-engine (T3.1); pane grid reconciliation in terminal/surface.rs (T3.3); selection, search, the link provider and its activation, the scrollbar and top-of-history detection in terminal/reading (T3.5); no GPU resource recovery is needed in a GPUI element | open |
+| `features/terminal/TerminalRenderer.ts` | 1453 | replace | 3 | XtermRenderer becomes TerminalElement (T3.3); restoreDecision is in terminal-engine (T3.1); pane grid reconciliation in terminal/surface.rs (T3.3); selection, search, the link provider, the OSC 8 `linkHandler` and their activation, the scrollbar and top-of-history detection in terminal/reading (T3.5); no GPU resource recovery is needed in a GPUI element | open |
 | `features/terminal/TerminalStateCache.test.ts` | 140 | retire | 3 | tests TerminalStateCache.ts, which retires | done (T3.1) |
 | `features/terminal/TerminalStateCache.ts` | 191 | retire | 3 | xterm serialize cache; hidden panes keep their live grids in crates/terminal-engine/src/engine.rs, bounded at 64 screens and 128 MiB, with the pager flags carried alongside | done (T3.1) |
-| `features/terminal/TerminalTransferSurface.test.tsx` | 906 | port | 3 | tests of TerminalTransferSurface.tsx | open |
-| `features/terminal/TerminalTransferSurface.tsx` | 638 | port | 3 | transfer surface (paste, file and image drop in, upload) | open |
+| `features/terminal/TerminalTransferSurface.test.tsx` | 906 | port | 3 | batch tests in apps/desktop-gpui/tests/terminal_integration.rs; DOM paste events, the WebView image encoder and point hit-testing retire with the WebView | done (T3.6) |
+| `features/terminal/TerminalTransferSurface.tsx` | 638 | port | 3 | terminal/integration/mod.rs (paste, drop, upload list) and upload.rs (the batch and its review dialog) | done (T3.6) |
 | `features/terminal/TerminalWriteScheduler.test.ts` | 499 | port | 3 | write and acknowledgement tests in crates/terminal-engine/src/terminal.rs and engine_tests.rs; fences, partial records and frame pacing have no equivalent | done (T3.1) |
 | `features/terminal/TerminalWriteScheduler.ts` | 613 | replace | 3 | synchronous parse in stream order in crates/terminal-engine/src/terminal.rs; a frame is acknowledged after it is applied, so the host's delivery window is the bound and nothing can overflow | done (T3.1) |
 | `features/terminal/accessibilityPreference.ts` | 25 | retire | 3 | owner exception: the screen-reader terminal mirror and its setting are not built | open |
@@ -528,25 +528,25 @@ font row covers them).
 | `features/terminal/cellMetrics.ts` | 213 | replace | 3 | terminal/cell_metrics.rs: measures the shaped font; snapping rules and `cellsForBox` carried over | done (T3.3) |
 | `features/terminal/clientSize.test.ts` | 208 | port | 3 | tests in terminal/client_size.rs | done (T3.3) |
 | `features/terminal/clientSize.ts` | 112 | port | 3 | terminal/client_size.rs | done (T3.3) |
-| `features/terminal/echoLagProbe.test.ts` | 334 | port | 3 | tests of echoLagProbe.ts; assigned to T3.4 | open |
-| `features/terminal/echoLagProbe.ts` | 272 | port | 3 | echo lag probe (the S1 measurement method); needs the input path, assigned to T3.4 | open |
+| `features/terminal/echoLagProbe.test.ts` | 334 | port | 3 | tests in terminal/input/latency.rs; the dispose and per-pane cases drop, since each pane owns its probe | done (T3.4) |
+| `features/terminal/echoLagProbe.ts` | 272 | port | 3 | terminal/input/latency.rs (EchoLagProbe), one per pane in PaneInput; a journalled lag reaches the link quality verdict as LinkEvent::EchoLag | done (T3.4) |
 | `features/terminal/glyphWeight.test.ts` | 231 | port | 3 | atlas canvas hook, xterm option tripwires and bundle-regex cases drop; cell-width snapping cases in terminal/cell_metrics.rs | done (T3.3) |
 | `features/terminal/gridMismatchProbe.test.ts` | 165 | port | 3 | tests in terminal/probes.rs | done (T3.3) |
 | `features/terminal/gridMismatchProbe.ts` | 160 | port | 3 | terminal/probes.rs (GridMismatchProbe) | done (T3.3) |
 | `features/terminal/historyPage.test.ts` | 139 | port | 3 | tests in crates/terminal-engine/src/history_page.rs | done (T3.1) |
 | `features/terminal/historyPage.ts` | 170 | port | 3 | crates/terminal-engine/src/history_page.rs | done (T3.1) |
-| `features/terminal/hostColors.ts` | 17 | port | 3 | TerminalColors report to host | open |
-| `features/terminal/inputLatencyStats.test.ts` | 159 | port | 3 | tests of inputLatencyStats.ts; assigned to T3.4 | open |
-| `features/terminal/inputLatencyStats.ts` | 192 | port | 3 | input latency histograms; needs the input path, assigned to T3.4 | open |
-| `features/terminal/internalPathDrag.test.ts` | 168 | port | 3 | tests of internalPathDrag.ts | open |
-| `features/terminal/internalPathDrag.ts` | 213 | port | 3 | in-app path drag state and validation; DataTransfer MIME and native-lane bridging retire | open |
+| `features/terminal/hostColors.ts` | 17 | port | 3 | terminal/integration/colors.rs: sent at start and on every theme change | done (T3.6) |
+| `features/terminal/inputLatencyStats.test.ts` | 159 | port | 3 | tests in terminal/input/latency.rs | done (T3.4) |
+| `features/terminal/inputLatencyStats.ts` | 192 | port | 3 | terminal/input/latency.rs (InputLatency, one app-wide window flushed each minute) | done (T3.4) |
+| `features/terminal/internalPathDrag.test.ts` | 168 | port | 3 | tests in terminal/integration/transfers.rs; gesture ids, expiry and the native lane retire with the DataTransfer | done (T3.6) |
+| `features/terminal/internalPathDrag.ts` | 213 | port | 3 | InternalPathDrag in terminal/integration/transfers.rs, dropped on a pane in integration/mod.rs; the Explorer starts the drag in Phase 5 | done (T3.6) |
 | `features/terminal/layout.test.ts` | 66 | port | 3 | tests in terminal/layout.rs | done (T3.3) |
 | `features/terminal/layout.ts` | 67 | port | 3 | terminal/layout.rs | done (T3.3) |
 | `features/terminal/measureBox.test.ts` | 174 | port | 3 | xterm internal-field canary and FitAddon comparison drop; `deviceSafeLineHeight` sweep and `cellsForBox` chrome arithmetic in terminal/cell_metrics.rs | done (T3.3) |
-| `features/terminal/nativeDragDropCoordinator.ts` | 112 | replace | 3 | Tauri webview drag-drop router becomes GPUI file-drop events; DOM plus native dual lane disappears | open |
+| `features/terminal/nativeDragDropCoordinator.ts` | 112 | replace | 3 | GPUI's `ExternalPaths` drop on each pane in terminal/integration/mod.rs | done (T3.6) |
 | `features/terminal/openExternalUrl.test.ts` | 31 | port | 3 | the Tauri and browser-tab split has no equivalent; the http(s) admission `activatedTerminalUrl` adds is tested in terminal/reading/links.rs, and desktop-core tests its own validation | done (T3.5) |
 | `features/terminal/openExternalUrl.ts` | 19 | replace | 3 | direct call into desktop-core external_links from terminal/reading/mod.rs; the browser-tab fallback for the dev harness goes | done (T3.5) |
-| `features/terminal/osc52Clipboard.ts` | 52 | port | 3 | OSC 52 write decode with bounds | open |
+| `features/terminal/osc52Clipboard.ts` | 52 | port | 3 | decoded by the engine's listener (crates/terminal-engine/src/terminal.rs), bounded and gated by the setting in terminal/integration/clipboard.rs, and written only for the host on screen | done (T3.6) |
 | `features/terminal/paintTailProbe.test.ts` | 384 | retire | 3 | tests the xterm write-backlog fingerprints of paintTailProbe.ts; the replacement has its own tests in terminal/probes.rs | done (T3.3) |
 | `features/terminal/paintTailProbe.ts` | 368 | replace | 3 | terminal/probes.rs (PaintTail): main-thread block and stopped frame clock fingerprints and the `render.paintSlow` incident; the xterm write-backlog fingerprints go | done (T3.3) |
 | `features/terminal/panePaintGate.test.ts` | 118 | port | 3 | tests in terminal/paint_gate.rs | done (T3.3) |
@@ -559,19 +559,19 @@ font row covers them).
 | `features/terminal/revealRetry.ts` | 123 | port | 3 | crates/terminal-engine/src/reveal_retry.rs | done (T3.1) |
 | `features/terminal/staleRestoreSilence.test.ts` | 533 | port | 3 | restore admission and splice refusal decisions | open |
 | `features/terminal/terminalClientLifecycle.test.ts` | 162 | port | 3 | native client ownership | open |
-| `features/terminal/terminalInputPolicy.test.ts` | 327 | port | 3 | tests of terminalInputPolicy.ts | open |
-| `features/terminal/terminalInputPolicy.ts` | 117 | port | 3 | terminal input translation | open |
+| `features/terminal/terminalInputPolicy.test.ts` | 327 | port | 3 | translation and clipboard-alias cases in terminal/input/policy.rs (T3.4); copy-on-select cases in tests/terminal_reading.rs (T3.5), OSC 52 cases with T3.6 | partial (T3.4) |
+| `features/terminal/terminalInputPolicy.ts` | 117 | port | 3 | terminal/input/policy.rs, with the keyboard encoding xterm.js did in terminal/input/keys.rs, mouse reports in mouse.rs and IME in ime.rs; `copyCompletedTerminalSelection` and `installTerminalCopyOnSelect` in terminal/reading/selection.rs and mod.rs (T3.5) | partial (T3.4) |
 | `features/terminal/terminalLinkActivation.test.ts` | 13 | port | 3 | tests in terminal/reading/links.rs | done (T3.5) |
 | `features/terminal/terminalLinkActivation.ts` | 9 | port | 3 | terminal/reading/links.rs (`is_link_activation`) | done (T3.5) |
 | `features/terminal/terminalPanePerf.test.ts` | 154 | port | 3 | tests in terminal/probes.rs | done (T3.3) |
 | `features/terminal/terminalPanePerf.ts` | 202 | port | 3 | terminal/probes.rs (PanePerf) | done (T3.3) |
 | `features/terminal/terminalSeedOverlay.test.ts` | 59 | port | 3 | re-assert on the alacritty_terminal grid the seed overlay's erase cases: attributed erase fills through the right edge, erase keeps soft-wrap metadata, adjacent blank spans keep their own backgrounds (the S9 lane does not assert them by name) | open |
-| `features/terminal/terminalTransferApi.test.ts` | 231 | port | 3 | behavior assertions move to the replacement of terminalTransferApi.ts | open |
-| `features/terminal/terminalTransferApi.ts` | 346 | replace | 3 | Tauri transfer client becomes direct desktop-core calls | open |
-| `features/terminal/terminalTransferRegistry.test.tsx` | 154 | port | 3 | tests of terminalTransferRegistry.ts | open |
-| `features/terminal/terminalTransferRegistry.ts` | 101 | port | 3 | transfer registry | open |
-| `features/terminal/terminalTransfers.test.ts` | 208 | port | 3 | tests of terminalTransfers.ts | open |
-| `features/terminal/terminalTransfers.ts` | 367 | port | 3 | path preparation and shell escaping | open |
+| `features/terminal/terminalTransferApi.test.ts` | 231 | port | 3 | native clipboard and event decode tests in terminal/integration/transfers.rs | done (T3.6) |
+| `features/terminal/terminalTransferApi.ts` | 346 | replace | 3 | TerminalBackend::start_upload and cancel_upload in connection_ui/backend.rs, straight into desktop-core; only a digest-verified, published completion is pasted | done (T3.6) |
+| `features/terminal/terminalTransferRegistry.test.tsx` | 154 | port | 3 | tests in terminal/integration/transfers.rs | done (T3.6) |
+| `features/terminal/terminalTransferRegistry.ts` | 101 | port | 3 | TransferRecords in terminal/integration/transfers.rs, held app-wide by upload.rs; a finished record is never reopened, the full canonical merge is not ported | done (T3.6) |
+| `features/terminal/terminalTransfers.test.ts` | 208 | port | 3 | tests in terminal/integration/transfers.rs; the canvas PNG encoder cases retire with the WebView | done (T3.6) |
+| `features/terminal/terminalTransfers.ts` | 367 | port | 3 | terminal/integration/transfers.rs; the batch order and cancellation in upload.rs. The WebView image encoder retires: the native reader stages PNGs | done (T3.6) |
 | `features/terminal/terminalViewport.ts` | 66 | port | 3 | ViewportAnchor in crates/terminal-engine/src/terminal.rs | done (T3.3) |
 | `features/terminal/theme.test.ts` | 107 | port | 3 | behavior assertions move to the replacement of theme.ts | open |
 | `features/terminal/theme.ts` | 223 | replace | 3 | reads --term-* CSS properties; becomes the Rust theme and generated palette | open |
