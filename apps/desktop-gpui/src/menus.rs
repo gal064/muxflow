@@ -267,6 +267,17 @@ fn on_actions(cx: &mut App) {
 /// Called once from [`crate::features::init`].
 pub fn init(cx: &mut App) {
     on_actions(cx);
+    if cfg!(target_os = "macos") {
+        // The application menu's own items take their key equivalents from the
+        // keymap, as the commands' do (see the module comment on `!Root`).
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, Some("!Root")),
+            KeyBinding::new("cmd-h", Hide, Some("!Root")),
+            KeyBinding::new("alt-cmd-h", HideOthers, Some("!Root")),
+            KeyBinding::new("cmd-m", Minimize, Some("!Root")),
+            KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, Some("!Root")),
+        ]);
+    }
     refresh(cx);
     cx.observe_global::<Commands>(refresh).detach();
 }
