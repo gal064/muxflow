@@ -1294,6 +1294,16 @@ impl ConnectionController {
                     cx.notify();
                 }
             }
+            LinkEvent::ClipboardWrite(text) => self.application_copied(profile_id, text, cx),
+        }
+    }
+
+    /// A program on a host copied, by OSC 52 or into a tmux buffer. A host
+    /// shown once stays attached and can still do so; only the host on screen
+    /// may write the user's clipboard.
+    fn application_copied(&mut self, profile_id: &str, text: &str, cx: &mut Context<Self>) {
+        if self.active_profile_id() == profile_id {
+            crate::terminal::integration::clipboard::write_from_application(text.to_owned(), cx);
         }
     }
 
@@ -1559,6 +1569,7 @@ impl ConnectionController {
             }
             // Spoken by the engine, which knows whether this frame was admitted.
             BridgeEvent::FlowStalled { .. } => {}
+            BridgeEvent::ClipboardWrite { text } => self.application_copied(profile_id, &text, cx),
             BridgeEvent::Error { message } => {
                 self.bridge_down(profile_id, "error", message.clone(), Some(&message), cx);
             }
