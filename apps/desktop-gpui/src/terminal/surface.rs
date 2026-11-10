@@ -6,16 +6,19 @@ use std::time::Instant;
 
 use desktop_core::app_state::load_app_state;
 use gpui_kit::{
-    AnyView, App, AppContext, Bounds, Context, DispatchPhase, Entity, Focusable,
-    InteractiveElement, IntoElement, MouseDownEvent, ParentElement, Pixels, Render, Role,
+    AnyElement, AnyView, App, AppContext, Bounds, Context, CursorStyle, DispatchPhase, Entity,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Role,
     SharedString, Size, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task,
-    WeakEntity, Window, canvas, div, prelude::FluentBuilder, px,
+    WeakEntity, Window, accesskit::Orientation, canvas, div, prelude::FluentBuilder, px, relative,
 };
+use serde_json::json;
 use terminal_engine::GridSize;
 use tmux_control::{Pane, TmuxSnapshot, Window as TmuxWindow};
 
 use crate::{
     app::Core,
+    commands,
     connection_ui::{controller::ConnectionController, host_links::HostLink},
     fonts,
     theme::{self, metrics::ui},
@@ -26,15 +29,27 @@ use super::client_size::{
     CLIENT_RESIZE_DEBOUNCE, ClientResize, ResizeContext, ResizeOutcome, RetryDecision,
     window_cell_size,
 };
+use super::integration::{
+    self,
+    agents::PaneAttention,
+    frames::{
+        AFTER_GRAB_QUIET, Axis, DRAG_THRESHOLD_PX, HOVER_FOCUS_DELAY, KEY_RESIZE_CELLS, PaneEdge,
+        divider_key, join_action, pane_edge_at, resize_action, resize_cells_from_pixels,
+    },
+};
 use super::layout::{PaneRect, WindowGrid, mounted_panes, pane_rect, separators, window_grid};
 use super::link::{TerminalLink, lock};
 use super::pane::TerminalPane;
+use super::reading::is_link_activation;
 
 /// A pane's box and grid, the last time tmux described it.
 struct Mounted {
     id: SharedString,
     pane: Entity<TerminalPane>,
     geometry: Pane,
+    /// The right and bottom dividers, which take arrow keys.
+    dividers: [FocusHandle; 2],
+    _focused: Subscription,
 }
 
 #[derive(Clone, PartialEq)]
@@ -46,6 +61,7 @@ struct SurfaceTarget {
     window_name: Option<String>,
     zoomed: bool,
     can_mutate: bool,
+    server_identity: Option<String>,
 }
 
 fn active_window<'a>(snapshot: &'a TmuxSnapshot, link: &HostLink) -> Option<&'a TmuxWindow> {
@@ -102,7 +118,42 @@ pub struct TerminalSurface {
     pending_focus: bool,
     active_pane: Option<String>,
     terminal_visible: bool,
+    /// Where the surface's top-left corner is in the window, for hit-testing
+    /// a grabbed pane's drop.
+    origin: Point<Pixels>,
+    /// A divider being dragged. It resizes once, when released.
+    divider: Option<DividerGrab>,
+    /// A pane grabbed with the link modifier, and when the last one ended.
+    grab: Option<PaneGrab>,
+    grab_ended: Option<Instant>,
+    /// The pane the pointer rests on, and the timer that focuses it.
+    hover: Option<(SharedString, Task<()>)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A pane held by the link modifier. Nothing moves until it is dropped on
+/// another pane's edge; the press alone is no drag, so the pane under it gets
+/// no click.
+struct PaneGrab {
+    pane_id: SharedString,
+    origin: Point<Pixels>,
+    moving: bool,
+    target: Option<(SharedString, PaneEdge)>,
+}
+
+struct DividerGrab {
+    pane_id: String,
+    axis: Axis,
+    origin: Point<Pixels>,
+    /// The pane's length and cells along the axis, to turn pixels into cells.
+    pane_pixels: f32,
+    pane_cells: u16,
+}
+
+/// The setting, off unless the user turned it on.
+fn focus_follows_mouse(cx: &App) -> bool {
+    load_app_state(&cx.global::<Core>().app_state)
+        .is_ok_and(|state| state.shell.focus_follows_mouse)
 }
 
 impl TerminalSurface {
@@ -124,10 +175,22 @@ impl TerminalSurface {
             // ahead of dispatch: a pane's key handler stops propagation.
             let keys = {
                 let this = cx.entity().downgrade();
-                cx.intercept_keystrokes(move |_, _, cx| {
-                    this.update(cx, |surface, cx| surface.request_take(cx)).ok();
+                cx.intercept_keystrokes(move |event, _, cx| {
+                    let escape = event.keystroke.key == "escape";
+                    let ended = this
+                        .update(cx, |surface, cx| {
+                            surface.request_take(cx);
+                            escape && surface.cancel_grab(cx)
+                        })
+                        .unwrap_or(false);
+                    // Escape ended a pane drag, and is spent on it.
+                    if ended {
+                        cx.stop_propagation();
+                    }
                 })
             };
+            let uploads = cx.observe_global::<integration::upload::Uploads>(|_, cx| cx.notify());
+            let attention = cx.observe_global::<PaneAttention>(|_, cx| cx.notify());
             let mut surface = Self {
                 this: cx.entity().downgrade(),
                 controller,
@@ -148,7 +211,12 @@ impl TerminalSurface {
                 pending_focus: false,
                 active_pane: None,
                 terminal_visible: true,
-                _subscriptions: vec![observe, keys],
+                origin: Point::default(),
+                divider: None,
+                grab: None,
+                grab_ended: None,
+                hover: None,
+                _subscriptions: vec![observe, keys, uploads, attention],
             };
             surface.sync(window, cx);
             surface
@@ -196,6 +264,7 @@ impl TerminalSurface {
                         window_name,
                         zoomed,
                         can_mutate: link.host_state.can_mutate,
+                        server_identity: link.host_state.server_identity.clone(),
                     }),
                     panes,
                 )
@@ -226,6 +295,15 @@ impl TerminalSurface {
         self.apply_panes(wanted, window, cx);
         if target_changed {
             self.schedule_resize(cx);
+        }
+        // Pane commands, paste among them, need a pane to act on. Written only
+        // when it changes: every write tells the palette to look again.
+        let has_pane = !self.panes.is_empty();
+        if cx
+            .try_global::<commands::Commands>()
+            .is_some_and(|commands| commands.context().has_pane != has_pane)
+        {
+            commands::update_context(cx, |context| context.has_pane = has_pane);
         }
         cx.notify();
     }
@@ -321,7 +399,23 @@ impl TerminalSurface {
             });
             link.update(cx, |link, _| link.mount(&id, &pane, size));
             self.pending_focus = true;
-            self.panes.push(Mounted { id, pane, geometry });
+            let focused = {
+                let id = id.clone();
+                let handle = pane.read(cx).focus_handle(cx);
+                cx.on_focus(&handle, window, move |surface, _, cx| {
+                    surface.pane_focused(&id, cx);
+                })
+            };
+            self.panes.push(Mounted {
+                id,
+                pane,
+                geometry,
+                dividers: [
+                    cx.focus_handle().tab_stop(true),
+                    cx.focus_handle().tab_stop(true),
+                ],
+                _focused: focused,
+            });
         }
         let several = self.panes.len() > 1;
         for mounted in &self.panes {
@@ -499,6 +593,316 @@ impl TerminalSurface {
             .update(cx, |controller, cx| controller.report_status(message, cx));
     }
 
+    /// Sends one tmux action for the window on screen, reporting a refusal
+    /// unless `quiet`. Nothing is sent while the host cannot be changed.
+    ///
+    /// Guarded by the server alone, with no topology generation: a focus or a
+    /// resize names its pane, which is the whole of what it needs to be right,
+    /// and a generation that moves under a dragged divider is no reason to
+    /// refuse it.
+    fn tmux_action(&mut self, mut action: serde_json::Value, quiet: bool, cx: &mut Context<Self>) {
+        let (Some(link), Some(target)) = (self.link.clone(), self.target.as_ref()) else {
+            return;
+        };
+        if !target.can_mutate {
+            return;
+        }
+        let (Some(client_id), Some(server)) =
+            (target.client_id.clone(), target.server_identity.clone())
+        else {
+            return;
+        };
+        action["expected_server_identity"] = server.into();
+        let answer = link.read(cx).backend().tmux_action(client_id, action);
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = answer.await
+                && !quiet
+            {
+                this.update(cx, |this, cx| this.report(error, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// A pane took the keyboard: a click, hover or a keyboard move. tmux's
+    /// active pane follows, as it does when the Tauri app's pane is focused.
+    fn pane_focused(&mut self, pane_id: &str, cx: &mut Context<Self>) {
+        let Some(mounted) = self.panes.iter().find(|mounted| mounted.id == pane_id) else {
+            return;
+        };
+        if mounted.geometry.active {
+            return;
+        }
+        let action = json!({
+            "kind": "focusPane",
+            "session_id": mounted.geometry.session_id,
+            "window_id": mounted.geometry.window_id,
+            "pane_id": pane_id,
+        });
+        // Following focus is navigation, which the Tauri app did silently.
+        self.tmux_action(action, true, cx);
+    }
+
+    fn begin_divider_drag(&mut self, pane_id: &str, axis: Axis, origin: Point<Pixels>) {
+        if !self.target.as_ref().is_some_and(|target| target.can_mutate) {
+            return;
+        }
+        let Some((mounted, surface)) = self
+            .panes
+            .iter()
+            .find(|mounted| mounted.id == pane_id)
+            .zip(self.surface_box())
+        else {
+            return;
+        };
+        let zoomed = self.target.as_ref().is_some_and(|target| target.zoomed);
+        let rect = pane_rect(&mounted.geometry, self.grid, surface, zoomed);
+        let (pane_pixels, pane_cells) = match axis {
+            Axis::Horizontal => (rect.width, mounted.geometry.width),
+            Axis::Vertical => (rect.height, mounted.geometry.height),
+        };
+        self.divider = Some(DividerGrab {
+            pane_id: pane_id.to_owned(),
+            axis,
+            origin,
+            pane_pixels,
+            pane_cells,
+        });
+    }
+
+    fn end_divider_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(grab) = self.divider.take() else {
+            return;
+        };
+        let delta = f32::from(match grab.axis {
+            Axis::Horizontal => position.x - grab.origin.x,
+            Axis::Vertical => position.y - grab.origin.y,
+        });
+        if delta.abs() < DRAG_THRESHOLD_PX {
+            return;
+        }
+        let cells = resize_cells_from_pixels(delta, grab.pane_pixels, grab.pane_cells);
+        self.tmux_action(
+            resize_action(&grab.pane_id, grab.axis, delta >= 0., cells),
+            false,
+            cx,
+        );
+    }
+
+    /// Arrow keys along a focused divider's axis move it two cells.
+    fn divider_key(&mut self, pane_id: &str, axis: Axis, key: &str, cx: &mut Context<Self>) {
+        let Some(forward) = divider_key(axis, key) else {
+            return;
+        };
+        cx.stop_propagation();
+        self.tmux_action(
+            resize_action(pane_id, axis, forward, KEY_RESIZE_CELLS),
+            false,
+            cx,
+        );
+    }
+
+    /// A press with the link modifier grabs the pane, unless it is on a link,
+    /// which that modifier opens. Claimed before the pane sees it, so no
+    /// selection starts and a program reading the mouse gets no click. The
+    /// grab does not focus the pane.
+    fn press_frame(
+        &mut self,
+        pane_id: &SharedString,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button != MouseButton::Left
+            || !is_link_activation(&event.modifiers)
+            || !self.target.as_ref().is_some_and(|target| target.can_mutate)
+        {
+            return;
+        }
+        let Some(mounted) = self.panes.iter().find(|mounted| mounted.id == *pane_id) else {
+            return;
+        };
+        if integration::link_at(mounted.pane.read(cx), event.position) {
+            return;
+        }
+        cx.stop_propagation();
+        self.hover = None;
+        self.grab = Some(PaneGrab {
+            pane_id: pane_id.clone(),
+            origin: event.position,
+            moving: false,
+            target: None,
+        });
+    }
+
+    /// Follows a grab's pointer. True while a grab holds the pointer.
+    fn move_grab(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
+        // A divider release this window never saw: no later click may resize.
+        if event.pressed_button.is_none() {
+            self.divider = None;
+        }
+        let Some(grab) = self.grab.as_ref() else {
+            return false;
+        };
+        // A release this gesture never saw: a later plain move is no drag.
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.grab = None;
+            cx.notify();
+            return false;
+        }
+        let moving = grab.moving
+            || (event.position - grab.origin).magnitude() >= f64::from(DRAG_THRESHOLD_PX);
+        let target = if moving {
+            self.drop_target(event.position)
+        } else {
+            None
+        };
+        let grab = self.grab.as_mut().expect("checked above");
+        if grab.moving != moving || grab.target != target {
+            grab.moving = moving;
+            grab.target = target;
+            cx.notify();
+        }
+        true
+    }
+
+    /// The pane edge under a window position, never the grabbed pane's own.
+    fn drop_target(&self, position: Point<Pixels>) -> Option<(SharedString, PaneEdge)> {
+        let surface = self.surface_box()?;
+        let zoomed = self.target.as_ref().is_some_and(|target| target.zoomed);
+        let x = f32::from(position.x - self.origin.x);
+        let y = f32::from(position.y - self.origin.y);
+        let grabbed = self.grab.as_ref().map(|grab| &grab.pane_id);
+        self.panes
+            .iter()
+            .filter(|mounted| Some(&mounted.id) != grabbed)
+            .find_map(|mounted| {
+                let rect = pane_rect(&mounted.geometry, self.grid, surface, zoomed);
+                // Half-open, so a split boundary belongs to one pane.
+                let inside = x >= rect.left
+                    && x < rect.left + rect.width
+                    && y >= rect.top
+                    && y < rect.top + rect.height;
+                let edge = inside
+                    .then(|| {
+                        pane_edge_at((x - rect.left) / rect.width, (y - rect.top) / rect.height)
+                    })
+                    .flatten()?;
+                Some((mounted.id.clone(), edge))
+            })
+    }
+
+    /// Drops a grabbed pane. True if a grab held the pointer.
+    fn end_grab(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some(grab) = self.grab.take() else {
+            return false;
+        };
+        if grab.moving {
+            self.grab_ended = Some(Instant::now());
+            cx.notify();
+            if let Some(action) = self
+                .drop_target(position)
+                .and_then(|(target, edge)| join_action(&grab.pane_id, &target, edge))
+            {
+                self.tmux_action(action, false, cx);
+            }
+        }
+        true
+    }
+
+    /// Escape: ends a grab that is moving, and says whether it did.
+    fn cancel_grab(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.grab.as_ref().is_some_and(|grab| grab.moving) {
+            return false;
+        }
+        self.grab = None;
+        self.grab_ended = Some(Instant::now());
+        cx.notify();
+        true
+    }
+
+    /// Port of `usePaneHoverFocus`. Every check is repeated when the timer
+    /// fires, because the delay is exactly when a dialog can open.
+    fn hover_moved(
+        &mut self,
+        pane_id: &SharedString,
+        pressed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Decided once per entry into a pane, as a pointer enter would be.
+        if self.hover.as_ref().is_some_and(|(id, _)| id == pane_id) {
+            return;
+        }
+        // A held button is a selection or a drag crossing panes, and the
+        // pane a grab was just dropped beside is no hover either: such an
+        // entry focuses nothing until the pointer leaves and comes back.
+        let after_grab = self
+            .grab_ended
+            .is_some_and(|ended| ended.elapsed() < AFTER_GRAB_QUIET);
+        let task = if pressed || self.divider.is_some() || self.grab.is_some() || after_grab {
+            Task::ready(())
+        } else {
+            let timer = cx.background_executor().timer(HOVER_FOCUS_DELAY);
+            let id = pane_id.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                timer.await;
+                let _ = this.update_in(cx, |surface, window, cx| {
+                    surface.hover_rested(&id, window, cx);
+                });
+            })
+        };
+        self.hover = Some((pane_id.clone(), task));
+    }
+
+    fn hover_rested(
+        &mut self,
+        pane_id: &SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.hover.as_ref().is_some_and(|(id, _)| id == pane_id)
+            || self.panes.len() < 2
+            || !window.is_window_active()
+            || !focus_follows_mouse(cx)
+        {
+            return;
+        }
+        let handles: Vec<FocusHandle> = self
+            .panes
+            .iter()
+            .map(|mounted| mounted.pane.read(cx).focus_handle(cx))
+            .collect();
+        let Some(target) = self
+            .panes
+            .iter()
+            .position(|mounted| mounted.id == *pane_id)
+            .map(|index| handles[index].clone())
+        else {
+            return;
+        };
+        // Never taken from anything but another pane or a divider between
+        // them: a field, a dialog or a menu keeps the keyboard while the
+        // pointer drifts over a split.
+        let ours = |focused: &FocusHandle| {
+            handles.contains(focused)
+                || self
+                    .panes
+                    .iter()
+                    .any(|mounted| mounted.dividers.contains(focused))
+        };
+        let elsewhere = window.focused(cx).is_some_and(|focused| !ours(&focused));
+        if target.is_focused(window) || elsewhere {
+            return;
+        }
+        window.focus(&target, cx);
+    }
+
+    fn hover_left(&mut self, pane_id: &SharedString) {
+        if self.hover.as_ref().is_some_and(|(id, _)| id == pane_id) {
+            self.hover = None;
+        }
+    }
+
     fn refresh_metrics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let fresh = Rc::new(self.measure(window));
         if self.metrics.as_ref() == Some(&fresh) {
@@ -547,6 +951,17 @@ impl Render for TerminalSurface {
         let surface = self.surface_box();
         let zoomed = self.target.as_ref().is_some_and(|target| target.zoomed);
         let grid = self.grid;
+        let grab_target = self
+            .grab
+            .as_ref()
+            .filter(|grab| grab.moving)
+            .and_then(|grab| grab.target.clone());
+        let drop_edge = |id: &SharedString| {
+            grab_target
+                .as_ref()
+                .filter(|(target, _)| target == id)
+                .map(|(_, edge)| *edge)
+        };
         let frames: Vec<_> = surface.map_or(Vec::new(), |surface| {
             self.panes
                 .iter()
@@ -559,39 +974,71 @@ impl Render for TerminalSurface {
                     } = pane_rect(&mounted.geometry, grid, surface, zoomed);
                     let (right, bottom) =
                         separators(&mounted.geometry, grid, self.panes.len() > 1, zoomed);
+                    let id = mounted.id.clone();
+                    let wants_attention = self.target.as_ref().is_some_and(|target| {
+                        cx.try_global::<PaneAttention>()
+                            .is_some_and(|attention| attention.wants(&target.profile_id, &id))
+                    });
                     // Measured pixels of this surface, already scaled.
                     div()
+                        .id(SharedString::from(format!("pane-frame-{id}")))
                         .absolute()
                         .left(px(left))
                         .top(px(top))
                         .w(px(width))
                         .h(px(height))
                         .overflow_hidden()
+                        .on_mouse_move(cx.listener({
+                            let id = id.clone();
+                            move |surface, event: &MouseMoveEvent, window, cx| {
+                                let pressed = event.pressed_button.is_some();
+                                surface.hover_moved(&id, pressed, window, cx);
+                            }
+                        }))
+                        // Leaving the pane, wherever to, ends its entry.
+                        .on_hover(cx.listener({
+                            let id = id.clone();
+                            move |surface, hovered: &bool, _, _| {
+                                if !*hovered {
+                                    surface.hover_left(&id);
+                                }
+                            }
+                        }))
                         .child(
-                            AnyView::from(mounted.pane.clone())
-                                .cached(StyleRefinement::default().size_full()),
+                            div()
+                                .id("pane-grip")
+                                .size_full()
+                                .capture_any_mouse_down(cx.listener({
+                                    let id = id.clone();
+                                    move |surface, event: &MouseDownEvent, _, cx| {
+                                        surface.press_frame(&id, event, cx);
+                                    }
+                                }))
+                                .child(
+                                    AnyView::from(mounted.pane.clone())
+                                        .cached(StyleRefinement::default().size_full()),
+                                ),
                         )
-                        .when(right, |frame| {
+                        .when_some(drop_edge(&id), |frame, edge| {
+                            frame.child(drop_hint(edge, cx))
+                        })
+                        // An agent in this pane wants a human.
+                        .when(wants_attention, |frame| {
                             frame.child(
                                 div()
                                     .absolute()
-                                    .top_0()
-                                    .right_0()
-                                    .h_full()
-                                    .w(ui(1.))
-                                    .bg(palette.chrome_hairline),
+                                    .inset(ui(2.))
+                                    .border(ui(2.5))
+                                    .border_color(palette.accent)
+                                    .rounded(ui(6.))
+                                    .opacity(0.9),
                             )
                         })
+                        .when(right, |frame| {
+                            frame.child(self.divider_handle(mounted, Axis::Horizontal, cx))
+                        })
                         .when(bottom, |frame| {
-                            frame.child(
-                                div()
-                                    .absolute()
-                                    .bottom_0()
-                                    .left_0()
-                                    .w_full()
-                                    .h(ui(1.))
-                                    .bg(palette.chrome_hairline),
-                            )
+                            frame.child(self.divider_handle(mounted, Axis::Vertical, cx))
                         })
                 })
                 .collect()
@@ -606,6 +1053,7 @@ impl Render for TerminalSurface {
                     cx.defer(move |cx| {
                         let _ = handle.update(cx, |_, window, cx| {
                             this.update(cx, |surface, cx| {
+                                surface.origin = bounds.origin;
                                 surface.measured_surface(bounds.size, window, cx)
                             })
                             .ok();
@@ -617,9 +1065,43 @@ impl Render for TerminalSurface {
                 {
                     let this = self.this.clone();
                     move |_, _, window, _| {
+                        let pressed = this.clone();
                         window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
-                                this.update(cx, |surface, cx| surface.request_take(cx)).ok();
+                                pressed
+                                    .update(cx, |surface, cx| surface.request_take(cx))
+                                    .ok();
+                            }
+                        });
+                        // A divider or a grabbed pane is released wherever
+                        // the pointer is by then. A grab holds the pointer the
+                        // way pointer capture does: nothing under it sees the
+                        // gesture.
+                        let released = this.clone();
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let grabbed = released
+                                .update(cx, |surface, cx| {
+                                    surface.end_divider_drag(event.position, cx);
+                                    surface.end_grab(event.position, cx)
+                                })
+                                .unwrap_or(false);
+                            if grabbed {
+                                cx.stop_propagation();
+                            }
+                        });
+                        let moved = this.clone();
+                        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                            if phase != DispatchPhase::Capture {
+                                return;
+                            }
+                            let grabbed = moved
+                                .update(cx, |surface, cx| surface.move_grab(event, cx))
+                                .unwrap_or(false);
+                            if grabbed {
+                                cx.stop_propagation();
                             }
                         });
                     }
@@ -657,8 +1139,95 @@ impl Render for TerminalSurface {
                                 .text_color(palette.chrome_dim)
                                 .child("No tmux panes in this terminal window."),
                         )
-                    }),
+                    })
+                    .children(integration::upload_list(cx)),
             )
+    }
+}
+
+/// The half of a pane a grabbed pane would fill: `.pane-drop-hint`.
+fn drop_hint(edge: PaneEdge, cx: &App) -> AnyElement {
+    let palette = theme::palette(cx);
+    let hint = div()
+        .absolute()
+        .top(ui(6.))
+        .bottom(ui(6.))
+        .left(ui(6.))
+        .right(ui(6.))
+        .border_2()
+        .border_dashed()
+        .border_color(palette.accent)
+        .rounded(ui(6.))
+        .bg(palette.accent_wash);
+    match edge {
+        PaneEdge::Left => hint.right(relative(0.5)),
+        PaneEdge::Right => hint.left(relative(0.5)),
+        PaneEdge::Top => hint.bottom(relative(0.5)),
+        PaneEdge::Bottom => hint.top(relative(0.5)),
+    }
+    .into_any_element()
+}
+
+impl TerminalSurface {
+    /// Port of the `divider-handle` in `TerminalWorkspaceSurface.tsx`: the
+    /// hairline on a pane's right or bottom edge, dragged or moved by arrow keys.
+    fn divider_handle(&self, mounted: &Mounted, axis: Axis, cx: &mut Context<Self>) -> AnyElement {
+        let palette = theme::palette(cx);
+        let id = mounted.id.clone();
+        let (focus, name, orientation, cursor, share) = match axis {
+            Axis::Horizontal => (
+                &mounted.dividers[0],
+                "horizontally",
+                Orientation::Vertical,
+                CursorStyle::ResizeLeftRight,
+                f64::from(mounted.geometry.width) / self.grid.width.max(1) as f64,
+            ),
+            Axis::Vertical => (
+                &mounted.dividers[1],
+                "vertically",
+                Orientation::Horizontal,
+                CursorStyle::ResizeUpDown,
+                f64::from(mounted.geometry.height) / self.grid.height.max(1) as f64,
+            ),
+        };
+        let line = div().absolute().bg(palette.chrome_hairline);
+        let line = match axis {
+            Axis::Horizontal => line.top_0().right_0().h_full().w(ui(1.)),
+            Axis::Vertical => line.bottom_0().left_0().w_full().h(ui(1.)),
+        };
+        let handle = div()
+            .id(SharedString::from(format!("divider-{name}-{id}")))
+            .role(Role::Splitter)
+            .aria_label(SharedString::from(format!("Resize {id} {name}")))
+            .aria_orientation(orientation)
+            .aria_numeric_value((share * 100.).round())
+            .track_focus(focus)
+            .focus_visible(move |style| style.bg(palette.accent_wash))
+            .absolute()
+            // The grip over the pane's edge is the divider's alone: a press
+            // there is neither a selection nor a pane grab.
+            .occlude()
+            .cursor(cursor)
+            .child(line)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener({
+                    let id = id.clone();
+                    move |surface, event: &MouseDownEvent, _, cx| {
+                        surface.begin_divider_drag(&id, axis, event.position);
+                        // The pane under the grip must not start a selection.
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .on_key_down(cx.listener(move |surface, event: &KeyDownEvent, _, cx| {
+                surface.divider_key(&id, axis, &event.keystroke.key, cx);
+            }));
+        match axis {
+            Axis::Horizontal => handle.top_0().right_0().h_full().w(ui(4.)),
+            Axis::Vertical => handle.bottom_0().left_0().w_full().h(ui(4.)),
+        }
+        .into_any_element()
     }
 }
 

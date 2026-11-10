@@ -74,8 +74,10 @@ pub fn start(cx: &mut App) -> Result<(), String> {
     connection::spawn_orphan_reaper();
     let backend = Arc::new(NativeBackend::new(
         app_state.clone(),
+        profiles.clone(),
         IncidentJournal::new(log_dir),
     ));
+    crate::terminal::integration::colors::start(backend.clone(), cx);
     let controller = cx.new(|cx| ConnectionController::new(backend, profiles, app_state, cx));
     cx.set_global(ConnectionUi(controller.clone()));
 
