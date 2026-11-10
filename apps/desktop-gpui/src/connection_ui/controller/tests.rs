@@ -21,7 +21,11 @@ use gpui_kit::{AppContext, Entity, TestAppContext};
 use serde_json::{Value, json};
 
 use super::*;
-use crate::connection_ui::helper_upgrade::RemoteHelperProbe;
+use crate::connection_ui::{
+    backend::{EngineChannel, TerminalBackend, inline::InlineEngine},
+    helper_upgrade::RemoteHelperProbe,
+};
+use crate::terminal::link::POLL_IDLE;
 
 struct Bridge {
     client_id: String,
@@ -93,6 +97,60 @@ impl Fake {
             .iter()
             .map(|(kind, _)| kind.clone())
             .collect()
+    }
+}
+
+impl TerminalBackend for Fake {
+    fn spawn_engine(
+        &self,
+        outputs: std::sync::mpsc::Sender<terminal_engine::EngineOutput>,
+    ) -> Box<dyn EngineChannel> {
+        Box::new(InlineEngine::new(outputs))
+    }
+
+    fn request_seed(&self, _: String, _: String) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn request_history(
+        &self,
+        _: String,
+        _: String,
+        _: u32,
+        _: u32,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn set_pane_visibility(
+        &self,
+        _: String,
+        _: String,
+        _: bool,
+        _: bool,
+        _: u64,
+        _: u64,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn resize_client(
+        &self,
+        _: String,
+        _: u16,
+        _: u16,
+        _: String,
+        _: String,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn send_input(&self, _: String, _: String, _: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn record_incident(&self, kind: &str, detail: Value) {
+        self.state().incidents.push((kind.to_owned(), detail));
     }
 }
 
@@ -195,10 +253,6 @@ impl ConnectionBackend for Fake {
 
     fn late_requests(&self, _client_id: &str) -> Option<u32> {
         self.state().late_requests
-    }
-
-    fn record_incident(&self, kind: &str, detail: Value) {
-        self.state().incidents.push((kind.to_owned(), detail));
     }
 
     fn now_ms(&self) -> u64 {
@@ -307,6 +361,9 @@ impl Harness {
         for frame in frames {
             self.fake.publish(index, frame);
         }
+        cx.run_until_parked();
+        // What the engine produced waits for the link's next drain.
+        cx.executor().advance_clock(POLL_IDLE);
         cx.run_until_parked();
     }
 
@@ -1116,6 +1173,7 @@ fn keeps_a_peers_failures_and_helper_questions_off_the_screen(cx: &mut TestAppCo
 fn restarts_only_the_stalled_peers_bridge_and_only_once(cx: &mut TestAppContext) {
     let harness = two_shown_hosts(cx);
     let local_epoch = harness.read(cx, |state| state.link("local").unwrap().connection_epoch);
+    harness.publish(cx, 1, vec![epoch_frame(9)]);
     harness.publish(cx, 1, vec![stall_frame("%0", 1), stall_frame("%1", 2)]);
     assert_eq!(harness.fake.state().stopped, ["client-2"]);
     assert_eq!(harness.fake.bridge_count(), 3);
@@ -1131,6 +1189,14 @@ fn restarts_only_the_stalled_peers_bridge_and_only_once(cx: &mut TestAppContext)
         );
         assert_eq!(state.active_link().unwrap().detail, "");
     });
+}
+
+#[gpui_kit::test]
+fn a_stall_outside_the_live_epoch_restarts_nothing(cx: &mut TestAppContext) {
+    let harness = two_shown_hosts(cx);
+    harness.publish(cx, 1, vec![stall_frame("%0", 1)]);
+    assert!(harness.fake.state().stopped.is_empty());
+    assert_eq!(harness.fake.bridge_count(), 2);
 }
 
 // Resume from sleep.
@@ -1280,6 +1346,19 @@ fn an_offline_to_online_transition_reconnects(cx: &mut TestAppContext) {
 }
 
 // Bridge lifecycle.
+
+#[gpui_kit::test]
+fn credit_waits_for_the_engine_to_consume_the_frame(cx: &mut TestAppContext) {
+    let harness = two_shown_hosts(cx);
+    harness.publish(cx, 0, vec![epoch_frame(7)]);
+    let before = harness.fake.state().acks.len();
+    harness.fake.publish(0, state_frame("connected"));
+    cx.run_until_parked();
+    assert_eq!(harness.fake.state().acks.len(), before);
+    cx.executor().advance_clock(POLL_IDLE);
+    cx.run_until_parked();
+    assert_eq!(harness.fake.state().acks.len(), before + 1);
+}
 
 #[gpui_kit::test]
 fn acknowledges_every_admitted_frame_including_undecodable_ones(cx: &mut TestAppContext) {
@@ -1740,6 +1819,8 @@ mod surface {
     impl Harness {
         fn publish_visual(&self, visual: &mut VisualTestContext, index: usize, frame: Vec<u8>) {
             self.fake.publish(index, frame);
+            visual.run_until_parked();
+            visual.executor().advance_clock(POLL_IDLE);
             visual.run_until_parked();
         }
     }

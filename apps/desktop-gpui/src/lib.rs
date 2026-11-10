@@ -21,6 +21,7 @@
 //! | [`notices`] | Which status messages show, as notifications |
 //! | [`tooltips`] | A control's name with its shortcut |
 //! | [`window_state`] | Window geometry, restored and saved |
+//! | [`terminal`] | Terminal panes: engine link, element, sizing, and the input, reading and integration seams |
 //!
 //! Colors and metrics come from [`theme`]. Controls follow the accessibility
 //! baseline in [`ui`].
@@ -34,6 +35,7 @@ pub mod fonts;
 pub mod menus;
 pub mod notices;
 pub mod paths;
+pub mod terminal;
 pub mod theme;
 pub mod tooltips;
 pub mod ui;
