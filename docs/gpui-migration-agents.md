@@ -210,6 +210,19 @@ T3.3 defines the pane entity and the three submodule seams, so wave 3 stays apar
 **Integrated QA:** `gdev_qa_phase3` runs Claude Code and Codex locally and over SSH, the
 VT parity lane at all five quiesce points, and resizing during heavy output.
 
+### Carry-forward from Phases 2 and 3
+
+The phase that owns each area fixes these; the Phase 6 parity check confirms them.
+
+- Sidebar says "No tmux sessions" while a session is attached; New workspace, Ctrl+N and the split commands have no handler (Phase 4).
+- Connecting renamed an SSH profile's label to its target in `profiles.json`. Compare with Tauri and fix (Phase 4 settings and hosts).
+- A notice "tmux server identity changed; authoritative reconnect required" appears when the first tmux server starts after connect. Compare with Tauri.
+- `pane.revealVoid` with `msWaited 4000` is journalled on every launch.
+- The split focus border overlaps column 0 by about 1 px.
+- Hover focus between splits not tested yet (needs the Settings option, Phase 4).
+- Keys typed within about 200 ms of Ctrl+V arrive before the paste.
+- X11 window position is not restored (owner informed).
+
 ## Phase 4: Workspaces and panels
 
 All run in one wave, at most 3 at a time. Each owns its feature module and registers
@@ -311,7 +324,7 @@ final sweep command returning only justified hits.
 | 0 | Done on Linux, stopped as agreed. Conditional go recommended | | Linux only, complete. Report: `docs/gpui-phase0-report.md`. Waiting for the owner's decision |
 | 1 | Done. `gdev_qa_phase1` passed | `7a4f66c`, `9c13af4`, `1b7df0a`, `29ee6f3` | Known: `test:git` fails on `origin/main` too, in the driver's patch check, so T5.3 must fix or retire it. `test:lifecycle` failed 1 of 34 runs at line 320, cause not found |
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
-| 3 | Tasks merged, `gdev_qa_phase3` running | | |
+| 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
 | 4 to 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
@@ -340,6 +353,7 @@ Phase 0 are not in the published history.
 | T3.6 `terminal-integration` | opus, high, full cycle, invariant | `gpui/terminal-integration` | Merged | `b9b25b3` | Restarted after an out-of-memory kill. 2 review rounds, 2 QA runs pass incl. screenshot paste over SSH. Open: about 24 MB clipboard images time out in desktop-core's reader, likely in Tauri too |
 | T3.7 `seed-fixes` | sonnet, high, full cycle | `gpui/seed-fixes` | Merged | `f91e002` | 1 review round, QA pass on tmux 3.8 (old seed failed 5 of 8 cases). Also fixes Tauri and mobile seeds. tmux 3.3 to 3.7 not tested |
 | T3.8 `desktop-paste` | opus, high, full cycle, invariant | `gpui/desktop-paste` | Merged | `34a57c9` | Owner chose the host paste path. QA pass on tmux 3.4 and 3.8, also after a reseed. Open: keys typed within about 200 ms of Ctrl+V go before the paste, because the clipboard read is slow; the Tauri app reads the clipboard asynchronously too |
+| `gdev_qa_phase3` | fresh QA | `gpui/integration` | Passed after a fix | | Claude Code and Codex local and over SSH, resize during floods, VT parity (only known VS16/ZWJ and pause-idle differences). Found a crash on typing in a scrolled-back pane, fixed in T3.5 `71f5a3d` and re-checked 13 of 13. Root fixed the link underline stopping one cell short |
 | T0.1 `license-gate` | sonnet, medium, full cycle | `gpui/license-gate` | Merged | `c025ace`, merge `259e207` | MPL-2.0, BSL-1.0, CDLA-Permissive-2.0 and LLVM-exception crates allowed per crate. Owner to confirm |
 | T0.2 `ledger` | sonnet, medium, impl only, reviewed in T0.7 | `gpui/ledger` | Merged, review pending in T0.7 | `68f33c9` | S8: no drag has to reach the OS. 402 files: 336 port, 31 replace, 35 retire |
 | T0.3 `spike-scaffold` | sonnet, high, full cycle | `gpui/spike-scaffold` | Merged | `9a7bdb0` | S6 builds on 1.99.1, license clean, 1.97.1 unproven. `.ttf` required. AccessKit works. Variable Inter weights not honored. |
