@@ -5417,6 +5417,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "terminal-engine",
+ "terminal-interactions",
  "tmux-control",
  "tokio",
  "uuid",
