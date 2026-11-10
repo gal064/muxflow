@@ -311,7 +311,7 @@ final sweep command returning only justified hits.
 | 0 | Done on Linux, stopped as agreed. Conditional go recommended | | Linux only, complete. Report: `docs/gpui-phase0-report.md`. Waiting for the owner's decision |
 | 1 | Done. `gdev_qa_phase1` passed | `7a4f66c`, `9c13af4`, `1b7df0a`, `29ee6f3` | Known: `test:git` fails on `origin/main` too, in the driver's patch check, so T5.3 must fix or retire it. `test:lifecycle` failed 1 of 34 runs at line 320, cause not found |
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
-| 3 | Running, wave 3 merging | | T3.5, T3.7 and T3.8 running |
+| 3 | Tasks merged, `gdev_qa_phase3` running | | |
 | 4 to 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
@@ -336,7 +336,7 @@ Phase 0 are not in the published history.
 | T3.2 `terminal-interactions` | sonnet, high, full cycle | `gpui/terminal-interactions` | Merged | `d563c37` | 1 review round plus differential fuzz, 0 mismatches. QA skipped, pure logic. T3.5 implements its `Buffer` traits |
 | T3.3 `terminal-element` | opus, high, full cycle, large, invariant, design | `gpui/terminal-element` | Merged | `a888887` | 2 review rounds, QA 5 of 5 (exact size, 20M-line flood, resize during flood). Engine wake polls on a timer. Root moved the status pill into the empty host row. Open: shrink then grow reflow differs from tmux, as in the current app. Idle blink costs about 15% CPU on software Vulkan |
 | T3.4 `terminal-input` | opus, high, full cycle, invariant | `gpui/terminal-input` | Merged | `3fa49fe` | Restarted after an out-of-memory kill. 1 review round, QA 9 of 9 incl. fcitx5 XIM. Paste moves to the host path in T3.8, owner approved |
-| T3.5 `terminal-reading` | opus, high, full cycle | `gpui/terminal-reading` | Running, resumed on the merged base | | Round 1 review found 12 items; fixing |
+| T3.5 `terminal-reading` | opus, high, full cycle | `gpui/terminal-reading` | Merged | `bc6ce34` | Restarted after an out-of-memory kill. 2 review rounds, QA passed 6 of 6; fixes for its light-theme and stale-underline bugs not re-checked live, so `gdev_qa_phase3` covers them. Opening `~` and relative file links waits for Phase 4/5 |
 | T3.6 `terminal-integration` | opus, high, full cycle, invariant | `gpui/terminal-integration` | Merged | `b9b25b3` | Restarted after an out-of-memory kill. 2 review rounds, 2 QA runs pass incl. screenshot paste over SSH. Open: about 24 MB clipboard images time out in desktop-core's reader, likely in Tauri too |
 | T3.7 `seed-fixes` | sonnet, high, full cycle | `gpui/seed-fixes` | Merged | `f91e002` | 1 review round, QA pass on tmux 3.8 (old seed failed 5 of 8 cases). Also fixes Tauri and mobile seeds. tmux 3.3 to 3.7 not tested |
 | T3.8 `desktop-paste` | opus, high, full cycle, invariant | `gpui/desktop-paste` | Merged | `34a57c9` | Owner chose the host paste path. QA pass on tmux 3.4 and 3.8, also after a reseed. Open: keys typed within about 200 ms of Ctrl+V go before the paste, because the clipboard read is slow; the Tauri app reads the clipboard asynchronously too |
