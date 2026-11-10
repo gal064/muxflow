@@ -160,7 +160,10 @@ impl RenderOnce for TitleBar {
             })
             .on_mouse_down(
                 MouseButton::Left,
-                window.listener_for(&drag, |drag, _, _, _| drag.should_move = true),
+                // A button on the bar prevents the default of its press, and a click on it is not a drag.
+                window.listener_for(&drag, |drag, _, window, _| {
+                    drag.should_move = !window.default_prevented();
+                }),
             )
             .child(drag_tracker(drag))
             .child(
