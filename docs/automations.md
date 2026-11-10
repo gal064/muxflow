@@ -586,7 +586,7 @@ If the feature isn't used:
    `crates/protocol/build.rs`. In `envelope.proto`, remove the import and the
    five additions, and reserve their numbers. Remove the `operation_policy`
    entry and the `dispatcher` arm.
-4. Delete `src-tauri/src/connection/automation.rs`, its `generate_handler!`
+4. Delete `src-tauri/src/connection/automation.rs`, its shim in `commands/connection.rs`, its `generate_handler!`
    entry, the event mapping in `bridge.rs` and `event_frame.rs`, the decode in
    `features/terminal/api.ts` and its test, and the `automationChanged`
    branch in `useAppConnectionController.ts`.

@@ -8,8 +8,9 @@
 const DISABLED: &str = "performance logging is not enabled for this process";
 
 pub(crate) mod bridge {
+    use crate::platform::EventSink;
     use serde::Serialize;
-    use tauri::ipc::{Channel, InvokeResponseBody};
+    use std::sync::Arc;
     use uuid::Uuid;
 
     #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -23,11 +24,11 @@ pub(crate) mod bridge {
     #[inline(always)]
     pub(crate) fn send_bridge_frame(
         _measurement_id: Uuid,
-        channel: &Channel<InvokeResponseBody>,
+        channel: &Arc<dyn EventSink>,
         frame: Vec<u8>,
     ) -> Result<(), String> {
         channel
-            .send(InvokeResponseBody::Raw(frame))
+            .send_raw(frame)
             .map_err(|error| format!("desktop event channel closed: {error}"))
     }
 
@@ -36,7 +37,6 @@ pub(crate) mod bridge {
         BridgeFinalTotals::default()
     }
 
-    #[tauri::command]
     pub fn acknowledge_bridge_events(
         measurement_id: String,
         cumulative_frame_count: u64,
@@ -50,13 +50,11 @@ pub(crate) mod bridge {
         Err(super::DISABLED.into())
     }
 
-    #[tauri::command]
     pub fn bridge_final_totals(measurement_id: String) -> Result<BridgeFinalTotals, String> {
         let _ = measurement_id;
         Err(super::DISABLED.into())
     }
 
-    #[tauri::command]
     pub fn finalize_bridge_measurement(measurement_id: String) -> Result<(), String> {
         let _ = measurement_id;
         Err(super::DISABLED.into())
@@ -139,7 +137,6 @@ pub(crate) mod operations {
     #[inline(always)]
     pub(crate) fn record_transfer_completion(_succeeded: bool) {}
 
-    #[tauri::command]
     pub fn sample_native_measurements() -> Result<(), String> {
         Err(super::DISABLED.into())
     }
@@ -222,12 +219,10 @@ pub(crate) mod input_timing {
 }
 
 pub(crate) mod sink {
-    #[tauri::command]
     pub fn perf_log_enabled() -> bool {
         false
     }
 
-    #[tauri::command]
     pub async fn append_perf_log(lines: Vec<String>) -> Result<(), String> {
         let _ = lines;
         Err(super::DISABLED.into())

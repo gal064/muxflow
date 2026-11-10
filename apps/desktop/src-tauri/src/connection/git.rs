@@ -4,7 +4,6 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tauri::State;
 use tmux_agent_protocol::v1;
 
 use super::{TerminalClients, get_client};
@@ -50,18 +49,17 @@ pub struct GitCommand {
 /// Async so the host round trip never runs on the WebView's main thread. Git
 /// carries a five-minute timeout for hooks, so a blocking command here could
 /// freeze the entire UI for five minutes.
-#[tauri::command]
 pub async fn git_request(
     client_id: String,
     command: GitCommand,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<Value, String> {
     if command.operation_id.is_empty() {
         return Err("Git operationId is required".into());
     }
     let operation_id = command.operation_id.clone();
     let operation = operation_from_name(&command.operation)?;
-    let client = get_client(&clients, &client_id)?;
+    let client = get_client(clients, &client_id)?;
     let connection_epoch = parse_optional_u64("connectionEpoch", &command.connection_epoch)?;
     if operation_requires_epoch(operation) {
         let current_epoch = client.terminal_epoch.load(Ordering::Acquire);
@@ -103,7 +101,7 @@ pub async fn git_request(
         git: Some(request),
         ..Default::default()
     };
-    let response = tauri::async_runtime::spawn_blocking(move || {
+    let response = crate::platform::spawn_blocking(move || {
         client.request_git(protocol_request, &operation_id)
     })
     .await
@@ -115,16 +113,15 @@ pub async fn git_request(
         .ok_or_else(|| "host omitted Git response".into())
 }
 
-#[tauri::command]
 pub fn cancel_git_request(
     client_id: String,
     operation_id: String,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<(), String> {
     if operation_id.is_empty() {
         return Err("Git operationId is required".into());
     }
-    get_client(&clients, &client_id)?.cancel_git(&operation_id)
+    get_client(clients, &client_id)?.cancel_git(&operation_id)
 }
 
 fn operation_from_name(value: &str) -> Result<v1::Operation, String> {

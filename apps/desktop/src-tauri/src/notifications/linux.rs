@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -13,9 +14,8 @@ use std::{
 
 use phase0_core::NotificationRoute;
 
-use super::{TEST_BODY, TEST_TITLE};
+use super::{ActivationSink, TEST_BODY, TEST_TITLE, deliver_activation};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
 use zbus::{blocking::Connection, proxy, zvariant::Value};
 
 #[proxy(
@@ -177,7 +177,7 @@ pub struct NotificationReceipt {
 }
 
 impl NativeNotifications {
-    pub fn new(app: AppHandle) -> Self {
+    pub fn new(activation: Arc<dyn ActivationSink>, _data_dir: Option<PathBuf>) -> Self {
         let connection = Connection::session().map_err(|error| error.to_string());
         let routes = Arc::new(Mutex::new(PendingNotificationRoutes::default()));
         let action_listener_healthy = Arc::new(AtomicBool::new(false));
@@ -185,14 +185,14 @@ impl NativeNotifications {
             let (ready_tx, ready_rx) = mpsc::sync_channel(1);
             let action_routes = Arc::clone(&routes);
             let action_health = Arc::clone(&action_listener_healthy);
-            let action_app = app.clone();
+            let action_sink = Arc::clone(&activation);
             let spawned = thread::Builder::new()
                 .name("notification-actions".into())
                 .spawn(move || {
                     listen_for_actions(
                         listener_connection,
                         action_routes,
-                        action_app,
+                        action_sink,
                         action_health,
                         ready_tx,
                     )
@@ -360,7 +360,7 @@ fn listen_for_closures(connection: Connection, routes: Arc<Mutex<PendingNotifica
 fn listen_for_actions(
     connection: Connection,
     routes: Arc<Mutex<PendingNotificationRoutes>>,
-    app: AppHandle,
+    activation: Arc<dyn ActivationSink>,
     health: Arc<AtomicBool>,
     ready: mpsc::SyncSender<bool>,
 ) {
@@ -387,7 +387,7 @@ fn listen_for_actions(
             .unwrap()
             .take_for_action(*arguments.id(), Instant::now());
         if let Some(route) = route {
-            deliver_activation(&app, route);
+            deliver_activation(activation.as_ref(), route);
         }
     }
 }
@@ -398,40 +398,6 @@ impl Drop for ListenerHealthGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
-}
-
-trait ActivationSink {
-    fn focus_main_window(&self);
-    fn emit_activation(&self, payload: serde_json::Value);
-}
-
-impl ActivationSink for AppHandle {
-    fn focus_main_window(&self) {
-        if let Some(window) = self.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.unminimize();
-            let _ = window.set_focus();
-        }
-    }
-
-    fn emit_activation(&self, payload: serde_json::Value) {
-        let _ = self.emit("notification-activated", payload);
-    }
-}
-
-fn deliver_activation(sink: &impl ActivationSink, route: NotificationRoute) {
-    sink.focus_main_window();
-    sink.emit_activation(serde_json::json!({
-        "hostProfile": route.host_profile,
-        "serverIdentity": route.server_identity,
-        "sessionId": route.session_id,
-        "sessionName": route.session_name,
-        "windowId": route.window_id,
-        "windowName": route.window_name,
-        "paneId": route.pane_id,
-        "agentId": route.agent_id,
-        "attentionGeneration": route.attention_generation.to_string(),
-    }));
 }
 
 #[cfg(test)]

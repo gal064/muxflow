@@ -1,3 +1,4 @@
+use crate::platform::{AppPaths, EventSink};
 use std::{
     collections::VecDeque,
     ffi::OsStr,
@@ -12,7 +13,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tauri::{State, ipc::Channel};
 use tmux_agent_protocol::{PublicationOutcome, v1};
 use uuid::Uuid;
 
@@ -48,7 +48,7 @@ struct DownloadJob {
     destination: Arc<ReservedDestination>,
     binding: BulkBinding,
     cancellation: Arc<CancelState>,
-    channel: Channel<Value>,
+    channel: Arc<dyn EventSink>,
     published: Arc<PathRegistry>,
 }
 
@@ -130,7 +130,6 @@ fn archive_destination(destination: PathBuf, folder: bool) -> PathBuf {
     destination
 }
 
-#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn start_download(
     client_id: String,
@@ -143,17 +142,17 @@ pub fn start_download(
     destination: String,
     folder: bool,
     collision: DownloadCollisionPolicy,
-    on_event: Channel<Value>,
-    profiles: State<'_, ProfileStore>,
-    clients: State<'_, TerminalClients>,
-    transfers: State<'_, DownloadManager>,
+    on_event: Arc<dyn EventSink>,
+    profiles: &ProfileStore,
+    clients: &TerminalClients,
+    transfers: &DownloadManager,
 ) -> Result<String, String> {
     if root.is_empty() || root_token.is_empty() || source.is_empty() || destination.is_empty() {
         return Err("root snapshot, source, and destination are required".into());
     }
     let connection = profiles.connection_for(&profile_id)?;
     let binding = BulkBinding::capture(
-        get_client(&clients, &client_id)?,
+        get_client(clients, &client_id)?,
         expected_server_identity,
         parse_required_u64("connectionEpoch", &connection_epoch)?,
     )?;
@@ -189,16 +188,12 @@ pub fn start_download(
 /// Renaming *after* the panel would be wrong — clicking Replace is consent, and
 /// silently renaming past it would ignore the user — so the uniqueness is
 /// applied to the default name instead, before they ever see it.
-#[tauri::command]
 pub fn suggest_download_destination(
     file_name: String,
-    app: tauri::AppHandle,
-    transfers: State<'_, DownloadManager>,
+    paths: &dyn AppPaths,
+    transfers: &DownloadManager,
 ) -> Result<String, String> {
-    use tauri::Manager;
-
-    let directory = app
-        .path()
+    let directory = paths
         .download_dir()
         .map_err(|error| format!("could not resolve the Downloads directory: {error}"))?;
     // A name is taken when it is on disk *or* has a transfer in flight against
@@ -217,7 +212,6 @@ pub fn suggest_download_destination(
         .map_err(|_| "the Downloads directory path is not valid UTF-8".to_owned())
 }
 
-#[tauri::command]
 pub fn cancel_download(transfer_id: String) -> Result<(), String> {
     cancel_transfer(&transfer_id).map(|_| ())
 }
@@ -258,7 +252,7 @@ pub(super) fn enqueue_acceptance_download(
     root_token: String,
     source: String,
     destination: PathBuf,
-    channel: Channel<Value>,
+    channel: Arc<dyn EventSink>,
 ) -> Result<String, String> {
     let transfer_id = Uuid::new_v4().to_string();
     let reservations = Arc::new(DestinationReservations::default());
@@ -305,7 +299,7 @@ fn finish_download_job(job: &DownloadJob, result: TransferResult) {
         event.failure(failure.failure_kind, failure.error)
     }
     .value();
-    let _ = job.channel.send(value);
+    let _ = job.channel.send_json(&value);
 }
 
 fn emit_download_state(job: &DownloadJob, state: TransferState, extra: Value) {
@@ -321,7 +315,7 @@ fn send_download_state(
         .fields(extra)
         .value();
     job.channel
-        .send(value)
+        .send_json(&value)
         .map_err(|error| format!("could not deliver download state: {error}"))
 }
 
@@ -590,14 +584,14 @@ fn stream_download(
             .cleanup(cleanup_status, None)
             .fields(fields)
             .value();
-        let _ = job.channel.send(value);
+        let _ = job.channel.send_json(&value);
     } else {
         let value = TransferEvent::new(&job.transfer_id, &job.binding, TransferState::Completed)
             .outcome(TransferOutcome::Published)
             .cleanup(cleanup_status, None)
             .fields(fields)
             .value();
-        let _ = job.channel.send(value);
+        let _ = job.channel.send_json(&value);
     }
     Ok(())
 }

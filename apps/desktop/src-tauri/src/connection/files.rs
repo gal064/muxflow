@@ -4,7 +4,6 @@ use std::sync::Arc;
 use super::{TerminalClients, get_client};
 use serde::Deserialize;
 use serde_json::Value;
-use tauri::State;
 use tmux_agent_protocol::v1;
 
 pub(crate) mod bulk_pool;
@@ -97,11 +96,10 @@ pub struct FileCommand {
 /// Async so the host round trip never runs on the WebView's main thread: a
 /// blocking command freezes every other interaction — typing included — for the
 /// whole trip, which over SSH is an entire RTT.
-#[tauri::command]
 pub async fn file_request(
     client_id: String,
     command: FileCommand,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<Value, String> {
     let operation = operation_from_name(&command.operation)?;
     let request = v1::FileServiceRequest {
@@ -132,7 +130,7 @@ pub async fn file_request(
         search_query: command.search_query,
         ..Default::default()
     };
-    let client = get_client(&clients, &client_id)?;
+    let client = get_client(clients, &client_id)?;
     // Reads only. A mutation that could be cancelled mid-flight would leave the
     // caller unable to say whether it happened, and this app never lets a
     // remote mutation reach an unknown outcome it could have avoided.
@@ -154,10 +152,9 @@ pub async fn file_request(
         file: Some(request),
         ..Default::default()
     };
-    let response =
-        tauri::async_runtime::spawn_blocking(move || client.request_file(request, claim))
-            .await
-            .map_err(|error| format!("file request task failed: {error}"))??;
+    let response = crate::platform::spawn_blocking(move || client.request_file(request, claim))
+        .await
+        .map_err(|error| format!("file request task failed: {error}"))??;
     let file = response.file.ok_or("host omitted file-service response")?;
     Ok(file_response_json(&file))
 }
@@ -174,17 +171,16 @@ pub async fn file_request(
 /// swap, and superseded preview, so a synchronous version would put a
 /// potentially multi-second stall on exactly the interactions whose budget is
 /// "no long task".
-#[tauri::command]
 pub async fn cancel_file_request(
     client_id: String,
     operation_id: String,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<(), String> {
     if operation_id.is_empty() {
         return Err("operation ID is required".into());
     }
-    let client = get_client(&clients, &client_id)?;
-    tauri::async_runtime::spawn_blocking(move || client.cancel_file(&operation_id))
+    let client = get_client(clients, &client_id)?;
+    crate::platform::spawn_blocking(move || client.cancel_file(&operation_id))
         .await
         .map_err(|error| error.to_string())?
 }

@@ -37,7 +37,6 @@ pub(super) fn configured_path() -> Option<&'static PathBuf> {
 }
 
 /// True only when the native process owns an absolute opt-in log destination.
-#[tauri::command]
 pub fn perf_log_enabled() -> bool {
     let enabled = configured_path().is_some();
     if enabled {
@@ -46,7 +45,6 @@ pub fn perf_log_enabled() -> bool {
     enabled
 }
 
-#[tauri::command]
 pub async fn append_perf_log(lines: Vec<String>) -> Result<(), String> {
     let Some(path) = configured_path() else {
         return Err("performance logging is not enabled for this process".into());
@@ -64,7 +62,7 @@ pub async fn append_perf_log(lines: Vec<String>) -> Result<(), String> {
         return Err("performance log lines must be single-line and bounded".into());
     }
     let body = lines.join("\n");
-    tauri::async_runtime::spawn_blocking(move || append_body(path, &body))
+    crate::platform::spawn_blocking(move || append_body(path, &body))
         .await
         .map_err(|error| format!("performance log worker failed: {error}"))?
 }

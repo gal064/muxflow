@@ -33,16 +33,15 @@ impl TerminalClient {
     }
 }
 
-#[tauri::command]
 pub async fn acknowledge_terminal_delivery(
     client_id: String,
     connection_epoch: u64,
     cumulative_frame_count: u64,
     cumulative_byte_length: u64,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<(), String> {
-    let client = get_client(&clients, &client_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let client = get_client(clients, &client_id)?;
+    crate::platform::spawn_blocking(move || {
         acknowledge_terminal_delivery_blocking(
             &client,
             connection_epoch,

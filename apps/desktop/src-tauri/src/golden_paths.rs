@@ -9,7 +9,8 @@
 //! environment is set on a child test process and never changed in this one.
 
 use std::process::Command;
-use tauri::Manager;
+
+use crate::{platform::AppPaths, tauri_adapters::TauriApp};
 
 const IDENTIFIER: &str = "dev.muxflow.desktop";
 
@@ -53,7 +54,7 @@ fn resolved_dirs_match() {
         .build(tauri::generate_context!())
         .expect("build mock app");
     assert_eq!(app.config().identifier, IDENTIFIER);
-    let path = app.path();
+    let path: &dyn AppPaths = &TauriApp(app.handle().clone());
 
     #[cfg(target_os = "linux")]
     let (config, data, log) = if std::env::var_os("XDG_CONFIG_HOME").is_some() {

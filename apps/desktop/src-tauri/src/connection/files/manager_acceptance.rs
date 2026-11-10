@@ -8,13 +8,14 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use tauri::ipc::{Channel, InvokeResponseBody};
 use tmux_agent_protocol::{
     envelope, read_frame_sync,
     v1::{self, envelope::Payload},
     write_frame_sync,
 };
 use uuid::Uuid;
+
+use crate::platform::{EventBody, EventSink};
 
 use super::{
     download_manager::enqueue_acceptance_download,
@@ -162,10 +163,10 @@ impl ControlLane {
     }
 }
 
-fn event_channel() -> (Channel<Value>, mpsc::Receiver<Value>) {
+fn event_channel() -> (Arc<dyn EventSink>, mpsc::Receiver<Value>) {
     let (sender, receiver) = mpsc::channel();
-    let channel = Channel::new(move |body| {
-        if let InvokeResponseBody::Json(value) = body
+    let channel = crate::platform::test_sink(move |body| {
+        if let EventBody::Json(value) = body
             && let Ok(value) = serde_json::from_str(&value)
         {
             let _ = sender.send(value);

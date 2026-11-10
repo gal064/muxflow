@@ -11,10 +11,6 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::{
-    State,
-    ipc::{Channel, InvokeResponseBody},
-};
 use tmux_agent_protocol::{
     envelope,
     v1::{self, envelope::Payload},
@@ -51,6 +47,7 @@ pub(crate) mod tmux_action;
 // the rest of `perf_log`; see `perf_log/switch_timing.rs` for what each stamp
 // means and why the counters are relaxed.
 use crate::perf_log::switch_timing::{AnswerMark, CountingReader, LinkCounters, RequestTiming};
+use crate::platform::EventSink;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a written request may wait for its answer. The host answers a
@@ -828,11 +825,10 @@ fn terminal_colors_request() -> Option<v1::Request> {
 /// Stored first, then sent to each live connection. A connection that is not
 /// up yet sends the stored colors once it is; a failed send is left to that,
 /// since the colors are a hint and never worth failing a theme switch.
-#[tauri::command]
 pub fn set_terminal_colors(
     foreground: String,
     background: String,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<(), String> {
     for color in [&foreground, &background] {
         let hex = color.strip_prefix('#').unwrap_or_default();
@@ -850,7 +846,7 @@ pub fn set_terminal_colors(
 /// The colors are read under the send lock rather than when the send was
 /// asked for, so a send that waited behind another carries the newest ones.
 fn send_terminal_colors(clients: Vec<Arc<TerminalClient>>) {
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::platform::spawn_blocking(move || {
         let _serial = TERMINAL_COLORS_SEND.lock().unwrap();
         let Some(request) = terminal_colors_request() else {
             return;
@@ -861,15 +857,14 @@ fn send_terminal_colors(clients: Vec<Arc<TerminalClient>>) {
     });
 }
 
-#[tauri::command]
 pub fn start_terminal(
     session_id: String,
     pane_ids: Vec<String>,
     connection: ConnectionSpec,
     attach: bool,
     measurement_id: String,
-    on_event: Channel<InvokeResponseBody>,
-    clients: State<'_, TerminalClients>,
+    on_event: Arc<dyn EventSink>,
+    clients: &TerminalClients,
 ) -> Result<String, String> {
     connection.validate()?;
     if !session_id.is_empty() {
@@ -926,8 +921,7 @@ pub fn start_terminal(
     Ok(client_id)
 }
 
-#[tauri::command]
-pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> Result<(), String> {
+pub fn stop_terminal(client_id: String, clients: &TerminalClients) -> Result<(), String> {
     if let Some(client) = clients.0.lock().unwrap().remove(&client_id) {
         client.shutdown_transport("host connection stopped");
         // Pooled bulk bridges are owned by this exact control-client token, so
@@ -945,12 +939,8 @@ pub fn stop_terminal(client_id: String, clients: State<'_, TerminalClients>) -> 
 /// Warms the active host's bulk file lane without making every shown peer pay
 /// for an idle SSH/helper process. The renderer calls this only for its active,
 /// writable link; the epoch gate makes repeated committed renders free.
-#[tauri::command]
-pub fn prewarm_terminal_bulk(
-    client_id: String,
-    clients: State<'_, TerminalClients>,
-) -> Result<(), String> {
-    let client = get_client(&clients, &client_id)?;
+pub fn prewarm_terminal_bulk(client_id: String, clients: &TerminalClients) -> Result<(), String> {
+    let client = get_client(clients, &client_id)?;
     let terminal_epoch = client.terminal_epoch.load(Ordering::Acquire);
     if terminal_epoch == 0 || !client.ready.load(Ordering::Acquire) {
         return Ok(());
@@ -1007,18 +997,17 @@ fn claim_bulk_prewarm_epoch(
     }
 }
 
-#[tauri::command]
 pub fn send_terminal_input(
     client_id: String,
     pane_id: String,
     data: String,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<(), String> {
     validate_tmux_id(&pane_id, '%')?;
     if data.len() > MAX_INPUT_REQUEST_BYTES {
         return Err("terminal input batch exceeds 1 MiB; retry with a smaller batch".into());
     }
-    let client = get_client(&clients, &client_id)?;
+    let client = get_client(clients, &client_id)?;
     client.enqueue_input(pane_id, data.into_bytes())
 }
 
@@ -1028,20 +1017,13 @@ pub fn send_terminal_input(
 /// roughly four characters of text per byte, stringified and re-parsed on the
 /// main thread. The payload is framed the same way the downlink event frames
 /// are, so the bytes cross the boundary once, as bytes.
-#[tauri::command]
-pub fn send_terminal_input_bytes(
-    request: tauri::ipc::Request<'_>,
-    clients: State<'_, TerminalClients>,
-) -> Result<(), String> {
-    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
-        return Err("terminal input IPC body must be raw binary".into());
-    };
+pub fn send_terminal_input_bytes(body: &[u8], clients: &TerminalClients) -> Result<(), String> {
     let (client_id, pane_id, data) = decode_terminal_input_frame(body)?;
     validate_tmux_id(pane_id, '%')?;
     if data.len() > MAX_INPUT_REQUEST_BYTES {
         return Err("terminal input batch exceeds 1 MiB".into());
     }
-    let client = get_client(&clients, client_id)?;
+    let client = get_client(clients, client_id)?;
     client.enqueue_input(pane_id.to_owned(), data.to_vec())
 }
 
@@ -1054,13 +1036,12 @@ fn decode_terminal_input_frame(body: &[u8]) -> Result<(&str, &str, &[u8]), Strin
 }
 
 /// A wake probe must check the existing transport without taking sizing.
-#[tauri::command]
 pub async fn probe_terminal_link(
     client_id: String,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<(), String> {
-    let client = get_client(&clients, &client_id)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let client = get_client(clients, &client_id)?;
+    crate::platform::spawn_blocking(move || {
         client.request(v1::Request {
             operation: v1::Operation::FullSnapshot.into(),
             ..Default::default()
@@ -1072,23 +1053,21 @@ pub async fn probe_terminal_link(
 }
 
 /// A resume whose probe found the link dead reconnects over fresh SSH masters.
-#[tauri::command]
 pub async fn discard_ssh_masters() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(discard_owned_control_masters)
+    crate::platform::spawn_blocking(discard_owned_control_masters)
         .await
         .map_err(|error| format!("SSH master discard task failed: {error}"))
 }
 
-#[tauri::command]
 pub async fn resize_terminal_client(
     client_id: String,
     columns: u16,
     rows: u16,
     session_id: String,
     window_id: String,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<(), String> {
-    let client = get_client(&clients, &client_id)?;
+    let client = get_client(clients, &client_id)?;
     validate_tmux_id(&session_id, '$')?;
     validate_tmux_id(&window_id, '@')?;
     *client.terminal_selection.lock().unwrap() = Some(TerminalSelection {
@@ -1113,16 +1092,9 @@ pub async fn resize_terminal_client(
 /// carries the renderer's serialized screen, up to 4 MiB, and as a JSON array
 /// of numbers that is roughly 15 MB of text to stringify and re-parse on the
 /// main thread — measured at one to two seconds per switch.
-#[tauri::command]
-pub async fn set_terminal_visibility(
-    request: tauri::ipc::Request<'_>,
-    clients: State<'_, TerminalClients>,
-) -> Result<(), String> {
-    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
-        return Err("terminal visibility IPC body must be raw binary".into());
-    };
+pub async fn set_terminal_visibility(body: &[u8], clients: &TerminalClients) -> Result<(), String> {
     let visibility = decode_terminal_visibility_frame(body)?;
-    let client = get_client(&clients, visibility.client_id)?;
+    let client = get_client(clients, visibility.client_id)?;
     let request = terminal_visibility_request(
         visibility.pane_id.to_owned(),
         visibility.visible,
@@ -1131,7 +1103,7 @@ pub async fn set_terminal_visibility(
         visibility.output_generation,
         client.terminal_epoch.load(Ordering::Acquire),
     )?;
-    tauri::async_runtime::spawn_blocking(move || client.request(request))
+    crate::platform::spawn_blocking(move || client.request(request))
         .await
         .map_err(|error| format!("terminal visibility task failed: {error}"))??;
     Ok(())
@@ -1247,15 +1219,14 @@ fn terminal_visibility_request(
     })
 }
 
-#[tauri::command]
 pub async fn request_terminal_seed(
     client_id: String,
     pane_id: String,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<(), String> {
     let request = terminal_seed_request(pane_id)?;
-    let client = get_client(&clients, &client_id)?;
-    tauri::async_runtime::spawn_blocking(move || client.request(request))
+    let client = get_client(clients, &client_id)?;
+    crate::platform::spawn_blocking(move || client.request(request))
         .await
         .map_err(|error| format!("terminal seed task failed: {error}"))??;
     Ok(())
@@ -1271,17 +1242,16 @@ pub async fn request_terminal_seed(
 /// measures its capture from the pane's current display, so a pane that has
 /// printed since it was seeded would otherwise be handed the rows that scrolled
 /// off in the meantime a second time.
-#[tauri::command]
 pub async fn request_terminal_history(
     client_id: String,
     pane_id: String,
     lines: u32,
     skip_lines: u32,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<(), String> {
     let request = terminal_history_request(pane_id, lines, skip_lines)?;
-    let client = get_client(&clients, &client_id)?;
-    tauri::async_runtime::spawn_blocking(move || client.request(request))
+    let client = get_client(clients, &client_id)?;
+    crate::platform::spawn_blocking(move || client.request(request))
         .await
         .map_err(|error| format!("terminal history task failed: {error}"))??;
     Ok(())
@@ -1342,12 +1312,11 @@ pub struct TerminalLinkStats {
     frames_read_total: Option<u64>,
 }
 
-#[tauri::command]
 pub fn terminal_link_stats(
     client_id: String,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<TerminalLinkStats, String> {
-    let client = get_client(&clients, &client_id)?;
+    let client = get_client(clients, &client_id)?;
     let last_frame_at = client.last_host_frame_at.load(Ordering::Relaxed);
     if last_frame_at == 0 {
         return Err("this terminal connection has not read a host frame yet".into());
@@ -1388,16 +1357,15 @@ pub struct InputLatencyStats {
 /// be reconnecting, and a client that has gone away is simply a window with
 /// nothing in it. `None` (null in the webview) means "no stats", exactly as
 /// `fetchLinkStats` treats its own failure.
-#[tauri::command]
 pub fn input_latency_stats(
     client_id: String,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Option<InputLatencyStats> {
-    Some(get_client(&clients, &client_id).ok()?.drain_input_latency())
+    Some(get_client(clients, &client_id).ok()?.drain_input_latency())
 }
 
-fn get_client(
-    clients: &State<'_, TerminalClients>,
+pub(crate) fn get_client(
+    clients: &TerminalClients,
     client_id: &str,
 ) -> Result<Arc<TerminalClient>, String> {
     clients
@@ -1471,14 +1439,14 @@ fn snapshot_from_proto(value: v1::Snapshot) -> tmux_control::TmuxSnapshot {
 #[derive(Clone)]
 pub(super) struct TerminalEventChannel {
     measurement: Arc<TerminalMeasurement>,
-    channel: Channel<InvokeResponseBody>,
+    channel: Arc<dyn EventSink>,
     delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
 }
 
 impl TerminalEventChannel {
     fn new(
         measurement_id: Uuid,
-        channel: Channel<InvokeResponseBody>,
+        channel: Arc<dyn EventSink>,
         delivery_window: Arc<Mutex<Option<Arc<DeliveryWindow>>>>,
     ) -> Self {
         Self {

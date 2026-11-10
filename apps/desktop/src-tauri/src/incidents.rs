@@ -38,11 +38,7 @@ impl IncidentJournal {
 /// Appends one journal line. Failures are reported but must stay harmless:
 /// the frontend fires and forgets, and a journal that cannot be written must
 /// never become a reason the app misbehaves.
-#[tauri::command]
-pub fn record_incident(
-    journal: tauri::State<'_, IncidentJournal>,
-    line: String,
-) -> Result<(), String> {
+pub fn record_incident(journal: &IncidentJournal, line: String) -> Result<(), String> {
     if line.len() > MAX_LINE_BYTES {
         return Err("incident record exceeds byte limit".into());
     }

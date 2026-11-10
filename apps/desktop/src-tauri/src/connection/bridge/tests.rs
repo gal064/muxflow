@@ -7,8 +7,6 @@ use std::{
     thread,
 };
 
-use tauri::ipc::{Channel, InvokeResponseBody};
-
 use crate::connection::DeliveryWindow;
 
 struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
@@ -157,8 +155,8 @@ impl StreamHarness {
         *client.writer.lock().unwrap() =
             Some(ControlWriterHandle::start_with(request_write, "resync-test").unwrap());
         let (sender, frames) = mpsc::channel();
-        let channel = Channel::new(move |body| {
-            if let InvokeResponseBody::Raw(frame) = body {
+        let channel = crate::platform::test_sink(move |body| {
+            if let crate::platform::EventBody::Raw(frame) = body {
                 let _ = sender.send(frame);
             }
             Ok(())

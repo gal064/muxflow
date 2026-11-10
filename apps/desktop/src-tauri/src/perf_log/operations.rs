@@ -348,7 +348,6 @@ pub(super) fn mark_native_measurements_dirty() {
     signal.changed.notify_one();
 }
 
-#[tauri::command]
 pub fn sample_native_measurements() -> Result<(), String> {
     write_native_snapshot()
 }

@@ -1,10 +1,10 @@
+use crate::platform::EventSink;
 use serde::Serialize;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
-use tauri::ipc::{Channel, InvokeResponseBody};
 use uuid::Uuid;
 
 use super::{operations::mark_native_measurements_dirty, sink::configured_path};
@@ -197,12 +197,12 @@ pub(super) fn measurement_snapshot() -> BridgeMeasurementSnapshot {
 /// process explicitly opted into the Phase 14 sink.
 pub(crate) fn send_bridge_frame(
     measurement_id: Uuid,
-    channel: &Channel<InvokeResponseBody>,
+    channel: &Arc<dyn EventSink>,
     frame: Vec<u8>,
 ) -> Result<(), String> {
     let Some(pending) = bridge_pending(measurement_id) else {
         return channel
-            .send(InvokeResponseBody::Raw(frame))
+            .send_raw(frame)
             .map_err(|error| format!("desktop event channel closed: {error}"));
     };
     let byte_length = frame.len();
@@ -226,7 +226,7 @@ pub(crate) fn send_bridge_frame(
             .max(measurements.snapshot.retained_bytes);
     }
     let result = channel
-        .send(InvokeResponseBody::Raw(frame))
+        .send_raw(frame)
         .map_err(|error| format!("desktop event channel closed: {error}"));
     let measurements = bridge_measurements().unwrap();
     let mut measurements = measurements.lock().unwrap();
@@ -264,7 +264,6 @@ pub(crate) fn send_bridge_frame(
     result
 }
 
-#[tauri::command]
 pub fn acknowledge_bridge_events(
     measurement_id: String,
     cumulative_frame_count: u64,
@@ -416,7 +415,6 @@ pub(crate) fn quiesce_bridge_measurement(measurement_id: Uuid) -> BridgeFinalTot
     totals
 }
 
-#[tauri::command]
 pub fn bridge_final_totals(measurement_id: String) -> Result<BridgeFinalTotals, String> {
     let measurement_id =
         Uuid::parse_str(&measurement_id).map_err(|_| "invalid terminal measurement ID")?;
@@ -442,7 +440,6 @@ pub fn bridge_final_totals(measurement_id: String) -> Result<BridgeFinalTotals, 
     })
 }
 
-#[tauri::command]
 pub fn finalize_bridge_measurement(measurement_id: String) -> Result<(), String> {
     let measurement_id =
         Uuid::parse_str(&measurement_id).map_err(|_| "invalid terminal measurement ID")?;

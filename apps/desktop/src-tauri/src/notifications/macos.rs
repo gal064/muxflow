@@ -8,7 +8,7 @@ use std::{
         fs::MetadataExt,
         io::{AsRawFd, FromRawFd},
     },
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU32, Ordering},
@@ -32,9 +32,8 @@ use objc2_user_notifications::{
 };
 use phase0_core::NotificationRoute;
 
-use super::{TEST_BODY, TEST_TITLE};
+use super::{ActivationSink, TEST_BODY, TEST_TITLE, deliver_activation};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 const NATIVE_CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -52,7 +51,7 @@ const FOREGROUND_KEY: &str = "adeForeground";
 /// never set the key — presents, because invisibility is this feature's bug.
 const FOREGROUND_SUPPRESS: &str = "suppress";
 
-static APP: OnceLock<AppHandle> = OnceLock::new();
+static ACTIVATION: OnceLock<Arc<dyn ActivationSink>> = OnceLock::new();
 static ROUTES: OnceLock<Mutex<PendingRoutes>> = OnceLock::new();
 static ROUTE_DIRECTORY: OnceLock<File> = OnceLock::new();
 static NEXT_RECEIPT: AtomicU32 = AtomicU32::new(1);
@@ -158,8 +157,8 @@ define_class!(
             } else {
                 None
             };
-            if let (Some(app), Some(route)) = (APP.get(), route) {
-                deliver_activation(app, route);
+            if let (Some(activation), Some(route)) = (ACTIVATION.get(), route) {
+                deliver_activation(activation.as_ref(), route);
             }
             completion.call(());
         }
@@ -214,11 +213,8 @@ struct Posting<'a> {
 }
 
 impl NativeNotifications {
-    pub fn new(app: AppHandle) -> Self {
-        let route_directory = app
-            .path()
-            .app_data_dir()
-            .ok()
+    pub fn new(activation: Arc<dyn ActivationSink>, data_dir: Option<PathBuf>) -> Self {
+        let route_directory = data_dir
             .and_then(|directory| open_route_directory(&directory).ok())
             .map(Arc::new);
         if let Some(directory) = &route_directory
@@ -226,7 +222,7 @@ impl NativeNotifications {
         {
             let _ = ROUTE_DIRECTORY.set(clone);
         }
-        let _ = APP.set(app);
+        let _ = ACTIVATION.set(activation);
         let bundled = running_from_bundle();
         if bundled {
             let center = UNUserNotificationCenter::currentNotificationCenter();
@@ -596,28 +592,6 @@ fn notification_status(center: &UNUserNotificationCenter) -> Result<UNAuthorizat
     receiver
         .recv_timeout(NATIVE_CALLBACK_TIMEOUT)
         .map_err(|_| "macOS notification settings query timed out".to_owned())
-}
-
-fn deliver_activation(app: &AppHandle, route: NotificationRoute) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
-    let _ = app.emit(
-        "notification-activated",
-        serde_json::json!({
-            "hostProfile": route.host_profile,
-            "serverIdentity": route.server_identity,
-            "sessionId": route.session_id,
-            "sessionName": route.session_name,
-            "windowId": route.window_id,
-            "windowName": route.window_name,
-            "paneId": route.pane_id,
-            "agentId": route.agent_id,
-            "attentionGeneration": route.attention_generation.to_string(),
-        }),
-    );
 }
 
 #[cfg(test)]

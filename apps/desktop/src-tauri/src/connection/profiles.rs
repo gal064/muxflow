@@ -1,7 +1,6 @@
 use std::{collections::HashSet, fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::Mutex};
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use uuid::Uuid;
 
 use super::{ConnectionSpec, validate_profile_id};
@@ -243,8 +242,7 @@ fn normalize_letter(letter: Option<String>) -> Result<Option<String>, String> {
     }
 }
 
-#[tauri::command]
-pub fn list_host_profiles(store: State<'_, ProfileStore>) -> Result<serde_json::Value, String> {
+pub fn list_host_profiles(store: &ProfileStore) -> Result<serde_json::Value, String> {
     let value = store.value.lock().unwrap().clone();
     let recovery = store.recovery.lock().unwrap().clone();
     Ok(serde_json::json!({
@@ -255,16 +253,11 @@ pub fn list_host_profiles(store: State<'_, ProfileStore>) -> Result<serde_json::
     }))
 }
 
-#[tauri::command]
-pub fn reset_host_profiles(store: State<'_, ProfileStore>) -> Result<(), String> {
+pub fn reset_host_profiles(store: &ProfileStore) -> Result<(), String> {
     store.reset_transactionally()
 }
 
-#[tauri::command]
-pub fn save_host_profile(
-    mut profile: HostProfile,
-    store: State<'_, ProfileStore>,
-) -> Result<(), String> {
+pub fn save_host_profile(mut profile: HostProfile, store: &ProfileStore) -> Result<(), String> {
     profile.connection.validate()?;
     validate_profile_id(&profile.id)?;
     if profile.label.trim().is_empty() {
@@ -276,19 +269,14 @@ pub fn save_host_profile(
 
 /// Names the host a restart reconnects to. Saving a profile no longer moves
 /// this pointer: several hosts can be saved and shown while one stays active.
-#[tauri::command]
-pub fn set_last_profile_id(
-    profile_id: String,
-    store: State<'_, ProfileStore>,
-) -> Result<(), String> {
+pub fn set_last_profile_id(profile_id: String, store: &ProfileStore) -> Result<(), String> {
     validate_profile_id(&profile_id)?;
     store.set_last_profile_id_transactionally(&profile_id)
 }
 
-#[tauri::command]
 pub fn delete_host_profile(
     profile_id: String,
-    store: State<'_, ProfileStore>,
+    store: &ProfileStore,
 ) -> Result<serde_json::Value, String> {
     validate_profile_id(&profile_id)?;
     store.delete_profile_transactionally(&profile_id)?;

@@ -45,14 +45,11 @@ pub struct AvailableUpdate {
 /// `Some` when the published release is newer than the running app. A failed
 /// fetch or an unreadable manifest is an error the caller may ignore; it never
 /// shows a notice.
-#[tauri::command]
-pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<AvailableUpdate>, String> {
-    let running = app.package_info().version.clone();
-    let running = (running.major, running.minor, running.patch);
+pub async fn check_for_update(running: (u64, u64, u64)) -> Result<Option<AvailableUpdate>, String> {
     // MUXFLOW_UPDATE_MANIFEST_URL points a development build at a local
     // manifest; releases always read the published one.
     let url = std::env::var("MUXFLOW_UPDATE_MANIFEST_URL").unwrap_or_else(|_| MANIFEST_URL.into());
-    let body = tauri::async_runtime::spawn_blocking(move || fetch_manifest(&url))
+    let body = crate::platform::spawn_blocking(move || fetch_manifest(&url))
         .await
         .map_err(|error| error.to_string())??;
     evaluate(running, &body)
@@ -62,14 +59,13 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<AvailableU
 /// work goes through the normal close path, and the exit relaunches. Only a copy
 /// in the installer's default location is replaced; any other copy gets an error
 /// and the caller opens the release page.
-#[tauri::command]
 pub async fn install_update() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     if !is_default_install(&exe, Path::new(&home)) {
         return Err("this copy of Muxflow is not in the default install location".into());
     }
-    let output = tauri::async_runtime::spawn_blocking(|| {
+    let output = crate::platform::spawn_blocking(|| {
         Command::new("bash").args(["-c", INSTALL_COMMAND]).output()
     })
     .await

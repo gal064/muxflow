@@ -16,16 +16,13 @@
 //! bodies instead, because a reference to a body the client cannot fetch would
 //! be worse than the payload it was avoiding.
 
+use crate::platform::EventSink;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
 use serde::Deserialize;
-use tauri::{
-    State,
-    ipc::{Channel, InvokeResponseBody},
-};
 use tmux_agent_protocol::v1;
 use uuid::Uuid;
 
@@ -102,29 +99,28 @@ struct GitContentJob {
     cancellation: Arc<CancelState>,
     request: v1::GitRequest,
     sides: Vec<DeferredSide>,
-    channel: Channel<InvokeResponseBody>,
+    channel: Arc<dyn EventSink>,
 }
 
-#[tauri::command]
 pub async fn read_git_diff_content(
     command: GitDiffContentCommand,
-    on_event: Channel<InvokeResponseBody>,
-    profiles: State<'_, ProfileStore>,
-    clients: State<'_, TerminalClients>,
+    on_event: Arc<dyn EventSink>,
+    profiles: &ProfileStore,
+    clients: &TerminalClients,
 ) -> Result<String, String> {
     // Resolved once: the registry that admits this read and the connection it
     // is bound to must be the same client, not two lookups that a reconnect
     // could land on either side of.
-    let client = get_client(&clients, &command.client_id)?;
+    let client = get_client(clients, &command.client_id)?;
     let reads = client.git_content_reads();
-    let job = prepare(command, on_event, &profiles, &client)?;
+    let job = prepare(command, on_event, profiles, &client)?;
     let read_id = job.read_id.clone();
     let registration = reads.register(&read_id, &job.cancellation)?;
     let reads = Arc::clone(&reads);
     // Kept out of the worker so a panicking worker still has somewhere to
     // report to; otherwise the renderer's read would never settle at all.
     let reporter = job.channel.clone();
-    tauri::async_runtime::spawn(async move {
+    crate::platform::spawn(async move {
         let _registration = registration;
         let permit = match reads.admission.acquire().await {
             Ok(permit) => permit,
@@ -143,7 +139,7 @@ pub async fn read_git_diff_content(
             Ok((job, Ok(total))) => {
                 let mut frame = vec![FRAME_COMPLETE];
                 frame.extend_from_slice(&total.to_be_bytes());
-                let _ = job.channel.send(InvokeResponseBody::Raw(frame));
+                let _ = job.channel.send_raw(frame);
             }
             Ok((job, Err(error))) => emit_error(&job.channel, &error),
             Err(error) => emit_error(&reporter, &format!("Git diff content read failed: {error}")),
@@ -152,13 +148,12 @@ pub async fn read_git_diff_content(
     Ok(read_id)
 }
 
-#[tauri::command]
 pub fn cancel_git_diff_content(
     client_id: String,
     read_id: String,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<(), String> {
-    get_client(&clients, &client_id)?
+    get_client(clients, &client_id)?
         .git_content_reads()
         .cancel(&read_id);
     Ok(())
@@ -166,7 +161,7 @@ pub fn cancel_git_diff_content(
 
 fn prepare(
     command: GitDiffContentCommand,
-    channel: Channel<InvokeResponseBody>,
+    channel: Arc<dyn EventSink>,
     profiles: &ProfileStore,
     client: &Arc<TerminalClient>,
 ) -> Result<GitContentJob, String> {
@@ -289,7 +284,7 @@ fn stream_sides(
             frame.extend_from_slice(&chunk.offset.to_be_bytes());
             frame.extend_from_slice(&chunk.data);
             job.channel
-                .send(InvokeResponseBody::Raw(frame))
+                .send_raw(frame)
                 .map_err(|error| format!("could not publish Git diff content: {error}"))?;
             delivered = delivered.saturating_add(chunk.data.len() as u64);
             if chunk.last {
@@ -307,10 +302,10 @@ fn stream_sides(
     Ok(total)
 }
 
-fn emit_error(channel: &Channel<InvokeResponseBody>, error: &str) {
+fn emit_error(channel: &Arc<dyn EventSink>, error: &str) {
     let mut frame = vec![FRAME_ERROR];
     frame.extend_from_slice(error.as_bytes());
-    let _ = channel.send(InvokeResponseBody::Raw(frame));
+    let _ = channel.send_raw(frame);
 }
 
 fn non_empty(value: &str, label: &str) -> Result<String, String> {
@@ -420,11 +415,11 @@ mod tests {
         client
     }
 
-    fn captured_channel() -> (Channel<InvokeResponseBody>, CapturedBytes) {
+    fn captured_channel() -> (Arc<dyn EventSink>, CapturedBytes) {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&sent);
-        let channel = Channel::new(move |body| {
-            if let InvokeResponseBody::Raw(bytes) = body {
+        let channel = crate::platform::test_sink(move |body| {
+            if let crate::platform::EventBody::Raw(bytes) = body {
                 sink.lock().unwrap().push(bytes);
             }
             Ok(())

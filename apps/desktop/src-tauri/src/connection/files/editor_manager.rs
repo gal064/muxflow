@@ -1,10 +1,7 @@
+use crate::platform::EventSink;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tauri::{
-    State,
-    ipc::{Channel, InvokeResponseBody},
-};
 use tmux_agent_protocol::v1;
 use uuid::Uuid;
 
@@ -37,7 +34,7 @@ pub(super) struct FileJob {
     pub(super) path: String,
     pub(super) binding: BulkBinding,
     pub(super) cancellation: Arc<CancelState>,
-    pub(super) channel: Channel<InvokeResponseBody>,
+    pub(super) channel: Arc<dyn EventSink>,
     pub(super) kind: FileJobKind,
     /// Per-open segment marks, keyed by this job's transfer id. Inert for
     /// writes and whenever the perf log is not enabled for the process.
@@ -59,7 +56,6 @@ pub(super) struct FileWrite {
 #[derive(Clone, Default)]
 pub struct FileIoManager;
 
-#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn start_file_read(
     client_id: String,
@@ -69,16 +65,16 @@ pub fn start_file_read(
     root: String,
     root_token: String,
     path: String,
-    on_event: Channel<InvokeResponseBody>,
-    profiles: State<'_, ProfileStore>,
-    clients: State<'_, TerminalClients>,
-    file_io: State<'_, FileIoManager>,
+    on_event: Arc<dyn EventSink>,
+    profiles: &ProfileStore,
+    clients: &TerminalClients,
+    file_io: &FileIoManager,
 ) -> Result<String, String> {
     if root.is_empty() || root_token.is_empty() || path.is_empty() {
         return Err("root snapshot and file path are required".into());
     }
     let binding = BulkBinding::capture(
-        get_client(&clients, &client_id)?,
+        get_client(clients, &client_id)?,
         expected_server_identity,
         parse_required_u64("connectionEpoch", &connection_epoch)?,
     )?;
@@ -99,7 +95,6 @@ pub fn start_file_read(
     Ok(transfer_id)
 }
 
-#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn start_file_write(
     client_id: String,
@@ -112,10 +107,10 @@ pub fn start_file_write(
     operation_id: String,
     file_generation: String,
     content: Vec<u8>,
-    on_event: Channel<InvokeResponseBody>,
-    profiles: State<'_, ProfileStore>,
-    clients: State<'_, TerminalClients>,
-    file_io: State<'_, FileIoManager>,
+    on_event: Arc<dyn EventSink>,
+    profiles: &ProfileStore,
+    clients: &TerminalClients,
+    file_io: &FileIoManager,
 ) -> Result<String, String> {
     if root.is_empty() || root_token.is_empty() || path.is_empty() || operation_id.is_empty() {
         return Err("root snapshot, file path, and operation ID are required".into());
@@ -127,7 +122,7 @@ pub fn start_file_write(
         return Err("editor writes require valid UTF-8 text without NUL bytes".into());
     }
     let binding = BulkBinding::capture(
-        get_client(&clients, &client_id)?,
+        get_client(clients, &client_id)?,
         expected_server_identity,
         parse_required_u64("connectionEpoch", &connection_epoch)?,
     )?;
@@ -152,11 +147,7 @@ pub fn start_file_write(
     Ok(transfer_id)
 }
 
-#[tauri::command]
-pub fn cancel_file_io(
-    transfer_id: String,
-    file_io: State<'_, FileIoManager>,
-) -> Result<(), String> {
+pub fn cancel_file_io(transfer_id: String, file_io: &FileIoManager) -> Result<(), String> {
     file_io.cancel(&transfer_id)
 }
 
@@ -412,18 +403,14 @@ pub(super) fn content_kind_name(kind: v1::FileContentKind) -> &'static str {
     }
 }
 
-fn emit_file_json(channel: &Channel<InvokeResponseBody>, kind: u8, value: Value) {
+fn emit_file_json(channel: &Arc<dyn EventSink>, kind: u8, value: Value) {
     let _ = send_file_json(channel, kind, value);
 }
 
-fn send_file_json(
-    channel: &Channel<InvokeResponseBody>,
-    kind: u8,
-    value: Value,
-) -> Result<(), String> {
+fn send_file_json(channel: &Arc<dyn EventSink>, kind: u8, value: Value) -> Result<(), String> {
     let frame = file_json_frame(kind, value)?;
     channel
-        .send(InvokeResponseBody::Raw(frame))
+        .send_raw(frame)
         .map_err(|error| format!("could not publish queued file transfer event: {error}"))
 }
 
@@ -437,7 +424,7 @@ fn file_json_frame(kind: u8, value: Value) -> Result<Vec<u8>, String> {
 }
 
 pub(super) fn emit_scoped_file_json(
-    channel: &Channel<InvokeResponseBody>,
+    channel: &Arc<dyn EventSink>,
     transfer_id: &str,
     binding: &BulkBinding,
     kind: u8,
@@ -454,14 +441,10 @@ pub(super) fn emit_scoped_file_json(
 }
 
 /// Writes one content frame, reporting whether the renderer is still listening.
-pub(super) fn emit_file_chunk(
-    channel: &Channel<InvokeResponseBody>,
-    offset: u64,
-    data: &[u8],
-) -> bool {
+pub(super) fn emit_file_chunk(channel: &Arc<dyn EventSink>, offset: u64, data: &[u8]) -> bool {
     let mut frame = Vec::with_capacity(9 + data.len());
     frame.push(2);
     frame.extend_from_slice(&offset.to_be_bytes());
     frame.extend_from_slice(data);
-    channel.send(InvokeResponseBody::Raw(frame)).is_ok()
+    channel.send_raw(frame).is_ok()
 }

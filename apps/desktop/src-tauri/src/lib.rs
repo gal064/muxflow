@@ -1,4 +1,5 @@
 mod app_state;
+mod commands;
 mod connection;
 mod external_links;
 #[cfg(test)]
@@ -10,162 +11,17 @@ mod macos_window;
 mod menu;
 mod notifications;
 mod perf_log;
+mod platform;
 mod power_events;
+mod tauri_adapters;
 mod update_check;
 
-use phase0_core::{NotificationRoute, ResolvedRoute, SyntheticTopology, resolve_route};
+use std::sync::Arc;
+
 use tauri::Manager;
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentNotificationRouteContent {
-    host_profile: String,
-    server_identity: String,
-    session_id: String,
-    session_name: String,
-    window_id: String,
-    window_name: String,
-    pane_id: String,
-    agent_id: String,
-    attention_generation: String,
-}
-
-impl AgentNotificationRouteContent {
-    fn into_route(self) -> Result<NotificationRoute, String> {
-        Ok(NotificationRoute {
-            host_profile: self.host_profile,
-            server_identity: self.server_identity,
-            session_id: self.session_id,
-            session_name: self.session_name,
-            window_id: self.window_id,
-            window_name: self.window_name,
-            pane_id: self.pane_id,
-            agent_id: self.agent_id,
-            attention_generation: self
-                .attention_generation
-                .parse()
-                .map_err(|_| "attentionGeneration must be a decimal u64 string")?,
-        })
-    }
-}
-
-#[tauri::command]
-fn resolve_notification_route(
-    route: AgentNotificationRouteContent,
-    topology: SyntheticTopology,
-) -> Result<serde_json::Value, String> {
-    let resolved = resolve_route(&route.into_route()?, &topology);
-    Ok(match resolved {
-        ResolvedRoute::Exact {
-            session_id,
-            window_id,
-            pane_id,
-            attention_generation,
-        } => serde_json::json!({
-            "resolution": "exact", "sessionId": session_id, "windowId": window_id,
-            "paneId": pane_id, "attentionGeneration": attention_generation.to_string(),
-        }),
-        ResolvedRoute::Expired => serde_json::json!({ "resolution": "expired" }),
-        ResolvedRoute::WrongServer => serde_json::json!({ "resolution": "wrongServer" }),
-    })
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentNotificationContent {
-    title: String,
-    body: String,
-    request_action: bool,
-    /// Whether macOS should show this while the app itself is frontmost. The
-    /// frontend is the only side that knows which pane the user is looking at.
-    ///
-    /// Defaulted to *presenting*, not to suppressing. A missing field is a bug
-    /// either way, but its two failure modes are not equal: showing a banner
-    /// for a pane already on screen is a duplicate, while suppressing one is
-    /// silence — which is the exact defect this flag exists to end, and the
-    /// kind nobody reports because nothing happens.
-    #[serde(default = "present_by_default")]
-    present_in_foreground: bool,
-    route: AgentNotificationRouteContent,
-}
-
-fn present_by_default() -> bool {
-    true
-}
-
-#[tauri::command]
-async fn emit_agent_notification(
-    notification: AgentNotificationContent,
-    notifications: tauri::State<'_, notifications::NativeNotifications>,
-) -> Result<notifications::NotificationReceipt, String> {
-    // The semantic reducer intentionally supplies only agent/state/workspace/tab.
-    // Keep a conservative bridge bound so an accidental payload cannot become a
-    // large or multiline lock-screen disclosure.
-    if !valid_notification_content(&notification.title, &notification.body) {
-        return Err("native notification content is malformed".into());
-    }
-    let notifications = notifications.inner().clone();
-    let route = notification.route.into_route()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        notifications.notify(
-            &notification.title,
-            &notification.body,
-            route,
-            notification.request_action,
-            notification.present_in_foreground,
-        )
-    })
-    .await
-    .map_err(|error| format!("native notification worker failed: {error}"))?
-}
-
-/// What the OS says about this app's permission, so Settings can say it too.
-///
-/// Read-only and never prompts: a status line that raised a modal system
-/// prompt just for being looked at would be a worse surface than none.
-#[tauri::command]
-async fn notification_permission_status(
-    notifications: tauri::State<'_, notifications::NativeNotifications>,
-) -> Result<String, String> {
-    let notifications = notifications.inner().clone();
-    let status = tauri::async_runtime::spawn_blocking(move || notifications.authorization_status())
-        .await
-        .map_err(|error| format!("notification status worker failed: {error}"))??;
-    // Three backends write this vocabulary independently and the UI renders one
-    // sentence per word, so a sixth word would render as an empty status line.
-    // The frontend re-checks it too; this is where a new backend finds out.
-    debug_assert!(
-        notifications::PERMISSION_STATUSES.contains(&status.as_str()),
-        "{status} is not a notification permission the UI can render"
-    );
-    Ok(status)
-}
-
-/// The notification the user asks for from Settings.
-///
-/// The permission prompt itself is raised at launch; this is how a person
-/// checks that banners actually arrive.
-#[tauri::command]
-async fn emit_test_notification(
-    notifications: tauri::State<'_, notifications::NativeNotifications>,
-) -> Result<notifications::NotificationReceipt, String> {
-    let notifications = notifications.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || notifications.send_test_notification())
-        .await
-        .map_err(|error| format!("native notification worker failed: {error}"))?
-}
-
-fn valid_notification_content(title: &str, body: &str) -> bool {
-    !title.is_empty()
-        && title.len() <= 160
-        && body.len() <= 320
-        && !title
-            .chars()
-            .any(|character| matches!(character, '\r' | '\n'))
-        && !body
-            .chars()
-            .any(|character| matches!(character, '\r' | '\n'))
-}
+use platform::AppPaths;
+use tauri_adapters::{AppEvent, DESKTOP_RESUMED, TauriApp};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -187,24 +43,31 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            power_events::start(app.handle().clone());
+            power_events::start(Arc::new(AppEvent::new(
+                app.handle().clone(),
+                DESKTOP_RESUMED,
+            )));
             // Startup, because a kill or a crash never runs `RunEvent::Exit`:
             // the debris those exits leave can only be cleaned by a later launch.
             connection::spawn_orphan_reaper();
-            let config_dir = app.path().app_config_dir()?;
+            let tauri_app = TauriApp(app.handle().clone());
+            let config_dir = tauri_app.app_config_dir()?;
             let profile_path = config_dir.join("profiles.json");
             app.manage(connection::ProfileStore::load(profile_path)?);
             let app_state = app_state::AppStateStore::load(config_dir.join("app-state.json"));
             let theme = app_state.theme();
             let ui_scale = app_state.ui_scale();
             app.manage(app_state);
-            app.manage(incidents::IncidentJournal::new(app.path().app_log_dir()?));
+            app.manage(incidents::IncidentJournal::new(tauri_app.app_log_dir()?));
             app.manage(connection::TerminalClients::default());
             app.manage(connection::files::DownloadManager::default());
             app.manage(connection::files::FileIoManager);
             app.manage(connection::files::UploadManager);
             app.manage(connection::ports::PortForwards::default());
-            let notifications = notifications::NativeNotifications::new(app.handle().clone());
+            let notifications = notifications::NativeNotifications::new(
+                Arc::new(TauriApp(app.handle().clone())),
+                tauri_app.app_data_dir().ok(),
+            );
             // At launch, not at the first agent event, so the permission prompt
             // is there while the person is looking. A no-op once they answered.
             let prompt = notifications.clone();
@@ -240,77 +103,77 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            connection::profiles::list_host_profiles,
-            connection::profiles::save_host_profile,
-            connection::profiles::reset_host_profiles,
-            connection::profiles::delete_host_profile,
-            connection::profiles::set_last_profile_id,
-            app_state::load_app_state,
-            app_state::save_app_state,
-            app_state::reset_app_state,
-            app_state::set_ui_scale,
-            connection::helper::probe_remote_helper,
-            connection::helper::install_remote_helper,
-            resolve_notification_route,
-            emit_agent_notification,
-            emit_test_notification,
-            notification_permission_status,
-            incidents::record_incident,
+            commands::connection::list_host_profiles,
+            commands::connection::save_host_profile,
+            commands::connection::reset_host_profiles,
+            commands::connection::delete_host_profile,
+            commands::connection::set_last_profile_id,
+            commands::app::load_app_state,
+            commands::app::save_app_state,
+            commands::app::reset_app_state,
+            commands::app::set_ui_scale,
+            commands::connection::probe_remote_helper,
+            commands::connection::install_remote_helper,
+            commands::app::resolve_notification_route,
+            commands::app::emit_agent_notification,
+            commands::app::emit_test_notification,
+            commands::app::notification_permission_status,
+            commands::app::record_incident,
             linux_window::window_chrome,
-            connection::start_terminal,
-            connection::stop_terminal,
-            connection::prewarm_terminal_bulk,
-            connection::delivery_ack::acknowledge_terminal_delivery,
-            perf_log::bridge::finalize_bridge_measurement,
-            perf_log::bridge::bridge_final_totals,
-            connection::send_terminal_input,
-            connection::send_terminal_input_bytes,
-            connection::resize_terminal_client,
-            connection::probe_terminal_link,
-            connection::discard_ssh_masters,
-            connection::set_terminal_visibility,
-            connection::set_terminal_colors,
-            connection::request_terminal_seed,
-            connection::request_terminal_history,
-            connection::terminal_link_stats,
-            connection::input_latency_stats,
-            connection::tmux_action::tmux_action,
-            connection::files::file_request,
-            connection::files::cancel_file_request,
-            connection::git::git_request,
-            connection::agent::agent_request,
-            connection::automation::automation_request,
-            connection::git::cancel_git_request,
-            connection::git_content::read_git_diff_content,
-            connection::git_content::cancel_git_diff_content,
-            connection::ports::ports_forward,
-            connection::ports::ports_stop,
-            connection::ports::ports_stop_host,
-            connection::ports::ports_list,
-            connection::ports::ports_detect,
-            connection::files::download_manager::start_download,
-            connection::files::download_manager::cancel_download,
-            connection::files::download_manager::suggest_download_destination,
-            connection::files::download_opener::open_download,
-            connection::files::download_opener::reveal_download,
-            connection::files::editor_manager::start_file_read,
-            connection::files::editor_manager::start_file_write,
-            connection::files::editor_manager::cancel_file_io,
-            connection::files::upload_manager::start_terminal_upload_preflight,
-            connection::files::upload_manager::cancel_terminal_upload_preflight,
-            connection::files::upload_manager::inspect_local_terminal_paths,
-            connection::files::upload_manager::start_terminal_upload,
-            connection::files::upload_manager::cancel_terminal_upload,
-            connection::files::upload_manager::stage_clipboard_png,
-            connection::files::native_clipboard::read_native_terminal_clipboard,
-            connection::files::native_clipboard::write_native_terminal_clipboard,
-            external_links::open_external_link,
-            update_check::check_for_update,
-            update_check::install_update,
-            perf_log::sink::perf_log_enabled,
-            perf_log::sink::append_perf_log,
-            perf_log::bridge::acknowledge_bridge_events,
-            perf_log::operations::sample_native_measurements,
+            commands::connection::start_terminal,
+            commands::connection::stop_terminal,
+            commands::connection::prewarm_terminal_bulk,
+            commands::connection::acknowledge_terminal_delivery,
+            commands::app::finalize_bridge_measurement,
+            commands::app::bridge_final_totals,
+            commands::connection::send_terminal_input,
+            commands::connection::send_terminal_input_bytes,
+            commands::connection::resize_terminal_client,
+            commands::connection::probe_terminal_link,
+            commands::connection::discard_ssh_masters,
+            commands::connection::set_terminal_visibility,
+            commands::connection::set_terminal_colors,
+            commands::connection::request_terminal_seed,
+            commands::connection::request_terminal_history,
+            commands::connection::terminal_link_stats,
+            commands::connection::input_latency_stats,
+            commands::connection::tmux_action,
+            commands::files::file_request,
+            commands::files::cancel_file_request,
+            commands::connection::git_request,
+            commands::connection::agent_request,
+            commands::connection::automation_request,
+            commands::connection::cancel_git_request,
+            commands::connection::read_git_diff_content,
+            commands::connection::cancel_git_diff_content,
+            commands::connection::ports_forward,
+            commands::connection::ports_stop,
+            commands::connection::ports_stop_host,
+            commands::connection::ports_list,
+            commands::connection::ports_detect,
+            commands::files::start_download,
+            commands::files::cancel_download,
+            commands::files::suggest_download_destination,
+            commands::files::open_download,
+            commands::files::reveal_download,
+            commands::files::start_file_read,
+            commands::files::start_file_write,
+            commands::files::cancel_file_io,
+            commands::files::start_terminal_upload_preflight,
+            commands::files::cancel_terminal_upload_preflight,
+            commands::files::inspect_local_terminal_paths,
+            commands::files::start_terminal_upload,
+            commands::files::cancel_terminal_upload,
+            commands::files::stage_clipboard_png,
+            commands::files::read_native_terminal_clipboard,
+            commands::files::write_native_terminal_clipboard,
+            commands::app::open_external_link,
+            commands::app::check_for_update,
+            commands::app::install_update,
+            commands::app::perf_log_enabled,
+            commands::app::append_perf_log,
+            commands::app::acknowledge_bridge_events,
+            commands::app::sample_native_measurements,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Muxflow")
@@ -342,41 +205,5 @@ fn window_background(
         tauri::window::Color(0x28, 0x2c, 0x34, 0xff)
     } else {
         tauri::window::Color(0xfa, 0xfa, 0xfa, 0xff)
-    }
-}
-
-#[cfg(test)]
-mod notification_content_tests {
-    use super::{AgentNotificationRouteContent, valid_notification_content};
-
-    #[test]
-    fn native_notification_content_is_bounded_and_single_line() {
-        assert!(valid_notification_content(
-            "Codex needs attention",
-            "work · agent · Blocked"
-        ));
-        assert!(!valid_notification_content("", "work"));
-        assert!(!valid_notification_content("agent\nprompt", "work"));
-        assert!(!valid_notification_content("agent", "output\nsecret"));
-        assert!(!valid_notification_content(&"a".repeat(161), "work"));
-        assert!(!valid_notification_content("agent", &"a".repeat(321)));
-    }
-
-    #[test]
-    fn notification_attention_generation_is_parsed_losslessly() {
-        let route = AgentNotificationRouteContent {
-            host_profile: "local".into(),
-            server_identity: "server".into(),
-            session_id: "$1".into(),
-            session_name: "work".into(),
-            window_id: "@1".into(),
-            window_name: "agent".into(),
-            pane_id: "%1".into(),
-            agent_id: "agent-1".into(),
-            attention_generation: u64::MAX.to_string(),
-        }
-        .into_route()
-        .expect("valid generation");
-        assert_eq!(route.attention_generation, u64::MAX);
     }
 }

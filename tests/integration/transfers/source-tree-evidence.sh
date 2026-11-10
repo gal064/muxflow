@@ -43,6 +43,9 @@ phase7_transfer_component_manifest() {
       apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/build.rs \
       apps/desktop/src-tauri/src/connection/files.rs \
       apps/desktop/src-tauri/src/connection/files \
+      apps/desktop/src-tauri/src/commands/files.rs \
+      apps/desktop/src-tauri/src/platform.rs \
+      apps/desktop/src-tauri/src/tauri_adapters.rs \
       crates/protocol tests/integration/Cargo.lock tests/integration/Cargo.toml \
       tests/integration/protocol-driver-support \
       tests/integration/transfers/protocol-driver/Cargo.toml \

@@ -1,7 +1,9 @@
-#[cfg(target_os = "linux")]
-pub fn start(handle: tauri::AppHandle) {
-    use tauri::Emitter;
+use std::sync::Arc;
 
+use crate::platform::EventSink;
+
+#[cfg(target_os = "linux")]
+pub fn start(resumed: Arc<dyn EventSink>) {
     std::thread::Builder::new()
         .name("linux-power-events".into())
         .spawn(move || {
@@ -21,7 +23,7 @@ pub fn start(handle: tauri::AppHandle) {
             };
             for signal in signals {
                 if matches!(signal.body().deserialize::<bool>(), Ok(false)) {
-                    let _ = handle.emit("desktop-resumed", ());
+                    let _ = resumed.send_json(&());
                 }
             }
         })
@@ -29,14 +31,13 @@ pub fn start(handle: tauri::AppHandle) {
 }
 
 #[cfg(target_os = "macos")]
-pub fn start(handle: tauri::AppHandle) {
+pub fn start(resumed: Arc<dyn EventSink>) {
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2_app_kit::{
         NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceSessionDidBecomeActiveNotification,
     };
     use objc2_foundation::{NSNotificationCenter, NSObjectProtocol};
-    use tauri::Emitter;
 
     let center: Retained<NSNotificationCenter> =
         NSWorkspace::sharedWorkspace().notificationCenter();
@@ -49,9 +50,9 @@ pub fn start(handle: tauri::AppHandle) {
         ]
     };
     for name in names {
-        let handle = handle.clone();
+        let resumed = Arc::clone(&resumed);
         let callback = RcBlock::new(move |_| {
-            let _ = handle.emit("desktop-resumed", ());
+            let _ = resumed.send_json(&());
         });
         let observer: Retained<objc2::runtime::ProtocolObject<dyn NSObjectProtocol>> = unsafe {
             center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &callback)
@@ -63,4 +64,4 @@ pub fn start(handle: tauri::AppHandle) {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn start(_: tauri::AppHandle) {}
+pub fn start(_: Arc<dyn EventSink>) {}

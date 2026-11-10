@@ -13,10 +13,9 @@ use super::{
     host_helper_path, ssh_profile_control_socket, validate_ssh_target,
 };
 
-#[tauri::command]
 pub async fn probe_remote_helper(connection: ConnectionSpec) -> Result<serde_json::Value, String> {
     // SSH and artifact hashing must not block the native UI event loop.
-    tauri::async_runtime::spawn_blocking(move || probe_remote_helper_inner(connection))
+    crate::platform::spawn_blocking(move || probe_remote_helper_inner(connection))
         .await
         .map_err(|error| format!("helper check task failed: {error}"))?
 }
@@ -49,14 +48,13 @@ fn compare_installed_artifact(probe: &mut serde_json::Value) -> Result<(), Strin
     Ok(())
 }
 
-#[tauri::command]
 pub async fn install_remote_helper(
     connection: ConnectionSpec,
     allow_upgrade: bool,
 ) -> HelperInstallReport {
     // Keep the progress dialog paintable while the helper process uploads,
     // verifies and restarts. The worker retains the SSH lease for the operation.
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let result = crate::platform::spawn_blocking(move || {
         install_remote_helper_inner(connection, allow_upgrade)
     })
     .await

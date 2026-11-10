@@ -13,22 +13,18 @@
 
 use std::path::{Path, PathBuf};
 
-use tauri::State;
-
 use super::download_manager::DownloadManager;
 
 /// Open the file with the user's default application.
-#[tauri::command]
-pub fn open_download(path: String, transfers: State<'_, DownloadManager>) -> Result<(), String> {
-    let path = authorized_download(&path, &transfers)?;
+pub fn open_download(path: String, transfers: &DownloadManager) -> Result<(), String> {
+    let path = authorized_download(&path, transfers)?;
     open_with_default_application(&path)
 }
 
 /// Select the file in the platform's file manager, leaving it selected rather
 /// than opening it — the "Show in Finder" half of the pair.
-#[tauri::command]
-pub fn reveal_download(path: String, transfers: State<'_, DownloadManager>) -> Result<(), String> {
-    let path = authorized_download(&path, &transfers)?;
+pub fn reveal_download(path: String, transfers: &DownloadManager) -> Result<(), String> {
+    let path = authorized_download(&path, transfers)?;
     reveal_in_file_manager(&path)
 }
 
