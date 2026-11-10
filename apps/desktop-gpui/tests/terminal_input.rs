@@ -24,8 +24,8 @@ use muxflow_gpui::{
 use serde_json::Value;
 use terminal_engine::{EngineOutput, GridSize, HubLimits};
 
-/// One send, as `(pane, bytes)`.
-type Sent = (String, Vec<u8>);
+/// One send, as `(pane, bytes, pasted)`.
+type Sent = (String, Vec<u8>, bool);
 
 #[derive(Clone, Default)]
 struct Fake(Arc<Mutex<Vec<Sent>>>);
@@ -79,7 +79,12 @@ impl TerminalBackend for Fake {
     }
 
     fn send_input(&self, _: String, pane_id: String, bytes: Vec<u8>) -> Result<(), String> {
-        self.0.lock().unwrap().push((pane_id, bytes));
+        self.0.lock().unwrap().push((pane_id, bytes, false));
+        Ok(())
+    }
+
+    fn send_paste(&self, _: String, pane_id: String, text: Vec<u8>) -> Result<(), String> {
+        self.0.lock().unwrap().push((pane_id, text, true));
         Ok(())
     }
 
@@ -279,7 +284,11 @@ fn cell(
 }
 
 fn sent(pane: &str, bytes: &[u8]) -> Sent {
-    (pane.to_owned(), bytes.to_vec())
+    (pane.to_owned(), bytes.to_vec(), false)
+}
+
+fn pasted(pane: &str, text: &[u8]) -> Sent {
+    (pane.to_owned(), text.to_vec(), true)
 }
 
 #[gpui_kit::test]
@@ -333,7 +342,7 @@ fn a_composition_holds_keys_until_it_commits_or_focus_leaves(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
-fn mouse_reports_and_pastes_follow_the_modes_the_program_asked_for(cx: &mut TestAppContext) {
+fn mouse_reports_follow_the_modes_the_program_asked_for(cx: &mut TestAppContext) {
     let (fake, link, panes, visual) = panes(1, cx);
     let pane = &panes[0];
     // Not reading the mouse: a click is the reading side's, and sends nothing.
@@ -341,9 +350,8 @@ fn mouse_reports_and_pastes_follow_the_modes_the_program_asked_for(cx: &mut Test
     visual.simulate_click(at, Modifiers::none());
     assert_eq!(fake.take(), []);
 
-    // Button-event tracking (1002) in the SGR encoding (1006), and bracketed
-    // paste (2004).
-    output(&link, visual, "%1", 2, b"\x1b[?1002h\x1b[?1006h\x1b[?2004h");
+    // Button-event tracking (1002) in the SGR encoding (1006).
+    output(&link, visual, "%1", 2, b"\x1b[?1002h\x1b[?1006h");
     wait_until(visual, |cx| {
         pane.read_with(cx, |pane, _| pane.mouse_reporting())
     });
@@ -405,18 +413,8 @@ fn mouse_reports_and_pastes_follow_the_modes_the_program_asked_for(cx: &mut Test
         [sent("%1", b"\x1b[<0;3;2M"), sent("%1", b"\x1b[<0;6;3m")]
     );
 
-    pane.update(visual, |pane, cx| {
-        terminal::input::paste(pane, "one\ntwo\x1b[201~", cx)
-    });
-    assert_eq!(fake.take(), [sent("%1", b"\x1b[200~one\rtwo\x1b[201~")]);
-    output(&link, visual, "%1", 3, b"\x1b[?2004l");
-    wait_until(visual, |cx| {
-        pane.update(cx, |pane, cx| terminal::input::paste(pane, "x\r\ny", cx));
-        fake.take() == [sent("%1", b"x\ry")]
-    });
-
     // Focus reports (1004) follow the window as well as the pane.
-    output(&link, visual, "%1", 4, b"\x1b[?1004h");
+    output(&link, visual, "%1", 3, b"\x1b[?1004h");
     wait_until(visual, |cx| {
         pane.read_with(cx, |pane, _| {
             let mode = *pane.terminal().expect("mounted").lock().mode();
@@ -427,4 +425,40 @@ fn mouse_reports_and_pastes_follow_the_modes_the_program_asked_for(cx: &mut Test
     visual.update(|window, _| window.activate_window());
     visual.run_until_parked();
     assert_eq!(fake.take(), [sent("%1", b"\x1b[O"), sent("%1", b"\x1b[I")]);
+}
+
+#[gpui_kit::test]
+fn a_paste_goes_to_the_host_as_one_paste_between_the_keys_around_it(cx: &mut TestAppContext) {
+    let (fake, link, panes, visual) = panes(1, cx);
+    let pane = &panes[0];
+    focus(pane, visual);
+    // The pane's own copy of the mode does not decide: tmux brackets, and only
+    // tmux knows whether the program asked (a seed from tmux 3.4 cannot say).
+    for (generation, bracketed) in [(2, false), (3, true)] {
+        let mode: &[u8] = if bracketed {
+            b"\x1b[?2004h"
+        } else {
+            b"\x1b[?2004l"
+        };
+        output(&link, visual, "%1", generation, mode);
+        wait_until(visual, |cx| {
+            pane.read_with(cx, |pane, _| {
+                let mode = *pane.terminal().expect("mounted").lock().mode();
+                mode.contains(TermMode::BRACKETED_PASTE) == bracketed
+            })
+        });
+        visual.simulate_keystrokes("a");
+        pane.update(visual, |pane, cx| {
+            terminal::input::paste(pane, "one\r\ntwo\nthree\x1b[201~", cx)
+        });
+        visual.simulate_keystrokes("enter");
+        assert_eq!(
+            fake.take(),
+            [
+                sent("%1", b"a"),
+                pasted("%1", b"one\ntwo\nthree"),
+                sent("%1", b"\r"),
+            ]
+        );
+    }
 }

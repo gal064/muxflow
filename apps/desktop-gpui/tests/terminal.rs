@@ -87,6 +87,11 @@ impl TerminalBackend for Fake {
         Ok(())
     }
 
+    fn send_paste(&self, _: String, _: String, text: Vec<u8>) -> Result<(), String> {
+        self.0.lock().unwrap().input.push(text);
+        Ok(())
+    }
+
     fn record_incident(&self, _: &str, _: Value) {}
 
     fn set_terminal_colors(&self, _: String, _: String) -> Result<(), String> {
