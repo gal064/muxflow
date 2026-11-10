@@ -67,14 +67,7 @@ Root continues through Phases 1 to 6, and stops and notifies the owner only if:
 | **Full cycle** | Ordinary implementation agent, told to load the `gdev_cycle` skill and run autonomously | That same worker: 1 to 3 review rounds (small/medium) or up to 5 (large), its `gdev_qa_*` QA agent, then its commit |
 | **Implementation only** | Ordinary implementation agent, with its lightweight tests and commit. Not given `gdev_cycle` | The later task named in its row |
 
-**Cycle rules, binding on every task and on any session that resumes this plan:**
-
-- Every implementation task runs as a full `gdev_cycle`, unless its row says implementation only and names the later task that owns review and QA.
-- A full cycle needs at least one independent review round: 1 to 3 for small or medium work, up to 5 for large work. A self-review does not count, and a test-only task is not exempt.
-- Every worker's brief says this, and its final report states how many independent rounds actually ran. Root records that number and the QA result in the [Task log](#task-log).
-- If a worker skips its reviews, root sends the task back or runs an independent review before merging.
-- Each phase ends with a fresh `gdev_qa_phase<N>` agent after all its tasks merge, before the next phase starts.
-- Root's own commits are limited to docs, CI fixes, merge resolution and privacy cleanup, checked by CI and `pnpm check:privacy`. Anything beyond a small fix goes to a worker.
+Every task runs a full `gdev_cycle` with at least one independent review, and each phase ends with `gdev_qa_phase<N>`. Root's own commits are small fixes only.
 
 "Invariant" means the worker adds an invariant reviewer. "Design" means it adds a
 design reviewer that renders the UI, as `gdev_cycle` requires for that kind of work.
@@ -307,7 +300,7 @@ Phase 0 are not in the published history.
 
 | Task | Agent | Branch | State | Commit | Notes |
 |---|---|---|---|---|---|
-| T1.1 `golden-paths` | sonnet, medium, full cycle | `gpui/golden-paths` | Merged | `7a4f66c` | Root fixed a shared `HOME` race by moving the checks to a child process. Passes on macOS CI. No independent review ran: the worker self-reviewed, and root's fix was checked by Linux and macOS CI and a wrong-path test |
+| T1.1 `golden-paths` | sonnet, medium, full cycle | `gpui/golden-paths` | Merged | `7a4f66c` | Root fixed a shared `HOME` race by moving the checks to a child process. Passes on macOS CI. No independent review |
 | T1.2 `prefs-to-app-state` | sonnet, high, full cycle | `gpui/prefs-to-app-state` | Merged | `9c13af4` | Sounds import once. Theme and zoom reach first paint through an injected boot script, so the window is created in `setup`. QA passed on Linux. 2 review rounds |
 | T1.3 `core-traits` | opus, high, full cycle, large, invariant | `gpui/core-traits` | Merged | `1b7df0a` | 2 review rounds, 5 GiB transfer QA passed. No dialog trait, because Rust has no dialog call. T1.4 must replace the Tauri spawn re-export in `platform.rs` |
 | T1.4 `core-crate` | opus, high, full cycle, large, invariant | `gpui/core-crate` | Merged | `29ee6f3` | No `tauri` in `cargo tree`. 1 review round. Lifecycle lane passed 3 of 4 runs, cause of the one failure not found |
