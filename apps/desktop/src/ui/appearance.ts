@@ -12,7 +12,6 @@ export type ResolvedTheme = "light" | "dark";
 /** Markdown's own palette: the app's, or one kept whatever the app uses. */
 export type MarkdownAppearance = "default" | "light" | "dark";
 
-const STORAGE_KEY = "muxflow.theme";
 const SYSTEM_DARK_QUERY = "(prefers-color-scheme: dark)";
 const listeners = new Set<() => void>();
 
@@ -82,45 +81,24 @@ export function followSystemTheme(theme: ThemePreference): () => void {
 }
 
 /**
- * Saved state arrives over IPC after the first paint, so the last choice is
- * also kept here, where `main.tsx` can apply it synchronously and a light-theme
- * user does not see a dark frame on every launch.
+ * The saved choice as the backend handed it to the page before its first
+ * script (`window.__muxflowBoot`, see `public/theme.js`). The saved app state
+ * itself arrives over IPC only after the first paint, so `main.tsx` applies
+ * this synchronously and a light-theme user does not see a dark frame.
  */
-export function rememberTheme(theme: ThemePreference, storage: Pick<Storage, "setItem"> | undefined = globalThis.localStorage): void {
-  try {
-    storage?.setItem(STORAGE_KEY, theme);
-  } catch {
-    // Storage is a startup nicety; the saved app state stays authoritative.
-  }
+export function bootTheme(boot: { theme?: unknown } | undefined = (globalThis as { __muxflowBoot?: { theme?: unknown } }).__muxflowBoot): ThemePreference | undefined {
+  return isThemePreference(boot?.theme) ? boot.theme : undefined;
 }
-
-export function rememberedTheme(storage: Pick<Storage, "getItem"> | undefined = globalThis.localStorage): ThemePreference | undefined {
-  try {
-    const value = storage?.getItem(STORAGE_KEY);
-    return isThemePreference(value) ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-const SCALE_STORAGE_KEY = "muxflow.uiScale";
 
 /**
  * Puts the interface zoom where the few lengths that must not zoom can divide
- * by it, and where `public/theme.js` finds it before the next launch's first
- * paint. The zoom itself is the backend's (`set_ui_scale`).
+ * by it. The zoom itself is the backend's (`set_ui_scale`).
  */
 export function applyInterfaceScale(
   scale: number,
   root: HTMLElement | undefined = globalThis.document?.documentElement,
-  storage: Pick<Storage, "setItem"> | undefined = globalThis.localStorage,
 ): void {
   root?.style.setProperty("--ui-scale", String(scale));
-  try {
-    storage?.setItem(SCALE_STORAGE_KEY, String(scale));
-  } catch {
-    // As with the theme: a startup nicety, never the source of truth.
-  }
 }
 
 /** The interface zoom on screen; 1 until one has been applied. */

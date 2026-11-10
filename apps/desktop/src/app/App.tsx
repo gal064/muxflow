@@ -29,7 +29,6 @@ import { TauriAgentClient } from "../features/agents/api";
 import type { AgentRuntimeScope } from "../features/agents/types";
 import { buildAgentRows, jumpTarget, unreadCount, type AgentListRow } from "../features/agents/agentsList";
 import { useRecentIdleClock } from "../features/agents/useRecentIdleClock";
-import { loadAgentSoundPreferences, saveAgentSoundPreferences } from "../features/agents/sound";
 import { emitTestNotification, notificationPermissionStatus } from "../features/agents/notifications";
 import { TauriFileWorkspaceClient } from "../features/files/api";
 import { reconcileDownloadStatus, type ActiveDownloadStatus } from "../features/files/downloadStatus";
@@ -96,7 +95,7 @@ import { hostLetter } from "../features/shell/hostProfiles";
 import type { CommandHost } from "../features/shell/useShellCommands";
 import { denormalizeSnapshot } from "../state/connectionReducer";
 import { hostLinkScope } from "../state/hostLinks";
-import type { AgentAdapterDescriptor, AgentAttentionRollup, AgentRecord } from "../features/agents/types";
+import { defaultAgentSoundPreferences, type AgentAdapterDescriptor, type AgentAttentionRollup, type AgentRecord } from "../features/agents/types";
 import type { ConnectionSpec, HostProfile, Pane, TmuxSnapshot } from "./types";
 import { resolveTerminalDestination } from "./paneRouting";
 import { useAppConnectionController } from "./useAppConnectionController";
@@ -315,7 +314,7 @@ export function App() {
     scope: HostScopeToken;
   }>();
   const [appStateResetConfirmation, setAppStateResetConfirmation] = useState(false);
-  const [agentSounds, setAgentSounds] = useState(loadAgentSoundPreferences);
+  const agentSounds = appState.shell.agentSounds ?? defaultAgentSoundPreferences;
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const controllers = useRef(new Map<string, TerminalPaneController>());
   const lastSlowSendAt = useRef(new Map<string, number>());
@@ -1999,7 +1998,7 @@ export function App() {
       onProfileFields={(patch) => saveProfileFields(selectedProfileId, patch)}
       onRequestHelperInstall={() => dispatchHelper({ type: "requestUpgrade" })}
       onShell={updateShell}
-      onSounds={(preferences) => { setAgentSounds(preferences); saveAgentSoundPreferences(preferences); }}
+      onSounds={(agentSounds) => updateShell({ agentSounds })}
       onWorkspaceDefaults={(patch) => setAppState((current) => setWorkspaceDefaults(current, currentHostProfileId, patch))}
       // The selection survives typing. It used to be cleared on every
       // keystroke, which made "correct this host's address" indistinguishable

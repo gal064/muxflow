@@ -10,13 +10,13 @@ import { bootstrapPerfProbe } from "./perf/bootstrap";
 import { scheduleEditorPreload } from "./startup/editorPreload";
 import { waitForTerminalFonts } from "./startup/fontGate";
 import { recordPerfMilestone } from "./perf/probe";
-import { applyTheme, onAppearanceChange, rememberedTheme } from "./ui/appearance";
+import { applyTheme, bootTheme, onAppearanceChange } from "./ui/appearance";
 import { reportTerminalColorsToHosts } from "./features/terminal/hostColors";
 import { defaultShellState } from "./features/shell/types";
 
 // Before the first paint and before any terminal reads its colors off :root.
 // The saved app state confirms or corrects this once it arrives.
-applyTheme(rememberedTheme() ?? defaultShellState.theme);
+applyTheme(bootTheme() ?? defaultShellState.theme);
 // Stored before any connection opens; each sends them as soon as it is ready.
 reportTerminalColorsToHosts();
 onAppearanceChange(reportTerminalColorsToHosts);
