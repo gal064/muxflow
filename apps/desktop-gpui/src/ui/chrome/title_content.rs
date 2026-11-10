@@ -56,8 +56,14 @@ impl RenderOnce for TitleContent {
             tip("Toggle right panel", "view.togglePanel"),
         );
         let settings = || {
-            disabled_button("title-settings", IconName::Settings, "Settings")
-                .tooltip(settings_tip.clone())
+            bar_button(
+                "title-settings",
+                IconName::Settings,
+                "Settings",
+                palette.chrome_dim,
+            )
+            .tooltip(settings_tip.clone())
+            .on_click(|_, window, cx| crate::commands::run("settings.show", window, cx))
         };
         // `aria-disabled` in Tauri: faint, without the disabled dimming.
         let bell = || {
