@@ -3,7 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tauri::State;
 use tmux_agent_protocol::v1;
 
 use super::{TerminalClients, get_client};
@@ -35,15 +34,14 @@ pub struct AutomationCommand {
 
 /// Async so a run started now, which waits on the new tab's shell, never
 /// freezes the WebView's main thread.
-#[tauri::command]
 pub async fn automation_request(
     client_id: String,
     command: AutomationCommand,
-    clients: State<'_, TerminalClients>,
+    clients: &TerminalClients,
 ) -> Result<Value, String> {
     let request = request_from(command)?;
-    let client = get_client(&clients, &client_id)?;
-    let response = tauri::async_runtime::spawn_blocking(move || client.request(request))
+    let client = get_client(clients, &client_id)?;
+    let response = crate::platform::spawn_blocking(move || client.request(request))
         .await
         .map_err(|error| format!("automation request task failed: {error}"))??;
     response

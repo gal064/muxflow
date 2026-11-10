@@ -247,7 +247,6 @@ mod tests {
     use crate::connection::{ConnectionSpec, TerminalClient};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
-    use tauri::ipc::Channel;
 
     fn job() -> FileJob {
         let client = Arc::new(TerminalClient::new());
@@ -262,7 +261,7 @@ mod tests {
             path: "/repo/a.txt".into(),
             binding: BulkBinding::capture(client, "server".into(), 7).unwrap(),
             cancellation: Arc::new(CancelState::new()),
-            channel: Channel::new(|_| Ok(())),
+            channel: crate::platform::test_sink(|_| Ok(())),
             kind: FileJobKind::Read,
             perf: crate::perf_log::FileOpenTiming::inert(),
         }

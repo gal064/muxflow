@@ -50,52 +50,28 @@ fn with_clipboard<T>(
     action(clipboard)
 }
 
-#[tauri::command]
-pub async fn write_native_terminal_clipboard(
-    app: tauri::AppHandle,
-    text: String,
-) -> Result<(), String> {
+#[cfg(not(target_os = "macos"))]
+pub async fn write_native_terminal_clipboard(text: String) -> Result<(), String> {
     let text = validated_native_clipboard_write(text)?;
-    #[cfg(target_os = "macos")]
-    {
-        write_macos_clipboard(app, text).await
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = app;
-        tauri::async_runtime::spawn_blocking(move || {
-            use clipboard_rs::Clipboard;
-            with_clipboard(|clipboard| {
-                clipboard
-                    .set_text(text)
-                    .map_err(|error| format!("write native clipboard text: {error}"))
-            })
+    crate::platform::spawn_blocking(move || {
+        use clipboard_rs::Clipboard;
+        with_clipboard(|clipboard| {
+            clipboard
+                .set_text(text)
+                .map_err(|error| format!("write native clipboard text: {error}"))
         })
-        .await
-        .map_err(|error| format!("native clipboard worker failed: {error}"))?
-    }
-}
-
-#[cfg(target_os = "macos")]
-async fn write_macos_clipboard(app: tauri::AppHandle, text: String) -> Result<(), String> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || {
-        let result = objc2::MainThreadMarker::new()
-            .ok_or_else(|| "native clipboard write did not run on the main thread".to_string())
-            .and_then(|main_thread| write_macos_clipboard_on_main_thread(text, main_thread));
-        let _ = sender.send(result);
     })
-    .map_err(|error| format!("schedule native clipboard write on the main thread: {error}"))?;
-    receiver
-        .await
-        .map_err(|_| "native clipboard main-thread write was cancelled".to_string())?
+    .await
+    .map_err(|error| format!("native clipboard worker failed: {error}"))?
 }
 
+/// AppKit's pasteboard belongs to the main thread, so the application calls
+/// this there. Fails if it was not.
 #[cfg(target_os = "macos")]
-fn write_macos_clipboard_on_main_thread(
-    text: String,
-    _main_thread: objc2::MainThreadMarker,
-) -> Result<(), String> {
+pub fn write_macos_clipboard_on_main_thread(text: String) -> Result<(), String> {
+    let text = validated_native_clipboard_write(text)?;
+    let _main_thread = objc2::MainThreadMarker::new()
+        .ok_or("native clipboard write did not run on the main thread")?;
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
     use objc2_foundation::NSString;
@@ -125,17 +101,16 @@ fn validated_native_clipboard_write(text: String) -> Result<String, String> {
     Ok(text)
 }
 
-#[tauri::command]
 pub async fn read_native_terminal_clipboard() -> Result<Option<Value>, String> {
     #[cfg(target_os = "linux")]
     {
-        tauri::async_runtime::spawn_blocking(read_linux_clipboard)
+        crate::platform::spawn_blocking(read_linux_clipboard)
             .await
             .map_err(|error| format!("native clipboard worker failed: {error}"))?
     }
     #[cfg(target_os = "macos")]
     {
-        tauri::async_runtime::spawn_blocking(read_macos_clipboard)
+        crate::platform::spawn_blocking(read_macos_clipboard)
             .await
             .map_err(|error| format!("native clipboard worker failed: {error}"))?
     }

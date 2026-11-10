@@ -372,8 +372,8 @@ fn oversized_pane_resource_crosses_native_delivery_and_releases_exact_credit() {
     let window = DeliveryWindow::new(epoch);
     let shared_window = Arc::new(Mutex::new(Some(Arc::clone(&window))));
     let (sender, receiver) = mpsc::channel();
-    let channel = Channel::new(move |body| {
-        if let InvokeResponseBody::Raw(frame) = body {
+    let channel = crate::platform::test_sink(move |body| {
+        if let crate::platform::EventBody::Raw(frame) = body {
             sender.send(frame).unwrap();
         }
         Ok(())
