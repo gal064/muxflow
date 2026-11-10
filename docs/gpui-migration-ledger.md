@@ -182,34 +182,34 @@ font row covers them).
 | `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | workspace terminal surface entity | open |
 | `app/WorkspaceDock.test.tsx` | 131 | port | 2 | tests of WorkspaceDock.tsx | open |
 | `app/WorkspaceDock.tsx` | 232 | port | 2 | dock layout on Kit dock; also a drop target, not a drag source (see S8) | open |
-| `app/appRecovery.test.ts` | 43 | port | 2 | tests of appRecovery.ts | open |
-| `app/appRecovery.ts` | 51 | port | 2 | app_recovery reducer | open |
-| `app/bridgeFailureText.test.ts` | 13 | port | 2 | tests of bridgeFailureText.ts | open |
-| `app/bridgeFailureText.ts` | 12 | port | 2 | bridge failure text helper | open |
+| `app/appRecovery.test.ts` | 43 | port | 2 | tests in connection_ui/app_recovery.rs | done (T2.4) |
+| `app/appRecovery.ts` | 51 | port | 2 | connection_ui/app_recovery.rs | done (T2.4) |
+| `app/bridgeFailureText.test.ts` | 13 | port | 2 | tests in connection_ui/controller.rs | done (T2.4) |
+| `app/bridgeFailureText.ts` | 12 | port | 2 | connection_ui/controller.rs user_facing_bridge_failure | done (T2.4) |
 | `app/editorChunkAbsence.test.tsx` | 225 | port | 5 | the chunk-not-fetched probe drops; the visible outcomes port: binary file, file over 10 MiB, disconnected tab, binary diff and oversized diff show their message instead of an editor, and a Markdown preview-only tab shows no editor | open |
 | `app/editorChunkBoundary.test.tsx` | 386 | port | 5 | chunk evaluation order and the 500 ms preview publish delay drop; port: dirty draft and its state survive a reconnect without an eager reread, a pending autosave survives the editor unmounting (preview switch), Live Markdown edits share one buffer with source, a live tab over the size limit falls back to source with live disabled | open |
-| `app/helperSetupFeedback.test.tsx` | 82 | port | 2 | helper setup feedback | open |
-| `app/linkQuality.test.ts` | 112 | port | 2 | tests of linkQuality.ts | open |
-| `app/linkQuality.ts` | 161 | port | 2 | link_quality network-fault notice logic | open |
-| `app/missingHelperRecovery.test.tsx` | 420 | port | 2 | missing helper recovery | open |
-| `app/multiHostBridges.test.tsx` | 412 | port | 2 | per-host bridge lifecycle | open |
+| `app/helperSetupFeedback.test.tsx` | 82 | port | 2 | helper dialog tests in connection_ui/controller/tests.rs; hook-setup activity is Phase 4 with useAgentHostSetup | done (T2.4) |
+| `app/linkQuality.test.ts` | 112 | port | 2 | tests in connection_ui/link_quality.rs | done (T2.4) |
+| `app/linkQuality.ts` | 161 | port | 2 | connection_ui/link_quality.rs | done (T2.4) |
+| `app/missingHelperRecovery.test.tsx` | 420 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
+| `app/multiHostBridges.test.tsx` | 412 | port | 2 | connection_ui/controller/tests.rs; prewarm, hub, reseed, clipboard, file, git and agent-stamping cases move with Phase 3/4 owners | done (T2.4) |
 | `app/paneHoverFocus.test.tsx` | 160 | port | 3 | tests of paneHoverFocus.ts | open |
 | `app/paneHoverFocus.ts` | 91 | port | 3 | pane hover focus | open |
 | `app/paneRouting.test.ts` | 44 | port | 3 | tests of paneRouting.ts | open |
 | `app/paneRouting.ts` | 60 | port | 3 | pane_routing notification route resolution | open |
 | `app/postResyncReseed.test.tsx` | 93 | port | 3 | reseed after resync | open |
-| `app/reconnectNoticeDedupe.test.tsx` | 129 | port | 2 | reconnect notice dedupe | open |
+| `app/reconnectNoticeDedupe.test.tsx` | 129 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
 | `app/shellNavigationCoordinator.ts` | 165 | port | 4 | shell navigation coordinator | open |
 | `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | tests of terminalFileOpenRoute.ts | open |
 | `app/terminalFileOpenRoute.ts` | 27 | port | 3 | terminal file open route check | open |
 | `app/types.ts` | 68 | replace | 2 | Session, Window, Pane, ConnectionSpec, HostProfile come from protocol and desktop-core types | open |
 | `app/useAppAgentController.ts` | 162 | port | 4 | agent controller entity | open |
-| `app/useAppConnectionController.ts` | 944 | port | 2 | connection controller entity over desktop-core | open |
+| `app/useAppConnectionController.ts` | 944 | port | 2 | connection_ui/controller.rs; terminal hub and state cache, reseeds, echo-lag and input-latency probes, clipboard, file, git, agent and automation frame routing, retireConnection, appFocused and prewarm_terminal_bulk stay with Phase 3 and 4 owners; active-window resolution and the optimistic window with T4.1; after-install agent setup with useAgentHostSetup | done (T2.4) |
 | `app/useAppFileActions.test.tsx` | 196 | port | 5 | tests of useAppFileActions.ts | open |
 | `app/useAppFileActions.ts` | 145 | port | 5 | file actions entity (mutation, save panel, transfers) | open |
-| `app/useAppHostSettingsActions.ts` | 179 | port | 4 | host settings actions | open |
-| `app/useAppRecoveryController.test.tsx` | 112 | port | 2 | tests of useAppRecoveryController.ts | open |
-| `app/useAppRecoveryController.ts` | 104 | port | 2 | recovery controller entity | open |
+| `app/useAppHostSettingsActions.ts` | 179 | port | 4 | host connection, profile and helper actions in connection_ui/controller.rs (T2.4); the rest of the host settings actions land with Phase 4 | open |
+| `app/useAppRecoveryController.test.tsx` | 112 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
+| `app/useAppRecoveryController.ts` | 104 | port | 2 | connection_ui/controller.rs; T4.1 rewires its app-state access to the single in-memory owner and adds the flush on close | done (T2.4) |
 | `app/useAppShellChrome.test.tsx` | 91 | port | 2 | tests of useAppShellChrome.ts | open |
 | `app/useAppShellChrome.ts` | 59 | port | 2 | rail layout and status-to-notice lifecycle | open |
 | `app/useBulkTabClose.test.tsx` | 117 | port | 4 | tests of useBulkTabClose.ts | open |
@@ -218,7 +218,7 @@ font row covers them).
 | `app/useClientResize.ts` | 320 | port | 3 | client_resize; keeps tmux client size exact | open |
 | `app/useFocusHistoryNavigation.test.tsx` | 190 | port | 4 | tests of useFocusHistoryNavigation.ts | open |
 | `app/useFocusHistoryNavigation.ts` | 135 | port | 4 | focus history navigation | open |
-| `app/useMissingHelperRecovery.ts` | 176 | port | 2 | missing helper recovery flow | open |
+| `app/useMissingHelperRecovery.ts` | 176 | port | 2 | connection_ui/helper_recovery.rs | done (T2.4) |
 | `app/usePaneMoves.test.tsx` | 160 | port | 3 | tests of usePaneMoves.ts | open |
 | `app/usePaneMoves.ts` | 201 | port | 3 | pane moves via drop_rules | open |
 | `app/usePerHostMemo.test.tsx` | 61 | retire | 2 | tests usePerHostMemo.ts, which retires | open |
@@ -439,7 +439,7 @@ font row covers them).
 |---|---|---|---|---|---|
 | `features/shell/AppTabSurface.test.tsx` | 644 | port | 4 | tests of AppTabSurface.tsx | open |
 | `features/shell/AppTabSurface.tsx` | 366 | port | 4 | app tab surface (document, diff, preview routing) | open |
-| `features/shell/DisconnectedStrip.tsx` | 75 | port | 2 | disconnected strip notice | open |
+| `features/shell/DisconnectedStrip.tsx` | 75 | port | 2 | connection_ui/surface.rs | done (T2.4) |
 | `features/shell/MarkdownPreview.test.tsx` | 346 | port | 5 | ? preview keeps selection while content updates; DOM selection mechanics may not apply, keep the behavior | open |
 | `features/shell/RightPanel.tsx` | 120 | port | 2 | right panel container with resizable width | open |
 | `features/shell/SettingsDialog.tsx` | 611 | port | 4 | settings dialog | open |
@@ -450,26 +450,26 @@ font row covers them).
 | `features/shell/appStatePersistence.ts` | 65 | port | 2 | serialized app_state saver with close barrier | open |
 | `features/shell/focusHistory.test.ts` | 98 | port | 4 | tests of focusHistory.ts | open |
 | `features/shell/focusHistory.ts` | 125 | port | 4 | focus history | open |
-| `features/shell/helperUpgrade.test.ts` | 78 | port | 2 | tests of helperUpgrade.ts | open |
-| `features/shell/helperUpgrade.ts` | 89 | port | 2 | helper upgrade decision | open |
+| `features/shell/helperUpgrade.test.ts` | 78 | port | 2 | tests in connection_ui/helper_upgrade.rs | done (T2.4) |
+| `features/shell/helperUpgrade.ts` | 89 | port | 2 | connection_ui/helper_upgrade.rs | done (T2.4) |
 | `features/shell/hostLatency.test.ts` | 39 | port | 2 | tests of hostLatency.ts | open |
 | `features/shell/hostLatency.ts` | 72 | port | 2 | host latency readout | open |
-| `features/shell/hostProfiles.test.ts` | 30 | port | 2 | tests of hostProfiles.ts | open |
-| `features/shell/hostProfiles.ts` | 31 | port | 2 | host letter helper | open |
-| `features/shell/hostScope.test.ts` | 43 | port | 2 | tests of hostScope.ts | open |
-| `features/shell/hostScope.ts` | 47 | port | 2 | host scope token | open |
+| `features/shell/hostProfiles.test.ts` | 30 | port | 2 | tests in connection_ui/host_profiles.rs | done (T2.4) |
+| `features/shell/hostProfiles.ts` | 31 | port | 2 | connection_ui/host_profiles.rs | done (T2.4) |
+| `features/shell/hostScope.test.ts` | 43 | port | 2 | tests in connection_ui/host_scope.rs | done (T2.4) |
+| `features/shell/hostScope.ts` | 47 | port | 2 | connection_ui/host_scope.rs | done (T2.4) |
 | `features/shell/model.test.ts` | 806 | port | 4 | tests of model.ts | open |
 | `features/shell/model.ts` | 1018 | port | 4 | shell model (tabs, workspaces, layout) | open |
 | `features/shell/panelExtensions.ts` | 48 | port | 4 | panel extension host interface | open |
 | `features/shell/responsiveShell.test.ts` | 86 | port | 2 | tests of responsiveShell.ts | open |
 | `features/shell/responsiveShell.ts` | 67 | port | 2 | responsive rail layout | open |
 | `features/shell/shellComponents.test.tsx` | 2301 | port | 4 | shell component behavior; React render mechanics cases dropped while porting | open |
-| `features/shell/statusNotice.test.ts` | 94 | port | 2 | tests of statusNotice.ts | open |
-| `features/shell/statusNotice.ts` | 96 | port | 2 | status notice policy | open |
+| `features/shell/statusNotice.test.ts` | 94 | port | 2 | tests in connection_ui/status_notice.rs | done (T2.4) |
+| `features/shell/statusNotice.ts` | 96 | port | 2 | connection_ui/status_notice.rs; surface.rs shows one notice at a time, dismissed on the Kit's own timer | done (T2.4) |
 | `features/shell/types.ts` | 458 | port | 4 | shell and persisted app-state types with normalization | open |
 | `features/shell/useAppearance.ts` | 33 | port | 2 | applies saved theme once state is ready | open |
-| `features/shell/useDesktopResumeRecovery.test.ts` | 81 | port | 2 | tests of useDesktopResumeRecovery.ts | open |
-| `features/shell/useDesktopResumeRecovery.ts` | 151 | port | 2 | resume-from-sleep recovery | open |
+| `features/shell/useDesktopResumeRecovery.test.ts` | 81 | port | 2 | tests in connection_ui/resume_recovery.rs | done (T2.4) |
+| `features/shell/useDesktopResumeRecovery.ts` | 151 | port | 2 | connection_ui/resume_recovery.rs; the browser online event is polled from getifaddrs on the 5 s check | done (T2.4) |
 | `features/shell/usePersistedAppState.test.tsx` | 89 | port | 4 | tests of usePersistedAppState.ts | open |
 | `features/shell/usePersistedAppState.ts` | 123 | port | 2 | persisted app state loader | open |
 | `features/shell/useShellCommands.test.tsx` | 384 | port | 2 | tests of useShellCommands.ts | open |
@@ -639,10 +639,10 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `state/connectionReducer.test.ts` | 226 | port | 2 | tests of connectionReducer.ts | open |
-| `state/connectionReducer.ts` | 194 | port | 2 | connection reducer | open |
-| `state/hostLinks.test.ts` | 173 | port | 2 | tests of hostLinks.ts | open |
-| `state/hostLinks.ts` | 217 | port | 2 | host links reducer | open |
+| `state/connectionReducer.test.ts` | 226 | port | 2 | tests in connection_ui/connection_reducer.rs; ordered-event cases dropped with the dead arms | done (T2.4) |
+| `state/connectionReducer.ts` | 194 | port | 2 | connection_ui/connection_reducer.rs; orderedSnapshot, orderedEvent and resync arms had no production dispatch and are not ported | done (T2.4) |
+| `state/hostLinks.test.ts` | 173 | port | 2 | tests in connection_ui/host_links.rs | done (T2.4) |
+| `state/hostLinks.ts` | 217 | port | 2 | connection_ui/host_links.rs | done (T2.4) |
 
 ### `transport`
 

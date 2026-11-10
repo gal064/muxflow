@@ -88,9 +88,9 @@ fn helper_install_report(result: Result<String, String>) -> HelperInstallReport 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HelperInstallReport {
-    ok: bool,
-    message: String,
-    rollback: HelperRollback,
+    pub ok: bool,
+    pub message: String,
+    pub rollback: HelperRollback,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
