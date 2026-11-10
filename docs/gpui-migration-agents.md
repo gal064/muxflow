@@ -325,7 +325,8 @@ final sweep command returning only justified hits.
 | 1 | Done. `gdev_qa_phase1` passed | `7a4f66c`, `9c13af4`, `1b7df0a`, `29ee6f3` | Known: `test:git` fails on `origin/main` too, in the driver's patch check, so T5.3 must fix or retire it. `test:lifecycle` failed 1 of 34 runs at line 320, cause not found |
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
-| 4 to 6 | Approved | | |
+| 4 | Running | | T4.1, T4.2 and T4.4 running; T4.3 next |
+| 5 to 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
 ### Task log
@@ -354,6 +355,9 @@ Phase 0 are not in the published history.
 | T3.7 `seed-fixes` | sonnet, high, full cycle | `gpui/seed-fixes` | Merged | `f91e002` | 1 review round, QA pass on tmux 3.8 (old seed failed 5 of 8 cases). Also fixes Tauri and mobile seeds. tmux 3.3 to 3.7 not tested |
 | T3.8 `desktop-paste` | opus, high, full cycle, invariant | `gpui/desktop-paste` | Merged | `34a57c9` | Owner chose the host paste path. QA pass on tmux 3.4 and 3.8, also after a reseed. Open: keys typed within about 200 ms of Ctrl+V go before the paste, because the clipboard read is slow; the Tauri app reads the clipboard asynchronously too |
 | `gdev_qa_phase3` | fresh QA | `gpui/integration` | Passed after a fix | | Claude Code and Codex local and over SSH, resize during floods, VT parity (only known VS16/ZWJ and pause-idle differences). Found a crash on typing in a scrolled-back pane, fixed in T3.5 `71f5a3d` and re-checked 13 of 13. Root fixed the link underline stopping one cell short |
+| T4.1 `workspaces-shell` | opus, high, full cycle, large, design | `gpui/workspaces-shell` | Dispatched | | |
+| T4.2 `agents-automations` | opus, high, full cycle, invariant | `gpui/agents-automations` | Dispatched | | |
+| T4.4 `settings-diagnostics` | sonnet, high, full cycle, design | `gpui/settings-diagnostics` | Dispatched | | |
 | T0.1 `license-gate` | sonnet, medium, full cycle | `gpui/license-gate` | Merged | `c025ace`, merge `259e207` | MPL-2.0, BSL-1.0, CDLA-Permissive-2.0 and LLVM-exception crates allowed per crate. Owner to confirm |
 | T0.2 `ledger` | sonnet, medium, impl only, reviewed in T0.7 | `gpui/ledger` | Merged, review pending in T0.7 | `68f33c9` | S8: no drag has to reach the OS. 402 files: 336 port, 31 replace, 35 retire |
 | T0.3 `spike-scaffold` | sonnet, high, full cycle | `gpui/spike-scaffold` | Merged | `9a7bdb0` | S6 builds on 1.99.1, license clean, 1.97.1 unproven. `.ttf` required. AccessKit works. Variable Inter weights not honored. |
