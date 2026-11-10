@@ -5,6 +5,7 @@ members = [
   "apps/host",
   "crates/desktop-core",
   "crates/protocol",
+  "crates/terminal-interactions",
   "crates/tmux-control",
   "crates/phase0-core",
 ]

@@ -1,0 +1,134 @@
+[
+  {
+    "label": "window-close",
+    "expected": {"name":"window-close"}
+  },
+  {
+    "label": "layout-change",
+    "expected": null
+  },
+  {
+    "label": "layout-change {}",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%1\",0,24]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%1\",80,1.5]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%1\",80,24],[\"%1\",40,12]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%7\",39,24],[\"%12\",80,24]]",
+    "expected": {"name":"layout-change","grids":[{"paneId":"%7","columns":39,"rows":24},{"paneId":"%12","columns":80,"rows":24}]}
+  },
+  {
+    "label": "layout-change []",
+    "expected": {"name":"layout-change","grids":[]}
+  },
+  {
+    "label": "layout-change [[\"%1\",80.0,24]]",
+    "expected": {"name":"layout-change","grids":[{"paneId":"%1","columns":80,"rows":24}]}
+  },
+  {
+    "label": "layout-change [[\"%1\",8e1,24]]",
+    "expected": {"name":"layout-change","grids":[{"paneId":"%1","columns":80,"rows":24}]}
+  },
+  {
+    "label": "layout-change [[\"%1\",65535,65535]]",
+    "expected": {"name":"layout-change","grids":[{"paneId":"%1","columns":65535,"rows":65535}]}
+  },
+  {
+    "label": "layout-change [[\"%1\",65536,24]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%1\",80,0]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"1\",80,24]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%\",80,24]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%a\",80,24]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%1\",80]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%1\",80,24,1]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[1,80,24]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%1\",\"80\",24]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%1\",null,24]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change [[\"%1\",-1,24]]",
+    "expected": null
+  },
+  {
+    "label": "layout-change not json",
+    "expected": null
+  },
+  {
+    "label": "layout-changed",
+    "expected": null
+  },
+  {
+    "label": "layout-change\t[]",
+    "expected": null
+  },
+  {
+    "label": "layout-change  []",
+    "expected": {"name":"layout-change","grids":[]}
+  },
+  {
+    "label": "layout-change [[\"%1\",80,24]] trailing",
+    "expected": null
+  },
+  {
+    "label": "layout-change null",
+    "expected": null
+  },
+  {
+    "label": "layout-change \"x\"",
+    "expected": null
+  },
+  {
+    "label": "layout-change-extra",
+    "expected": null
+  },
+  {
+    "label": "pane-mode-changed %1",
+    "expected": {"name":"pane-mode-changed %1"}
+  },
+  {
+    "label": "",
+    "expected": {"name":""}
+  },
+  {
+    "label": "layout-change [[\"%0\",1,1]]",
+    "expected": {"name":"layout-change","grids":[{"paneId":"%0","columns":1,"rows":1}]}
+  }
+]
