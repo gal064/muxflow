@@ -192,6 +192,7 @@ restores tabs as placeholders, and confirms all 64 commands appear.
 | 3 | T3.5 `terminal-reading` | Full | opus, high | `terminal/reading/**`: selection, search, links, history | T3.3, T3.2 |
 | 3 | T3.6 `terminal-integration` | Full, invariant | opus, high | `terminal/integration/**`: OSC 52, paste, drag and drop, transfers, routing, colors, screen reader | T3.3 |
 | 4 | T3.7 `seed-fixes` | Full | sonnet, high | `apps/host/src/service/terminal/seed.rs` | none |
+| 4 | T3.8 `desktop-paste` | Full, invariant | opus, high | desktop-core input dispatch, `terminal/input` paste, `connection_ui/backend.rs` | T3.4 |
 
 T3.3 defines the pane entity and the three submodule seams, so wave 3 stays apart.
 
@@ -204,6 +205,7 @@ T3.3 defines the pane entity and the three submodule seams, so wave 3 stays apar
 | T3.5 | Copy cleanup, `~` links and history paging match today | Ported selection and paging tests | Scripted selection and search against tmux |
 | T3.6 | Screenshot paste works over SSH, and `TerminalColors` is sent | Unit tests per surface | Docker SSH paste with an isolated socket |
 | T3.7 | Host seeds place trailing-cell overlays at the right columns when `capture-pane -N` does not pad the line, and seed mouse mode from `mouse_all_flag` | Seed unit tests from real captures | Seed a pane with a mid-line background run and a click-only mouse app on an isolated socket |
+| T3.8 | A desktop paste goes through the host's paste path, as on mobile, ordered with the keys around it | desktop-core dispatch tests | Multi-line paste into a bracketed-paste program on tmux 3.4 and 3.5 in the sandbox |
 
 **Integrated QA:** `gdev_qa_phase3` runs Claude Code and Codex locally and over SSH, the
 VT parity lane at all five quiesce points, and resizing during heavy output.
@@ -309,7 +311,7 @@ final sweep command returning only justified hits.
 | 0 | Done on Linux, stopped as agreed. Conditional go recommended | | Linux only, complete. Report: `docs/gpui-phase0-report.md`. Waiting for the owner's decision |
 | 1 | Done. `gdev_qa_phase1` passed | `7a4f66c`, `9c13af4`, `1b7df0a`, `29ee6f3` | Known: `test:git` fails on `origin/main` too, in the driver's patch check, so T5.3 must fix or retire it. `test:lifecycle` failed 1 of 34 runs at line 320, cause not found |
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
-| 3 | Running, wave 3 dispatched | | T3.4 to T3.6 running. T3.7 after |
+| 3 | Running, wave 3 merging | | T3.5, T3.7 and T3.8 running |
 | 4 to 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
@@ -333,9 +335,11 @@ Phase 0 are not in the published history.
 | T3.1 `terminal-engine` | opus, high, full cycle, large, invariant | `gpui/terminal-engine` | Merged | `5db235a` | 2 review rounds, replay QA on real tmux recordings. Changes host `seed.rs` to erase before text, no frame format change. Open: ZWJ width skews paging (tmux 2 cells, alacritty 4); host seeds `mouse_any_flag` as `?1003`, a bug that predates the port |
 | T3.2 `terminal-interactions` | sonnet, high, full cycle | `gpui/terminal-interactions` | Merged | `d563c37` | 1 review round plus differential fuzz, 0 mismatches. QA skipped, pure logic. T3.5 implements its `Buffer` traits |
 | T3.3 `terminal-element` | opus, high, full cycle, large, invariant, design | `gpui/terminal-element` | Merged | `a888887` | 2 review rounds, QA 5 of 5 (exact size, 20M-line flood, resize during flood). Engine wake polls on a timer. Root moved the status pill into the empty host row. Open: shrink then grow reflow differs from tmux, as in the current app. Idle blink costs about 15% CPU on software Vulkan |
-| T3.4 `terminal-input` | opus, high, full cycle, invariant | `gpui/terminal-input` | Dispatched | | |
-| T3.5 `terminal-reading` | opus, high, full cycle | `gpui/terminal-reading` | Dispatched | | |
-| T3.6 `terminal-integration` | opus, high, full cycle, invariant | `gpui/terminal-integration` | Dispatched | | |
+| T3.4 `terminal-input` | opus, high, full cycle, invariant | `gpui/terminal-input` | Merged | `3fa49fe` | Restarted after an out-of-memory kill. 1 review round, QA 9 of 9 incl. fcitx5 XIM. Paste moves to the host path in T3.8, owner approved |
+| T3.5 `terminal-reading` | opus, high, full cycle | `gpui/terminal-reading` | Running, resumed on the merged base | | Round 1 review found 12 items; fixing |
+| T3.6 `terminal-integration` | opus, high, full cycle, invariant | `gpui/terminal-integration` | Merged | `b9b25b3` | Restarted after an out-of-memory kill. 2 review rounds, 2 QA runs pass incl. screenshot paste over SSH. Open: about 24 MB clipboard images time out in desktop-core's reader, likely in Tauri too |
+| T3.7 `seed-fixes` | sonnet, high, full cycle | `gpui/seed-fixes` | Dispatched | | |
+| T3.8 `desktop-paste` | opus, high, full cycle, invariant | `gpui/desktop-paste` | Dispatched | | Owner chose the host paste path (`paste-buffer -p`) over client bracketing |
 | T0.1 `license-gate` | sonnet, medium, full cycle | `gpui/license-gate` | Merged | `c025ace`, merge `259e207` | MPL-2.0, BSL-1.0, CDLA-Permissive-2.0 and LLVM-exception crates allowed per crate. Owner to confirm |
 | T0.2 `ledger` | sonnet, medium, impl only, reviewed in T0.7 | `gpui/ledger` | Merged, review pending in T0.7 | `68f33c9` | S8: no drag has to reach the OS. 402 files: 336 port, 31 replace, 35 retire |
 | T0.3 `spike-scaffold` | sonnet, high, full cycle | `gpui/spike-scaffold` | Merged | `9a7bdb0` | S6 builds on 1.99.1, license clean, 1.97.1 unproven. `.ttf` required. AccessKit works. Variable Inter weights not honored. |
