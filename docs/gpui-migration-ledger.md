@@ -258,7 +258,7 @@ font row covers them).
 | `commands/fuzzy.test.ts` | 43 | port | 2 | `commands/fuzzy.rs` | open |
 | `commands/fuzzy.ts` | 61 | port | 2 | `commands/fuzzy.rs` | open |
 | `commands/registry.test.ts` | 524 | port | 2 | `commands/{registry,keymap}.rs`, `tests/commands.rs` | open |
-| `commands/registry.ts` | 583 | port | 2 | `commands/registry.rs`, `commands/keymap.rs`; keys matched against the portable form through `intercept_keystrokes`, no GPUI bindings. Editor fallback and the docked-document chords wait for Phase 5; the terminal's IME check for Phase 3. GPUI reports no physical key, so digit selectors on layouts with shifted digits (AZERTY) do not resolve | open |
+| `commands/registry.ts` | 583 | port | 2 | `commands/registry.rs`, `commands/keymap.rs`; keys matched against the portable form through `intercept_keystrokes`, no GPUI bindings. Editor fallback and the docked-document chords wait for Phase 5; the terminal's IME check is `terminal::input::is_composing` (T3.4). GPUI reports no physical key, so digit selectors on layouts with shifted digits (AZERTY) do not resolve | open |
 | `commands/rowCommands.test.ts` | 54 | port | 2 | `tests/commands.rs` | open |
 | `commands/rowCommands.ts` | 99 | port | 2 | `commands/mod.rs` `publish_row_commands` | open |
 | `commands/shortcutGlyphs.test.ts` | 47 | port | 2 | `commands/glyphs.rs` | open |
@@ -528,16 +528,16 @@ font row covers them).
 | `features/terminal/cellMetrics.ts` | 213 | replace | 3 | terminal/cell_metrics.rs: measures the shaped font; snapping rules and `cellsForBox` carried over | done (T3.3) |
 | `features/terminal/clientSize.test.ts` | 208 | port | 3 | tests in terminal/client_size.rs | done (T3.3) |
 | `features/terminal/clientSize.ts` | 112 | port | 3 | terminal/client_size.rs | done (T3.3) |
-| `features/terminal/echoLagProbe.test.ts` | 334 | port | 3 | tests of echoLagProbe.ts; assigned to T3.4 | open |
-| `features/terminal/echoLagProbe.ts` | 272 | port | 3 | echo lag probe (the S1 measurement method); needs the input path, assigned to T3.4 | open |
+| `features/terminal/echoLagProbe.test.ts` | 334 | port | 3 | tests in terminal/input/latency.rs; the dispose and per-pane cases drop, since each pane owns its probe | done (T3.4) |
+| `features/terminal/echoLagProbe.ts` | 272 | port | 3 | terminal/input/latency.rs (EchoLagProbe), one per pane in PaneInput; a journalled lag reaches the link quality verdict as LinkEvent::EchoLag | done (T3.4) |
 | `features/terminal/glyphWeight.test.ts` | 231 | port | 3 | atlas canvas hook, xterm option tripwires and bundle-regex cases drop; cell-width snapping cases in terminal/cell_metrics.rs | done (T3.3) |
 | `features/terminal/gridMismatchProbe.test.ts` | 165 | port | 3 | tests in terminal/probes.rs | done (T3.3) |
 | `features/terminal/gridMismatchProbe.ts` | 160 | port | 3 | terminal/probes.rs (GridMismatchProbe) | done (T3.3) |
 | `features/terminal/historyPage.test.ts` | 139 | port | 3 | tests in crates/terminal-engine/src/history_page.rs | done (T3.1) |
 | `features/terminal/historyPage.ts` | 170 | port | 3 | crates/terminal-engine/src/history_page.rs | done (T3.1) |
 | `features/terminal/hostColors.ts` | 17 | port | 3 | TerminalColors report to host | open |
-| `features/terminal/inputLatencyStats.test.ts` | 159 | port | 3 | tests of inputLatencyStats.ts; assigned to T3.4 | open |
-| `features/terminal/inputLatencyStats.ts` | 192 | port | 3 | input latency histograms; needs the input path, assigned to T3.4 | open |
+| `features/terminal/inputLatencyStats.test.ts` | 159 | port | 3 | tests in terminal/input/latency.rs | done (T3.4) |
+| `features/terminal/inputLatencyStats.ts` | 192 | port | 3 | terminal/input/latency.rs (InputLatency, one app-wide window flushed each minute) | done (T3.4) |
 | `features/terminal/internalPathDrag.test.ts` | 168 | port | 3 | tests of internalPathDrag.ts | open |
 | `features/terminal/internalPathDrag.ts` | 213 | port | 3 | in-app path drag state and validation; DataTransfer MIME and native-lane bridging retire | open |
 | `features/terminal/layout.test.ts` | 66 | port | 3 | tests in terminal/layout.rs | done (T3.3) |
@@ -559,8 +559,8 @@ font row covers them).
 | `features/terminal/revealRetry.ts` | 123 | port | 3 | crates/terminal-engine/src/reveal_retry.rs | done (T3.1) |
 | `features/terminal/staleRestoreSilence.test.ts` | 533 | port | 3 | restore admission and splice refusal decisions | open |
 | `features/terminal/terminalClientLifecycle.test.ts` | 162 | port | 3 | native client ownership | open |
-| `features/terminal/terminalInputPolicy.test.ts` | 327 | port | 3 | tests of terminalInputPolicy.ts | open |
-| `features/terminal/terminalInputPolicy.ts` | 117 | port | 3 | terminal input translation | open |
+| `features/terminal/terminalInputPolicy.test.ts` | 327 | port | 3 | translation and clipboard-alias cases in terminal/input/policy.rs (T3.4); copy-on-select cases with T3.5, OSC 52 cases with T3.6 | partial (T3.4) |
+| `features/terminal/terminalInputPolicy.ts` | 117 | port | 3 | terminal/input/policy.rs, with the keyboard encoding xterm.js did in terminal/input/keys.rs, mouse reports in mouse.rs and IME in ime.rs; copy of a finished selection goes to T3.5 | partial (T3.4) |
 | `features/terminal/terminalLinkActivation.test.ts` | 13 | port | 3 | tests of terminalLinkActivation.ts | open |
 | `features/terminal/terminalLinkActivation.ts` | 9 | port | 3 | link activation modifier | open |
 | `features/terminal/terminalPanePerf.test.ts` | 154 | port | 3 | tests in terminal/probes.rs | done (T3.3) |

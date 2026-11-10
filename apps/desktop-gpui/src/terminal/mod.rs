@@ -15,14 +15,16 @@
 //!
 //! | Seam | Reaches the pane through | Owner |
 //! |---|---|---|
-//! | [`input`] | `PaneInput`, `input::attach`, `input::paint`, the pane's `send_input` | T3.4 |
+//! | [`input`] | `PaneInput`, `input::attach`, `input::paint`, `input::report_focus` (on focus and window activation), the pane's `send_input` | T3.4 |
 //! | [`reading`] | `PaneReading`, `reading::attach`, `reading::children`, `reading::highlights` | T3.5 |
 //! | [`integration`] | `PaneIntegration`, `integration::attach`, `integration::children` | T3.6 |
 //!
 //! Mouse and wheel events are claimed by mode, so `input` and `reading` never
 //! fight over them: [`TerminalPane::mouse_reporting`] is true while the program
-//! in the pane reads the mouse (`input` owns the event, except a Shift press,
-//! which is forced local selection), and false otherwise (`reading` owns it).
+//! in the pane reads the mouse (`input` owns the event, except a Shift press, or
+//! Option on macOS, which is forced local selection, and the Ctrl or Cmd left
+//! press that grabs a pane or opens a link: [`input::claims_press`]), and false
+//! otherwise (`reading` owns it).
 //!
 //! Dragging a pane, or a divider, is a gesture on the frame rather than the
 //! pane, so T3.6 alone extends the frames in `surface.rs` for those.
