@@ -181,7 +181,7 @@ impl TerminalPane {
     /// live client. Keys and pastes also return it to its live screen
     /// (`reading::before_user_input`).
     pub fn send_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) -> Result<(), String> {
-        input::send(self, bytes, cx)
+        input::send(self, bytes, false, cx)
     }
 
     /// Asks the next paint to rebuild every row: for changes the grid's damage

@@ -87,6 +87,11 @@ impl muxflow_gpui::connection_ui::backend::TerminalBackend for Fake {
         Ok(())
     }
 
+    fn send_paste(&self, _: String, _: String, bytes: Vec<u8>) -> Result<(), String> {
+        self.0.lock().unwrap().input.push(bytes);
+        Ok(())
+    }
+
     fn record_incident(&self, _: &str, _: Value) {}
 
     fn set_terminal_colors(&self, _: String, _: String) -> Result<(), String> {
@@ -302,12 +307,59 @@ fn a_drag_selects_and_copies_and_a_double_click_takes_the_word(cx: &mut TestAppC
     visual.run_until_parked();
     assert_eq!(fake.0.lock().unwrap().input, [b"x".to_vec()]);
     assert!(!selected(&pane, visual));
+}
 
-    // A focus report is not the user's input: it leaves the selection alone.
+/// Focus and mouse reports go to the program, but they are not the user's
+/// input: the selection and the view stay as they were.
+#[gpui_kit::test]
+fn focus_and_mouse_reports_leave_the_selection_and_the_view_alone(cx: &mut TestAppContext) {
+    // `?1004h` asks for focus reports, `?1000h` for clicks.
+    let (Mounted { fake, pane, .. }, visual) = mounted(cx, b"\x1b[?1004h\x1b[?1000hecho hi");
+    let sent = |fake: &Fake| fake.0.lock().unwrap().input.clone();
     select_first_word(&pane, visual);
-    pane.update(visual, |pane, cx| pane.send_input(b"\x1b[O".to_vec(), cx))
-        .unwrap();
+    // Focus and window activation reach `input::report_focus` through the pane.
+    visual.update(|window, _| window.activate_window());
+    let focus = pane.read_with(visual, |pane, cx| pane.focus_handle(cx));
+    visual.update(|window, cx| window.focus(&focus, cx));
+    visual.run_until_parked();
+    assert_eq!(sent(&fake), [b"\x1b[I".to_vec()]);
     assert!(selected(&pane, visual));
+    visual.deactivate_window();
+    visual.run_until_parked();
+    assert_eq!(sent(&fake).last(), Some(&b"\x1b[O".to_vec()));
+    assert!(selected(&pane, visual));
+
+    let click = at(&pane, visual, 0, 6, false);
+    visual.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
+    visual.simulate_mouse_up(click, MouseButton::Left, Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(sent(&fake).len(), 4, "a press and a release reported");
+    assert!(selected(&pane, visual));
+    assert_eq!(
+        pane.read_with(visual, |pane, _| pane.reading_state()),
+        TerminalReadingState::Live
+    );
+}
+
+/// The underline under the pointer goes once output rewrites its line.
+#[gpui_kit::test]
+fn a_hovered_link_is_dropped_when_output_rewrites_its_line(cx: &mut TestAppContext) {
+    let (Mounted { link, pane, .. }, visual) = mounted(cx, b"see https://example.com/x");
+    let underlined = |visual: &VisualTestContext| {
+        pane.read_with(visual, |pane, _| {
+            let term = pane.terminal().unwrap().lock();
+            reading::highlights(pane, &term)
+                .iter()
+                .any(|highlight| highlight.underline)
+        })
+    };
+    visual.simulate_mouse_move(at(&pane, visual, 0, 10, false), None, Modifiers::default());
+    visual.run_until_parked();
+    assert!(underlined(visual));
+    link.read_with(visual, |link, _| {
+        link.forward_frame(output_frame(2, b"\r\x1b[Kplain text"))
+    });
+    wait_until(visual, |visual| !underlined(visual));
 }
 
 fn select_first_word(pane: &Entity<TerminalPane>, cx: &mut VisualTestContext) {

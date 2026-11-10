@@ -76,6 +76,9 @@ pub trait TerminalBackend: Send + Sync {
         window_id: String,
     ) -> BoxFuture<'static, Result<(), String>>;
     fn send_input(&self, client_id: String, pane_id: String, bytes: Vec<u8>) -> Result<(), String>;
+    /// Text the host pastes through tmux, bracketed iff the program asked, in
+    /// order with `send_input`'s keys.
+    fn send_paste(&self, client_id: String, pane_id: String, text: Vec<u8>) -> Result<(), String>;
     fn record_incident(&self, kind: &str, detail: Value);
     /// The link's delivery state, as `terminal_link_stats` reports it.
     fn link_stats(&self, _client_id: &str) -> Option<Value> {
@@ -236,6 +239,10 @@ impl TerminalBackend for NativeBackend {
     fn send_input(&self, client_id: String, pane_id: String, bytes: Vec<u8>) -> Result<(), String> {
         let body = input_frame(&client_id, &pane_id, &bytes);
         connection::send_terminal_input_bytes(&body, &self.clients)
+    }
+
+    fn send_paste(&self, client_id: String, pane_id: String, text: Vec<u8>) -> Result<(), String> {
+        connection::send_terminal_paste(&client_id, &pane_id, text, &self.clients)
     }
 
     fn record_incident(&self, kind: &str, detail: Value) {
