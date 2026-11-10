@@ -44,6 +44,13 @@ By target phase:
 Test files marked `port` are a mix. Where a file has retire-worthy cases (React render
 mechanics, xterm or Monaco internals) the target column says which cases drop.
 
+`packages/terminal-interactions` is shared with the mobile app, so its modules sit
+outside the file table. T3.2 ported its pure logic to `crates/terminal-interactions`
+(done): `terminalWebLinks` to `web_links.rs`, `terminalFilePaths` to `file_paths.rs`,
+`terminalLinks` to `links.rs`, `terminalSelection` to `selection.rs` and
+`topologyNotification` to `topology.rs`. Both suites run the JSON cases in
+`packages/terminal-interactions/fixtures`. The TypeScript package stays for mobile.
+
 ## S8: drag out
 
 Question from the plan: the explorer, git sidebar and dock use `draggable` today;
@@ -570,7 +577,7 @@ font row covers them).
 | `features/terminal/theme.ts` | 223 | replace | 3 | reads --term-* CSS properties; becomes the Rust theme and generated palette | open |
 | `features/terminal/timeBound.test.ts` | 63 | port | 3 | tests of timeBound.ts | open |
 | `features/terminal/timeBound.ts` | 63 | port | 3 | settleWithin time bound | open |
-| `features/terminal/topologyNotification.test.ts` | 29 | port | 3 | topology notification decode | open |
+| `features/terminal/topologyNotification.test.ts` | 29 | port | 3 | topology notification decode: cases in the shared `topology.json` fixture, run by `crates/terminal-interactions` and vitest | done (T3.2) |
 | `features/terminal/viewportPreservation.test.ts` | 79 | port | 3 | viewport anchor through reflow, asserted on the engine grid | open |
 
 ### `features/terminal/testing`

@@ -1,0 +1,107 @@
+[
+  {
+    "name": "closing-prose-punctuation",
+    "line": "Read (https://nathanbarry.com/2016-review/): next",
+    "links": [{"text":"https://nathanbarry.com/2016-review/","start":6,"end":42}]
+  },
+  {
+    "name": "trailing-suffix-.",
+    "line": "https://example.com/path.",
+    "links": [{"text":"https://example.com/path","start":0,"end":24}]
+  },
+  {
+    "name": "trailing-suffix-,",
+    "line": "https://example.com/path,",
+    "links": [{"text":"https://example.com/path","start":0,"end":24}]
+  },
+  {
+    "name": "trailing-suffix-;",
+    "line": "https://example.com/path;",
+    "links": [{"text":"https://example.com/path","start":0,"end":24}]
+  },
+  {
+    "name": "trailing-suffix-:",
+    "line": "https://example.com/path:",
+    "links": [{"text":"https://example.com/path","start":0,"end":24}]
+  },
+  {
+    "name": "trailing-suffix-!",
+    "line": "https://example.com/path!",
+    "links": [{"text":"https://example.com/path","start":0,"end":24}]
+  },
+  {
+    "name": "trailing-suffix-?",
+    "line": "https://example.com/path?",
+    "links": [{"text":"https://example.com/path","start":0,"end":24}]
+  },
+  {
+    "name": "trailing-suffix-`",
+    "line": "https://example.com/path`",
+    "links": [{"text":"https://example.com/path","start":0,"end":24}]
+  },
+  {
+    "name": "trailing-suffix-).",
+    "line": "https://example.com/path).",
+    "links": [{"text":"https://example.com/path","start":0,"end":24}]
+  },
+  {
+    "name": "trailing-suffix-]:",
+    "line": "https://example.com/path]:",
+    "links": [{"text":"https://example.com/path","start":0,"end":24}]
+  },
+  {
+    "name": "trailing-suffix-}!",
+    "line": "https://example.com/path}!",
+    "links": [{"text":"https://example.com/path","start":0,"end":24}]
+  },
+  {
+    "name": "balanced-delimiters-and-punctuation",
+    "line": "https://example.com/foo_(bar) https://example.com/a:b https://example.com/search?q=x:y http://[::1]:3000/path",
+    "links": [{"text":"https://example.com/foo_(bar)","start":0,"end":29},{"text":"https://example.com/a:b","start":30,"end":53},{"text":"https://example.com/search?q=x:y","start":54,"end":86},{"text":"http://[::1]:3000/path","start":87,"end":109}]
+  },
+  {
+    "name": "excess-closing-delimiters",
+    "line": "https://example.com/foo_(bar))]:",
+    "links": [{"text":"https://example.com/foo_(bar)","start":0,"end":29}]
+  },
+  {
+    "name": "multiple-links",
+    "line": "One https://one.example/a, then https://two.example/b.",
+    "links": [{"text":"https://one.example/a","start":4,"end":25},{"text":"https://two.example/b","start":32,"end":53}]
+  },
+  {
+    "name": "no-link",
+    "line": "no web link here",
+    "links": []
+  },
+  {
+    "name": "ends-at-quote-or-angle",
+    "line": "<a href=\"https://example.com/x\">https://example.com/y</a> 'https://example.com/z'",
+    "links": [{"text":"https://example.com/x","start":9,"end":30},{"text":"https://example.com/y","start":32,"end":53},{"text":"https://example.com/z","start":59,"end":80}]
+  },
+  {
+    "name": "multibyte-line",
+    "line": "界 https://例え.test/日本語. and https://example.com/🚀)",
+    "links": [{"text":"https://例え.test/日本語","start":2,"end":21},{"text":"https://example.com/🚀","start":27,"end":49}]
+  },
+  {
+    "name": "bom-separates-url",
+    "line": "https://a.example/x\ufeffhttps://b.example/y",
+    "links": [{"text":"https://a.example/x","start":0,"end":19},{"text":"https://b.example/y","start":20,"end":39}]
+  },
+  {
+    "name": "nel-does-not-separate-url",
+    "line": "https://a.example/x\u0085y",
+    "links": [{"text":"https://a.example/x\u0085y","start":0,"end":21}]
+  },
+  {
+    "name": "non-breaking-space-separates-url",
+    "line": "https://a.example/x\u00a0y",
+    "links": [{"text":"https://a.example/x","start":0,"end":19}]
+  },
+  {
+    "name": "scheme-case-sensitive",
+    "line": "HTTPS://EXAMPLE.COM/x http://ok.example/",
+    "links": [{"text":"http://ok.example/","start":22,"end":40}]
+  }
+]
