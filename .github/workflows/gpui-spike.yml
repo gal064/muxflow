@@ -96,4 +96,7 @@ jobs:
           workspaces: spikes/gpui
       - name: Build the spike workspace
         working-directory: spikes/gpui
-        run: cargo build --locked --workspace
+        # gpui-pre-macos 0.3.11 and 0.3.12 use an API that stable Rust lacks.
+        run: |
+          ./prepare-macos.sh
+          cargo --config 'patch.crates-io.gpui-pre-macos.path="target/patched-macos"' build --workspace
