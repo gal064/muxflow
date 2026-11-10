@@ -74,7 +74,7 @@ jobs:
       - name: Point Vulkan at lavapipe only
         run: echo "VK_DRIVER_FILES=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)" >> "$GITHUB_ENV"
       - name: Rust tests
-        run: cargo test --locked --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets --no-fail-fast
 
       - name: Test-only crates outside the workspace
         run: |
@@ -175,4 +175,4 @@ jobs:
       - name: Rust lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Rust tests
-        run: cargo test --locked --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets --no-fail-fast
