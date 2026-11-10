@@ -302,7 +302,7 @@ final sweep command returning only justified hits.
 |---|---|---|---|
 | 0 | Done on Linux, stopped as agreed. Conditional go recommended | | Linux only, complete. Report: `docs/gpui-phase0-report.md`. Waiting for the owner's decision |
 | 1 | Done. `gdev_qa_phase1` passed | `7a4f66c`, `9c13af4`, `1b7df0a`, `29ee6f3` | Known: `test:git` fails on `origin/main` too, in the driver's patch check, so T5.3 must fix or retire it. `test:lifecycle` failed 1 of 34 runs at line 320, cause not found |
-| 2 | Running, T2.1 merged | `08f8108` | Wave 2, after macOS CI confirms T2.1 |
+| 2 | Running, wave 2 dispatched | `08f8108` | T2.2, T2.3, T2.4, then T2.5 |
 | 3 to 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
@@ -318,6 +318,9 @@ Phase 0 are not in the published history.
 | T1.3 `core-traits` | opus, high, full cycle, large, invariant | `gpui/core-traits` | Merged | `1b7df0a` | 2 review rounds, 5 GiB transfer QA passed. No dialog trait, because Rust has no dialog call. T1.4 must replace the Tauri spawn re-export in `platform.rs` |
 | T1.4 `core-crate` | opus, high, full cycle, large, invariant | `gpui/core-crate` | Merged | `29ee6f3` | No `tauri` in `cargo tree`. 1 review round. Lifecycle lane passed 3 of 4 runs, cause of the one failure not found |
 | T2.1 `app-foundation` | opus, high, full cycle, large, design | `gpui/app-foundation` | Merged | `08f8108` | 2 review rounds, QA passed. Vendored `gpui-pre-macos` patch. Open: title-bar drag under openbox, for T2.5 |
+| T2.2 `chrome-layout` | opus, high, full cycle, design | `gpui/chrome-layout` | Dispatched | | |
+| T2.3 `commands-keymap` | opus, high, full cycle | `gpui/commands-keymap` | Dispatched | | |
+| T2.4 `connections` | opus, high, full cycle, invariant | `gpui/connections` | Dispatched | | |
 | T0.1 `license-gate` | sonnet, medium, full cycle | `gpui/license-gate` | Merged | `c025ace`, merge `259e207` | MPL-2.0, BSL-1.0, CDLA-Permissive-2.0 and LLVM-exception crates allowed per crate. Owner to confirm |
 | T0.2 `ledger` | sonnet, medium, impl only, reviewed in T0.7 | `gpui/ledger` | Merged, review pending in T0.7 | `68f33c9` | S8: no drag has to reach the OS. 402 files: 336 port, 31 replace, 35 retire |
 | T0.3 `spike-scaffold` | sonnet, high, full cycle | `gpui/spike-scaffold` | Merged | `9a7bdb0` | S6 builds on 1.99.1, license clean, 1.97.1 unproven. `.ttf` required. AccessKit works. Variable Inter weights not honored. |
