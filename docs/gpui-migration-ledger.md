@@ -27,9 +27,9 @@ so a task may change a view test's row to retire, with a reason.
 
 | Scope | port | replace | retire | Total |
 |---|---|---|---|---|
-| All | 344 files / 74,465 lines | 34 files / 9,835 lines | 24 files / 2,395 lines | 402 files / 86,695 lines |
+| All | 345 files / 74,554 lines | 34 files / 9,835 lines | 24 files / 2,395 lines | 403 files / 86,784 lines |
 | Production | 178 files / 36,261 lines | 34 files / 9,835 lines | 13 files / 966 lines | 225 files / 47,062 lines |
-| Tests | 166 files / 38,204 lines | 0 files / 0 lines | 11 files / 1,429 lines | 177 files / 39,633 lines |
+| Tests | 167 files / 38,293 lines | 0 files / 0 lines | 11 files / 1,429 lines | 178 files / 39,722 lines |
 
 By target phase:
 
@@ -470,6 +470,7 @@ font row covers them).
 | `features/shell/useAppearance.ts` | 33 | port | 2 | applies saved theme once state is ready | open |
 | `features/shell/useDesktopResumeRecovery.test.ts` | 81 | port | 2 | tests of useDesktopResumeRecovery.ts | open |
 | `features/shell/useDesktopResumeRecovery.ts` | 151 | port | 2 | resume-from-sleep recovery | open |
+| `features/shell/usePersistedAppState.test.tsx` | 89 | port | 4 | tests of usePersistedAppState.ts | open |
 | `features/shell/usePersistedAppState.ts` | 123 | port | 2 | persisted app state loader | open |
 | `features/shell/useShellCommands.test.tsx` | 384 | port | 2 | tests of useShellCommands.ts | open |
 | `features/shell/useShellCommands.ts` | 443 | port | 2 | shell command wiring | open |
