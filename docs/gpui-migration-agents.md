@@ -304,8 +304,9 @@ final sweep command returning only justified hits.
 |---|---|---|---|
 | 0 | Done on Linux, stopped as agreed. Conditional go recommended | | Linux only, complete. Report: `docs/gpui-phase0-report.md`. Waiting for the owner's decision |
 | 1 | Done. `gdev_qa_phase1` passed | `7a4f66c`, `9c13af4`, `1b7df0a`, `29ee6f3` | Known: `test:git` fails on `origin/main` too, in the driver's patch check, so T5.3 must fix or retire it. `test:lifecycle` failed 1 of 34 runs at line 320, cause not found |
-| 2 | Tasks merged, `gdev_qa_phase2` running | `08f8108` | QA also covers T2.4 items not verified |
-| 3 to 6 | Approved | | |
+| 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
+| 3 | Running, wave 1 dispatched | | T3.1 and T3.2 running |
+| 4 to 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
 ### Task log
@@ -325,6 +326,8 @@ Phase 0 are not in the published history.
 | T2.4 `connections` | opus, high, full cycle, invariant | `gpui/connections` | Merged | `a9823b4` | 2 review rounds. QA passed except Enter on a focused confirm button, fixed after QA with unit tests only. `gdev_qa_phase2` must re-check it and real quit. Status pill placement open |
 | T2.5 `native-surfaces` | sonnet, high, full cycle, design | `gpui/native-surfaces` | Merged | `bee12e9` | 3 review rounds. QA passed with observations. Merge kept `notices.rs` as the one status-notice port and removed the T2.4 copy. macOS, Wayland and a real compositor not run. Saved x,y did not match in 3 of 4 runs under emulated compositor. Bar buttons not reachable by Tab, for T6.1 |
 | `gdev_qa_phase2` | fresh QA | `gpui/integration` | Passed | | 14 of 15 items passed. Fixed after QA: focus lost after the helper dialog, unbounded problem notice, status pill over the host row, CI scheduler failure. Open for owner: X11 window position is not restored (size is), because GPUI sets no position hint. Context menu has no Phase 2 surface, so its real-app check waits for Phase 4 |
+| T3.1 `terminal-engine` | opus, high, full cycle, large, invariant | `gpui/terminal-engine` | Dispatched | | |
+| T3.2 `terminal-interactions` | sonnet, high, full cycle | `gpui/terminal-interactions` | Dispatched | | |
 | T0.1 `license-gate` | sonnet, medium, full cycle | `gpui/license-gate` | Merged | `c025ace`, merge `259e207` | MPL-2.0, BSL-1.0, CDLA-Permissive-2.0 and LLVM-exception crates allowed per crate. Owner to confirm |
 | T0.2 `ledger` | sonnet, medium, impl only, reviewed in T0.7 | `gpui/ledger` | Merged, review pending in T0.7 | `68f33c9` | S8: no drag has to reach the OS. 402 files: 336 port, 31 replace, 35 retire |
 | T0.3 `spike-scaffold` | sonnet, high, full cycle | `gpui/spike-scaffold` | Merged | `9a7bdb0` | S6 builds on 1.99.1, license clean, 1.97.1 unproven. `.ttf` required. AccessKit works. Variable Inter weights not honored. |
