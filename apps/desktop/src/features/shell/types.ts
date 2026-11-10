@@ -1,5 +1,7 @@
 import type { ConnectionSpec } from "../../app/types";
 import { isAgentSortMode, type AgentSortMode } from "../agents/agentsList";
+import { normalizeAgentSoundPreferences } from "../agents/sound";
+import type { AgentSoundPreferences } from "../agents/types";
 import { isMarkdownAppearance, isThemePreference, type MarkdownAppearance, type ThemePreference } from "../../ui/appearance";
 
 export type AppTabKind = "file" | "markdown" | "gitDiff";
@@ -155,6 +157,8 @@ export interface ShellState {
   uiScale: number;
   /** Markdown's Live and Preview colors: the app's, or always light or dark. */
   markdownAppearance: MarkdownAppearance;
+  /** Agent notification sounds; absent until first changed, which is the defaults. */
+  agentSounds?: AgentSoundPreferences;
   /** The host most recently picked in the New workspace dialog. */
   newWorkspaceHostProfileId?: string;
   /**
@@ -232,6 +236,7 @@ export const defaultShellState: ShellState = {
   theme: "system",
   uiScale: 1,
   markdownAppearance: "default",
+  agentSounds: undefined,
   newWorkspaceHostProfileId: undefined,
   defaultMarkdownView: "split",
 };
@@ -308,6 +313,7 @@ export function normalizePersistedAppState(value: unknown): PersistedAppState {
       theme: isThemePreference(shell?.theme) ? shell.theme : defaultShellState.theme,
       uiScale: UI_SCALES.find((scale) => scale === shell?.uiScale) ?? defaultShellState.uiScale,
       markdownAppearance: isMarkdownAppearance(shell?.markdownAppearance) ? shell.markdownAppearance : defaultShellState.markdownAppearance,
+      agentSounds: normalizeAgentSoundPreferences(shell?.agentSounds),
       newWorkspaceHostProfileId: typeof shell?.newWorkspaceHostProfileId === "string" && shell.newWorkspaceHostProfileId.trim()
         ? shell.newWorkspaceHostProfileId
         : undefined,
