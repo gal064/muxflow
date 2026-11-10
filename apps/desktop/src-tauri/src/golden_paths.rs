@@ -22,7 +22,7 @@ fn run_child(xdg: &[(&str, &str)]) {
             "--test-threads=1",
             "golden_paths::resolved_dirs_match",
         ])
-        .env("HOME", "/home/golden")
+        .env("HOME", "/fixture-home")
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("XDG_DATA_HOME")
         .envs(xdg.iter().copied());
@@ -64,18 +64,18 @@ fn resolved_dirs_match() {
         )
     } else {
         (
-            "/home/golden/.config/dev.muxflow.desktop",
-            "/home/golden/.local/share/dev.muxflow.desktop",
-            "/home/golden/.local/share/dev.muxflow.desktop/logs",
+            "/fixture-home/.config/dev.muxflow.desktop",
+            "/fixture-home/.local/share/dev.muxflow.desktop",
+            "/fixture-home/.local/share/dev.muxflow.desktop/logs",
         )
     };
 
     // Not run locally: written from the tauri/dirs source, CI runs it on macOS.
     #[cfg(target_os = "macos")]
     let (config, data, log) = (
-        "/home/golden/Library/Application Support/dev.muxflow.desktop",
-        "/home/golden/Library/Application Support/dev.muxflow.desktop",
-        "/home/golden/Library/Logs/dev.muxflow.desktop",
+        "/fixture-home/Library/Application Support/dev.muxflow.desktop",
+        "/fixture-home/Library/Application Support/dev.muxflow.desktop",
+        "/fixture-home/Library/Logs/dev.muxflow.desktop",
     );
 
     assert_eq!(path.app_config_dir().unwrap().to_str().unwrap(), config);
