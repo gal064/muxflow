@@ -5360,6 +5360,7 @@ dependencies = [
  "desktop-core",
  "dirs 6.0.0",
  "gpui-kit",
+ "regex",
  "serde_json",
  "tempfile",
 ]

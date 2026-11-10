@@ -15,6 +15,8 @@ use gpui_kit::App;
 
 pub fn init(cx: &mut App) {
     crate::commands::init(cx);
+    crate::menus::init(cx);
     crate::connection_ui::init(cx);
     crate::ui::chrome::init(cx);
+    crate::window_state::init(cx);
 }
