@@ -177,6 +177,7 @@ impl TerminalPane {
     /// Sends bytes to the program in this pane. Fails while the pane has no
     /// live client.
     pub fn send_input(&self, bytes: Vec<u8>, cx: &mut Context<Self>) -> Result<(), String> {
+        reading::before_input(self, cx);
         let link = self.link.clone();
         let pane_id = self.pane_id.clone();
         link.update(cx, |link, _| {
