@@ -181,7 +181,7 @@ impl ConnectionSurface {
         h_flex()
             .id("connection-status-pill")
             .absolute()
-            .left(ui(8.))
+            .right(ui(8.))
             .bottom(ui(8.))
             .gap(ui(6.))
             .items_center()

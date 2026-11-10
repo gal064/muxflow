@@ -15,6 +15,8 @@
 # Docker stays reachable through its socket. There is no network, so reach an SSH
 # target with this in $STATE/home/.ssh/config:
 #   ProxyCommand docker exec -i <container> socat - TCP:localhost:22
+# ssh finds ~/.ssh through passwd, not $HOME, so pass that config with -F (the
+# app has an SSH config field).
 # Connecting to the Docker socket can still affect any container: use only
 # containers named for your task.
 set -euo pipefail
@@ -26,7 +28,7 @@ shift 2
 state="$root/$name"
 
 entered_env=(env -i "HOME=$state/home" "PATH=$PATH" "USER=${USER:-qa}" "LANG=C.UTF-8"
-  "XDG_RUNTIME_DIR=$state/runtime" "ADE_HOST_RUNTIME_DIR=$state/host-runtime"
+  "XDG_RUNTIME_DIR=$state/runtime" "ADE_HOST_RUNTIME_DIR=/tmp/host-runtime"
   "QA_SANDBOX_STATE=$state")
 
 child_pid() {
@@ -36,12 +38,12 @@ child_pid() {
 case "$action" in
   up)
     [[ ! -e "$state" ]] || { echo "already exists: $state" >&2; exit 1; }
-    mkdir -p "$state/home/.ssh" "$state/runtime" "$state/host-runtime" "$state/etc-ssh"
-    chmod 700 "$state/home/.ssh" "$state/runtime" "$state/host-runtime"
+    mkdir -p "$state/home/.ssh" "$state/runtime" "$state/etc-ssh"
+    chmod 700 "$state/home/.ssh" "$state/runtime"
     # ssh rejects a config owned by the unmapped root, so it gets its own copy.
     cp -rL /etc/ssh/ssh_config /etc/ssh/ssh_config.d "$state/etc-ssh/" 2>/dev/null || true
 
-    args=(--ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --tmpfs "/run/user/$(id -u)"
+    args=(--ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --perms 0700 --dir /tmp/host-runtime --tmpfs "/run/user/$(id -u)"
       --bind "$state" "$state" --ro-bind "$state/etc-ssh" /etc/ssh
       --unshare-user --unshare-net --unshare-pid --unshare-ipc --unshare-uts)
     for hidden in .config .local .cache .ssh; do

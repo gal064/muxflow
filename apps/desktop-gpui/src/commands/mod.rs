@@ -24,7 +24,7 @@ pub mod quick_open;
 pub mod registry;
 pub mod shortcut_editor;
 
-use std::{collections::HashMap, future::Future, rc::Rc};
+use std::{collections::HashMap, rc::Rc, time::Duration};
 
 use desktop_core::{
     app_state::{load_app_state, update_app_state},
@@ -185,14 +185,24 @@ pub fn run(id: CommandId, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// How often a pending save is checked for its result.
+const SAVE_POLL: Duration = Duration::from_millis(50);
+
 /// Saves the overrides, reports a failure, and applies them at once.
 pub fn set_overrides(overrides: ShortcutOverrides, window: &mut Window, cx: &mut App) {
     let save = store_overrides(&overrides, cx);
     cx.update_global(|commands: &mut Commands, _| commands.overrides = overrides);
     window
         .spawn(cx, async move |cx| {
-            let Err(failure) = save.await else {
-                return;
+            // Polled, not awaited: GPUI's test scheduler rejects a wake from a
+            // runtime thread.
+            while !save.is_finished() {
+                cx.background_executor().timer(SAVE_POLL).await;
+            }
+            let failure = match save.await {
+                Ok(Ok(())) => return,
+                Ok(Err(failure)) => failure,
+                Err(error) => error.to_string(),
             };
             cx.update(|window, cx| {
                 notices::notify(&format!("Could not save shortcuts: {failure}"), window, cx);
@@ -206,16 +216,15 @@ pub fn set_overrides(overrides: ShortcutOverrides, window: &mut Window, cx: &mut
 fn store_overrides(
     overrides: &ShortcutOverrides,
     cx: &App,
-) -> impl Future<Output = Result<(), String>> + use<> {
+) -> tokio::task::JoinHandle<Result<(), String>> {
     let store = cx.global::<Core>().app_state.clone();
     let overrides = overrides.clone();
-    let save = platform::spawn(async move {
+    platform::spawn(async move {
         update_app_state(&store, move |state| {
             state.commands.shortcut_overrides = overrides;
         })
         .await
-    });
-    async move { save.await.map_err(|error| error.to_string())? }
+    })
 }
 
 fn on_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
