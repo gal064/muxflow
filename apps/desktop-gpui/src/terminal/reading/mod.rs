@@ -27,7 +27,6 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::term::TermMode;
-use desktop_core::app_state::load_app_state;
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext, Bounds, ClipboardItem, Context, CursorStyle,
     DispatchPhase, Div, Entity, EntityId, Focusable, Global, InteractiveElement, IntoElement,
@@ -47,7 +46,6 @@ use gpui_kit::{
 use terminal_engine::{Command, Listener, TerminalReadingState};
 use terminal_interactions::LinkKind;
 
-use crate::app::Core;
 use crate::commands::{self, Commands, dialogs::is_composing, registry::Platform};
 use crate::notices;
 use crate::theme::{
@@ -154,6 +152,11 @@ struct Panes {
 
 impl Global for Panes {}
 
+/// The pane keyboard commands go to: the focused one, or the last one that was.
+pub fn focused_pane(window: &Window, cx: &App) -> Option<Entity<TerminalPane>> {
+    target(window, cx)
+}
+
 fn target(window: &Window, cx: &App) -> Option<Entity<TerminalPane>> {
     let panes = cx.try_global::<Panes>()?;
     panes
@@ -184,19 +187,10 @@ fn set_has_selection(cx: &mut App, selected: bool) {
     }
 }
 
-/// `copyOnSelect` and `cleanWrappedCommands`, both on unless turned off.
+/// `copyOnSelect` and `cleanWrappedCommands`, from the live Settings.
 fn copy_settings(cx: &App) -> (bool, bool) {
-    let shell = cx
-        .try_global::<Core>()
-        .and_then(|core| load_app_state(&core.app_state).ok())
-        .map(|state| state.shell);
-    let shell = shell.as_ref();
-    (
-        shell.and_then(|shell| shell.copy_on_select).unwrap_or(true),
-        shell
-            .and_then(|shell| shell.clean_wrapped_commands)
-            .unwrap_or(true),
-    )
+    let prefs = crate::settings::get(cx);
+    (prefs.copy_on_select, prefs.clean_wrapped_commands)
 }
 
 /// Selection, search hits and the link under the pointer, in viewport rows.

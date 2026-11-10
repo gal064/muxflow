@@ -201,8 +201,8 @@ fn a_menu_item_is_enabled_once_its_command_has_a_handler(cx: &mut TestAppContext
     // The chrome answers the view commands, the palette answers its own.
     assert!(!item(cx, "Toggle sidebar"));
     assert!(!item(cx, "Show command palette"));
-    // Nothing handles Settings yet. It sits in the macOS application menu, which
-    // the installed Linux menus do not have, so read the model directly.
+    // Settings sits in the macOS application menu, which the installed Linux
+    // menus do not have, so read the model directly.
     let settings_disabled = |cx: &mut TestAppContext| {
         cx.update(|cx| {
             menus::app_menus(cx.global::<Commands>(), Platform::Mac)
@@ -217,9 +217,7 @@ fn a_menu_item_is_enabled_once_its_command_has_a_handler(cx: &mut TestAppContext
                 .expect("Settings is in the application menu")
         })
     };
-    assert!(settings_disabled(cx));
-    cx.update(|cx| commands::on_command("settings.show", cx, |_, _| {}));
-    assert!(!settings_disabled(cx));
+    assert!(!settings_disabled(cx), "Settings has its handler");
 }
 
 #[gpui_kit::test]
@@ -330,8 +328,11 @@ fn a_disabled_control_explains_itself_in_a_tooltip(cx: &mut TestAppContext) {
         ("Settings (Ctrl+,)", "Back (Ctrl+[)")
     };
     with_window(handle, cx, |window, _| {
+        // Settings has its handler, so its button works and keeps the tooltip.
+        let gear = window.find_by_label("Settings");
+        assert_ne!(gear.disabled(), Some(true));
+        assert_eq!(gear.description(), Some(settings));
         for (name, tip) in [
-            ("Settings", settings),
             ("Back", back),
             ("No agents waiting", "No agents waiting"),
             ("Close other tabs", "Close other tabs"),
