@@ -1,0 +1,21 @@
+[package]
+name = "spike-markdown"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+spike-shared.workspace = true
+gpui-kit.workspace = true
+# Both already resolved through gpui-base; used here for source offsets and caret motion.
+markdown = "=1.0.0"
+unicode-segmentation = "=1.13.3"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "spike-markdown"
+path = "src/main.rs"

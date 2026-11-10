@@ -1,0 +1,20 @@
+# Disposable GPUI feasibility workspace (docs/gpui-migration.md, Phase 0).
+# Deliberately NOT a member of the root workspace: it has its own Cargo.lock and
+# `target`, and the root `[workspace] members` list does not name it.
+[workspace]
+members = ["shared", "terminal", "markdown"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.97.1"
+
+[workspace.dependencies]
+# Exact pins. `gpui-fast` stays off (migration decision 4).
+gpui-kit = { version = "=0.9.0", default-features = true }
+# Pre-added for the terminal spike (T0.4) so it does not collide on Cargo.lock.
+alacritty_terminal = "=0.26.0"
+tmux-control = { path = "../../crates/tmux-control" }
+spike-shared = { path = "shared" }

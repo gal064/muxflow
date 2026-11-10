@@ -57,3 +57,9 @@ Thumbs.db
 *.swo
 *~
 __pycache__/
+
+# GPUI measurement output.
+tests/performance/runtime/renderer-baseline/s11-macos/
+tests/performance/runtime/renderer-baseline/phase0/
+spikes/gpui/terminal/results/
+spikes/gpui/markdown/qa-frames/

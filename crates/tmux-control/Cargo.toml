@@ -1,6 +1,7 @@
 [package]
 name = "tmux-control"
 version = "0.1.0"
+license = "MIT"
 edition.workspace = true
 rust-version.workspace = true
 

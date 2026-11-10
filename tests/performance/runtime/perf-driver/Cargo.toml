@@ -3,6 +3,7 @@ name = "performance-test-driver"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT"
 
 [workspace]
 
@@ -14,3 +15,8 @@ tmux-agent-protocol = { path = "../../../../crates/protocol" }
 # both sides of the comparison — what the host delivered, and what tmux itself
 # has — into screens that can be diffed cell by cell.
 vt100 = "0.16.2"
+# S9: the terminal engine the GPUI app will use, compared against tmux in the
+# same lane. Pinned exactly: a width table change is a behaviour change here.
+alacritty_terminal = "=0.26.0"
+# `composeHistoryPage` measures rows in grapheme clusters (Intl.Segmenter).
+unicode-segmentation = "1"

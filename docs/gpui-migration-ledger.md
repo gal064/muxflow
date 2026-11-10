@@ -1,0 +1,667 @@
+# GPUI migration ledger
+
+Module-by-module tracker for [the desktop migration](gpui-migration.md). Phase 0
+task T0.2. One row for every tracked `.ts`, `.tsx` and `.css` file under
+`apps/desktop/src` (`git ls-files apps/desktop/src`), production and tests.
+`tests/release/check-migration-ledger.sh` fails if a row is missing or extra, or if a
+`retire` row has no reason.
+
+Dispositions:
+
+- **port**: the behavior is carried over into a Rust module that mirrors this file.
+  For a test, the assertions are ported.
+- **replace**: the behavior stays, but a different mechanism supplies it (Kit, GPUI,
+  `desktop-core` direct calls, a generated theme). Nothing is ported line for line.
+- **retire**: the behavior goes away with the technology. The target column holds the
+  one-line reason.
+
+A target beginning with `?` is an open question; the file is marked `port` until it is
+answered. Phase is the phase in which the row is done (a retire row, the phase from
+which it is no longer needed; files are deleted together at cutover). Status is `open`
+for every row until its phase closes.
+
+Tests: port logic and state-machine tests. A small end-to-end set replaces view tests,
+so a task may change a view test's row to retire, with a reason.
+
+## Totals
+
+| Scope | port | replace | retire | Total |
+|---|---|---|---|---|
+| All | 344 files / 74,465 lines | 34 files / 9,835 lines | 24 files / 2,395 lines | 402 files / 86,695 lines |
+| Production | 178 files / 36,261 lines | 34 files / 9,835 lines | 13 files / 966 lines | 225 files / 47,062 lines |
+| Tests | 166 files / 38,204 lines | 0 files / 0 lines | 11 files / 1,429 lines | 177 files / 39,633 lines |
+
+By target phase:
+
+| Target phase | port | replace | retire | Total files |
+|---|---|---|---|---|
+| 2 | 89 | 10 | 5 | 104 |
+| 3 | 90 | 11 | 9 | 110 |
+| 4 | 91 | 5 | 0 | 96 |
+| 5 | 75 | 8 | 8 | 91 |
+| 8 | 0 | 0 | 1 | 1 |
+
+Test files marked `port` are a mix. Where a file has retire-worthy cases (React render
+mechanics, xterm or Monaco internals) the target column says which cases drop.
+
+## S8: drag out
+
+Question from the plan: the explorer, git sidebar and dock use `draggable` today;
+confirm each is an in-app drag and list any that must reach the OS.
+
+**Answer: no data drag in `apps/desktop/src` has to reach the OS. Every drag source
+that carries data is in-app. Nothing needs an OS drag source from GPUI.** One drag does
+reach the OS, but it carries no data: the title bar moves the window (source 5). I did not check what GPUI offers
+for OS drag sources or drops, so nothing below depends on it. The one OS-facing
+feature is the opposite direction (files dragged into the app), which is a drop target.
+
+Searched `draggable`, `startDragging`, `dataTransfer`, `onDragStart`, `setData`,
+`effectAllowed`, `onDragDropEvent`, `setPointerCapture`, `data-tauri-drag-region`, plus
+`features/dragDrop`, `internalPathDrag.ts` and `nativeDragDropCoordinator.ts`.
+`startDragging` has no hit in the source, but Tauri calls it for every
+`data-tauri-drag-region` (and the capability file grants it), see source 5.
+
+### Drag sources
+
+| # | Source | Where | Payload | Class |
+|---|---|---|---|---|
+| 1 | Explorer row, HTML5 `draggable` | `features/files/ExplorerRow.tsx:51`, `:64-65`; handler `features/files/ExplorerTree.tsx:281-285`; enabled at `:434` | One MIME type, `application/x-muxflow-internal-path+json`, written at `features/terminal/internalPathDrag.ts:61-68` | In-app |
+| 2 | Git sidebar change row, HTML5 `draggable` | `features/git/GitSidebar.tsx:216-221`, `:331-333` | Same writer, same MIME | In-app |
+| 3 | Tab, pane or agent row, pointer capture (no HTML5 drag) | `features/dragDrop/pointerDrag.ts:147` (`beginPointerDrag`, capture at `:180`); started from `features/workspaces/TabStrip.tsx:340`, `features/workspaces/WorkspaceSidebar.tsx:337`, `app/TerminalWorkspaceSurface.tsx:109` | In-process `DragPayload` | In-app |
+| 4 | Resize handles, pointer capture: dock divider, right panel width, sidebar width, agents section ratio, pane dividers | `app/WorkspaceDock.tsx:57`, `:83`, `features/shell/RightPanel.tsx:37`, `features/workspaces/WorkspaceSidebar.tsx:142-143` (all via `features/workspaces/transientDrag.ts:67`); pane dividers `app/App.tsx:1426-1430` | A number | In-app, a resize rather than a data drag |
+| 5 | Title bar, `data-tauri-drag-region` | `features/shell/TitleBar.tsx:172-199`, `features/workspaces/TabStrip.tsx:259` (when in the title bar); capability `core:window:allow-start-dragging` | Nothing | **OS-bound, but it moves the window and carries no data.** GPUI needs a window-move area or `start_window_move`; this is the S3 client-decoration work, not an S8 data drag |
+
+Why 1 and 2 cannot reach the OS even today:
+
+- The only `setData` call in the tree writes the private MIME type above
+  (`internalPathDrag.ts:68`). There is no `text/plain` or `text/uri-list`, so another
+  program receives nothing it can use.
+- The payload is a host path (`hostProfileId`, `serverIdentity`, `path`), usually a path
+  on a remote machine, not a local file. `readInternalPathDrop` rejects it unless the
+  target is a terminal on the same host (`internalPathDrag.ts:196-200`). The only
+  consumers are the terminal transfer surface and the dock drop zones, both in the
+  same window.
+
+`app/WorkspaceDock.tsx` is **not** a drag source, which corrects the plan's S8 row. It
+holds the dock drop zones that accept source 1 and 2 (`:177-195`), and the divider
+resize (source 4).
+
+Nothing deliberately writes a file path, URI, text or file into a `DataTransfer` for
+another application, and the explorer cannot drag a file out to Finder or the desktop.
+The styles set no `user-drag` rule, so WebKit's own default drags of links, images and
+selected text in the Markdown preview are not suppressed, but no behavior is built on
+them and the port does not need to reproduce them.
+
+### Drop targets (OS to app, inbound)
+
+These are the only places data crosses the OS boundary, and all of them are inbound.
+They matter for S3 (file drop in), not S8.
+
+| Where | What |
+|---|---|
+| `features/terminal/nativeDragDropCoordinator.ts:46` | Tauri `onDragDropEvent`: the only source of real local file paths, routed to registered targets by position |
+| `features/terminal/TerminalTransferSurface.tsx:386`, `:476-510` | Terminal pane: internal path drop, then `x-special/gnome-copied-files`, `text/uri-list`, `File` objects, then a single image |
+| `app/WorkspaceDock.tsx:157`, `:177-195` | Dock edge zones: internal path drops (HTML5), plus a native-lane claim that only recognizes our own drags (`:160`); files from the desktop are left to the terminal pane |
+
+### Consequences for the port
+
+- Sources 1 and 2 become in-process drag state. `internalPathDrag.ts` keeps its host
+  check and path validation. The MIME type, `DataTransfer`, the `gestureId` round trip
+  and the macOS native-claim bridge exist only because the DOM drag and Tauri's native
+  drop event are two lanes for one gesture. With one lane they can go.
+- Sources 3 and 4 already avoid HTML5 drag (`pointerDrag.ts` says why), so they port as
+  mouse capture.
+- GPUI must receive a file drop from the OS for the terminal and dock (S3, "file drop in").
+  That is the one capability to verify, and it is a drop, not a drag source.
+
+## Expected to retire: confirmed or overturned
+
+The plan lists seven items. Four are confirmed (one with a carry-over note) and three
+are overturned.
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| `TerminalRenderer` | **Overturned**: `replace`, not `retire` | `XtermRenderer` is replaced by `TerminalElement`, but the file also holds logic that must survive: `restoreDecision` (`:352`), `activatedTerminalUrl` (`:380`), pane grid reconciliation, resource recovery and `HistoryPageAnchor`. Its 42-case test file mixes xterm mechanics (retire) with these (port) |
+| `TerminalWriteScheduler` | **Overturned**: `replace`, not `retire` | Frame pacing and the 200 ms occlusion fallback retire, but the bounded queue, overflow-to-reseed exactly once, fenced and partial records, and the rendered-checkpoint callback order are the contract the engine's admission step must keep before it acks host credit |
+| `TerminalStateCache` | Confirmed `retire` | The serialize cache goes with `addon-serialize`. Carry-over: its `screenSeeded` and "reached top of history" flags (`TerminalStateCache.ts:22-45`) become plain pane state in the engine, and `PaneHistoryPager.ts:3` imports `CachedHistoryState` from it. `terminalCacheKey` is also used by `useActiveRoot.ts:5` and `useAppConnectionController.ts:29` |
+| `atlasFontSmoothing` | Confirmed `retire` | Workaround for the xterm WebGL glyph atlas |
+| `atlasStaleProbe` | Confirmed `retire` | Detects a stale shared WebGL atlas (`atlasModelInvalidation.test.ts` retires with it; `glyphWeight.test.ts` is `port`, because its cell-width cases outlive the atlas) |
+| `panePaintGate` | **Overturned**: `replace`, not `retire` | It is not a rendering workaround. It delays the Explorer root probe until the pane's first paint so a slow link carries the terminal first (`panePaintGate.ts:1-24`). The need survives; only the DOM-paint trigger changes. Consumer: `features/files/useActiveRoot.ts:4` |
+| `tests/performance/runtime/atlas-merge-repro` | Confirmed `retire` | `harness.js`, `index.html` and `run.mjs` reproduce the WebGL atlas merge. Outside `apps/desktop/src`, so it has no row here |
+
+Also marked `retire`, beyond the plan's list: `TerminalBytes`,
+`testing/RustPaneHost`, `fontGate`, `editorPreload`, `editorLayout`,
+`usePerHostMemo`, `useCommittedRef`. `monaco` and `markdownPreview` are not retired
+outright: `monaco.ts` carries the editor theme (`replace`), and `markdownPreview.ts`
+carries the selection hold (`?`, below). `main.tsx` is `replace` because its startup
+ordering stays.
+
+## Open questions (`?` rows)
+
+| File | Question |
+|---|---|
+| `features/files/LiveMarkdownEditor.tsx` | Depends on S4. Does the editor wrapper exist at all if Live Markdown lands on the Kit editor, or does it become the preview-beside-source fallback (decision 3) |
+| `features/files/liveMarkdown.ts` | Depends on S4. CodeMirror decoration extension; the pure helpers port, the hiding mechanism may not. Its tests (`liveMarkdown.test.ts`, `LiveMarkdownEditor.test.tsx`) follow the answer |
+| `features/files/liveTable.ts` | Depends on S4. Inline editable table; the cell-replace logic ports, the widget does not. `liveTable.test.ts` follows |
+| `features/shell/MarkdownPreview.test.tsx` | Preview keeps the user's selection while content updates, using DOM selection events. Does the Kit Markdown view need the same behavior |
+| `features/shell/appStateContract.test.ts` | Shared fixture `features/shell/persistedAppState.contract.json` (not a ledger file) must move with `app_state.rs` in Phase 1; which half of the test survives |
+| `features/terminal/rendererResizeOrdering.test.ts` | Does the engine serialize a queued history rewrite and a resize by construction, or does the ordering need its own test |
+| `features/terminal/rendererDrainBound.test.ts` | Does the engine keep a bounded hide drain with an honest checkpoint watermark? If hiding no longer serializes anything, three xterm-timed cases drop, but the frozen-pane contract still needs a test |
+| `features/files/markdownPreview.ts` | `useSanitizedMarkdown` holds a refresh while the user is selecting in the preview, and `CLICK_SLOP_PX` separates a link click from a selection drag. Does the Kit Markdown view need either (same question as `MarkdownPreview.test.tsx`) |
+
+## Not in the ledger
+
+Tracked files under `apps/desktop/src` that are not `.ts`, `.tsx` or `.css` have no row
+and need a decision in the phase that touches them: `features/shell/persistedAppState.contract.json`
+(see above) and `assets/fonts/` (six `.woff2` files and two license texts; the plan's
+font row covers them).
+
+## Files
+
+### `(src root)`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `main.tsx` | 73 | replace | 2 | GPUI app main: apply the remembered theme before first paint, report terminal colors to hosts at start and on appearance change, record the startup perf milestones; React, StrictMode and the font gate drop | open |
+| `monaco-languages.d.ts` | 7 | retire | 5 | Monaco language module typings | open |
+| `styles.css` | 2062 | replace | 2 | Rust theme and per-view styles (2,062 lines); its reduced-motion, forced-colors, narrow-width and 150 ms delayed-loading rules are behavior to carry | open |
+| `tokens.css` | 117 | replace | 2 | generated Rust palette from client-core generator | open |
+| `vite-env.d.ts` | 4 | retire | 9 | Vite client typings; the `__MUXFLOW_PERF_BUILD__` switch (set in `vite.config.ts`, not a row) needs a Rust equivalent in the perf work | open |
+
+### `app`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `app/App.integration.test.tsx` | 241 | port | 2 | app-level connect and restore journeys on GPUI test context | open |
+| `app/App.multiHost.test.tsx` | 593 | port | 2 | multi-host shell behavior | open |
+| `app/App.tsx` | 2129 | port | 2 | app root entity; split into per-domain entities | open |
+| `app/AppDialogLayer.tsx` | 122 | port | 2 | dialog layer over Kit dialogs | open |
+| `app/AppNoticeLayer.tsx` | 52 | port | 2 | notice and transfer-toast layer | open |
+| `app/AppRightPanel.tsx` | 89 | port | 2 | right panel host (Explorer, Git, Ports rails) | open |
+| `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | tests of TerminalWorkspaceSurface.tsx | open |
+| `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | workspace terminal surface entity | open |
+| `app/WorkspaceDock.test.tsx` | 131 | port | 2 | tests of WorkspaceDock.tsx | open |
+| `app/WorkspaceDock.tsx` | 232 | port | 2 | dock layout on Kit dock; also a drop target, not a drag source (see S8) | open |
+| `app/appRecovery.test.ts` | 43 | port | 2 | tests of appRecovery.ts | open |
+| `app/appRecovery.ts` | 51 | port | 2 | app_recovery reducer | open |
+| `app/bridgeFailureText.test.ts` | 13 | port | 2 | tests of bridgeFailureText.ts | open |
+| `app/bridgeFailureText.ts` | 12 | port | 2 | bridge failure text helper | open |
+| `app/editorChunkAbsence.test.tsx` | 225 | port | 5 | the chunk-not-fetched probe drops; the visible outcomes port: binary file, file over 10 MiB, disconnected tab, binary diff and oversized diff show their message instead of an editor, and a Markdown preview-only tab shows no editor | open |
+| `app/editorChunkBoundary.test.tsx` | 386 | port | 5 | chunk evaluation order and the 500 ms preview publish delay drop; port: dirty draft and its state survive a reconnect without an eager reread, a pending autosave survives the editor unmounting (preview switch), Live Markdown edits share one buffer with source, a live tab over the size limit falls back to source with live disabled | open |
+| `app/helperSetupFeedback.test.tsx` | 82 | port | 2 | helper setup feedback | open |
+| `app/linkQuality.test.ts` | 112 | port | 2 | tests of linkQuality.ts | open |
+| `app/linkQuality.ts` | 161 | port | 2 | link_quality network-fault notice logic | open |
+| `app/missingHelperRecovery.test.tsx` | 420 | port | 2 | missing helper recovery | open |
+| `app/multiHostBridges.test.tsx` | 412 | port | 2 | per-host bridge lifecycle | open |
+| `app/paneHoverFocus.test.tsx` | 160 | port | 3 | tests of paneHoverFocus.ts | open |
+| `app/paneHoverFocus.ts` | 91 | port | 3 | pane hover focus | open |
+| `app/paneRouting.test.ts` | 44 | port | 3 | tests of paneRouting.ts | open |
+| `app/paneRouting.ts` | 60 | port | 3 | pane_routing notification route resolution | open |
+| `app/postResyncReseed.test.tsx` | 93 | port | 3 | reseed after resync | open |
+| `app/reconnectNoticeDedupe.test.tsx` | 129 | port | 2 | reconnect notice dedupe | open |
+| `app/shellNavigationCoordinator.ts` | 165 | port | 4 | shell navigation coordinator | open |
+| `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | tests of terminalFileOpenRoute.ts | open |
+| `app/terminalFileOpenRoute.ts` | 27 | port | 3 | terminal file open route check | open |
+| `app/types.ts` | 68 | replace | 2 | Session, Window, Pane, ConnectionSpec, HostProfile come from protocol and desktop-core types | open |
+| `app/useAppAgentController.ts` | 162 | port | 4 | agent controller entity | open |
+| `app/useAppConnectionController.ts` | 944 | port | 2 | connection controller entity over desktop-core | open |
+| `app/useAppFileActions.test.tsx` | 196 | port | 5 | tests of useAppFileActions.ts | open |
+| `app/useAppFileActions.ts` | 145 | port | 5 | file actions entity (mutation, save panel, transfers) | open |
+| `app/useAppHostSettingsActions.ts` | 179 | port | 4 | host settings actions | open |
+| `app/useAppRecoveryController.test.tsx` | 112 | port | 2 | tests of useAppRecoveryController.ts | open |
+| `app/useAppRecoveryController.ts` | 104 | port | 2 | recovery controller entity | open |
+| `app/useAppShellChrome.test.tsx` | 91 | port | 2 | tests of useAppShellChrome.ts | open |
+| `app/useAppShellChrome.ts` | 59 | port | 2 | rail layout and status-to-notice lifecycle | open |
+| `app/useBulkTabClose.test.tsx` | 117 | port | 4 | tests of useBulkTabClose.ts | open |
+| `app/useBulkTabClose.ts` | 145 | port | 4 | bulk tab close | open |
+| `app/useClientResize.test.tsx` | 421 | port | 3 | tests of useClientResize.ts | open |
+| `app/useClientResize.ts` | 320 | port | 3 | client_resize; keeps tmux client size exact | open |
+| `app/useFocusHistoryNavigation.test.tsx` | 190 | port | 4 | tests of useFocusHistoryNavigation.ts | open |
+| `app/useFocusHistoryNavigation.ts` | 135 | port | 4 | focus history navigation | open |
+| `app/useMissingHelperRecovery.ts` | 176 | port | 2 | missing helper recovery flow | open |
+| `app/usePaneMoves.test.tsx` | 160 | port | 3 | tests of usePaneMoves.ts | open |
+| `app/usePaneMoves.ts` | 201 | port | 3 | pane moves via drop_rules | open |
+| `app/usePerHostMemo.test.tsx` | 61 | retire | 2 | tests usePerHostMemo.ts, which retires | open |
+| `app/usePerHostMemo.ts` | 56 | retire | 2 | React hook that memoizes a list per host; entities hold per-host state directly | open |
+| `app/useShellNavigation.test.tsx` | 1378 | port | 4 | tests of useShellNavigation.ts | open |
+| `app/useShellNavigation.ts` | 735 | port | 4 | shell navigation | open |
+| `app/useTerminalFileOpen.ts` | 108 | port | 3 | terminal file open | open |
+| `app/useTmuxActionPerformer.test.tsx` | 187 | port | 4 | tests of useTmuxActionPerformer.ts | open |
+| `app/useTmuxActionPerformer.ts` | 146 | port | 4 | tmux action performer | open |
+| `app/useWorkspaceCreate.test.tsx` | 142 | port | 4 | tests of useWorkspaceCreate.ts | open |
+| `app/useWorkspaceCreate.ts` | 69 | port | 4 | workspace create with host defaults | open |
+| `app/useWorkspaceDomainController.test.ts` | 27 | port | 4 | tests of useWorkspaceDomainController.ts | open |
+| `app/useWorkspaceDomainController.ts` | 99 | port | 4 | workspace domain controller | open |
+| `app/windowSelection.test.ts` | 79 | port | 4 | tests of windowSelection.ts | open |
+| `app/windowSelection.ts` | 97 | port | 4 | window selection and reorder | open |
+
+### `commands`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `commands/CommandPalette.tsx` | 126 | port | 2 | command palette view on Kit | open |
+| `commands/ConfirmationDialog.tsx` | 49 | replace | 2 | Kit dialog | open |
+| `commands/NewWorkspaceDialog.test.tsx` | 118 | port | 4 | tests of NewWorkspaceDialog.tsx | open |
+| `commands/NewWorkspaceDialog.tsx` | 113 | port | 4 | new workspace dialog | open |
+| `commands/ShortcutEditorDialog.test.tsx` | 43 | port | 4 | tests of ShortcutEditorDialog.tsx | open |
+| `commands/ShortcutEditorDialog.tsx` | 53 | port | 4 | shortcut editor dialog (Settings) | open |
+| `commands/TextInputDialog.tsx` | 34 | replace | 2 | Kit text-input dialog; Enter does not submit while composing | open |
+| `commands/destructiveConfirmation.test.ts` | 84 | port | 2 | tests of destructiveConfirmation.ts | open |
+| `commands/destructiveConfirmation.ts` | 45 | port | 2 | destructive confirmation state | open |
+| `commands/fuzzy.test.ts` | 43 | port | 2 | tests of fuzzy.ts | open |
+| `commands/fuzzy.ts` | 61 | port | 2 | fuzzy subsequence scorer | open |
+| `commands/registry.test.ts` | 524 | port | 2 | tests of registry.ts | open |
+| `commands/registry.ts` | 583 | port | 2 | command registry (64 commands) and keymaps | open |
+| `commands/rowCommands.test.ts` | 54 | port | 2 | tests of rowCommands.ts | open |
+| `commands/rowCommands.ts` | 99 | port | 2 | row commands for the palette | open |
+| `commands/shortcutGlyphs.test.ts` | 47 | port | 2 | tests of shortcutGlyphs.ts | open |
+| `commands/shortcutGlyphs.ts` | 106 | port | 2 | shortcut glyph rendering per platform | open |
+| `commands/useCommittedRef.ts` | 29 | retire | 2 | React stale-closure workaround; entities read live state | open |
+| `commands/useModalDialog.test.tsx` | 67 | port | 2 | focus trap and inert-background cases drop (Kit dialog); port: Escape during IME composition does not cancel a dialog, and a text dialog does not submit while its value is being composed (S5) | open |
+| `commands/useModalDialog.ts` | 92 | replace | 2 | Kit dialog focus trap, Escape (ignored during IME composition) and focus return | open |
+
+### `diagnostics`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `diagnostics/copyChordJournal.test.ts` | 44 | port | 3 | tests of copyChordJournal.ts | open |
+| `diagnostics/copyChordJournal.ts` | 37 | port | 3 | Ctrl+C copy-then-interrupt journal | open |
+| `diagnostics/incidents.test.ts` | 47 | port | 2 | behavior assertions move to the replacement of incidents.ts | open |
+| `diagnostics/incidents.ts` | 39 | replace | 2 | direct call into desktop-core incidents (renderer half of incidents.rs) | open |
+
+### `features/agents`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/agents/AgentHookWorkflow.tsx` | 165 | port | 4 | agent lifecycle actions | open |
+| `features/agents/AgentHostSetupDialog.tsx` | 77 | port | 4 | host setup prompt dialog | open |
+| `features/agents/AgentIdentity.test.tsx` | 75 | port | 4 | tests of AgentIdentity.tsx | open |
+| `features/agents/AgentIdentity.tsx` | 85 | port | 4 | adapter marks as embedded SVG | open |
+| `features/agents/HookReviewDialog.tsx` | 49 | port | 4 | hook review dialog | open |
+| `features/agents/adapterDefinitions.ts` | 6 | port | 4 | canonical adapter id | open |
+| `features/agents/agentLabels.test.ts` | 87 | port | 4 | tests of agentLabels.ts | open |
+| `features/agents/agentLabels.ts` | 1 | port | 4 | re-export of client-core label helpers; needs a Rust implementation shared via fixtures | open |
+| `features/agents/agentStatusSurfaces.test.tsx` | 279 | port | 4 | agent status across surfaces | open |
+| `features/agents/agentsList.test.ts` | 402 | port | 4 | tests of agentsList.ts | open |
+| `features/agents/agentsList.ts` | 331 | port | 4 | agents list ordering | open |
+| `features/agents/api.test.ts` | 118 | port | 4 | behavior assertions move to the replacement of api.ts | open |
+| `features/agents/api.ts` | 407 | replace | 4 | Tauri agent client becomes direct desktop-core calls | open |
+| `features/agents/catchUp.test.tsx` | 100 | port | 4 | agent catch-up after reconnect | open |
+| `features/agents/generation.test.ts` | 20 | port | 4 | tests of generation.ts | open |
+| `features/agents/generation.ts` | 29 | port | 4 | u64 agent generation compare | open |
+| `features/agents/hookWiring.test.ts` | 92 | port | 4 | tests of hookWiring.ts | open |
+| `features/agents/hookWiring.ts` | 88 | port | 4 | hook wiring status | open |
+| `features/agents/notifications.test.ts` | 117 | port | 4 | behavior assertions move to the replacement of notifications.ts | open |
+| `features/agents/notifications.ts` | 169 | replace | 4 | invoke wrapper and decode of native notifications; desktop-core notifications kept | open |
+| `features/agents/runtimeMemory.test.ts` | 23 | port | 4 | tests of runtimeMemory.ts | open |
+| `features/agents/runtimeMemory.ts` | 69 | port | 4 | bounded LRU reconnect memory | open |
+| `features/agents/selectors.test.ts` | 54 | port | 4 | tests of selectors.ts | open |
+| `features/agents/selectors.ts` | 97 | port | 4 | agent selectors and rollups | open |
+| `features/agents/sound.test.ts` | 23 | port | 4 | behavior assertions move to the replacement of sound.ts | open |
+| `features/agents/sound.ts` | 70 | replace | 4 | AudioContext cues become rodio; prefs move to app_state (Phase 1 step 4) | open |
+| `features/agents/state.test.ts` | 233 | port | 4 | tests of state.ts | open |
+| `features/agents/state.ts` | 153 | port | 4 | agent store reducer | open |
+| `features/agents/testFixtures.ts` | 20 | port | 4 | agent test fixture helper | open |
+| `features/agents/types.ts` | 293 | port | 4 | agent record types | open |
+| `features/agents/useAgentHostSetup.test.tsx` | 624 | port | 4 | tests of useAgentHostSetup.tsx | open |
+| `features/agents/useAgentHostSetup.tsx` | 448 | port | 4 | host setup flow entity | open |
+| `features/agents/useAgentNotificationActivation.test.tsx` | 115 | port | 4 | tests of useAgentNotificationActivation.ts | open |
+| `features/agents/useAgentNotificationActivation.ts` | 146 | port | 4 | notification activation routing | open |
+| `features/agents/useAgentRuntime.test.tsx` | 505 | port | 4 | tests of useAgentRuntime.ts | open |
+| `features/agents/useAgentRuntime.ts` | 378 | port | 4 | agent runtime entity | open |
+| `features/agents/useRecentIdleClock.test.tsx` | 85 | port | 4 | tests of useRecentIdleClock.ts | open |
+| `features/agents/useRecentIdleClock.ts` | 33 | port | 4 | timer for Recent to Idle transition | open |
+
+### `features/automations`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/automations/AutomationEditor.tsx` | 265 | port | 4 | automation editor view | open |
+| `features/automations/AutomationsPanel.test.tsx` | 317 | port | 4 | tests of AutomationsPanel.tsx | open |
+| `features/automations/AutomationsPanel.tsx` | 342 | port | 4 | automations panel view | open |
+| `features/automations/api.ts` | 46 | replace | 4 | invoke wrapper becomes direct desktop-core calls | open |
+| `features/automations/cronText.test.ts` | 35 | port | 4 | tests of cronText.ts | open |
+| `features/automations/cronText.ts` | 92 | port | 4 | cron text formatter | open |
+| `features/automations/types.ts` | 60 | port | 4 | automation types | open |
+
+### `features/dragDrop`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/dragDrop/DragGhost.tsx` | 11 | port | 4 | drag ghost view | open |
+| `features/dragDrop/dropRules.test.ts` | 163 | port | 4 | tests of dropRules.ts | open |
+| `features/dragDrop/dropRules.ts` | 158 | port | 4 | drop planning rules | open |
+| `features/dragDrop/pointerDrag.test.ts` | 190 | port | 4 | tests of pointerDrag.ts | open |
+| `features/dragDrop/pointerDrag.ts` | 277 | port | 4 | pointer drag state; mouse capture instead of DOM pointer capture | open |
+
+### `features/files`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/files/DownloadActions.tsx` | 28 | port | 5 | download completion actions | open |
+| `features/files/DownloadTransfers.test.tsx` | 109 | port | 5 | tests of DownloadTransfers.tsx | open |
+| `features/files/DownloadTransfers.tsx` | 90 | port | 5 | downloads list view | open |
+| `features/files/ExplorerMutationDialog.test.tsx` | 32 | port | 5 | tests of ExplorerMutationDialog.tsx | open |
+| `features/files/ExplorerMutationDialog.tsx` | 148 | port | 5 | explorer mutation dialogs | open |
+| `features/files/ExplorerRow.tsx` | 131 | port | 5 | explorer row; has an in-app drag source (see S8) | open |
+| `features/files/ExplorerTree.test.tsx` | 760 | port | 5 | tests of ExplorerTree.tsx | open |
+| `features/files/ExplorerTree.tsx` | 624 | port | 5 | explorer tree view; has an in-app drag source (see S8) | open |
+| `features/files/FileEditor.tsx` | 57 | replace | 5 | Kit code editor wrapper replaces the Monaco wrapper | open |
+| `features/files/LiveMarkdownEditor.test.tsx` | 117 | port | 7 | tests of LiveMarkdownEditor.tsx | open |
+| `features/files/LiveMarkdownEditor.tsx` | 154 | port | 7 | ? depends on S4: does Live Markdown fit the Kit editor or gpui-base text | open |
+| `features/files/api.test.ts` | 506 | port | 5 | behavior assertions move to the replacement of api.ts | open |
+| `features/files/api.ts` | 647 | replace | 5 | Tauri file client becomes direct desktop-core calls; its request validation moves with it | open |
+| `features/files/autosave.test.ts` | 104 | port | 5 | tests of autosave.ts | open |
+| `features/files/autosave.ts` | 108 | port | 5 | autosave controller | open |
+| `features/files/directoryCache.test.ts` | 57 | port | 5 | tests of directoryCache.ts | open |
+| `features/files/directoryCache.ts` | 103 | port | 5 | explorer directory cache | open |
+| `features/files/directoryRequests.test.ts` | 82 | port | 5 | tests of directoryRequests.ts | open |
+| `features/files/directoryRequests.ts` | 119 | port | 5 | directory request coalescing | open |
+| `features/files/directoryState.test.ts` | 223 | port | 5 | tests of directoryState.ts | open |
+| `features/files/directoryState.ts` | 205 | port | 5 | directory state model | open |
+| `features/files/downloadFlow.test.ts` | 78 | port | 5 | tests of downloadFlow.ts | open |
+| `features/files/downloadFlow.ts` | 73 | port | 5 | download flow | open |
+| `features/files/downloadStatus.test.ts` | 67 | port | 5 | tests of downloadStatus.ts | open |
+| `features/files/downloadStatus.ts` | 37 | port | 5 | download status | open |
+| `features/files/editorFlushRegistry.test.ts` | 27 | port | 5 | tests of editorFlushRegistry.ts | open |
+| `features/files/editorFlushRegistry.ts` | 26 | port | 5 | editor flush registry | open |
+| `features/files/editorLanguage.test.ts` | 31 | port | 5 | tests of editorLanguage.ts | open |
+| `features/files/editorLanguage.ts` | 34 | port | 5 | extension to Tree-sitter grammar table | open |
+| `features/files/editorLayout.test.tsx` | 118 | retire | 5 | tests editorLayout.ts, which retires | open |
+| `features/files/editorLayout.ts` | 99 | retire | 5 | forces Monaco to re-measure its container; no equivalent layout step in GPUI | open |
+| `features/files/editorText.ts` | 18 | replace | 5 | Monaco font options; becomes editor font settings from the theme | open |
+| `features/files/explorerWindow.test.ts` | 158 | port | 5 | tests of explorerWindow.ts | open |
+| `features/files/explorerWindow.ts` | 120 | port | 5 | explorer virtual window (4,096 entries gate) | open |
+| `features/files/fileIcons.test.ts` | 58 | port | 5 | tests of fileIcons.ts | open |
+| `features/files/fileIcons.ts` | 91 | port | 5 | file icon mapping | open |
+| `features/files/ignoredPaths.test.ts` | 76 | port | 5 | tests of ignoredPaths.ts | open |
+| `features/files/ignoredPaths.ts` | 58 | port | 5 | gitignore toggle model | open |
+| `features/files/listingModel.test.ts` | 165 | port | 5 | tests of listingModel.ts | open |
+| `features/files/listingModel.ts` | 173 | port | 5 | listing model | open |
+| `features/files/liveMarkdown.test.ts` | 776 | port | 7 | tests of liveMarkdown.ts | open |
+| `features/files/liveMarkdown.ts` | 1176 | port | 7 | ? depends on S4: CodeMirror decoration extension; pure helpers (block markup, list indent, link targets) port, hiding mechanism does not | open |
+| `features/files/liveTable.test.ts` | 159 | port | 7 | tests of liveTable.ts | open |
+| `features/files/liveTable.ts` | 535 | port | 7 | ? depends on S4: inline editable table; cell-replace logic ports, widget mechanism does not | open |
+| `features/files/markdown.test.ts` | 91 | port | 5 | keep markdownFilePath cases; drop the sanitizer cases with DOMPurify | open |
+| `features/files/markdown.ts` | 32 | port | 5 | markdownFilePath link resolution ports; renderSafeMarkdown and renderSafeSvg retire with DOMPurify | open |
+| `features/files/markdownPreview.test.ts` | 66 | retire | 5 | tests the sanitize debounce and idle scheduling, which retire with DOMPurify | open |
+| `features/files/markdownPreview.ts` | 164 | port | 5 | ? the debounced DOMPurify pass drops (Kit renders natively); `useSanitizedMarkdown`'s selection hold and `CLICK_SLOP_PX` (used by AppTabSurface) port only if the Kit Markdown view needs them, see MarkdownPreview.test.tsx | open |
+| `features/files/monaco.ts` | 152 | replace | 5 | editor theme from the generated palette (syntax colors from the terminal ANSI palette, comments dim, selection, cursor and diff washes, light and dark); Monaco workers, loader and font remeasure drop (open decision 2) | open |
+| `features/files/monarch.test.ts` | 93 | port | 5 | tests of monarch.ts | open |
+| `features/files/monarch.ts` | 109 | port | 5 | Python and TypeScript highlight additions become Tree-sitter highlight queries | open |
+| `features/files/saveStatus.test.tsx` | 229 | port | 5 | tests of saveStatus.ts | open |
+| `features/files/saveStatus.ts` | 51 | port | 5 | calm save status projection | open |
+| `features/files/searchCount.test.ts` | 79 | port | 5 | tests of searchCount.ts | open |
+| `features/files/searchCount.ts` | 85 | port | 5 | search match count with limit | open |
+| `features/files/types.ts` | 280 | port | 5 | file types, limits, wire shapes | open |
+| `features/files/useActiveRoot.ts` | 280 | port | 5 | active root resolution; waits on pane paint gate | open |
+| `features/files/useConnectionTransfers.ts` | 85 | port | 5 | per-connection download transfers | open |
+| `features/files/useOpenFileTab.ts` | 504 | port | 5 | open file tab flow | open |
+| `features/files/useWorkspaceFiles.test.tsx` | 1402 | port | 5 | tests of useWorkspaceFiles.ts | open |
+| `features/files/useWorkspaceFiles.ts` | 908 | port | 5 | workspace files controller | open |
+| `features/files/watchLeases.test.ts` | 208 | port | 5 | tests of watchLeases.ts | open |
+| `features/files/watchLeases.ts` | 181 | port | 5 | watch leases | open |
+| `features/files/webkitWidgetBuffers.test.ts` | 43 | retire | 5 | CodeMirror widget buffer behavior in WebKit | open |
+| `features/files/wire.ts` | 135 | port | 5 | file wire decode and transfer state validation | open |
+
+### `features/git`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/git/GitCommitForm.tsx` | 166 | port | 5 | commit form view | open |
+| `features/git/GitDiffEditor.test.tsx` | 39 | retire | 5 | asserts Monaco diff option values through a mocked wrapper; wrap and alignment are covered by the Phase 5 diff exit gate | open |
+| `features/git/GitDiffEditor.tsx` | 60 | replace | 5 | Kit Diff (read-only, virtualized) with a patch from similar | open |
+| `features/git/GitDiffSurface.test.tsx` | 350 | port | 5 | tests of GitDiffSurface.tsx | open |
+| `features/git/GitDiffSurface.tsx` | 237 | port | 5 | diff surface with wrapped aligned columns | open |
+| `features/git/GitSidebar.test.tsx` | 588 | port | 5 | tests of GitSidebar.tsx | open |
+| `features/git/GitSidebar.tsx` | 450 | port | 5 | git sidebar; has an in-app drag source (see S8) | open |
+| `features/git/api.test.ts` | 169 | port | 5 | behavior assertions move to the replacement of api.ts | open |
+| `features/git/api.ts` | 559 | replace | 5 | Tauri git client becomes direct desktop-core calls | open |
+| `features/git/repositoryStore.test.ts` | 306 | port | 5 | tests of repositoryStore.ts | open |
+| `features/git/repositoryStore.ts` | 470 | port | 5 | repository store | open |
+| `features/git/types.ts` | 144 | port | 5 | git types | open |
+| `features/git/useSharedGitDiff.ts` | 268 | port | 5 | shared git diff controller | open |
+| `features/git/useWorkspaceGit.test.tsx` | 163 | port | 5 | tests of useWorkspaceGit.ts | open |
+| `features/git/useWorkspaceGit.ts` | 78 | port | 5 | workspace git controller | open |
+
+### `features/ports`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/ports/PortsPanel.test.tsx` | 118 | port | 4 | tests of PortsPanel.tsx | open |
+| `features/ports/PortsPanel.tsx` | 162 | port | 4 | ports panel view | open |
+| `features/ports/api.ts` | 38 | replace | 4 | invoke wrapper becomes direct desktop-core calls; parsePort ports | open |
+| `features/ports/usePortForwards.ts` | 37 | port | 4 | port forwards entity | open |
+
+### `features/shell`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/shell/AppTabSurface.test.tsx` | 644 | port | 4 | tests of AppTabSurface.tsx | open |
+| `features/shell/AppTabSurface.tsx` | 366 | port | 4 | app tab surface (document, diff, preview routing) | open |
+| `features/shell/DisconnectedStrip.tsx` | 75 | port | 2 | disconnected strip notice | open |
+| `features/shell/MarkdownPreview.test.tsx` | 346 | port | 5 | ? preview keeps selection while content updates; DOM selection mechanics may not apply, keep the behavior | open |
+| `features/shell/RightPanel.tsx` | 120 | port | 2 | right panel container with resizable width | open |
+| `features/shell/SettingsDialog.tsx` | 611 | port | 4 | settings dialog | open |
+| `features/shell/TitleBar.test.tsx` | 57 | port | 2 | tests of TitleBar.tsx | open |
+| `features/shell/TitleBar.tsx` | 206 | port | 2 | title bar on GPUI client decorations | open |
+| `features/shell/appStateContract.test.ts` | 334 | port | 4 | ? TS half of the shared app-state fixture retires (Rust half stays in app_state.rs); normalize and clamp cases port | open |
+| `features/shell/appStatePersistence.test.ts` | 69 | port | 2 | tests of appStatePersistence.ts | open |
+| `features/shell/appStatePersistence.ts` | 65 | port | 2 | serialized app_state saver with close barrier | open |
+| `features/shell/focusHistory.test.ts` | 98 | port | 4 | tests of focusHistory.ts | open |
+| `features/shell/focusHistory.ts` | 125 | port | 4 | focus history | open |
+| `features/shell/helperUpgrade.test.ts` | 78 | port | 2 | tests of helperUpgrade.ts | open |
+| `features/shell/helperUpgrade.ts` | 89 | port | 2 | helper upgrade decision | open |
+| `features/shell/hostLatency.test.ts` | 39 | port | 2 | tests of hostLatency.ts | open |
+| `features/shell/hostLatency.ts` | 72 | port | 2 | host latency readout | open |
+| `features/shell/hostProfiles.test.ts` | 30 | port | 2 | tests of hostProfiles.ts | open |
+| `features/shell/hostProfiles.ts` | 31 | port | 2 | host letter helper | open |
+| `features/shell/hostScope.test.ts` | 43 | port | 2 | tests of hostScope.ts | open |
+| `features/shell/hostScope.ts` | 47 | port | 2 | host scope token | open |
+| `features/shell/model.test.ts` | 806 | port | 4 | tests of model.ts | open |
+| `features/shell/model.ts` | 1018 | port | 4 | shell model (tabs, workspaces, layout) | open |
+| `features/shell/panelExtensions.ts` | 48 | port | 4 | panel extension host interface | open |
+| `features/shell/responsiveShell.test.ts` | 86 | port | 2 | tests of responsiveShell.ts | open |
+| `features/shell/responsiveShell.ts` | 67 | port | 2 | responsive rail layout | open |
+| `features/shell/shellComponents.test.tsx` | 2301 | port | 4 | shell component behavior; React render mechanics cases dropped while porting | open |
+| `features/shell/statusNotice.test.ts` | 94 | port | 2 | tests of statusNotice.ts | open |
+| `features/shell/statusNotice.ts` | 96 | port | 2 | status notice policy | open |
+| `features/shell/types.ts` | 458 | port | 4 | shell and persisted app-state types with normalization | open |
+| `features/shell/useAppearance.ts` | 33 | port | 2 | applies saved theme once state is ready | open |
+| `features/shell/useDesktopResumeRecovery.test.ts` | 81 | port | 2 | tests of useDesktopResumeRecovery.ts | open |
+| `features/shell/useDesktopResumeRecovery.ts` | 151 | port | 2 | resume-from-sleep recovery | open |
+| `features/shell/usePersistedAppState.ts` | 123 | port | 2 | persisted app state loader | open |
+| `features/shell/useShellCommands.test.tsx` | 384 | port | 2 | tests of useShellCommands.ts | open |
+| `features/shell/useShellCommands.ts` | 443 | port | 2 | shell command wiring | open |
+| `features/shell/useUpdateCheck.test.ts` | 95 | port | 2 | tests of useUpdateCheck.ts | open |
+| `features/shell/useUpdateCheck.ts` | 97 | port | 2 | update check notice over kept update_check.rs | open |
+| `features/shell/useWindowChrome.test.tsx` | 85 | port | 2 | behavior assertions move to the replacement of useWindowChrome.ts | open |
+| `features/shell/useWindowChrome.ts` | 81 | replace | 2 | Linux window chrome mode from linux_window.rs becomes GPUI client decorations | open |
+| `features/shell/windowGeometry.test.ts` | 40 | port | 2 | tests of windowGeometry.ts | open |
+| `features/shell/windowGeometry.ts` | 85 | port | 2 | window geometry restore | open |
+
+### `features/terminal`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/terminal/DeferredTerminalOutputQueue.test.ts` | 29 | port | 3 | tests of DeferredTerminalOutputQueue.ts | open |
+| `features/terminal/DeferredTerminalOutputQueue.ts` | 57 | port | 3 | deferred output queue in terminal-engine | open |
+| `features/terminal/PaneDegradedWatchdog.test.ts` | 102 | port | 3 | tests of PaneDegradedWatchdog.ts | open |
+| `features/terminal/PaneDegradedWatchdog.ts` | 185 | port | 3 | pane degraded watchdog in terminal-engine | open |
+| `features/terminal/PaneHistoryPager.test.ts` | 358 | port | 3 | tests of PaneHistoryPager.ts | open |
+| `features/terminal/PaneHistoryPager.ts` | 500 | port | 3 | history pager in terminal-engine | open |
+| `features/terminal/PaneRecovery.ts` | 35 | port | 3 | pane recovery plan | open |
+| `features/terminal/PaneRevealState.test.ts` | 161 | port | 3 | tests of PaneRevealState.ts | open |
+| `features/terminal/PaneRevealState.ts` | 154 | port | 3 | pane reveal state | open |
+| `features/terminal/TerminalBytes.ts` | 18 | retire | 3 | branded owned-bytes type for a JS copy boundary; Rust ownership makes it a language fact | open |
+| `features/terminal/TerminalEventHub.test.ts` | 812 | port | 3 | tests of TerminalEventHub.ts | open |
+| `features/terminal/TerminalEventHub.ts` | 844 | port | 3 | TerminalEventHub in terminal-engine | open |
+| `features/terminal/TerminalGenerationWatermark.ts` | 40 | port | 3 | generation watermark | open |
+| `features/terminal/TerminalPane.test.tsx` | 1810 | port | 3 | tests of TerminalPane.tsx | open |
+| `features/terminal/TerminalPane.tsx` | 1621 | port | 3 | terminal view entity and TerminalElement host | open |
+| `features/terminal/TerminalPaneHostHandshake.test.tsx` | 810 | port | 3 | host handshake reveal | open |
+| `features/terminal/TerminalReadingState.test.ts` | 71 | port | 3 | tests of TerminalReadingState.ts | open |
+| `features/terminal/TerminalReadingState.ts` | 57 | port | 3 | reading state | open |
+| `features/terminal/TerminalRenderer.test.ts` | 915 | port | 3 | split: scheduler, xterm callbacks, search addon, paste interception retire; restoreDecision, pane grid reconciliation, resource recovery, link activation port | open |
+| `features/terminal/TerminalRenderer.ts` | 1453 | replace | 3 | XtermRenderer becomes TerminalElement; restoreDecision, pane grid reconciliation, resource recovery and link activation must be carried over | open |
+| `features/terminal/TerminalStateCache.test.ts` | 140 | retire | 3 | tests TerminalStateCache.ts, which retires | open |
+| `features/terminal/TerminalStateCache.ts` | 191 | retire | 3 | xterm serialize cache; hidden panes keep their grids in memory, which needs a byte bound like today's 64 entries and 24 MiB (`terminalCacheKey` and the `screenSeeded`, `historyExhausted` and `historyNextPageLines` flags carry over as pane state) | open |
+| `features/terminal/TerminalTransferSurface.test.tsx` | 906 | port | 3 | tests of TerminalTransferSurface.tsx | open |
+| `features/terminal/TerminalTransferSurface.tsx` | 638 | port | 3 | transfer surface (paste, file and image drop in, upload) | open |
+| `features/terminal/TerminalWriteScheduler.test.ts` | 499 | port | 3 | behavior assertions move to the replacement of TerminalWriteScheduler.ts | open |
+| `features/terminal/TerminalWriteScheduler.ts` | 613 | replace | 3 | frame pacing retires; bounded queue, overflow-to-reseed and rendered-checkpoint contract move into terminal-engine admission | open |
+| `features/terminal/accessibilityPreference.ts` | 25 | retire | 3 | owner exception: the screen-reader terminal mirror and its setting are not built | open |
+| `features/terminal/api.test.ts` | 748 | port | 3 | behavior assertions move to the replacement of api.ts | open |
+| `features/terminal/api.ts` | 1004 | replace | 3 | 27 invokes and binary event decode become the in-process desktop-core bridge | open |
+| `features/terminal/atlasFontSmoothing.ts` | 157 | retire | 3 | workaround for the xterm WebGL glyph atlas font smoothing | open |
+| `features/terminal/atlasModelInvalidation.test.ts` | 147 | retire | 3 | tests the shared xterm WebGL atlas model invalidation | open |
+| `features/terminal/atlasStaleProbe.test.ts` | 180 | retire | 3 | tests atlasStaleProbe.ts, which retires | open |
+| `features/terminal/atlasStaleProbe.ts` | 176 | retire | 3 | detects a stale xterm WebGL shared atlas | open |
+| `features/terminal/cellMetrics.ts` | 213 | replace | 3 | reads xterm render-service cell size; TerminalElement measures shaped font cells, snapping rules carry over | open |
+| `features/terminal/clientSize.test.ts` | 208 | port | 3 | tests of clientSize.ts | open |
+| `features/terminal/clientSize.ts` | 112 | port | 3 | client size from surface and topology | open |
+| `features/terminal/echoLagProbe.test.ts` | 334 | port | 3 | tests of echoLagProbe.ts | open |
+| `features/terminal/echoLagProbe.ts` | 272 | port | 3 | echo lag probe (the S1 measurement method) | open |
+| `features/terminal/glyphWeight.test.ts` | 231 | port | 3 | atlas canvas hook, xterm option tripwires and bundle-regex cases drop; port the cell-width snapping cases (13 px face is an 8 CSS px cell at every ratio, never narrower than the face, under one device pixel wider) with cellMetrics | open |
+| `features/terminal/gridMismatchProbe.test.ts` | 165 | port | 3 | tests of gridMismatchProbe.ts | open |
+| `features/terminal/gridMismatchProbe.ts` | 160 | port | 3 | grid mismatch probe | open |
+| `features/terminal/historyPage.test.ts` | 139 | port | 3 | tests of historyPage.ts | open |
+| `features/terminal/historyPage.ts` | 170 | port | 3 | history page composition and autowrap contract (S9) | open |
+| `features/terminal/hostColors.ts` | 17 | port | 3 | TerminalColors report to host | open |
+| `features/terminal/inputLatencyStats.test.ts` | 159 | port | 3 | tests of inputLatencyStats.ts | open |
+| `features/terminal/inputLatencyStats.ts` | 192 | port | 3 | input latency histograms | open |
+| `features/terminal/internalPathDrag.test.ts` | 168 | port | 3 | tests of internalPathDrag.ts | open |
+| `features/terminal/internalPathDrag.ts` | 213 | port | 3 | in-app path drag state and validation; DataTransfer MIME and native-lane bridging retire | open |
+| `features/terminal/layout.test.ts` | 66 | port | 3 | tests of layout.ts | open |
+| `features/terminal/layout.ts` | 67 | port | 3 | pane geometry and zoom | open |
+| `features/terminal/measureBox.test.ts` | 174 | port | 3 | xterm internal-field canary and FitAddon comparison drop; port the `deviceSafeLineHeight` sweep (row whole in both pixel spaces, at most 1 CSS px of pitch lost) and the `cellsForBox` chrome arithmetic (123 by 47 case) that size the tmux client | open |
+| `features/terminal/nativeDragDropCoordinator.ts` | 112 | replace | 3 | Tauri webview drag-drop router becomes GPUI file-drop events; DOM plus native dual lane disappears | open |
+| `features/terminal/openExternalUrl.test.ts` | 31 | port | 3 | behavior assertions move to the replacement of openExternalUrl.ts | open |
+| `features/terminal/openExternalUrl.ts` | 19 | replace | 3 | direct call into desktop-core external_links | open |
+| `features/terminal/osc52Clipboard.ts` | 52 | port | 3 | OSC 52 write decode with bounds | open |
+| `features/terminal/paintTailProbe.test.ts` | 384 | retire | 3 | tests the xterm write-backlog fingerprints of paintTailProbe.ts; the replacement gets its own tests | open |
+| `features/terminal/paintTailProbe.ts` | 368 | replace | 3 | keep the main-thread block and stopped frame clock fingerprints and the `render.paintSlow` incident in the GPUI paint loop; the xterm write-backlog fingerprints go | open |
+| `features/terminal/panePaintGate.test.ts` | 118 | port | 3 | behavior assertions move to the replacement of panePaintGate.ts | open |
+| `features/terminal/panePaintGate.ts` | 127 | replace | 3 | app-level ordering gate: keep the idea (explorer waits for the pane's first paint), replace the DOM-paint trigger | open |
+| `features/terminal/panePaintOrdering.test.tsx` | 274 | port | 3 | explorer ordered behind pane paint | open |
+| `features/terminal/rendererDrainBound.test.ts` | 129 | port | 3 | ? xterm write callbacks drop; if the engine keeps a hide drain, port: a drain that never completes is answered by a bound with only the generation actually applied, a late completion cannot advance the published watermark, a sealed writer refuses writes and says so (frozen-pane failure) | open |
+| `features/terminal/rendererResizeOrdering.test.ts` | 140 | port | 3 | ? ordering of queued history rewrite versus resize; does the engine serialize these by construction | open |
+| `features/terminal/revealPayloadBudget.test.ts` | 112 | port | 3 | reveal payload cost over the Rust contract; reuses tmux-control directly | open |
+| `features/terminal/revealRetry.test.ts` | 91 | port | 3 | tests of revealRetry.ts | open |
+| `features/terminal/revealRetry.ts` | 123 | port | 3 | reveal retry classification | open |
+| `features/terminal/staleRestoreSilence.test.ts` | 533 | port | 3 | restore admission and splice refusal decisions | open |
+| `features/terminal/terminalClientLifecycle.test.ts` | 162 | port | 3 | native client ownership | open |
+| `features/terminal/terminalInputPolicy.test.ts` | 327 | port | 3 | tests of terminalInputPolicy.ts | open |
+| `features/terminal/terminalInputPolicy.ts` | 117 | port | 3 | terminal input translation | open |
+| `features/terminal/terminalLinkActivation.test.ts` | 13 | port | 3 | tests of terminalLinkActivation.ts | open |
+| `features/terminal/terminalLinkActivation.ts` | 9 | port | 3 | link activation modifier | open |
+| `features/terminal/terminalPanePerf.test.ts` | 154 | port | 3 | tests of terminalPanePerf.ts | open |
+| `features/terminal/terminalPanePerf.ts` | 202 | port | 3 | per-pane perf accounting | open |
+| `features/terminal/terminalSeedOverlay.test.ts` | 59 | port | 3 | re-assert on the alacritty_terminal grid the seed overlay's erase cases: attributed erase fills through the right edge, erase keeps soft-wrap metadata, adjacent blank spans keep their own backgrounds (the S9 lane does not assert them by name) | open |
+| `features/terminal/terminalTransferApi.test.ts` | 231 | port | 3 | behavior assertions move to the replacement of terminalTransferApi.ts | open |
+| `features/terminal/terminalTransferApi.ts` | 346 | replace | 3 | Tauri transfer client becomes direct desktop-core calls | open |
+| `features/terminal/terminalTransferRegistry.test.tsx` | 154 | port | 3 | tests of terminalTransferRegistry.ts | open |
+| `features/terminal/terminalTransferRegistry.ts` | 101 | port | 3 | transfer registry | open |
+| `features/terminal/terminalTransfers.test.ts` | 208 | port | 3 | tests of terminalTransfers.ts | open |
+| `features/terminal/terminalTransfers.ts` | 367 | port | 3 | path preparation and shell escaping | open |
+| `features/terminal/terminalViewport.ts` | 66 | port | 3 | viewport anchor across reflow | open |
+| `features/terminal/theme.test.ts` | 107 | port | 3 | behavior assertions move to the replacement of theme.ts | open |
+| `features/terminal/theme.ts` | 223 | replace | 3 | reads --term-* CSS properties; becomes the Rust theme and generated palette | open |
+| `features/terminal/timeBound.test.ts` | 63 | port | 3 | tests of timeBound.ts | open |
+| `features/terminal/timeBound.ts` | 63 | port | 3 | settleWithin time bound | open |
+| `features/terminal/topologyNotification.test.ts` | 29 | port | 3 | topology notification decode | open |
+| `features/terminal/viewportPreservation.test.ts` | 79 | port | 3 | viewport anchor through reflow, asserted on the engine grid | open |
+
+### `features/terminal/testing`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/terminal/testing/RustPaneHost.ts` | 72 | retire | 3 | TS shim that spawns the tmux-control terminal_contract example; Rust tests call it in-process | open |
+
+### `features/tmux`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/tmux/actionReconciliation.test.ts` | 122 | port | 4 | tests of actionReconciliation.ts | open |
+| `features/tmux/actionReconciliation.ts` | 145 | port | 4 | tmux action reconciliation | open |
+| `features/tmux/actions.test.ts` | 116 | port | 4 | tests of actions.ts | open |
+| `features/tmux/actions.ts` | 195 | port | 4 | tmux actions | open |
+
+### `features/transfers`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/transfers/transferState.test.ts` | 69 | port | 4 | tests of transferState.ts | open |
+| `features/transfers/transferState.ts` | 190 | port | 4 | transfer state model | open |
+
+### `features/workspaces`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `features/workspaces/TabStrip.tsx` | 548 | port | 2 | tab strip on Kit tab; pointer-drag source, in-app | open |
+| `features/workspaces/WorkspaceSidebar.hosts.test.tsx` | 234 | port | 2 | multi-host sidebar rows | open |
+| `features/workspaces/WorkspaceSidebar.tsx` | 973 | port | 2 | workspace sidebar on Kit sidebar; pointer-drag source, in-app | open |
+| `features/workspaces/WorkspaceSwitcher.test.tsx` | 158 | port | 2 | tests of WorkspaceSwitcher.tsx | open |
+| `features/workspaces/WorkspaceSwitcher.tsx` | 144 | port | 2 | workspace switcher | open |
+| `features/workspaces/mergedWorkspaceRows.test.ts` | 109 | port | 4 | tests of mergedWorkspaceRows.ts | open |
+| `features/workspaces/mergedWorkspaceRows.ts` | 103 | port | 4 | merged multi-host workspace rows | open |
+| `features/workspaces/quickOpen.ts` | 53 | port | 2 | Quick Open items | open |
+| `features/workspaces/transientDrag.test.tsx` | 101 | port | 2 | tests of transientDrag.ts | open |
+| `features/workspaces/transientDrag.ts` | 71 | port | 2 | captured-pointer divider drag | open |
+| `features/workspaces/useQuickOpenSearch.ts` | 48 | port | 2 | Quick Open cancellable search | open |
+| `features/workspaces/workspaceRows.test.ts` | 223 | port | 4 | tests of workspaceRows.ts | open |
+| `features/workspaces/workspaceRows.ts` | 215 | port | 4 | workspace rows | open |
+
+### `perf`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `perf/bootstrap.ts` | 34 | replace | 3 | perf probe enablement becomes a direct desktop-core query | open |
+| `perf/operations.ts` | 27 | port | 3 | operation counters | open |
+| `perf/paintTicket.test.ts` | 20 | port | 3 | tests of paintTicket.ts | open |
+| `perf/paintTicket.ts` | 61 | port | 3 | paint ticket | open |
+| `perf/probe.test.ts` | 261 | port | 3 | tests of probe.ts | open |
+| `perf/probe.ts` | 571 | port | 3 | perf probe keeping the perf-log schema | open |
+| `perf/surfacePaint.test.ts` | 101 | port | 5 | the editor-generation case drops; port the paint-reporter cases: a superseded load keeps the successor's ticket, abandon needs a fresh commit, a stale lifetime publishes nothing | open |
+| `perf/surfacePaint.ts` | 206 | replace | 5 | tracks which lazily mounted Monaco generation is ready; GPUI reports paint from the view | open |
+
+### `startup`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `startup/editorPreload.test.ts` | 191 | retire | 5 | tests editorPreload.ts, which retires | open |
+| `startup/editorPreload.ts` | 82 | retire | 5 | idle preload of the lazy Monaco chunk; no chunk to load | open |
+| `startup/fontGate.test.ts` | 60 | retire | 2 | tests fontGate.ts, which retires | open |
+| `startup/fontGate.ts` | 50 | retire | 2 | waits for a web font before xterm measures a cell; fonts are embedded so metrics exist at start | open |
+
+### `state`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `state/connectionReducer.test.ts` | 226 | port | 2 | tests of connectionReducer.ts | open |
+| `state/connectionReducer.ts` | 194 | port | 2 | connection reducer | open |
+| `state/hostLinks.test.ts` | 173 | port | 2 | tests of hostLinks.ts | open |
+| `state/hostLinks.ts` | 217 | port | 2 | host links reducer | open |
+
+### `transport`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `transport/abortable.ts` | 68 | replace | 5 | cancellation by tokio CancellationToken in desktop-core clients | open |
+
+### `ui`
+
+| File | Lines | Disposition | Phase | Target or reason | Status |
+|---|---|---|---|---|---|
+| `ui/AgentStateIndicator.tsx` | 39 | port | 2 | agent state indicator | open |
+| `ui/ContextMenu.tsx` | 211 | replace | 2 | Kit context menu | open |
+| `ui/DelayedLoading.tsx` | 19 | port | 2 | loading text shown after 150 ms (the delay is a CSS animation in styles.css) | open |
+| `ui/Icon.tsx` | 244 | port | 2 | icon path data becomes embedded SVG assets | open |
+| `ui/SetupProgress.tsx` | 6 | port | 2 | setup progress line | open |
+| `ui/StateDot.tsx` | 53 | port | 2 | agent state dot with shape option | open |
+| `ui/SurfaceError.tsx` | 50 | port | 2 | surface error with disclosure | open |
+| `ui/appearance.test.ts` | 79 | port | 2 | theme preference and palette parity; palette cases become generator output tests | open |
+| `ui/appearance.ts` | 130 | port | 2 | theme preference and UI scale over app_state | open |
+| `ui/errorSummary.test.ts` | 109 | port | 2 | tests of errorSummary.ts | open |
+| `ui/errorSummary.ts` | 142 | port | 2 | host rejection to sentence | open |
+
