@@ -110,6 +110,12 @@ pub enum EngineOutput {
         byte_length: usize,
         epoch: Option<u64>,
     },
+    /// The program in the pane wrote the clipboard with OSC 52. Whether that
+    /// is allowed is the desktop's setting, so this is a request.
+    ClipboardWrite {
+        pane_id: String,
+        text: String,
+    },
 }
 
 pub(crate) struct PendingHandoff {
@@ -740,6 +746,12 @@ impl Pane {
     }
 
     fn wake_ui(&mut self, shared: &mut Shared) {
+        for text in self.writer.take_clipboard_writes() {
+            shared.out.push(EngineOutput::ClipboardWrite {
+                pane_id: self.id.clone(),
+                text,
+            });
+        }
         if self.writer.take_wake() {
             shared.out.push(EngineOutput::Dirty {
                 pane_id: self.id.clone(),

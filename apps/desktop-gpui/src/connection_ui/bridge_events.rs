@@ -43,6 +43,10 @@ pub enum BridgeEvent {
     FlowPaused {
         pane_id: String,
     },
+    /// A terminal program copied into a tmux paste buffer.
+    ClipboardWrite {
+        text: String,
+    },
     /// A valid frame this module has no reaction to.
     Ignored,
 }
@@ -171,7 +175,18 @@ pub fn decode_frame(frame: &[u8]) -> Result<BridgeEvent, String> {
             text(data, "terminal flow pause payload")?;
             Ok(BridgeEvent::FlowPaused { pane_id: label })
         }
-        1 | 2 | 8 | 9 | 11 | 12 | 13 | 14 | 17 | 18 | 19 => Ok(BridgeEvent::Ignored),
+        17 => {
+            require_host_sequence(sequence, "terminal clipboard write")?;
+            if label != "terminal-clipboard"
+                || data.is_empty()
+                || data.len() > tmux_control::MAX_INPUT_REQUEST_BYTES
+            {
+                return Err("terminal clipboard write frame is malformed or oversized".into());
+            }
+            let text = text(data, "terminal clipboard write payload")?;
+            Ok(BridgeEvent::ClipboardWrite { text })
+        }
+        1 | 2 | 8 | 9 | 11 | 12 | 13 | 14 | 18 | 19 => Ok(BridgeEvent::Ignored),
         kind => Err(format!("unknown terminal frame kind {kind}")),
     }
 }
@@ -378,6 +393,20 @@ mod tests {
     fn refuses_a_flow_frame_without_a_pane_id() {
         assert!(decode_frame(&frame(15, "pane", 9, b"stalled")).is_err());
         assert!(decode_frame(&frame(16, "%", 9, b"paused")).is_err());
+    }
+
+    #[test]
+    fn decodes_a_forwarded_copy_and_refuses_a_malformed_one() {
+        assert_eq!(
+            decode_frame(&frame(17, "terminal-clipboard", 3, b"copied")),
+            Ok(BridgeEvent::ClipboardWrite {
+                text: "copied".into()
+            })
+        );
+        assert!(decode_frame(&frame(17, "terminal-clipboard", 0, b"copied")).is_err());
+        assert!(decode_frame(&frame(17, "elsewhere", 3, b"copied")).is_err());
+        assert!(decode_frame(&frame(17, "terminal-clipboard", 3, b"")).is_err());
+        assert!(decode_frame(&frame(17, "terminal-clipboard", 3, b"\xff")).is_err());
     }
 
     #[test]

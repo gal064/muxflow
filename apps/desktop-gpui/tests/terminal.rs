@@ -88,6 +88,26 @@ impl TerminalBackend for Fake {
     }
 
     fn record_incident(&self, _: &str, _: Value) {}
+
+    fn set_terminal_colors(&self, _: String, _: String) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn tmux_action(&self, _: String, _: Value) -> BoxFuture<'static, Result<Value, String>> {
+        async { Ok(Value::Null) }.boxed()
+    }
+
+    fn start_upload(
+        &self,
+        _: muxflow_gpui::terminal::integration::transfers::UploadRequest,
+        _: Arc<dyn desktop_core::platform::EventSink>,
+    ) -> Result<String, String> {
+        Err("no uploads here".into())
+    }
+
+    fn cancel_upload(&self, _: String) -> Result<Value, String> {
+        Ok(Value::Null)
+    }
 }
 
 fn frame(kind: u8, label: &str, sequence: u64, payload: &[u8]) -> Vec<u8> {

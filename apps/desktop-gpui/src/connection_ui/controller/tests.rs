@@ -152,6 +152,26 @@ impl TerminalBackend for Fake {
     fn record_incident(&self, kind: &str, detail: Value) {
         self.state().incidents.push((kind.to_owned(), detail));
     }
+
+    fn set_terminal_colors(&self, _: String, _: String) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn tmux_action(&self, _: String, _: Value) -> BoxFuture<'static, Result<Value, String>> {
+        async { Ok(json!({})) }.boxed()
+    }
+
+    fn start_upload(
+        &self,
+        _: crate::terminal::integration::transfers::UploadRequest,
+        _: Arc<dyn EventSink>,
+    ) -> Result<String, String> {
+        Err("no uploads here".into())
+    }
+
+    fn cancel_upload(&self, _: String) -> Result<Value, String> {
+        Ok(json!({}))
+    }
 }
 
 impl ConnectionBackend for Fake {
@@ -1850,4 +1870,18 @@ mod surface {
         }
         assert_eq!(role_of(&mut visual, "Connect"), Some(Role::Button));
     }
+}
+
+#[gpui_kit::test]
+fn only_the_host_on_screen_may_write_the_clipboard(cx: &mut TestAppContext) {
+    let harness = two_shown_hosts(cx);
+    let copied = |text: &[u8]| frame(17, "terminal-clipboard", 3, text);
+    // The SSH peer is shown, not on screen.
+    harness.publish(cx, 1, vec![copied(b"from the peer")]);
+    assert_eq!(cx.read_from_clipboard(), None);
+    harness.publish(cx, 0, vec![copied(b"from the screen")]);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("from the screen".into())
+    );
 }
