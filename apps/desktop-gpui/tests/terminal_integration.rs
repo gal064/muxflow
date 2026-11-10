@@ -54,6 +54,7 @@ struct Started {
 #[derive(Default)]
 struct Calls {
     input: Vec<Vec<u8>>,
+    pastes: Vec<Vec<u8>>,
     started: Vec<Started>,
     cancelled: Vec<String>,
     outcome: Outcome,
@@ -122,6 +123,11 @@ impl TerminalBackend for Fake {
 
     fn send_input(&self, _: String, _: String, bytes: Vec<u8>) -> Result<(), String> {
         self.0.lock().unwrap().input.push(bytes);
+        Ok(())
+    }
+
+    fn send_paste(&self, _: String, _: String, text: Vec<u8>) -> Result<(), String> {
+        self.0.lock().unwrap().pastes.push(text);
         Ok(())
     }
 
@@ -263,8 +269,9 @@ fn settle(cx: &mut TestAppContext) {
 
 fn pasted(fake: &Fake) -> Vec<String> {
     let calls = fake.0.lock().unwrap();
+    assert!(calls.input.is_empty(), "a paste went out as keys");
     calls
-        .input
+        .pastes
         .iter()
         .map(|bytes| String::from_utf8(bytes.clone()).unwrap())
         .collect()

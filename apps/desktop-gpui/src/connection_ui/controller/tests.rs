@@ -149,6 +149,10 @@ impl TerminalBackend for Fake {
         Ok(())
     }
 
+    fn send_paste(&self, _: String, _: String, _: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+
     fn record_incident(&self, kind: &str, detail: Value) {
         self.state().incidents.push((kind.to_owned(), detail));
     }
