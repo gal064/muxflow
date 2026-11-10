@@ -8,11 +8,5 @@ crate=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -nam
 [[ -n "$crate" ]]
 mkdir -p target/patched-macos
 cp -R "$crate/." target/patched-macos/
-uv run --no-project --python 3.12 - <<'PATCH'
-from pathlib import Path
-p = Path('target/patched-macos/src/window.rs')
-s = p.read_text()
-assert s.count('.map_or_default(') == 3
-p.write_text(s.replace('.map_or_default(', '.map_or_else(Default::default, '))
-PATCH
+perl -pi -e 's/\.map_or_default\(/.map_or_else(Default::default, /g' target/patched-macos/src/window.rs
 printf 'Build with: cargo --config '\''patch.crates-io.gpui-pre-macos.path="target/patched-macos"'\'' build --workspace\n'
