@@ -66,7 +66,7 @@ struct ControlsOnly;
 
 impl Render for ControlsOnly {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().child(WindowControls)
+        div().size_full().child(WindowControls::trailing())
     }
 }
 
