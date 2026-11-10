@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use desktop_core::connection::{ConnectionSpec, helper::HelperRollback, profiles::HostProfile};
 use gpui_kit::{
-    App, Context, Entity, FontWeight, IntoElement, KeyBinding, NoAction, Render, Role,
+    App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyBinding, NoAction, Render, Role,
     SharedString, Subscription, Window,
     component::{
         Disableable, Sizable, WindowExt,
@@ -249,6 +249,7 @@ pub struct ConnectionForm {
     ssh_target: Entity<InputState>,
     ssh_config: Entity<InputState>,
     letter: Entity<InputState>,
+    focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -306,6 +307,7 @@ impl ConnectionForm {
             }),
         );
         let mut this = Self {
+            focus: cx.focus_handle(),
             controller,
             ssh_target,
             ssh_config,
@@ -583,6 +585,7 @@ impl ConnectionForm {
         );
         if let Some(probe) = helper_can_install(&helper) {
             let request = controller.clone();
+            let focus = self.focus.clone();
             section = section.child(
                 Button::new("connection-install-helper")
                     .primary()
@@ -592,7 +595,10 @@ impl ConnectionForm {
                     } else {
                         "Install helper…"
                     })
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
+                        // This button goes away with the install, and the dialog
+                        // returns focus to whatever opened it.
+                        window.focus(&focus, cx);
                         request.update(cx, |state, cx| state.request_helper_install(cx));
                     }),
             );
@@ -609,7 +615,7 @@ impl ConnectionForm {
                 };
                 section = section.child(hint(
                     format!(
-                        "Remote {} {}  ·  tmux {}  ·  Helper {version}  ·  Path {}",
+                        "Remote {} {}  ·  {}  ·  Helper {version}  ·  Path {}",
                         probe.operating_system,
                         probe.architecture,
                         probe.tmux_version,
@@ -672,6 +678,7 @@ impl Render for ConnectionForm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("connection-form")
+            .track_focus(&self.focus)
             .key_context(CONTROLS)
             .role(Role::Form)
             .aria_label("Connection")

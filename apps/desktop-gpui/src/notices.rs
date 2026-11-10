@@ -15,10 +15,17 @@ use gpui_kit::{
     component::{
         Sizable, WindowExt,
         button::{Button, ButtonVariants},
-        notification::Notification,
+        notification::{Notification, NotificationType},
     },
+    div,
+    prelude::*,
 };
 use regex::Regex;
+
+use crate::theme::metrics::ui;
+
+/// Matches the height of the Tauri notice's error details.
+const PROBLEM_MAX_HEIGHT: f32 = 132.;
 
 /// Progress the connection already reports through the host row, the
 /// disconnected strip and the workspace list. Matched on the whole message.
@@ -94,6 +101,23 @@ pub fn notice_for_status(message: &str) -> Option<StatusNotice> {
     })
 }
 
+/// An error text can be any length, so its card scrolls instead of growing past
+/// the window and taking its Dismiss button with it.
+fn problem_card(message: String) -> Notification {
+    Notification::new()
+        .with_type(NotificationType::Error)
+        .autohide(false)
+        .content(move |_, _, _| {
+            div()
+                .id("problem-notice-text")
+                .max_h(ui(PROBLEM_MAX_HEIGHT))
+                .overflow_y_scroll()
+                .text_sm()
+                .child(message.clone())
+                .into_any_element()
+        })
+}
+
 /// The status notice's identity: a new one replaces the one showing.
 struct StatusNoticeId;
 
@@ -106,20 +130,16 @@ pub fn notify(message: &str, window: &mut Window, cx: &mut App) -> bool {
         Severity::Info => Notification::info(notice.message),
         // Kit's own close button shows only while the pointer is on the card, so a
         // notice that stays offers a visible way to go.
-        Severity::Problem => {
-            Notification::error(notice.message)
-                .autohide(false)
-                .action(|_, _, cx| {
-                    let notice = cx.entity();
-                    Button::new("dismiss-notice")
-                        .ghost()
-                        .small()
-                        .label("Dismiss")
-                        .on_click(move |_, window, cx| {
-                            notice.update(cx, |notice, cx| notice.dismiss(window, cx));
-                        })
+        Severity::Problem => problem_card(notice.message).action(|_, _, cx| {
+            let notice = cx.entity();
+            Button::new("dismiss-notice")
+                .ghost()
+                .small()
+                .label("Dismiss")
+                .on_click(move |_, window, cx| {
+                    notice.update(cx, |notice, cx| notice.dismiss(window, cx));
                 })
-        }
+        }),
     };
     window.push_notification(notification.id::<StatusNoticeId>(), cx);
     true

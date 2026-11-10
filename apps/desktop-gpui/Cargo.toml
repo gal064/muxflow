@@ -27,6 +27,7 @@ libc.workspace = true
 regex = "1"
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 tmux-control = { path = "../../crates/tmux-control" }
 uuid.workspace = true
 
