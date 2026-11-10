@@ -37,8 +37,8 @@ exceptions = [
   { crate = "symphonia-core", allow = ["MPL-2.0"] },
   { crate = "symphonia-format-isomp4", allow = ["MPL-2.0"] },
   { crate = "symphonia-metadata", allow = ["MPL-2.0"] },
-  { crate = "cbindgen", allow = ["MPL-2.0"] },         # GPUI spike: build-script tool of gpui-pre-apple (macOS)
-  { crate = "dwrote", allow = ["MPL-2.0"] },           # GPUI spike: Windows font backend of zed-font-kit
+  { crate = "cbindgen", allow = ["MPL-2.0"] },         # GPUI: build-script tool of gpui-pre-apple (macOS)
+  { crate = "dwrote", allow = ["MPL-2.0"] },           # GPUI: Windows font backend of zed-font-kit
   # Boost Software License 1.0: permissive, pulled in by clipboard-rs on Windows.
   { crate = "clipboard-win", allow = ["BSL-1.0"] },
   { crate = "error-code", allow = ["BSL-1.0"] },
