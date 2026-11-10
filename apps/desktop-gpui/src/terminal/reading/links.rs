@@ -96,8 +96,12 @@ pub fn text_links<T>(term: &Term<T>, line: Line) -> Vec<Link> {
         .collect()
 }
 
-/// What a line shows, to tell whether output changed it.
+/// What a line shows, to tell whether output changed it. A line the grid no
+/// longer holds, after a reseed or a resize shrank it, shows nothing.
 pub fn line_text<T>(term: &Term<T>, line: Line) -> String {
+    if line < term.topmost_line() || line > term.bottommost_line() {
+        return String::new();
+    }
     let row = &term.grid()[line];
     (0..term.columns())
         .map(|column| row[Column(column)].c)
@@ -221,6 +225,14 @@ mod tests {
         assert_eq!(link.text, "https://example.com/pr/1");
         assert_eq!((link.start, link.end), (point(0, 4), point(0, 8)));
         assert!(link_at(&term, point(0, 10)).is_none());
+    }
+
+    #[test]
+    fn a_line_the_grid_no_longer_holds_shows_nothing() {
+        let term = term(10, 2, b"ab");
+        assert_eq!(line_text(&term, Line(0)).trim_end(), "ab");
+        assert_eq!(line_text(&term, Line(-5)), "");
+        assert_eq!(line_text(&term, Line(2)), "");
     }
 
     #[test]
