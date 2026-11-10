@@ -1,0 +1,6 @@
+%begin 1794322266 322 0
+%end 1794322266 322 0
+%session-changed $0 s
+%output %0 \033[31mred\033[0m plain\015\012\033[1;44mbold on blue\033[K\033[0m\015\012\033[10;5Hplaced\033[1;1Htop\033[2;3H\033[Kx\015\012abc\015Z\015\012\011tabbed\015\012
+%window-renamed @0 sh
+%exit
