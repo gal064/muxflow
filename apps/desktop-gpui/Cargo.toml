@@ -1,0 +1,36 @@
+[package]
+name = "muxflow-gpui"
+version = "0.0.0"
+license = "MIT"
+description = "Muxflow's native desktop app, built on GPUI"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "muxflow_gpui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "muxflow-gpui"
+path = "src/main.rs"
+
+[dependencies]
+desktop-core = { path = "../../crates/desktop-core" }
+dirs = "6"
+# Exact pin: gpui-kit pins the matching gpui-pre snapshot (0.3.11). `gpui-fast`
+# stays off (see docs/gpui-migration.md).
+gpui-kit = { version = "=0.9.0", default-features = true }
+serde_json.workspace = true
+
+[dev-dependencies]
+gpui-kit = { version = "=0.9.0", default-features = true, features = ["test-support"] }
+tempfile = "3"
+
+# A real offscreen render through GPUI's headless renderer, so it needs a
+# Vulkan driver (lavapipe in CI) but no display. Not libtest: GPUI's offscreen
+# renderer wants the main thread, as in gpui-kit's own tests/rendering.rs.
+[[test]]
+name = "frames"
+path = "tests/frames.rs"
+harness = false
