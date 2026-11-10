@@ -188,16 +188,39 @@ fn save_now(cx: &mut App) -> Option<impl Future<Output = ()> + use<>> {
     })
 }
 
+/// The geometry to keep after a placement change. A maximized window keeps the
+/// size it had before: X11 reports the screen rectangle as its bounds, and the
+/// restore size is the one worth coming back to.
+fn next_geometry(
+    previous: Option<WindowGeometry>,
+    bounds: Rect,
+    maximized: bool,
+    scale: f64,
+) -> WindowGeometry {
+    match previous {
+        Some(previous) if maximized => WindowGeometry {
+            maximized: true,
+            ..previous
+        },
+        _ => capture(bounds, maximized, scale),
+    }
+}
+
 /// Notes the window's placement and writes it once it rests.
 fn record(window: &mut Window, cx: &mut App) {
+    // X11 reports a full-screen window as a windowed one of screen size.
+    if window.is_fullscreen() {
+        return;
+    }
     let (bounds, maximized) = match window.window_bounds() {
         WindowBounds::Windowed(bounds) => (bounds, false),
         WindowBounds::Maximized(bounds) => (bounds, true),
         // Leaving full screen reports the real placement again.
         WindowBounds::Fullscreen(_) => return,
     };
-    let geometry = capture(rect(bounds), maximized, f64::from(window.scale_factor()));
-    cx.global_mut::<Saver>().latest = Some(geometry);
+    let scale = f64::from(window.scale_factor());
+    let saver = cx.global_mut::<Saver>();
+    saver.latest = Some(next_geometry(saver.latest, rect(bounds), maximized, scale));
     let delay = window.spawn(cx, async move |cx| {
         cx.background_executor().timer(SAVE_DELAY).await;
         cx.update(|_, cx| drop(save_now(cx))).ok();
@@ -207,7 +230,15 @@ fn record(window: &mut Window, cx: &mut App) {
 
 /// Called once from [`crate::features::init`].
 pub fn init(cx: &mut App) {
-    cx.set_global(Saver::default());
+    // Seeded from disk, so a window that starts maximized keeps its restore size.
+    let on_disk = load_app_state(&cx.global::<Core>().app_state)
+        .ok()
+        .and_then(|state| state.shell.window_geometry);
+    cx.set_global(Saver {
+        latest: on_disk,
+        saved: on_disk,
+        delay: None,
+    });
     // A window closed inside the delay still writes where it ended.
     cx.on_app_quit(|cx| {
         let save = save_now(cx);
@@ -348,6 +379,41 @@ mod tests {
     fn restoring_with_no_display_keeps_the_saved_position() {
         let restored = restore(&saved(30, 40, 800, 600, Some(1000)), &[], None);
         assert_eq!((restored.bounds.x, restored.bounds.y), (30., 40.));
+    }
+
+    #[test]
+    fn a_maximized_window_keeps_the_size_it_had() {
+        let windowed = capture(
+            Rect {
+                x: 100.,
+                y: 80.,
+                width: 900.,
+                height: 600.,
+            },
+            false,
+            1.,
+        );
+        let screen = Rect {
+            x: 0.,
+            y: 0.,
+            width: 1920.,
+            height: 1080.,
+        };
+        let maximized = next_geometry(Some(windowed), screen, true, 1.);
+        assert_eq!(
+            maximized,
+            WindowGeometry {
+                maximized: true,
+                ..windowed
+            }
+        );
+        // With nothing earlier to keep, the bounds given are all there is.
+        assert_eq!(next_geometry(None, screen, true, 1.).width, 1920);
+        // Restoring takes the new bounds.
+        assert_eq!(
+            next_geometry(Some(maximized), screen, false, 1.).width,
+            1920
+        );
     }
 
     #[test]

@@ -12,7 +12,11 @@ use std::sync::LazyLock;
 
 use gpui_kit::{
     App, Window,
-    component::{WindowExt, notification::Notification},
+    component::{
+        Sizable, WindowExt,
+        button::{Button, ButtonVariants},
+        notification::Notification,
+    },
 };
 use regex::Regex;
 
@@ -100,7 +104,18 @@ pub fn notify(message: &str, window: &mut Window, cx: &mut App) -> bool {
     };
     let notification = match notice.severity {
         Severity::Info => Notification::info(notice.message),
-        Severity::Problem => Notification::error(notice.message).autohide(false),
+        // Kit's own close button shows only while the pointer is on the card, so a
+        // notice that stays offers a visible way to go.
+        Severity::Problem => Notification::error(notice.message).action(|_, _, cx| {
+            let notice = cx.entity();
+            Button::new("dismiss-notice")
+                .ghost()
+                .small()
+                .label("Dismiss")
+                .on_click(move |_, window, cx| {
+                    notice.update(cx, |notice, cx| notice.dismiss(window, cx));
+                })
+        }),
     };
     window.push_notification(notification.id::<StatusNoticeId>(), cx);
     true
