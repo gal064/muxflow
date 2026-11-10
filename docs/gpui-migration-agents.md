@@ -320,7 +320,7 @@ Phase 0 are not in the published history.
 | T2.1 `app-foundation` | opus, high, full cycle, large, design | `gpui/app-foundation` | Merged | `08f8108` | 2 review rounds, QA passed. Vendored `gpui-pre-macos` patch. Open: title-bar drag under openbox, for T2.5 |
 | T2.2 `chrome-layout` | opus, high, full cycle, design | `gpui/chrome-layout` | Merged | `fd15463` | 3 review rounds. QA found 4 bugs, fixed after QA. Adds atomic `update_app_state`. T6.1 must add keyboard access to tabs, a regression until then. T2.5 adds tooltips on disabled controls |
 | T2.3 `commands-keymap` | opus, high, full cycle | `gpui/commands-keymap` | Merged | `3c6eb38` | 1 review round. QA 6 of 7, shortcut-editor bugs fixed after QA and covered by tests only. Known: digit selectors do not resolve on layouts with shifted digits such as AZERTY. T2.5 must add menu accelerators itself |
-| T2.4 `connections` | opus, high, full cycle, invariant | `gpui/connections` | Dispatched | | |
+| T2.4 `connections` | opus, high, full cycle, invariant | `gpui/connections` | Merged | `a9823b4` | 2 review rounds. QA passed except Enter on a focused confirm button, fixed after QA with unit tests only. `gdev_qa_phase2` must re-check it and real quit. Status pill placement open |
 | T2.5 `native-surfaces` | sonnet, high, full cycle, design | `gpui/native-surfaces` | Dispatched | | |
 | T0.1 `license-gate` | sonnet, medium, full cycle | `gpui/license-gate` | Merged | `c025ace`, merge `259e207` | MPL-2.0, BSL-1.0, CDLA-Permissive-2.0 and LLVM-exception crates allowed per crate. Owner to confirm |
 | T0.2 `ledger` | sonnet, medium, impl only, reviewed in T0.7 | `gpui/ledger` | Merged, review pending in T0.7 | `68f33c9` | S8: no drag has to reach the OS. 402 files: 336 port, 31 replace, 35 retire |
