@@ -34,7 +34,7 @@ use gpui_kit::{
     App, BorrowAppContext, Global, KeystrokeEvent, Window, base::Root, component::WindowExt,
 };
 
-use crate::{app::Core, ui::shell::Shell};
+use crate::{app::Core, notices, ui::shell::Shell};
 
 use keymap::{
     ShortcutDisposition, ShortcutOverrides, repair_shortcut_collisions, shortcut_disposition,
@@ -169,8 +169,9 @@ pub fn run(id: CommandId, window: &mut Window, cx: &mut App) {
         // has to be said rather than silently doing nothing.
         let Some(source) = commands.row_source(id) else {
             let title = command.title.trim_end_matches('…');
-            window.push_notification(
-                format!("{title} is unavailable: nothing is selected in that panel any more."),
+            notices::notify(
+                &format!("{title} is unavailable: nothing is selected in that panel any more."),
+                window,
                 cx,
             );
             return;
@@ -194,7 +195,7 @@ pub fn set_overrides(overrides: ShortcutOverrides, window: &mut Window, cx: &mut
                 return;
             };
             cx.update(|window, cx| {
-                window.push_notification(format!("Could not save shortcuts: {failure}"), cx);
+                notices::notify(&format!("Could not save shortcuts: {failure}"), window, cx);
             })
             .ok();
         })
@@ -295,7 +296,9 @@ pub fn init(cx: &mut App) {
         };
         let notice = cx.update_global(|commands: &mut Commands, _| commands.startup_notice.take());
         if let Some(notice) = notice {
-            window.defer(cx, move |window, cx| window.push_notification(notice, cx));
+            window.defer(cx, move |window, cx| {
+                notices::notify(&notice, window, cx);
+            });
         }
     })
     .detach();

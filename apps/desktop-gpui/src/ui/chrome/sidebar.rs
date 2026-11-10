@@ -124,6 +124,7 @@ impl RenderOnce for Sidebar {
                 disabled_ink(palette.chrome_faint),
             )
             .my(ui(-4.))
+            .tooltip("New workspace")
             .disabled(true)
         });
 
