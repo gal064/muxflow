@@ -1850,6 +1850,39 @@ mod surface {
     }
 
     #[gpui_kit::test]
+    fn host_delete_is_offered_only_while_settings_shows_a_host_to_delete(cx: &mut TestAppContext) {
+        let harness = two_shown_hosts(cx);
+        let mut visual = open(cx, &harness);
+        let offered = |visual: &mut VisualTestContext| {
+            visual.update(|_, cx| {
+                let commands = cx.global::<crate::commands::Commands>();
+                let command = crate::commands::registry::command_by_id("host.delete").unwrap();
+                commands.is_available(command)
+            })
+        };
+        assert!(!offered(&mut visual), "no Settings, no picked host");
+        visual.update(|window, cx| {
+            crate::connection_ui::dialog::open_connection_dialog(
+                harness.controller.clone(),
+                window,
+                cx,
+            );
+        });
+        visual.run_until_parked();
+        assert!(offered(&mut visual));
+
+        // The command is the Delete button: it asks before it deletes.
+        visual.update(|window, cx| crate::commands::run("host.delete", window, cx));
+        visual.run_until_parked();
+        assert_eq!(role_of(&mut visual, "Delete host"), Some(Role::Button));
+        visual.simulate_keystrokes("escape");
+        visual.run_until_parked();
+        visual.simulate_keystrokes("escape");
+        visual.run_until_parked();
+        assert!(!offered(&mut visual), "Settings closed");
+    }
+
+    #[gpui_kit::test]
     fn the_connection_dialog_names_its_controls_and_connects(cx: &mut TestAppContext) {
         let harness = two_shown_hosts(cx);
         let mut visual = open(cx, &harness);

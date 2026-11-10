@@ -211,6 +211,8 @@ fn mounted_with<'a>(
             std::fs::remove_file(&state).unwrap();
         }
         commands::init(cx);
+        // Copy on select is read from the live Settings.
+        muxflow_gpui::settings::init(cx);
         reading::init(cx);
     });
     let fake = Fake::default();

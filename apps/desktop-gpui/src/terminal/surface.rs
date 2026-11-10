@@ -4,7 +4,6 @@
 use std::rc::Rc;
 use std::time::Instant;
 
-use desktop_core::app_state::load_app_state;
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext, Bounds, Context, CursorStyle, DispatchPhase, Entity,
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
@@ -17,7 +16,6 @@ use terminal_engine::GridSize;
 use tmux_control::{Pane, TmuxSnapshot, Window as TmuxWindow};
 
 use crate::{
-    app::Core,
     commands,
     connection_ui::{controller::ConnectionController, host_links::HostLink},
     fonts,
@@ -150,10 +148,8 @@ struct DividerGrab {
     pane_cells: u16,
 }
 
-/// The setting, off unless the user turned it on.
 fn focus_follows_mouse(cx: &App) -> bool {
-    load_app_state(&cx.global::<Core>().app_state)
-        .is_ok_and(|state| state.shell.focus_follows_mouse)
+    crate::settings::get(cx).focus_follows_mouse
 }
 
 impl TerminalSurface {
@@ -162,11 +158,7 @@ impl TerminalSurface {
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
-        let store = cx.global::<Core>().app_state.clone();
-        let saved = load_app_state(&store)
-            .ok()
-            .and_then(|state| state.shell.terminal_font_size)
-            .map_or(theme::metrics::TERM_FONT_SIZE, f32::from);
+        let saved = f32::from(crate::settings::get(cx).terminal_font_size);
         cx.new(|cx: &mut Context<Self>| {
             let observe = cx.observe_in(&controller, window, |surface, _, window, cx| {
                 surface.sync(window, cx);
@@ -191,6 +183,12 @@ impl TerminalSurface {
             };
             let uploads = cx.observe_global::<integration::upload::Uploads>(|_, cx| cx.notify());
             let attention = cx.observe_global::<PaneAttention>(|_, cx| cx.notify());
+            // The font size applies to every open terminal at once; the next
+            // render measures the new cell and the panes follow.
+            let settings = cx.observe_global::<crate::settings::Settings>(|surface, cx| {
+                surface.font_size = f32::from(crate::settings::get(cx).terminal_font_size);
+                cx.notify();
+            });
             let mut surface = Self {
                 this: cx.entity().downgrade(),
                 controller,
@@ -216,7 +214,7 @@ impl TerminalSurface {
                 grab: None,
                 grab_ended: None,
                 hover: None,
-                _subscriptions: vec![observe, keys, uploads, attention],
+                _subscriptions: vec![observe, keys, uploads, attention, settings],
             };
             surface.sync(window, cx);
             surface

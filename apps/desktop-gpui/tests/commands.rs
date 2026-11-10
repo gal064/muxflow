@@ -345,13 +345,14 @@ fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestApp
             .collect::<Vec<_>>()
     });
     // The pinned filter's "show pinned only" has no handler yet, so only what
-    // this module and the window chrome implement is available.
+    // this module, Settings and the window chrome implement is available.
     assert_eq!(
         available,
         [
             "commands.show",
             "workspaces.switch",
             "shortcuts.configure",
+            "settings.show",
             "view.toggleSidebar",
             "view.togglePanel",
             "view.showFiles",

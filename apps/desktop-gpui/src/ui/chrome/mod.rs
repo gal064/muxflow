@@ -102,7 +102,7 @@ pub struct Chrome {
     this: WeakEntity<Self>,
     prefs: Prefs,
     drag: Option<(Divider, f32)>,
-    /// `shell.tabsInTitleBar`, which Settings sets. Read at start.
+    /// `shell.tabsInTitleBar`, which Settings sets and this follows.
     tabs_in_title_bar: bool,
     /// (id, label) of each right-panel segment, built-ins first.
     surfaces: Vec<(String, String)>,
@@ -125,16 +125,28 @@ impl Chrome {
         let store = cx.global::<Core>().app_state.clone();
         // A broken file shows defaults; `app_state` keeps it write-frozen.
         let state = app_state::load_app_state(&store).unwrap_or_default();
-        let chrome = cx.new(|cx| Self {
-            this: cx.entity().downgrade(),
-            prefs: Prefs::from_shell(&state.shell),
-            drag: None,
-            tabs_in_title_bar: state.shell.tabs_in_title_bar.unwrap_or(true),
-            surfaces: layout::panel_surfaces(state.shell.enabled_panel_extensions.as_deref()),
-            workspaces: saved_workspaces(&state),
-            active_workspace: 0,
-            saves: Arc::default(),
-            terminal: None,
+        let chrome = cx.new(|cx| {
+            // Settings changes these two live.
+            cx.observe_global::<crate::settings::Settings>(|chrome: &mut Self, cx| {
+                let prefs = crate::settings::get(cx);
+                chrome.tabs_in_title_bar = prefs.tabs_in_title_bar;
+                chrome.surfaces = layout::panel_surfaces(Some(&prefs.enabled_panel_extensions));
+                cx.notify();
+            })
+            .detach();
+            Self {
+                this: cx.entity().downgrade(),
+                prefs: Prefs::from_shell(&state.shell),
+                drag: None,
+                tabs_in_title_bar: crate::settings::get(cx).tabs_in_title_bar,
+                surfaces: layout::panel_surfaces(Some(
+                    &crate::settings::get(cx).enabled_panel_extensions,
+                )),
+                workspaces: saved_workspaces(&state),
+                active_workspace: 0,
+                saves: Arc::default(),
+                terminal: None,
+            }
         });
         if let Some(controller) = cx.try_global::<ConnectionUi>().map(|ui| ui.0.clone()) {
             let surface = TerminalSurface::new(controller, window, cx);

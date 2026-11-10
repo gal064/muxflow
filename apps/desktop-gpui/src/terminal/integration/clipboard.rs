@@ -3,10 +3,7 @@
 //! buffer, which the host forwards. Both reach the system clipboard only while
 //! the `terminalApplicationClipboard` setting allows it.
 
-use desktop_core::app_state::load_app_state;
 use gpui_kit::{App, ClipboardItem};
-
-use crate::app::Core;
 
 /// One program may replace at most 1 MiB of clipboard text.
 pub const MAX_APPLICATION_CLIPBOARD_BYTES: usize = 1024 * 1024;
@@ -17,12 +14,8 @@ pub fn admitted(enabled: bool, text: &str) -> bool {
     enabled && !text.is_empty() && text.len() <= MAX_APPLICATION_CLIPBOARD_BYTES
 }
 
-/// On unless the user turned it off, as in the Tauri app.
 fn enabled(cx: &App) -> bool {
-    cx.try_global::<Core>()
-        .and_then(|core| load_app_state(&core.app_state).ok())
-        .and_then(|state| state.shell.terminal_application_clipboard)
-        .unwrap_or(true)
+    crate::settings::get(cx).terminal_application_clipboard
 }
 
 pub fn write_from_application(text: String, cx: &mut App) {

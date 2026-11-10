@@ -17,7 +17,7 @@ use desktop_core::{
     platform::{self, EventSink},
 };
 use futures::future::{BoxFuture, FutureExt};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use terminal_engine::{Command, EngineHandle, EngineOutput, HubLimits};
 use uuid::Uuid;
 
@@ -246,19 +246,11 @@ impl TerminalBackend for NativeBackend {
     }
 
     fn record_incident(&self, kind: &str, detail: Value) {
-        let mut record = Map::new();
-        record.insert(
-            "t".into(),
-            Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
-        );
-        record.insert("launch".into(), Value::String(self.launch.clone()));
-        record.insert("kind".into(), Value::String(kind.to_owned()));
-        if let Value::Object(fields) = detail {
-            record.extend(fields);
-        }
+        let time = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let record = crate::diagnostics::incident_record(&self.launch, time, kind, detail);
         // Must stay harmless: a journal that cannot be written is never a
         // reason the app misbehaves.
-        let _ = record_incident(&self.journal, Value::Object(record).to_string());
+        let _ = record_incident(&self.journal, record.to_string());
     }
 
     fn link_stats(&self, client_id: &str) -> Option<Value> {
