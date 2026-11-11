@@ -230,6 +230,29 @@ fn go_to_line_moves_the_cursor_to_a_line_and_column(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn go_to_line_shows_the_line_in_the_middle_of_the_view(cx: &mut TestAppContext) {
+    let content: String = (1..=400).map(|n| format!("line {n}\n")).collect();
+    let (pane, _, cx) = open(cx, Some(text(&content)), true);
+    let editor = editor(&pane, cx);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.open_go_to(window, cx);
+            pane.go_to_line("200", window, cx);
+        })
+    });
+    draw(cx);
+    draw(cx);
+    let rows = cx
+        .update(|_, cx| editor.read(cx).visible_row_range())
+        .expect("laid out");
+    let middle = (rows.start + rows.end) / 2;
+    assert!(
+        rows.len() > 8 && middle.abs_diff(199) <= 2,
+        "line 200 is not centered in {rows:?}"
+    );
+}
+
+#[gpui_kit::test]
 fn a_binary_file_shows_its_details_instead_of_an_editor(cx: &mut TestAppContext) {
     let binary = Opened::Binary(crate::editor::io::BinaryFile {
         path: "/repo/a.rs".into(),

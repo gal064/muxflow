@@ -952,6 +952,7 @@ impl Explorer {
             this.update(cx, |this, cx| {
                 if let FileMutation::Rename(relocation) | FileMutation::Move(relocation) = &mutation
                 {
+                    this.view.follow = Some(relocation.destination.clone());
                     cx.emit(ExplorerEvent::Relocated {
                         host_profile_id: scope.host_profile_id.clone(),
                         server_identity: scope.server_identity.clone(),
