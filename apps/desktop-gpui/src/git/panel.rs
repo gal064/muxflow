@@ -129,6 +129,9 @@ pub struct GitPanel {
     pending: HashMap<String, &'static str>,
     limits: HashMap<&'static str, usize>,
     form: CommitForm,
+    /// `workflow.git.panelPaint`: from showing or observing a repository to
+    /// drawing its first status. None unless the perf probe is on.
+    panel_paint: Option<crate::perf::PaintTicket>,
     _store: Subscription,
 }
 
@@ -149,6 +152,7 @@ impl GitPanel {
             pending: HashMap::new(),
             limits: HashMap::new(),
             form: CommitForm::default(),
+            panel_paint: None,
             _store: observed,
         }
     }
@@ -172,6 +176,7 @@ impl GitPanel {
                 }
                 self.key = observable.map(|scope| store.acquire(&scope, cx));
             });
+            self.start_panel_paint();
             self.limits.clear();
             // Tauri unmounted the form with its repository: a message, error
             // or output never carries over to another one. Work in flight
@@ -439,11 +444,25 @@ impl GitPanel {
     /// The row commands the palette and shortcuts reach: the last row focused.
     /// A hidden panel has no selected row, as an unmounted sidebar had none.
     pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        let revealed = shown && !self.shown;
         self.shown = shown;
         if !shown {
             self.focused = None;
         }
+        // Tauri mounted the panel when it was shown, so its measurement
+        // started there: a hidden panel would count the time it stayed hidden.
+        if revealed || !shown {
+            self.start_panel_paint();
+        }
         self.publish_rows(cx);
+    }
+
+    fn start_panel_paint(&mut self) {
+        self.panel_paint = self
+            .key
+            .as_ref()
+            .filter(|_| self.shown)
+            .and_then(|_| crate::perf::PaintTicket::start(&["workflow.git.panelPaint"]));
     }
 
     fn publish_rows(&self, cx: &mut Context<Self>) {
@@ -1271,6 +1290,9 @@ impl Render for GitPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::palette(cx);
         let state = self.state(cx);
+        if state.status.is_some() {
+            crate::perf::after_next_frame(self.panel_paint.take(), window);
+        }
         let Some(root) = &self.context.root else {
             return self.render_empty(
                 "Select a terminal pane to discover its repository.".into(),

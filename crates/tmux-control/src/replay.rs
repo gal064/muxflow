@@ -1120,6 +1120,78 @@ mod tests {
         assert!(repeated.raw_tail.is_empty());
     }
 
+    /// A shown pane at the production bound, hidden at generation 10 with the
+    /// renderer holding everything printed so far, and what it printed while
+    /// hidden. Returns the reveal's answer.
+    fn reveal_after_hiding_with(hidden_output: &[u8]) -> PaneResource {
+        let mut store = PaneResourceStore::new(32, REVEAL_TAIL_BOUND);
+        store.ensure("%1", true, 1);
+        store.record_output("%1", b"visible", 10);
+        let checkpoint = VisibilityCheckpoint {
+            epoch: 7,
+            generation: 10,
+        };
+        store.hide_with_checkpoint("%1", checkpoint, 11).unwrap();
+        if !hidden_output.is_empty() {
+            store.record_output("%1", hidden_output, 12);
+        }
+        store.reveal("%1", 13, Some(checkpoint)).unwrap()
+    }
+
+    /// What one hide and reveal puts on the wire: nothing for a pane that
+    /// printed nothing, and it is still an answer the renderer may resume on.
+    #[test]
+    fn a_reveal_of_a_pane_that_printed_nothing_while_hidden_costs_no_bytes() {
+        let revealed = reveal_after_hiding_with(b"");
+        assert!(revealed.raw_tail.is_empty());
+        assert!(revealed.resume_from_renderer);
+        assert!(!revealed.requires_seed);
+    }
+
+    #[test]
+    fn a_reveal_costs_exactly_the_hidden_output_up_to_and_including_the_bound() {
+        for bytes in [4 * 1024, REVEAL_TAIL_BOUND] {
+            let revealed = reveal_after_hiding_with(&vec![b'x'; bytes]);
+            assert_eq!(revealed.raw_tail.len(), bytes);
+            assert!(revealed.resume_from_renderer);
+            assert!(!revealed.requires_seed);
+        }
+    }
+
+    /// The bound is bytes, not characters: a multibyte character over it seeds.
+    #[test]
+    fn a_reveal_one_character_over_the_bound_seeds_and_carries_nothing() {
+        for character in ["x", "\u{e9}"] {
+            let over = character.repeat(REVEAL_TAIL_BOUND / character.len() + 1);
+            let revealed = reveal_after_hiding_with(over.as_bytes());
+            assert!(revealed.raw_tail.is_empty(), "{character}");
+            assert!(revealed.requires_seed, "{character}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_checkpoint_on_epoch_zero_and_still_completes_a_valid_handoff() {
+        let mut store = PaneResourceStore::new(32, REVEAL_TAIL_BOUND);
+        store.ensure("%1", true, 1);
+        let refused = VisibilityCheckpoint {
+            epoch: 0,
+            generation: 1,
+        };
+        assert_eq!(
+            store.hide_with_checkpoint("%1", refused, 2).unwrap_err(),
+            "terminal visibility checkpoint epoch must be non-zero"
+        );
+        let checkpoint = VisibilityCheckpoint {
+            epoch: 7,
+            generation: 1,
+        };
+        store.hide_with_checkpoint("%1", checkpoint, 3).unwrap();
+        store.record_output("%1", b"tail", 4);
+        let revealed = store.reveal("%1", 5, Some(checkpoint)).unwrap();
+        assert_eq!(revealed.raw_tail, b"tail");
+        assert!(revealed.resume_from_renderer);
+    }
+
     /// Past the bound the tail is no longer the cheaper answer, and a truncated
     /// one is worse than none: it splices bytes onto a screen with a hole in the
     /// middle that nothing later repairs. The pane is released instead and the

@@ -435,6 +435,30 @@ fn an_attached_host_lists_its_workspaces_and_the_host_row_names_it(cx: &mut Test
     assert!(!shell.shows("Local · Connected"), "the status pill is gone");
 }
 
+/// Port of the font size case in `TerminalPane.test.tsx`: the setting reaches
+/// the panes already open, which keep their screens rather than remounting.
+#[gpui_kit::test]
+fn a_font_size_change_reaches_open_panes_without_remounting_them(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    shell.publish(vec![frame(10, "terminal", &1u64.to_be_bytes())]);
+    let focused = |shell: &mut Shell| {
+        shell
+            .visual
+            .update(|window, cx| crate::terminal::reading::focused_pane(window, cx))
+            .expect("the terminal has a pane in focus")
+    };
+    let pane = focused(&mut shell);
+    shell.visual.update(|window, cx| {
+        crate::settings::update(|prefs| prefs.terminal_font_size = 19, window, cx)
+    });
+    shell.settle();
+    assert_eq!(focused(&mut shell), pane, "the pane was remounted");
+    let size = shell
+        .visual
+        .update(|_, cx| pane.read(cx).metrics().font_size);
+    assert_eq!(size, px(19.));
+}
+
 #[gpui_kit::test]
 fn selecting_a_workspace_paints_at_once_and_asks_the_host(cx: &mut TestAppContext) {
     let mut shell = shell(cx, json!([]), json!({}));
@@ -932,6 +956,73 @@ mod agent_seams {
         shell
             .visual
             .update(|_, cx| cx.global::<ConnectionUi>().0.read(cx).active_profile_id())
+    }
+
+    fn agent_inputs(shell: &mut Shell) -> agents::runtime::RuntimeInputs {
+        shell
+            .visual
+            .update(|_, cx| agents::inputs(cx.global::<ConnectionUi>().0.read(cx)))
+    }
+
+    #[gpui_kit::test]
+    fn asks_agents_only_over_a_writable_epoch_and_focuses_the_active_pane(cx: &mut TestAppContext) {
+        let mut shell = shell(cx, json!([]), json!({}));
+        let unasked = agent_inputs(&mut shell);
+        assert!(unasked.scopes.is_empty(), "no terminal epoch yet");
+        let focus = &unasked.focus;
+        assert_eq!(
+            (
+                focus.host_profile_id.as_str(),
+                focus.session_id.as_str(),
+                focus.window_id.as_str(),
+                focus.pane_id.as_str()
+            ),
+            ("local", "$1", "@1", "%1"),
+            "the active window's active pane"
+        );
+        shell.publish(vec![frame(10, "terminal", &1u64.to_be_bytes())]);
+        let live = agent_inputs(&mut shell);
+        assert_eq!(live.scopes.len(), 1);
+        assert_eq!(live.scopes[0].connection_epoch, 1);
+        assert_eq!(live.scopes[0].server_identity, "tmux");
+        assert_eq!(live.shown, ["local"]);
+        shell.publish(vec![frame(6, "resyncing", &[])]);
+        assert!(
+            agent_inputs(&mut shell).scopes.is_empty(),
+            "a link that cannot mutate is not asked"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_launch_opens_under_the_explorers_root_and_waits_for_one(cx: &mut TestAppContext) {
+        let mut shell = shell(cx, json!([]), json!({}));
+        start_agents(&mut shell, HashMap::new());
+        let request = |shell: &mut Shell| {
+            shell.visual.update(|_, cx| {
+                agents::view::launch_request("claude-code", agents::model::Placement::Split, cx)
+            })
+        };
+        assert!(request(&mut shell).is_none(), "no root, no launch");
+        shell.visual.update(|_, cx| {
+            cx.set_global(agents::view::ActiveRoot {
+                path: "/repo".into(),
+                token: "root".into(),
+                git_worktree: false,
+            })
+        });
+        let launch = request(&mut shell).unwrap();
+        assert_eq!(
+            (launch.active_root.as_str(), launch.root_token.as_str()),
+            ("/repo", "root")
+        );
+        assert_eq!(
+            (
+                launch.session_id.as_str(),
+                launch.window_id.as_str(),
+                launch.pane_id.as_str()
+            ),
+            ("$1", "@1", "%1")
+        );
     }
 
     #[gpui_kit::test]

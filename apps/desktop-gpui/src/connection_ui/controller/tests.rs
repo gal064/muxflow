@@ -57,6 +57,8 @@ struct FakeState {
     incidents: Vec<(String, Value)>,
     now: u64,
     online: bool,
+    seeds: Vec<String>,
+    prewarms: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -108,7 +110,8 @@ impl TerminalBackend for Fake {
         Box::new(InlineEngine::new(outputs))
     }
 
-    fn request_seed(&self, _: String, _: String) -> BoxFuture<'static, Result<(), String>> {
+    fn request_seed(&self, _: String, pane_id: String) -> BoxFuture<'static, Result<(), String>> {
+        self.state().seeds.push(pane_id);
         async { Ok(()) }.boxed()
     }
 
@@ -273,6 +276,10 @@ impl ConnectionBackend for Fake {
         fake.saved_app_states.push(state);
         let answer = fake.save_failure.clone().map_or(Ok(()), Err);
         async move { answer }.boxed()
+    }
+
+    fn prewarm_bulk(&self, client_id: String) {
+        self.state().prewarms.push(client_id);
     }
 
     fn late_requests(&self, _client_id: &str) -> Option<u32> {
@@ -1477,6 +1484,60 @@ fn the_journal_records_what_the_user_saw(cx: &mut TestAppContext) {
     ] {
         assert!(kinds.contains(&expected.to_owned()), "{expected}");
     }
+}
+
+/// Port of `postResyncReseed.test.tsx`: a repaired stream reseeds the panes
+/// on screen; an ordinary connect or reconnect does not.
+#[gpui_kit::test]
+fn only_a_resync_repair_reseeds_the_mounted_panes(cx: &mut TestAppContext) {
+    let harness = two_shown_hosts(cx);
+    harness.publish(cx, 0, vec![epoch_frame(7), state_frame("connected")]);
+    let link = harness.read(cx, |state| state.terminal_link("local").unwrap());
+    cx.update(|cx| {
+        link.read(cx).send(terminal_engine::Command::Mount {
+            pane_id: "%1".into(),
+            size: terminal_engine::GridSize {
+                columns: 80,
+                rows: 24,
+            },
+        })
+    });
+    harness.publish(cx, 0, vec![]);
+    let seeds = || harness.fake.state().seeds.len();
+    let mounted = seeds();
+    harness.publish(cx, 0, vec![state_frame("reconnecting")]);
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    harness.publish(cx, 0, vec![state_frame("connecting")]);
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    assert_eq!(seeds(), mounted, "a plain reconnect reseeded");
+    harness.publish(cx, 0, vec![frame(6, "resyncing", 0, b"sequence gap")]);
+    assert_eq!(seeds(), mounted, "reseeded before the repair finished");
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    assert_eq!(seeds(), mounted + 1);
+    assert_eq!(harness.fake.state().seeds.last().unwrap(), "%1");
+}
+
+/// The file-transfer connection is warmed for the host on screen, once per
+/// writable epoch, and never for a peer beside it.
+#[gpui_kit::test]
+fn warms_file_transfer_for_the_active_host_only(cx: &mut TestAppContext) {
+    let harness = two_shown_hosts(cx);
+    let prewarms = || harness.fake.state().prewarms.clone();
+    harness.publish(cx, 0, vec![epoch_frame(7)]);
+    assert!(prewarms().is_empty(), "warmed before the host was writable");
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    assert_eq!(prewarms(), ["client-1"]);
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    let peer = harness.fake.bridge_index("client-2");
+    harness.publish(cx, peer, vec![epoch_frame(3), state_frame("connected")]);
+    assert_eq!(prewarms(), ["client-1"], "a peer or a repeat warmed");
+    harness.publish(cx, 0, vec![state_frame("reconnecting")]);
+    harness.publish(cx, 0, vec![epoch_frame(8), state_frame("connected")]);
+    assert_eq!(
+        prewarms(),
+        ["client-1", "client-1"],
+        "a new epoch earns one warmup"
+    );
 }
 
 #[gpui_kit::test]

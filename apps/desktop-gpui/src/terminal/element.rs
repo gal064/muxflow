@@ -440,34 +440,22 @@ impl Element for TerminalElement {
             now,
         );
         if let Some(record) = perf_record {
-            record_perf(record);
+            crate::perf::record("perf.terminalPane", record);
         }
-        if note_painted.take()
-            && let Some(key) = gate_key
-        {
-            cx.default_global::<PanePaintGate>()
-                .note_painted(key.as_ref());
+        if note_painted.take() {
+            if let Some(key) = gate_key {
+                cx.default_global::<PanePaintGate>()
+                    .note_painted(key.as_ref());
+            }
+            // The first content after a reveal is what an action that made or
+            // showed this pane was waiting for.
+            let link = self.pane.read(cx).link().read(cx);
+            if let Some(client_id) = link.client_id() {
+                crate::perf::note_pane_painted(client_id, pane_id.as_ref());
+            }
+            crate::perf::milestone("startup.terminalPaint");
         }
     }
-}
-
-fn record_perf(record: serde_json::Value) {
-    if !desktop_core::perf_log::sink::perf_log_enabled() {
-        return;
-    }
-    let line = serde_json::json!({
-        "t": chrono::Utc::now().timestamp_millis(),
-        "kind": "perf.terminalPane",
-    });
-    let mut merged = line.as_object().cloned().unwrap_or_default();
-    if let serde_json::Value::Object(fields) = record {
-        merged.extend(fields);
-    }
-    let text = serde_json::Value::Object(merged).to_string();
-    desktop_core::platform::spawn(async move {
-        // A probe that fails is never a reason to disturb the terminal.
-        let _ = desktop_core::perf_log::sink::append_perf_log(vec![text]).await;
-    });
 }
 
 fn paint_cursor(

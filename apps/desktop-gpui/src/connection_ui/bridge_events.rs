@@ -499,6 +499,28 @@ mod tests {
     }
 
     #[test]
+    fn holds_service_and_flow_frames_to_their_sequence_and_text_rules() {
+        assert_eq!(
+            decode_frame(&frame(16, "%2", 4, b"paused")),
+            Ok(BridgeEvent::FlowPaused {
+                pane_id: "%2".into()
+            })
+        );
+        assert!(decode_frame(&frame(16, "%2", 0, b"paused")).is_err());
+        assert!(decode_frame(&frame(16, "%2", 4, b"\xff")).is_err());
+        assert!(decode_frame(&frame(15, "%2", 4, b"\xff")).is_err());
+        assert!(decode_frame(&frame(12, "files", 0, b"{}")).is_err());
+        assert!(decode_frame(&frame(12, "files", 3, b"\xff")).is_err());
+        assert!(decode_frame(&frame(13, "git", 3, b"\xff")).is_err());
+        assert!(decode_frame(&frame(6, "connected", 2, &[])).is_err());
+        assert!(decode_frame(&frame(6, "resyncing", 0, b"\xff")).is_err());
+        let oversized = vec![b'x'; tmux_control::MAX_INPUT_REQUEST_BYTES + 1];
+        assert!(decode_frame(&frame(17, "terminal-clipboard", 3, &oversized)).is_err());
+        let largest = vec![b'x'; tmux_control::MAX_INPUT_REQUEST_BYTES];
+        assert!(decode_frame(&frame(17, "terminal-clipboard", 3, &largest)).is_ok());
+    }
+
+    #[test]
     fn leaves_terminal_payload_frames_for_their_owners() {
         assert_eq!(
             decode_frame(&frame(2, "%1", 4, b"output")),

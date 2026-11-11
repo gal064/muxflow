@@ -223,10 +223,10 @@ fn panes(
         columns: 40,
         rows: 6,
     };
-    link.update(visual, |link, _| {
+    link.update(visual, |link, cx| {
         link.set_client(Some("client-1".into()), 1);
         for (index, pane) in panes.iter().enumerate() {
-            link.mount(&format!("%{}", index + 1), pane, size);
+            link.mount(&format!("%{}", index + 1), pane, size, cx);
         }
         link.forward_frame(frame(10, "terminal", 0, &7_u64.to_be_bytes()));
     });
@@ -313,6 +313,28 @@ fn keys_reach_only_the_focused_pane(cx: &mut TestAppContext) {
     focus(&panes[1], visual);
     visual.simulate_keystrokes("b");
     assert_eq!(fake.take(), [sent("%2", b"b")]);
+}
+
+/// Port of the activity cases in `TerminalPane.test.tsx`: a key or a press in
+/// a pane is the person acting there, which acknowledges its agent; focus
+/// arriving on its own is not.
+#[gpui_kit::test]
+fn a_key_or_a_press_is_activity_and_focus_alone_is_not(cx: &mut TestAppContext) {
+    let (_fake, _link, panes, visual) = panes(2, cx);
+    let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+    let recorder = seen.clone();
+    visual.update(|_, cx| {
+        cx.set_global(terminal::integration::agents::PaneActivity(Rc::new(
+            move |host, pane, _| recorder.borrow_mut().push(format!("{host}/{pane}")),
+        )))
+    });
+    focus(&panes[1], visual);
+    assert!(seen.borrow().is_empty(), "focus alone counted");
+    visual.simulate_keystrokes("b");
+    assert_eq!(*seen.borrow(), ["qa/%2"]);
+    let inside = cell(&panes[0], visual, 2., 1.);
+    visual.simulate_click(inside, Modifiers::none());
+    assert_eq!(*seen.borrow(), ["qa/%2", "qa/%1"]);
 }
 
 #[gpui_kit::test]

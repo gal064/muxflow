@@ -21,6 +21,7 @@ use serde_json::Value;
 
 use crate::{
     editor::FileNotice,
+    perf::PaintTicket,
     terminal::paint_gate::{PANE_PAINT_TIMEOUT, wait_for_pane_paint},
 };
 
@@ -156,7 +157,20 @@ pub struct Explorer {
     /// The view's state, kept here so a model change can keep the keyboard on
     /// the same row.
     pub(super) view: super::view::ViewState,
+    /// Perf-log measurements (all empty unless the probe is on): expansions
+    /// owed a paint by their listing, recoveries owed one by their re-read,
+    /// and those the next frame of the tree completes.
+    expand_paints: HashMap<String, PaintTicket>,
+    recovery_paints: HashMap<String, PaintTicket>,
+    pub(super) due_paints: Vec<PaintTicket>,
 }
+
+const EXPAND_PAINT: &[&str] = &[
+    "explorer.expandToPaint",
+    "workflow.explorer.directoryExpandPaint",
+];
+const EXTERNAL_CHANGE_PAINT: &[&str] = &["explorer.externalChangeToPaint"];
+const ROOT_PAINT: &[&str] = &["workflow.explorer.rootPaint"];
 
 impl EventEmitter<ExplorerEvent> for Explorer {}
 
@@ -179,6 +193,9 @@ impl Explorer {
             picker_open: false,
             search_root: None,
             view: super::view::ViewState::new(cx),
+            expand_paints: HashMap::new(),
+            recovery_paints: HashMap::new(),
+            due_paints: Vec::new(),
         }
     }
 
@@ -329,7 +346,38 @@ impl Explorer {
             }
         }
         self.refresh_rows(cx);
+        self.settle_expand_paints();
         cx.notify();
+    }
+
+    /// An expansion's paint is owed by whatever puts its rows on screen: a
+    /// cached listing or the read it started. A collapse retires it.
+    fn settle_expand_paints(&mut self) {
+        if self.expand_paints.is_empty() {
+            return;
+        }
+        let tree = &self.tree;
+        self.expand_paints
+            .retain(|path, _| tree.expanded.contains(path));
+        let listed: Vec<String> = self
+            .expand_paints
+            .keys()
+            .filter(|path| tree.listings.contains_key(*path))
+            .cloned()
+            .collect();
+        for path in listed {
+            if let Some(ticket) = self.expand_paints.remove(&path) {
+                self.note_due(Some(ticket));
+            }
+        }
+    }
+
+    /// A measured change is on its way to the screen. Only a drawn tree
+    /// paints it: a hidden one would publish the time it stayed hidden.
+    fn note_due(&mut self, ticket: Option<PaintTicket>) {
+        if self.view.shown {
+            self.due_paints.extend(ticket);
+        }
     }
 
     // Reads.
@@ -338,10 +386,12 @@ impl Explorer {
     /// and gives their rows their wait state back.
     fn abort_listing(&mut self, matches: impl Fn(&str) -> bool) {
         self.abort_reads(&matches);
-        self.recoveries.retain(|key, _| {
+        let kept = |key: &String| {
             let path = key.split_once('\0').map_or(key.as_str(), |(_, path)| path);
             !matches(path)
-        });
+        };
+        self.recoveries.retain(|key, _| kept(key));
+        self.recovery_paints.retain(|key, _| kept(key));
     }
 
     fn abort_reads(&mut self, matches: impl Fn(&str) -> bool) {
@@ -460,9 +510,16 @@ impl Explorer {
             return;
         }
         self.reads.remove(&key);
+        // A page of a longer listing is not the re-read a change asked for.
+        let recovery_paint = (kind == ReadKind::List)
+            .then(|| self.recovery_paints.remove(&recovery_key(&root, &path)))
+            .flatten();
         match result.and_then(|value| decode_listing(value, &root.token)) {
             Ok(listing) if same_root(self.tree.root.as_ref(), Some(&root)) => {
                 self.apply_listing(&root, &path, listing, kind == ReadKind::Page, false, cx);
+                if self.tree.expanded.contains(&path) {
+                    self.note_due(recovery_paint);
+                }
             }
             Ok(_) => {
                 self.tree.loading.remove(&path);
@@ -484,12 +541,17 @@ impl Explorer {
         if self.recoveries.contains_key(&key) {
             return;
         }
+        if let Some(ticket) = PaintTicket::start(EXTERNAL_CHANGE_PAINT) {
+            self.recovery_paints.insert(key.clone(), ticket);
+        }
         let (root, path, owned_key) = (root.clone(), path.to_owned(), key.clone());
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(RECOVERY_COALESCE).await;
             this.update(cx, |this, cx| {
                 this.recoveries.remove(&owned_key);
-                if same_root(this.tree.root.as_ref(), Some(&root)) {
+                if !same_root(this.tree.root.as_ref(), Some(&root)) {
+                    this.recovery_paints.remove(&owned_key);
+                } else {
                     this.load_directory(&root, &path, None, false, None, cx);
                 }
                 this.changed(cx);
@@ -692,11 +754,17 @@ impl Explorer {
         if !self.tree.on_directory(root, directory) {
             return;
         }
+        let paint = PaintTicket::start(EXTERNAL_CHANGE_PAINT);
         match patch(self.tree.listings.get(directory).map(|held| &**held)) {
             Patched::Changed(listing) => {
                 self.tree
                     .listings
                     .insert(directory.to_owned(), Rc::new(listing));
+                // Only a patch that moved something publishes a measurement.
+                if paint.is_some() && self.tree.expanded.contains(directory) {
+                    crate::perf::counter("explorer.listingPatches", 1);
+                    self.note_due(paint);
+                }
             }
             Patched::Unchanged => {}
             Patched::Recover(_) => self.coalesce_recovery(root, directory, cx),
@@ -779,9 +847,12 @@ impl Explorer {
             return;
         };
         let key = format!("{}\0{}", scope.host_profile_id, scope.pane_id);
-        let painted = wait_for_pane_paint(&key, PANE_PAINT_TIMEOUT, cx);
+        // Looked up once this update has settled: the terminal surface mounts
+        // and arms the pane in its own observer of the same switch, which may
+        // run after this one.
         self.probe.gate = Some(cx.spawn(async move |this, cx| {
-            painted.await;
+            cx.update(|cx| wait_for_pane_paint(&key, PANE_PAINT_TIMEOUT, cx))
+                .await;
             this.update(cx, |this, cx| this.resolve(cx)).ok();
         }));
     }
@@ -802,6 +873,7 @@ impl Explorer {
         };
         let operation = operation_id();
         let known = self.tree.root.as_ref().map(|root| root.token.clone());
+        let paint = PaintTicket::start(ROOT_PAINT);
         let request = client::request(
             self.transport.clone(),
             scope.client_id.clone(),
@@ -824,6 +896,7 @@ impl Explorer {
                     Ok(root) => {
                         this.probe.unchanged = 0;
                         this.adopt_root(root);
+                        this.note_due(paint);
                     }
                     Err(error) => this.tree.error = Some(error),
                 }
@@ -851,6 +924,7 @@ impl Explorer {
         }
         if !kept {
             self.abort_listing(|_| true);
+            self.recovery_paints.clear();
             self.cache
                 .invalidate_other_roots(&cache_scope(&scope.client_id, &root));
             self.tree.listings.clear();
@@ -881,6 +955,10 @@ impl Explorer {
             _ => None,
         };
         if expanding {
+            // A newer expansion of the same path replaces the older's span.
+            if let Some(ticket) = PaintTicket::start(EXPAND_PAINT) {
+                self.expand_paints.insert(path.to_owned(), ticket);
+            }
             self.tree.expanded.insert(path.to_owned());
             // A valid cached revisit paints now and revalidates behind the paint.
             if let Some(cached) = cached {

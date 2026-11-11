@@ -19,6 +19,8 @@ use gpui_kit::{
     },
 };
 
+use crate::perf::{PaintReporter, PaintTicket};
+
 use super::{
     autosave::{Autosave, SAVE_DELAY, SaveRequest, SaveState, Snapshot},
     io::{BinaryFile, FileIo, FileScope, Opened, Reply, Root, TEXT_FILE_LIMIT_BYTES},
@@ -127,8 +129,13 @@ pub struct Document {
     revision: u64,
     /// A change from disk is going into the editor.
     applying: bool,
+    /// `workflow.file.editorPaint`: from asking for the file, or for the
+    /// editor, to the editor drawing it. Empty unless the perf probe is on.
+    paint: PaintReporter,
     _subscriptions: Vec<Subscription>,
 }
+
+const EDITOR_PAINT: &[&str] = &["workflow.file.editorPaint"];
 
 impl EventEmitter<DocumentEvent> for Document {}
 
@@ -169,6 +176,7 @@ impl Document {
             save: None,
             revision: 0,
             applying: false,
+            paint: PaintReporter::default(),
             _subscriptions: Vec::new(),
         };
         document.follow_connection(cx);
@@ -293,6 +301,24 @@ impl Document {
         editor
     }
 
+    /// Asking for the editor (leaving the preview) measures its paint too,
+    /// unless a read's measurement is already waiting.
+    pub fn hold_editor_paint(&mut self) {
+        if !self.paint.is_pending() {
+            self.paint
+                .hold(self.load_serial, PaintTicket::start(EDITOR_PAINT));
+        }
+    }
+
+    /// The editor is drawing what the last read loaded: the measurement that
+    /// read or request started ends with this frame.
+    pub fn editor_paint_due(&mut self) -> Option<PaintTicket> {
+        if self.load.is_some() || !self.loaded {
+            return None;
+        }
+        self.paint.paintable(self.load_serial)
+    }
+
     pub fn existing_editor(&self) -> Option<&Entity<EditorState>> {
         self.editor.as_ref()
     }
@@ -322,6 +348,8 @@ impl Document {
             Some(scope) if self.attempted.as_ref() != Some(&scope) => {
                 if !self.loaded {
                     self.load(None, cx);
+                    self.paint
+                        .hold(self.load_serial, PaintTicket::start(EDITOR_PAINT));
                 } else if self.load.is_some() {
                     // A reload asked on an earlier connection answers for
                     // that one only. It is dropped, not asked again: the new
@@ -373,6 +401,7 @@ impl Document {
         let opened = match result {
             Ok(opened) => opened,
             Err(error) => {
+                self.paint.discard(serial);
                 self.error = Some(error);
                 return;
             }
@@ -405,6 +434,9 @@ impl Document {
         }
         match opened {
             Opened::Binary(file) => {
+                // No editor draws a binary or oversized file, so it never
+                // publishes the editor's paint.
+                self.paint.abandon();
                 // A file that stopped being text has no editor and no autosave.
                 self.autosave = None;
                 self.debounce = None;
@@ -414,6 +446,7 @@ impl Document {
             Opened::Text(file) => {
                 self.binary_generation = None;
                 if file.size_bytes > TEXT_FILE_LIMIT_BYTES {
+                    self.paint.abandon();
                     self.autosave = None;
                     self.content = Content::TooLarge;
                     return;
@@ -424,6 +457,7 @@ impl Document {
                     line_ending: file.line_ending,
                 };
                 self.content = Content::Text;
+                self.paint.note_committed(serial);
                 match &mut self.autosave {
                     Some(autosave) => {
                         // A rescan also sees our own atomic rename: keep a

@@ -266,7 +266,14 @@ pub fn decode_frame(frame: &[u8]) -> Result<TerminalEvent, String> {
                 sequence,
             }))
         }
-        4..=6 | 8 | 12..=14 | 16 | 17 | 19 => Ok(TerminalEvent::Other { sequence }),
+        8 => {
+            host("protocol progress")?;
+            if label != "protocol" || !data.is_empty() {
+                return Err("protocol progress frame is malformed".into());
+            }
+            Ok(TerminalEvent::Other { sequence })
+        }
+        4..=6 | 12..=14 | 16 | 17 | 19 => Ok(TerminalEvent::Other { sequence }),
         kind => Err(format!("unknown terminal frame kind {kind}")),
     }
 }
@@ -569,6 +576,98 @@ mod tests {
         assert!(decode_frame(&frame(99, "x", 1, &[])).is_err());
         assert!(decode_frame(&[1, 0]).is_err());
         assert!(decode_frame(&[1, 0, 9, b'x']).is_err());
+    }
+
+    fn resource_payload(state: u8, flags: u8, reason: &[u8], tail: &[u8]) -> Vec<u8> {
+        let mut payload = vec![state, flags];
+        for generation in [9_u64, 4, 7] {
+            payload.extend_from_slice(&generation.to_be_bytes());
+        }
+        payload.extend_from_slice(&(reason.len() as u32).to_be_bytes());
+        payload.extend_from_slice(&(tail.len() as u32).to_be_bytes());
+        payload.extend_from_slice(reason);
+        payload.extend_from_slice(tail);
+        payload
+    }
+
+    #[test]
+    fn refuses_a_malformed_pane_resource() {
+        let decode = |payload: &[u8]| decode_frame(&frame(9, "%1", 5, payload));
+        assert!(decode(&resource_payload(1, 0, b"", b"")).is_ok());
+        let full = resource_payload(1, 0, b"why", b"ab");
+        assert!(decode(&full[..33]).is_err(), "truncated header");
+        assert!(
+            decode(&resource_payload(1, 4, b"", b"")).is_err(),
+            "unknown flags"
+        );
+        assert!(
+            decode(&resource_payload(4, 0, b"", b"")).is_err(),
+            "unknown state"
+        );
+        assert!(
+            decode(&resource_payload(1, 0, &[0xff], b"")).is_err(),
+            "reason not UTF-8"
+        );
+        assert!(decode(&full[..full.len() - 1]).is_err(), "length fields");
+        assert!(
+            decode(&[full.as_slice(), b"x"].concat()).is_err(),
+            "length fields"
+        );
+        assert!(
+            decode_frame(&frame(9, "pane", 5, &full)).is_err(),
+            "pane label"
+        );
+        assert!(
+            decode_frame(&frame(9, "%1", 0, &full)).is_err(),
+            "host sequence"
+        );
+    }
+
+    #[test]
+    fn decodes_a_seed_diagnostic_and_refuses_a_bad_one() {
+        assert_eq!(
+            decode_frame(&frame(11, "%2", 4, b"no mouse state")).unwrap(),
+            TerminalEvent::Pane(PaneEvent::SeedDiagnostic {
+                pane_id: "%2".into(),
+                message: "no mouse state".into(),
+                sequence: 4,
+            })
+        );
+        assert!(decode_frame(&frame(11, "two", 4, b"x")).is_err());
+        assert!(decode_frame(&frame(11, "%2", 4, &[0xff])).is_err());
+        assert!(decode_frame(&frame(11, "%2", 0, b"x")).is_err());
+    }
+
+    #[test]
+    fn a_history_of_zero_lines_is_known_and_a_bad_history_frame_is_refused() {
+        assert!(matches!(
+            decode_frame(&frame(18, "%1", 2, &[1, 0, 0, 0, 0])).unwrap(),
+            TerminalEvent::Pane(PaneEvent::History {
+                history_size: Some(0),
+                ..
+            })
+        ));
+        assert!(decode_frame(&frame(18, "%1", 2, &[1, 0, 0, 0])).is_err());
+        assert!(decode_frame(&frame(18, "%1", 0, &[0; 5])).is_err());
+        assert!(decode_frame(&frame(18, "x", 2, &[0; 5])).is_err());
+    }
+
+    #[test]
+    fn refuses_pane_bytes_without_their_generation() {
+        assert!(decode_frame(&frame(1, "%1", 3, &[0; 7])).is_err());
+        assert!(decode_frame(&frame(2, "%1", 3, &[0; 7])).is_err());
+        assert!(decode_frame(&frame(1, "%1", 3, &[0; 8])).is_ok());
+    }
+
+    #[test]
+    fn protocol_progress_is_an_empty_frame_with_its_own_label() {
+        assert_eq!(
+            decode_frame(&frame(8, "protocol", 6, &[])).unwrap(),
+            TerminalEvent::Other { sequence: 6 }
+        );
+        assert!(decode_frame(&frame(8, "protocol", 6, b"x")).is_err());
+        assert!(decode_frame(&frame(8, "terminal", 6, &[])).is_err());
+        assert!(decode_frame(&frame(8, "protocol", 0, &[])).is_err());
     }
 
     #[test]
