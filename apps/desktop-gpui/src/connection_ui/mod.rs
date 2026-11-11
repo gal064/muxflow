@@ -82,6 +82,12 @@ pub fn start(cx: &mut App) -> Result<(), String> {
         cx.new(|cx| ConnectionController::new(backend.clone(), profiles, app_state, cx));
     cx.set_global(ConnectionUi(controller.clone()));
     crate::agents::start(controller.clone(), backend.clone(), cx);
+    let (clients, profiles) = backend.file_service();
+    crate::files::start(
+        controller.clone(),
+        crate::files::native_transport(clients, profiles),
+        cx,
+    );
     crate::automations::start(controller.clone(), backend.clone(), cx);
     crate::git::start(controller.clone(), backend, cx);
     crate::ports::start(controller.clone(), cx);

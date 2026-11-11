@@ -17,6 +17,7 @@ use gpui_kit::{
 
 use crate::{
     dragdrop::{self, DropTarget},
+    terminal::integration::transfers::InternalPathDrag,
     theme::{self, metrics::ui},
     ui::chrome::{
         Chrome,
@@ -78,10 +79,19 @@ impl RenderOnce for WorkspaceArea {
 
         // A document dragged over the workspace can dock at either edge.
         let dock_zones = dragdrop::payload(cx).is_some_and(|payload| payload.is_app_tab());
+        // A path dragged from the Explorer or Git still pastes into the pane it
+        // lands on, so its zones are a narrow strip at each edge. Drawn for any
+        // in-app drag; only a path drop is taken.
+        let path_zones = !dock_zones && cx.has_active_drag();
+        let path_side = window.use_keyed_state("dock-path-side", cx, |_, _| None::<DockSide>);
+        if !path_zones && path_side.read(cx).is_some() {
+            path_side.update(cx, |held, _| *held = None);
+        }
         let dock_hint = match dragdrop::marker(cx) {
             Some((_, DropTarget::Dock(side))) => Some(*side),
             _ => None,
-        };
+        }
+        .or_else(|| path_zones.then(|| *path_side.read(cx)).flatten());
         let chrome = self.chrome.clone();
         let dock_on_right = docked
             .as_ref()
@@ -182,6 +192,46 @@ impl RenderOnce for WorkspaceArea {
                             match side {
                                 DockSide::Left => zone.left_0(),
                                 DockSide::Right => zone.right_0(),
+                            }
+                        };
+                        this.child(zone(DockSide::Left))
+                            .child(zone(DockSide::Right))
+                    })
+                    .when(path_zones, |this| {
+                        let zone = |side: DockSide| {
+                            let path_side = path_side.clone();
+                            let strip = div()
+                                .id(match side {
+                                    DockSide::Left => "dock-path-left",
+                                    DockSide::Right => "dock-path-right",
+                                })
+                                .absolute()
+                                .top_0()
+                                .h_full()
+                                .w(relative(0.12))
+                                .max_w(ui(120.))
+                                // Every strip hears every move: the one under the
+                                // pointer claims the hint, the other lets go of it.
+                                .on_drag_move::<InternalPathDrag>(move |event, _, cx| {
+                                    let over = event.bounds.contains(&event.event.position);
+                                    path_side.update(cx, |held, cx| {
+                                        let next = match (over, *held) {
+                                            (true, _) => Some(side),
+                                            (false, Some(current)) if current == side => None,
+                                            (false, current) => current,
+                                        };
+                                        if *held != next {
+                                            *held = next;
+                                            cx.notify();
+                                        }
+                                    });
+                                })
+                                .on_drop(move |drag: &InternalPathDrag, _, cx| {
+                                    crate::files::dock_path(drag, side, cx)
+                                });
+                            match side {
+                                DockSide::Left => strip.left_0(),
+                                DockSide::Right => strip.right_0(),
                             }
                         };
                         this.child(zone(DockSide::Left))

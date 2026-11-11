@@ -188,7 +188,7 @@ font row covers them).
 | `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | separator rule and naming in terminal/layout.rs and surface.rs; divider rules in terminal/integration/frames.rs (T3.6), the grab's join rule in dragdrop/rules.rs and its gesture in workspaces/tests.rs (T4.3); key and pointer activity reports the pane through terminal/integration/agents.rs `note_activity`; the acknowledgement it drives is tested in agents/tests.rs (T4.2) | done (T4.2) |
 | `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | terminal/surface.rs: pane frames, resting dividers, empty state, region name, and (T3.6) divider drag and arrow-key resize, the attention ring (fed by the agents runtime in Phase 4), hover focus, selecting a pane in tmux on focus, and the link-modifier pane grab, a drag through dragdrop (T4.3) that joins a pane beside another; the grab yields to a link once T3.5's link test is wired into `integration::link_at` | done (T3.6) |
 | `app/WorkspaceDock.test.tsx` | 131 | port | 2 | tests of WorkspaceDock.tsx | open |
-| `app/WorkspaceDock.tsx` | 232 | port | 2 | dock layout on Kit dock; also a drop target, not a drag source (see S8) | open |
+| `app/WorkspaceDock.tsx` | 232 | port | 2 | dock layout on Kit dock; also a drop target, not a drag source (see S8). Path drops on the edge strips (12%, at most 120 px): ui/chrome/workspace.rs, opening through files/mod.rs `dock_path` (T5.1) | open |
 | `app/appRecovery.test.ts` | 43 | port | 2 | tests in connection_ui/app_recovery.rs | done (T2.4) |
 | `app/appRecovery.ts` | 51 | port | 2 | connection_ui/app_recovery.rs | done (T2.4) |
 | `app/bridgeFailureText.test.ts` | 13 | port | 2 | tests in connection_ui/controller.rs | done (T2.4) |
@@ -207,13 +207,13 @@ font row covers them).
 | `app/postResyncReseed.test.tsx` | 93 | port | 3 | reseed after resync | open |
 | `app/reconnectNoticeDedupe.test.tsx` | 129 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
 | `app/shellNavigationCoordinator.ts` | 165 | port | 4 | workspaces/navigation.rs `Coordinator`: one move in flight, only the latest queued | done (T4.1) |
-| `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | editor/open.rs `opens_only_while_the_pane_route_that_asked_still_holds` | done (T5.2) |
-| `app/terminalFileOpenRoute.ts` | 27 | port | 3 | editor/open.rs `current_pane` | done (T5.2) |
+| `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | tests in files/tests.rs (`current_terminal_file_pane`) | done (T5.1) |
+| `app/terminalFileOpenRoute.ts` | 27 | port | 3 | files/wire.rs `current_terminal_file_pane`, used by editor/open.rs `open_terminal_path` | done (T5.1) |
 | `app/types.ts` | 68 | replace | 2 | Session, Window, Pane, ConnectionSpec, HostProfile come from protocol and desktop-core types | open |
 | `app/useAppAgentController.ts` | 162 | port | 5 | agents/mod.rs: scopes, focus and setup gating from the connection controller, rows across hosts (in the sidebar's own workspace order and pinned filter), the jump, row opening through the shell's `select_pane`, and the palette's row commands; the workflow half is agents/setup.rs; selecting a terminal tab acknowledges its pane (T4.5); bringing an agent's pane here and moving it are workspaces/moves.rs (T4.5). Phase 5: launch and resume need the active root (`agents::view::ActiveRoot`, set by the Explorer) | open |
 | `app/useAppConnectionController.ts` | 944 | port | 2 | connection_ui/controller.rs; terminal hub and state cache, reseeds, echo-lag and input-latency probes, clipboard, file, git, agent and automation frame routing, retireConnection, appFocused and prewarm_terminal_bulk stay with Phase 3 and 4 owners; active-window resolution and the optimistic window with T4.1; after-install agent setup with useAgentHostSetup | done (T2.4) |
-| `app/useAppFileActions.test.tsx` | 196 | port | 5 | tests of useAppFileActions.ts | open |
-| `app/useAppFileActions.ts` | 145 | port | 5 | file actions entity (mutation, save panel, transfers) | open |
+| `app/useAppFileActions.test.tsx` | 196 | port | 5 | tests in files/tests.rs (download origins, scope moved under the save panel) | done (T5.1) |
+| `app/useAppFileActions.ts` | 145 | port | 5 | files/explorer.rs `mutate` and downloads; files/mod.rs `download`, `download_app_tab` | done (T5.1) |
 | `app/useAppHostSettingsActions.ts` | 179 | port | 4 | host connection, profile and helper actions in connection_ui/controller.rs (T2.4); the same actions now run from the Settings Connection tab (T4.4) | done (T2.4, T4.4) |
 | `app/useAppRecoveryController.test.tsx` | 112 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
 | `app/useAppRecoveryController.ts` | 104 | port | 2 | connection_ui/controller.rs; T4.1 rewires its app-state access to the single in-memory owner and adds the flush on close | done (T2.4, T4.1) |
@@ -232,13 +232,13 @@ font row covers them).
 | `app/usePerHostMemo.ts` | 56 | retire | 2 | React hook that memoizes a list per host; entities hold per-host state directly | open |
 | `app/useShellNavigation.test.tsx` | 1378 | port | 4 | coordinator and write-planning cases in workspaces/navigation.rs, the optimistic window in connection_ui/host_links.rs, select and placeholder cases end to end in workspaces/tests.rs; React identity and rerender cases dropped | done (T4.1) |
 | `app/useShellNavigation.ts` | 735 | port | 4 | workspaces/mod.rs `navigate`, `fly`, `land`, app-tab protection and the create placeholder | done (T4.1) |
-| `app/useTerminalFileOpen.ts` | 108 | port | 3 | editor/open.rs `open_terminal_path`, called from terminal/reading/mod.rs for a file link | done (T5.2) |
+| `app/useTerminalFileOpen.ts` | 108 | port | 3 | editor/open.rs `open_terminal_path` (T5.2), with the answer decoded by files/wire.rs `decode_terminal_file` (T5.1); reached from a terminal file link (terminal/reading/mod.rs) and from a path dropped on a dock zone (files/mod.rs `dock_path`, T5.1) | done (T5.2) |
 | `app/useTmuxActionPerformer.test.tsx` | 187 | port | 4 | reconciliation cases in workspaces/actions.rs, the refusal and confirmation flows end to end in workspaces/tests.rs | done (T4.1) |
 | `app/useTmuxActionPerformer.ts` | 146 | port | 4 | workspaces/mod.rs `perform`: the target's client and scope, silent or visible feedback, `action.refused` incident | done (T4.1) |
 | `app/useWorkspaceCreate.test.tsx` | 142 | port | 4 | per-host defaults in workspaces/model.rs, the startup command end to end in workspaces/tests.rs | done (T4.1) |
 | `app/useWorkspaceCreate.ts` | 69 | port | 4 | workspaces/mod.rs `create_workspace`, `send_startup` | done (T4.1) |
-| `app/useWorkspaceDomainController.test.ts` | 27 | port | 5 | tmux half in T4.1: a tmux request needs the link's client, writes and server identity (workspaces/mod.rs `perform`). Phase 5: the file and Git scope half; the Git scope half in git/model.rs `git_scope`, tested in git/tests.rs (T5.3) | open |
-| `app/useWorkspaceDomainController.ts` | 99 | port | 5 | tmux half in T4.1: the tmux request scope in workspaces/mod.rs `perform` and `scope_current`. Phase 5: the live file scope; the Git scope half in git/model.rs `git_scope` and git/mod.rs `sync` (T5.3) | open |
+| `app/useWorkspaceDomainController.test.ts` | 27 | port | 5 | tmux half in T4.1: a tmux request needs the link's client, writes and server identity (workspaces/mod.rs `perform`). Git scope half: git/model.rs `git_scope`, tested in git/tests.rs (T5.3). File half: `live_file_scope` tests in files/tests.rs (T5.1) | done (T4.1, T5.1, T5.3) |
+| `app/useWorkspaceDomainController.ts` | 99 | port | 5 | tmux half in T4.1: the tmux request scope in workspaces/mod.rs `perform` and `scope_current`. Git scope half: git/model.rs `git_scope` and git/mod.rs `sync` (T5.3). File half: files/wire.rs `live_file_scope`, fed by files/mod.rs `inputs`; file events are emitted without settling the controller (T5.1) | done (T4.1, T5.1, T5.3) |
 | `app/windowSelection.test.ts` | 79 | port | 4 | tests in workspaces/navigation.rs and connection_ui/host_links.rs | done (T4.1) |
 | `app/windowSelection.ts` | 97 | port | 4 | workspaces/navigation.rs; the optimistic window guard in connection_ui/host_links.rs `settle_active_window` | done (T4.1) |
 
@@ -345,31 +345,31 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/files/DownloadActions.tsx` | 28 | port | 5 | download completion actions | open |
-| `features/files/DownloadTransfers.test.tsx` | 109 | port | 5 | tests of DownloadTransfers.tsx | open |
-| `features/files/DownloadTransfers.tsx` | 90 | port | 5 | downloads list view | open |
-| `features/files/ExplorerMutationDialog.test.tsx` | 32 | port | 5 | tests of ExplorerMutationDialog.tsx | open |
-| `features/files/ExplorerMutationDialog.tsx` | 148 | port | 5 | explorer mutation dialogs | open |
-| `features/files/ExplorerRow.tsx` | 131 | port | 5 | explorer row; has an in-app drag source (see S8) | open |
-| `features/files/ExplorerTree.test.tsx` | 760 | port | 5 | tests of ExplorerTree.tsx | open |
-| `features/files/ExplorerTree.tsx` | 624 | port | 5 | explorer tree view; has an in-app drag source (see S8) | open |
+| `features/files/DownloadActions.tsx` | 28 | port | 5 | files/view.rs `render_download`: Open and the reveal action only on a published download; a refused open stays on its row | done (T5.1) |
+| `features/files/DownloadTransfers.test.tsx` | 109 | retire | 5 | view test: the list's lifecycle and retirement are tested in files/tests.rs (DownloadList, reconcile_status); its row cases (Open and Reveal only on a published download, a refused open on its row, Cancel on a running download, Clear finished, nothing drawn when empty) were run in the app in the T5.1 QA pass | done (T5.1) |
+| `features/files/DownloadTransfers.tsx` | 90 | port | 5 | files/view.rs `render_downloads`: progress, cancel on cancellable states, Clear finished | done (T5.1) |
+| `features/files/ExplorerMutationDialog.test.tsx` | 32 | port | 5 | tests in files/tests.rs (`MutationDialog::mutation`; a failure shown in the dialog, and on the status line once it was dismissed; closed by a root change) | done (T5.1) |
+| `features/files/ExplorerMutationDialog.tsx` | 148 | port | 5 | files/dialog.rs; closed when the root token or the scope changes, and re-checked on submit | done (T5.1) |
+| `features/files/ExplorerRow.tsx` | 131 | port | 5 | files/view.rs `render_row`: icon, chevron, tooltip, preview on click and pin on double click, context menu, and the InternalPathDrag source | done (T5.1) |
+| `features/files/ExplorerTree.test.tsx` | 760 | retire | 5 | view test: flattening, per-level positions, the ignored filter, row commands (none hidden, none mutating while read-only), the cursor kept when its row is hidden, keyboard walking and Load more by keyboard are tested in files/tests.rs; the row menu, drag to a dock edge, the dialogs, the error disclosure and download actions were run in the app in the T5.1 QA pass | done (T5.1) |
+| `features/files/ExplorerTree.tsx` | 624 | port | 5 | files/view.rs: tree role, roving keyboard focus (Enter and Space page a Load more row), header actions, ignored toggle reset per root and scope, empty states, row commands published only while the Files segment is shown; rows virtualized by uniform_list. The context-menu key on a row is a Phase 6 item | done (T5.1) |
 | `features/files/FileEditor.tsx` | 57 | replace | 5 | editor/pane.rs: the Kit code editor (gpui-component `Editor`) with the toolbar, find bar and go-to box | done (T5.2) |
 | `features/files/LiveMarkdownEditor.test.tsx` | 117 | port | 7 | tests of LiveMarkdownEditor.tsx | open |
 | `features/files/LiveMarkdownEditor.tsx` | 154 | port | 7 | ? depends on S4: does Live Markdown fit the Kit editor or gpui-base text | open |
-| `features/files/api.test.ts` | 506 | port | 5 | behavior assertions move to the replacement of api.ts | open |
-| `features/files/api.ts` | 647 | replace | 5 | Tauri file client becomes direct desktop-core calls; its request validation moves with it | open |
+| `features/files/api.test.ts` | 506 | port | 5 | behavior assertions move to the replacement of api.ts; Explorer half in files/tests.rs (search scope, events, listings, watch release, download events) (T5.1); the text and bulk read cases go with the editor | open |
+| `features/files/api.ts` | 647 | replace | 5 | Tauri file client becomes direct desktop-core calls; its request validation moves with it; Explorer half (T5.1): files/client.rs and files/wire.rs over desktop-core `file_request`, and the shared watch registry in files/watches.rs (one host watch per directory for the tree and the open documents); read and write go with the editor | open |
 | `features/files/autosave.test.ts` | 104 | port | 5 | editor/autosave.rs tests, and the document-level cases in editor/document_tests.rs | done (T5.2) |
 | `features/files/autosave.ts` | 108 | port | 5 | editor/autosave.rs `Autosave`; driven by editor/document.rs | done (T5.2) |
-| `features/files/directoryCache.test.ts` | 57 | port | 5 | tests of directoryCache.ts | open |
-| `features/files/directoryCache.ts` | 103 | port | 5 | explorer directory cache | open |
-| `features/files/directoryRequests.test.ts` | 82 | port | 5 | tests of directoryRequests.ts | open |
-| `features/files/directoryRequests.ts` | 119 | port | 5 | directory request coalescing | open |
-| `features/files/directoryState.test.ts` | 223 | port | 5 | tests of directoryState.ts | open |
-| `features/files/directoryState.ts` | 205 | port | 5 | directory state model | open |
-| `features/files/downloadFlow.test.ts` | 78 | port | 5 | tests of downloadFlow.ts | open |
-| `features/files/downloadFlow.ts` | 73 | port | 5 | download flow | open |
-| `features/files/downloadStatus.test.ts` | 67 | port | 5 | tests of downloadStatus.ts | open |
-| `features/files/downloadStatus.ts` | 37 | port | 5 | download status | open |
+| `features/files/directoryCache.test.ts` | 57 | port | 5 | tests in files/tests.rs | done (T5.1) |
+| `features/files/directoryCache.ts` | 103 | port | 5 | files/listing.rs `ListingCache` | done (T5.1) |
+| `features/files/directoryRequests.test.ts` | 82 | port | 5 | tests in files/tests.rs (supersession, pages left alone, wholesale aborts) | done (T5.1) |
+| `features/files/directoryRequests.ts` | 119 | port | 5 | files/explorer.rs: one read task per directory and kind; dropping the task stops the host read (files/client.rs `request`) | done (T5.1) |
+| `features/files/directoryState.test.ts` | 223 | port | 5 | tests in files/tests.rs | done (T5.1) |
+| `features/files/directoryState.ts` | 205 | port | 5 | files/listing.rs `TreeState` | done (T5.1) |
+| `features/files/downloadFlow.test.ts` | 78 | port | 5 | tests in files/tests.rs | done (T5.1) |
+| `features/files/downloadFlow.ts` | 73 | port | 5 | files/explorer.rs `begin_download`, `finish_picking`; files/mod.rs `download` | done (T5.1) |
+| `features/files/downloadStatus.test.ts` | 67 | port | 5 | tests in files/tests.rs | done (T5.1) |
+| `features/files/downloadStatus.ts` | 37 | port | 5 | files/downloads.rs `reconcile_status` | done (T5.1) |
 | `features/files/editorFlushRegistry.test.ts` | 27 | port | 5 | editor/document_tests.rs `flushing_every_editor_waits_for_each_save_and_fails_if_one_does` | done (T5.2) |
 | `features/files/editorFlushRegistry.ts` | 26 | port | 5 | editor/mod.rs `flush_all` over mounted and retiring documents; gates window close, app tab close and bulk close | done (T5.2) |
 | `features/files/editorLanguage.test.ts` | 31 | port | 5 | editor/language.rs tests; `every_grammar_highlights` checks each grammar colors a sample | done (T5.2) |
@@ -377,14 +377,14 @@ font row covers them).
 | `features/files/editorLayout.test.tsx` | 118 | retire | 5 | tests editorLayout.ts, which retires | done (T5.2) |
 | `features/files/editorLayout.ts` | 99 | retire | 5 | forces Monaco to re-measure its container; no equivalent layout step in GPUI | done (T5.2) |
 | `features/files/editorText.ts` | 18 | replace | 5 | the theme mono font and the Kit editor line height | done (T5.2) |
-| `features/files/explorerWindow.test.ts` | 158 | port | 5 | tests of explorerWindow.ts | open |
-| `features/files/explorerWindow.ts` | 120 | port | 5 | explorer virtual window (4,096 entries gate) | open |
-| `features/files/fileIcons.test.ts` | 58 | port | 5 | tests of fileIcons.ts | open |
-| `features/files/fileIcons.ts` | 91 | port | 5 | file icon mapping | open |
-| `features/files/ignoredPaths.test.ts` | 76 | port | 5 | tests of ignoredPaths.ts | open |
-| `features/files/ignoredPaths.ts` | 58 | port | 5 | gitignore toggle model | open |
-| `features/files/listingModel.test.ts` | 165 | port | 5 | tests of listingModel.ts | open |
-| `features/files/listingModel.ts` | 173 | port | 5 | listing model | open |
+| `features/files/explorerWindow.test.ts` | 158 | retire | 5 | tests explorerWindow.ts, which retires | done (T5.1) |
+| `features/files/explorerWindow.ts` | 120 | retire | 5 | GPUI uniform_list lays out only the rows in view, and scroll_to_item replaces scrollOffsetForRow; no DOM row budget to manage | done (T5.1) |
+| `features/files/fileIcons.test.ts` | 58 | port | 5 | tests in files/tests.rs | done (T5.1) |
+| `features/files/fileIcons.ts` | 91 | port | 5 | files/icons.rs | done (T5.1) |
+| `features/files/ignoredPaths.test.ts` | 76 | port | 5 | tests in files/tests.rs | done (T5.1) |
+| `features/files/ignoredPaths.ts` | 58 | port | 5 | files/mod.rs `ignored_paths`, fed from the Git panel's status by `follow_git_status` | done (T5.1) |
+| `features/files/listingModel.test.ts` | 165 | port | 5 | tests in files/tests.rs | done (T5.1) |
+| `features/files/listingModel.ts` | 173 | port | 5 | files/listing.rs | done (T5.1) |
 | `features/files/liveMarkdown.test.ts` | 776 | port | 7 | tests of liveMarkdown.ts | open |
 | `features/files/liveMarkdown.ts` | 1176 | port | 7 | ? depends on S4: CodeMirror decoration extension; pure helpers (block markup, list indent, link targets) port, hiding mechanism does not | open |
 | `features/files/liveTable.test.ts` | 159 | port | 7 | tests of liveTable.ts | open |
@@ -400,16 +400,16 @@ font row covers them).
 | `features/files/saveStatus.ts` | 51 | port | 5 | editor/save_status.rs | done (T5.2) |
 | `features/files/searchCount.test.ts` | 79 | port | 5 | editor/find.rs tests | done (T5.2) |
 | `features/files/searchCount.ts` | 85 | port | 5 | editor/find.rs `count_label`, with the find, replace and go-to-line matching | done (T5.2) |
-| `features/files/types.ts` | 280 | port | 5 | file types, limits, wire shapes | open |
-| `features/files/useActiveRoot.ts` | 280 | port | 5 | active root resolution; waits on pane paint gate | open |
-| `features/files/useConnectionTransfers.ts` | 85 | port | 5 | per-connection download transfers | open |
+| `features/files/types.ts` | 280 | port | 5 | file types, limits, wire shapes; Explorer half (T5.1) in files/wire.rs; editor limits and text types go with the editor | open |
+| `features/files/useActiveRoot.ts` | 280 | port | 5 | files/explorer.rs probe: one at a time, behind the pane paint gate, backstop that slows once settled and runs only while the window is visible or active; published as `agents::view::ActiveRoot` (with `git_worktree`) by files/mod.rs `publish_root` | done (T5.1) |
+| `features/files/useConnectionTransfers.ts` | 85 | port | 5 | files/downloads.rs `DownloadList` | done (T5.1) |
 | `features/files/useOpenFileTab.ts` | 504 | port | 5 | editor/tabs.rs `open_file_tab` (preview-tab rule), editor/open.rs (explorer, terminal path and Quick Open opens), editor/document.rs (read, watch reconciliation, reload rules) | done (T5.2) |
-| `features/files/useWorkspaceFiles.test.tsx` | 1402 | port | 5 | tests of useWorkspaceFiles.ts | open |
-| `features/files/useWorkspaceFiles.ts` | 908 | port | 5 | workspace files controller | open |
-| `features/files/watchLeases.test.ts` | 208 | port | 5 | tests of watchLeases.ts | open |
-| `features/files/watchLeases.ts` | 181 | port | 5 | watch leases | open |
+| `features/files/useWorkspaceFiles.test.tsx` | 1402 | port | 5 | tests in files/tests.rs, against a scripted file service | done (T5.1) |
+| `features/files/useWorkspaceFiles.ts` | 908 | port | 5 | files/explorer.rs `Explorer` | done (T5.1) |
+| `features/files/watchLeases.test.ts` | 208 | port | 5 | tests in files/tests.rs | done (T5.1) |
+| `features/files/watchLeases.ts` | 181 | port | 5 | files/watches.rs `sync_watches`: reachable targets, refusal backoff, unwatch after a failed bootstrap or once an abandoned arming settles, one host watch shared with open documents | done (T5.1) |
 | `features/files/webkitWidgetBuffers.test.ts` | 43 | retire | 5 | CodeMirror widget buffer behavior in WebKit | done (T5.2) |
-| `features/files/wire.ts` | 135 | port | 5 | file wire decode and transfer state validation | open |
+| `features/files/wire.ts` | 135 | port | 5 | file wire decode and transfer state validation; Explorer half (T5.1): files/wire.rs and files/downloads.rs `decode_event`; line endings go with the editor | open |
 
 ### `features/git`
 
@@ -444,7 +444,7 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/shell/AppTabSurface.test.tsx` | 644 | port | 5 | read, reload, echo, rescan, bootstrap and save-status cases in editor/document_tests.rs and editor/save_status.rs; the Markdown link case in markdown/link.rs (T5.4); the watch lease release is left to the T5.1 watcher | open |
+| `features/shell/AppTabSurface.test.tsx` | 644 | port | 5 | read, reload, echo, rescan, bootstrap and save-status cases in editor/document_tests.rs and editor/save_status.rs; the Markdown link case in markdown/link.rs (T5.4); the watch lease, its release and its re-arm on a new connection in files/tests.rs (T5.1) | done (T5.2, T5.4, T5.1) |
 | `features/shell/AppTabSurface.tsx` | 366 | port | 5 | editor/mod.rs `surface` routes document, diff (T5.3 `set_diff_surface`) and preview (T5.4 `set_markdown_preview`); editor/pane.rs draws the document tab | done (T5.2) |
 | `features/shell/DisconnectedStrip.tsx` | 75 | port | 2 | connection_ui/surface.rs | done (T2.4) |
 | `features/shell/MarkdownPreview.test.tsx` | 346 | port | 5 | markdown/view.rs `a_standing_selection_holds_a_change_until_it_is_cleared` and `going_back_to_what_is_shown_drops_a_held_change`; link routing in markdown/link.rs `routes_each_kind_of_link_to_what_it_opens`; the click test in `only_a_left_press_and_release_in_one_place_follows_a_link`. The DOM-node-identity cases drop: Kit's view keeps its parsed document, not nodes | done (T5.4) |

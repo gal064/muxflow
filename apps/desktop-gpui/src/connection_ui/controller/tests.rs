@@ -1930,3 +1930,14 @@ fn only_the_host_on_screen_may_write_the_clipboard(cx: &mut TestAppContext) {
         Some("from the screen".into())
     );
 }
+
+#[test]
+fn settles_on_no_file_service_event() {
+    assert!(!settles(&BridgeEvent::FileService {
+        payload: "{}".into()
+    }));
+    assert!(!settles(&BridgeEvent::Ignored));
+    assert!(settles(&BridgeEvent::GitService {
+        payload: "{}".into()
+    }));
+}

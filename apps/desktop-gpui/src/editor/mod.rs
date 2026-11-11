@@ -37,9 +37,7 @@ use gpui_kit::{
 
 pub use document::{Document, FileNotice};
 pub use io::Root;
-pub use open::{
-    OpenFile, open_file, open_search_match, open_terminal_path, search_files, search_key,
-};
+pub use open::{OpenFile, open_file, open_search_match, open_terminal_path};
 pub use pane::DocumentPane;
 
 use crate::{

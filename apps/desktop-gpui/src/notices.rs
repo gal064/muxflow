@@ -127,6 +127,12 @@ pub fn notify(message: &str, window: &mut Window, cx: &mut App) -> bool {
         return false;
     };
     let notification = match notice.severity {
+        // A finished download offers to open what it wrote.
+        Severity::Info
+            if let Some(download) = crate::files::download_notice(&notice.message, cx) =>
+        {
+            download
+        }
         Severity::Info => Notification::info(notice.message),
         // Kit's own close button shows only while the pointer is on the card, so a
         // notice that stays offers a visible way to go.

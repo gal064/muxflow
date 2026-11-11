@@ -893,6 +893,21 @@ fn tab_menu(
             };
             entries.push(item.into());
         }
+        // A diff has no file behind it to save, so it has no item at all.
+        if let TabKind::App {
+            tab_id, app_kind, ..
+        } = &tab.kind
+            && *app_kind != desktop_core::app_state::AppTabKind::GitDiff
+        {
+            let tab_id = tab_id.clone();
+            entries.push(Entry::Separator);
+            entries.push(
+                Item::new("Download…", move |window, cx| {
+                    crate::files::download_app_tab(&tab_id, window, cx)
+                })
+                .into(),
+            );
+        }
         context_menu::fill(menu, &entries, window, cx)
     }
 }
