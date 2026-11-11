@@ -5,9 +5,12 @@
 //! refusal carries `VoiceResponse { operation_id, retryable }` because
 //! `Response` has no retry hint of its own.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use tmux_agent_protocol::v1;
@@ -25,6 +28,7 @@ pub(super) async fn handle(
     control_tx: &tokio::sync::mpsc::Sender<SequencerControl>,
     connection_id: u64,
     active_server_identity: &str,
+    live_panes: Option<&HashSet<String>>,
     cancellation: &AtomicBool,
     connection_closed: &AtomicBool,
 ) {
@@ -41,6 +45,7 @@ pub(super) async fn handle(
                 voice,
                 connection_id,
                 active_server_identity,
+                live_panes,
                 cancellation,
                 connection_closed,
             )
@@ -55,6 +60,7 @@ async fn handle_inner(
     request: v1::VoiceRequest,
     connection_id: u64,
     active_server_identity: &str,
+    live_panes: Option<&HashSet<String>>,
     cancellation: &AtomicBool,
     connection_closed: &AtomicBool,
 ) -> v1::Response {
@@ -72,6 +78,7 @@ async fn handle_inner(
         request,
         connection_id,
         active_server_identity,
+        live_panes,
         cancellation,
         connection_closed,
     )
@@ -101,6 +108,7 @@ async fn dispatch(
     request: v1::VoiceRequest,
     connection_id: u64,
     active_server_identity: &str,
+    live_panes: Option<&HashSet<String>>,
     cancellation: &AtomicBool,
     connection_closed: &AtomicBool,
 ) -> Result<v1::VoiceResponse, VoiceError> {
@@ -129,6 +137,7 @@ async fn dispatch(
                     connection_id,
                     active_server_identity,
                     &request.pane_id,
+                    live_panes,
                 )?;
             }
             Ok(v1::VoiceResponse::default())
@@ -198,6 +207,7 @@ mod tests {
             &control_tx,
             1,
             "server-a",
+            None,
             &AtomicBool::new(false),
             &AtomicBool::new(false),
         )
@@ -227,6 +237,7 @@ mod tests {
             },
             1,
             "server-a",
+            None,
             &AtomicBool::new(true),
             &AtomicBool::new(false),
         )
@@ -248,6 +259,7 @@ mod tests {
             },
             91,
             "server-new",
+            None,
             &AtomicBool::new(false),
             &AtomicBool::new(false),
         )
