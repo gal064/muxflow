@@ -698,6 +698,16 @@ pub fn group_entries(entries: &[StatusEntry]) -> Groups<'_> {
     }
 }
 
+impl Groups<'_> {
+    /// Nothing to show: a tree whose only entries are ignored files is clean.
+    pub fn is_empty(&self) -> bool {
+        self.conflicts.is_empty()
+            && self.staged.is_empty()
+            && self.unstaged.is_empty()
+            && self.untracked.is_empty()
+    }
+}
+
 pub fn status_code(entry: &StatusEntry, target: Target) -> &'static str {
     if entry.conflicted {
         return "U";
