@@ -99,6 +99,9 @@ pub struct Latency {
 
 /// A reading older than this says nothing about the link now.
 const LATENCY_STALE_AFTER: Duration = Duration::from_secs(60);
+/// How long, and how often, a new workspace's startup command is retried.
+const STARTUP_WAIT: Duration = Duration::from_secs(10);
+const STARTUP_RETRY: Duration = Duration::from_millis(250);
 const LATENCY_SMOOTHING: f64 = 0.3;
 
 fn smoothed_latency(previous: Option<Latency>, sample: f64, now: Instant) -> Latency {
@@ -1248,12 +1251,16 @@ impl Workspaces {
         let session_already_active = from
             .as_ref()
             .is_some_and(|from| from.session_id == target.session_id);
-        let window_already_active = target.window_id.as_ref().is_some_and(|id| {
-            snapshot
-                .windows
-                .iter()
-                .any(|w| w.id == *id && w.session_id == target.session_id && w.active)
-        });
+        // tmux's select-pane leaves a workspace on its window, so a pane move
+        // selects the window even when the snapshot, maybe stale, says it is
+        // there already.
+        let window_already_active = intent.pane.is_none()
+            && target.window_id.as_ref().is_some_and(|id| {
+                snapshot
+                    .windows
+                    .iter()
+                    .any(|w| w.id == *id && w.session_id == target.session_id && w.active)
+            });
         let current = match (predecessor, &from) {
             (None, Some(from)) => Some(Outcome::Partial {
                 location: from.clone(),
@@ -1566,7 +1573,7 @@ impl Workspaces {
                 };
                 this.upgrade_pending(key, Some(session.clone()), created.window_id.clone());
                 if let (Some(command), Some(pane)) = (startup, created.pane_id.clone()) {
-                    this.send_startup(&host, &pane, command, cx);
+                    this.send_startup(host.clone(), pane, command, cx);
                 }
                 if this.intents == intent {
                     this.commit_local(&host, &session, created.window_id.as_deref(), None, cx);
@@ -1577,25 +1584,41 @@ impl Workspaces {
         .detach();
     }
 
-    fn send_startup(&self, host: &str, pane: &str, command: String, cx: &mut App) {
-        let Some(controller) = &self.controller else {
-            return;
-        };
-        let Some(client) = self.link(host, cx).and_then(|link| link.client_id) else {
-            return;
-        };
+    /// Types a new workspace's startup command into its first pane. When
+    /// creating it started the tmux server, the host is still reconnecting,
+    /// so a refusal is tried again for a while before it is reported.
+    fn send_startup(&self, host: String, pane: String, command: String, cx: &mut Context<Self>) {
         // Shell text, sent verbatim: escaping it would change the command.
-        let sent = controller.read(cx).backend().send_input(
-            client,
-            pane.to_owned(),
-            format!("{command}\n").into_bytes(),
-        );
-        if let Err(error) = sent {
-            self.report(
-                format!("Workspace created, but the startup command could not be sent: {error}"),
-                cx,
-            );
-        }
+        let input = format!("{command}\n").into_bytes();
+        cx.spawn(async move |this, cx| {
+            let mut waited = Duration::ZERO;
+            loop {
+                let sent = this.update(cx, |this, cx| {
+                    let controller = this.controller.clone()?;
+                    let client = this.link(&host, cx)?.client_id?;
+                    let backend = controller.read(cx).backend();
+                    Some(backend.send_input(client, pane.clone(), input.clone()))
+                });
+                let error = match sent {
+                    Err(_) | Ok(Some(Ok(()))) => return,
+                    Ok(Some(Err(error))) => error,
+                    Ok(None) => "its host is not connected".to_owned(),
+                };
+                if waited >= STARTUP_WAIT {
+                    this.update(cx, |this, cx| {
+                        this.report(
+                            format!("Workspace created, but the startup command could not be sent: {error}"),
+                            cx,
+                        )
+                    })
+                    .ok();
+                    return;
+                }
+                cx.background_executor().timer(STARTUP_RETRY).await;
+                waited += STARTUP_RETRY;
+            }
+        })
+        .detach();
     }
 
     /// The New workspace dialog's answer.

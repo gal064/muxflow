@@ -44,6 +44,8 @@ struct HostState {
     actions: Vec<Value>,
     answers: VecDeque<Result<Value, String>>,
     inputs: Vec<(String, Vec<u8>)>,
+    /// How many inputs to refuse first, as a bridge still reconnecting does.
+    refused_inputs: usize,
     generation: u64,
 }
 
@@ -121,7 +123,12 @@ impl TerminalBackend for FakeHost {
     }
 
     fn send_input(&self, _: String, pane: String, bytes: Vec<u8>) -> Result<(), String> {
-        self.state().inputs.push((pane, bytes));
+        let mut state = self.state();
+        if state.refused_inputs > 0 {
+            state.refused_inputs -= 1;
+            return Err("terminal bridge is disconnected or reconciling".into());
+        }
+        state.inputs.push((pane, bytes));
         Ok(())
     }
 
@@ -591,6 +598,34 @@ fn creating_a_workspace_sends_its_startup_command_once(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+fn a_startup_command_waits_for_a_host_still_reconnecting(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    let workspaces = shell.workspaces();
+    // Creating the first workspace started the tmux server: the bridge
+    // refuses input until it has reconnected.
+    shell.host.state().refused_inputs = 3;
+    shell.visual.update(|window, cx| {
+        crate::settings::update(
+            |prefs| prefs.set_workspace_defaults("local", None, Some("make dev")),
+            window,
+            cx,
+        );
+        workspaces.update(cx, |this, cx| this.create_workspace("api".into(), cx));
+    });
+    shell.settle();
+    assert!(shell.host.state().inputs.is_empty());
+    shell
+        .visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    shell.settle();
+    assert_eq!(
+        shell.host.state().inputs,
+        [("%9".to_owned(), b"make dev\n".to_vec())]
+    );
+}
+
+#[gpui_kit::test]
 fn closing_a_workspace_asks_first(cx: &mut TestAppContext) {
     let mut shell = shell(cx, json!([]), json!({}));
     shell.run("session.close");
@@ -957,6 +992,15 @@ mod agent_seams {
             (focus["pane_id"].as_str(), focus["client"].as_str()),
             (Some("%3"), Some("client-1"))
         );
+        // Another workspace whose window tmux says is current: still selected,
+        // since focusing a pane leaves its workspace on whatever window it shows.
+        shell
+            .visual
+            .update(|_, cx| agents::open_pane("local", "%4", cx))
+            .unwrap();
+        shell.settle();
+        assert_eq!(shell.host.last("selectWindow")["window_id"], "@3");
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%4");
 
         shell
             .visual
