@@ -112,6 +112,8 @@ pub(super) fn supervise_bridge(
         if let Ok(Some(lease)) = lease {
             lease.require_revalidation();
         }
+        // Every error above is followed by this state; the desktop app relies
+        // on it to supersede the error's own notice.
         send_event(
             &channel,
             TerminalEvent::ConnectionState {
