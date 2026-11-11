@@ -82,7 +82,11 @@ pub fn button(button: Button, action: Action, disabled: bool, palette: &Palette)
             .border_color(palette.chrome_border)
             .text_color(palette.chrome_ink),
         Action::Primary => button.primary().border_color(palette.accent),
-        Action::Danger => button.danger().border_color(palette.danger),
+        // `.danger`: filled, where Kit's own danger variant is a pale wash.
+        Action::Danger => button
+            .bg(palette.danger)
+            .border_color(palette.danger)
+            .text_color(palette.accent_ink),
         Action::DangerQuiet => button
             .bg(palette.chrome_bg)
             .border_color(palette.chrome_border)
