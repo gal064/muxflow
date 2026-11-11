@@ -631,12 +631,12 @@ fn release_at(
     } else if let Some(link) = link
         && cell_at(pane, event.position).is_some_and(|(point, _)| link.contains(point))
     {
-        activate(&link, window, cx);
+        activate(&link, pane.pane_id(), window, cx);
     }
     pane.repaint_all(cx);
 }
 
-fn activate(link: &Link, window: &mut Window, cx: &mut App) {
+fn activate(link: &Link, pane_id: &str, window: &mut Window, cx: &mut App) {
     match link.kind {
         LinkKind::Web => {
             let Some(url) = links::external_url(&link.text) else {
@@ -650,18 +650,8 @@ fn activate(link: &Link, window: &mut Window, cx: &mut App) {
                 );
             }
         }
-        // Resolving a path on the host and opening it in a tab needs the file
-        // tabs of Phase 4 and the editor of Phase 5.
-        LinkKind::File => {
-            notices::notify(
-                &format!(
-                    "Could not open {}: opening files from the terminal is not available yet.",
-                    link.text
-                ),
-                window,
-                cx,
-            );
-        }
+        // The host resolves the path for this pane, then it opens in a tab.
+        LinkKind::File => crate::editor::open_terminal_path(pane_id, &link.text, None, cx),
     }
 }
 
