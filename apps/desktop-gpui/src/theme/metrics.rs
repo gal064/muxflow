@@ -1,7 +1,7 @@
 //! Lengths and type steps from `apps/desktop/src/tokens.css`, in CSS pixels at
 //! 100% UI scale. Size chrome with [`ui`], not `px()`, so it follows UI scale.
 
-use gpui_kit::{Rems, rems};
+use gpui_kit::{Rems, Window, rems};
 
 /// A `tokens.css` length as rems. Kit sets the rem from the UI scale.
 pub fn ui(css_pixels: f32) -> Rems {
@@ -33,3 +33,47 @@ pub const FOCUS_RING: f32 = 2.;
 pub const ATTENTION_RING: f32 = 2.5;
 pub const ATTENTION_RADIUS: f32 = 6.;
 pub const ATTENTION_INSET: f32 = 2.;
+
+/// `styles.css`'s narrow-window breakpoints, in CSS pixels. Tauri zoomed the
+/// webview for UI scale, so they move with it: compare with [`narrower_than`].
+pub const NARROW_DIALOGS: f32 = 600.;
+pub const NARROW_TERMINAL: f32 = 880.;
+pub const NARROW_QUICK_OPEN: f32 = 480.;
+
+/// Whether the window is at most `breakpoint` CSS pixels wide at this scale.
+pub fn narrower_than(breakpoint: f32, window: &Window) -> bool {
+    window.viewport_size().width <= ui(breakpoint).to_pixels(window.rem_size())
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{Context, IntoElement, Render, TestAppContext, div, px, size};
+
+    use super::*;
+
+    struct Blank;
+
+    impl Render for Blank {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_breakpoint_follows_ui_scale(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| Blank);
+        let mut at = |width: f32, rem: f32| {
+            cx.simulate_resize(size(px(width), px(600.)));
+            cx.update(|window, _| {
+                window.set_rem_size(px(rem));
+                narrower_than(NARROW_TERMINAL, window)
+            })
+        };
+        assert!(!at(1000., 16.));
+        // Inclusive, as `max-width` is.
+        assert!(at(880., 16.));
+        // The breakpoints follow UI scale, as Tauri's zoomed webview did.
+        assert!(!at(1200., 20.));
+        assert!(at(1100., 20.));
+    }
+}

@@ -35,7 +35,7 @@ struct Manifest {
     url: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailableUpdate {
     pub version: String,

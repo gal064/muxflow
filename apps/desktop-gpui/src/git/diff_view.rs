@@ -35,6 +35,7 @@ use crate::{
         self, Palette,
         metrics::{BAR_HEIGHT, TYPE_LABEL, TYPE_META, ui},
     },
+    ui::surface_error::SurfaceError,
 };
 
 use super::{
@@ -908,7 +909,7 @@ impl Render for GitDiffView {
                 this.child(banner("git-diff-block", Role::Note, block.into(), &palette))
             })
             .when_some(error, |this, error| {
-                this.child(banner("git-diff-error", Role::Alert, error, &palette))
+                this.child(SurfaceError::new("git-diff-error", error))
             })
             .child(div().flex_1().min_h_0().min_w_0().child(body))
             .when(hunk_actions, |this| {
@@ -991,6 +992,11 @@ impl GitDiffView {
 
     pub(super) fn loading(&self) -> bool {
         self.loading
+    }
+
+    /// Whether the loading line is visible yet, not only laid out.
+    pub(super) fn loading_shown(&self) -> bool {
+        self.loading_shown
     }
 
     pub(super) fn stage_hunk(&mut self, index: u32, cx: &mut Context<Self>) {

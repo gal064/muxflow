@@ -6,7 +6,6 @@ use gpui_kit::{
     AnyElement, App, AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement,
     ParentElement, Render, Role, SharedString, StatefulInteractiveElement, Styled, Subscription,
     Window,
-    assets::IconName,
     base::TestSupportExt,
     component::{
         Disableable, Icon, Sizable,
@@ -19,6 +18,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
 };
 
+use crate::ui::icons::Glyph;
 use crate::{
     context_menu::{Entry, Item, fill},
     fonts,
@@ -309,7 +309,7 @@ impl Render for PortsPanel {
                                     .accessibility_label(format!("Stop forwarding {remote}"))
                                     .tooltip("Stop forwarding")
                                     .icon(
-                                        Icon::new(IconName::Close)
+                                        Icon::new(Glyph::Close)
                                             .size(ui(11.))
                                             .text_color(palette.chrome_faint),
                                     )
@@ -348,7 +348,7 @@ impl Render for PortsPanel {
                             .accessibility_label("Detect listening ports")
                             .tooltip("Detect listening ports")
                             .icon(
-                                Icon::new(IconName::RefreshCw)
+                                Icon::new(Glyph::Refresh)
                                     .size(ui(14.))
                                     .text_color(palette.chrome_dim),
                             )
