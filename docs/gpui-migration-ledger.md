@@ -214,7 +214,7 @@ font row covers them).
 | `app/useAppConnectionController.ts` | 944 | port | 2 | connection_ui/controller.rs; terminal hub and state cache, reseeds, echo-lag and input-latency probes, clipboard, file, git, agent and automation frame routing, retireConnection, appFocused and prewarm_terminal_bulk stay with Phase 3 and 4 owners; active-window resolution and the optimistic window with T4.1; after-install agent setup with useAgentHostSetup | done (T2.4) |
 | `app/useAppFileActions.test.tsx` | 196 | port | 5 | tests of useAppFileActions.ts | open |
 | `app/useAppFileActions.ts` | 145 | port | 5 | file actions entity (mutation, save panel, transfers) | open |
-| `app/useAppHostSettingsActions.ts` | 179 | port | 4 | host connection, profile and helper actions in connection_ui/controller.rs (T2.4); the rest of the host settings actions land with Phase 4 | open |
+| `app/useAppHostSettingsActions.ts` | 179 | port | 4 | host connection, profile and helper actions in connection_ui/controller.rs (T2.4); the same actions now run from the Settings Connection tab (T4.4) | done (T2.4, T4.4) |
 | `app/useAppRecoveryController.test.tsx` | 112 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
 | `app/useAppRecoveryController.ts` | 104 | port | 2 | connection_ui/controller.rs; T4.1 rewires its app-state access to the single in-memory owner and adds the flush on close | done (T2.4, T4.1) |
 | `app/useAppShellChrome.test.tsx` | 91 | port | 2 | tests of useAppShellChrome.ts | open |
@@ -271,10 +271,10 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `diagnostics/copyChordJournal.test.ts` | 44 | port | 3 | tests of copyChordJournal.ts | open |
-| `diagnostics/copyChordJournal.ts` | 37 | port | 3 | Ctrl+C copy-then-interrupt journal | open |
-| `diagnostics/incidents.test.ts` | 47 | port | 2 | behavior assertions move to the replacement of incidents.ts | open |
-| `diagnostics/incidents.ts` | 39 | replace | 2 | direct call into desktop-core incidents (renderer half of incidents.rs) | open |
+| `diagnostics/copyChordJournal.test.ts` | 44 | port | 3 | tests in `diagnostics.rs` | done (T4.4) |
+| `diagnostics/copyChordJournal.ts` | 37 | port | 3 | `diagnostics.rs` `CopyChordJournal`, fed from `commands::on_keystroke` on Linux | done (T4.4) |
+| `diagnostics/incidents.test.ts` | 47 | port | 2 | record format cases in `diagnostics.rs`, including a detail that cannot overwrite `kind`, `t` or `launch`; the write-failure case is the backend's `let _ =` | done (T4.4) |
+| `diagnostics/incidents.ts` | 39 | replace | 2 | direct call into desktop-core incidents (renderer half of incidents.rs); the record is built by `diagnostics::incident_record` | done (T4.4) |
 
 ### `features/agents`
 
@@ -449,7 +449,7 @@ font row covers them).
 | `features/shell/DisconnectedStrip.tsx` | 75 | port | 2 | connection_ui/surface.rs | done (T2.4) |
 | `features/shell/MarkdownPreview.test.tsx` | 346 | port | 5 | ? preview keeps selection while content updates; DOM selection mechanics may not apply, keep the behavior | open |
 | `features/shell/RightPanel.tsx` | 120 | port | 2 | right panel container with resizable width | open |
-| `features/shell/SettingsDialog.tsx` | 611 | port | 4 | settings dialog | open |
+| `features/shell/SettingsDialog.tsx` | 611 | port | 4 | `settings/dialog.rs` with the live values in `settings/prefs.rs` and `settings/mod.rs`. The terminal screen-reader setting is the agreed exception. Agent setup and the notifier are published by T4.2 through `settings::set_agent_setup` and `settings::set_notifier` | done (T4.4) |
 | `features/shell/TitleBar.test.tsx` | 57 | port | 2 | tests of TitleBar.tsx | open |
 | `features/shell/TitleBar.tsx` | 206 | port | 2 | title bar on GPUI client decorations | open |
 | `features/shell/appStateContract.test.ts` | 334 | port | 4 | ? TS half of the shared app-state fixture retires (Rust half stays in app_state.rs); normalize and clamp cases port | open |
@@ -474,7 +474,7 @@ font row covers them).
 | `features/shell/statusNotice.test.ts` | 94 | port | 2 | `notices.rs` unit tests | done (T2.4, T2.5) |
 | `features/shell/statusNotice.ts` | 96 | port | 2 | `notices.rs`; one notice at a time, a problem stays until dismissed | done (T2.4, T2.5) |
 | `features/shell/types.ts` | 458 | port | 4 | shell and persisted app-state types with normalization | open |
-| `features/shell/useAppearance.ts` | 33 | port | 2 | applies saved theme once state is ready | open |
+| `features/shell/useAppearance.ts` | 33 | port | 2 | `settings::update` applies a changed theme or size through `theme::apply`; `Shell` follows the OS while the choice is System | done (T4.4) |
 | `features/shell/useDesktopResumeRecovery.test.ts` | 81 | port | 2 | tests in connection_ui/resume_recovery.rs | done (T2.4) |
 | `features/shell/useDesktopResumeRecovery.ts` | 151 | port | 2 | connection_ui/resume_recovery.rs; the browser online event is polled from getifaddrs on the 5 s check | done (T2.4) |
 | `features/shell/usePersistedAppState.test.tsx` | 89 | port | 4 | tests of usePersistedAppState.ts | open |
@@ -637,10 +637,10 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `startup/editorPreload.test.ts` | 191 | retire | 5 | tests editorPreload.ts, which retires | open |
-| `startup/editorPreload.ts` | 82 | retire | 5 | idle preload of the lazy Monaco chunk; no chunk to load | open |
-| `startup/fontGate.test.ts` | 60 | retire | 2 | tests fontGate.ts, which retires | open |
-| `startup/fontGate.ts` | 50 | retire | 2 | waits for a web font before xterm measures a cell; fonts are embedded so metrics exist at start | open |
+| `startup/editorPreload.test.ts` | 191 | retire | 5 | tests editorPreload.ts, which retires | done (T4.4) |
+| `startup/editorPreload.ts` | 82 | retire | 5 | idle preload of the lazy Monaco chunk; no chunk to load | done (T4.4) |
+| `startup/fontGate.test.ts` | 60 | retire | 2 | tests fontGate.ts, which retires | done (T4.4) |
+| `startup/fontGate.ts` | 50 | retire | 2 | waits for a web font before xterm measures a cell; fonts are embedded so metrics exist at start | done (T4.4) |
 
 ### `state`
 
@@ -668,8 +668,8 @@ font row covers them).
 | `ui/SetupProgress.tsx` | 6 | port | 2 | setup progress line | open |
 | `ui/StateDot.tsx` | 53 | port | 2 | agents/view.rs `state_indicator`, glyphs from `shell.agent_state_glyphs` | done (T4.2) |
 | `ui/SurfaceError.tsx` | 50 | port | 2 | surface error with disclosure | open |
-| `ui/appearance.test.ts` | 79 | port | 2 | theme preference and palette parity; palette cases become generator output tests | open |
-| `ui/appearance.ts` | 130 | port | 2 | theme preference and UI scale over app_state | open |
+| `ui/appearance.test.ts` | 79 | port | 2 | theme preference and palette parity; palette cases become generator output tests; the System, Light and Dark resolution cases are in `theme::tests` | done (T2.1, T4.4) |
+| `ui/appearance.ts` | 130 | port | 2 | theme preference and UI scale over app_state: `theme::apply`, `settings::update`. The Markdown palette choice is `Prefs::markdown_appearance`, read by the Markdown view in Phase 5 | done (T2.1, T4.4) |
 | `ui/errorSummary.test.ts` | 109 | port | 2 | tests of errorSummary.ts | open |
 | `ui/errorSummary.ts` | 142 | port | 2 | host rejection to sentence | open |
 
