@@ -4,10 +4,20 @@
 
 use gpui_kit::{
     AnyElement, App, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    RenderOnce, SharedString, Styled, WeakEntity, Window, assets::IconName, base::Disableable,
-    component::h_flex, div, prelude::FluentBuilder, px,
+    RenderOnce, SharedString, StatefulInteractiveElement, Styled, TestSupportExt, WeakEntity,
+    Window,
+    base::Disableable,
+    component::{
+        Sizable,
+        button::{Button, ButtonRounded, ButtonVariants},
+        h_flex,
+    },
+    div,
+    prelude::FluentBuilder,
+    px,
 };
 
+use crate::ui::icons::Glyph;
 use crate::{
     commands,
     theme::{
@@ -70,7 +80,7 @@ impl RenderOnce for TitleContent {
         let settings = || {
             bar_button(
                 "title-settings",
-                IconName::Settings,
+                Glyph::Settings,
                 "Settings",
                 palette.chrome_dim,
             )
@@ -103,7 +113,7 @@ impl RenderOnce for TitleContent {
             div()
                 .relative()
                 .child(
-                    bar_button("title-bell", IconName::Bell, label.clone(), ink)
+                    bar_button("title-bell", Glyph::Bell, label.clone(), ink)
                         .tooltip(hint.clone())
                         .disabled(!can_jump)
                         .on_click(|_, _, cx| crate::agents::jump_to_unread(cx)),
@@ -134,7 +144,7 @@ impl RenderOnce for TitleContent {
                 })
         };
         let command_button =
-            |id: &'static str, icon: IconName, label: &'static str, enabled: bool, command| {
+            |id: &'static str, icon: Glyph, label: &'static str, enabled: bool, command| {
                 bar_button(
                     id,
                     icon,
@@ -151,7 +161,7 @@ impl RenderOnce for TitleContent {
         let back = || {
             command_button(
                 "title-back",
-                IconName::ArrowLeft,
+                Glyph::ArrowLeft,
                 "Back",
                 can_back,
                 "focus.back",
@@ -161,7 +171,7 @@ impl RenderOnce for TitleContent {
         let forward = || {
             command_button(
                 "title-forward",
-                IconName::ArrowRight,
+                Glyph::ArrowRight,
                 "Forward",
                 can_forward,
                 "focus.forward",
@@ -171,13 +181,34 @@ impl RenderOnce for TitleContent {
         let new_workspace = || {
             command_button(
                 "title-new-workspace",
-                IconName::Plus,
+                Glyph::Plus,
                 "New workspace",
                 can_create,
                 "session.new",
             )
             .tooltip(new_workspace_tip.clone())
         };
+
+        // Only while a newer release is published. No dismiss on purpose: it is
+        // gone once the app is updated.
+        let update = crate::update::available(cx).map(|update| {
+            Button::new("title-update")
+                .danger()
+                .xsmall()
+                .compact()
+                .h(ui(17.))
+                .px(ui(8.))
+                .mr(ui(6.))
+                .rounded(ButtonRounded::Large)
+                .text_size(ui(10.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .label(format!("↑ Update {}", update.version))
+                .tooltip(format!(
+                    "Muxflow {} is available. Install the update.",
+                    update.version
+                ))
+                .on_click(|_, window, cx| crate::update::install(window, cx))
+        });
 
         let rail_ink = move |open: bool, fits: bool| {
             if !fits {
@@ -195,7 +226,7 @@ impl RenderOnce for TitleContent {
                 let weak = weak.clone();
                 bar_button(
                     "title-sidebar-toggle",
-                    IconName::PanelLeft,
+                    Glyph::SidebarLeft,
                     "Toggle sidebar",
                     rail_ink(rails.sidebar_open, rails.sidebar_fits),
                 )
@@ -217,7 +248,7 @@ impl RenderOnce for TitleContent {
                 let weak = weak.clone();
                 bar_button(
                     "title-panel-toggle",
-                    IconName::PanelRight,
+                    Glyph::PanelRight,
                     "Toggle right panel",
                     rail_ink(rails.panel_open, rails.panel_fits),
                 )
@@ -291,6 +322,7 @@ impl RenderOnce for TitleContent {
                 )
                 // Fixed, so a window full of tabs still leaves room to drag it.
                 .child(div().flex_none().w(ui(32.)).h_full())
+                .child(group().children(update))
                 .child(
                     group()
                         .pl(ui(4.))
@@ -317,6 +349,9 @@ impl RenderOnce for TitleContent {
                 )
                 .child(
                     div()
+                        .id("title-workspace-name")
+                        .aria_label(SharedString::from(name.clone()))
+                        .test_support()
                         .ml(ui(6.))
                         .min_w_0()
                         .truncate()
@@ -329,6 +364,7 @@ impl RenderOnce for TitleContent {
                 .child(div().flex_1().min_w(ui(8.)).h_full())
                 .child(
                     group()
+                        .children(update)
                         .child(bell())
                         .child(new_workspace())
                         .child(panel_toggle()),
