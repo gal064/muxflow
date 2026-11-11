@@ -245,6 +245,7 @@ through the T2.1 seam.
 | T6.3 `behavior-docs` | sonnet, medium, full cycle, docs only | `gpui/behavior-docs` | Merged | `2f6ebe0` | `docs/gpui-behavior-audit.md`: 116 statements hold, 5 differ or are missing: 3 keyboard gaps routed to T6.1, stale source paths in `mac-ssh-hosts.md` (cutover edit), and the incident journal. Mac items for the owner prompt, cutover edits listed. The incident-journal gap was fixed at the root (`674fc7e`) |
 | T6.7 `parity-fixes` | opus, high, full cycle | `gpui/parity-fixes` | Merged | `26d930f` | Fixed the transient "host bridge closed" notice and the 0.0.0 app version. Ports after a host switch, the New workspace default host, the blank terminal after relaunch and the attention-generation toast all match Tauri (checked side by side). QA pass |
 | T6.2 `visual-parity` | sonnet, high, full cycle, design | `gpui/visual-parity` | Merged | `c5187a5` | Fixed a diff crash across 900 px, scrim, toasts, setup dialog, Settings Connection tab, split Commit, Markdown source colours, diff row colours, palette band. Accepted (Kit or rasterization): heading letter-spacing, textarea grip, hatched diff fillers, line pitch within 1 px, editor gutter and find widget, context-menu row size, preview mid-word breaks, radio size, dialog width below 600 px. Open: tab strip pitch (Tauri reference build was stale), preview a few px short |
+| T6.1 `accessibility` | opus, high, full cycle, large, invariant | `gpui/accessibility` | Merged | `a000c07` | Keyboard context menus everywhere Tauri has them (Shift+F10, Menu key, Home/End, Tab trap, open on checked item), roving and per-row Tab stops as in Tauri, focus return after menus and dialogs, posinset fix, named alerts and groups. 4 review rounds, QA pass. Open: Settings volume slider not keyboard-reachable (Kit slider takes no focus). Kit/AccessKit gaps recorded in `ui/mod.rs` |
 | T5.4 `markdown` | sonnet, high, full cycle, design | `gpui/markdown` | Merged | `587887b` | 2 review rounds, QA PASS local. Kit bug: double-click selects nothing in a paragraph with inline code. Drag-select in the preview not verified (xdotool). Settings copy still mentions Live Markdown |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
@@ -278,6 +279,7 @@ against a scratch remote over Docker SSH.
 | 2 | T6.2 `visual-parity` | Full, design | sonnet, high | Headless PNG comparison, theme fixes | Wave 1 |
 | 2 | T6.3 `behavior-docs` | Full, docs only, QA skipped | sonnet, medium | The behavior audit docs in the migration plan | Wave 1 |
 | 2 | T6.7 `parity-fixes` | Full | opus, high | Parity bugs wave-1 QA found outside its scope | Wave 1 |
+| 3 | T6.8 `final-polish` | Full | opus, high | Volume slider keyboard access, tab strip pitch, preview height | Wave 2 |
 
 **Integrated QA, root-owned because it needs shared state:** acceptance suites,
 `run-stall.sh`, `run-pause-probe.sh`, and release builds that connect to a local and an
@@ -343,7 +345,7 @@ final sweep command returning only justified hits.
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
 | 4 | Done, QA passed | `0912995` | |
 | 5 | Done | `ec39e80` | Integrated QA passed on local and SSH hosts |
-| 6 | Running, wave 2 | | T6.2, T6.3 and T6.7 merged; T6.1 finishing |
+| 6 | Running, polish | | Wave 2 merged; T6.8 `final-polish` running, then `gdev_qa_phase6` |
 | 7 to 10 | After parity, owner decides | | |
 
 ### Task log
