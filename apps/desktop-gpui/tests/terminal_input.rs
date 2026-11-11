@@ -462,3 +462,42 @@ fn a_paste_goes_to_the_host_as_one_paste_between_the_keys_around_it(cx: &mut Tes
         );
     }
 }
+
+#[gpui_kit::test]
+fn keys_typed_while_the_clipboard_is_read_follow_the_paste(cx: &mut TestAppContext) {
+    let (fake, _link, panes, visual) = panes(1, cx);
+    let pane = &panes[0];
+    focus(pane, visual);
+    visual.simulate_keystrokes("a");
+    let first = pane.update(visual, |pane, _| terminal::input::begin_paste(pane));
+    visual.simulate_keystrokes("b");
+    let second = pane.update(visual, |pane, _| terminal::input::begin_paste(pane));
+    visual.simulate_keystrokes("c");
+    assert_eq!(fake.take(), [sent("%1", b"a")]);
+    // The second read answers first: it still waits behind the first paste.
+    pane.update(visual, |pane, cx| {
+        terminal::input::end_paste(pane, second, Some("two"), cx)
+    });
+    assert_eq!(fake.take(), []);
+    pane.update(visual, |pane, cx| {
+        terminal::input::end_paste(pane, first, Some("one"), cx)
+    });
+    assert_eq!(
+        fake.take(),
+        [
+            pasted("%1", b"one"),
+            sent("%1", b"b"),
+            pasted("%1", b"two"),
+            sent("%1", b"c"),
+        ]
+    );
+    // A read with nothing to paste lets what waited go on its own.
+    let empty = pane.update(visual, |pane, _| terminal::input::begin_paste(pane));
+    visual.simulate_keystrokes("d");
+    pane.update(visual, |pane, cx| {
+        terminal::input::end_paste(pane, empty, None, cx)
+    });
+    assert_eq!(fake.take(), [sent("%1", b"d")]);
+    visual.simulate_keystrokes("e");
+    assert_eq!(fake.take(), [sent("%1", b"e")]);
+}

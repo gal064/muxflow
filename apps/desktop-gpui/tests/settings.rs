@@ -347,16 +347,21 @@ fn the_theme_and_the_interface_size_apply_to_the_window_at_once(cx: &mut TestApp
 #[gpui_kit::test]
 fn markdown_choices_are_saved_by_their_tauri_names(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let state = write_state(dir.path(), json!({}));
+    // Live is saved by the Tauri app, and kept for it: this app offers no Live
+    // view, but writing the other settings leaves the saved one alone.
+    let state = write_state(dir.path(), json!({ "defaultMarkdownView": "live" }));
     let handle = open_app(&state, cx);
     open_settings(handle, Some("Appearance"), cx);
     pick(handle, "settings-markdown-appearance", 2, cx);
-    click_tab(handle, "Workspace", cx);
-    pick(handle, "settings-markdown-view", 2, cx);
     let value = saved(cx, &state, |value| {
+        value["shell"]["markdownAppearance"] == json!("dark")
+    });
+    assert_eq!(value["shell"]["defaultMarkdownView"], json!("live"));
+    click_tab(handle, "Workspace", cx);
+    pick(handle, "settings-markdown-view", 1, cx);
+    saved(cx, &state, |value| {
         value["shell"]["defaultMarkdownView"] == json!("preview")
     });
-    assert_eq!(value["shell"]["markdownAppearance"], json!("dark"));
 }
 
 #[gpui_kit::test]

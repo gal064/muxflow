@@ -1031,6 +1031,44 @@ fn strips_the_local_teardown_suffix_from_what_the_user_reads(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn the_first_tmux_server_starting_is_no_lost_link(cx: &mut TestAppContext) {
+    const CHANGED: &str = "tmux server identity changed; authoritative reconnect required";
+    let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, true))));
+    let statuses = harness.statuses(cx);
+    harness.publish(
+        cx,
+        0,
+        vec![state_frame("connected"), world("tmux:none", 1, &[])],
+    );
+    harness.publish(cx, 0, vec![error_frame(CHANGED)]);
+    assert_eq!(count(&statuses, CHANGED), 0);
+    // A server that was already running and is replaced is a real loss.
+    harness.publish(
+        cx,
+        0,
+        vec![
+            state_frame("connected"),
+            world("srv-qa", 2, &[("$0", "home")]),
+        ],
+    );
+    harness.publish(cx, 0, vec![error_frame(CHANGED)]);
+    assert_eq!(count(&statuses, CHANGED), 1);
+}
+
+#[gpui_kit::test]
+fn a_host_without_a_tmux_server_still_reports_a_lost_link(cx: &mut TestAppContext) {
+    let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, true))));
+    let statuses = harness.statuses(cx);
+    harness.publish(
+        cx,
+        0,
+        vec![state_frame("connected"), world("tmux:none", 1, &[])],
+    );
+    harness.publish(cx, 0, vec![error_frame(UNREACHABLE)]);
+    assert_eq!(count(&statuses, UNREACHABLE), 1);
+}
+
+#[gpui_kit::test]
 fn a_second_drop_inside_the_window_speaks_the_verdict_instead(cx: &mut TestAppContext) {
     let harness = ssh_host(cx, |fake| {
         queue_answer(fake, Ok(probe_of(true, true)));

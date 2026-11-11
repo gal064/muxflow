@@ -215,6 +215,8 @@ pub struct ViewState {
     /// Which row has the keyboard, by identity.
     pub focus_key: Option<String>,
     pub last_focus_index: usize,
+    /// A renamed or moved row: the keyboard goes to it once it is listed.
+    pub follow: Option<String>,
     /// VS Code's escape hatch, reversible from the tree itself.
     pub show_ignored: bool,
     /// Whether the keyboard moved last: the ring shows only then, as
@@ -235,6 +237,7 @@ impl ViewState {
             scroll: UniformListScrollHandle::new(),
             focus_key: None,
             last_focus_index: 0,
+            follow: None,
             show_ignored: false,
             keyboard: false,
             open_error: None,
@@ -274,6 +277,17 @@ impl Explorer {
             ),
             None => Vec::new(),
         });
+        let followed = self
+            .view
+            .follow
+            .as_ref()
+            .and_then(|key| self.view.rows.iter().position(|row| row.is(key)));
+        if let Some(index) = followed {
+            self.view.focus_key = self.view.follow.take();
+            self.view
+                .scroll
+                .scroll_to_item(index, ScrollStrategy::Nearest);
+        }
         let index = self.view.focus_index();
         self.view.last_focus_index = index;
         self.view.focus_key = self
@@ -299,6 +313,7 @@ impl Explorer {
         };
         self.view.focus_key = Some(row.key());
         self.view.last_focus_index = index;
+        self.view.follow = None;
         self.view
             .scroll
             .scroll_to_item(index, ScrollStrategy::Nearest);

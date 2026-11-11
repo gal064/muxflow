@@ -92,6 +92,13 @@ static HANDSHAKE_FAILURE: LazyLock<Regex> =
 
 const MAX_FRAME_BATCH: usize = 256;
 
+/// The server identity a host reports while it has no tmux server.
+const NO_TMUX_SERVER: &str = "tmux:none";
+/// desktop-core's bridge error when the host's tmux server is not the one it
+/// attached to.
+const SERVER_IDENTITY_CHANGED: &str =
+    "tmux server identity changed; authoritative reconnect required";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionMode {
     Local,
@@ -1784,10 +1791,15 @@ impl ConnectionController {
             json!({ "hostProfileId": profile_id, "event": kind, "detail": detail }),
         );
         let shown = user_facing_bridge_failure(&detail).to_owned();
-        let was_connected = self
-            .links
-            .link(profile_id)
-            .is_some_and(|link| link.host_state.phase == ConnectionPhase::Connected);
+        // A host with no tmux server yet: the first workspace starts one, and
+        // the bridge reconnects to attach to it. That is not a lost link. The
+        // Tauri app announces it, but its next status replaces the notice in
+        // the same render, so it is never seen there either.
+        let was_connected = self.links.link(profile_id).is_some_and(|link| {
+            link.host_state.phase == ConnectionPhase::Connected
+                && !(error == Some(SERVER_IDENTITY_CHANGED)
+                    && link.host_state.server_identity.as_deref() == Some(NO_TMUX_SERVER))
+        });
         let active = self.is_active(profile_id);
         // An error while the link is up is the link dropping under the app:
         // exactly one per outage. A verdict spoken here is the notice for this
