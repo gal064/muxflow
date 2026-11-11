@@ -240,6 +240,9 @@ through the T2.1 seam.
 | T4.3 `ports-transfers` | sonnet, high, full cycle | `gpui/ports-transfers` | Merged | `daa7af4` | 2 reviewers, 1 round. QA pass on local and SSH hosts; document-tab drags, the dock zones and the agent menu were not run live (headless tests only). Open: upload Cancel waits for the host's response before it reports |
 | `gdev_qa_phase4` | fresh QA | `gpui/integration` | Passed after fixes | | All panels against local and SSH hosts. Found a notification click leaving tmux focus on the old pane, and a tooltip over a context menu |
 | T4.6 `phase4-fixes` | opus, high, full cycle, invariant | `gpui/phase4-fixes` | Merged | `0912995` | Fixed both QA bugs (cross-host navigation was cancelled by a connection change). Ported the topology authority, so Close All Non-Agent Tabs works. No Phase 4 ledger rows left open except the Phase 5 deferrals |
+| T5.1 `explorer` | opus, high, full cycle, invariant | `gpui/explorer` | Dispatched | | |
+| T5.2 `editor` | opus, high, full cycle, large, design | `gpui/editor` | Dispatched | | |
+| T5.3 `git-diff` | opus, high, full cycle, design | `gpui/git-diff` | Dispatched | | |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
 isolated host, headless. **Integrated QA:** `gdev_qa_phase4` exercises every panel
@@ -332,7 +335,8 @@ final sweep command returning only justified hits.
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
 | 4 | Done, QA passed | `0912995` | |
-| 5 to 6 | Approved | | |
+| 5 | Running, wave 1 dispatched | | T5.1, T5.2 and T5.3 running |
+| 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
 ### Task log
