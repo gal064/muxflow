@@ -19,6 +19,8 @@ use desktop_core::{
             self, FileIoManager, editor_manager,
             upload_manager::{self, UploadManager},
         },
+        git::{self, GitCommand},
+        git_content::{self, GitDiffContentCommand},
         helper::{self, HelperInstallReport},
         tmux_action,
     },
@@ -147,6 +149,28 @@ pub trait TerminalBackend: Send + Sync {
         _command: Value,
     ) -> BoxFuture<'static, Result<Value, String>> {
         futures::future::ready(Err("files are unavailable here".to_owned())).boxed()
+    }
+    /// One Git request, answered with the host's JSON (`git_request`).
+    fn git_request(
+        &self,
+        _client_id: String,
+        _command: GitCommand,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        futures::future::ready(Err("Git is unavailable here".to_owned())).boxed()
+    }
+    fn cancel_git_request(&self, _client_id: String, _operation_id: String) -> Result<(), String> {
+        Ok(())
+    }
+    /// Starts reading withheld diff bodies into `sink`, answering the read's id.
+    fn read_git_diff_content(
+        &self,
+        _command: GitDiffContentCommand,
+        _sink: Arc<dyn EventSink>,
+    ) -> BoxFuture<'static, Result<String, String>> {
+        futures::future::ready(Err("Git is unavailable here".to_owned())).boxed()
+    }
+    fn cancel_git_diff_content(&self, _client_id: String, _read_id: String) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -451,6 +475,34 @@ impl TerminalBackend for NativeBackend {
             let command = serde_json::from_value(command).map_err(|error| error.to_string())?;
             files::file_request(client_id, command, &clients).await
         })
+    }
+
+    fn git_request(
+        &self,
+        client_id: String,
+        command: GitCommand,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let clients = self.clients.clone();
+        spawned(async move { git::git_request(client_id, command, &clients).await })
+    }
+
+    fn cancel_git_request(&self, client_id: String, operation_id: String) -> Result<(), String> {
+        git::cancel_git_request(client_id, operation_id, &self.clients)
+    }
+
+    fn read_git_diff_content(
+        &self,
+        command: GitDiffContentCommand,
+        sink: Arc<dyn EventSink>,
+    ) -> BoxFuture<'static, Result<String, String>> {
+        let (clients, profiles) = (self.clients.clone(), self.profiles.clone());
+        spawned(async move {
+            git_content::read_git_diff_content(command, sink, &profiles, &clients).await
+        })
+    }
+
+    fn cancel_git_diff_content(&self, client_id: String, read_id: String) -> Result<(), String> {
+        git_content::cancel_git_diff_content(client_id, read_id, &self.clients)
     }
 }
 
