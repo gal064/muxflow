@@ -237,8 +237,8 @@ font row covers them).
 | `app/useTmuxActionPerformer.ts` | 146 | port | 4 | workspaces/mod.rs `perform`: the target's client and scope, silent or visible feedback, `action.refused` incident | done (T4.1) |
 | `app/useWorkspaceCreate.test.tsx` | 142 | port | 4 | per-host defaults in workspaces/model.rs, the startup command end to end in workspaces/tests.rs | done (T4.1) |
 | `app/useWorkspaceCreate.ts` | 69 | port | 4 | workspaces/mod.rs `create_workspace`, `send_startup` | done (T4.1) |
-| `app/useWorkspaceDomainController.test.ts` | 27 | port | 5 | tmux half in T4.1: a tmux request needs the link's client, writes and server identity (workspaces/mod.rs `perform`). Phase 5: the file and Git scope half | open |
-| `app/useWorkspaceDomainController.ts` | 99 | port | 5 | tmux half in T4.1: the tmux request scope in workspaces/mod.rs `perform` and `scope_current`. Phase 5: the live file scope | open |
+| `app/useWorkspaceDomainController.test.ts` | 27 | port | 5 | tmux half in T4.1: a tmux request needs the link's client, writes and server identity (workspaces/mod.rs `perform`). Phase 5: the file and Git scope half; the Git scope half in git/model.rs `git_scope`, tested in git/tests.rs (T5.3) | open |
+| `app/useWorkspaceDomainController.ts` | 99 | port | 5 | tmux half in T4.1: the tmux request scope in workspaces/mod.rs `perform` and `scope_current`. Phase 5: the live file scope; the Git scope half in git/model.rs `git_scope` and git/mod.rs `sync` (T5.3) | open |
 | `app/windowSelection.test.ts` | 79 | port | 4 | tests in workspaces/navigation.rs and connection_ui/host_links.rs | done (T4.1) |
 | `app/windowSelection.ts` | 97 | port | 4 | workspaces/navigation.rs; the optimistic window guard in connection_ui/host_links.rs `settle_active_window` | done (T4.1) |
 
@@ -415,21 +415,21 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/git/GitCommitForm.tsx` | 166 | port | 5 | commit form view | open |
-| `features/git/GitDiffEditor.test.tsx` | 39 | retire | 5 | asserts Monaco diff option values through a mocked wrapper; wrap and alignment are covered by the Phase 5 diff exit gate | open |
-| `features/git/GitDiffEditor.tsx` | 60 | replace | 5 | Kit Diff (read-only, virtualized) with a patch from similar | open |
-| `features/git/GitDiffSurface.test.tsx` | 350 | port | 5 | tests of GitDiffSurface.tsx | open |
-| `features/git/GitDiffSurface.tsx` | 237 | port | 5 | diff surface with wrapped aligned columns | open |
-| `features/git/GitSidebar.test.tsx` | 588 | port | 5 | tests of GitSidebar.tsx | open |
-| `features/git/GitSidebar.tsx` | 450 | port | 5 | git sidebar; has an in-app drag source (see S8) | open |
-| `features/git/api.test.ts` | 169 | port | 5 | behavior assertions move to the replacement of api.ts | open |
-| `features/git/api.ts` | 559 | replace | 5 | Tauri git client becomes direct desktop-core calls | open |
-| `features/git/repositoryStore.test.ts` | 306 | port | 5 | tests of repositoryStore.ts | open |
-| `features/git/repositoryStore.ts` | 470 | port | 5 | repository store | open |
-| `features/git/types.ts` | 144 | port | 5 | git types | open |
-| `features/git/useSharedGitDiff.ts` | 268 | port | 5 | shared git diff controller | open |
-| `features/git/useWorkspaceGit.test.tsx` | 163 | port | 5 | tests of useWorkspaceGit.ts | open |
-| `features/git/useWorkspaceGit.ts` | 78 | port | 5 | workspace git controller | open |
+| `features/git/GitCommitForm.tsx` | 166 | port | 5 | git/panel.rs: the commit form (`render_form`, `run`), with Commit, Commit & Push and Push | done (T5.3) |
+| `features/git/GitDiffEditor.test.tsx` | 39 | retire | 5 | asserts Monaco diff option values through a mocked wrapper; wrap and alignment are covered by the Phase 5 diff exit gate | done (T5.3) |
+| `features/git/GitDiffEditor.tsx` | 60 | replace | 5 | Kit Diff (read-only, virtualized) with a whole-file patch from similar (git/model.rs `whole_file_patch`), wrapped, side by side from 900 px and inline below, in git/diff_view.rs | done (T5.3) |
+| `features/git/GitDiffSurface.test.tsx` | 350 | port | 5 | logic cases in git/tests.rs (the diff tab); drawing-only cases are covered by the T5.3 and Phase 5 QA | done (T5.3) |
+| `features/git/GitDiffSurface.tsx` | 237 | port | 5 | git/diff_view.rs, reached through `git::diff_surface`, the document area's route for a Git diff tab | done (T5.3) |
+| `features/git/GitSidebar.test.tsx` | 588 | port | 5 | logic cases in git/tests.rs (the panel and its model); drawing-only cases (row layout, drag payload, DOM bounds) are covered by the T5.3 and Phase 5 QA | done (T5.3) |
+| `features/git/GitSidebar.tsx` | 450 | port | 5 | git/panel.rs; the row's drag carries `InternalPathDrag` (see S8) | done (T5.3) |
+| `features/git/api.test.ts` | 169 | port | 5 | tests in git/tests.rs (the wire) | done (T5.3) |
+| `features/git/api.ts` | 559 | replace | 5 | git/client.rs over desktop-core through the connection backend; the wire shapes in git/model.rs | done (T5.3) |
+| `features/git/repositoryStore.test.ts` | 306 | port | 5 | tests in git/tests.rs (the shared observation) | done (T5.3) |
+| `features/git/repositoryStore.ts` | 470 | port | 5 | git/store.rs | done (T5.3) |
+| `features/git/types.ts` | 144 | port | 5 | git/model.rs | done (T5.3) |
+| `features/git/useSharedGitDiff.ts` | 268 | port | 5 | git/diff_view.rs | done (T5.3) |
+| `features/git/useWorkspaceGit.test.tsx` | 163 | port | 5 | tests in git/tests.rs (the panel's observation) | done (T5.3) |
+| `features/git/useWorkspaceGit.ts` | 78 | port | 5 | git/panel.rs `set_context` and git/mod.rs `sync` | done (T5.3) |
 
 ### `features/ports`
 
