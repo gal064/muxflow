@@ -129,6 +129,7 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
             } else {
                 Action::Primary
             },
+            false,
             &palette,
         );
         dialog::card(alert, &palette)
@@ -151,6 +152,7 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
                             .track_focus(&cancel_focus)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                         Action::Plain,
+                        false,
                         &palette,
                     ))
                     .child(button),

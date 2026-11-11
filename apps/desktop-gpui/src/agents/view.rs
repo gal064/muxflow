@@ -1418,6 +1418,7 @@ fn open_setup_dialog(
                                 decline.update(cx, |runtime, cx| runtime.decline_setup(cx))
                             }),
                         Action::Plain,
+                        busy,
                         &palette,
                     ))
                     .child(dialog::button(
@@ -1432,6 +1433,7 @@ fn open_setup_dialog(
                                 review.update(cx, |runtime, cx| runtime.review_setup(cx))
                             }),
                         Action::Plain,
+                        busy,
                         &palette,
                     ))
                     .child(dialog::button(
@@ -1446,6 +1448,7 @@ fn open_setup_dialog(
                                 accept.update(cx, |runtime, cx| runtime.accept_setup(cx))
                             }),
                         Action::Primary,
+                        busy,
                         &palette,
                     )),
             )
@@ -1603,6 +1606,7 @@ fn open_review_dialog(
                 .disabled(open.applying)
                 .on_click(move |_, _, cx| confirm.update(cx, |runtime, cx| runtime.confirm_review(cx))),
             if installing { Action::Primary } else { Action::Danger },
+            open.applying,
             &palette,
         );
         dialog::card(dialog, &palette)
@@ -1664,6 +1668,7 @@ fn open_review_dialog(
                             .disabled(open.applying)
                             .on_click(move |_, _, cx| cancel.update(cx, |runtime, cx| runtime.cancel_review(cx))),
                         Action::Plain,
+                        open.applying,
                         &palette,
                     ))
                     .child(confirm_button),

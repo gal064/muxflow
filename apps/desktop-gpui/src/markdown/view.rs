@@ -92,31 +92,53 @@ static IMAGE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// An image the preview will not show, as its alt text in a code span: a browser draws a
 /// blocked image as a box holding the alt text, where Kit's text view leaves blank
-/// space. Fenced code is left as written.
+/// space. Fenced code and inline code are left as written.
 fn show_blocked_images(markdown: &str) -> String {
-    let mut fenced = false;
+    // The open fence's marker: a fence closes only on the same character, as long.
+    let mut fence: Option<(char, usize)> = None;
     let mut out = String::with_capacity(markdown.len());
     for line in markdown.split_inclusive('\n') {
-        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-            fenced = !fenced;
-        }
-        if fenced {
-            out.push_str(line);
-            continue;
-        }
-        out.push_str(&IMAGE.replace_all(line, |found: &regex::Captures| {
-            if EMBEDDED_IMAGE.is_match(&found[2]) {
-                return found[0].to_owned();
+        let trimmed = line.trim_start();
+        let marker = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'));
+        let run = marker.map_or(0, |m| trimmed.chars().take_while(|c| *c == m).count());
+        match (fence, marker) {
+            (None, Some(m)) if run >= 3 && !(m == '`' && trimmed[run..].contains('`')) => {
+                fence = Some((m, run));
+                out.push_str(line);
+                continue;
             }
-            let alt = found[1].replace('`', "");
-            if alt.trim().is_empty() {
-                String::new()
+            (Some((open, len)), _) => {
+                if marker == Some(open) && run >= len && trimmed[run..].trim().is_empty() {
+                    fence = None;
+                }
+                out.push_str(line);
+                continue;
+            }
+            _ => {}
+        }
+        // Odd pieces between backticks are inline code.
+        for (index, piece) in line.split('`').enumerate() {
+            if index > 0 {
+                out.push('`');
+            }
+            if index % 2 == 1 {
+                out.push_str(piece);
             } else {
-                format!("`{}`", alt.trim())
+                out.push_str(&IMAGE.replace_all(piece, alt_text));
             }
-        }));
+        }
     }
     out
+}
+
+fn alt_text(found: &regex::Captures) -> String {
+    if EMBEDDED_IMAGE.is_match(&found[2]) {
+        return found[0].to_owned();
+    }
+    match found[1].trim() {
+        "" => String::new(),
+        alt => format!("`{alt}`"),
+    }
 }
 
 /// Whether a refresh must wait: replacing the text under a selection, or one
@@ -459,6 +481,13 @@ mod tests {
         assert_eq!(
             show_blocked_images(&text),
             format!("`remote` and  then {embedded}\n```\n![in code](u)\n```\n")
+        );
+        // A badge inside a link keeps the link; inline code and a longer or other-marker
+        // fence are not images.
+        let more = "[![build](b.svg)](ci)\n`![syntax](u)`\n~~~\n```\n![a](u)\n~~~\n![b](u)\n";
+        assert_eq!(
+            show_blocked_images(more),
+            "[`build`](ci)\n`![syntax](u)`\n~~~\n```\n![a](u)\n~~~\n`b`\n"
         );
     }
 
