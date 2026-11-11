@@ -14,7 +14,7 @@ use gpui_kit::{
     MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, RenderOnce, Rgba, Role, SharedString,
     StatefulInteractiveElement, Styled, Window, canvas,
     component::{
-        ActiveTheme, Icon, IconName, InteractiveElementExt, Sizable,
+        ActiveTheme, Icon, InteractiveElementExt, Sizable,
         button::{Button, ButtonCustomVariant, ButtonVariants},
         h_flex,
     },
@@ -28,6 +28,7 @@ use crate::theme::{
     self,
     metrics::{BAR_HEIGHT, TITLEBAR_HEIGHT, ui},
 };
+use crate::ui::icons::Glyph;
 
 /// Height and left inset. macOS draws its traffic lights over the bar at a fixed
 /// size, so there the room kept for them does not follow UI scale. With tabs in
@@ -84,6 +85,17 @@ pub fn classify(desktop: Option<&str>) -> ChromeMode {
     } else {
         ChromeMode::Buttons
     }
+}
+
+/// The `window.chrome` incident Tauri journaled at start on Linux: what was
+/// decided, on which desktop, and why. A floating window without buttons
+/// would be one nobody can close, so the decision is worth a line.
+pub fn chrome_incident(desktop: Option<&str>) -> serde_json::Value {
+    let (mode, reason) = match classify(desktop) {
+        ChromeMode::Buttons => ("buttons", "floating desktop"),
+        ChromeMode::Bare => ("bare", "tiling desktop"),
+    };
+    serde_json::json!({ "mode": mode, "desktop": desktop.unwrap_or_default(), "reason": reason })
 }
 
 fn chrome_mode() -> ChromeMode {
@@ -228,20 +240,15 @@ impl RenderOnce for WindowControls {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let ink = theme::palette(cx).chrome_dim;
         let (maximize_icon, maximize_label) = if window.is_maximized() {
-            (IconName::WindowRestore, "Restore window")
+            (Glyph::WindowRestore, "Restore")
         } else {
-            (IconName::WindowMaximize, "Maximize window")
+            (Glyph::WindowMaximize, "Maximize")
         };
         let leading = self.leading;
-        let control = |id: &'static str, icon: IconName, label: &'static str| {
-            bar_button(id, icon, label, ink)
-        };
-        let minimize = control(
-            "window-minimize",
-            IconName::WindowMinimize,
-            "Minimize window",
-        )
-        .on_click(|_, window, _| window.minimize_window());
+        let control =
+            |id: &'static str, icon: Glyph, label: &'static str| bar_button(id, icon, label, ink);
+        let minimize = control("window-minimize", Glyph::Minus, "Minimize")
+            .on_click(|_, window, _| window.minimize_window());
         let maximize = control("window-maximize", maximize_icon, maximize_label)
             .on_click(|_, window, _| window.zoom_window());
         // Close is the one control that answers hover with the danger color, and its
@@ -254,12 +261,8 @@ impl RenderOnce for WindowControls {
         } else {
             ink
         };
-        let close = control("window-close", IconName::WindowClose, "Close window")
-            .icon(
-                Icon::new(IconName::WindowClose)
-                    .size(ui(14.))
-                    .text_color(close_ink),
-            )
+        let close = control("window-close", Glyph::Close, "Close window")
+            .icon(Icon::new(Glyph::Close).size(ui(14.)).text_color(close_ink))
             .custom(ButtonCustomVariant::new(cx).hover(danger).active(danger))
             .on_hover(move |hovered, _, cx| {
                 close_hovered.update(cx, |state, cx| {
@@ -292,6 +295,18 @@ impl RenderOnce for WindowControls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_journal_line_says_what_decided() {
+        assert_eq!(
+            chrome_incident(Some("Hyprland")),
+            serde_json::json!({ "mode": "bare", "desktop": "Hyprland", "reason": "tiling desktop" })
+        );
+        assert_eq!(
+            chrome_incident(None),
+            serde_json::json!({ "mode": "buttons", "desktop": "", "reason": "floating desktop" })
+        );
+    }
 
     #[test]
     fn floating_and_unknown_desktops_get_buttons() {

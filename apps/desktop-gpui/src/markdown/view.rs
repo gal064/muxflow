@@ -14,7 +14,9 @@ use gpui_kit::{
     ParentElement, Pixels, Point, Render, Role, SharedString, SharedUri,
     StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Window,
     base::{TextView, TextViewStyle, text::TextViewState},
-    div, px, relative, rems,
+    div,
+    prelude::FluentBuilder,
+    px, relative, rems,
 };
 use regex::Regex;
 use std::sync::LazyLock;
@@ -23,7 +25,10 @@ use super::link::{self, Target};
 use crate::{
     commands::dialogs::{Confirmation, open_confirmation},
     editor::{self, Document},
-    theme::{self, Palette},
+    theme::{
+        self, Palette,
+        metrics::{NARROW_TERMINAL, narrower_than},
+    },
 };
 
 /// Document typography belongs to the page, not to the app's UI scale.
@@ -282,7 +287,14 @@ impl Render for PreviewView {
             .min_w_0()
             .min_h_0()
             .overflow_hidden()
-            .border_l_1()
+            // A narrow window stacks the split, so the preview sits below.
+            .map(|this| {
+                if narrower_than(NARROW_TERMINAL, window) {
+                    this.border_t_1()
+                } else {
+                    this.border_l_1()
+                }
+            })
             .border_color(palette.chrome_hairline)
             .bg(palette.chrome_bg)
             .text_color(palette.chrome_ink)

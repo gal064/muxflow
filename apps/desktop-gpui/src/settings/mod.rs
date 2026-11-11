@@ -105,6 +105,11 @@ pub fn update(change: impl FnOnce(&mut Prefs), window: &mut Window, cx: &mut App
         cx.refresh_windows();
     }
     let store = cx.global::<Core>().app_state.clone();
+    // Unreadable saved state takes no writes until it is reset, and the
+    // shell already says so once: the change lives for this run.
+    if load_app_state(&store).is_err() {
+        return;
+    }
     let latest = cx.global::<Settings>().latest.clone();
     let save = on_runtime(
         async move {
@@ -172,6 +177,21 @@ pub fn set_notifier(notifier: NativeNotifications, cx: &mut App) {
 
 fn notifier(cx: &App) -> Option<NativeNotifications> {
     cx.try_global::<Notifier>().map(|slot| slot.0.clone())
+}
+
+/// Makes `state`'s preferences the live ones, as after saved shell state was
+/// reset, without saving them again.
+pub fn reload(state: &PersistedAppState, cx: &mut App) {
+    if !cx.has_global::<Settings>() {
+        return;
+    }
+    let prefs = Prefs::from_state(state);
+    let settings = cx.global_mut::<Settings>();
+    *settings.latest.lock().unwrap() = prefs.clone();
+    settings.prefs = prefs.clone();
+    let system = cx.window_appearance();
+    theme::apply(prefs.theme, prefs.ui_scale, system, cx);
+    cx.refresh_windows();
 }
 
 /// Called once from [`crate::features::init`].

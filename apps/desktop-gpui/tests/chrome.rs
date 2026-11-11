@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use desktop_core::app_state::ShellPreferences;
 use gpui_kit::{
     App, Role, TestAppContext, VisualTestContext, point, px, size,
     test::{TestQueryExt, TestWindowExt},
@@ -14,7 +15,7 @@ use gpui_kit::{
 use muxflow_gpui::{
     app::{self, Core},
     commands,
-    ui::shell::Shell,
+    ui::{chrome::layout, shell::Shell},
 };
 use serde_json::{Value, json};
 
@@ -301,4 +302,220 @@ fn a_broken_state_file_is_left_alone(cx: &mut TestAppContext) {
         sleep(Duration::from_millis(5));
     }
     assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+}
+
+/// The left edge of each named control, which must all sit in the title bar.
+fn title_bar_xs(window_cx: &mut VisualTestContext, labels: &[&str]) -> Vec<f32> {
+    window_cx.update(|window, _| {
+        let bar = window.find_by_label("Settings").bounds();
+        labels
+            .iter()
+            .map(|label| {
+                let bounds = window.find_by_label(label).bounds();
+                assert!(
+                    bounds.top() < bar.bottom() && bounds.bottom() > bar.top(),
+                    "{label} is not in the title bar: {bounds:?}"
+                );
+                bounds.origin.x.as_f32()
+            })
+            .collect()
+    })
+}
+
+fn in_order(window_cx: &mut VisualTestContext, labels: &[&str]) {
+    let xs = title_bar_xs(window_cx, labels);
+    for (pair, names) in xs.windows(2).zip(labels.windows(2)) {
+        assert!(
+            pair[0] < pair[1],
+            "{} before {}: {xs:?}",
+            names[0],
+            names[1]
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn the_title_bar_keeps_todays_arrangement_without_tabs(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({ "tabsInTitleBar": false }));
+    let window_cx = open(&state, cx);
+    in_order(
+        window_cx,
+        &[
+            "Settings",
+            "Toggle sidebar",
+            "Back",
+            "Forward",
+            "No workspace",
+            "No agents waiting",
+            "New workspace",
+            "Toggle right panel",
+        ],
+    );
+    // No host is connected, so none can create a workspace.
+    window_cx.update(|window, _| {
+        assert_eq!(window.find_by_label("New workspace").disabled(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn with_tabs_the_title_bar_ends_with_the_rail_toggles(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({}));
+    let window_cx = open(&state, cx);
+    // The strip's own toolbar stands for the tabs: the tab list is not observed.
+    let tabs = "New terminal tab";
+    in_order(
+        window_cx,
+        &[
+            "Settings",
+            "No agents waiting",
+            "Back",
+            "Forward",
+            tabs,
+            "Toggle sidebar",
+            "Toggle right panel",
+        ],
+    );
+    assert!(
+        !shows(window_cx, "No workspace"),
+        "the tabs replace the name"
+    );
+    // The open sidebar holds New workspace; the title bar does not repeat it.
+    window_cx.update(|window, _| {
+        let new = window.find_by_label("New workspace").bounds();
+        let bar = window.find_by_label("Settings").bounds();
+        assert!(new.top() >= bar.bottom(), "{new:?}");
+    });
+
+    click(window_cx, "title-sidebar-toggle");
+    in_order(window_cx, &["Forward", "New workspace", tabs]);
+    window_cx.update(|window, _| {
+        assert_eq!(window.find_by_label("New workspace").disabled(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn the_panel_toggle_says_why_it_is_unavailable(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({}));
+    let window_cx = open(&state, cx);
+    // 700 - 300 leaves the terminal less than its 480.
+    window_cx.simulate_resize(size(px(700.), px(600.)));
+    window_cx.update(|window, _| {
+        let toggle = window.find_by_label("Toggle right panel");
+        assert_eq!(toggle.disabled(), Some(true));
+        assert_eq!(
+            toggle.description(),
+            Some("Widen the window to show Files and Git")
+        );
+    });
+}
+
+fn default_prefs(sidebar_width: f32, panel_width: f32, panel_open: bool) -> layout::Prefs {
+    let mut prefs = layout::Prefs::from_shell(&ShellPreferences::default());
+    prefs.sidebar_width = sidebar_width;
+    prefs.panel_width = panel_width;
+    prefs.panel_open = panel_open;
+    prefs
+}
+
+#[test]
+fn the_sidebar_gets_the_panels_room_when_the_panel_is_closed() {
+    let sidebar_only = default_prefs(240., 300., false);
+    let at = |width| {
+        let rails = layout::rails(&sidebar_only, width);
+        (rails.sidebar_open, rails.panel_open)
+    };
+    assert_eq!(at(240. + 480.), (true, false));
+    assert_eq!(at(240. + 480. - 1.), (false, false));
+}
+
+#[test]
+fn the_rails_measure_against_their_own_widths() {
+    let at = |sidebar, panel| {
+        let rails = layout::rails(&default_prefs(sidebar, panel, true), 1_200.);
+        (rails.sidebar_open, rails.panel_open)
+    };
+    assert_eq!(at(240., 300.), (true, true));
+    // A sidebar dragged wide gives way sooner than a default one.
+    assert_eq!(at(400., 400.), (false, true));
+}
+
+#[gpui_kit::test]
+fn asking_for_a_surface_twice_keeps_it_open(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({}));
+    let window_cx = open(&state, cx);
+    for _ in 0..2 {
+        window_cx.update(|window, cx| commands::run("view.showGit", window, cx));
+        assert!(shows(window_cx, PANEL));
+        window_cx.update(|window, _| {
+            assert_eq!(window.find_by_label("Git").selected(), Some(true));
+        });
+    }
+    window_cx.update(|window, cx| commands::run("view.showPorts", window, cx));
+    assert!(shows(window_cx, PANEL));
+    window_cx.update(|window, _| {
+        assert_eq!(window.find_by_label("Ports").selected(), Some(true));
+    });
+    saved(window_cx, &state, |value| {
+        value["shell"]["panelOpen"] == json!(true)
+            && value["shell"]["panelSurface"] == json!("ports")
+    });
+}
+
+#[gpui_kit::test]
+fn a_rail_command_means_the_same_at_any_width(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(
+        dir.path(),
+        json!({ "sidebarCollapsed": true, "panelOpen": true }),
+    );
+    let window_cx = open(&state, cx);
+    window_cx.simulate_resize(size(px(900.), px(800.)));
+    window_cx.update(|window, cx| commands::run("view.toggleSidebar", window, cx));
+    // Too narrow for the sidebar beside the panel: it waits, and the panel stays.
+    assert!(!shows(window_cx, SIDEBAR));
+    assert!(shows(window_cx, PANEL));
+    saved(window_cx, &state, |value| {
+        value["shell"]["sidebarCollapsed"] == json!(false)
+            && value["shell"]["panelOpen"] == json!(true)
+    });
+    window_cx.simulate_resize(size(px(1280.), px(800.)));
+    assert!(shows(window_cx, SIDEBAR) && shows(window_cx, PANEL));
+}
+
+#[gpui_kit::test]
+fn dragging_the_panel_edge_resizes_it_within_its_bounds(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({ "panelOpen": true }));
+    let window_cx = open(&state, cx);
+    let grab = |window_cx: &mut VisualTestContext| {
+        window_cx.update(|window, _| {
+            let bounds = window.find("panel-resize").bounds();
+            point(
+                bounds.origin.x + px(3.),
+                bounds.origin.y + bounds.size.height / 2.,
+            )
+        })
+    };
+    let width = |value: &Value| value["shell"]["panelWidth"].as_f64().unwrap_or_default();
+
+    let from = grab(window_cx);
+    window_cx.update(|window, cx| window.drag(from, point(px(1280. - 400.), from.y), cx));
+    let value = saved(window_cx, &state, |value| width(value) > 350.);
+    assert!((width(&value) - 400.).abs() < 6., "saved {}", width(&value));
+
+    // 1280 less the terminal's 480 and the sidebar's 240 caps a drag at 560.
+    let from = grab(window_cx);
+    window_cx.update(|window, cx| window.drag(from, point(px(100.), from.y), cx));
+    let value = saved(window_cx, &state, |value| width(value) == 560.);
+    assert_eq!(width(&value), 560.);
+
+    // And it never gets narrower than 240.
+    let from = grab(window_cx);
+    window_cx.update(|window, cx| window.drag(from, point(px(1270.), from.y), cx));
+    let value = saved(window_cx, &state, |value| width(value) == 240.);
+    assert_eq!(width(&value), 240.);
 }

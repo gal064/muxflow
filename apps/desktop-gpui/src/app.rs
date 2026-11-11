@@ -40,6 +40,7 @@ impl Core {
 }
 
 pub fn run() {
+    crate::update::wait_for_predecessor();
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .with_quit_mode(QuitMode::LastWindowClosed)
@@ -48,6 +49,7 @@ pub fn run() {
             fonts::register(cx);
             init(Core::load(), cx);
             crate::connection_ui::start(cx).expect("load the saved host profiles");
+            crate::update::start(cx);
             open_main_window(cx).expect("open the main window");
             cx.activate(true);
         });

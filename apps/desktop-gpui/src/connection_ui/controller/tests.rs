@@ -515,6 +515,38 @@ fn connecting_an_empty_form_only_asks_for_a_host(cx: &mut TestAppContext) {
     assert_eq!(harness.fake.bridge_count(), 2);
 }
 
+/// Port of the second half of `App.integration.test.tsx`'s "edits the picked
+/// host in place, and adds one only when asked to".
+#[gpui_kit::test]
+fn add_host_starts_an_empty_form_and_connect_saves_a_new_host(cx: &mut TestAppContext) {
+    let harness = ssh_host(cx, |_| {});
+    harness.update(cx, |state, cx| state.add_host(cx));
+    harness.read(cx, |state| {
+        assert_eq!(state.ssh_target(), "");
+        assert_eq!(state.selected_profile_id(), "");
+        assert_eq!(state.connection_mode(), ConnectionMode::Ssh);
+    });
+    harness.update(cx, |state, cx| {
+        state.set_ssh_target("staging-host".into(), cx)
+    });
+    harness.update(cx, |state, cx| state.connect(cx));
+    let path = harness._dir.path().join("profiles.json");
+    let saved = list_host_profiles(&ProfileStore::load(path).unwrap()).unwrap();
+    let profiles = saved["profiles"].as_array().unwrap();
+    assert_eq!(profiles.len(), 2, "{saved}");
+    let kept = profiles
+        .iter()
+        .find(|profile| profile["id"] == "remote-a")
+        .expect("the first host is still there");
+    assert_eq!(kept["connection"]["target"], "qa-host");
+    let added = profiles
+        .iter()
+        .find(|profile| profile["label"] == "staging-host")
+        .expect("the new host was saved");
+    assert_ne!(added["id"], "remote-a");
+    assert_eq!(added["connection"]["target"], "staging-host");
+}
+
 #[gpui_kit::test]
 fn correcting_a_picked_hosts_address_moves_it_with_exactly_one_restart(cx: &mut TestAppContext) {
     let harness = two_shown_hosts(cx);
@@ -1657,6 +1689,86 @@ fn a_reset_of_recovered_profiles_lands_on_local_with_a_fresh_bridge(cx: &mut Tes
     );
 }
 
+#[gpui_kit::test]
+fn an_unreadable_state_keeps_tabs_in_memory_until_a_reset_preserves_it(cx: &mut TestAppContext) {
+    let harness = harness_with(
+        cx,
+        vec![local_profile(true)],
+        "local",
+        |_| {},
+        |dir| std::fs::write(dir.join("app-state.json"), "{ not json").unwrap(),
+    );
+    let recovery = harness.read(cx, |state| state.app_state_recovery().map(str::to_owned));
+    assert!(
+        recovery.as_deref().is_some_and(
+            |error| error.starts_with("Saved shell state requires recovery: invalid app state")
+        ),
+        "{recovery:?}"
+    );
+    // Frozen: a change holds in memory and nothing is written.
+    harness.update(cx, |state, cx| {
+        state.update_app_state(
+            |state| {
+                state.workspace_ui.clear();
+                true
+            },
+            cx,
+        )
+    });
+    assert!(harness.fake.state().saved_app_states.is_empty());
+    harness.read(cx, |state| assert!(state.unsaved_app_state.is_some()));
+
+    // Preferences and shortcuts changed during the frozen run are live.
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::app::init(
+            crate::app::Core::at(Path::new("/nonexistent/app-state.json")),
+            cx,
+        );
+        let mut changed = PersistedAppState::default();
+        changed.shell.copy_on_select = Some(!crate::settings::get(cx).copy_on_select);
+        changed.commands.shortcut_overrides =
+            [("commands.show".to_owned(), Some("Ctrl+Shift+J".to_owned()))].into();
+        crate::settings::reload(&changed, cx);
+        crate::commands::reload_overrides(&changed, cx);
+    });
+
+    let statuses = harness.statuses(cx);
+    harness.update(cx, |state, cx| state.confirm_app_state_reset(cx));
+    assert_eq!(
+        statuses.lock().unwrap().as_slice(),
+        ["Saved shell state was reset; the invalid original was preserved for recovery."]
+    );
+    harness.read(cx, |state| {
+        assert_eq!(state.app_state_recovery(), None);
+        assert!(state.unsaved_app_state.is_none());
+    });
+    cx.read(|cx| {
+        let defaults = PersistedAppState::default();
+        assert_eq!(
+            crate::settings::get(cx),
+            &crate::settings::Prefs::from_state(&defaults),
+            "the reset's defaults are the live preferences"
+        );
+        assert!(
+            cx.global::<crate::commands::Commands>()
+                .overrides()
+                .is_empty()
+        );
+    });
+    let dir = harness._dir.path();
+    let preserved = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().contains("invalid-"))
+        .count();
+    assert_eq!(
+        preserved, 1,
+        "the invalid original is kept beside the new file"
+    );
+    assert!(load_app_state(&AppStateStore::load(dir.join("app-state.json"))).is_ok());
+}
+
 // The shell surface.
 
 mod surface {
@@ -1664,7 +1776,7 @@ mod surface {
 
     use gpui_kit::{
         KeyDownEvent, KeyUpEvent, Keystroke, Role, TestAppContext, VisualTestContext,
-        test::TestQueryExt,
+        test::{TestQueryExt, TestWindowExt},
     };
 
     use super::*;
@@ -1752,6 +1864,14 @@ mod surface {
             HelperUpgradeState::Upgrading { .. }
         ));
         assert_eq!(role_of(&mut visual, "Working…"), Some(Role::Button));
+        // Tauri's `SetupProgress`: the busy detail is spoken as a status.
+        assert_eq!(
+            role_of(
+                &mut visual,
+                "Uploading and verifying the helper. This may take a little while."
+            ),
+            Some(Role::Status)
+        );
     }
 
     #[gpui_kit::test]
@@ -1888,6 +2008,108 @@ mod surface {
         visual.simulate_keystrokes("escape");
         visual.run_until_parked();
         assert!(!offered(&mut visual), "Settings closed");
+    }
+
+    #[gpui_kit::test]
+    fn an_open_settings_form_sits_out_a_host_switch_until_it_closes(cx: &mut TestAppContext) {
+        let harness = two_shown_hosts(cx);
+        let mut visual = open(cx, &harness);
+        // Settings is open on the local host, a host being typed in.
+        visual.update(|window, cx| {
+            crate::connection_ui::dialog::open_connection_dialog(
+                harness.controller.clone(),
+                window,
+                cx,
+            );
+        });
+        visual.run_until_parked();
+        harness.update(cx, |state, cx| {
+            state.set_ssh_target("typed-host".into(), cx);
+            state.activate_host("remote-a", cx);
+        });
+        harness.read(cx, |state| {
+            assert_eq!(state.active_profile_id(), "remote-a");
+            assert_eq!(state.selected_profile_id(), "local");
+            assert_eq!(state.ssh_target(), "typed-host");
+        });
+        // Closing Settings catches the form up with the host on screen.
+        visual.simulate_keystrokes("escape");
+        visual.run_until_parked();
+        harness.read(cx, |state| {
+            assert_eq!(state.selected_profile_id(), "remote-a");
+            assert_eq!(state.ssh_target(), "qa-host");
+        });
+    }
+
+    /// Port of `App.multiHost.test.tsx`'s "saves a host's letter and
+    /// visibility from Settings, without Connect".
+    #[gpui_kit::test]
+    fn settings_saves_a_letter_without_connect_and_keeps_the_active_host_shown(
+        cx: &mut TestAppContext,
+    ) {
+        let harness = two_shown_hosts(cx);
+        let mut visual = open(cx, &harness);
+        visual.update(|window, cx| {
+            crate::connection_ui::dialog::open_connection_dialog(
+                harness.controller.clone(),
+                window,
+                cx,
+            );
+        });
+        visual.run_until_parked();
+        let placeholder = visual.update(|window, _| {
+            window
+                .find_by_label("Host letter")
+                .placeholder()
+                .map(str::to_owned)
+        });
+        assert_eq!(placeholder.as_deref(), Some("L"));
+        visual.update(|window, cx| {
+            window.click("connection-host-letter", cx);
+            window.input("z", cx);
+        });
+        visual.run_until_parked();
+        let local = harness.read(&mut visual, |state| {
+            state
+                .profiles()
+                .iter()
+                .find(|profile| profile.id == "local")
+                .cloned()
+                .unwrap()
+        });
+        assert_eq!(local.letter.as_deref(), Some("z"));
+        assert_eq!(
+            crate::connection_ui::host_profiles::host_letter(&local),
+            "Z"
+        );
+        let path = harness._dir.path().join("profiles.json");
+        let saved = list_host_profiles(&ProfileStore::load(path).unwrap()).unwrap();
+        let on_disk = saved["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|profile| profile["id"] == "local")
+            .cloned()
+            .unwrap();
+        assert_eq!(on_disk["letter"], "z");
+        // The host on screen cannot be hidden from here either.
+        let shown: Vec<_> = visual.update(|window, _| {
+            window
+                .find_all_by_label("Show in sidebar")
+                .into_iter()
+                .filter(|element| element.checked().is_some())
+                .collect()
+        });
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(
+            (shown[0].checked(), shown[0].disabled()),
+            (Some(true), Some(true))
+        );
+        // Saved without Connect: no bridge moved and the host on screen stayed.
+        assert_eq!(harness.fake.bridge_count(), 2);
+        assert!(harness.fake.state().stopped.is_empty());
+        let active = harness.read(&mut visual, |state| state.active_profile_id());
+        assert_eq!(active, "local");
     }
 
     #[gpui_kit::test]

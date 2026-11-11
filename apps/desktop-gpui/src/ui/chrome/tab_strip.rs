@@ -11,10 +11,9 @@ use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 use desktop_core::app_state::AppTabKind;
 use gpui_kit::{
-    AnyElement, App, Bounds, ClickEvent, Entity, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, RenderOnce, ScrollHandle,
-    SharedString, StatefulInteractiveElement, Styled, Window,
-    assets::IconName,
+    Animation, AnimationExt, AnyElement, App, Bounds, ClickEvent, Entity, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    RenderOnce, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Window,
     base::{Disableable, Tab, Tabs},
     canvas,
     component::{
@@ -25,9 +24,11 @@ use gpui_kit::{
     },
     div,
     prelude::FluentBuilder,
-    px,
+    pulsating_between, px,
 };
 
+use crate::files::{icons::file_icon, wire::FileKind};
+use crate::ui::icons::Glyph;
 use crate::{
     agents::view::{adapter_glyph, state_indicator},
     context_menu::{self, Entry, Item},
@@ -35,7 +36,7 @@ use crate::{
     fonts,
     theme::{
         self,
-        metrics::{BAR_HEIGHT, TYPE_META, ui},
+        metrics::{BAR_HEIGHT, NARROW_TERMINAL, TYPE_META, narrower_than, ui},
     },
     ui::{
         chrome::sidebar::pin_glyph,
@@ -125,6 +126,12 @@ impl RenderOnce for TabStrip {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let palette = theme::palette(cx);
         let glyphs = crate::settings::get(cx).agent_state_glyphs;
+        // `styles.css` caps a tab tighter in a narrow window, so more fit.
+        let tab_max = ui(if narrower_than(NARROW_TERMINAL, window) {
+            150.
+        } else {
+            220.
+        });
         let state = self.workspaces.read(cx);
         let view = state.view(cx);
         let strip_focus = state.strip_focus.clone();
@@ -199,7 +206,7 @@ impl RenderOnce for TabStrip {
                     div()
                         .flex()
                         .flex_none()
-                        .max_w(ui(220.))
+                        .max_w(tab_max)
                         .items_stretch()
                         .child(
                             Tab::new(id)
@@ -212,7 +219,7 @@ impl RenderOnce for TabStrip {
                                 .px(ui(14.))
                                 .text_size(ui(13.))
                                 .text_color(palette.chrome_faint)
-                                .child(div().size(ui(6.)).rounded_full().bg(palette.chrome_faint))
+                                .child(pending_dot(palette.chrome_faint))
                                 .child(div().italic().truncate().child(tab.title.clone())),
                         )
                         .into_any_element(),
@@ -301,13 +308,18 @@ impl RenderOnce for TabStrip {
                 } => {
                     label.push(tab.title.clone());
                     italic = *preview;
+                    // A document wears its Explorer row's icon, so the two
+                    // cannot disagree; a diff is not a file type.
                     let (icon, color) = match app_kind {
-                        AppTabKind::GitDiff => (IconName::FileText, palette.state_working),
-                        AppTabKind::Markdown => (IconName::FileText, palette.chrome_dim),
-                        AppTabKind::File => (IconName::File, palette.chrome_dim),
+                        AppTabKind::GitDiff => (Glyph::Diff.svg(), palette.state_working),
+                        AppTabKind::Markdown | AppTabKind::File => {
+                            let (shape, tint) = file_icon(&tab.title, FileKind::File, None, false);
+                            (shape.svg(), tint.color(&palette))
+                        }
                     };
                     glyph = Some(
-                        Icon::new(icon)
+                        Icon::empty()
+                            .data(icon)
                             .size(ui(12.))
                             .text_color(color)
                             .into_any_element(),
@@ -326,7 +338,7 @@ impl RenderOnce for TabStrip {
                                     format!("Close {}", tab.title),
                                 )
                                 .icon(
-                                    Icon::new(IconName::Close)
+                                    Icon::new(Glyph::Close)
                                         .size(ui(11.))
                                         .text_color(palette.chrome_faint),
                                 )
@@ -401,7 +413,7 @@ impl RenderOnce for TabStrip {
                     .relative()
                     .flex()
                     .flex_none()
-                    .max_w(ui(220.))
+                    .max_w(tab_max)
                     .items_stretch()
                     .on_mouse_up(MouseButton::Middle, middle)
                     .on_mouse_move({
@@ -518,7 +530,7 @@ impl RenderOnce for TabStrip {
                             )
                             .when(zoom, |tab| {
                                 tab.child(
-                                    Icon::new(IconName::Maximize)
+                                    Icon::new(Glyph::Zoom)
                                         .size(ui(11.))
                                         .text_color(palette.chrome_faint),
                                 )
@@ -552,7 +564,7 @@ impl RenderOnce for TabStrip {
             .as_deref()
             .map_or_else(Vec::new, |key| tabs_to_close_others(&tabs, key));
         let non_agent = tabs_to_close_non_agent(&tabs);
-        let tool = |id: &'static str, icon: IconName, label: &'static str, enabled: bool| {
+        let tool = |id: &'static str, icon: Glyph, label: &'static str, enabled: bool| {
             bar_button(
                 id,
                 icon,
@@ -574,7 +586,7 @@ impl RenderOnce for TabStrip {
             );
             tool(
                 "close-others",
-                IconName::CircleX,
+                Glyph::CloseOthers,
                 "Close other tabs",
                 !bulk_close_disabled(&others, can_mutate),
             )
@@ -593,7 +605,7 @@ impl RenderOnce for TabStrip {
             );
             tool(
                 "close-non-agent",
-                IconName::Ban,
+                Glyph::CloseNonAgent,
                 "Close all non-agent tabs",
                 !bulk_close_disabled(&non_agent, can_mutate),
             )
@@ -609,7 +621,7 @@ impl RenderOnce for TabStrip {
             let session = view.session.as_ref().map(|session| session.id.clone());
             tool(
                 "new-terminal",
-                IconName::Plus,
+                Glyph::Plus,
                 "New terminal tab",
                 can_mutate && session.is_some(),
             )
@@ -654,34 +666,30 @@ impl RenderOnce for TabStrip {
         let all_tabs = {
             let weak = self.workspaces.downgrade();
             let scroll = scroll.clone();
-            bar_button(
-                "all-tabs",
-                IconName::Ellipsis,
-                "All tabs",
-                palette.chrome_dim,
+            bar_button("all-tabs", Glyph::More, "All tabs", palette.chrome_dim).dropdown_menu(
+                move |mut menu, _, _| {
+                    for (index, (key, label, checked, pending)) in entries.iter().enumerate() {
+                        let (weak, key, reveal) = (weak.clone(), key.clone(), scroll.clone());
+                        menu = menu.item(
+                            PopupMenuItem::new(label.clone())
+                                .checked(*checked)
+                                .disabled(*pending)
+                                .on_click(move |_, window, cx| {
+                                    weak.update(cx, |this, cx| this.select_tab(&key, cx)).ok();
+                                    // Also for the tab already selected: the
+                                    // one this list was opened to find.
+                                    reveal.scroll_to_item(index);
+                                    if let (Some(this), true) =
+                                        (weak.upgrade(), key.starts_with("terminal:"))
+                                    {
+                                        focus_terminal(&this, window, cx);
+                                    }
+                                }),
+                        );
+                    }
+                    menu
+                },
             )
-            .dropdown_menu(move |mut menu, _, _| {
-                for (index, (key, label, checked, pending)) in entries.iter().enumerate() {
-                    let (weak, key, reveal) = (weak.clone(), key.clone(), scroll.clone());
-                    menu = menu.item(
-                        PopupMenuItem::new(label.clone())
-                            .checked(*checked)
-                            .disabled(*pending)
-                            .on_click(move |_, window, cx| {
-                                weak.update(cx, |this, cx| this.select_tab(&key, cx)).ok();
-                                // Also for the tab already selected: the
-                                // one this list was opened to find.
-                                reveal.scroll_to_item(index);
-                                if let (Some(this), true) =
-                                    (weak.upgrade(), key.starts_with("terminal:"))
-                                {
-                                    focus_terminal(&this, window, cx);
-                                }
-                            }),
-                    );
-                }
-                menu
-            })
         };
 
         let (keys, follow) = (self.workspaces.downgrade(), scroll.clone());
@@ -909,5 +917,55 @@ fn tab_menu(
             );
         }
         context_menu::fill(menu, &entries, window, cx)
+    }
+}
+
+/// A tab whose window the host has not created yet: the pulse is what says
+/// "still waiting". Under reduced motion GPUI draws the start of a repeating
+/// animation and schedules nothing, and this pulse starts mid-range, so the
+/// dot stays, still, at the 0.6 or so Tauri gave it there.
+fn pending_dot(color: gpui_kit::Rgba) -> impl IntoElement {
+    div().size(ui(6.)).rounded_full().bg(color).with_animation(
+        "tab-pending-pulse",
+        Animation::new(std::time::Duration::from_millis(1200))
+            .repeat()
+            .with_easing(pulsating_between(0.3, 1.)),
+        |dot, opacity| dot.opacity(opacity),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{Context, Render, TestAppContext, px, size};
+
+    use super::*;
+
+    struct Pending;
+
+    impl Render for Pending {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(pending_dot(gpui_kit::rgba(0x808080ff)))
+        }
+    }
+
+    fn frames_asked(reduce: bool, cx: &mut TestAppContext) -> usize {
+        cx.update(|cx| cx.set_reduce_motion(reduce));
+        let window = cx.open_window(size(px(40.), px(40.)), |_, _| Pending);
+        cx.run_until_parked();
+        window
+            .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+            .unwrap()
+    }
+
+    #[gpui_kit::test]
+    fn a_pending_tab_pulses_unless_motion_is_reduced(cx: &mut TestAppContext) {
+        assert!(frames_asked(false, cx) > 0, "the dot pulses");
+    }
+
+    #[gpui_kit::test]
+    fn reduced_motion_keeps_the_pending_dot_still(cx: &mut TestAppContext) {
+        assert_eq!(frames_asked(true, cx), 0);
     }
 }

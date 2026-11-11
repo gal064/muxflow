@@ -75,8 +75,46 @@ fn window_controls_are_named_buttons_in_the_tree(cx: &mut TestAppContext) {
     cx.update(|cx| boot(Path::new(NO_STATE), cx));
     let (_, window_cx) = cx.add_window_view(|_, _| ControlsOnly);
     window_cx.update(|window, _| {
-        for name in ["Minimize window", "Maximize window", "Close window"] {
+        for name in ["Minimize", "Maximize", "Close window"] {
             assert_eq!(window.find_by_label(name).role(), Some(Role::Button));
         }
+    });
+}
+
+struct LeadingControls;
+
+impl Render for LeadingControls {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(WindowControls::leading())
+    }
+}
+
+/// Left to right, as `elements()` lists one row.
+fn control_order(window: &Window) -> Vec<String> {
+    window
+        .elements()
+        .iter()
+        .filter_map(|element| element.label())
+        .filter(|label| ["Minimize", "Maximize", "Restore", "Close window"].contains(label))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[gpui_kit::test]
+fn window_controls_lead_with_close_beside_the_tabs(cx: &mut TestAppContext) {
+    cx.update(|cx| boot(Path::new(NO_STATE), cx));
+    let (_, trailing) = cx.add_window_view(|_, _| ControlsOnly);
+    trailing.update(|window, _| {
+        assert_eq!(
+            control_order(window),
+            ["Minimize", "Maximize", "Close window"]
+        );
+    });
+    let (_, leading) = cx.add_window_view(|_, _| LeadingControls);
+    leading.update(|window, _| {
+        assert_eq!(
+            control_order(window),
+            ["Close window", "Minimize", "Maximize"]
+        );
     });
 }

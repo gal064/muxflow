@@ -32,6 +32,7 @@
 //! | [`ports`] | Port forwarding from SSH hosts, as a right-panel segment |
 //! | [`files`] | The file explorer, its file actions and downloads, as a right-panel segment |
 //! | [`transfers`] | The transfer vocabulary uploads and downloads share |
+//! | [`update`] | The update check and install behind the title bar's update pill |
 //!
 //! Colors and metrics come from [`theme`]. Controls follow the accessibility
 //! baseline in [`ui`].
@@ -60,5 +61,6 @@ pub mod theme;
 pub mod tooltips;
 pub mod transfers;
 pub mod ui;
+pub mod update;
 pub mod window_state;
 pub mod workspaces;

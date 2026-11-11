@@ -140,6 +140,15 @@ impl RenderOnce for WorkspaceArea {
                         let doc = div()
                             .id("docked-document")
                             .key_context(crate::editor::DOCKED_CONTEXT)
+                            .on_mouse_move(|event: &MouseMoveEvent, window, cx| {
+                                let pressed = event.pressed_button.is_some();
+                                crate::editor::dock_hover_moved(pressed, window, cx);
+                            })
+                            .on_hover(|hovered, _, cx| {
+                                if !*hovered {
+                                    crate::editor::dock_hover_left(cx);
+                                }
+                            })
                             .role(Role::Group)
                             .aria_label(title.clone())
                             .relative()
