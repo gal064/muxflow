@@ -27,6 +27,7 @@
 //! | [`agents`] | Agents list, agent status, notifications, sounds and host hook setup |
 //! | [`automations`] | The host's scheduled agent runs, as a right-panel segment |
 //! | [`dragdrop`] | Dragging tabs, documents and panes onto tabs, workspaces and pane edges |
+//! | [`git`] | Source Control panel and Git diff tabs |
 //! | [`ports`] | Port forwarding from SSH hosts, as a right-panel segment |
 //! | [`transfers`] | The transfer vocabulary uploads and downloads share |
 //!
@@ -43,6 +44,7 @@ pub mod diagnostics;
 pub mod dragdrop;
 pub mod features;
 pub mod fonts;
+pub mod git;
 pub mod menus;
 pub mod notices;
 pub mod paths;

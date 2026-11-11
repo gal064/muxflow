@@ -28,4 +28,5 @@ pub fn init(cx: &mut App) {
     crate::automations::init(cx);
     crate::dragdrop::init(cx);
     crate::ports::init(cx);
+    crate::git::init(cx);
 }
