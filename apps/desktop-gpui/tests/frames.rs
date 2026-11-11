@@ -6,6 +6,7 @@
 
 fn main() {
     weights_are_distinct_faces();
+    terminal_styles_are_distinct_faces();
     #[cfg(target_os = "linux")]
     frames::run();
 }
@@ -341,5 +342,40 @@ mod frames {
             render_surfaces(theme);
             render_context_menu(theme);
         }
+    }
+}
+
+/// Port of `theme.test.ts` "names every style the atlas can hold": the
+/// terminal's four styles each resolve to their own bundled face, so bold and
+/// italic are never synthesized from the regular one.
+fn terminal_styles_are_distinct_faces() {
+    use gpui_kit::{FontStyle, FontWeight, HeadlessAppContext, assets::Assets, font};
+    use muxflow_gpui::fonts;
+    use std::sync::Arc;
+
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(|cx| fonts::register(cx));
+    let text = cx.text_system().clone();
+    let face = |weight, style| {
+        let mut mono = font(fonts::MONO);
+        mono.weight = weight;
+        mono.style = style;
+        text.resolve_font(&mono)
+    };
+    let faces = [
+        face(FontWeight::NORMAL, FontStyle::Normal),
+        face(FontWeight::BOLD, FontStyle::Normal),
+        face(FontWeight::NORMAL, FontStyle::Italic),
+        face(FontWeight::BOLD, FontStyle::Italic),
+    ];
+    for (index, id) in faces.iter().enumerate() {
+        assert!(
+            !faces[index + 1..].contains(id),
+            "two terminal styles resolved to one face: {faces:?}"
+        );
     }
 }

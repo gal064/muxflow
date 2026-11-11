@@ -906,6 +906,13 @@ impl Overlay {
         palette: &Palette,
     ) -> impl IntoElement {
         let pane = self.pane.clone();
+        // xterm's slider from `theme.ts`: dim chrome ink, stronger when
+        // hovered and when held.
+        let thumb = |alpha: u8| gpui_kit::Rgba {
+            a: f32::from(alpha) / 255.,
+            ..palette.chrome_dim
+        };
+        let (idle, hovered, held) = (thumb(0x40), thumb(0x66), thumb(0x99));
         div()
             .id("terminal-scrollbar")
             .absolute()
@@ -923,13 +930,16 @@ impl Overlay {
             })
             .child(
                 div()
+                    .id("terminal-scrollbar-thumb")
                     .absolute()
                     .top(px(top))
                     .h(px(height))
                     .left(ui(3.))
                     .right(ui(3.))
                     .rounded(ui(3.))
-                    .bg(palette.chrome_faint),
+                    .bg(idle)
+                    .hover(move |style| style.bg(hovered))
+                    .active(move |style| style.bg(held)),
             )
     }
 
