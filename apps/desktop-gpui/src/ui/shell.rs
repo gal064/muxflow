@@ -39,7 +39,8 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::notices::fit_to(window, cx);
         let chrome = self.chrome.read(cx);
         let (title, tabs_in_bar): (AnyElement, bool) = (
             chrome.title_bar_content().into_any_element(),

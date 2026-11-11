@@ -243,7 +243,7 @@ pub(crate) fn sync(
     runtime: &Entity<AgentRuntime>,
     cx: &mut App,
 ) {
-    let (inputs, label, allowed, helper_install) = {
+    let (inputs, label, allowed, helper_install, persistable) = {
         let controller = controller.read(cx);
         let helper = controller.helper();
         (
@@ -259,9 +259,12 @@ pub(crate) fn sync(
                 }
             )
             .then(|| controller.active_profile_id()),
+            // A reset of unreadable saved state makes answers recordable again.
+            controller.app_state_recovery().is_none(),
         )
     };
     runtime.update(cx, |runtime, cx| {
+        runtime.setup.persistable = persistable;
         runtime.setup.host_label = label;
         runtime.setup.allowed = allowed;
         // An install names agent status as part of what it sets up, so it
@@ -528,15 +531,35 @@ pub fn open_row(row: &AgentListRow, cx: &mut App) {
             ),
         );
     }
-    if let Err(reason) = open_pane(&agent.host_profile_id, &agent.pane_id, cx) {
+    let Err(reason) = open_pane(&agent.host_profile_id, &agent.pane_id, cx) else {
+        return;
+    };
+    // On another host the click was also a move there: it still lands, on
+    // the agent's workspace.
+    let elsewhere = cx.try_global::<Agents>().is_some_and(|agents| {
+        agents.controller.read(cx).active_profile_id() != agent.host_profile_id
+    });
+    let workspaces = crate::workspaces::current(cx);
+    if let Some(workspaces) = workspaces.filter(|_| elsewhere && !agent.session_id.is_empty()) {
         report(
             cx,
             format!(
-                "Agent destination {} is no longer available: {reason}.",
+                "Agent {}'s pane is no longer available: {reason}; opening its workspace.",
                 agent.display_name
             ),
         );
+        workspaces.update(cx, |workspaces, cx| {
+            workspaces.select_on_host(&agent.host_profile_id, &agent.session_id, None, cx)
+        });
+        return;
     }
+    report(
+        cx,
+        format!(
+            "Agent destination {} is no longer available: {reason}.",
+            agent.display_name
+        ),
+    );
 }
 
 /// Puts `pane_id` on screen through the shell's navigation: its host made

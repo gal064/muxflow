@@ -28,14 +28,13 @@ use gpui_kit::{
 use crate::{
     commands::{self, Commands, RowCommandSource, RowSurface, registry::CommandId},
     context_menu::{Entry, Item, fill},
-    fonts,
     terminal::integration::transfers::InternalPathDrag,
     theme::{
         self, Palette,
         metrics::{RADIUS_CONTROL, TYPE_LABEL, TYPE_META, TYPE_ROW, TYPE_SECONDARY, ui},
     },
     transfers::TransferState,
-    ui::error_summary::{self, Summary},
+    ui::surface_error::SurfaceError,
 };
 
 use super::{
@@ -900,69 +899,6 @@ impl Render for DragGhost {
     }
 }
 
-/// A rejection as a sentence, with the host's diagnostic one disclosure
-/// away. Port of `ui/SurfaceError.tsx`.
-pub(super) fn surface_error(
-    id: &'static str,
-    raw: &str,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let palette = theme::palette(cx);
-    let Summary { summary, detail } = error_summary::summarize(raw);
-    // The detail shown open; a new rejection opens closed.
-    let opened = window.use_keyed_state(SharedString::from(format!("{id}-details")), cx, |_, _| {
-        None::<String>
-    });
-    let open = detail.is_some() && opened.read(cx).as_deref() == detail.as_deref();
-    div()
-        .id(id)
-        .role(Role::Alert)
-        .aria_label(SharedString::from(summary.clone()))
-        .flex()
-        .flex_col()
-        .items_start()
-        .gap(ui(4.))
-        .px(ui(8.))
-        .py(ui(6.))
-        .rounded(ui(RADIUS_CONTROL))
-        .bg(palette.danger_wash)
-        .text_color(palette.danger_ink)
-        .text_size(ui(TYPE_SECONDARY))
-        .child(summary)
-        .when_some(detail, |banner, detail| {
-            let shown = detail.clone();
-            banner
-                .child(
-                    Button::new(SharedString::from(format!("{id}-toggle")))
-                        .ghost()
-                        .xsmall()
-                        .label(if open { "▾ Details" } else { "▸ Details" })
-                        .on_click(move |_, _, cx| {
-                            opened.update(cx, |held, cx| {
-                                *held = (!open).then(|| shown.clone());
-                                cx.notify();
-                            })
-                        }),
-                )
-                .when(open, |banner| {
-                    banner.child(
-                        div()
-                            .id(SharedString::from(format!("{id}-detail")))
-                            .role(Role::Paragraph)
-                            .aria_label(SharedString::from(detail.clone()))
-                            .max_h(ui(132.))
-                            .overflow_y_scroll()
-                            .text_color(palette.chrome_ink)
-                            .font_family(fonts::MONO)
-                            .text_size(ui(TYPE_META))
-                            .child(detail),
-                    )
-                })
-        })
-        .into_any_element()
-}
-
 fn quiet(text: impl Into<SharedString>, palette: &Palette) -> AnyElement {
     div()
         .px(ui(12.))
@@ -1076,7 +1012,7 @@ impl Render for Explorer {
                 .flex_none()
                 .mx(ui(12.))
                 .my(ui(6.))
-                .child(surface_error("explorer-error", &text, window, cx))
+                .child(SurfaceError::new("explorer-error", text))
         });
 
         let rows = self.view.rows.clone();

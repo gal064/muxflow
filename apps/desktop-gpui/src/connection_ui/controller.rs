@@ -14,7 +14,7 @@ use std::{
 };
 
 use desktop_core::{
-    app_state::{AppStateStore, PersistedAppState, load_app_state},
+    app_state::{AppStateStore, PersistedAppState, load_app_state, reset_app_state},
     connection::{
         ConnectionSpec, ProfileStore,
         helper::{HelperInstallReport, HelperRollback},
@@ -193,6 +193,15 @@ pub struct ConnectionController {
     selected_profile_id: String,
     profiles_hydrated: bool,
     profile_recovery: Option<ProfileRecovery>,
+    /// Settings is showing the form. A host switch then leaves the form
+    /// alone, so a host being typed in survives a notification click; the
+    /// form catches up when Settings closes.
+    form_held: bool,
+    /// The host the form last followed.
+    form_synced_to: Option<String>,
+    /// Why `app-state.json` could not be read. While set the store is
+    /// write-frozen and app tabs live in memory only, until the user resets.
+    app_state_recovery: Option<String>,
     helper: HelperUpgradeState,
     helper_recovery: HelperRecovery,
     link_quality: LinkQualityMonitor,
@@ -244,10 +253,12 @@ impl ConnectionController {
                 }
             }
         });
+        let app_state_recovery = load_app_state(&app_state).err();
         let mut this = Self {
             backend,
             profile_store,
             app_state,
+            app_state_recovery,
             links: HostLinksState::default(),
             connection: ConnectionSpec::Local,
             connection_mode: ConnectionMode::Local,
@@ -257,6 +268,8 @@ impl ConnectionController {
             selected_profile_id: String::new(),
             profiles_hydrated: false,
             profile_recovery: None,
+            form_held: false,
+            form_synced_to: None,
             helper: HelperUpgradeState::Idle,
             helper_recovery: HelperRecovery::default(),
             link_quality: LinkQualityMonitor::default(),
@@ -316,6 +329,7 @@ impl ConnectionController {
                     .cloned();
                 if let Some(selected) = selected {
                     self.show_in_form(&selected);
+                    self.form_synced_to = Some(selected.id.clone());
                     self.connection = selected.connection;
                     self.selected_profile_id = selected.id;
                 }
@@ -358,6 +372,10 @@ impl ConnectionController {
 
     pub fn profile_recovery(&self) -> Option<&ProfileRecovery> {
         self.profile_recovery.as_ref()
+    }
+
+    pub fn app_state_recovery(&self) -> Option<&str> {
+        self.app_state_recovery.as_deref()
     }
 
     pub fn helper(&self) -> &HelperUpgradeState {
@@ -684,6 +702,13 @@ impl ConnectionController {
         }
         self.connection = target;
         // The form follows the host on screen, so Connect cannot go back.
+        if !self.form_held {
+            self.follow_in_form(profile_id);
+        }
+        self.settle(cx);
+    }
+
+    fn follow_in_form(&mut self, profile_id: &str) {
         if let Some(profile) = self
             .profiles
             .iter()
@@ -693,7 +718,18 @@ impl ConnectionController {
             self.selected_profile_id = profile.id.clone();
             self.show_in_form(&profile);
         }
-        self.settle(cx);
+        self.form_synced_to = Some(profile_id.to_owned());
+    }
+
+    /// Settings opened or closed the form. On close it catches up with a
+    /// host switch it sat out.
+    pub fn hold_form(&mut self, held: bool, cx: &mut Context<Self>) {
+        self.form_held = held;
+        let active = self.active_profile_id();
+        if !held && self.form_synced_to.as_deref() != Some(active.as_str()) {
+            self.follow_in_form(&active);
+            cx.notify();
+        }
     }
 
     pub fn save_profile_fields(
@@ -738,6 +774,31 @@ impl ConnectionController {
             ),
         }
         self.settle(cx);
+    }
+
+    /// "Preserve and reset": moves the unreadable file aside, writes an empty
+    /// state, and starts this session's app tabs over from it.
+    pub fn confirm_app_state_reset(&mut self, cx: &mut Context<Self>) {
+        match reset_app_state(&self.app_state) {
+            Ok(state) => {
+                self.app_state_recovery = None;
+                self.unsaved_app_state = None;
+                // Preferences and shortcuts start over too, not only the
+                // tabs. The rails keep the sizes on screen, as layout.
+                crate::settings::reload(&state, cx);
+                crate::commands::reload_overrides(&state, cx);
+                *self.saved_app_state.borrow_mut() = Some(Arc::new(state));
+                self.set_status(
+                    "Saved shell state was reset; the invalid original was preserved for recovery."
+                        .to_owned(),
+                    cx,
+                );
+            }
+            Err(error) => {
+                self.set_status(format!("Could not reset saved shell state: {error}"), cx);
+            }
+        }
+        cx.notify();
     }
 
     pub fn confirm_profile_reset(&mut self, cx: &mut Context<Self>) {
@@ -987,7 +1048,8 @@ impl ConnectionController {
         if let Some(state) = self.saved_app_state.borrow().as_ref() {
             return Ok(state.clone());
         }
-        let state = Arc::new(load_app_state(&self.app_state)?);
+        // An unreadable file starts the session empty, as a missing one does.
+        let state = Arc::new(load_app_state(&self.app_state).unwrap_or_default());
         *self.saved_app_state.borrow_mut() = Some(state.clone());
         Ok(state)
     }
@@ -999,7 +1061,6 @@ impl ConnectionController {
         change: impl FnOnce(&mut PersistedAppState) -> bool,
         cx: &mut Context<Self>,
     ) {
-        // A frozen store is reported by the shell that owns it.
         let Ok(current) = self.current_app_state() else {
             return;
         };
@@ -1008,6 +1069,12 @@ impl ConnectionController {
             return;
         }
         self.unsaved_app_state = Some(Arc::new(state.clone()));
+        // Frozen: the change holds in memory and nothing is written until the
+        // user resets, as Tauri saved nothing before its state had loaded.
+        if self.app_state_recovery.is_some() {
+            cx.notify();
+            return;
+        }
         self.app_state_saves += 1;
         let save_number = self.app_state_saves;
         let save = self.backend.save_app_state(state);

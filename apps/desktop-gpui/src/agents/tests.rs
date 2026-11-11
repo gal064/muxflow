@@ -63,7 +63,7 @@ pub(crate) struct Effects {
     shown: RefCell<Vec<AgentNativeNotification>>,
     played: RefCell<Vec<AttentionKind>>,
     decisions: RefCell<Vec<(String, HostSetupDecision)>>,
-    now: Cell<u64>,
+    pub(crate) now: Cell<u64>,
 }
 
 pub(crate) struct Recorded(pub(crate) Rc<Effects>);
