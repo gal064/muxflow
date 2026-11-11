@@ -51,7 +51,10 @@ use crate::{
             narrower_than, ui,
         },
     },
-    ui::surface_error::SurfaceError,
+    ui::{
+        surface_error::SurfaceError,
+        toolbar::{Tone, toolbar_button},
+    },
     workspaces::{self, model::pin_app_tab},
 };
 
@@ -817,10 +820,14 @@ impl Render for DocumentPane {
 
 impl DocumentPane {
     fn download_button(&self, cx: &mut Context<Self>) -> Button {
-        Button::new("file-download")
-            .xsmall()
-            .label("Download…")
-            .on_click(cx.listener(|this, _, window, cx| this.download(window, cx)))
+        let palette = theme::palette(cx);
+        toolbar_button(
+            Button::new("file-download").label("Download…"),
+            Tone::Plain,
+            false,
+            &palette,
+        )
+        .on_click(cx.listener(|this, _, window, cx| this.download(window, cx)))
     }
 
     /// The bar across the top, drawn the same whether the file has arrived or
@@ -895,14 +902,22 @@ impl DocumentPane {
                         .role(Role::Group)
                         .aria_label("Markdown view")
                         .children(modes.into_iter().map(|item| {
-                            Button::new(SharedString::from(format!(
-                                "markdown-mode-{}",
-                                mode_label(item)
-                            )))
-                            .xsmall()
-                            .label(mode_label(item))
-                            .selected(item == shown)
-                            .toggled(item == shown)
+                            toolbar_button(
+                                Button::new(SharedString::from(format!(
+                                    "markdown-mode-{}",
+                                    mode_label(item)
+                                )))
+                                .label(mode_label(item))
+                                .selected(item == shown)
+                                .toggled(item == shown),
+                                if item == shown {
+                                    Tone::Pressed
+                                } else {
+                                    Tone::Plain
+                                },
+                                false,
+                                &palette,
+                            )
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.set_view_mode(item, cx)),
                             )

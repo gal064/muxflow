@@ -86,6 +86,27 @@ pub fn headline(raw: &str, summary: Option<&str>) -> Summary {
     }
 }
 
+/// GPUI breaks a line after any hyphen, so `git push -u` could wrap between the
+/// dash and its letter, where a browser keeps a flag whole. A non-breaking
+/// hyphen keeps it together; the accessible name keeps the plain text.
+fn keep_flags_whole(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut before: Option<char> = None;
+    while let Some(c) = chars.next() {
+        // A dash that opens a flag: after a space or its own first dash, before
+        // a letter or the second dash. `well-known` is left alone.
+        let flag = c == '-'
+            && before.is_some_and(|b| b.is_whitespace() || b == '-')
+            && chars
+                .peek()
+                .is_some_and(|next| next.is_alphanumeric() || *next == '-');
+        kept.push(if flag { '\u{2011}' } else { c });
+        before = Some(c);
+    }
+    kept
+}
+
 impl RenderOnce for SurfaceError {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let palette = theme::palette(cx);
@@ -137,7 +158,7 @@ impl RenderOnce for SurfaceError {
                 .on_click(move |_, window, cx| dismiss(window, cx))
         });
         banner
-            .child(summary)
+            .child(keep_flags_whole(&summary))
             .when(toggle.is_some() || dismiss.is_some(), |this| {
                 this.child(h_flex().gap(ui(4.)).children(toggle).children(dismiss))
             })
@@ -162,6 +183,18 @@ impl RenderOnce for SurfaceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flag_is_not_broken_after_its_dash() {
+        assert_eq!(
+            keep_flags_whole("git push --set-upstream"),
+            "git push \u{2011}\u{2011}set-upstream"
+        );
+        assert_eq!(
+            keep_flags_whole("run git push -u once, a well-known step"),
+            "run git push \u{2011}u once, a well-known step"
+        );
+    }
 
     #[test]
     fn a_given_sentence_leads_and_the_raw_text_is_disclosed() {

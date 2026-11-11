@@ -1225,3 +1225,27 @@ fn asks_nothing_of_a_host_that_is_not_the_tab_s_own(cx: &mut TestAppContext) {
     assert_eq!(panel.fake.operations(), ["watch"]);
     assert_eq!(view.read_with(cx, |view, _| view.shown()), (false, None));
 }
+
+/// The mode is switched before the list is laid out, because the list counts
+/// the rows of the mode it was built in. Switching while painting left the
+/// list indexing rows of the other mode, and the window panicked on narrowing.
+#[gpui_kit::test]
+fn the_diff_survives_a_window_resize_across_the_side_by_side_width(cx: &mut TestAppContext) {
+    use desktop_core::app_state::ThemePreference;
+    use gpui_kit::{WindowAppearance, px, size};
+
+    let panel = Panel::new(cx, with_diffs);
+    cx.update(|cx| crate::theme::apply(ThemePreference::Light, 1., WindowAppearance::Light, cx));
+    panel.point_at("t", 1, cx);
+    let owner = panel.panel.clone();
+    let record = tab("repo");
+    let (view, cx) = cx.add_window_view(move |_, cx| GitDiffView::new(owner, record, cx));
+    cx.run_until_parked();
+    for width in [1400., 500., 1400., 500.] {
+        cx.simulate_resize(size(px(width), px(600.)));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+    assert_eq!(view.read_with(cx, |view, _| view.shown()), (true, None));
+}

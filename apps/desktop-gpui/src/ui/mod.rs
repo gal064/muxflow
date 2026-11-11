@@ -30,3 +30,4 @@ pub mod icons;
 pub mod shell;
 pub mod surface_error;
 pub mod title_bar;
+pub mod toolbar;

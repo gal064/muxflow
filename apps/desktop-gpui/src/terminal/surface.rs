@@ -1094,12 +1094,9 @@ impl Render for TerminalSurface {
             .top_0()
             .size_full()
         };
-        let empty = self.target.is_some()
-            && self
-                .target
-                .as_ref()
-                .is_some_and(|target| target.window_id.is_some())
-            && self.panes.is_empty();
+        // As in Tauri, whenever nothing is drawn: with no workspace at all it is
+        // the first thing a new install shows.
+        let empty = self.panes.is_empty();
         div()
             .id("terminal-surface")
             .role(Role::Group)
@@ -1118,8 +1115,10 @@ impl Render for TerminalSurface {
                     .when(empty, |window| {
                         window.child(
                             div()
+                                .px(ui(12.))
+                                .py(ui(10.))
                                 .text_size(ui(theme::metrics::TYPE_SECONDARY))
-                                .text_color(palette.chrome_dim)
+                                .text_color(palette.chrome_faint)
                                 .child("No tmux panes in this terminal window."),
                         )
                     })
