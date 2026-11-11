@@ -1249,3 +1249,129 @@ fn the_diff_survives_a_window_resize_across_the_side_by_side_width(cx: &mut Test
     }
     assert_eq!(view.read_with(cx, |view, _| view.shown()), (true, None));
 }
+
+#[gpui_kit::test]
+fn a_row_is_a_tab_stop_with_its_actions_next_and_its_menu_on_the_menu_key(cx: &mut TestAppContext) {
+    use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
+
+    let panel = Panel::new(cx, |command| match command.operation.as_str() {
+        "mutate" => Some(Ok(
+            json!({ "command": { "outcome": "applied", "status": status_in(
+            "repo",
+            2,
+            vec![entry(A, "a.txt", "modified", "none")],
+        ) } }),
+        )),
+        _ => answering(command),
+    });
+    cx.update(|cx| {
+        crate::theme::apply(
+            desktop_core::app_state::ThemePreference::Light,
+            1.,
+            gpui_kit::WindowAppearance::Light,
+            cx,
+        );
+        crate::context_menu::init(cx);
+    });
+    let previews = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|cx| {
+        let previews = previews.clone();
+        cx.subscribe(&panel.panel, move |_, event, _| {
+            if let PanelEvent::OpenDiff { entry, preview, .. } = event {
+                previews
+                    .borrow_mut()
+                    .push((entry.display_path.clone(), *preview));
+            }
+        })
+        .detach();
+    });
+    let shown = cx.new(|_| crate::context_menu::WithMenus(panel.panel.clone().into()));
+    let (_, visual) =
+        cx.add_window_view(move |window, cx| gpui_kit::base::Root::new(shown, window, cx));
+    let context = PanelContext::new(Some(root("t")), live(1), true);
+    panel
+        .panel
+        .update(visual, |panel, cx| panel.set_context(context, cx));
+    visual.run_until_parked();
+    let focused = |label: &str, visual: &mut gpui_kit::VisualTestContext| {
+        visual.update(|window, _| {
+            window
+                .try_find_by_label(label)
+                .is_some_and(|element| element.focused() == Some(true))
+        })
+    };
+    let shown = |label: &str, visual: &mut gpui_kit::VisualTestContext| {
+        visual.update(|window, _| {
+            window
+                .try_find_by_label(label)
+                .is_some_and(|element| element.visible())
+        })
+    };
+    assert!(
+        !shown("Stage file", visual),
+        "a pointer affordance until then"
+    );
+
+    visual.update(|window, cx| window.focus_next(cx));
+    let reached = (0..10).any(|_| {
+        if focused("a.txt", visual) {
+            return true;
+        }
+        visual.simulate_keystrokes("tab");
+        false
+    });
+    assert!(reached, "Tab reaches the row");
+    assert!(
+        shown("Stage file", visual),
+        "the row's actions show with it"
+    );
+    visual.simulate_keystrokes("tab");
+    assert!(focused("Stage file", visual), "and come next");
+    visual.simulate_keystrokes("shift-tab");
+    assert!(focused("a.txt", visual));
+
+    visual.update(|window, cx| window.press("enter", cx));
+    assert_eq!(*previews.borrow(), [("a.txt".to_owned(), true)], "once");
+
+    visual.simulate_keystrokes("shift-f10");
+    visual.update(|window, cx| assert!(crate::context_menu::is_open(window, cx)));
+    visual.simulate_keystrokes("escape");
+    visual.update(|window, cx| assert!(!crate::context_menu::is_open(window, cx)));
+    assert!(focused("a.txt", visual), "the menu hands the keyboard back");
+
+    // Staged, the row moves to its new group and the keyboard with it, before
+    // anything that claims a keyboard left nowhere (the terminal does) can.
+    let elsewhere = visual.update(|_, cx| cx.focus_handle());
+    panel.panel.update_in(visual, |_, window, cx| {
+        let elsewhere = elsewhere.clone();
+        cx.on_focus_lost(window, move |_, window, cx| window.focus(&elsewhere, cx))
+            .detach();
+    });
+    visual.simulate_keystrokes("shift-f10");
+    for _ in 0..2 {
+        visual.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        visual.run_until_parked();
+    }
+    visual.simulate_keystrokes("down");
+    visual.update(|window, cx| window.press("enter", cx));
+    visual.run_until_parked();
+    let staged = visual.update(|window, _| {
+        window
+            .elements()
+            .into_iter()
+            .find(|element| element.label() == Some("a.txt"))
+            .map(|element| (element.path().last().cloned(), element.focused()))
+    });
+    assert_eq!(
+        staged,
+        Some((Some("git-row-staged-YS50eHQ=".into()), Some(true))),
+        "not left nowhere, nor to an editor"
+    );
+    assert!(
+        shown("Unstage file", visual),
+        "with its actions, as a row the keyboard reached"
+    );
+}
