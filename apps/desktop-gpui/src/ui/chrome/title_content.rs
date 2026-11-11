@@ -4,8 +4,8 @@
 
 use gpui_kit::{
     AnyElement, App, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    RenderOnce, Styled, WeakEntity, Window, assets::IconName, base::Disableable, component::h_flex,
-    div, prelude::FluentBuilder, px,
+    RenderOnce, SharedString, Styled, WeakEntity, Window, assets::IconName, base::Disableable,
+    component::h_flex, div, prelude::FluentBuilder, px,
 };
 
 use crate::{
@@ -59,16 +59,61 @@ impl RenderOnce for TitleContent {
             disabled_button("title-settings", IconName::Settings, "Settings")
                 .tooltip(settings_tip.clone())
         };
-        // `aria-disabled` in Tauri: faint, without the disabled dimming.
+        // Three states, and the tooltip says what the label does: somewhere to
+        // go, nothing waiting, or something waiting the bell cannot reach.
+        let (unread, can_jump) = crate::agents::bell(cx);
+        let plural = if unread == 1 { "" } else { "s" };
+        let hint: SharedString = if can_jump {
+            "Go to the next agent waiting (blocked first, then unread completed)".into()
+        } else if unread > 0 {
+            format!("{unread} agent{plural} waiting, none reachable right now").into()
+        } else {
+            "No agents waiting".into()
+        };
+        let label: SharedString = if can_jump {
+            format!("{unread} agent{plural} waiting; go to the next one").into()
+        } else {
+            hint.clone()
+        };
         let bell = || {
-            bar_button(
-                "title-bell",
-                IconName::Bell,
-                "No agents waiting",
-                palette.chrome_faint,
-            )
-            .tooltip("No agents waiting")
-            .disabled(true)
+            // `aria-disabled` in Tauri: faint, without the disabled dimming.
+            let ink = if can_jump {
+                palette.chrome_dim
+            } else {
+                palette.chrome_faint
+            };
+            div()
+                .relative()
+                .child(
+                    bar_button("title-bell", IconName::Bell, label.clone(), ink)
+                        .tooltip(hint.clone())
+                        .disabled(!can_jump)
+                        .on_click(|_, _, cx| crate::agents::jump_to_unread(cx)),
+                )
+                .when(unread > 0, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top(ui(-1.))
+                            .right(ui(-3.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .min_w(ui(15.))
+                            .h(ui(15.))
+                            .px(ui(4.))
+                            .rounded(ui(8.))
+                            .bg(palette.accent)
+                            .text_color(palette.accent_ink)
+                            .text_size(ui(9.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(if unread > 99 {
+                                "99+".to_owned()
+                            } else {
+                                unread.to_string()
+                            }),
+                    )
+                })
         };
         let back =
             || disabled_button("title-back", IconName::ArrowLeft, "Back").tooltip(back_tip.clone());

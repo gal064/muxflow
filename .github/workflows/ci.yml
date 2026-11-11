@@ -38,11 +38,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install system packages
         timeout-minutes: 14
-        # The X11, xkb and Wayland development files are for the GPUI app. Mesa's
-        # software Vulkan (lavapipe) is for its offscreen frame test.
+        # The X11, xkb, Wayland and ALSA development files are for the GPUI app
+        # (ALSA for its agent sounds). Mesa's software Vulkan (lavapipe) is for its
+        # offscreen frame test.
         run: >-
           .github/scripts/apt-install.sh libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev tmux
-          libxkbcommon-x11-dev libwayland-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers
+          libxkbcommon-x11-dev libwayland-dev libfontconfig-dev libvulkan1 mesa-vulkan-drivers libasound2-dev
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:

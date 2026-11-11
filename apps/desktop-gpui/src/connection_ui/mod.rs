@@ -78,8 +78,11 @@ pub fn start(cx: &mut App) -> Result<(), String> {
         IncidentJournal::new(log_dir),
     ));
     crate::terminal::integration::colors::start(backend.clone(), cx);
-    let controller = cx.new(|cx| ConnectionController::new(backend, profiles, app_state, cx));
+    let controller =
+        cx.new(|cx| ConnectionController::new(backend.clone(), profiles, app_state, cx));
     cx.set_global(ConnectionUi(controller.clone()));
+    crate::agents::start(controller.clone(), backend.clone(), cx);
+    crate::automations::start(controller.clone(), backend, cx);
 
     let (sender, mut resumed) = mpsc::unbounded();
     power_events::start(Arc::new(ResumeSink(sender)));

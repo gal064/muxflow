@@ -106,6 +106,20 @@ struct PersistedProfiles {
 pub enum ConnectionEvent {
     /// The app's status channel: every write, including repeats.
     Status(String),
+    /// An agent snapshot or event from any shown host, with the bridge it came
+    /// over; the agents feature maps and checks it.
+    AgentService(AgentServiceFrame),
+    /// A host's automations changed. Every host's, as the panel may show any.
+    AutomationChanged { profile_id: String },
+}
+
+pub struct AgentServiceFrame {
+    pub profile_id: String,
+    /// The tmux server this bridge's snapshots describe.
+    pub server_identity: String,
+    pub terminal_epoch: u64,
+    pub scope: String,
+    pub payload: String,
 }
 
 impl EventEmitter<ConnectionEvent> for ConnectionController {}
@@ -584,6 +598,27 @@ impl ConnectionController {
             self.selected_profile_id = profile.id.clone();
             self.show_in_form(&profile);
         }
+        self.settle(cx);
+    }
+
+    /// Puts one window of a shown host on screen, the host made active first:
+    /// where an agent row or a notification leads.
+    pub fn select_window(
+        &mut self,
+        profile_id: &str,
+        session_id: &str,
+        window_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch(HostLinksAction::ActiveSession {
+            profile_id: profile_id.to_owned(),
+            session_id: Some(session_id.to_owned()),
+        });
+        self.dispatch(HostLinksAction::ActiveWindow {
+            profile_id: profile_id.to_owned(),
+            window_id: Some(window_id.to_owned()),
+        });
+        self.activate_host(profile_id, cx);
         self.settle(cx);
     }
 
@@ -1608,6 +1643,32 @@ impl ConnectionController {
                 // Either way it closes the reconciling status above.
                 self.announce(profile_id, "Live".to_owned(), cx);
             }
+            BridgeEvent::AgentService { scope, payload } => {
+                // Scoped to the server this bridge's snapshots describe; before
+                // the first there is nothing to scope it to.
+                let server_identity = self
+                    .runtimes
+                    .get(profile_id)
+                    .and_then(|runtime| runtime.server_identity.clone());
+                let terminal_epoch = self
+                    .bridge_mut(profile_id, token)
+                    .map(|bridge| bridge.terminal_epoch);
+                let (Some(server_identity), Some(terminal_epoch)) =
+                    (server_identity, terminal_epoch)
+                else {
+                    return;
+                };
+                cx.emit(ConnectionEvent::AgentService(AgentServiceFrame {
+                    profile_id: profile_id.to_owned(),
+                    server_identity,
+                    terminal_epoch,
+                    scope,
+                    payload,
+                }));
+            }
+            BridgeEvent::AutomationChanged => cx.emit(ConnectionEvent::AutomationChanged {
+                profile_id: profile_id.to_owned(),
+            }),
             BridgeEvent::Ignored => {}
         }
     }

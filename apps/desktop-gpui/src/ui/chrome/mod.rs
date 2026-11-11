@@ -16,6 +16,7 @@
 pub mod divider;
 pub mod layout;
 mod right_panel;
+pub use right_panel::PanelBodies;
 mod sidebar;
 mod tab_strip;
 mod title_content;
