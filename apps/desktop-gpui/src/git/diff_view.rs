@@ -20,7 +20,10 @@ use gpui_kit::{
     component::{
         Disableable, Sizable,
         button::Button,
-        diff::{Diff as DiffElement, DiffFile, DiffHunkSeparator, DiffMode, DiffState},
+        diff::{
+            Diff as DiffElement, DiffDecoration, DiffFile, DiffHunkSeparator, DiffLineRange,
+            DiffMode, DiffSide, DiffState,
+        },
         h_flex, v_flex,
     },
     div,
@@ -54,11 +57,69 @@ use super::{
 /// Kit could not read the patch built from the two sides.
 const UNREADABLE: &str = "This diff could not be displayed.";
 
+/// Monaco's own line backgrounds, the same in both themes: the whole removed or added
+/// line, where Kit tints it at 12% of the theme's red or green.
+const REMOVED_LINE: (f32, f32, f32) = (255., 0., 0.);
+const ADDED_LINE: (f32, f32, f32) = (155., 185., 85.);
+const LINE_ALPHA: f32 = 0.2;
+
+/// The removed and added lines of a one-hunk patch, as runs of lines on their own side.
+fn changed_lines(path: &SharedString, patch: &str) -> Vec<DiffDecoration> {
+    let colour = |(r, g, b): (f32, f32, f32)| {
+        gpui_kit::rgba(u32::from_be_bytes([
+            r as u8,
+            g as u8,
+            b as u8,
+            (LINE_ALPHA * 255.) as u8,
+        ]))
+    };
+    let (mut old, mut new) = (0usize, 0usize);
+    let mut runs: Vec<(DiffSide, usize, usize)> = Vec::new();
+    let mut push = |side: DiffSide, line: usize| match runs.last_mut() {
+        Some((last, _, end)) if *last == side && *end + 1 == line => *end = line,
+        _ => runs.push((side, line, line)),
+    };
+    let mut in_hunk = false;
+    for line in patch.lines() {
+        if let Some(header) = line.strip_prefix("@@ -") {
+            let start = |part: &str| part.split([',', ' ']).next()?.parse::<usize>().ok();
+            old = start(header).unwrap_or(1);
+            new = header
+                .split_once('+')
+                .and_then(|(_, rest)| start(rest))
+                .unwrap_or(1);
+            in_hunk = true;
+        } else if !in_hunk {
+            continue;
+        } else if line.starts_with('-') {
+            push(DiffSide::Original, old);
+            old += 1;
+        } else if line.starts_with('+') {
+            push(DiffSide::Modified, new);
+            new += 1;
+        } else if line.starts_with(' ') || line.is_empty() {
+            old += 1;
+            new += 1;
+        }
+    }
+    runs.into_iter()
+        .map(|(side, start, end)| {
+            let tint = if side == DiffSide::Original {
+                REMOVED_LINE
+            } else {
+                ADDED_LINE
+            };
+            DiffDecoration::new(DiffLineRange::new(path.clone(), side, start, end))
+                .with_background(colour(tint))
+        })
+        .collect()
+}
+
 /// The diff body, built off the UI thread.
 enum Built {
     Blocked(&'static str),
     Unreadable,
-    Files(Vec<DiffFile>),
+    Files(Vec<DiffFile>, Vec<DiffDecoration>),
 }
 
 enum Body {
@@ -122,6 +183,8 @@ pub struct GitDiffView {
     width: Rc<Cell<Option<Pixels>>>,
     /// Frames drawn since the diff was built; it stays transparent for the first few.
     settled: Rc<Cell<u8>>,
+    /// The changed lines' backgrounds, which Kit's own faint tint stands in for.
+    marks: Rc<Vec<DiffDecoration>>,
     /// `workflow.git.diffPaint`: from a read to its diff on screen. Empty
     /// unless the perf probe is on.
     paint: PaintReporter,
@@ -163,6 +226,7 @@ impl GitDiffView {
             load_task: None,
             width: Rc::default(),
             settled: Rc::default(),
+            marks: Rc::default(),
             paint: PaintReporter::default(),
             _delay: None,
             _subscriptions: subscriptions,
@@ -407,7 +471,13 @@ impl GitDiffView {
                     Shown::Text { original, modified } => {
                         let patch =
                             model::whole_file_patch(&diff.display_path, &original, &modified);
-                        DiffFile::parse(&patch).map_or(Built::Unreadable, Built::Files)
+                        DiffFile::parse(&patch).map_or(Built::Unreadable, |files| {
+                            let marks = files
+                                .first()
+                                .map(|file| changed_lines(file.path(), &patch))
+                                .unwrap_or_default();
+                            Built::Files(files, marks)
+                        })
                     }
                 }
             });
@@ -430,10 +500,13 @@ impl GitDiffView {
                 };
                 this.update(cx, |this, cx| {
                     this.settled.set(0);
+                    if let Built::Files(_, marks) = &built {
+                        this.marks = Rc::new(marks.clone());
+                    }
                     this.body = Some(match built {
                         Built::Blocked(detail) => Body::Blocked(detail),
                         Built::Unreadable => Body::Blocked(UNREADABLE),
-                        Built::Files(files) => Body::Drawn(cx.new(|cx| {
+                        Built::Files(files, _) => Body::Drawn(cx.new(|cx| {
                             DiffState::new(files, cx)
                                 .with_mode(mode)
                                 .with_context_lines(None)
@@ -847,6 +920,7 @@ impl Render for GitDiffView {
                 let laid_out = self.width.clone();
                 let settled = self.settled.clone();
                 let hidden = settled.get() < SETTLE_FRAMES;
+                let marks = self.marks.clone();
                 // Switched here, from the width the last frame drew at, and not
                 // while painting: the list below counts the rows of the mode it
                 // is built in, so a switch after that left it indexing rows of
@@ -893,6 +967,8 @@ impl Render for GitDiffView {
                             // rows are measured.
                             .when(hidden, |diff| diff.opacity(0.))
                             .header_visible(false)
+                            .change_background(false)
+                            .decorations(marks.iter().cloned())
                             // The whole file is one hunk: its `@@` header says
                             // nothing Monaco showed.
                             .hunk_separator(DiffHunkSeparator::Simple)
@@ -1035,5 +1111,27 @@ impl GitDiffView {
 
     pub(super) fn stage_hunk(&mut self, index: u32, cx: &mut Context<Self>) {
         self.mutate(MutationKind::StageHunk, index, cx);
+    }
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+
+    #[test]
+    fn removed_and_added_lines_are_marked_on_their_own_side() {
+        let patch = "--- a/f\n+++ b/f\n@@ -1,4 +1,4 @@\n a\n-b\n-c\n+B\n d\n";
+        let marks = changed_lines(&"f".into(), patch);
+        let runs: Vec<_> = marks
+            .iter()
+            .map(|mark| {
+                let range = mark.range();
+                (range.side(), range.start(), range.end())
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [(DiffSide::Original, 2, 3), (DiffSide::Modified, 2, 2)]
+        );
     }
 }
