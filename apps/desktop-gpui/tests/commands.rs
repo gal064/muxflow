@@ -345,7 +345,7 @@ fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestApp
             .collect::<Vec<_>>()
     });
     // The pinned filter's "show pinned only" has no handler yet, so only what
-    // this module and the window chrome implement is available.
+    // this module, the window chrome and the agents feature implement is available.
     assert_eq!(
         available,
         [
@@ -357,6 +357,7 @@ fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestApp
             "view.showFiles",
             "view.showGit",
             "view.showPorts",
+            "agents.jumpUnread",
         ]
     );
 }

@@ -216,18 +216,10 @@ impl RenderOnce for Sidebar {
                     .child(div().min_w_0().truncate().child(name))
             }));
 
-        let agents_list = div()
-            .id("sidebar-agents-list")
-            .role(Role::List)
-            .aria_label("Agents")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .child(quiet(if self.pinned_only {
-                "No agents in pinned workspaces."
-            } else {
-                "No agents detected."
-            }));
+        let agents_list = crate::agents::view::AgentsList {
+            sort: self.agent_sort,
+            pinned_only: self.pinned_only,
+        };
 
         v_flex()
             .id("sidebar")

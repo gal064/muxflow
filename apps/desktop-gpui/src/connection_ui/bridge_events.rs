@@ -47,6 +47,14 @@ pub enum BridgeEvent {
     ClipboardWrite {
         text: String,
     },
+    /// An agent snapshot (`scope` is `snapshot`) or event, as the host's JSON;
+    /// the agents feature reads it.
+    AgentService {
+        scope: String,
+        payload: String,
+    },
+    /// A host's automations changed; the panel lists them again.
+    AutomationChanged,
     /// A valid frame this module has no reaction to.
     Ignored,
 }
@@ -186,9 +194,36 @@ pub fn decode_frame(frame: &[u8]) -> Result<BridgeEvent, String> {
             let text = text(data, "terminal clipboard write payload")?;
             Ok(BridgeEvent::ClipboardWrite { text })
         }
-        1 | 2 | 8 | 9 | 11 | 12 | 13 | 14 | 18 | 19 => Ok(BridgeEvent::Ignored),
+        14 => decode_agent_service(label, sequence, data),
+        19 => {
+            require_host_sequence(sequence, "automation event")?;
+            Ok(BridgeEvent::AutomationChanged)
+        }
+        1 | 2 | 8 | 9 | 11 | 12 | 13 | 18 => Ok(BridgeEvent::Ignored),
         kind => Err(format!("unknown terminal frame kind {kind}")),
     }
+}
+
+/// An agent snapshot rides along with the topology frame built from the same
+/// host event, which already spent their shared sequence, so it arrives local.
+/// An agent event is a host event of its own with its own sequence.
+fn decode_agent_service(label: String, sequence: u64, data: &[u8]) -> Result<BridgeEvent, String> {
+    let snapshot = label == "snapshot";
+    if snapshot {
+        require_local_sequence(sequence, "agent snapshot")?;
+    } else {
+        require_host_sequence(sequence, "agent event")?;
+    }
+    let malformed = || "agent-service payload is not valid UTF-8 JSON".to_owned();
+    let payload = text(data, "agent-service payload").map_err(|_| malformed())?;
+    let parsed: serde_json::Value = serde_json::from_str(&payload).map_err(|_| malformed())?;
+    if !parsed.is_object() || (!snapshot && parsed.get("generation").is_none()) {
+        return Err(malformed());
+    }
+    Ok(BridgeEvent::AgentService {
+        scope: label,
+        payload,
+    })
 }
 
 fn decode_snapshot(label: &str, sequence: u64, data: &[u8]) -> Result<BridgeEvent, String> {
@@ -407,6 +442,33 @@ mod tests {
         assert!(decode_frame(&frame(17, "elsewhere", 3, b"copied")).is_err());
         assert!(decode_frame(&frame(17, "terminal-clipboard", 3, b"")).is_err());
         assert!(decode_frame(&frame(17, "terminal-clipboard", 3, b"\xff")).is_err());
+    }
+
+    #[test]
+    fn decodes_agent_service_and_automation_frames_with_their_sequence_rules() {
+        let snapshot = br#"{"generation":"6","agents":[]}"#;
+        assert_eq!(
+            decode_frame(&frame(14, "snapshot", 0, snapshot)),
+            Ok(BridgeEvent::AgentService {
+                scope: "snapshot".into(),
+                payload: String::from_utf8(snapshot.to_vec()).unwrap(),
+            })
+        );
+        // A snapshot shares its topology frame's sequence; an event has its own.
+        assert!(decode_frame(&frame(14, "snapshot", 3, snapshot)).is_err());
+        let event = br#"{"generation":"7","connectionEpoch":"4"}"#;
+        assert!(matches!(
+            decode_frame(&frame(14, "agent", 7, event)),
+            Ok(BridgeEvent::AgentService { .. })
+        ));
+        assert!(decode_frame(&frame(14, "agent", 0, event)).is_err());
+        assert!(decode_frame(&frame(14, "agent", 7, br#"{"connectionEpoch":"4"}"#)).is_err());
+        assert!(decode_frame(&frame(14, "agent", 7, b"not json")).is_err());
+        assert_eq!(
+            decode_frame(&frame(19, "automation", 9, b"")),
+            Ok(BridgeEvent::AutomationChanged)
+        );
+        assert!(decode_frame(&frame(19, "automation", 0, b"")).is_err());
     }
 
     #[test]
