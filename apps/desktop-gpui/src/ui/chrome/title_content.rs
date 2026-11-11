@@ -56,10 +56,6 @@ impl RenderOnce for TitleContent {
             )
         };
 
-        let disabled_button = |id: &'static str, icon: IconName, label: &'static str| {
-            bar_button(id, icon, label, disabled_ink(palette.chrome_faint)).disabled(true)
-        };
-
         let tip = |label: &str, command| with_shortcut(label, command, cx);
         let (settings_tip, back_tip, forward_tip, new_workspace_tip) = (
             tip("Settings", "settings.show"),
@@ -72,8 +68,14 @@ impl RenderOnce for TitleContent {
             tip("Toggle right panel", "view.togglePanel"),
         );
         let settings = || {
-            disabled_button("title-settings", IconName::Settings, "Settings")
-                .tooltip(settings_tip.clone())
+            bar_button(
+                "title-settings",
+                IconName::Settings,
+                "Settings",
+                palette.chrome_dim,
+            )
+            .tooltip(settings_tip.clone())
+            .on_click(|_, window, cx| crate::commands::run("settings.show", window, cx))
         };
         // Three states, and the tooltip says what the label does: somewhere to
         // go, nothing waiting, or something waiting the bell cannot reach.

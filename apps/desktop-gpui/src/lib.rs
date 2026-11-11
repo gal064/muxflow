@@ -16,6 +16,8 @@
 //! | [`ui::chrome`] | Window body: dock, sidebar, tabs, right panel |
 //! | [`commands`] | Command registry, keymap, palette, Quick Open |
 //! | [`connection_ui`] | Connection, host profile and setup flows |
+//! | [`settings`] | Live preferences and the Settings dialog |
+//! | [`diagnostics`] | Incident record format, the copy-chord journal |
 //! | [`menus`] | Application menu and its accelerators |
 //! | [`context_menu`] | Context menu items on Kit's popup |
 //! | [`notices`] | Which status messages show, as notifications |
@@ -34,11 +36,13 @@ pub mod automations;
 pub mod commands;
 pub mod connection_ui;
 pub mod context_menu;
+pub mod diagnostics;
 pub mod features;
 pub mod fonts;
 pub mod menus;
 pub mod notices;
 pub mod paths;
+pub mod settings;
 pub mod terminal;
 pub mod theme;
 pub mod tooltips;

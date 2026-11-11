@@ -59,7 +59,7 @@ pub struct Chrome {
     this: WeakEntity<Self>,
     prefs: Prefs,
     drag: Option<(Divider, f32)>,
-    /// `shell.tabsInTitleBar`, which Settings sets. Read at start.
+    /// `shell.tabsInTitleBar`, which Settings sets and this follows.
     tabs_in_title_bar: bool,
     /// (id, label) of each right-panel segment, built-ins first.
     surfaces: Vec<(String, String)>,
@@ -91,6 +91,14 @@ impl Chrome {
                 cx.notify();
             })
             .detach();
+            // Settings changes these two live.
+            cx.observe_global::<crate::settings::Settings>(|chrome: &mut Self, cx| {
+                let prefs = crate::settings::get(cx);
+                chrome.tabs_in_title_bar = prefs.tabs_in_title_bar;
+                chrome.surfaces = layout::panel_surfaces(Some(&prefs.enabled_panel_extensions));
+                cx.notify();
+            })
+            .detach();
             // A layout changed just before quitting is still written: the
             // writer runs on the backend's runtime, which quitting would stop.
             cx.on_app_quit(|chrome: &mut Self, _| {
@@ -106,8 +114,10 @@ impl Chrome {
                 this: cx.entity().downgrade(),
                 prefs,
                 drag: None,
-                tabs_in_title_bar: state.shell.tabs_in_title_bar.unwrap_or(true),
-                surfaces: layout::panel_surfaces(state.shell.enabled_panel_extensions.as_deref()),
+                tabs_in_title_bar: crate::settings::get(cx).tabs_in_title_bar,
+                surfaces: layout::panel_surfaces(Some(
+                    &crate::settings::get(cx).enabled_panel_extensions,
+                )),
                 workspaces,
                 saves: Arc::default(),
                 terminal: None,

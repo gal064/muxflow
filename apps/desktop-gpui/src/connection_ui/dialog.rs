@@ -23,7 +23,7 @@ use gpui_kit::{
 
 use crate::theme::{
     self,
-    metrics::{TYPE_META, TYPE_ROW, TYPE_SECONDARY, ui},
+    metrics::{TYPE_LABEL, TYPE_META, TYPE_ROW, TYPE_SECONDARY, ui},
 };
 
 use super::{
@@ -32,7 +32,6 @@ use super::{
     host_profiles::host_letter,
 };
 
-const DIALOG_WIDTH: f32 = 520.;
 const CONFIRM_WIDTH: f32 = 420.;
 
 type DialogAction = Box<dyn Fn(&mut Window, &mut App)>;
@@ -46,7 +45,7 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("enter", NoAction, Some(CONTROLS))]);
 }
 
-fn controls(footer: DialogFooter) -> impl IntoElement {
+pub(crate) fn controls(footer: DialogFooter) -> impl IntoElement {
     div().w_full().key_context(CONTROLS).child(footer)
 }
 
@@ -397,6 +396,35 @@ fn helper_failure_summary(
     }
 }
 
+/// The confirmation Delete raises, here so the `host.delete` command opens the
+/// same one.
+pub fn confirm_delete_host(
+    controller: Entity<ConnectionController>,
+    profile: HostProfile,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let label = profile.label.clone();
+    open_confirmation(
+        Confirmation {
+            title: "Delete saved host?",
+            detail: format!(
+                "“{label}” will be removed from the saved hosts on this machine. Nothing on the host is changed: its tmux sessions, its helper and your SSH config are untouched, and connecting to it again saves it again."
+            )
+            .into(),
+            confirm_label: "Delete host",
+            destructive: true,
+            on_confirm: Box::new(move |_, cx| {
+                controller.update(cx, |state, cx| {
+                    state.delete_profile(&profile, cx);
+                });
+            }),
+        },
+        window,
+        cx,
+    );
+}
+
 impl ConnectionForm {
     fn saved_hosts(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let controller = self.controller.clone();
@@ -427,8 +455,11 @@ impl ConnectionForm {
             .child(
                 RadioGroup::vertical("connection-saved-hosts")
                     .children(profiles.iter().map(|profile| {
-                        Radio::new(SharedString::from(format!("connection-host-{}", profile.id)))
-                            .label(profile.label.clone())
+                        Radio::new(SharedString::from(format!(
+                            "connection-host-{}",
+                            profile.id
+                        )))
+                        .label(profile.label.clone())
                     }))
                     .selected_index(selected)
                     .on_change(move |index, _, cx| {
@@ -445,7 +476,9 @@ impl ConnectionForm {
                             .ghost()
                             .xsmall()
                             .label("+ Add host")
-                            .on_click(move |_, _, cx| add.update(cx, |state, cx| state.add_host(cx))),
+                            .on_click(move |_, _, cx| {
+                                add.update(cx, |state, cx| state.add_host(cx))
+                            }),
                     )
                     .child(
                         Button::new("connection-delete-host")
@@ -454,29 +487,9 @@ impl ConnectionForm {
                             .label(delete_label)
                             .disabled(deletable.is_none())
                             .on_click(move |_, window, cx| {
-                                let Some(profile) = deletable.clone() else {
-                                    return;
-                                };
-                                let controller = delete_target.clone();
-                                let label = profile.label.clone();
-                                open_confirmation(
-                                    Confirmation {
-                                        title: "Delete saved host?",
-                                        detail: format!(
-                                            "“{label}” will be removed from the saved hosts on this machine. Nothing on the host is changed: its tmux sessions, its helper and your SSH config are untouched, and connecting to it again saves it again."
-                                        )
-                                        .into(),
-                                        confirm_label: "Delete host",
-                                        destructive: true,
-                                        on_confirm: Box::new(move |_, cx| {
-                                            controller.update(cx, |state, cx| {
-                                                state.delete_profile(&profile, cx);
-                                            });
-                                        }),
-                                    },
-                                    window,
-                                    cx,
-                                );
+                                if let Some(profile) = deletable.clone() {
+                                    confirm_delete_host(delete_target.clone(), profile, window, cx);
+                                }
                             }),
                     ),
             )
@@ -489,6 +502,12 @@ impl ConnectionForm {
         let mode = state.connection_mode();
         let on_mode = controller.clone();
         let mut fields = v_flex().gap(ui(6.)).child(
+            div()
+                .text_size(ui(TYPE_LABEL))
+                .text_color(theme::palette(cx).chrome_faint)
+                .child("TRANSPORT"),
+        );
+        fields = fields.child(
             RadioGroup::horizontal("connection-mode")
                 .child(Radio::new("connection-mode-local").label("Local"))
                 .child(Radio::new("connection-mode-ssh").label("SSH"))
@@ -693,39 +712,17 @@ impl Render for ConnectionForm {
     }
 }
 
-/// Opens the connection dialog; the entities are created once, before the
-/// dialog's builder, which re-runs on every render.
+/// Opens Settings on its Connection tab, the form behind "Connection…" and the
+/// host row.
 pub fn open_connection_dialog(
     controller: Entity<ConnectionController>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let form = cx.new(|cx| ConnectionForm::new(controller.clone(), window, cx));
-    window.open_dialog(cx, move |dialog, window, _| {
-        let connect = controller.clone();
-        dialog
-            .title("Connection")
-            .close_button(false)
-            .on_ok(|_, _, _| false)
-            .w(ui(DIALOG_WIDTH).to_pixels(window.rem_size()))
-            .child(form.clone())
-            .footer(controls(
-                DialogFooter::new()
-                    .child(
-                        Button::new("connection-close")
-                            .ghost()
-                            .label("Close")
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        Button::new("connection-connect")
-                            .primary()
-                            .label("Connect")
-                            .on_click(move |_, window, cx| {
-                                connect.update(cx, |state, cx| state.connect(cx));
-                                window.close_dialog(cx);
-                            }),
-                    ),
-            ))
-    });
+    crate::settings::dialog::open_with(
+        crate::settings::dialog::Tab::Connection,
+        Some(controller),
+        window,
+        cx,
+    );
 }
