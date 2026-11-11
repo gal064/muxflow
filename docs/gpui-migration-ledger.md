@@ -185,7 +185,7 @@ font row covers them).
 | `app/AppDialogLayer.tsx` | 122 | port | 2 | dialog layer over Kit dialogs | open |
 | `app/AppNoticeLayer.tsx` | 52 | port | 2 | Kit notifications through `notices.rs`. One status notice at a time, a problem stays. The transfer toast is not here yet; it comes with transfers | open |
 | `app/AppRightPanel.tsx` | 89 | port | 2 | right panel host (Explorer, Git, Ports rails) | open |
-| `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | separator rule and naming in terminal/layout.rs and surface.rs; divider, grab and join rules in terminal/integration/frames.rs (T3.6); activity forwarding goes with the agents runtime in Phase 4 | open |
+| `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | separator rule and naming in terminal/layout.rs and surface.rs; divider, grab and join rules in terminal/integration/frames.rs (T3.6); key and pointer activity reports the pane through terminal/integration/agents.rs `note_activity`; the acknowledgement it drives is tested in agents/tests.rs (T4.2) | done (T4.2) |
 | `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | terminal/surface.rs: pane frames, resting dividers, empty state, region name, and (T3.6) divider drag and arrow-key resize, the attention ring (fed by the agents runtime in Phase 4), hover focus, selecting a pane in tmux on focus, and the link-modifier pane grab, which joins a pane beside another; the grab yields to a link once T3.5's link test is wired into `integration::link_at` | done (T3.6) |
 | `app/WorkspaceDock.test.tsx` | 131 | port | 2 | tests of WorkspaceDock.tsx | open |
 | `app/WorkspaceDock.tsx` | 232 | port | 2 | dock layout on Kit dock; also a drop target, not a drag source (see S8) | open |
@@ -210,7 +210,7 @@ font row covers them).
 | `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | tests of terminalFileOpenRoute.ts | open |
 | `app/terminalFileOpenRoute.ts` | 27 | port | 3 | terminal file open route check | open |
 | `app/types.ts` | 68 | replace | 2 | Session, Window, Pane, ConnectionSpec, HostProfile come from protocol and desktop-core types | open |
-| `app/useAppAgentController.ts` | 162 | port | 4 | agent controller entity | open |
+| `app/useAppAgentController.ts` | 162 | port | 4 | agents/mod.rs: scopes, focus and setup gating from the connection controller, rows across hosts, the jump, row opening and the palette's row commands; the workflow half is agents/setup.rs. Open: launch and resume need the active root (`agents::view::ActiveRoot`, set by the Explorer in Phase 5); selecting a terminal tab should acknowledge its pane through `terminal::integration::agents::note_activity` (tab strip owner); bringing an agent's pane here and moving it go with pane moves | open |
 | `app/useAppConnectionController.ts` | 944 | port | 2 | connection_ui/controller.rs; terminal hub and state cache, reseeds, echo-lag and input-latency probes, clipboard, file, git, agent and automation frame routing, retireConnection, appFocused and prewarm_terminal_bulk stay with Phase 3 and 4 owners; active-window resolution and the optimistic window with T4.1; after-install agent setup with useAgentHostSetup | done (T2.4) |
 | `app/useAppFileActions.test.tsx` | 196 | port | 5 | tests of useAppFileActions.ts | open |
 | `app/useAppFileActions.ts` | 145 | port | 5 | file actions entity (mutation, save panel, transfers) | open |
@@ -280,56 +280,56 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/agents/AgentHookWorkflow.tsx` | 165 | port | 4 | agent lifecycle actions | open |
-| `features/agents/AgentHostSetupDialog.tsx` | 77 | port | 4 | host setup prompt dialog | open |
-| `features/agents/AgentIdentity.test.tsx` | 75 | port | 4 | tests of AgentIdentity.tsx | open |
-| `features/agents/AgentIdentity.tsx` | 85 | port | 4 | adapter marks as embedded SVG | open |
-| `features/agents/HookReviewDialog.tsx` | 49 | port | 4 | hook review dialog | open |
-| `features/agents/adapterDefinitions.ts` | 6 | port | 4 | canonical adapter id | open |
-| `features/agents/agentLabels.test.ts` | 87 | port | 4 | tests of agentLabels.ts | open |
-| `features/agents/agentLabels.ts` | 1 | port | 4 | re-export of client-core label helpers; needs a Rust implementation shared via fixtures | open |
-| `features/agents/agentStatusSurfaces.test.tsx` | 279 | port | 4 | agent status across surfaces | open |
-| `features/agents/agentsList.test.ts` | 402 | port | 4 | tests of agentsList.ts | open |
-| `features/agents/agentsList.ts` | 331 | port | 4 | agents list ordering | open |
-| `features/agents/api.test.ts` | 118 | port | 4 | behavior assertions move to the replacement of api.ts | open |
-| `features/agents/api.ts` | 407 | replace | 4 | Tauri agent client becomes direct desktop-core calls | open |
-| `features/agents/catchUp.test.tsx` | 100 | port | 4 | agent catch-up after reconnect | open |
-| `features/agents/generation.test.ts` | 20 | port | 4 | tests of generation.ts | open |
-| `features/agents/generation.ts` | 29 | port | 4 | u64 agent generation compare | open |
-| `features/agents/hookWiring.test.ts` | 92 | port | 4 | tests of hookWiring.ts | open |
-| `features/agents/hookWiring.ts` | 88 | port | 4 | hook wiring status | open |
-| `features/agents/notifications.test.ts` | 117 | port | 4 | behavior assertions move to the replacement of notifications.ts | open |
-| `features/agents/notifications.ts` | 169 | replace | 4 | invoke wrapper and decode of native notifications; desktop-core notifications kept | open |
-| `features/agents/runtimeMemory.test.ts` | 23 | port | 4 | tests of runtimeMemory.ts | open |
-| `features/agents/runtimeMemory.ts` | 69 | port | 4 | bounded LRU reconnect memory | open |
-| `features/agents/selectors.test.ts` | 54 | port | 4 | tests of selectors.ts | open |
-| `features/agents/selectors.ts` | 97 | port | 4 | agent selectors and rollups | open |
-| `features/agents/sound.test.ts` | 23 | port | 4 | behavior assertions move to the replacement of sound.ts | open |
-| `features/agents/sound.ts` | 70 | replace | 4 | AudioContext cues become rodio; prefs move to app_state (Phase 1 step 4) | open |
-| `features/agents/state.test.ts` | 233 | port | 4 | tests of state.ts | open |
-| `features/agents/state.ts` | 153 | port | 4 | agent store reducer | open |
-| `features/agents/testFixtures.ts` | 20 | port | 4 | agent test fixture helper | open |
-| `features/agents/types.ts` | 293 | port | 4 | agent record types | open |
-| `features/agents/useAgentHostSetup.test.tsx` | 624 | port | 4 | tests of useAgentHostSetup.tsx | open |
-| `features/agents/useAgentHostSetup.tsx` | 448 | port | 4 | host setup flow entity | open |
-| `features/agents/useAgentNotificationActivation.test.tsx` | 115 | port | 4 | tests of useAgentNotificationActivation.ts | open |
-| `features/agents/useAgentNotificationActivation.ts` | 146 | port | 4 | notification activation routing | open |
-| `features/agents/useAgentRuntime.test.tsx` | 505 | port | 4 | tests of useAgentRuntime.ts | open |
-| `features/agents/useAgentRuntime.ts` | 378 | port | 4 | agent runtime entity | open |
-| `features/agents/useRecentIdleClock.test.tsx` | 85 | port | 4 | tests of useRecentIdleClock.ts | open |
-| `features/agents/useRecentIdleClock.ts` | 33 | port | 4 | timer for Recent to Idle transition | open |
+| `features/agents/AgentHookWorkflow.tsx` | 165 | port | 4 | agents/setup.rs (review, confirm, cancel; bound to the host the review was loaded for) with the dialog in agents/view.rs | done (T4.2) |
+| `features/agents/AgentHostSetupDialog.tsx` | 77 | port | 4 | agents/view.rs `open_setup_dialog`, with the Tauri copy | done (T4.2) |
+| `features/agents/AgentIdentity.test.tsx` | 75 | port | 4 | label cases in agents/labels.rs; the marks and the docked state are view behavior, checked in T4.2 QA | done (T4.2) |
+| `features/agents/AgentIdentity.tsx` | 85 | port | 4 | agents/view.rs `agent_mark` (adapter SVGs drawn as masks, state docked or beside with glyphs); labels in agents/labels.rs | done (T4.2) |
+| `features/agents/HookReviewDialog.tsx` | 49 | port | 4 | agents/view.rs `open_review_dialog`, with the Tauri copy | done (T4.2) |
+| `features/agents/adapterDefinitions.ts` | 6 | port | 4 | the adapter ids are matched where they are used (agents/view.rs marks, agents/labels.rs) | done (T4.2) |
+| `features/agents/agentLabels.test.ts` | 87 | port | 4 | tests in agents/labels.rs | done (T4.2) |
+| `features/agents/agentLabels.ts` | 1 | port | 4 | agents/labels.rs; the mobile app keeps its own client-core copy | done (T4.2) |
+| `features/agents/agentStatusSurfaces.test.tsx` | 279 | port | 4 | the notice and wiring cases in agents/wiring.rs, the row and selection cases in agents/list.rs; dot shapes, slots and stylesheet cases are view behavior, checked in T4.2 QA | done (T4.2) |
+| `features/agents/agentsList.test.ts` | 402 | port | 4 | tests in agents/list.rs | done (T4.2) |
+| `features/agents/agentsList.ts` | 331 | port | 4 | agents/list.rs | done (T4.2) |
+| `features/agents/api.test.ts` | 118 | port | 4 | tests in agents/wire.rs | done (T4.2) |
+| `features/agents/api.ts` | 407 | replace | 4 | agents/wire.rs maps commands and answers; requests go through `TerminalBackend::agent_request` to desktop-core | done (T4.2) |
+| `features/agents/catchUp.test.tsx` | 100 | port | 4 | reconnect catch-up (an advanced watermark notifies once) in agents/tests.rs | done (T4.2) |
+| `features/agents/generation.test.ts` | 20 | port | 4 | full-range u64 generations in agents/wire.rs tests | done (T4.2) |
+| `features/agents/generation.ts` | 29 | port | 4 | generations are `u64` (agents/model.rs `Generation`), parsed in agents/wire.rs | done (T4.2) |
+| `features/agents/hookWiring.test.ts` | 92 | port | 4 | tests in agents/wiring.rs | done (T4.2) |
+| `features/agents/hookWiring.ts` | 88 | port | 4 | agents/wiring.rs | done (T4.2) |
+| `features/agents/notifications.test.ts` | 117 | port | 4 | tests in agents/notify.rs | done (T4.2) |
+| `features/agents/notifications.ts` | 169 | replace | 4 | agents/notify.rs decides; desktop-core shows the notification (agents/runtime.rs `NativeEffects`) | done (T4.2) |
+| `features/agents/runtimeMemory.test.ts` | 23 | port | 4 | tests in agents/model.rs | done (T4.2) |
+| `features/agents/runtimeMemory.ts` | 69 | port | 4 | agents/model.rs `RuntimeMemory` | done (T4.2) |
+| `features/agents/selectors.test.ts` | 54 | port | 4 | tests in agents/model.rs | done (T4.2) |
+| `features/agents/selectors.ts` | 97 | port | 4 | agents/model.rs selectors and rollups | done (T4.2) |
+| `features/agents/sound.test.ts` | 23 | port | 4 | tests in agents/sound.rs; the localStorage import retires with the WebView | done (T4.2) |
+| `features/agents/sound.ts` | 70 | replace | 4 | agents/sound.rs: the same two cues synthesized and played with rodio, preferences read from app state when a cue plays | done (T4.2) |
+| `features/agents/state.test.ts` | 233 | port | 4 | tests in agents/model.rs | done (T4.2) |
+| `features/agents/state.ts` | 153 | port | 4 | agents/model.rs `AgentStore` | done (T4.2) |
+| `features/agents/testFixtures.ts` | 20 | port | 4 | agents/model.rs `fixtures` | done (T4.2) |
+| `features/agents/types.ts` | 293 | port | 4 | agents/model.rs | done (T4.2) |
+| `features/agents/useAgentHostSetup.test.tsx` | 624 | port | 4 | prompt, decline, install, frozen state, helper auto-setup and reassert cases in agents/tests.rs; host binding through the `consented_scope` refusal there (a switch between review and apply takes the same check) | done (T4.2) |
+| `features/agents/useAgentHostSetup.tsx` | 448 | port | 4 | agents/setup.rs | done (T4.2) |
+| `features/agents/useAgentNotificationActivation.test.tsx` | 115 | port | 4 | route, stale-error and resolution cases in agents/activation.rs; the focus and exact acknowledgement flow is checked in T4.2 QA | done (T4.2) |
+| `features/agents/useAgentNotificationActivation.ts` | 146 | port | 4 | agents/activation.rs: clicks are queued off the notification thread and polled | done (T4.2) |
+| `features/agents/useAgentRuntime.test.tsx` | 505 | port | 4 | tests in agents/tests.rs against a scripted host | done (T4.2) |
+| `features/agents/useAgentRuntime.ts` | 378 | port | 4 | agents/runtime.rs. Open: the topology authority (the tmux window set an agent snapshot was paired with, which `useBulkTabClose.ts` uses to protect agent tabs) is not produced; it lands with the bulk tab close port | open |
+| `features/agents/useRecentIdleClock.test.tsx` | 85 | port | 4 | expiration cases in agents/list.rs | done (T4.2) |
+| `features/agents/useRecentIdleClock.ts` | 33 | port | 4 | agents/runtime.rs `arm_recent_clock`: one timer at the nearest expiration | done (T4.2) |
 
 ### `features/automations`
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/automations/AutomationEditor.tsx` | 265 | port | 4 | automation editor view | open |
-| `features/automations/AutomationsPanel.test.tsx` | 317 | port | 4 | tests of AutomationsPanel.tsx | open |
-| `features/automations/AutomationsPanel.tsx` | 342 | port | 4 | automations panel view | open |
-| `features/automations/api.ts` | 46 | replace | 4 | invoke wrapper becomes direct desktop-core calls | open |
-| `features/automations/cronText.test.ts` | 35 | port | 4 | tests of cronText.ts | open |
-| `features/automations/cronText.ts` | 92 | port | 4 | cron text formatter | open |
-| `features/automations/types.ts` | 60 | port | 4 | automation types | open |
+| `features/automations/AutomationEditor.tsx` | 265 | port | 4 | automations/panel.rs (draft, save, delete, stale handling) and automations/view.rs (dialog), with the Tauri copy | done (T4.2) |
+| `features/automations/AutomationsPanel.test.tsx` | 317 | port | 4 | tests in automations/tests.rs against a scripted helper | done (T4.2) |
+| `features/automations/AutomationsPanel.tsx` | 342 | port | 4 | automations/panel.rs and automations/view.rs, the right panel's "automations" segment | done (T4.2) |
+| `features/automations/api.ts` | 46 | replace | 4 | requests go through `TerminalBackend::automation_request` to desktop-core; refusal helpers in automations/model.rs | done (T4.2) |
+| `features/automations/cronText.test.ts` | 35 | port | 4 | tests in automations/model.rs | done (T4.2) |
+| `features/automations/cronText.ts` | 92 | port | 4 | automations/model.rs | done (T4.2) |
+| `features/automations/types.ts` | 60 | port | 4 | automations/model.rs | done (T4.2) |
 
 ### `features/dragDrop`
 
@@ -661,12 +661,12 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `ui/AgentStateIndicator.tsx` | 39 | port | 2 | agent state indicator | open |
+| `ui/AgentStateIndicator.tsx` | 39 | port | 2 | agents/view.rs `state_indicator` | done (T4.2) |
 | `ui/ContextMenu.tsx` | 211 | replace | 2 | Kit `PopupMenu` through `context_menu.rs`. Not carried over: opening from the keyboard, which Kit lacks | open |
 | `ui/DelayedLoading.tsx` | 19 | port | 2 | loading text shown after 150 ms (the delay is a CSS animation in styles.css) | open |
 | `ui/Icon.tsx` | 244 | port | 2 | icon path data becomes embedded SVG assets | open |
 | `ui/SetupProgress.tsx` | 6 | port | 2 | setup progress line | open |
-| `ui/StateDot.tsx` | 53 | port | 2 | agent state dot with shape option | open |
+| `ui/StateDot.tsx` | 53 | port | 2 | agents/view.rs `state_indicator`, glyphs from `shell.agent_state_glyphs` | done (T4.2) |
 | `ui/SurfaceError.tsx` | 50 | port | 2 | surface error with disclosure | open |
 | `ui/appearance.test.ts` | 79 | port | 2 | theme preference and palette parity; palette cases become generator output tests | open |
 | `ui/appearance.ts` | 130 | port | 2 | theme preference and UI scale over app_state | open |

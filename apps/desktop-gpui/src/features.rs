@@ -21,4 +21,6 @@ pub fn init(cx: &mut App) {
     crate::ui::chrome::init(cx);
     crate::window_state::init(cx);
     crate::terminal::init(cx);
+    crate::agents::init(cx);
+    crate::automations::init(cx);
 }

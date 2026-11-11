@@ -72,7 +72,9 @@ impl ConnectionSurface {
                 controller,
                 window,
                 |_, _, event: &ConnectionEvent, window, cx| {
-                    let ConnectionEvent::Status(message) = event;
+                    let ConnectionEvent::Status(message) = event else {
+                        return;
+                    };
                     notices::notify(message, window, cx);
                 },
             ));
