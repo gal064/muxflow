@@ -39,7 +39,9 @@ _SPIKE_SWRAST_VERSION="1:26.2.5-1"
 spike_fetch_lavapipe() {
   local d="$SPIKE_LAVAPIPE_DIR" url want got
   if [ -s "$d/pkg/usr/lib/libvulkan_lvp.so" ]; then
-    _spike_write_icd; return
+    # A read-only copy (as inside qa-sandbox.sh) keeps the ICD it was given.
+    [ -s "$d/lvp_icd.json" ] || _spike_write_icd
+    return
   fi
   mkdir -p "$d/dl" "$d/pkg" || return 1
   url="$(pacman -Sp vulkan-swrast 2>/dev/null | tail -n1)"
