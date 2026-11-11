@@ -199,7 +199,7 @@ installer it starts, through `desktop-core`'s `ureq` and `curl`.
 | Clicking the pill on the desktop runs the published installer | holds | `desktop-core/src/update_check.rs:30`, `:62-80`; refused outside the default install location |
 | Tapping the pill on Android downloads the APK | holds | mobile, out of scope |
 | Remote images and scripts in rendered content cannot phone home | holds | `gpui/markdown/view.rs` `embedded_image` allows only inline raster data URIs, tested against `https:`, `file:` and SVG sources. This replaces what the webview's content-security policy did |
-| The doc says nothing of the always-on incident journal (`incidents.jsonl`, 2 MiB, one rotated file) the app writes to its log directory | differs | `desktop-core/src/incidents.rs`; `gpui/diagnostics.rs`; `gpui/paths.rs:27-35`. It holds ids, timings and reasons, and `action.refused` keeps up to 200 characters of a host error. Its file mode follows the umask, not 0600 |
+| The incident journal (`incidents.jsonl`, 2 MiB, one rotated file) in the log directory is documented and user-only | holds | `desktop-core/src/incidents.rs` sets `0600` and `0700` (test `the_journal_is_readable_by_its_user_only`); documented in `diagnostics-privacy-security.md` |
 
 ## Gaps for the root
 
@@ -208,7 +208,7 @@ Every "differs" or "missing" row above, with a suggested owner.
 1. **Menu key and Shift+F10 do not open a context menu.** Documented in `keybindings.md`; `gpui/context_menu.rs:9` records it as not carried over because Kit opens a menu only on a right or long press. Owner: T6.1 `accessibility`.
 2. **Open menu: Home, End and Tab are not bound.** `keybindings.md` lists them; Kit's `PopupMenu` binds only enter, escape and the arrows, and the comment in `context_menu.rs:5` wrongly says Home and End come from Kit. Owner: T6.1 `accessibility`. If it is not fixed, drop "Home / End, Tab" from the doc at cutover.
 3. **Focused agent list has no ↑ / ↓ row navigation.** The workspace list and tab strip have it (`moved_cursor`); `gpui/agents/view.rs` has no key handler or focus handle on the list. Owner: T6.1 `accessibility`.
-4. **The incident journal is undocumented and not user-only.** `diagnostics-privacy-security.md` does not mention `incidents.jsonl`, and the file and its log directory take the process umask instead of 0600 and 0700 (`desktop-core/src/incidents.rs`, `gpui/paths.rs`). `action.refused` may carry up to 200 characters of a host error, which could include a path. The TypeScript journal (`apps/desktop/src/diagnostics/incidents.ts`) fed the same `desktop-core` writer, so this is not a webview regression. Owner: the root, to decide between a doc paragraph and tightening the file mode (the latter is a code change, so T6.7 if taken).
+4. **Resolved:** the incident journal is now documented and user-only (`0600` file, `0700` directory), in `desktop-core`, so the Tauri app gets it too.
 5. **`mac-ssh-hosts.md` cites Tauri-era source paths** (`connection/helper.rs`, `connection/ports.rs`). The code now lives in `crates/desktop-core`. Owner: the root (doc edit at cutover, see below).
 
 ## Cutover edits
@@ -218,7 +218,6 @@ Tauri release is still the shipping app.
 
 - `docs/mac-ssh-hosts.md`: replace the desktop source references (`connection/helper.rs`, `connection/ports.rs`, "desktop") with `crates/desktop-core/src/connection/{helper,ports}.rs`. Better: move the whole plan to `docs/history/` once the Mac host work is done, since it is dated and describes past test runs. Keep the machine name and user name out of any copy.
 - `docs/keybindings.md`: if gaps 1 or 2 are not fixed, remove the Menu key and Shift+F10 sentence from the Mouse table and "Home / End, Tab" from the open-menu row.
-- `docs/diagnostics-privacy-security.md`: add one sentence that the desktop also keeps a local incident journal (ids, timings, reasons; never uploaded), once gap 4 is decided.
 - `docs/keybindings.md`: the Omarchy Super+C and Super+V sentence is true only while Omarchy does not tag the app as a terminal. No edit now; if the owner finds it false on Omarchy, remove the sentence.
 
 ## Mac prompt items

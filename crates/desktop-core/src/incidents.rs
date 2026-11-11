@@ -51,13 +51,31 @@ pub fn record_incident(journal: &IncidentJournal, line: String) -> Result<(), St
 fn append_line(path: &PathBuf, line: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        // Records can quote host errors, which may name remote paths, so the
+        // journal is readable by its user only, like saved state and profiles.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
     }
     if fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_JOURNAL_BYTES) {
         // Rename-then-recreate keeps rotation atomic enough for a journal:
         // the worst interleaving loses lines to the old file, never corrupts.
         let _ = fs::rename(path, path.with_extension("jsonl.1"));
     }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        // A journal written before this rule keeps its old mode otherwise.
+        if fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o077 != 0) {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    let mut file = options.open(path)?;
     file.write_all(line.as_bytes())?;
     file.write_all(b"\n")
 }
@@ -81,6 +99,24 @@ mod tests {
         let fresh = fs::read_to_string(&path).unwrap();
         assert_eq!(fresh.lines().count(), 1);
         assert!(path.with_extension("jsonl.1").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_journal_is_readable_by_its_user_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("incidents-mode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.join("incidents.jsonl");
+        fs::write(&path, "").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        append_line(&path, r#"{"kind":"first"}"#).unwrap();
+        let mode = |path: &PathBuf| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir), 0o700);
         fs::remove_dir_all(&dir).unwrap();
     }
 }
