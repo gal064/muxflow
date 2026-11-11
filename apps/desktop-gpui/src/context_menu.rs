@@ -12,7 +12,7 @@
 use std::rc::Rc;
 
 use gpui_kit::{
-    App, IntoElement, ParentElement, SharedString, Styled, Window,
+    App, Context, IntoElement, ParentElement, SharedString, Styled, Window,
     component::menu::{PopupMenu, PopupMenuItem},
     div,
 };
@@ -21,6 +21,7 @@ use crate::{commands::registry::CommandId, menus::RunCommand, theme};
 
 type Run = Rc<dyn Fn(&mut Window, &mut App)>;
 
+#[derive(Clone)]
 pub struct Item {
     label: SharedString,
     disabled: bool,
@@ -94,9 +95,26 @@ impl Item {
     }
 }
 
+#[derive(Clone)]
 pub enum Entry {
     Item(Item),
     Separator,
+    /// A second level of the menu, opening beside it.
+    Submenu {
+        label: SharedString,
+        disabled: bool,
+        entries: Rc<[Entry]>,
+    },
+}
+
+impl Entry {
+    pub fn submenu(label: impl Into<SharedString>, entries: Vec<Entry>, disabled: bool) -> Self {
+        Self::Submenu {
+            label: label.into(),
+            disabled,
+            entries: entries.into(),
+        }
+    }
 }
 
 impl From<Item> for Entry {
@@ -106,9 +124,26 @@ impl From<Item> for Entry {
 }
 
 /// Fills `menu` with `entries`.
-pub fn fill(menu: PopupMenu, entries: &[Entry]) -> PopupMenu {
+pub fn fill(
+    menu: PopupMenu,
+    entries: &[Entry],
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
     entries.iter().fold(menu, |menu, entry| match entry {
         Entry::Separator => menu.separator(),
         Entry::Item(item) => menu.item(item.popup()),
+        // Kit has no disabled submenu: a disabled item says the same.
+        Entry::Submenu {
+            label,
+            disabled: true,
+            ..
+        } => menu.item(PopupMenuItem::new(label.clone()).disabled(true)),
+        Entry::Submenu { label, entries, .. } => {
+            let entries = entries.clone();
+            menu.submenu(label.clone(), window, cx, move |menu, window, cx| {
+                fill(menu, &entries, window, cx)
+            })
+        }
     })
 }

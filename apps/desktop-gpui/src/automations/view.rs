@@ -157,7 +157,7 @@ impl Render for AutomationsPanel {
                     .xsmall()
                     .label(host.label.clone())
                     .accessibility_label(format!("Host: {}", host.label))
-                    .dropdown_menu(move |menu, _, _| {
+                    .dropdown_menu(move |menu, window, cx| {
                         let entries: Vec<Entry> = hosts
                             .iter()
                             .map(|(id, label)| {
@@ -171,7 +171,7 @@ impl Render for AutomationsPanel {
                                 .into()
                             })
                             .collect();
-                        fill(menu, &entries)
+                        fill(menu, &entries, window, cx)
                     })
                     .into_any_element()
             } else {

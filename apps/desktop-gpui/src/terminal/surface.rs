@@ -32,7 +32,7 @@ use super::integration::{
     agents::PaneAttention,
     frames::{
         AFTER_GRAB_QUIET, Axis, DRAG_THRESHOLD_PX, HOVER_FOCUS_DELAY, KEY_RESIZE_CELLS, PaneEdge,
-        divider_key, join_action, pane_edge_at, resize_action, resize_cells_from_pixels,
+        divider_key, pane_edge_at, resize_action, resize_cells_from_pixels,
     },
 };
 use super::layout::{PaneRect, WindowGrid, mounted_panes, pane_rect, separators, window_grid};
@@ -121,22 +121,9 @@ pub struct TerminalSurface {
     origin: Point<Pixels>,
     /// A divider being dragged. It resizes once, when released.
     divider: Option<DividerGrab>,
-    /// A pane grabbed with the link modifier, and when the last one ended.
-    grab: Option<PaneGrab>,
-    grab_ended: Option<Instant>,
     /// The pane the pointer rests on, and the timer that focuses it.
     hover: Option<(SharedString, Task<()>)>,
     _subscriptions: Vec<Subscription>,
-}
-
-/// A pane held by the link modifier. Nothing moves until it is dropped on
-/// another pane's edge; the press alone is no drag, so the pane under it gets
-/// no click.
-struct PaneGrab {
-    pane_id: SharedString,
-    origin: Point<Pixels>,
-    moving: bool,
-    target: Option<(SharedString, PaneEdge)>,
 }
 
 struct DividerGrab {
@@ -167,18 +154,8 @@ impl TerminalSurface {
             // ahead of dispatch: a pane's key handler stops propagation.
             let keys = {
                 let this = cx.entity().downgrade();
-                cx.intercept_keystrokes(move |event, _, cx| {
-                    let escape = event.keystroke.key == "escape";
-                    let ended = this
-                        .update(cx, |surface, cx| {
-                            surface.request_take(cx);
-                            escape && surface.cancel_grab(cx)
-                        })
-                        .unwrap_or(false);
-                    // Escape ended a pane drag, and is spent on it.
-                    if ended {
-                        cx.stop_propagation();
-                    }
+                cx.intercept_keystrokes(move |_, _, cx| {
+                    this.update(cx, |surface, cx| surface.request_take(cx)).ok();
                 })
             };
             let uploads = cx.observe_global::<integration::upload::Uploads>(|_, cx| cx.notify());
@@ -231,8 +208,6 @@ impl TerminalSurface {
                 terminal_visible: true,
                 origin: Point::default(),
                 divider: None,
-                grab: None,
-                grab_ended: None,
                 hover: None,
                 _subscriptions: vec![observe, keys, uploads, attention, lost, settings],
             };
@@ -726,7 +701,8 @@ impl TerminalSurface {
     /// A press with the link modifier grabs the pane, unless it is on a link,
     /// which that modifier opens. Claimed before the pane sees it, so no
     /// selection starts and a program reading the mouse gets no click. The
-    /// grab does not focus the pane.
+    /// grab does not focus the pane. It is a drag like any other once the
+    /// pointer travels: nothing moves until it is dropped.
     fn press_frame(
         &mut self,
         pane_id: &SharedString,
@@ -747,98 +723,55 @@ impl TerminalSurface {
         }
         cx.stop_propagation();
         self.hover = None;
-        self.grab = Some(PaneGrab {
-            pane_id: pane_id.clone(),
-            origin: event.position,
-            moving: false,
-            target: None,
+        let payload = self.target.as_ref().and_then(|target| {
+            crate::workspaces::current(cx)?.read(cx).pane_payload(
+                &target.profile_id,
+                pane_id,
+                None,
+                cx,
+            )
         });
+        crate::dragdrop::press(payload, event.position, cx);
     }
 
-    /// Follows a grab's pointer. True while a grab holds the pointer.
-    fn move_grab(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
-        // A divider release this window never saw: no later click may resize.
+    /// A divider release this window never saw: no later click may resize.
+    fn move_frame(&mut self, event: &MouseMoveEvent) {
         if event.pressed_button.is_none() {
             self.divider = None;
         }
-        let Some(grab) = self.grab.as_ref() else {
-            return false;
-        };
-        // A release this gesture never saw: a later plain move is no drag.
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.grab = None;
-            cx.notify();
-            return false;
-        }
-        let moving = grab.moving
-            || (event.position - grab.origin).magnitude() >= f64::from(DRAG_THRESHOLD_PX);
-        let target = if moving {
-            self.drop_target(event.position)
-        } else {
-            None
-        };
-        let grab = self.grab.as_mut().expect("checked above");
-        if grab.moving != moving || grab.target != target {
-            grab.moving = moving;
-            grab.target = target;
-            cx.notify();
-        }
-        true
     }
 
-    /// The pane edge under a window position, never the grabbed pane's own.
+    /// Offers the pane edge under a drag's pointer as a place to drop.
+    fn offer_pane_edge(&self, position: Point<Pixels>, cx: &mut App) {
+        if let Some((pane_id, edge)) = self.drop_target(position) {
+            crate::dragdrop::offer(
+                crate::dragdrop::DropTarget::Pane {
+                    pane_id: pane_id.to_string(),
+                    edge,
+                },
+                cx,
+            );
+        }
+    }
+
+    /// The pane edge under a window position.
     fn drop_target(&self, position: Point<Pixels>) -> Option<(SharedString, PaneEdge)> {
         let surface = self.surface_box()?;
         let zoomed = self.target.as_ref().is_some_and(|target| target.zoomed);
         let x = f32::from(position.x - self.origin.x);
         let y = f32::from(position.y - self.origin.y);
-        let grabbed = self.grab.as_ref().map(|grab| &grab.pane_id);
-        self.panes
-            .iter()
-            .filter(|mounted| Some(&mounted.id) != grabbed)
-            .find_map(|mounted| {
-                let rect = pane_rect(&mounted.geometry, self.grid, surface, zoomed);
-                // Half-open, so a split boundary belongs to one pane.
-                let inside = x >= rect.left
-                    && x < rect.left + rect.width
-                    && y >= rect.top
-                    && y < rect.top + rect.height;
-                let edge = inside
-                    .then(|| {
-                        pane_edge_at((x - rect.left) / rect.width, (y - rect.top) / rect.height)
-                    })
-                    .flatten()?;
-                Some((mounted.id.clone(), edge))
-            })
-    }
-
-    /// Drops a grabbed pane. True if a grab held the pointer.
-    fn end_grab(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
-        let Some(grab) = self.grab.take() else {
-            return false;
-        };
-        if grab.moving {
-            self.grab_ended = Some(Instant::now());
-            cx.notify();
-            if let Some(action) = self
-                .drop_target(position)
-                .and_then(|(target, edge)| join_action(&grab.pane_id, &target, edge))
-            {
-                self.tmux_action(action, false, cx);
-            }
-        }
-        true
-    }
-
-    /// Escape: ends a grab that is moving, and says whether it did.
-    fn cancel_grab(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.grab.as_ref().is_some_and(|grab| grab.moving) {
-            return false;
-        }
-        self.grab = None;
-        self.grab_ended = Some(Instant::now());
-        cx.notify();
-        true
+        self.panes.iter().find_map(|mounted| {
+            let rect = pane_rect(&mounted.geometry, self.grid, surface, zoomed);
+            // Half-open, so a split boundary belongs to one pane.
+            let inside = x >= rect.left
+                && x < rect.left + rect.width
+                && y >= rect.top
+                && y < rect.top + rect.height;
+            let edge = inside
+                .then(|| pane_edge_at((x - rect.left) / rect.width, (y - rect.top) / rect.height))
+                .flatten()?;
+            Some((mounted.id.clone(), edge))
+        })
     }
 
     /// Port of `usePaneHoverFocus`. Every check is repeated when the timer
@@ -857,10 +790,10 @@ impl TerminalSurface {
         // A held button is a selection or a drag crossing panes, and the
         // pane a grab was just dropped beside is no hover either: such an
         // entry focuses nothing until the pointer leaves and comes back.
-        let after_grab = self
-            .grab_ended
-            .is_some_and(|ended| ended.elapsed() < AFTER_GRAB_QUIET);
-        let task = if pressed || self.divider.is_some() || self.grab.is_some() || after_grab {
+        let after_grab =
+            crate::dragdrop::ended_at(cx).is_some_and(|ended| ended.elapsed() < AFTER_GRAB_QUIET);
+        let task = if pressed || self.divider.is_some() || crate::dragdrop::active(cx) || after_grab
+        {
             Task::ready(())
         } else {
             let timer = cx.background_executor().timer(HOVER_FOCUS_DELAY);
@@ -981,15 +914,16 @@ impl Render for TerminalSurface {
         let surface = self.surface_box();
         let zoomed = self.target.as_ref().is_some_and(|target| target.zoomed);
         let grid = self.grid;
-        let grab_target = self
-            .grab
-            .as_ref()
-            .filter(|grab| grab.moving)
-            .and_then(|grab| grab.target.clone());
+        let drop_pane = match crate::dragdrop::marker(cx) {
+            Some((_, crate::dragdrop::DropTarget::Pane { pane_id, edge })) => {
+                Some((pane_id.clone(), *edge))
+            }
+            _ => None,
+        };
         let drop_edge = |id: &SharedString| {
-            grab_target
+            drop_pane
                 .as_ref()
-                .filter(|(target, _)| target == id)
+                .filter(|(target, _)| target.as_str() == id.as_ref())
                 .map(|(_, edge)| *edge)
         };
         // The active pane's ring sits just outside its frame, in the divider
@@ -1121,36 +1055,33 @@ impl Render for TerminalSurface {
                                     .ok();
                             }
                         });
-                        // A divider or a grabbed pane is released wherever
-                        // the pointer is by then. A grab holds the pointer the
-                        // way pointer capture does: nothing under it sees the
-                        // gesture.
+                        // A divider is released wherever the pointer is by then.
                         let released = this.clone();
                         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                            if phase != DispatchPhase::Capture {
-                                return;
-                            }
-                            let grabbed = released
-                                .update(cx, |surface, cx| {
-                                    surface.end_divider_drag(event.position, cx);
-                                    surface.end_grab(event.position, cx)
-                                })
-                                .unwrap_or(false);
-                            if grabbed {
-                                cx.stop_propagation();
+                            if phase == DispatchPhase::Capture {
+                                released
+                                    .update(cx, |surface, cx| {
+                                        surface.end_divider_drag(event.position, cx)
+                                    })
+                                    .ok();
                             }
                         });
+                        // A drag offers the pane edge under it as a place to
+                        // drop; the window's drag listeners, painted first,
+                        // have already seen this move.
                         let moved = this.clone();
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                             if phase != DispatchPhase::Capture {
                                 return;
                             }
-                            let grabbed = moved
-                                .update(cx, |surface, cx| surface.move_grab(event, cx))
-                                .unwrap_or(false);
-                            if grabbed {
-                                cx.stop_propagation();
-                            }
+                            moved
+                                .update(cx, |surface, cx| {
+                                    surface.move_frame(event);
+                                    if crate::dragdrop::active(cx) {
+                                        surface.offer_pane_edge(event.position, cx);
+                                    }
+                                })
+                                .ok();
                         });
                     }
                 },

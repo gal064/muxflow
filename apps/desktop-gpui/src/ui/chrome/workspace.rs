@@ -5,8 +5,9 @@
 
 use desktop_core::app_state::DockSide;
 use gpui_kit::{
-    AnyElement, AnyView, App, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    Role, SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window,
+    AnyElement, AnyView, App, Entity, InteractiveElement, IntoElement, MouseMoveEvent,
+    ParentElement, RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled, WeakEntity,
+    Window,
     base::{HandleEdge, TestSupportExt},
     component::{h_flex, v_flex},
     div,
@@ -15,7 +16,8 @@ use gpui_kit::{
 };
 
 use crate::{
-    theme,
+    dragdrop::{self, DropTarget},
+    theme::{self, metrics::ui},
     ui::chrome::{
         Chrome,
         divider::{Divider, DividerDrag, divider},
@@ -71,6 +73,12 @@ impl RenderOnce for WorkspaceArea {
             in_title_bar: false,
         });
 
+        // A document dragged over the workspace can dock at either edge.
+        let dock_zones = dragdrop::payload(cx).is_some_and(|payload| payload.is_app_tab());
+        let dock_hint = match dragdrop::marker(cx) {
+            Some((_, DropTarget::Dock(side))) => Some(*side),
+            _ => None,
+        };
         let chrome = self.chrome.clone();
         let dock_on_right = docked
             .as_ref()
@@ -162,7 +170,46 @@ impl RenderOnce for WorkspaceArea {
                             ),
                         }
                     })
-                    .when(no_dock, |this| this.child(body(body_label.clone()))),
+                    .when(no_dock, |this| this.child(body(body_label.clone())))
+                    .when(dock_zones, |this| {
+                        let zone = |side: DockSide| {
+                            let zone = div()
+                                .id(match side {
+                                    DockSide::Left => "dock-zone-left",
+                                    DockSide::Right => "dock-zone-right",
+                                })
+                                .absolute()
+                                .top_0()
+                                .h_full()
+                                .w(relative(0.25))
+                                .on_mouse_move(move |_: &MouseMoveEvent, _, cx| {
+                                    dragdrop::offer(DropTarget::Dock(side), cx);
+                                });
+                            match side {
+                                DockSide::Left => zone.left_0(),
+                                DockSide::Right => zone.right_0(),
+                            }
+                        };
+                        this.child(zone(DockSide::Left))
+                            .child(zone(DockSide::Right))
+                    })
+                    // Where the document would dock, at the share it would take.
+                    .when_some(dock_hint, |this, side| {
+                        let hint = div()
+                            .absolute()
+                            .top(ui(6.))
+                            .bottom(ui(6.))
+                            .w(share)
+                            .border_2()
+                            .border_dashed()
+                            .border_color(palette.accent)
+                            .rounded(ui(6.))
+                            .bg(palette.accent_wash);
+                        this.child(match side {
+                            DockSide::Left => hint.left(ui(6.)),
+                            DockSide::Right => hint.right(ui(6.)),
+                        })
+                    }),
             )
     }
 }
