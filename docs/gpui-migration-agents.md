@@ -222,6 +222,8 @@ The phase that owns each area fixes these; the Phase 6 parity check confirms the
 - Hover focus between splits not tested yet (needs the Settings option, Phase 4).
 - Keys typed within about 200 ms of Ctrl+V arrive before the paste.
 - X11 window position is not restored (owner informed).
+- After clicking a notification popup on X11, the next pointer move over a pane made it tmux-active. Check whether hover focus was on; if not, fix the input path.
+- Agent rows for panes that never existed stay after SessionEnd and have no dismiss.
 
 ## Phase 4: Workspaces and panels
 
@@ -236,6 +238,8 @@ through the T2.1 seam.
 | T4.4 `settings-diagnostics` | sonnet, high, full cycle, design | `gpui/settings-diagnostics` | Merged via T4.5 | `e6e8510` | 1 review round, QA pass. The profile label rename and the tmux identity notice match Tauri |
 | T4.5 `phase4-wiring` | opus, high, full cycle, invariant | `gpui/phase4-wiring` | Merged | `ee8358d` | Merged T4.1, T4.2, T4.4 and joined their seams. 1 review round, QA pass after 2 fixes (a pane move selects its window; a startup command is retried while the bridge reconnects). Open: bulk-close topology authority, `agent.state` diagnostics |
 | T4.3 `ports-transfers` | sonnet, high, full cycle | `gpui/ports-transfers` | Merged | `daa7af4` | 2 reviewers, 1 round. QA pass on local and SSH hosts; document-tab drags, the dock zones and the agent menu were not run live (headless tests only). Open: upload Cancel waits for the host's response before it reports |
+| `gdev_qa_phase4` | fresh QA | `gpui/integration` | Passed after fixes | | All panels against local and SSH hosts. Found a notification click leaving tmux focus on the old pane, and a tooltip over a context menu |
+| T4.6 `phase4-fixes` | opus, high, full cycle, invariant | `gpui/phase4-fixes` | Merged | `0912995` | Fixed both QA bugs (cross-host navigation was cancelled by a connection change). Ported the topology authority, so Close All Non-Agent Tabs works. No Phase 4 ledger rows left open except the Phase 5 deferrals |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
 isolated host, headless. **Integrated QA:** `gdev_qa_phase4` exercises every panel
@@ -327,7 +331,7 @@ final sweep command returning only justified hits.
 | 1 | Done. `gdev_qa_phase1` passed | `7a4f66c`, `9c13af4`, `1b7df0a`, `29ee6f3` | Known: `test:git` fails on `origin/main` too, in the driver's patch check, so T5.3 must fix or retire it. `test:lifecycle` failed 1 of 34 runs at line 320, cause not found |
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
-| 4 | Tasks merged, `gdev_qa_phase4` running | `daa7af4` | |
+| 4 | Done, QA passed | `0912995` | |
 | 5 to 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
