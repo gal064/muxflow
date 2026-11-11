@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use desktop_core::connection::{ConnectionSpec, profiles::HostProfile};
-use tmux_control::Session;
+use tmux_control::{Session, Window};
 
 use super::{
     connection_reducer::{HostAction, NormalizedHostState, connection_reducer},
@@ -26,7 +26,26 @@ pub struct HostLink {
     /// Remembered per host so switching back lands where the user left.
     pub active_session_id: Option<String>,
     pub active_window_id: Option<String>,
+    /// A switch the shell has painted ahead of the host. See
+    /// [`OptimisticWindow`].
+    pub optimistic_window: Option<OptimisticWindow>,
     pub detail: String,
+}
+
+/// A window or workspace switch committed locally while its request is still in
+/// flight. Port of `OptimisticWindowSwitch` from `app/windowSelection.ts`.
+///
+/// Every snapshot in that gap still names the old window as active and would
+/// snap the shell back to it, so while this is held its window wins. It is
+/// released once a snapshot at or past `through_generation` arrives (the host
+/// has seen the switch), or once another workspace is selected. Until the
+/// select action answers there is no generation to wait for, and it holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OptimisticWindow {
+    pub session_id: String,
+    /// Unset where the workspace's windows were not known yet.
+    pub window_id: Option<String>,
+    pub through_generation: Option<u64>,
 }
 
 impl HostLink {
@@ -40,6 +59,7 @@ impl HostLink {
             host_state: NormalizedHostState::default(),
             active_session_id: None,
             active_window_id: None,
+            optimistic_window: None,
             detail: String::new(),
         }
     }
@@ -113,9 +133,15 @@ pub enum HostLinksAction {
         profile_id: String,
         session_id: Option<String>,
     },
+    /// Sets the window as is, with no resolution: a local switch while the
+    /// host cannot be changed has nothing to reconcile against.
     ActiveWindow {
         profile_id: String,
         window_id: Option<String>,
+    },
+    Optimistic {
+        profile_id: String,
+        guard: Option<OptimisticWindow>,
     },
 }
 
@@ -145,6 +171,9 @@ fn bump_epoch(state: &mut HostLinksState, profile_id: &str) {
     if let Some(link) = state.by_profile_id.get_mut(profile_id) {
         link.connection_epoch = state.next_epoch;
         state.next_epoch += 1;
+        // A switch in flight on the old connection lands nowhere now, so its
+        // guard would hold the shell against tmux with nothing to release it.
+        link.optimistic_window = None;
     }
 }
 
@@ -228,6 +257,7 @@ pub fn host_links_reducer(state: &mut HostLinksState, action: HostLinksAction) {
                 )
                 .map(|session| session.id.clone());
             }
+            settle_active_window(link);
         }
         HostLinksAction::ActiveSession {
             profile_id,
@@ -235,6 +265,7 @@ pub fn host_links_reducer(state: &mut HostLinksState, action: HostLinksAction) {
         } => {
             if let Some(link) = state.by_profile_id.get_mut(&profile_id) {
                 link.active_session_id = session_id;
+                settle_active_window(link);
             }
         }
         HostLinksAction::ActiveWindow {
@@ -245,7 +276,79 @@ pub fn host_links_reducer(state: &mut HostLinksState, action: HostLinksAction) {
                 link.active_window_id = window_id;
             }
         }
+        HostLinksAction::Optimistic { profile_id, guard } => {
+            if let Some(link) = state.by_profile_id.get_mut(&profile_id) {
+                link.optimistic_window = guard;
+                settle_active_window(link);
+            }
+        }
     }
+}
+
+/// The window the shell shows in the link's workspace, after anything that can
+/// change it: the guard is released once the host caught up, then the window
+/// is resolved. Port of the active-window effect in
+/// `useAppConnectionController.ts`.
+fn settle_active_window(link: &mut HostLink) {
+    let session = link.active_session_id.clone();
+    if let Some(guard) = &link.optimistic_window {
+        let settled = guard
+            .through_generation
+            .is_some_and(|through| link.host_state.generation >= through);
+        if settled || Some(&guard.session_id) != session.as_ref() {
+            link.optimistic_window = None;
+        }
+    }
+    let preferred = link
+        .optimistic_window
+        .as_ref()
+        .and_then(|guard| guard.window_id.clone());
+    let windows = session.as_deref().map_or_else(Vec::new, |session| {
+        session_windows(&link.host_state.snapshot.windows, session)
+    });
+    link.active_window_id = resolve_active_window_id(
+        &windows,
+        link.active_window_id.as_deref(),
+        preferred.as_deref(),
+    )
+    .map(str::to_owned);
+}
+
+/// One workspace's windows in tab order.
+pub fn session_windows<'a>(windows: &'a [Window], session_id: &str) -> Vec<&'a Window> {
+    let mut owned: Vec<&Window> = windows
+        .iter()
+        .filter(|window| window.session_id == session_id)
+        .collect();
+    owned.sort_by(|left, right| {
+        left.index
+            .cmp(&right.index)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    owned
+}
+
+/// `resolveActiveWindowId` from `app/windowSelection.ts`: the host's active
+/// window, unless a switch still in flight names one that exists; then the
+/// current one, then the first.
+pub fn resolve_active_window_id<'a>(
+    windows: &[&'a Window],
+    current: Option<&str>,
+    optimistic: Option<&str>,
+) -> Option<&'a str> {
+    if let Some(window) = optimistic.and_then(|id| windows.iter().find(|window| window.id == id)) {
+        return Some(&window.id);
+    }
+    windows
+        .iter()
+        .find(|window| window.active)
+        .or_else(|| {
+            windows
+                .iter()
+                .find(|window| Some(window.id.as_str()) == current)
+        })
+        .or_else(|| windows.first())
+        .map(|window| window.id.as_str())
 }
 
 /// `resolveSelectedSession` from `features/shell/model.ts`: the session id, then
@@ -592,6 +695,142 @@ mod tests {
         assert_eq!(
             state.link("qa").unwrap().active_session_id.as_deref(),
             Some("$0")
+        );
+    }
+
+    fn windowed(active: &str) -> Arc<TmuxSnapshot> {
+        let window = |id: &str, index| Window {
+            id: id.into(),
+            session_id: "$0".into(),
+            index,
+            name: id.into(),
+            active: id == active,
+            layout: String::new(),
+            zoomed: false,
+            pinned: false,
+        };
+        Arc::new(TmuxSnapshot {
+            windows: vec![window("@2", 1), window("@1", 0)],
+            ..(*world(&[("$0", "home"), ("$1", "work")])).clone()
+        })
+    }
+
+    #[test]
+    fn a_switch_painted_ahead_of_the_host_holds_until_a_snapshot_catches_up() {
+        let mut state = two_hosts();
+        host_links_reducer(&mut state, snapshot_action("qa", windowed("@1"), 1));
+        assert_eq!(
+            state.link("qa").unwrap().active_window_id.as_deref(),
+            Some("@1")
+        );
+        let guard = |through| OptimisticWindow {
+            session_id: "$0".into(),
+            window_id: Some("@2".into()),
+            through_generation: through,
+        };
+        host_links_reducer(
+            &mut state,
+            HostLinksAction::Optimistic {
+                profile_id: "qa".into(),
+                guard: Some(guard(None)),
+            },
+        );
+        // Snapshots still naming the old window do not snap the shell back.
+        host_links_reducer(&mut state, snapshot_action("qa", windowed("@1"), 2));
+        assert_eq!(
+            state.link("qa").unwrap().active_window_id.as_deref(),
+            Some("@2")
+        );
+        host_links_reducer(
+            &mut state,
+            HostLinksAction::Optimistic {
+                profile_id: "qa".into(),
+                guard: Some(guard(Some(4))),
+            },
+        );
+        host_links_reducer(&mut state, snapshot_action("qa", windowed("@1"), 3));
+        assert!(state.link("qa").unwrap().optimistic_window.is_some());
+        // Caught up: the host's own answer stands again.
+        host_links_reducer(&mut state, snapshot_action("qa", windowed("@1"), 4));
+        let link = state.link("qa").unwrap();
+        assert_eq!(link.optimistic_window, None);
+        assert_eq!(link.active_window_id.as_deref(), Some("@1"));
+    }
+
+    #[test]
+    fn a_reconnect_drops_a_guard_its_switch_can_no_longer_release() {
+        let mut state = two_hosts();
+        host_links_reducer(&mut state, snapshot_action("qa", windowed("@1"), 1));
+        host_links_reducer(
+            &mut state,
+            HostLinksAction::Optimistic {
+                profile_id: "qa".into(),
+                guard: Some(OptimisticWindow {
+                    session_id: "$0".into(),
+                    window_id: Some("@2".into()),
+                    through_generation: None,
+                }),
+            },
+        );
+        host_links_reducer(
+            &mut state,
+            HostLinksAction::Reconnect {
+                profile_id: "qa".into(),
+            },
+        );
+        host_links_reducer(&mut state, snapshot_action("qa", windowed("@1"), 1));
+        let link = state.link("qa").unwrap();
+        assert_eq!(link.optimistic_window, None);
+        assert_eq!(link.active_window_id.as_deref(), Some("@1"));
+    }
+
+    #[test]
+    fn selecting_another_workspace_releases_the_guard() {
+        let mut state = two_hosts();
+        host_links_reducer(&mut state, snapshot_action("qa", windowed("@1"), 1));
+        host_links_reducer(
+            &mut state,
+            HostLinksAction::Optimistic {
+                profile_id: "qa".into(),
+                guard: Some(OptimisticWindow {
+                    session_id: "$0".into(),
+                    window_id: Some("@2".into()),
+                    through_generation: None,
+                }),
+            },
+        );
+        host_links_reducer(
+            &mut state,
+            HostLinksAction::ActiveSession {
+                profile_id: "qa".into(),
+                session_id: Some("$1".into()),
+            },
+        );
+        let link = state.link("qa").unwrap();
+        assert_eq!(link.optimistic_window, None);
+        assert_eq!(link.active_window_id, None, "$1 has no windows");
+    }
+
+    #[test]
+    fn resolves_the_window_in_order_of_claim() {
+        let snapshot = windowed("@1");
+        let windows = session_windows(&snapshot.windows, "$0");
+        assert_eq!(
+            windows.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
+            ["@1", "@2"]
+        );
+        assert_eq!(
+            resolve_active_window_id(&windows, Some("@2"), Some("@2")),
+            Some("@2")
+        );
+        assert_eq!(
+            resolve_active_window_id(&windows, Some("@2"), Some("@9")),
+            Some("@1")
+        );
+        let none_active: Vec<&Window> = Vec::new();
+        assert_eq!(
+            resolve_active_window_id(&none_active, Some("@2"), None),
+            None
         );
     }
 

@@ -7,6 +7,7 @@
 //! [`ConnectionController::settle`] once.
 
 use std::{
+    cell::RefCell,
     collections::HashMap,
     sync::{Arc, LazyLock},
     time::Duration,
@@ -48,7 +49,8 @@ use super::{
         HelperOperation, HelperUpgradeAction, HelperUpgradeState, helper_upgrade_reducer,
     },
     host_links::{
-        HostLink, HostLinksAction, HostLinksState, host_links_reducer, shown_host_profiles,
+        HostLink, HostLinksAction, HostLinksState, OptimisticWindow, host_links_reducer,
+        shown_host_profiles,
     },
     host_profiles::{
         LOCAL_PROFILE_ID, helper_connection_key, host_profile_id, profile_id_for_ssh_connection,
@@ -167,7 +169,10 @@ pub struct ConnectionController {
     last_identities: HashMap<String, String>,
     observed_host: Option<(String, Option<String>, Vec<Session>)>,
     /// Written, and not yet durably in the store; the base of the next change.
-    unsaved_app_state: Option<PersistedAppState>,
+    unsaved_app_state: Option<Arc<PersistedAppState>>,
+    /// What the store last held, read once: the shell reads the tabs on
+    /// every frame, and this process is their only writer.
+    saved_app_state: RefCell<Option<Arc<PersistedAppState>>>,
     app_state_saves: u64,
     app_state_save: Option<Task<()>>,
     status: String,
@@ -226,6 +231,7 @@ impl ConnectionController {
             last_identities: HashMap::new(),
             observed_host: None,
             unsaved_app_state: None,
+            saved_app_state: RefCell::default(),
             app_state_saves: 0,
             app_state_save: None,
             status: String::new(),
@@ -236,6 +242,23 @@ impl ConnectionController {
             _ticker: ticker,
         };
         this.hydrate_profiles(cx);
+        // Closing the window quits the app, and a tab change still on its way
+        // to disk would be lost with it. Foreground tasks stop while the quit
+        // handlers run, so the newest state is written again directly.
+        cx.on_app_quit(|this: &mut Self, _| {
+            let save = this
+                .unsaved_app_state
+                .clone()
+                .map(|state| this.backend.save_app_state((*state).clone()));
+            async move {
+                if let Some(save) = save
+                    && let Err(error) = save.await
+                {
+                    eprintln!("muxflow: could not save application tabs on quit: {error}");
+                }
+            }
+        })
+        .detach();
         this
     }
 
@@ -330,6 +353,53 @@ impl ConnectionController {
     /// A message for the status bar from outside this module.
     pub fn report_status(&mut self, message: String, cx: &mut Context<Self>) {
         self.set_status(message, cx);
+    }
+
+    /// The backend, for the tmux actions and input the shell sends.
+    pub fn backend(&self) -> Arc<dyn ConnectionBackend> {
+        self.backend.clone()
+    }
+
+    // The shell's navigation, written into the host's link.
+
+    pub fn set_active_session(
+        &mut self,
+        profile_id: &str,
+        session_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch(HostLinksAction::ActiveSession {
+            profile_id: profile_id.to_owned(),
+            session_id,
+        });
+        cx.notify();
+    }
+
+    /// Sets the window without resolving it against the host's.
+    pub fn set_active_window(
+        &mut self,
+        profile_id: &str,
+        window_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch(HostLinksAction::ActiveWindow {
+            profile_id: profile_id.to_owned(),
+            window_id,
+        });
+        cx.notify();
+    }
+
+    pub fn set_optimistic_window(
+        &mut self,
+        profile_id: &str,
+        guard: Option<OptimisticWindow>,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch(HostLinksAction::Optimistic {
+            profile_id: profile_id.to_owned(),
+            guard,
+        });
+        cx.notify();
     }
 
     pub fn active_host_state(&self) -> Option<&NormalizedHostState> {
@@ -863,27 +933,42 @@ impl ConnectionController {
             .unwrap_or_default()
     }
 
-    fn current_app_state(&self) -> Result<PersistedAppState, String> {
-        match &self.unsaved_app_state {
-            Some(state) => Ok(state.clone()),
-            None => load_app_state(&self.app_state),
-        }
+    /// The app tabs and workspace records, including changes still being
+    /// saved. This controller is their one owner in memory; the rest of the
+    /// state here is whatever was on disk when the change began, so read only
+    /// `app_tabs` and `workspace_ui` from it.
+    pub fn app_state(&self) -> Result<Arc<PersistedAppState>, String> {
+        self.current_app_state()
     }
 
+    fn current_app_state(&self) -> Result<Arc<PersistedAppState>, String> {
+        if let Some(state) = &self.unsaved_app_state {
+            return Ok(state.clone());
+        }
+        if let Some(state) = self.saved_app_state.borrow().as_ref() {
+            return Ok(state.clone());
+        }
+        let state = Arc::new(load_app_state(&self.app_state)?);
+        *self.saved_app_state.borrow_mut() = Some(state.clone());
+        Ok(state)
+    }
+
+    /// Changes the app tabs or workspace records; `change` says whether it did.
     /// Saves are chained so an older one can never land after a newer one.
-    fn update_app_state(
+    pub fn update_app_state(
         &mut self,
         change: impl FnOnce(&mut PersistedAppState) -> bool,
         cx: &mut Context<Self>,
     ) {
         // A frozen store is reported by the shell that owns it.
-        let Ok(mut state) = self.current_app_state() else {
+        let Ok(current) = self.current_app_state() else {
             return;
         };
+        let mut state = (*current).clone();
         if !change(&mut state) {
             return;
         }
-        self.unsaved_app_state = Some(state.clone());
+        self.unsaved_app_state = Some(Arc::new(state.clone()));
         self.app_state_saves += 1;
         let save_number = self.app_state_saves;
         let save = self.backend.save_app_state(state);
@@ -896,7 +981,7 @@ impl ConnectionController {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(()) if this.app_state_saves == save_number => {
-                        this.unsaved_app_state = None;
+                        *this.saved_app_state.borrow_mut() = this.unsaved_app_state.take();
                     }
                     Ok(()) => {}
                     // Kept as the base of the next change, which saves it again.
