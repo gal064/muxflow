@@ -3,9 +3,13 @@
 //! visible outcomes of `editorChunkAbsence.test.tsx` and the find widget's
 //! behavior Monaco provided.
 
-use std::{cell::RefCell, path::Path, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    path::Path,
+    rc::Rc,
+};
 
-use desktop_core::app_state::{AppTabKind, AppTabRecord};
+use desktop_core::app_state::{AppTabKind, AppTabRecord, AppTabViewMode};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext};
 
 use super::*;
@@ -21,6 +25,8 @@ use crate::{
 struct Host {
     file: RefCell<Option<Opened>>,
     reads: RefCell<usize>,
+    /// How many times the Markdown preview was asked to draw.
+    previews: Cell<usize>,
     writes: RefCell<Vec<String>>,
 }
 
@@ -65,6 +71,15 @@ fn open(
     file: Option<Opened>,
     connected: bool,
 ) -> (Entity<DocumentPane>, Rc<Host>, &mut VisualTestContext) {
+    open_tab(cx, record(), file, connected)
+}
+
+fn open_tab(
+    cx: &mut TestAppContext,
+    record: AppTabRecord,
+    file: Option<Opened>,
+    connected: bool,
+) -> (Entity<DocumentPane>, Rc<Host>, &mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         app::init(Core::at(Path::new("/nonexistent/app-state.json")), cx);
@@ -72,6 +87,17 @@ fn open(
     let host = Rc::new(Host {
         file: RefCell::new(file),
         ..Host::default()
+    });
+    // Counts the draws; what the preview shows is the Markdown module's own test.
+    cx.update(|cx| {
+        let host = host.clone();
+        crate::editor::set_markdown_preview(
+            Rc::new(move |_, _, _, _| {
+                host.previews.set(host.previews.get() + 1);
+                div().id("preview-stub").into_any_element()
+            }),
+            cx,
+        );
     });
     let io: Rc<dyn FileIo> = Rc::new(Io(host.clone()));
     let live = Rc::new(Live {
@@ -90,7 +116,7 @@ fn open(
         token: "root".into(),
     };
     let (pane, cx) =
-        cx.add_window_view(|_, cx| DocumentPane::new(record(), root, io, live, None, cx));
+        cx.add_window_view(|_, cx| DocumentPane::new(record, root, io, live, None, cx));
     cx.run_until_parked();
     draw(cx);
     (pane, host, cx)
@@ -309,4 +335,80 @@ fn find_reopens_on_the_query_and_toggles_it_closed_with(cx: &mut TestAppContext)
         )
     });
     assert_eq!((query.as_str(), case), ("cat", true));
+}
+
+fn markdown_tab(mode: AppTabViewMode) -> AppTabRecord {
+    let mut record = record();
+    record.kind = AppTabKind::Markdown;
+    record.view_mode = Some(mode);
+    record
+}
+
+#[gpui_kit::test]
+fn a_preview_only_markdown_tab_reads_the_file_but_never_makes_an_editor(cx: &mut TestAppContext) {
+    let (pane, host, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Preview),
+        Some(text("# heading")),
+        true,
+    );
+    assert_eq!(*host.reads.borrow(), 1);
+    assert!(cx.update(|_, cx| pane.read(cx).editor(cx).is_none()));
+    assert!(host.previews.get() > 0, "the preview was not drawn");
+}
+
+#[gpui_kit::test]
+fn a_split_markdown_tab_shows_the_editor_and_the_preview(cx: &mut TestAppContext) {
+    let (pane, host, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Split),
+        Some(text("# heading")),
+        true,
+    );
+    assert!(cx.update(|_, cx| pane.read(cx).editor(cx).is_some()));
+    assert!(host.previews.get() > 0);
+}
+
+#[gpui_kit::test]
+fn a_source_markdown_tab_and_a_plain_file_draw_no_preview(cx: &mut TestAppContext) {
+    let (pane, host, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Source),
+        Some(text("# heading")),
+        true,
+    );
+    assert!(cx.update(|_, cx| pane.read(cx).editor(cx).is_some()));
+    assert_eq!(host.previews.get(), 0);
+}
+
+#[gpui_kit::test]
+fn a_plain_file_never_draws_a_preview(cx: &mut TestAppContext) {
+    let mut file = record();
+    file.view_mode = Some(AppTabViewMode::Preview);
+    let (_, host, _) = open_tab(cx, file, Some(text("# heading")), true);
+    assert_eq!(host.previews.get(), 0);
+}
+
+#[gpui_kit::test]
+fn an_edit_in_split_mode_reaches_the_buffer(cx: &mut TestAppContext) {
+    let (pane, _, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Split),
+        Some(text("one")),
+        true,
+    );
+    let editor = editor(&pane, cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.set_selected_range(0..3, cx);
+            editor.replace("two", window, cx);
+        })
+    });
+    draw(cx);
+    let document = cx.update(|_, cx| pane.read(cx).document.clone());
+    assert_eq!(
+        cx.update(|_, cx| document.read(cx).text().map(|text| text.to_string())),
+        Some("two".into()),
+        "the buffer the preview reads"
+    );
 }
