@@ -111,14 +111,15 @@ fn markdown_inline_highlights(bundled: &str) -> String {
 /// Monaco's Rust grammar spells the primitive types as keywords and colours no call or
 /// definition name, where the bundled query marks both.
 fn rust_highlights(bundled: &str) -> String {
-    bundled
-        .replace(
-            "(primitive_type) @type.builtin",
-            "(primitive_type) @keyword",
-        )
-        .replace("@function.macro", "@none")
-        .replace("@function.method", "@none")
-        .replace("@function", "@none")
+    let highlights = bundled.replace(
+        "(primitive_type) @type.builtin",
+        "(primitive_type) @keyword",
+    );
+    // Only the call and definition captures: a `@function.builtin` is left as it is.
+    static NAMES: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"@function(\.macro|\.method)?(\s|\)|\]|$)").expect("a valid pattern")
+    });
+    NAMES.replace_all(&highlights, "@none$2").into_owned()
 }
 
 /// Registers the additions over the bundled grammars, once per process: the
@@ -281,6 +282,7 @@ mod tests {
     #[test]
     fn markdown_source_is_coloured_as_monaco_colours_it() {
         let doc = "# Title\n\n- item\n- [x] done\n\n> quoted\n\n| Name | Value |\n|------|-------|\n| a | 1 |\n\nsee [guide](docs/guide.md) and `code`\n\n```rust\nfn main() {}\n```\n";
+        let found = captures("markdown", doc);
         for (token, expected) in [
             ("#", "keyword"),
             ("Title", "keyword"),
@@ -292,7 +294,6 @@ mod tests {
             ("`code`", "function"),
             ("rust", "string"),
         ] {
-            let found = captures("markdown", doc);
             assert!(
                 found
                     .iter()
@@ -308,10 +309,10 @@ mod tests {
 
     #[test]
     fn rust_primitive_types_are_keywords_and_names_are_plain() {
-        let code = "fn main() { let a: u32 = f(1); }";
+        let code = "fn main() { let a: u32 = f(1); a.pow(2); vec![1]; }";
         assert_eq!(capture_of("rust", code, "u32"), "keyword");
         let all = captures("rust", code);
-        for name in ["main", "f"] {
+        for name in ["main", "f", "pow", "vec"] {
             assert!(
                 all.iter()
                     .all(|(text, capture)| text != name || capture == "none"),

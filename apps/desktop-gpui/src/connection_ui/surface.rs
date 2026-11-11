@@ -368,7 +368,8 @@ fn toast(
     cx: &App,
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
     let palette = theme::palette(cx);
-    toast::card(v_flex().id(id), true, &palette)
+    // Only an alert has the danger border, as `.toast[role="alert"]`.
+    toast::card(v_flex().id(id), role == Role::Alert, &palette)
         .occlude()
         .role(role)
         .aria_label(title.clone())
