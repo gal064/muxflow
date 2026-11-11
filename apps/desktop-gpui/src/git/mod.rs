@@ -126,6 +126,9 @@ pub fn start(
         move |controller, cx| sync(&controller, &panel, cx)
     })
     .detach();
+    // The Explorer hides what this status calls ignored.
+    cx.observe(&panel, |_, cx| crate::files::follow_git_status(cx))
+        .detach();
     cx.observe_global::<ActiveRoot>({
         let (controller, panel) = (controller.clone(), panel.clone());
         move |cx| sync(&controller, &panel, cx)
