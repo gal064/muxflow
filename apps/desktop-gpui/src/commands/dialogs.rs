@@ -16,9 +16,13 @@ use gpui_kit::{
     },
     div,
     prelude::*,
+    px,
 };
 
-use crate::theme::{self, metrics::ui};
+use crate::theme::{
+    self,
+    metrics::{NARROW_DIALOGS, narrower_than, ui},
+};
 use crate::ui::dialog::{self, Action};
 
 const CONFIRMATION_WIDTH: f32 = 620.;
@@ -132,9 +136,18 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
             false,
             &palette,
         );
-        dialog::card(alert, &palette)
-            .entrance(DialogEntrance::None)
-            .w(ui(CONFIRMATION_WIDTH).to_pixels(window.rem_size()))
+        // `.confirmation` spans a window 600 CSS px or narrower, centered; otherwise it sits
+        // 12vh down, as every `.modal-backdrop` dialog does.
+        let narrow = narrower_than(NARROW_DIALOGS, window);
+        let alert = dialog::card(alert, &palette).entrance(DialogEntrance::None);
+        let alert = if narrow {
+            alert.w(window.viewport_size().width - px(16.)).centered()
+        } else {
+            alert
+                .width(ui(CONFIRMATION_WIDTH).to_pixels(window.rem_size()))
+                .margin_top(window.viewport_size().height * 0.12)
+        };
+        alert
             .title(confirmation.title.clone())
             .description(confirmation.detail.clone())
             .on_ok(|_, _, cx| {
