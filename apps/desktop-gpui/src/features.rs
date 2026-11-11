@@ -15,6 +15,9 @@ use gpui_kit::App;
 
 pub fn init(cx: &mut App) {
     crate::commands::init(cx);
+    // Before the features that read a preference as they start, and before the
+    // menus, which show Settings once it has a handler.
+    crate::settings::init(cx);
     crate::menus::init(cx);
     crate::connection_ui::init(cx);
     crate::workspaces::init(cx);
