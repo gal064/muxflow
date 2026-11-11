@@ -28,8 +28,9 @@ use gpui_kit::{
         },
         v_flex,
     },
-    div, img,
+    div, img, point,
     prelude::FluentBuilder,
+    px,
 };
 
 use super::{
@@ -651,6 +652,15 @@ impl DocumentPane {
         editor.update(cx, |editor, cx| {
             let position = Position::new(line as u32 - 1, column.unwrap_or(1) as u32 - 1);
             editor.set_cursor_position(position, window, cx);
+            // In the middle of the view, as Monaco reveals it, not at the edge
+            // the cursor move scrolls it to. The editor clamps the offset.
+            if let Some(height) = editor.line_height() {
+                let row = editor.display_map().buffer_line_to_display_row(line - 1);
+                let viewport = editor.input_bounds().size.height;
+                let top = height * row as f32 - (viewport - height) / 2.;
+                let x = editor.scroll_offset().x;
+                editor.set_scroll_offset(point(x, -top.max(px(0.))), cx);
+            }
         });
         cx.notify();
     }

@@ -454,6 +454,16 @@ fn groups_conflicts_staged_unstaged_and_untracked_and_shows_nothing_ignored() {
         "Conflict UU"
     );
     assert_eq!(split_display_path("dir/b.txt"), ("b.txt", "dir"));
+    assert!(!groups.is_empty());
+    // Ignored files alone leave the tree clean.
+    let ignored_only = parse(status_in(
+        "repo",
+        1,
+        vec![
+            json!({ "path": "ZC50eHQ=", "displayPath": "d.txt", "ignored": true, "worktreeKind": "ignored" }),
+        ],
+    ));
+    assert!(group_entries(&ignored_only.entries).is_empty());
 }
 
 #[test]
