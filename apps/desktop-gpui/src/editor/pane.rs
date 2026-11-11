@@ -178,13 +178,7 @@ impl DocumentPane {
                 },
             ),
         ];
-        // A terminal capability for one file is watched as that file; any
-        // other root watches the file's directory.
-        let watched = if root.token.starts_with("file-v2:") {
-            record.resource.clone()
-        } else {
-            parent_path(&record.resource)
-        };
+        let watched = watched_path(&root, &record.resource);
         let watch = watcher.map(|watcher| {
             watcher(
                 &WatchTarget {
@@ -259,6 +253,12 @@ impl DocumentPane {
         let Some(workspaces) = workspaces::current(cx) else {
             return;
         };
+        // Only a person leaving the preview for the editor starts a new
+        // editor-paint interaction.
+        if self.previewing(cx) && mode != AppTabViewMode::Preview {
+            self.document
+                .update(cx, |document, _| document.hold_editor_paint());
+        }
         let (host, id) = (self.record.host_profile_id.clone(), self.record.id.clone());
         workspaces.update(cx, |this, cx| {
             this.update_app_state(
@@ -692,6 +692,16 @@ impl Focusable for DocumentPane {
     }
 }
 
+/// A terminal capability for one file is watched as that file; any other root
+/// watches the file's directory.
+fn watched_path(root: &Root, resource: &str) -> String {
+    if root.token.starts_with("file-v2:") {
+        resource.to_owned()
+    } else {
+        parent_path(resource)
+    }
+}
+
 fn parent_path(path: &str) -> String {
     match path.rfind('/') {
         Some(0) | None => "/".into(),
@@ -924,6 +934,18 @@ impl DocumentPane {
             self.document
                 .update(cx, |document, cx| document.editor(window, cx))
         });
+        if editor.is_some() {
+            let due = self
+                .document
+                .update(cx, |document, _| document.editor_paint_due());
+            crate::perf::after_next_frame(due, window);
+        } else {
+            // A load shown only as a preview drew no editor; a later switch
+            // to the editor measures that switch, not the time in preview.
+            self.document.update(cx, |document, _| {
+                let _ = document.editor_paint_due();
+            });
+        }
         // Focus given to the tab before its editor existed goes on to it.
         if let Some(editor) = &editor
             && self.focus.is_focused(window)
@@ -1511,6 +1533,22 @@ mod tests {
     fn watches_the_files_directory() {
         assert_eq!(parent_path("/repo/src/main.rs"), "/repo/src");
         assert_eq!(parent_path("/main.rs"), "/");
+    }
+
+    #[test]
+    fn a_single_file_capability_watches_the_file_itself() {
+        let root = |token: &str| Root {
+            path: "/repo".into(),
+            token: token.into(),
+        };
+        assert_eq!(
+            watched_path(&root("file-v2:abc"), "/elsewhere/notes.md"),
+            "/elsewhere/notes.md"
+        );
+        assert_eq!(
+            watched_path(&root("root"), "/repo/src/main.rs"),
+            "/repo/src"
+        );
     }
 }
 

@@ -206,6 +206,18 @@ mod tests {
         assert!(!resolve_dark(ThemePreference::System, Light));
     }
 
+    /// Port of `theme.test.ts`: the dark terminal is Ghostty's Default Style
+    /// Dark, so it matches the user's own terminal, with an inverted selection.
+    #[test]
+    fn the_dark_terminal_is_ghostty_default_style_dark() {
+        let palette = dark();
+        assert_eq!(hex(palette.term_bg), "#282c34ff");
+        assert_eq!(hex(palette.term_fg), "#ffffffff");
+        assert_eq!(hex(palette.term_cursor), "#ffffffff");
+        assert_eq!(hex(palette.term_selection_bg), "#ffffffff");
+        assert_eq!(hex(palette.term_selection_fg), "#282c34ff");
+    }
+
     #[test]
     fn hex_keeps_alpha() {
         assert_eq!(hex(dark().accent_wash), "#7aa6da1f");

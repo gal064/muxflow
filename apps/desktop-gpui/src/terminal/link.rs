@@ -126,12 +126,28 @@ impl TerminalLink {
     }
 
     pub fn set_client(&mut self, client_id: Option<String>, connection_epoch: u64) {
+        if let Some(old) = self.client_id.as_deref()
+            && client_id.as_deref() != Some(old)
+        {
+            crate::perf::abandon_pane_spans_for_scope(old);
+        }
         self.client_id = client_id.clone();
         self.connection_epoch = connection_epoch;
         self.send(Command::SetClient(client_id));
     }
 
-    pub fn mount(&mut self, pane_id: &str, pane: &Entity<TerminalPane>, size: GridSize) {
+    pub fn mount(
+        &mut self,
+        pane_id: &str,
+        pane: &Entity<TerminalPane>,
+        size: GridSize,
+        cx: &mut Context<Self>,
+    ) {
+        // Armed here, not when the engine asks for the reveal: that answer comes
+        // back on the engine's poll, after the Explorer has already looked at the
+        // gate for this switch and found nothing pending.
+        cx.default_global::<PanePaintGate>()
+            .arm(&self.scoped_key(pane_id));
         self.panes.insert(pane_id.to_owned(), pane.downgrade());
         self.send(Command::Mount {
             pane_id: pane_id.to_owned(),

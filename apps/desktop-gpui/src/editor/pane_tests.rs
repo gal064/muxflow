@@ -435,3 +435,40 @@ fn an_edit_in_split_mode_reaches_the_buffer(cx: &mut TestAppContext) {
         "the buffer the preview reads"
     );
 }
+
+#[gpui_kit::test]
+fn switching_to_the_preview_and_back_keeps_the_buffer_and_its_pending_save(
+    cx: &mut TestAppContext,
+) {
+    let (pane, host, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Split),
+        Some(text("one")),
+        true,
+    );
+    let editor = editor(&pane, cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.set_selected_range(0..3, cx);
+            editor.replace("two", window, cx);
+        })
+    });
+    let set_mode = |mode, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| pane.update(cx, |pane, _| pane.record.view_mode = Some(mode)));
+        draw(cx);
+    };
+    // The editor leaves the screen with the save still owed.
+    set_mode(AppTabViewMode::Preview, cx);
+    assert!(host.writes.borrow().is_empty());
+    cx.executor().advance_clock(SAVE_DELAY);
+    cx.run_until_parked();
+    assert_eq!(
+        *host.writes.borrow(),
+        ["two"],
+        "the debounce outlives the view"
+    );
+    set_mode(AppTabViewMode::Split, cx);
+    let back = cx.update(|_, cx| pane.read(cx).editor(cx)).unwrap();
+    assert_eq!(back, editor, "the same editor comes back");
+    assert_eq!(cx.update(|_, cx| back.read(cx).text().to_string()), "two");
+}
