@@ -249,6 +249,10 @@ through the T2.1 seam.
 | T5.1 `explorer` | opus, high, full cycle, invariant | `gpui/explorer` | Merged | `6604380` | 3 review rounds, QA PASS local and SSH after one dialog-focus crash fix. Wired the editor opener, watcher and download, `ActiveRoot` and Git ignored paths. One shared watch registry serves the tree and open documents |
 | T5.2 `editor` | opus, high, full cycle, large, design | `gpui/editor` | Merged | `1e4a659`, merge `e372bc2` | Kit code editor. 3 review rounds, QA PASS local and SSH. An external edit to an open remote file leaves the tab in Save failed until T5.1 delivers change notices |
 | T5.3 `git-diff` | opus, high, full cycle, design | `gpui/git-diff` | Merged | `ef076e7`, merge `9a9ad34` | 3 review rounds, QA PASS local and SSH, `test:git` passes after a driver fix. Gaps: SurfaceError summary on push errors, keyboard row access, file icons |
+| `gdev_qa_phase5` | fresh QA | `gpui/integration` | Passed | `ec39e80` | All 10 steps on local and SSH hosts: browse, edit, external change, Markdown, file operations, diff, stage, commit, push to a scratch remote, gitignore, reconnect, relaunch. Minor: Go to Line leaves the line at the bottom edge; Git panel blank instead of "Working tree clean." when only ignored files exist; the docked tab can sit in the overflow menu |
+| T6.4 `ledger-shell` | opus, high, full cycle, invariant | `gpui/ledger-shell` | Dispatched | | |
+| T6.5 `ledger-terminal-files` | opus, high, full cycle, invariant | `gpui/ledger-terminal-files` | Dispatched | | |
+| T6.6 `carry-forward` | opus, high, full cycle | `gpui/carry-forward` | Dispatched | | |
 | T5.4 `markdown` | sonnet, high, full cycle, design | `gpui/markdown` | Merged | `587887b` | 2 review rounds, QA PASS local. Kit bug: double-click selects nothing in a paragraph with inline code. Drag-select in the preview not verified (xdotool). Settings copy still mentions Live Markdown |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
@@ -275,9 +279,12 @@ against a scratch remote over Docker SSH.
 
 | Wave | Task | Mode | Model, effort | Touches | Depends on |
 |---|---|---|---|---|---|
-| 1 | T6.1 `accessibility` | Full, large, invariant | opus, high | AccessKit roles and focus order across the UI | Phase 5 |
-| 1 | T6.2 `visual-parity` | Full, design | sonnet, high | Headless PNG comparison, theme fixes | Phase 5 |
-| 1 | T6.3 `behavior-docs` | Full, docs only, QA skipped | sonnet, medium | The behavior audit docs in the migration plan | Phase 5 |
+| 1 | T6.4 `ledger-shell` | Full, invariant | opus, high | Close the open Phase 2 ledger rows: verify each against code and tests, port what is missing, and SurfaceError on every surface | Phase 5 |
+| 1 | T6.5 `ledger-terminal-files` | Full, invariant | opus, high | Close the open Phase 3 and Phase 5 ledger rows the same way, including the perf probe | Phase 5 |
+| 1 | T6.6 `carry-forward` | Full | opus, high | The carry-forward list and the Phase 5 QA findings | Phase 5 |
+| 2 | T6.1 `accessibility` | Full, large, invariant | opus, high | AccessKit roles and focus order across the UI, keyboard context menus, keyboard access to tabs, title bar and rows | Wave 1 |
+| 2 | T6.2 `visual-parity` | Full, design | sonnet, high | Headless PNG comparison, theme fixes | Wave 1 |
+| 2 | T6.3 `behavior-docs` | Full, docs only, QA skipped | sonnet, medium | The behavior audit docs in the migration plan | Wave 1 |
 
 **Integrated QA, root-owned because it needs shared state:** acceptance suites,
 `run-stall.sh`, `run-pause-probe.sh`, and release builds that connect to a local and an
@@ -342,8 +349,8 @@ final sweep command returning only justified hits.
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
 | 4 | Done, QA passed | `0912995` | |
-| 5 | Running, integrated QA | | T5.1 to T5.4 merged; `gdev_qa_phase5` running |
-| 6 | Approved | | |
+| 5 | Done | `ec39e80` | Integrated QA passed on local and SSH hosts |
+| 6 | Running, wave 1 dispatched | | T6.4, T6.5 and T6.6 running |
 | 7 to 10 | After parity, owner decides | | |
 
 ### Task log
