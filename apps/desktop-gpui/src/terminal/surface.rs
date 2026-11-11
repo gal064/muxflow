@@ -10,7 +10,8 @@ use gpui_kit::{
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Role,
     SharedString, Size, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Task,
-    WeakEntity, Window, accesskit::Orientation, canvas, div, prelude::FluentBuilder, px, relative,
+    WeakEntity, Window, accesskit::Orientation, canvas, component::WindowExt as _, div,
+    prelude::FluentBuilder, px, relative,
 };
 use serde_json::json;
 use terminal_engine::GridSize;
@@ -18,7 +19,6 @@ use tmux_control::{Pane, TmuxSnapshot, Window as TmuxWindow};
 
 use crate::{
     app::Core,
-    commands,
     connection_ui::{controller::ConnectionController, host_links::HostLink},
     fonts,
     theme::{self, metrics::ui},
@@ -191,6 +191,26 @@ impl TerminalSurface {
             };
             let uploads = cx.observe_global::<integration::upload::Uploads>(|_, cx| cx.notify());
             let attention = cx.observe_global::<PaneAttention>(|_, cx| cx.notify());
+            // Focus left on nothing, or on something no longer drawn (a list
+            // in a closed sidebar, a menu gone with its dialog), comes back to
+            // the terminal rather than leaving the keyboard dead.
+            let lost = cx.on_focus_lost(window, |surface, window, cx| {
+                if surface.terminal_visible && !window.has_active_dialog(cx) {
+                    surface.pending_focus = true;
+                    if let Some(mounted) = surface
+                        .panes
+                        .iter()
+                        .find(|mounted| mounted.geometry.active)
+                        .or_else(|| surface.panes.first())
+                    {
+                        window.focus(&mounted.pane.read(cx).focus_handle(cx), cx);
+                        // GPUI draws nothing after a focus-lost listener moves
+                        // focus, so the pane would not paint as focused nor
+                        // take typed text until something else redrew.
+                        window.defer(cx, |window, _| window.refresh());
+                    }
+                }
+            });
             let mut surface = Self {
                 this: cx.entity().downgrade(),
                 controller,
@@ -216,7 +236,7 @@ impl TerminalSurface {
                 grab: None,
                 grab_ended: None,
                 hover: None,
-                _subscriptions: vec![observe, keys, uploads, attention],
+                _subscriptions: vec![observe, keys, uploads, attention, lost],
             };
             surface.sync(window, cx);
             surface
@@ -295,15 +315,6 @@ impl TerminalSurface {
         self.apply_panes(wanted, window, cx);
         if target_changed {
             self.schedule_resize(cx);
-        }
-        // Pane commands, paste among them, need a pane to act on. Written only
-        // when it changes: every write tells the palette to look again.
-        let has_pane = !self.panes.is_empty();
-        if cx
-            .try_global::<commands::Commands>()
-            .is_some_and(|commands| commands.context().has_pane != has_pane)
-        {
-            commands::update_context(cx, |context| context.has_pane = has_pane);
         }
         cx.notify();
     }
@@ -624,6 +635,15 @@ impl TerminalSurface {
         .detach();
     }
 
+    /// Hands the keyboard to the active pane, once it is mounted: a workspace
+    /// or tab chosen from the sidebar or the strip is chosen to type in, as
+    /// the Tauri app focuses the pane it mounts.
+    pub fn focus_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.blur(cx);
+        self.pending_focus = true;
+        cx.notify();
+    }
+
     /// A pane took the keyboard: a click, hover or a keyboard move. tmux's
     /// active pane follows, as it does when the Tauri app's pane is focused.
     fn pane_focused(&mut self, pane_id: &str, cx: &mut Context<Self>) {
@@ -927,7 +947,11 @@ impl Render for TerminalSurface {
             .panes
             .iter()
             .any(|mounted| mounted.pane.read(cx).focus_handle(cx).is_focused(window));
-        if self.pending_focus && (surface_holds_focus || window.focused(cx).is_none()) {
+        // With nothing focused the terminal takes the keyboard back: a dialog
+        // opened from a menu returns focus to that menu, which is gone.
+        let unowned =
+            self.terminal_visible && window.focused(cx).is_none() && !window.has_active_dialog(cx);
+        if (self.pending_focus && surface_holds_focus) || unowned {
             let active = self
                 .panes
                 .iter()
@@ -962,6 +986,12 @@ impl Render for TerminalSurface {
                 .filter(|(target, _)| target == id)
                 .map(|(_, edge)| *edge)
         };
+        // The active pane's ring sits just outside its frame, in the divider
+        // cell or the surface's inset: inside, it covered the first column.
+        let ring = ui(theme::metrics::FOCUS_RING)
+            .to_pixels(window.rem_size())
+            .as_f32();
+        let mut rings = Vec::new();
         let frames: Vec<_> = surface.map_or(Vec::new(), |surface| {
             self.panes
                 .iter()
@@ -974,6 +1004,18 @@ impl Render for TerminalSurface {
                     } = pane_rect(&mounted.geometry, grid, surface, zoomed);
                     let (right, bottom) =
                         separators(&mounted.geometry, grid, self.panes.len() > 1, zoomed);
+                    if mounted.pane.read(cx).active {
+                        rings.push(
+                            div()
+                                .absolute()
+                                .left(px(left - ring))
+                                .top(px(top - ring))
+                                .w(px(width + 2. * ring))
+                                .h(px(height + 2. * ring))
+                                .border(px(ring))
+                                .border_color(palette.accent),
+                        );
+                    }
                     let id = mounted.id.clone();
                     let wants_attention = self.target.as_ref().is_some_and(|target| {
                         cx.try_global::<PaneAttention>()
@@ -1132,6 +1174,7 @@ impl Render for TerminalSurface {
                     .size_full()
                     .child(measure)
                     .children(frames)
+                    .children(rings)
                     .when(empty, |window| {
                         window.child(
                             div()

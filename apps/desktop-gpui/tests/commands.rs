@@ -344,8 +344,8 @@ fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestApp
             .map(|command| command.id)
             .collect::<Vec<_>>()
     });
-    // The pinned filter's "show pinned only" has no handler yet, so only what
-    // this module and the window chrome implement is available.
+    // With no connection, only what needs no host is available: the commands
+    // that need a workspace, a tab or a pane wait for one.
     assert_eq!(
         available,
         [
@@ -357,6 +357,21 @@ fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestApp
             "view.showFiles",
             "view.showGit",
             "view.showPorts",
+            "focus.workspaces",
+            "focus.tabs",
+            "focus.back",
+            "focus.forward",
+            "agents.toggleSort",
+            "workspaces.showPinnedOnly",
+            "workspace.select1",
+            "workspace.select2",
+            "workspace.select3",
+            "workspace.select4",
+            "workspace.select5",
+            "workspace.select6",
+            "workspace.select7",
+            "workspace.select8",
+            "workspace.select9",
         ]
     );
 }
