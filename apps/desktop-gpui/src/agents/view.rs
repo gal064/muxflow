@@ -7,9 +7,9 @@ use std::{rc::Rc, time::Duration};
 
 use desktop_core::app_state::AgentSortMode;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, RenderOnce, Rgba, Role, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    Task, Window,
+    AnyElement, App, Context, Entity, FontWeight, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Render, RenderOnce, Rgba, Role, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, Task, Window,
     base::{RootPlugin, TestSupportExt},
     component::{
         Disableable, Sizable, WindowExt,
@@ -29,6 +29,7 @@ use gpui_kit::{
 use crate::{
     commands::{RowCommandSource, registry::CommandId},
     context_menu::{Entry, Item, fill},
+    dragdrop::{self, DragPayload},
     fonts,
     theme::{
         self, Palette,
@@ -36,6 +37,7 @@ use crate::{
             RADIUS_CONTROL, RADIUS_ROW, TYPE_LABEL, TYPE_META, TYPE_ROW, TYPE_SECONDARY, ui,
         },
     },
+    workspaces,
 };
 
 use super::{
@@ -523,7 +525,68 @@ fn row_menu(row: &AgentListRow, cx: &App) -> Vec<Entry> {
         .disabled(!can_branch(row, cx))
         .into(),
     );
+    entries.push(Entry::Separator);
+    entries.extend(move_entries(row, cx));
     entries
+}
+
+/// What dragging the row carries: its pane, on the host on screen, for an
+/// agent that can be resumed and routed to.
+fn agent_drag_payload(row: &AgentListRow, label: &str, cx: &App) -> Option<DragPayload> {
+    if !can_resume(row, cx) || !row.routable || row.agent.pane_id.is_empty() {
+        return None;
+    }
+    workspaces::current(cx)?.read(cx).pane_payload(
+        &row.agent.host_profile_id,
+        &row.agent.pane_id,
+        Some(label),
+        cx,
+    )
+}
+
+/// Bringing an agent here and sending it elsewhere. Both are moves of its pane
+/// on the host on screen, so they are offered only for its agents, like a
+/// resume.
+fn move_entries(row: &AgentListRow, cx: &App) -> Vec<Entry> {
+    let (host, pane) = (row.agent.host_profile_id.clone(), row.agent.pane_id.clone());
+    let moves = (can_resume(row, cx) && row.routable)
+        .then(|| {
+            workspaces::current(cx).and_then(|shell| shell.read(cx).agent_moves(&host, &pane, cx))
+        })
+        .flatten();
+    let bring = {
+        let (host, pane) = (host.clone(), pane.clone());
+        Item::new("Bring here as split", move |_, cx| {
+            if let Some(shell) = workspaces::current(cx) {
+                shell.update(cx, |shell, cx| shell.bring_agent_here(&host, &pane, cx));
+            }
+        })
+        .disabled(
+            moves
+                .as_ref()
+                .is_none_or(|moves| moves.bring_here.is_none()),
+        )
+    };
+    let choices: Vec<Entry> = moves
+        .iter()
+        .flat_map(|moves| moves.workspaces.iter())
+        .map(|(workspace, name)| {
+            let (host, pane, workspace) = (host.clone(), pane.clone(), workspace.clone());
+            Item::new(name.clone(), move |_, cx| {
+                if let Some(shell) = workspaces::current(cx) {
+                    shell.update(cx, |shell, cx| {
+                        shell.move_agent_to_workspace(&host, &pane, workspace.clone(), cx)
+                    });
+                }
+            })
+            .into()
+        })
+        .collect();
+    let none = choices.is_empty();
+    vec![
+        bring.into(),
+        Entry::submenu("Move to workspace…", choices, none),
+    ]
 }
 
 /// The section's own menu: set up, launch, and hook review, for the host on screen.
@@ -721,6 +784,8 @@ fn agent_row(row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &A
     let menu_row = row.clone();
     let title = row_title(row, &session_label);
     let unavailable = !row.routable;
+    let drag = row.clone();
+    let drag_label = session_label.clone();
     let button = h_flex()
         .id(id.clone())
         .test_support()
@@ -742,9 +807,16 @@ fn agent_row(row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &A
         })
         .when(unavailable, |this| this.opacity(0.5))
         .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
+        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            let payload = agent_drag_payload(&drag, &drag_label, cx);
+            dragdrop::press(payload, event.position, cx);
+        })
         // Shift-click pins the agent's tab rather than navigating to it, as it
         // does in the tab strip and the workspace list.
         .on_click(move |event, _, cx| {
+            if dragdrop::just_ended(cx) {
+                return;
+            }
             if event.modifiers().shift {
                 toggle_tab_pin(&click, cx);
             } else if click.routable {
@@ -820,7 +892,9 @@ fn agent_row(row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &A
                     .on_click(move |_, _, cx| branch(&branch_row, cx)),
                 ),
         )
-        .context_menu(move |menu: PopupMenu, _, cx| fill(menu, &row_menu(&menu_row, cx)))
+        .context_menu(move |menu: PopupMenu, window, cx| {
+            fill(menu, &row_menu(&menu_row, cx), window, cx)
+        })
         .into_any_element()
 }
 
@@ -1037,7 +1111,9 @@ impl RenderOnce for AgentsList {
                     .min_h_0()
                     .overflow_y_scroll()
                     .children(body)
-                    .context_menu(|menu: PopupMenu, _, cx| fill(menu, &section_menu(cx))),
+                    .context_menu(|menu: PopupMenu, window, cx| {
+                        fill(menu, &section_menu(cx), window, cx)
+                    }),
             )
     }
 }

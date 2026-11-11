@@ -83,6 +83,7 @@ pub fn start(cx: &mut App) -> Result<(), String> {
     cx.set_global(ConnectionUi(controller.clone()));
     crate::agents::start(controller.clone(), backend.clone(), cx);
     crate::automations::start(controller.clone(), backend, cx);
+    crate::ports::start(controller.clone(), cx);
 
     let (sender, mut resumed) = mpsc::unbounded();
     power_events::start(Arc::new(ResumeSink(sender)));

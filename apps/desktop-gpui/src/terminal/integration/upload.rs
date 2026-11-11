@@ -334,7 +334,7 @@ impl Batch {
                 // A late progress frame never reopens a finished transfer.
                 let settled = latest
                     .get(&event.transfer_id)
-                    .is_some_and(|known| known.state.finished());
+                    .is_some_and(|known| known.state.is_terminal());
                 if !settled {
                     latest.insert(event.transfer_id.clone(), event);
                 }
@@ -342,7 +342,11 @@ impl Batch {
             if failure.is_none() && !self.still_current(cx) {
                 failure = Some(Stop::Silent);
             }
-            let finished = |id: &String| latest.get(id).is_some_and(|event| event.state.finished());
+            let finished = |id: &String| {
+                latest
+                    .get(id)
+                    .is_some_and(|event| event.state.is_terminal())
+            };
             if failure.is_some() && !cancelled {
                 cancelled = true;
                 for id in ids.iter().filter(|id| !finished(id)) {

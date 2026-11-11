@@ -388,6 +388,9 @@ impl Render for Chrome {
             .size_full()
             .overflow_hidden()
             .bg(theme::palette(cx).chrome_bg)
+            // First, so that on every move it follows the pointer before any
+            // target offers itself.
+            .child(crate::dragdrop::listeners())
             .on_drag_move::<DividerDrag>({
                 let chrome = chrome.clone();
                 move |event, window, cx| {
@@ -431,5 +434,6 @@ impl Render for Chrome {
                     surface,
                 })
             })
+            .children(crate::dragdrop::ghost(cx))
     }
 }

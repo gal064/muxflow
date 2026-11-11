@@ -19,6 +19,7 @@ mod commands;
 mod dialog;
 pub mod focus_history;
 pub mod model;
+pub mod moves;
 pub mod navigation;
 pub mod rows;
 #[cfg(test)]
@@ -964,26 +965,59 @@ impl Workspaces {
             self.report("Pane destination is no longer available.", cx);
             return;
         };
+        self.go_to_pane(
+            &view,
+            scope,
+            &pane.id,
+            &pane.session_id,
+            &pane.window_id,
+            seq,
+            cx,
+        );
+    }
+
+    /// Shows a pane where the host says it now is, on the host on screen: how
+    /// focus follows the pane on screen when a move carries it elsewhere.
+    pub fn select_pane_at(
+        &mut self,
+        pane_id: &str,
+        session_id: &str,
+        window_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let seq = self.begin_intent(true);
+        let view = self.view(cx);
+        let Some(scope) = view.scope.clone() else {
+            return;
+        };
+        self.go_to_pane(&view, scope, pane_id, session_id, window_id, seq, cx);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn go_to_pane(
+        &mut self,
+        view: &ShellView,
+        scope: HostScopeToken,
+        pane_id: &str,
+        session_id: &str,
+        window_id: &str,
+        seq: u64,
+        cx: &mut Context<Self>,
+    ) {
         if !view.can_mutate {
-            self.commit_local(
-                &view.host,
-                &pane.session_id,
-                Some(&pane.window_id),
-                None,
-                cx,
-            );
+            self.commit_local(&view.host, session_id, Some(window_id), None, cx);
             return;
         }
         let intent = Intent {
-            key: format!("pane:{}:{}:{}", pane.session_id, pane.window_id, pane.id),
+            key: format!("pane:{session_id}:{window_id}:{pane_id}"),
             host: view.host.clone(),
             scope,
             destination: Location {
-                session_id: pane.session_id.clone(),
-                window_id: Some(pane.window_id.clone()),
+                session_id: session_id.to_owned(),
+                window_id: Some(window_id.to_owned()),
             },
             whole_workspace: false,
-            pane: Some(pane.id.clone()),
+            pane: Some(pane_id.to_owned()),
             optimistic: None,
             origin: None,
             app_tab: None,

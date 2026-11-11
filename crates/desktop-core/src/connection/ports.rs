@@ -82,19 +82,19 @@ pub enum ForwardState {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PortForward {
-    profile_id: String,
-    remote_port: u16,
-    local_port: u16,
-    state: ForwardState,
-    error: Option<String>,
+    pub profile_id: String,
+    pub remote_port: u16,
+    pub local_port: u16,
+    pub state: ForwardState,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectedPort {
-    port: u16,
+    pub port: u16,
     /// Known only for the user's own processes; `ss -p` cannot name others.
-    process: Option<String>,
+    pub process: Option<String>,
 }
 
 struct Entry {

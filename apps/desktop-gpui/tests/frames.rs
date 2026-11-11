@@ -210,7 +210,9 @@ mod frames {
                         .text_color(palette.chrome_ink)
                         .child("src/main.rs")
                         .test_support()
-                        .context_menu(move |menu, _, _| context_menu::fill(menu, &entries)),
+                        .context_menu(move |menu, window, cx| {
+                            context_menu::fill(menu, &entries, window, cx)
+                        }),
                 )
                 // How a tooltip looks: the card the app builds on hover.
                 .child(div().mt(gpui_kit::px(160.)).child(tooltip))

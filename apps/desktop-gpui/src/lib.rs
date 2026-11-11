@@ -26,6 +26,9 @@
 //! | [`terminal`] | Terminal panes: engine link, element, sizing, and the input, reading and integration seams |
 //! | [`agents`] | Agents list, agent status, notifications, sounds and host hook setup |
 //! | [`automations`] | The host's scheduled agent runs, as a right-panel segment |
+//! | [`dragdrop`] | Dragging tabs, documents and panes onto tabs, workspaces and pane edges |
+//! | [`ports`] | Port forwarding from SSH hosts, as a right-panel segment |
+//! | [`transfers`] | The transfer vocabulary uploads and downloads share |
 //!
 //! Colors and metrics come from [`theme`]. Controls follow the accessibility
 //! baseline in [`ui`].
@@ -37,15 +40,18 @@ pub mod commands;
 pub mod connection_ui;
 pub mod context_menu;
 pub mod diagnostics;
+pub mod dragdrop;
 pub mod features;
 pub mod fonts;
 pub mod menus;
 pub mod notices;
 pub mod paths;
+pub mod ports;
 pub mod settings;
 pub mod terminal;
 pub mod theme;
 pub mod tooltips;
+pub mod transfers;
 pub mod ui;
 pub mod window_state;
 pub mod workspaces;

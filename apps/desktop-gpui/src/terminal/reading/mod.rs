@@ -494,7 +494,7 @@ fn hover(
     _: &mut Window,
     cx: &mut Context<TerminalPane>,
 ) {
-    if pane.reading.drag.is_some() {
+    if pane.reading.drag.is_some() || crate::dragdrop::active(cx) {
         return;
     }
     // Links show even while the program reads the mouse: the link modifier

@@ -494,7 +494,11 @@ pub fn attach(
         .on_mouse_move(move |event, _, cx| {
             moved.update(cx, |pane, cx| {
                 // A drag is reported from `paint`, wherever the pointer goes.
-                if pane.input.mouse.pressed.is_none() && pane.mouse_reporting() {
+                // A pane or tab being dragged is not a pointer over the program.
+                if pane.input.mouse.pressed.is_none()
+                    && pane.mouse_reporting()
+                    && !crate::dragdrop::active(cx)
+                {
                     report_motion(pane, event.position, event.modifiers, cx);
                 }
             });
