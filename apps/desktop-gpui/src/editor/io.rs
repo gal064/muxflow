@@ -93,16 +93,20 @@ impl<T> Reply<T> {
         }
     }
 
-    /// An answer a test fills in through the returned slot.
+    /// An answer a test fills in through the returned slot, and whether the
+    /// transfer was cancelled.
     #[cfg(test)]
-    pub fn pending() -> (Self, Slot<T>) {
+    pub fn pending() -> (Self, Slot<T>, std::rc::Rc<std::cell::Cell<bool>>) {
         let slot = Arc::new(Mutex::new(None));
+        let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+        let flag = cancelled.clone();
         (
             Self {
                 slot: slot.clone(),
-                cancel: None,
+                cancel: Some(Box::new(move || flag.set(true))),
             },
             slot,
+            cancelled,
         )
     }
 
@@ -147,8 +151,16 @@ impl BackendIo {
         finish: fn(Completed, Vec<u8>) -> Result<T, String>,
     ) -> Reply<T> {
         let slot = Arc::new(Mutex::new(None));
+        let first_content = request
+            .write
+            .is_none()
+            .then(|| crate::perf::PaintTicket::start(&["file.timeToFirstContent"]))
+            .flatten();
         let sink = Arc::new(FrameReader {
-            state: Mutex::new(Frames::default()),
+            state: Mutex::new(Frames {
+                first_content,
+                ..Frames::default()
+            }),
             slot: slot.clone(),
             finish,
         });
@@ -185,29 +197,39 @@ impl FileIo for BackendIo {
         path: &str,
         save: &SaveRequest,
     ) -> Reply<String> {
-        let content = save
-            .line_ending
-            .apply(&save.content.to_string())
-            .into_bytes();
-        if content.len() as u64 > TEXT_FILE_LIMIT_BYTES {
-            return Reply::ready(Err(
-                "Text files larger than 10 MiB cannot be edited.".to_owned()
-            ));
+        match write_request(scope, root, path, save) {
+            Ok(request) => self.start(request, written),
+            Err(error) => Reply::ready(Err(error)),
         }
-        self.start(
-            FileIoRequest {
-                scope: scope.clone(),
-                root: root.clone(),
-                path: path.to_owned(),
-                write: Some(FileWrite {
-                    operation_id: save.operation_id.clone(),
-                    base_generation: save.generation.clone(),
-                    content,
-                }),
-            },
-            written,
-        )
     }
+}
+
+/// The write the host is asked for: the buffer in the file's own line
+/// endings, on top of the generation it was read at. One over the editor's
+/// limit is refused before it leaves.
+fn write_request(
+    scope: &FileScope,
+    root: &Root,
+    path: &str,
+    save: &SaveRequest,
+) -> Result<FileIoRequest, String> {
+    let content = save
+        .line_ending
+        .apply(&save.content.to_string())
+        .into_bytes();
+    if content.len() as u64 > TEXT_FILE_LIMIT_BYTES {
+        return Err("Text files larger than 10 MiB cannot be edited.".to_owned());
+    }
+    Ok(FileIoRequest {
+        scope: scope.clone(),
+        root: root.clone(),
+        path: path.to_owned(),
+        write: Some(FileWrite {
+            operation_id: save.operation_id.clone(),
+            base_generation: save.generation.clone(),
+            content,
+        }),
+    })
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -257,6 +279,9 @@ struct Frames {
     bytes: Vec<u8>,
     metadata: Option<Metadata>,
     content_kind: Option<String>,
+    /// A read's `file.timeToFirstContent`, ended by its first frame: the
+    /// first chunk, or the completion of a file with none.
+    first_content: Option<crate::perf::PaintTicket>,
 }
 
 struct FrameReader<T> {
@@ -268,6 +293,9 @@ struct FrameReader<T> {
 impl<T: Send> FrameReader<T> {
     fn settle(&self, frames: &mut Frames, result: Result<T, String>) {
         frames.done = true;
+        if let (Ok(_), Some(first)) = (&result, frames.first_content.take()) {
+            first.painted();
+        }
         frames.bytes = Vec::new();
         if let Ok(mut slot) = self.slot.lock() {
             *slot = Some(result);
@@ -346,6 +374,13 @@ impl<T: Send> EventSink for FrameReader<T> {
             EventBody::Raw(raw) => raw.as_slice(),
             EventBody::Json(json) => json.as_bytes(),
         };
+        // Queued, running and the metadata header come first; content is the
+        // first chunk, or the answer itself for a file with none.
+        if raw.first() == Some(&2)
+            && let Some(first) = frames.first_content.take()
+        {
+            first.painted();
+        }
         match self.frame(&mut frames, raw) {
             Ok(None) => Ok(()),
             Ok(Some(result)) => {
@@ -421,6 +456,7 @@ fn written(completed: Completed, _: Vec<u8>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::autosave::{Autosave, Snapshot};
 
     fn reader<T: Send>(
         finish: fn(Completed, Vec<u8>) -> Result<T, String>,
@@ -584,6 +620,59 @@ mod tests {
             Some(Err(
                 "stale_file_generation: file changed since it was opened".into()
             ))
+        );
+    }
+
+    #[test]
+    fn dropping_a_reply_before_its_answer_cancels_the_transfer_once() {
+        let (reply, _, cancelled) = Reply::<String>::pending();
+        drop(reply);
+        assert!(cancelled.get(), "an obsolete read stops the host's work");
+
+        let (mut reply, slot, cancelled) = Reply::<String>::pending();
+        *slot.lock().unwrap() = Some(Ok("1".into()));
+        assert_eq!(reply.take(), Some(Ok("1".into())));
+        drop(reply);
+        assert!(!cancelled.get(), "an answered transfer has nothing to stop");
+    }
+
+    fn save_over(original: &str, edited: &str) -> SaveRequest {
+        let mut autosave = Autosave::new(Snapshot {
+            content: original.into(),
+            generation: "7".into(),
+            line_ending: LineEnding::detect(original),
+        });
+        autosave.edit(edited.into());
+        autosave.flush().unwrap()
+    }
+
+    #[test]
+    fn a_write_carries_its_scope_and_the_files_own_line_endings() {
+        let scope = FileScope {
+            client_id: "client-1".into(),
+            profile_id: "local".into(),
+            server_identity: "server-a".into(),
+            terminal_epoch: 3,
+        };
+        let root = Root {
+            path: "/repo".into(),
+            token: "root-token".into(),
+        };
+        let save = save_over("x\r\ny", "a\nb");
+        let request = write_request(&scope, &root, "/repo/a.txt", &save).unwrap();
+        assert_eq!(request.scope, scope);
+        assert_eq!(request.root, root);
+        assert_eq!(request.path, "/repo/a.txt");
+        let write = request.write.unwrap();
+        assert_eq!(write.content, b"a\r\nb");
+        assert_eq!(write.base_generation, "7");
+        assert_eq!(write.operation_id, save.operation_id);
+
+        let huge = "a".repeat(TEXT_FILE_LIMIT_BYTES as usize + 1);
+        let refused = write_request(&scope, &root, "/repo/a.txt", &save_over("", &huge));
+        assert_eq!(
+            refused.err().as_deref(),
+            Some("Text files larger than 10 MiB cannot be edited.")
         );
     }
 }

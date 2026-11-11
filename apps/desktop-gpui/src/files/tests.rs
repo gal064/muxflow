@@ -49,6 +49,7 @@ use super::{
     },
 };
 use crate::{
+    agents::view::ActiveRoot as AgentRoot,
     editor::{FileNotice, Root, WatchTarget},
     terminal::paint_gate::{PANE_PAINT_TIMEOUT, PanePaintGate},
     transfers::{TransferCleanupStatus, TransferFailureKind, TransferOutcome, TransferState},
@@ -1328,6 +1329,46 @@ fn opened(cx: &mut TestAppContext) -> (Rc<Host>, Entity<Explorer>) {
 }
 
 #[gpui_kit::test]
+fn publishes_the_resolved_root_for_agent_launches_and_withdraws_it(cx: &mut TestAppContext) {
+    let host = Rc::new(Host::default());
+    let explorer = cx.new(|cx| Explorer::new(Rc::new(Transport(host.clone())), cx));
+    // As `init` wires it.
+    cx.update(|cx| {
+        cx.observe(&explorer, |explorer, cx| super::publish_root(&explorer, cx))
+            .detach()
+    });
+    let held = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            cx.try_global::<AgentRoot>()
+                .map(|root| (root.path.clone(), root.token.clone(), root.git_worktree))
+        })
+    };
+    set(&explorer, inputs("%1", "/repo", "client"), cx);
+    assert_eq!(
+        held(cx),
+        None,
+        "nothing to launch under before the root resolves"
+    );
+    host.answer(
+        "resolveActiveRoot",
+        "",
+        Ok(root_answer("root", "/repo", "%1")),
+    );
+    cx.run_until_parked();
+    assert_eq!(held(cx), Some(("/repo".into(), "root".into(), true)));
+    set(&explorer, inputs("%2", "/other", "client"), cx);
+    host.answer(
+        "resolveActiveRoot",
+        "",
+        Ok(root_answer("other", "/other", "%2")),
+    );
+    cx.run_until_parked();
+    assert_eq!(held(cx), Some(("/other".into(), "other".into(), true)));
+    set(&explorer, Inputs::default(), cx);
+    assert_eq!(held(cx), None, "a lost root is withdrawn");
+}
+
+#[gpui_kit::test]
 fn lists_the_root_through_its_watch_and_nothing_else(cx: &mut TestAppContext) {
     let (host, explorer) = opened(cx);
     assert_eq!(rows(&explorer, cx), ["/repo/src", "/repo/a.txt"]);
@@ -2300,6 +2341,24 @@ fn holds_the_root_probe_behind_the_revealed_panes_first_paint(cx: &mut TestAppCo
     assert!(read(&explorer, cx, |explorer| explorer.paints_selection()));
 }
 
+/// Port of `panePaintOrdering.test.tsx`: on a switch the Explorer and the
+/// terminal surface observe the same change, and the surface may arm the pane
+/// after the Explorer has asked about it. The probe must still wait.
+#[gpui_kit::test]
+fn holds_the_probe_when_the_pane_arms_later_in_the_same_switch(cx: &mut TestAppContext) {
+    let (host, explorer) = unopened(cx);
+    cx.update(|cx| {
+        explorer.update(cx, |explorer, cx| {
+            explorer.set_inputs(inputs("%1", "/repo", "client"), cx)
+        });
+        cx.default_global::<PanePaintGate>().arm("local\0%1");
+    });
+    cx.run_until_parked();
+    assert_eq!(probes(&host), 0, "asked ahead of the pane's own screen");
+    painted("%1", cx);
+    assert_eq!(probes(&host), 1);
+}
+
 #[gpui_kit::test]
 fn holds_the_probe_behind_the_paint_when_the_switch_also_moved_the_cwd(cx: &mut TestAppContext) {
     let (host, explorer) = opened(cx);
@@ -2623,6 +2682,35 @@ fn revalidates_a_bootstrap_the_tree_joined_after_a_document_armed_it(cx: &mut Te
         explorer.toggle_directory("/repo/src", cx)
     });
     assert_eq!(unwatches(&host), 1);
+}
+
+#[gpui_kit::test]
+fn the_holder_that_armed_a_watch_leaving_mid_bootstrap_keeps_it_for_the_other(
+    cx: &mut TestAppContext,
+) {
+    let (host, explorer) = opened(cx);
+    let lease = update(&explorer, cx, |explorer, cx| {
+        explorer.watch_document(&document("/repo/src", "/repo/src/main.rs"), cx)
+    });
+    update(&explorer, cx, |explorer, cx| {
+        explorer.toggle_directory("/repo/src", cx)
+    });
+    assert_eq!(host.asked("watchDirectory"), ["/repo", "/repo/src"]);
+    drop(lease);
+    cx.run_until_parked();
+    assert!(host.stopped().is_empty(), "the tree still waits on it");
+    assert_eq!(unwatches(&host), 0);
+    host.answer(
+        "watchDirectory",
+        "/repo/src",
+        Ok(directory("/repo/src", &[("/repo/src/main.rs", false)])),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&explorer, cx),
+        ["/repo/src", "/repo/src/main.rs", "/repo/a.txt"]
+    );
+    assert_eq!(unwatches(&host), 0);
 }
 
 #[gpui_kit::test]

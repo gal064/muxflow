@@ -193,6 +193,8 @@ pub struct ConnectionController {
     link_quality_profile: Option<String>,
     seen_late_requests: Option<(String, u32)>,
     runtimes: HashMap<String, LinkRuntime>,
+    /// The active client and epoch whose bulk connection was last warmed.
+    bulk_prewarmed: Option<(String, u64)>,
     next_bridge_token: u64,
     app_recovery: Option<AppRecoveryState>,
     last_identities: HashMap<String, String>,
@@ -255,6 +257,7 @@ impl ConnectionController {
             link_quality_profile: None,
             seen_late_requests: None,
             runtimes: HashMap::new(),
+            bulk_prewarmed: None,
             next_bridge_token: 0,
             app_recovery: None,
             last_identities: HashMap::new(),
@@ -1871,9 +1874,29 @@ impl ConnectionController {
         self.announce(profile_id, message, cx);
     }
 
+    /// File transfer is a second helper connection. Warm it only for the host
+    /// on screen: a shown peer must not spend an idle bulk-pool slot or evict
+    /// the active host's. Asked again each time the host becomes writable.
+    fn prewarm_active_bulk(&mut self) {
+        let eligible = self.active_link().and_then(|link| {
+            let writable = link.host_state.phase == ConnectionPhase::Connected
+                && link.host_state.can_mutate
+                && link.terminal_epoch != 0;
+            writable.then(|| link.client_id.clone().map(|id| (id, link.terminal_epoch)))?
+        });
+        if eligible == self.bulk_prewarmed {
+            return;
+        }
+        self.bulk_prewarmed = eligible.clone();
+        if let Some((client_id, _)) = eligible {
+            self.backend.prewarm_bulk(client_id);
+        }
+    }
+
     /// What a host's phase change means: the journal's record of what the user
     /// saw, per link.
     fn observe_transitions(&mut self, cx: &App) {
+        self.prewarm_active_bulk();
         let now = self.backend.now_ms();
         for profile_id in self.links.order.clone() {
             let Some(link) = self.links.link(&profile_id) else {

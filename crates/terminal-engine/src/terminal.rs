@@ -70,7 +70,8 @@ pub struct HistoryPageAnchor {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HistorySpliceOutcome {
     Applied,
-    Superseded,
+    /// Why the page could not go above this screen, as the journal names it.
+    Superseded(&'static str),
     OverlapExceedsPage,
 }
 
@@ -389,12 +390,18 @@ impl PaneWriter {
         // already counted.
         self.flush_sync();
         let facts = self.facts();
-        if facts.alternate_screen
-            || facts.scrollback_rows >= facts.scrollback_limit
-            || facts.grid.columns != anchor.columns
-            || facts.grid.rows != anchor.rows
-        {
-            return HistorySpliceOutcome::Superseded;
+        // A TUI's alternate screen has no scrollback to prepend to.
+        if facts.alternate_screen {
+            return HistorySpliceOutcome::Superseded("alternateScreen");
+        }
+        // Rows dropped off the top leave a hole no trimming can close.
+        if facts.scrollback_rows >= facts.scrollback_limit {
+            return HistorySpliceOutcome::Superseded("scrollbackCapped");
+        }
+        // A reflow between the request and the answer: the page's rows are not
+        // this buffer's rows.
+        if facts.grid.columns != anchor.columns || facts.grid.rows != anchor.rows {
+            return HistorySpliceOutcome::Superseded("gridChanged");
         }
         let captured = split_history_rows(history);
         // What the ordered stream printed since the request is at the foot of
@@ -541,12 +548,12 @@ mod tests {
         other.columns = 9;
         assert_eq!(
             writer.prepend_history(b"x", other),
-            HistorySpliceOutcome::Superseded
+            HistorySpliceOutcome::Superseded("gridChanged")
         );
         writer.write(b"\x1b[?1049h");
         assert_eq!(
             writer.prepend_history(b"x", anchor(0)),
-            HistorySpliceOutcome::Superseded
+            HistorySpliceOutcome::Superseded("alternateScreen")
         );
     }
 
@@ -563,7 +570,7 @@ mod tests {
         let held = writer.facts().scrollback_rows;
         assert_eq!(
             writer.prepend_history(b"x", anchor(held)),
-            HistorySpliceOutcome::Superseded
+            HistorySpliceOutcome::Superseded("scrollbackCapped")
         );
     }
 
@@ -765,6 +772,86 @@ mod tests {
         writer.seed(b"\x1b[2J\x1b[Hscreen");
         assert_eq!(writer.facts().scrollback_rows, 0);
         assert_eq!(all_text(&writer)[0], "screen");
+    }
+
+    fn backgrounds(writer: &PaneWriter, line: i32) -> Vec<Color> {
+        let term = writer.terminal().lock();
+        let row = &term.grid()[Line(line)];
+        (0..term.columns())
+            .map(|column| row[Column(column)].bg)
+            .collect()
+    }
+
+    const OVERLAY_GRID: GridSize = GridSize {
+        columns: 20,
+        rows: 3,
+    };
+    const PLAN_GREY: Color = Color::Spec(alacritty_terminal::vte::ansi::Rgb {
+        r: 65,
+        g: 69,
+        b: 76,
+    });
+
+    // The host seed's cell overlay: the joined capture supplies the text, the
+    // physical capture only the SGR state, its start column and the erase.
+    #[test]
+    fn a_seed_overlay_fills_an_attributed_erase_through_the_right_edge() {
+        let mut writer = PaneWriter::new(OVERLAY_GRID);
+        writer.seed(b"\x1b[48;2;65;69;76mPlan\x1b[m\x1b[48;2;65;69;76m\x1b[1;5H\x1b[K\x1b[m");
+        assert_eq!(all_text(&writer)[0], "Plan");
+        assert_eq!(backgrounds(&writer, 0), vec![PLAN_GREY; 20]);
+    }
+
+    #[test]
+    fn a_seed_overlay_restores_adjacent_blank_spans_with_their_own_backgrounds() {
+        use alacritty_terminal::vte::ansi::NamedColor;
+        let mut writer = PaneWriter::new(OVERLAY_GRID);
+        writer.seed(b"\x1b[41mA\x1b[m\x1b[41m\x1b[1;2H\x1b[9X\x1b[44m\x1b[1;11H\x1b[K\x1b[m");
+        let backgrounds = backgrounds(&writer, 0);
+        assert_eq!(backgrounds[..10], [Color::Named(NamedColor::Red); 10]);
+        assert_eq!(backgrounds[10..], [Color::Named(NamedColor::Blue); 10]);
+    }
+
+    /// xterm marks the continuation row as wrapped; alacritty marks the last
+    /// cell of the row that wraps, and an erase on that row clears the mark. The
+    /// host paints every overlay before the text, so the text's own wrap is
+    /// what is left on the row either way.
+    #[test]
+    fn a_seed_overlay_keeps_the_soft_wrap_it_lands_on() {
+        let wraps = |writer: &PaneWriter| {
+            let term = writer.terminal().lock();
+            term.grid()[Line(0)][Column(19)]
+                .flags
+                .contains(Flags::WRAPLINE)
+        };
+        let mut writer = PaneWriter::new(OVERLAY_GRID);
+        writer.seed(b"1234567890123456789012345\x1b[m\x1b[48;2;65;69;76m\x1b[2;6H\x1b[K\x1b[m");
+        assert!(wraps(&writer), "an erase on the continuation row");
+        writer.seed(b"\x1b[48;2;65;69;76m\x1b[1;16H\x1b[K\x1b[m\x1b[H123456789012345     next");
+        assert!(
+            wraps(&writer),
+            "an erase on the wrapping row itself, before its text"
+        );
+        // Why the host's order matters: the same erase after the text drops it.
+        writer.write(b"\x1b[1;16H\x1b[K");
+        assert!(!wraps(&writer));
+    }
+
+    #[test]
+    fn a_page_put_above_the_screen_leaves_the_screen_colours_and_the_pen_alone() {
+        let mut writer = PaneWriter::new(SIZE);
+        writer.seed(b"\x1b[44ma\x1b[K\r\nb\r\nc\r\nd\x1b[48;2;65;69;76m");
+        let screen = |writer: &PaneWriter| {
+            let rows: Vec<Vec<Color>> = (0..SIZE.rows as i32)
+                .map(|line| backgrounds(writer, line))
+                .collect();
+            let pen = writer.terminal().lock().grid().cursor.template.bg;
+            (rows, pen)
+        };
+        let before = screen(&writer);
+        let outcome = writer.prepend_history(b"x\r\ny", anchor(1));
+        assert_eq!(outcome, HistorySpliceOutcome::Applied);
+        assert_eq!(screen(&writer), before);
     }
 
     #[test]

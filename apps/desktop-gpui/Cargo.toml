@@ -15,6 +15,11 @@ path = "src/lib.rs"
 name = "muxflow-gpui"
 path = "src/main.rs"
 
+[features]
+# Compiles the perf-log probe's native sink into a release build for a
+# measurement campaign; debug builds always have it. See desktop-core's perf_log.
+perf-log = ["desktop-core/perf-log"]
+
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

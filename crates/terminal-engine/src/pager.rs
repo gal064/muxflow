@@ -285,17 +285,27 @@ impl PaneHistoryPager {
             self.exhausted = last_page;
             return;
         }
-        match splice(data, request.anchor) {
+        let refused = match splice(data, request.anchor) {
             HistorySpliceOutcome::Applied => {
                 self.exhausted = last_page;
                 self.next_page_lines = grown_page(request.lines);
+                None
             }
             // Every row had already been printed while the page crossed the
             // link. The same ask would get the same answer, so the page grows.
             HistorySpliceOutcome::OverlapExceedsPage => {
                 self.next_page_lines = grown_page(request.lines);
+                Some("overlapExceedsPage")
             }
-            HistorySpliceOutcome::Superseded => {}
+            HistorySpliceOutcome::Superseded(reason) => Some(reason),
+        };
+        // Journalled, never spoken: a refused splice is a pane that stops
+        // growing its scrollback, and this is the only trace of why.
+        if let Some(reason) = refused {
+            journal(
+                "pane.historySuperseded",
+                json!({ "paneId": self.pane_id, "serial": request.serial, "reason": reason }),
+            );
         }
         self.busy = false;
     }
@@ -439,8 +449,12 @@ mod tests {
         let mut h = Harness::new();
         h.pager.note_screen_seeded();
         h.ask(Prefetch);
-        h.renderer.outcome = HistorySpliceOutcome::Superseded;
+        h.renderer.outcome = HistorySpliceOutcome::Superseded("scrollbackCapped");
         h.deliver(0, Some(50_000));
+        let (kind, detail) = h.log.0.last().unwrap();
+        assert_eq!(*kind, "pane.historySuperseded");
+        assert_eq!(detail["reason"], "scrollbackCapped");
+        assert_eq!(detail["paneId"], "%1");
         assert!(!h.pager.snapshot().history_exhausted);
         assert_eq!(
             h.pager.snapshot().history_next_page_lines,
@@ -457,6 +471,9 @@ mod tests {
         h.ask(Prefetch);
         h.renderer.outcome = HistorySpliceOutcome::OverlapExceedsPage;
         h.deliver(0, Some(50_000));
+        let (kind, detail) = h.log.0.last().unwrap();
+        assert_eq!(*kind, "pane.historySuperseded");
+        assert_eq!(detail["reason"], "overlapExceedsPage");
         assert!(!h.pager.snapshot().history_exhausted);
         assert_eq!(
             h.pager.snapshot().history_next_page_lines,

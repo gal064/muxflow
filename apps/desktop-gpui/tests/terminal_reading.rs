@@ -137,6 +137,13 @@ fn output_frame(sequence: u64, text: &[u8]) -> Vec<u8> {
     frame(2, "%1", sequence, &payload)
 }
 
+/// A screen frame at an explicit generation: `kind` 1 is a seed, 2 output.
+fn screen_frame(kind: u8, sequence: u64, generation: u64, text: &[u8]) -> Vec<u8> {
+    let mut payload = generation.to_be_bytes().to_vec();
+    payload.extend_from_slice(text);
+    frame(kind, "%1", sequence, &payload)
+}
+
 /// tmux's answer to a history request: rows above the screen, and how many
 /// tmux holds in all.
 fn history_frame(sequence: u64, history_size: u32, text: &[u8]) -> Vec<u8> {
@@ -228,9 +235,9 @@ fn mounted_with<'a>(
         columns: 40,
         rows: 6,
     };
-    link.update(visual, |link, _| {
+    link.update(visual, |link, cx| {
         link.set_client(Some("client-1".into()), 1);
-        link.mount("%1", &pane, size);
+        link.mount("%1", &pane, size, cx);
     });
     link.read_with(visual, |link, _| {
         link.forward_frame(frame(10, "terminal", 0, &7_u64.to_be_bytes()))
@@ -487,6 +494,108 @@ fn the_wheel_reads_history_and_asks_for_the_page_above_the_top(cx: &mut TestAppC
             pane.reading_state() == TerminalReadingState::Live
         })
     });
+}
+
+/// Port of the tmux-style reading cases in `TerminalPane.test.tsx`: typing
+/// while scrolled up goes back to live output, and only a view that missed
+/// output while it was away (the "New output" button) asks for a fresh screen.
+#[gpui_kit::test]
+fn typing_or_new_output_takes_a_reader_back_to_live(cx: &mut TestAppContext) {
+    let (Mounted { fake, link, pane }, visual) = mounted(cx, b"\x1b[2J\x1b[Hscreen");
+    wait_until(visual, |_| fake.0.lock().unwrap().history.len() == 1);
+    let older: Vec<u8> = (0..12)
+        .flat_map(|row| format!("older {row}\r\n").into_bytes())
+        .collect();
+    link.read_with(visual, |link, _| {
+        link.forward_frame(history_frame(2, 12, &older))
+    });
+    wait_until(visual, |cx| {
+        pane.read_with(cx, |pane, _| {
+            pane.terminal().unwrap().lock().grid().history_size() >= 12
+        })
+    });
+    visual.update(|window, cx| window.focus(&pane.focus_handle(cx), cx));
+    let inside = at(&pane, visual, 2, 2, false);
+    let scroll_up = |visual: &mut VisualTestContext| {
+        visual.simulate_event(ScrollEvent {
+            position: inside,
+            delta: ScrollDelta::Lines(point(0., 2.)),
+            ..Default::default()
+        });
+        wait_until(visual, |cx| {
+            pane.read_with(cx, |pane, _| {
+                pane.reading_state() != TerminalReadingState::Live
+            })
+        });
+    };
+    let state = |visual: &mut VisualTestContext| {
+        pane.read_with(visual, |pane, _| {
+            let offset = pane.terminal().unwrap().lock().grid().display_offset();
+            (pane.reading_state(), offset)
+        })
+    };
+    let seeds = fake.0.lock().unwrap().seeds;
+
+    scroll_up(visual);
+    fake.0.lock().unwrap().input.clear();
+    visual.simulate_input("a");
+    wait_until(visual, |cx| {
+        pane.read_with(cx, |pane, _| {
+            pane.reading_state() == TerminalReadingState::Live
+        })
+    });
+    assert_eq!(state(visual), (TerminalReadingState::Live, 0));
+    assert_eq!(fake.0.lock().unwrap().input, [b"a".to_vec()]);
+    assert_eq!(fake.0.lock().unwrap().seeds, seeds, "nothing was missed");
+
+    // Output while reading: the view is outdated, and its button brings it back.
+    scroll_up(visual);
+    link.read_with(visual, |link, _| {
+        link.forward_frame(screen_frame(2, 3, 2, b"!"))
+    });
+    wait_until(visual, |cx| {
+        pane.read_with(cx, |pane, _| {
+            pane.reading_state() == TerminalReadingState::Outdated
+        })
+    });
+    // The button sits in the pane's bottom-right corner; the pane is the window.
+    let corner = visual.update(|window, _| window.viewport_size());
+    visual.simulate_click(
+        point(corner.width - px(24.), corner.height - px(18.)),
+        Modifiers::none(),
+    );
+    wait_until(visual, |_| fake.0.lock().unwrap().seeds == seeds + 1);
+    // The fresh screen is taller than the pane, so there is history to read.
+    let fresh: Vec<u8> = (0..20)
+        .flat_map(|row| format!("fresh {row}\r\n").into_bytes())
+        .collect();
+    link.read_with(visual, |link, _| {
+        link.forward_frame(screen_frame(1, 4, 3, &fresh))
+    });
+    wait_until(visual, |cx| {
+        pane.read_with(cx, |pane, _| {
+            pane.reading_state() == TerminalReadingState::Live
+        })
+    });
+    assert_eq!(state(visual), (TerminalReadingState::Live, 0));
+
+    // And typing does the same, once, however many keys it takes.
+    scroll_up(visual);
+    link.read_with(visual, |link, _| {
+        link.forward_frame(screen_frame(2, 5, 4, b"!"))
+    });
+    wait_until(visual, |cx| {
+        pane.read_with(cx, |pane, _| {
+            pane.reading_state() == TerminalReadingState::Outdated
+        })
+    });
+    fake.0.lock().unwrap().input.clear();
+    visual.simulate_input("b");
+    visual.simulate_input("c");
+    wait_until(visual, |_| fake.0.lock().unwrap().seeds == seeds + 2);
+    visual.run_until_parked();
+    assert_eq!(fake.0.lock().unwrap().seeds, seeds + 2);
+    assert_eq!(fake.0.lock().unwrap().input, [b"b".to_vec(), b"c".to_vec()]);
 }
 
 #[gpui_kit::test]
