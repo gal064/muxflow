@@ -30,6 +30,7 @@
 //! | [`editor`] | File tabs on the Kit code editor: read, autosave, find, grammars; document-tab surface routing |
 //! | [`git`] | Source Control panel and Git diff tabs |
 //! | [`ports`] | Port forwarding from SSH hosts, as a right-panel segment |
+//! | [`files`] | The file explorer, its file actions and downloads, as a right-panel segment |
 //! | [`transfers`] | The transfer vocabulary uploads and downloads share |
 //!
 //! Colors and metrics come from [`theme`]. Controls follow the accessibility
@@ -45,6 +46,7 @@ pub mod diagnostics;
 pub mod dragdrop;
 pub mod editor;
 pub mod features;
+pub mod files;
 pub mod fonts;
 pub mod git;
 pub mod markdown;

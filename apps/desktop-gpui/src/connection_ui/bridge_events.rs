@@ -55,6 +55,10 @@ pub enum BridgeEvent {
     },
     /// A host's automations changed; the panel lists them again.
     AutomationChanged,
+    /// A file-service event, as the host's JSON; the Explorer reads it.
+    FileService {
+        payload: String,
+    },
     /// A Git watch's status or error, as the host's JSON; the Git feature
     /// reads it.
     GitService {
@@ -204,12 +208,18 @@ pub fn decode_frame(frame: &[u8]) -> Result<BridgeEvent, String> {
             require_host_sequence(sequence, "automation event")?;
             Ok(BridgeEvent::AutomationChanged)
         }
+        // Its JSON is checked where it is read, in files::wire.
+        12 => {
+            require_host_sequence(sequence, "file service")?;
+            let payload = text(data, "file-service payload")?;
+            Ok(BridgeEvent::FileService { payload })
+        }
         13 => {
             require_host_sequence(sequence, "Git event")?;
             let payload = text(data, "Git event payload")?;
             Ok(BridgeEvent::GitService { payload })
         }
-        1 | 2 | 8 | 9 | 11 | 12 | 18 => Ok(BridgeEvent::Ignored),
+        1 | 2 | 8 | 9 | 11 | 18 => Ok(BridgeEvent::Ignored),
         kind => Err(format!("unknown terminal frame kind {kind}")),
     }
 }
