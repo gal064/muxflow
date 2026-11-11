@@ -25,7 +25,6 @@ use gpui_kit::{
     prelude::FluentBuilder,
     px, relative, svg,
 };
-use serde_json::json;
 
 use crate::{
     commands::{RowCommandSource, registry::CommandId},
@@ -268,54 +267,27 @@ fn resume_placements(agent: &AgentRecord, cx: &App) -> Vec<Placement> {
         .unwrap_or_default()
 }
 
-/// One tmux action on the row's host, refused when that host cannot take it.
-/// The expected server is the row's own: a host that restarted its tmux since
-/// the row was drawn refuses, instead of acting on a reused window id.
-fn host_action(agent: &AgentRecord, mut action: serde_json::Value, cx: &mut App) {
-    let Some(agents) = cx.try_global::<Agents>() else {
-        return;
-    };
-    let client_id = agents
-        .controller
-        .read(cx)
-        .link(&agent.host_profile_id)
-        .and_then(|link| {
-            link.host_state
-                .can_mutate
-                .then(|| link.client_id.clone())
-                .flatten()
-        });
-    let Some(client_id) = client_id else {
-        return report(cx, "This host cannot take changes right now.".into());
-    };
-    action["expected_server_identity"] = agent.server_identity.clone().into();
-    let answer = agents
-        .runtime
-        .read(cx)
-        .transport()
-        .tmux_action(client_id, action);
-    cx.spawn(async move |cx| {
-        if let Err(error) = answer.await {
-            cx.update(|cx| report(cx, error));
-        }
-    })
-    .detach();
-}
-
+/// The shell's pin toggle, aimed at the agent's window on its own host.
+/// Nothing happens once that host's tmux is another server.
 fn toggle_tab_pin(row: &AgentListRow, cx: &mut App) {
-    if !row.routable {
+    let agent = &row.agent;
+    let current = cx.try_global::<Agents>().is_some_and(|agents| {
+        agents
+            .controller
+            .read(cx)
+            .link(&agent.host_profile_id)
+            .is_some_and(|link| {
+                link.host_state.server_identity.as_deref() == Some(&agent.server_identity)
+            })
+    });
+    if !row.routable || !current {
         return;
     }
-    host_action(
-        &row.agent,
-        json!({
-            "kind": "setPinned",
-            "session_id": row.agent.session_id,
-            "window_id": row.agent.window_id,
-            "pinned": !row.location.tab_pinned,
-        }),
-        cx,
-    );
+    if let Some(workspaces) = crate::workspaces::current(cx) {
+        workspaces.update(cx, |workspaces, cx| {
+            workspaces.toggle_window_pin_on(&agent.host_profile_id, &agent.window_id, cx)
+        });
+    }
 }
 
 /// The shell's Rename terminal tab, aimed at the agent's window on its own

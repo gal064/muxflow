@@ -238,15 +238,48 @@ fn workspace_row(
     // One workspace-level indicator, in the same place in both modes. The
     // agent lines already say blocked and done in words, so the full row shows
     // working alone; a compact row has no lines and shows the loudest state.
+    // The slot stays while empty, so a state arriving cannot move the name.
     let indicator = if compact {
-        agents.state.filter(|state| {
+        let state = agents.state.filter(|state| {
             matches!(
                 state,
                 DisplayState::Blocked | DisplayState::Done | DisplayState::Working
             )
-        })
+        });
+        state_indicator(state.unwrap_or(DisplayState::Idle), glyphs, 7., cx)
     } else {
-        agents.working.then_some(DisplayState::Working)
+        // Working alone, and always as motion: the lines below carry the rest.
+        let state = if agents.working {
+            DisplayState::Working
+        } else {
+            DisplayState::Idle
+        };
+        state_indicator(state, false, 7., cx)
+    };
+    // Waiting agents: inline after a compact row's marks, else at the right edge.
+    let unread = (agents.unread > 0).then(|| {
+        let count = if agents.unread > 99 {
+            "99+".to_owned()
+        } else {
+            agents.unread.to_string()
+        };
+        h_flex()
+            .flex_none()
+            .justify_center()
+            .min_w(ui(15.))
+            .h(ui(15.))
+            .px(ui(4.))
+            .rounded(ui(8.))
+            .bg(palette.accent)
+            .text_color(palette.accent_ink)
+            .text_size(ui(9.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(count)
+    });
+    let (inline_unread, edge_unread) = if compact {
+        (unread, None)
+    } else {
+        (None, unread)
     };
     let group: SharedString = format!("workspace-row-{index}").into();
     h_flex()
@@ -335,14 +368,7 @@ fn workspace_row(
                                     .child(row.letter.clone()),
                             )
                         })
-                        // The slot stays while empty, so a state arriving cannot
-                        // move the name.
-                        .child(state_indicator(
-                            indicator.unwrap_or(DisplayState::Idle),
-                            glyphs,
-                            7.,
-                            cx,
-                        ))
+                        .child(indicator)
                         .child(
                             div()
                                 .flex_1()
@@ -377,7 +403,8 @@ fn workspace_row(
                                         )
                                     }),
                             )
-                        }),
+                        })
+                        .children(inline_unread),
                 )
                 .when(!compact, |this| {
                     this.children(agents.agents.iter().map(|agent| {
@@ -411,29 +438,10 @@ fn workspace_row(
                     )
                 }),
         )
-        .when(agents.unread > 0, |this| {
-            let count = if agents.unread > 99 {
-                "99+".to_owned()
-            } else {
-                agents.unread.to_string()
-            };
-            this.child(
-                h_flex()
-                    .flex_none()
-                    .justify_center()
-                    .min_w(ui(15.))
-                    .h(ui(15.))
-                    .px(ui(4.))
-                    .rounded(ui(8.))
-                    .bg(palette.accent)
-                    .text_color(palette.accent_ink)
-                    .text_size(ui(9.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    // The pin takes the count's place on hover.
-                    .group_hover(group.clone(), |style| style.invisible())
-                    .child(count),
-            )
-        })
+        .children(edge_unread.map(|badge| {
+            // The pin takes the count's place on hover.
+            badge.group_hover(group.clone(), |style| style.invisible())
+        }))
         // Over the row's right edge, on a backing of the row's own colour, so
         // showing it moves nothing and takes no width from the name.
         .child(
