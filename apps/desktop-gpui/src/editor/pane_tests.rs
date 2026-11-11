@@ -10,14 +10,16 @@ use std::{
 };
 
 use desktop_core::app_state::{AppTabKind, AppTabRecord, AppTabViewMode};
-use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+use gpui_kit::{
+    Entity, TestAppContext, TestSupportExt, VisualTestContext, px, size, test::TestQueryExt,
+};
 
 use super::*;
 use crate::{
     app::{self, Core},
     editor::{
         autosave::{LineEnding, SAVE_DELAY, SaveRequest},
-        io::{FileScope, Opened, Reply, TEXT_FILE_LIMIT_BYTES, TextFile},
+        io::{FileScope, Opened, Reply, Slot, TEXT_FILE_LIMIT_BYTES, TextFile},
     },
 };
 
@@ -28,6 +30,7 @@ struct Host {
     /// How many times the Markdown preview was asked to draw.
     previews: Cell<usize>,
     writes: RefCell<Vec<String>>,
+    unanswered: RefCell<Vec<Slot<Opened>>>,
 }
 
 struct Io(Rc<Host>);
@@ -35,13 +38,13 @@ struct Io(Rc<Host>);
 impl FileIo for Io {
     fn read(&self, _: &FileScope, _: &Root, _: &str) -> Reply<Opened> {
         *self.0.reads.borrow_mut() += 1;
-        Reply::ready(
-            self.0
-                .file
-                .borrow()
-                .clone()
-                .ok_or("File unavailable.".into()),
-        )
+        // No file is a read the host has not answered yet.
+        let Some(file) = self.0.file.borrow().clone() else {
+            let (reply, slot, _) = Reply::pending();
+            self.0.unanswered.borrow_mut().push(slot);
+            return reply;
+        };
+        Reply::ready(Ok(file))
     }
 
     fn write(&self, _: &FileScope, _: &Root, _: &str, save: &SaveRequest) -> Reply<String> {
@@ -94,7 +97,12 @@ fn open_tab(
         crate::editor::set_markdown_preview(
             Rc::new(move |_, _, _, _| {
                 host.previews.set(host.previews.get() + 1);
-                div().id("preview-stub").into_any_element()
+                div()
+                    .id("preview-stub")
+                    .test_support()
+                    .aria_label("preview stub")
+                    .size_full()
+                    .into_any_element()
             }),
             cx,
         );
@@ -360,6 +368,26 @@ fn find_reopens_on_the_query_and_toggles_it_closed_with(cx: &mut TestAppContext)
     assert_eq!((query.as_str(), case), ("cat", true));
 }
 
+#[gpui_kit::test]
+fn only_a_slow_open_says_it_is_loading(cx: &mut TestAppContext) {
+    let (pane, host, cx) = open_tab(cx, record(), None, true);
+    let loading = |cx: &mut VisualTestContext| {
+        draw(cx);
+        cx.update(|window, _| window.try_find_by_label("Loading…").map(|line| line.role()))
+    };
+    // DelayedLoading's 150 ms: a fast open never flashes the line.
+    cx.executor()
+        .advance_clock(LOADING_DELAY - Duration::from_millis(10));
+    assert_eq!(loading(cx), None);
+    cx.executor().advance_clock(Duration::from_millis(10));
+    assert_eq!(loading(cx), Some(Some(Role::Status)));
+    // The answer replaces it.
+    *host.unanswered.borrow()[0].lock().unwrap() = Some(Ok(text("done")));
+    cx.executor().advance_clock(LOADING_DELAY);
+    assert_eq!(loading(cx), None);
+    assert!(cx.update(|_, cx| pane.read(cx).editor(cx).is_some()));
+}
+
 fn markdown_tab(mode: AppTabViewMode) -> AppTabRecord {
     let mut record = record();
     record.kind = AppTabKind::Markdown;
@@ -390,6 +418,25 @@ fn a_split_markdown_tab_shows_the_editor_and_the_preview(cx: &mut TestAppContext
     );
     assert!(cx.update(|_, cx| pane.read(cx).editor(cx).is_some()));
     assert!(host.previews.get() > 0);
+}
+
+#[gpui_kit::test]
+fn a_narrow_window_stacks_the_split_preview_below_the_editor(cx: &mut TestAppContext) {
+    let (_, _, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Split),
+        Some(text("# heading")),
+        true,
+    );
+    let mut preview_at = |width: f32| {
+        cx.simulate_resize(size(px(width), px(800.)));
+        draw(cx);
+        cx.update(|window, _| window.find_by_label("preview stub").bounds().origin)
+    };
+    let beside = preview_at(1280.);
+    assert!(beside.x > px(400.), "{beside:?}");
+    let below = preview_at(860.);
+    assert!(below.x < px(10.) && below.y > px(300.), "{below:?}");
 }
 
 #[gpui_kit::test]

@@ -814,8 +814,10 @@ impl TerminalSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A docked document is one more pane to come back from.
+        let docked = crate::editor::docked_id(cx).is_some();
         if !self.hover.as_ref().is_some_and(|(id, _)| id == pane_id)
-            || self.panes.len() < 2
+            || (self.panes.len() < 2 && !docked)
             || !window.is_window_active()
             || !focus_follows_mouse(cx)
         {
@@ -844,7 +846,8 @@ impl TerminalSurface {
                     .iter()
                     .any(|mounted| mounted.dividers.contains(focused))
         };
-        let elsewhere = window.focused(cx).is_some_and(|focused| !ours(&focused));
+        let elsewhere = window.focused(cx).is_some_and(|focused| !ours(&focused))
+            && !crate::editor::dock_input_focused(window, cx);
         if target.is_focused(window) || elsewhere {
             return;
         }

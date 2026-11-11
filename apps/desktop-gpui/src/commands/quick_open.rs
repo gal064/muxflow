@@ -11,13 +11,22 @@ use gpui_kit::{
     ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
     StyledText, Subscription, Task, TestSupportExt, Window,
     component::{
-        Icon, IconName, Sizable, WindowExt, h_flex,
+        Icon, Sizable, WindowExt, h_flex,
         input::{Input, InputEvent, InputState, MoveDown, MoveUp},
         v_flex,
     },
     div,
     prelude::FluentBuilder,
-    transparent_black,
+    svg, transparent_black,
+};
+
+use crate::ui::icons::Glyph;
+use crate::{
+    agents::{model::DisplayState, view::state_indicator},
+    files::{
+        icons::{Shape, file_icon},
+        wire::FileKind,
+    },
 };
 
 use super::{
@@ -27,7 +36,10 @@ use super::{
 };
 use crate::theme::{
     self,
-    metrics::{RADIUS_CONTROL, RADIUS_PANEL, TYPE_LABEL, TYPE_MENU, TYPE_META, TYPE_SECONDARY, ui},
+    metrics::{
+        NARROW_QUICK_OPEN, RADIUS_CONTROL, RADIUS_PANEL, TYPE_LABEL, TYPE_MENU, TYPE_META,
+        TYPE_SECONDARY, narrower_than, ui,
+    },
 };
 
 const WIDTH: f32 = 680.;
@@ -48,6 +60,8 @@ pub struct QuickOpenWorkspace {
     pub detail: String,
     pub active: bool,
     pub letter: Option<String>,
+    /// The loudest agent state in it, while one wants showing.
+    pub attention: Option<DisplayState>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -400,14 +414,41 @@ impl QuickOpen {
     ) -> impl IntoElement + use<> {
         let colors = theme::palette(cx);
         let selected = Some(index) == self.active_index();
-        let (icon, letter, kind_label) = match &item.kind {
-            QuickOpenKind::File(_) => (IconName::File, None, "File"),
-            QuickOpenKind::Workspace(workspace) => {
-                (IconName::PanelLeft, workspace.letter.clone(), "Workspace")
-            }
-            QuickOpenKind::Tab(tab) if tab.is_file => (IconName::File, None, "Open tab"),
-            QuickOpenKind::Tab(_) => (IconName::SquareTerminal, None, "Tab"),
+        // A file wears its type's shape and color, as in the Explorer.
+        let file_icon = |name: &str| {
+            let (shape, tint) = file_icon(name, FileKind::File, None, false);
+            svg()
+                .data(shape.svg())
+                .flex_none()
+                .size(ui(16.))
+                .text_color(tint.color(&colors))
+                .into_any_element()
         };
+        let glyph = |shape: Shape, color| {
+            svg()
+                .data(shape.svg())
+                .flex_none()
+                .size(ui(16.))
+                .text_color(color)
+                .into_any_element()
+        };
+        let (icon, letter, kind_label, attention) = match &item.kind {
+            QuickOpenKind::File(_) => (file_icon(&item.title), None, "File", None),
+            QuickOpenKind::Workspace(workspace) => (
+                Icon::new(Glyph::SidebarLeft)
+                    .xsmall()
+                    .text_color(colors.term_6)
+                    .into_any_element(),
+                workspace.letter.clone(),
+                "Workspace",
+                workspace.attention,
+            ),
+            QuickOpenKind::Tab(tab) if tab.is_file => {
+                (file_icon(&item.title), None, "Open tab", None)
+            }
+            QuickOpenKind::Tab(_) => (glyph(Shape::Shell, colors.chrome_dim), None, "Tab", None),
+        };
+        let glyphs = crate::settings::get(cx).agent_state_glyphs;
         let kind = if item.current {
             format!("{kind_label} · current")
         } else {
@@ -441,7 +482,7 @@ impl QuickOpen {
                 }
             }))
             .on_click(cx.listener(move |this, _, window, cx| this.choose(index, window, cx)))
-            .child(Icon::new(icon).xsmall().text_color(colors.chrome_dim))
+            .child(icon)
             .when_some(letter, |row, letter| {
                 row.child(div().text_color(colors.accent).child(letter))
             })
@@ -459,6 +500,19 @@ impl QuickOpen {
                     .text_size(ui(TYPE_SECONDARY))
                     .child(highlighted(&item.detail, query, colors.accent)),
             )
+            .when_some(attention, |row, state| {
+                row.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "quick-open-attention-{}",
+                            item.key
+                        )))
+                        .role(Role::Image)
+                        .aria_label(format!("Agent {}", state.word()))
+                        .child(state_indicator(state, glyphs, 7., cx))
+                        .test_support(),
+                )
+            })
             .child(
                 div()
                     .flex_none()
@@ -492,7 +546,14 @@ pub fn open(window: &mut Window, cx: &mut App) {
 impl Render for QuickOpen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = theme::palette(cx);
+        // `styles.css` drops the scope's and footer's secondary labels this narrow.
+        let narrow = narrower_than(NARROW_QUICK_OPEN, window);
         let snapshot = Self::snapshot(cx);
+        // The focused pane's directory or connection changed under an open
+        // Quick Open: search the new root, never show the old one's files.
+        if snapshot.search_key != self.searched.0 {
+            self.sync_search(cx);
+        }
         self.refresh_items(&snapshot, cx);
         let query = self.selection.0.clone();
         let max_height = ui(LIST_MAX_HEIGHT)
@@ -537,7 +598,7 @@ impl Render for QuickOpen {
                         .rounded(ui(RADIUS_CONTROL))
                         .bg(colors.chrome_bg)
                         .child(
-                            Icon::new(IconName::Search)
+                            Icon::new(Glyph::Search)
                                 .xsmall()
                                 .text_color(colors.chrome_dim),
                         )
@@ -561,19 +622,36 @@ impl Render for QuickOpen {
                     .pb(ui(7.))
                     .text_size(ui(TYPE_META))
                     .text_color(colors.chrome_dim)
-                    .child(if query.is_empty() {
-                        "Open tabs & workspaces"
-                    } else {
-                        "Matches"
+                    .child({
+                        let heading = if query.is_empty() {
+                            "Open tabs & workspaces"
+                        } else {
+                            "Matches"
+                        };
+                        div()
+                            .id("quick-open-heading")
+                            .aria_label(heading)
+                            .test_support()
+                            .child(heading)
                     })
-                    .child(if self.loading {
-                        "Searching files…".to_owned()
-                    } else {
-                        format!("{} results", self.items.len())
+                    .child({
+                        let count = if self.loading {
+                            "Searching files…".to_owned()
+                        } else {
+                            format!("{} results", self.items.len())
+                        };
+                        div()
+                            .id("quick-open-count")
+                            .aria_label(SharedString::from(count.clone()))
+                            .test_support()
+                            .child(count)
                     }),
             )
             .child(if rows.is_empty() {
                 div()
+                    .id("quick-open-empty")
+                    .aria_label(empty_text)
+                    .test_support()
                     .px(ui(14.))
                     .py(ui(12.))
                     .text_color(colors.chrome_dim)
@@ -596,6 +674,10 @@ impl Render for QuickOpen {
             .when_some(status, |this, status| {
                 this.child(
                     div()
+                        .id("quick-open-status")
+                        .role(Role::Status)
+                        .aria_label(status)
+                        .test_support()
                         .px(ui(14.))
                         .py(ui(7.))
                         .border_t_1()
@@ -614,7 +696,7 @@ impl Render for QuickOpen {
                     .border_color(colors.chrome_hairline)
                     .text_size(ui(TYPE_META))
                     .text_color(colors.chrome_dim)
-                    .child(Icon::new(IconName::Folder).xsmall())
+                    .child(Icon::new(Glyph::Folder).xsmall())
                     .child(
                         div().flex_1().min_w_0().truncate().child(
                             snapshot
@@ -623,7 +705,18 @@ impl Render for QuickOpen {
                                 .unwrap_or_else(|| "No focused terminal directory".to_owned()),
                         ),
                     )
-                    .child(format!("{} · focused pane", snapshot.host_label)),
+                    .child({
+                        let scope = if narrow {
+                            snapshot.host_label.clone()
+                        } else {
+                            format!("{} · focused pane", snapshot.host_label)
+                        };
+                        div()
+                            .id("quick-open-scope-host")
+                            .test_support()
+                            .aria_label(SharedString::from(scope.clone()))
+                            .child(scope)
+                    }),
             )
             .child(
                 h_flex()
@@ -636,10 +729,13 @@ impl Render for QuickOpen {
                     .rounded_b(ui(RADIUS_PANEL))
                     .text_size(ui(TYPE_LABEL))
                     .text_color(colors.chrome_dim)
+                    .when(narrow, |this| this.gap(ui(10.)))
                     .child(hint("↑ ↓ navigate"))
                     .child(hint("↵ open / switch"))
                     .child(hint("esc close"))
-                    .child(div().ml_auto().child("Names & paths")),
+                    .when(!narrow, |this| {
+                        this.child(div().ml_auto().child("Names & paths"))
+                    }),
             )
     }
 }
@@ -655,6 +751,7 @@ mod tests {
             detail: format!("branch-{name}"),
             active,
             letter: None,
+            attention: None,
         }
     }
 

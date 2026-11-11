@@ -29,6 +29,7 @@ use super::{
     prefs::{AUTOMATIONS_EXTENSION, UI_SCALES, clamped_terminal_font_size},
     update,
 };
+use crate::ui::surface_error::SurfaceError;
 use crate::{
     commands,
     connection_ui::{
@@ -762,7 +763,6 @@ impl SettingsDialog {
             }
         };
         let can_test = notifier(cx).is_some() && !self.sending_test;
-        let palette = theme::palette(cx);
         v_flex()
             .gap(ui(12.))
             .child(setting_check(
@@ -820,12 +820,8 @@ impl SettingsDialog {
                     )
                     .child(hint(notification_status_hint(self.notification_status.as_deref()), cx))
                     .children(self.test_failure.as_ref().map(|failure| {
-                        div()
-                            .id("settings-test-failure")
-                            .role(Role::Alert)
-                            .text_size(ui(TYPE_SECONDARY))
-                            .text_color(palette.danger)
-                            .child(format!("The test notification could not be sent. {failure}"))
+                        SurfaceError::new("settings-test-failure", failure.clone())
+                            .summary("The test notification could not be sent.")
                     }))
                     .children(self.test_sent.then(|| {
                         div()

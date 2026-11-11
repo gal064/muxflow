@@ -22,11 +22,12 @@ use crate::{
         self,
         metrics::{TYPE_META, ui},
     },
+    ui::surface_error::SurfaceError,
 };
 
 use super::{
     explorer::{Explorer, ExplorerEvent},
-    view::{MutationAction, surface_error},
+    view::MutationAction,
     wire::{ActiveRoot, FileEntry, FileKind, FileMutation, Relocation},
 };
 
@@ -241,7 +242,7 @@ pub fn open(
 }
 
 impl Render for MutationDialog {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::palette(cx);
         let destructive = self.action == MutationAction::Delete;
         let replaceable = self.replaceable();
@@ -331,7 +332,7 @@ impl Render for MutationDialog {
                 )
             })
             .when_some(self.error.clone(), |this, error| {
-                this.child(surface_error("explorer-mutation-error", &error, window, cx))
+                this.child(SurfaceError::new("explorer-mutation-error", error))
             })
             .child(
                 h_flex()

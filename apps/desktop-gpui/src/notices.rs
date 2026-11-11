@@ -13,16 +13,19 @@ use std::sync::LazyLock;
 use gpui_kit::{
     App, Window,
     component::{
-        Sizable, WindowExt,
+        ActiveTheme, Sizable, Theme, WindowExt,
         button::{Button, ButtonVariants},
-        notification::{Notification, NotificationType},
+        notification::{Notification, NotificationSettings, NotificationType},
     },
     div,
     prelude::*,
 };
 use regex::Regex;
 
-use crate::theme::metrics::ui;
+use crate::{
+    theme::metrics::{NARROW_DIALOGS, narrower_than, ui},
+    ui::surface_error::SurfaceError,
+};
 
 /// Matches the height of the Tauri notice's error details.
 const PROBLEM_MAX_HEIGHT: f32 = 132.;
@@ -101,8 +104,10 @@ pub fn notice_for_status(message: &str) -> Option<StatusNotice> {
     })
 }
 
-/// An error text can be any length, so its card scrolls instead of growing past
-/// the window and taking its Dismiss button with it.
+/// A problem as a sentence with the host's text behind Details, as Tauri's
+/// toast drew `SurfaceError`. An error text can be any length, so its card
+/// scrolls instead of growing past the window and taking its Dismiss button
+/// with it.
 fn problem_card(message: String) -> Notification {
     Notification::new()
         .with_type(NotificationType::Error)
@@ -113,9 +118,29 @@ fn problem_card(message: String) -> Notification {
                 .max_h(ui(PROBLEM_MAX_HEIGHT))
                 .overflow_y_scroll()
                 .text_sm()
-                .child(message.clone())
+                // The card itself is the alert, so the text inside it is not one.
+                .child(SurfaceError::new("problem-notice-error", message.clone()).no_role())
                 .into_any_element()
         })
+}
+
+/// Kit draws notices at one width; `styles.css` spans a 600 CSS px or narrower
+/// window with them instead, 8 px in from each side. Called each frame from the
+/// shell, and writes only on a change: the theme is shared and observed.
+pub fn fit_to(window: &Window, cx: &mut App) {
+    let defaults = NotificationSettings::default();
+    let (width, side) = if narrower_than(NARROW_DIALOGS, window) {
+        let margin = ui(8.).to_pixels(window.rem_size());
+        (window.viewport_size().width - margin * 2., margin)
+    } else {
+        (defaults.width, defaults.margins.right)
+    };
+    let current = &cx.theme().notification;
+    if current.width != width || current.margins.right != side {
+        let settings = &mut Theme::global_mut(cx).notification;
+        settings.width = width;
+        settings.margins.right = side;
+    }
 }
 
 /// The status notice's identity: a new one replaces the one showing.

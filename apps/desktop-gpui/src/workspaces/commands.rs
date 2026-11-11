@@ -333,16 +333,19 @@ impl Workspaces {
         }
     }
 
-    fn focus_direction(&mut self, direction: PaneDirection, cx: &mut Context<Self>) {
+    /// Whether there was a pane that way to move to.
+    fn focus_direction(&mut self, direction: PaneDirection, cx: &mut Context<Self>) -> bool {
         let view = self.view(cx);
         let Some(active) = &view.active_pane else {
-            return;
+            return false;
         };
         let panes: Vec<&Pane> = view.panes.iter().collect();
-        if let Some(target) = adjacent_pane(&panes, active, direction) {
-            let (host, pane) = (view.host.clone(), target.id.clone());
-            self.select_pane(&host, &pane, cx);
-        }
+        let Some(target) = adjacent_pane(&panes, active, direction) else {
+            return false;
+        };
+        let (host, pane) = (view.host.clone(), target.id.clone());
+        self.select_pane(&host, &pane, cx);
+        true
     }
 
     /// Docks the selected document beside the terminal, or returns the docked
@@ -633,7 +636,34 @@ pub fn run(
         _ => None,
     };
     if let Some(direction) = direction {
-        this.update(cx, |this, cx| this.focus_direction(direction, cx));
+        // A docked document is one more column past the edge panes: stepping
+        // off the edge toward it goes in, and stepping any other way comes out.
+        let view = this.read(cx).view(cx);
+        let docked = view.docked.map(|(tab, side)| (tab.id, side));
+        let toward = |side| {
+            matches!(
+                (direction, side),
+                (PaneDirection::Left, DockSide::Left) | (PaneDirection::Right, DockSide::Right)
+            )
+        };
+        if let Some((_, side)) = &docked
+            && crate::editor::holds_focus(window)
+        {
+            if !toward(*side) {
+                super::focus_terminal(this, window, cx);
+            }
+            return;
+        }
+        let moved = this.update(cx, |this, cx| this.focus_direction(direction, cx));
+        if !moved
+            && view.active_pane.is_some()
+            && let Some((id, side)) = docked
+            && toward(side)
+        {
+            crate::editor::request_focus(&id, cx);
+            // The next draw of the workspace hands the keyboard over.
+            this.update(cx, |_, cx| cx.notify());
+        }
         return;
     }
     match id {
@@ -991,18 +1021,28 @@ impl QuickOpenSource for Source {
         };
         let this = this.read(cx);
         let view = this.view(cx);
+        // Only the active workspace has a known branch: searching for one is
+        // the fastest way back to it.
+        let branch =
+            crate::git::active_status(cx).and_then(|status| status.repository.head_name.clone());
         let workspaces = this
             .rows(false, cx)
             .into_iter()
             .map(|row| QuickOpenWorkspace {
                 key: format!("workspace:{}", row.key),
-                detail: [row.path.clone().unwrap_or_default(), row.host_label.clone()]
-                    .into_iter()
-                    .filter(|part| !part.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" · "),
+                detail: [
+                    row.active.then(|| branch.clone()).flatten(),
+                    row.path.clone(),
+                    Some(row.host_label.clone()),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · "),
                 active: row.active,
                 letter: (!row.letter.is_empty()).then(|| row.letter.clone()),
+                attention: row.agents.state,
                 name: row.session.name,
             })
             .collect();

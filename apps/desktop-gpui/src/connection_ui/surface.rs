@@ -21,7 +21,9 @@ use gpui_kit::{
 use crate::notices;
 use crate::theme::{
     self,
-    metrics::{TITLEBAR_HEIGHT, TYPE_META, TYPE_ROW, TYPE_SECONDARY, ui},
+    metrics::{
+        NARROW_DIALOGS, TITLEBAR_HEIGHT, TYPE_META, TYPE_ROW, TYPE_SECONDARY, narrower_than, ui,
+    },
 };
 
 use super::{
@@ -274,6 +276,46 @@ impl ConnectionSurface {
         ))
     }
 
+    fn app_state_recovery_toast(
+        controller: &Entity<ConnectionController>,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let error = controller.read(cx).app_state_recovery()?.to_owned();
+        let reset = controller.clone();
+        Some(
+            toast(
+                "connection-state-recovery",
+                Role::Alert,
+                "Saved shell state is write-frozen".into(),
+                error.into(),
+                cx,
+            )
+            .child(
+                Button::new("connection-state-recovery-reset")
+                    .xsmall()
+                    .label("Reset saved shell state…")
+                    .on_click(move |_, window, cx| {
+                        let target = reset.clone();
+                        open_confirmation(
+                            Confirmation {
+                                title: "Reset saved shell state?",
+                                detail: "The incompatible or malformed file will be preserved beside app-state.json, then shell preferences and app-owned tabs will start empty. tmux sessions and terminal processes are not changed.".into(),
+                                confirm_label: "Preserve and reset",
+                                destructive: false,
+                                on_confirm: Box::new(move |_, cx| {
+                                    target.update(cx, |controller, cx| {
+                                        controller.confirm_app_state_reset(cx)
+                                    });
+                                }),
+                            },
+                            window,
+                            cx,
+                        );
+                    }),
+            ),
+        )
+    }
+
     fn app_recovery_toast(
         controller: &Entity<ConnectionController>,
         cx: &mut Context<Self>,
@@ -336,7 +378,7 @@ fn toast(
         .occlude()
         .role(role)
         .aria_label(title.clone())
-        .w(ui(340.))
+        .w_full()
         .gap(ui(6.))
         .p(ui(10.))
         .rounded(cx.theme().radius)
@@ -373,15 +415,24 @@ impl Render for ConnectionSurface {
             .strip_ready
             .then(|| Self::disconnected_strip(&controller, cx))
             .flatten();
+        // A narrow window gives the offers its whole width, as `styles.css` does.
+        let narrow = narrower_than(NARROW_DIALOGS, window);
         let toasts = v_flex()
             .id("connection-offers")
             .absolute()
-            .right(ui(12.))
-            .bottom(ui(12.))
+            .map(|this| {
+                if narrow {
+                    this.left(ui(8.)).right(ui(8.)).bottom(ui(8.))
+                } else {
+                    this.w(ui(340.)).right(ui(12.)).bottom(ui(12.))
+                }
+            })
             .gap(ui(8.))
-            .items_end()
             .children(
                 Self::profile_recovery_toast(&controller, cx).map(IntoElement::into_any_element),
+            )
+            .children(
+                Self::app_state_recovery_toast(&controller, cx).map(IntoElement::into_any_element),
             )
             .children(Self::app_recovery_toast(&controller, cx).map(IntoElement::into_any_element));
         root.children(strip).child(toasts)

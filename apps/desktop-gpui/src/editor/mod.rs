@@ -30,9 +30,9 @@ use std::{any::Any, rc::Rc, sync::Arc};
 
 use desktop_core::app_state::{AppTabKind, AppTabRecord};
 use gpui_kit::{
-    AnyElement, App, AppContext, Entity, Focusable, Global, InteractiveElement, IntoElement,
-    ParentElement, Role, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
-    Window, div,
+    AnyElement, App, AppContext, Entity, FocusHandle, Focusable, Global, InteractiveElement,
+    IntoElement, ParentElement, Role, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Task, Window, div,
 };
 
 pub use document::{Document, FileNotice};
@@ -93,6 +93,9 @@ struct Editors {
     focus_request: Option<String>,
     /// The keyboard was in a document that went away.
     focus_lost: bool,
+    /// The pointer's current rest on the docked document, for focus follows
+    /// mouse.
+    dock_hover: Option<Task<()>>,
 }
 
 impl Global for Editors {}
@@ -247,6 +250,11 @@ pub fn shown(
             selected.clone().filter(|_| lost)
         });
     let editors = cx.global_mut::<Editors>();
+    // A dock that went away under the pointer never saw it leave: the next
+    // docked document starts with no rest recorded.
+    if editors.docked != docked_tab {
+        editors.dock_hover = None;
+    }
     (editors.selected, editors.docked) = (selected, docked_tab);
     editors.focus_request = None;
     editors.focus_lost = false;
@@ -255,20 +263,94 @@ pub fn shown(
     };
     // After this draw, which mounts the pane.
     window.defer(cx, move |window, cx| {
-        let pane = cx
-            .global::<Editors>()
-            .panes
-            .iter()
-            .find(|(pane_id, _)| *pane_id == id)
-            .map(|(_, pane)| pane.clone());
-        if let Some(pane) = pane {
-            let target = match pane.read(cx).editor(cx) {
-                Some(editor) => editor.read(cx).focus_handle(cx),
-                None => pane.read(cx).focus.clone(),
-            };
+        if let Some(target) = input_focus(&id, cx) {
             window.focus(&target, cx);
         }
     });
+}
+
+/// The handle that takes the keyboard in document `id`: its editor, or the
+/// pane itself while it has none.
+fn input_focus(id: &str, cx: &App) -> Option<FocusHandle> {
+    let (_, pane) = cx
+        .try_global::<Editors>()?
+        .panes
+        .iter()
+        .find(|(pane_id, _)| pane_id == id)?;
+    let pane = pane.read(cx);
+    Some(match pane.editor(cx) {
+        Some(editor) => editor.read(cx).focus_handle(cx),
+        None => pane.focus.clone(),
+    })
+}
+
+/// The docked document's tab id, while one is on screen.
+pub fn docked_id(cx: &App) -> Option<String> {
+    cx.try_global::<Editors>()?
+        .docked
+        .as_ref()
+        .map(|(_, id)| id.clone())
+}
+
+/// Whether the keyboard is in the docked document's own text. Hover moves it
+/// to and from there like a pane; the find fields in the dock keep it.
+pub fn dock_input_focused(window: &Window, cx: &App) -> bool {
+    docked_id(cx)
+        .and_then(|id| input_focus(&id, cx))
+        .is_some_and(|handle| handle.is_focused(window))
+}
+
+/// Focus follows mouse onto the docked document, as onto a pane: decided
+/// once per entry, after the pointer rests there.
+pub fn dock_hover_moved(pressed: bool, window: &mut Window, cx: &mut App) {
+    if !cx.has_global::<Editors>() || cx.global::<Editors>().dock_hover.is_some() {
+        return;
+    }
+    // A held button is a selection or a drag, and the place a drag just
+    // dropped is no hover either.
+    let after_drag = crate::dragdrop::ended_at(cx).is_some_and(|ended| {
+        ended.elapsed() < crate::terminal::integration::frames::AFTER_GRAB_QUIET
+    });
+    let task = if pressed || crate::dragdrop::active(cx) || after_drag {
+        Task::ready(())
+    } else {
+        let timer = cx
+            .background_executor()
+            .timer(crate::terminal::integration::frames::HOVER_FOCUS_DELAY);
+        window.spawn(cx, async move |cx| {
+            timer.await;
+            let _ = cx.update(dock_hover_rested);
+        })
+    };
+    cx.global_mut::<Editors>().dock_hover = Some(task);
+}
+
+pub fn dock_hover_left(cx: &mut App) {
+    if cx.has_global::<Editors>() {
+        cx.global_mut::<Editors>().dock_hover = None;
+    }
+}
+
+/// Every check again now, because the delay is exactly when a dialog or a
+/// menu can open: the keyboard moves only out of a terminal pane, or from nowhere.
+fn dock_hover_rested(window: &mut Window, cx: &mut App) {
+    let in_terminal = window
+        .context_stack()
+        .iter()
+        .any(|context| context.contains(crate::terminal::input::KEY_CONTEXT));
+    // As with panes, nothing focused is free to take; anything but a pane
+    // keeps the keyboard.
+    let free = in_terminal || window.focused(cx).is_none();
+    if !crate::settings::get(cx).focus_follows_mouse
+        || !window.is_window_active()
+        || crate::dragdrop::active(cx)
+        || !free
+    {
+        return;
+    }
+    if let Some(target) = docked_id(cx).and_then(|id| input_focus(&id, cx)) {
+        window.focus(&target, cx);
+    }
 }
 
 /// Gives the keyboard to the document tab `id` the next time it is drawn,

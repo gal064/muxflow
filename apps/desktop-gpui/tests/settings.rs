@@ -498,3 +498,32 @@ fn done_closes_every_tab_but_connection_which_has_connect(cx: &mut TestAppContex
         assert!(window.try_find_by_label("Connect").is_some());
     });
 }
+
+#[gpui_kit::test]
+fn a_reset_of_saved_state_makes_its_defaults_live(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(
+        dir.path(),
+        json!({ "theme": "dark", "copyOnSelect": false }),
+    );
+    let handle = open_app(&state, cx);
+    let palette_opens = |cx: &mut TestAppContext| {
+        press(handle, "ctrl-k", cx);
+        let open = with_window(handle, cx, |window, cx| window.has_active_dialog(cx));
+        if open {
+            press(handle, "escape", cx);
+        }
+        open
+    };
+    assert!(!palette_opens(cx), "the saved override moved it");
+    let defaults = desktop_core::app_state::PersistedAppState::default();
+    cx.update(|cx| {
+        settings::reload(&defaults, cx);
+        muxflow_gpui::commands::reload_overrides(&defaults, cx);
+    });
+    assert_eq!(
+        cx.read(|cx| settings::get(cx).clone()),
+        Prefs::from_state(&defaults)
+    );
+    assert!(palette_opens(cx));
+}

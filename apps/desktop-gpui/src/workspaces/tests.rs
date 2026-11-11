@@ -792,6 +792,23 @@ fn the_all_tabs_button_follows_the_window_without_lagging(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn a_narrow_window_caps_tabs_tighter(cx: &mut TestAppContext) {
+    let long = "a_file_name_long_enough_to_reach_the_cap_of_any_tab.rs";
+    let tabs = json!([doc("a", long, 0)]);
+    let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
+    let width = |shell: &mut Shell| {
+        shell.settle();
+        shell
+            .visual
+            .update(|window, _| window.find_by_label(long).bounds().size.width)
+    };
+    let wide = width(&mut shell);
+    assert!(wide > px(150.) && wide <= px(220.), "{wide:?}");
+    shell.visual.simulate_resize(size(px(860.), px(700.)));
+    assert!(width(&mut shell) <= px(150.));
+}
+
+#[gpui_kit::test]
 fn selecting_with_a_dock_open_follows_the_dock_rules(cx: &mut TestAppContext) {
     let tabs = json!([doc("a", "main.rs", 0), doc("b", "lib.rs", 1)]);
     let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
@@ -809,6 +826,117 @@ fn selecting_with_a_dock_open_follows_the_dock_rules(cx: &mut TestAppContext) {
     assert_eq!(shell.selected("main.rs"), Some(false));
     assert_eq!(shell.selected("editor"), Some(true));
     assert!(shell.shows("Resize the docked document"));
+}
+
+#[gpui_kit::test]
+fn pane_focus_steps_into_the_docked_document_past_the_edge_and_back(cx: &mut TestAppContext) {
+    let mut tab = doc("a", "main.rs", 0);
+    // A root, so the document mounts a pane that can hold the keyboard.
+    tab["rootPath"] = json!("/repo");
+    tab["rootToken"] = json!("root");
+    let mut shell = shell(cx, json!([tab]), json!({ "tabsInTitleBar": false }));
+    let workspaces = shell.workspaces();
+    shell.visual.update(|_, cx| {
+        workspaces.update(cx, |this, cx| {
+            this.dock_tab("a", Some(desktop_core::app_state::DockSide::Left), cx)
+        })
+    });
+    shell.settle();
+    let in_dock = |shell: &mut Shell| {
+        shell.visual.update(|window, cx| {
+            window.render_frame(cx);
+            crate::editor::holds_focus(window)
+        })
+    };
+    assert!(!in_dock(&mut shell));
+    // %1 is the leftmost pane: off its edge toward the dock goes in.
+    shell.run("pane.focusLeft");
+    assert!(in_dock(&mut shell));
+    // Toward the dock again stays; any other way comes back out.
+    shell.run("pane.focusLeft");
+    assert!(in_dock(&mut shell));
+    shell.run("pane.focusUp");
+    assert!(!in_dock(&mut shell));
+    shell.run("pane.focusLeft");
+    assert!(in_dock(&mut shell));
+    shell.run("pane.focusRight");
+    assert!(!in_dock(&mut shell));
+}
+
+#[gpui_kit::test]
+fn focus_follows_the_mouse_onto_the_docked_document_and_back(cx: &mut TestAppContext) {
+    let mut tab = doc("a", "main.rs", 0);
+    tab["rootPath"] = json!("/repo");
+    tab["rootToken"] = json!("root");
+    let mut shell = shell(
+        cx,
+        json!([tab]),
+        json!({ "tabsInTitleBar": false, "focusFollowsMouse": true }),
+    );
+    let workspaces = shell.workspaces();
+    shell.visual.update(|window, cx| {
+        window.activate_window();
+        workspaces.update(cx, |this, cx| {
+            this.dock_tab("a", Some(desktop_core::app_state::DockSide::Left), cx)
+        })
+    });
+    shell.settle();
+    let in_dock = |shell: &mut Shell| {
+        shell.visual.update(|window, cx| {
+            window.render_frame(cx);
+            crate::editor::holds_focus(window)
+        })
+    };
+    // The dock is on the left, so its divider is its right edge.
+    let edge = shell.visual.update(|window, _| {
+        window
+            .find_by_label("Resize the docked document")
+            .bounds()
+            .center()
+    });
+    let rest_on = |shell: &mut Shell, at: gpui_kit::Point<gpui_kit::Pixels>| {
+        shell
+            .visual
+            .simulate_mouse_move(at, None, gpui_kit::Modifiers::none());
+        shell.visual.run_until_parked();
+        shell
+            .visual
+            .executor()
+            .advance_clock(crate::terminal::integration::frames::HOVER_FOCUS_DELAY);
+        shell.visual.run_until_parked();
+    };
+    // The keyboard starts in the terminal pane.
+    shell
+        .visual
+        .update(|window, cx| crate::workspaces::focus_terminal(&workspaces, window, cx));
+    shell.settle();
+    assert!(!in_dock(&mut shell));
+    rest_on(&mut shell, gpui_kit::point(edge.x - px(60.), edge.y));
+    assert!(
+        in_dock(&mut shell),
+        "resting on the dock takes the keyboard"
+    );
+    rest_on(&mut shell, gpui_kit::point(edge.x + px(60.), edge.y));
+    assert!(!in_dock(&mut shell), "resting on a pane takes it back");
+
+    // The dock goes away under the pointer, which so never leaves it; the
+    // next docked document still takes the keyboard on a rest.
+    let on_dock = gpui_kit::point(edge.x - px(60.), edge.y);
+    rest_on(&mut shell, on_dock);
+    shell
+        .visual
+        .update(|_, cx| workspaces.update(cx, |this, cx| this.undock(cx)));
+    shell.settle();
+    shell.visual.update(|window, cx| {
+        workspaces.update(cx, |this, cx| {
+            this.dock_tab("a", Some(desktop_core::app_state::DockSide::Left), cx)
+        });
+        crate::workspaces::focus_terminal(&workspaces, window, cx);
+    });
+    shell.settle();
+    assert!(!in_dock(&mut shell));
+    rest_on(&mut shell, on_dock);
+    assert!(in_dock(&mut shell), "a new dock is a new entry");
 }
 
 #[test]
@@ -857,12 +985,16 @@ mod agent_seams {
         workspaces::model::terminal_key,
     };
 
-    type Requests = Rc<RefCell<Vec<(String, AgentCommand)>>>;
+    pub(super) type Requests = Rc<RefCell<Vec<(String, AgentCommand)>>>;
+
+    /// What each `branch` request is answered with, in order.
+    pub(super) type Branches = Vec<BoxFuture<'static, Result<Value, String>>>;
 
     /// Each host's agents, told by the client the request came over.
     struct ByClient {
         agents: HashMap<&'static str, Vec<Value>>,
         requests: Requests,
+        branches: RefCell<VecDeque<BoxFuture<'static, Result<Value, String>>>>,
     }
 
     impl AgentTransport for ByClient {
@@ -871,6 +1003,13 @@ mod agent_seams {
             client: String,
             command: AgentCommand,
         ) -> BoxFuture<'static, Result<Value, String>> {
+            if command.operation == "branch" {
+                let answer = self.branches.borrow_mut().pop_front();
+                self.requests.borrow_mut().push((client, command));
+                return answer.unwrap_or_else(|| {
+                    futures::future::ready(Err("no branch answer".into())).boxed()
+                });
+            }
             let answer = match command.operation.as_str() {
                 "snapshot" => Ok(snapshot_answer(
                     &command,
@@ -887,7 +1026,7 @@ mod agent_seams {
         }
     }
 
-    fn agent(id: &str, host: &str, place: (&str, &str, &str, &str)) -> Value {
+    pub(super) fn agent(id: &str, host: &str, place: (&str, &str, &str, &str)) -> Value {
         let (session, session_name, window, pane) = place;
         let mut agent = wire_agent("blocked", 7, Some("blocked"), 0);
         agent["agentId"] = json!(id);
@@ -904,7 +1043,7 @@ mod agent_seams {
 
     /// Local, with `notes` pinned, and a second host over ssh showing the
     /// same [`world`].
-    fn two_hosts(cx: &mut TestAppContext) -> Shell {
+    pub(super) fn two_hosts(cx: &mut TestAppContext) -> Shell {
         let remote = json!({
             "id": "remote", "label": "Remote",
             "connection": { "mode": "ssh", "profileId": "remote", "target": "remote" },
@@ -928,14 +1067,26 @@ mod agent_seams {
     /// The runtime on the shell's controller, kept in step with it as
     /// `agents::start` keeps it.
     fn start_agents(shell: &mut Shell, agents: HashMap<&'static str, Vec<Value>>) -> Requests {
+        start_agents_with(shell, agents, Vec::new()).0
+    }
+
+    /// [`start_agents`], with `branches` answered in order and the runtime's
+    /// clock handed back.
+    pub(super) fn start_agents_with(
+        shell: &mut Shell,
+        agents: HashMap<&'static str, Vec<Value>>,
+        branches: Branches,
+    ) -> (Requests, Rc<Effects>) {
         let requests = Requests::default();
         let transport = Rc::new(ByClient {
             agents,
             requests: requests.clone(),
+            branches: RefCell::new(branches.into()),
         });
+        let clock = Rc::new(Effects::default());
         shell.visual.update(|_, cx| {
             let controller = cx.global::<ConnectionUi>().0.clone();
-            let effects = Rc::new(Recorded(Rc::new(Effects::default())));
+            let effects = Rc::new(Recorded(clock.clone()));
             let runtime = cx.new(|_| AgentRuntime::new(transport, effects));
             cx.set_global(Agents {
                 runtime: runtime.clone(),
@@ -949,10 +1100,10 @@ mod agent_seams {
             agents::sync(&controller, &runtime, cx);
         });
         shell.settle();
-        requests
+        (requests, clock)
     }
 
-    fn active_host(shell: &mut Shell) -> String {
+    pub(super) fn active_host(shell: &mut Shell) -> String {
         shell
             .visual
             .update(|_, cx| cx.global::<ConnectionUi>().0.read(cx).active_profile_id())
@@ -1156,6 +1307,48 @@ mod agent_seams {
             .visual
             .update(|_, cx| agents::open_pane("remote", "%7", cx));
         assert!(gone.is_err());
+    }
+
+    #[gpui_kit::test]
+    fn an_agent_on_another_host_whose_pane_is_gone_opens_its_workspace(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(
+            &mut shell,
+            HashMap::from([(
+                "client-2",
+                vec![agent("gone", "remote", ("$2", "notes", "@3", "%9"))],
+            )]),
+        );
+        let statuses = Rc::new(RefCell::new(Vec::<String>::new()));
+        shell.visual.update(|_, cx| {
+            let controller = cx.global::<ConnectionUi>().0.clone();
+            let log = statuses.clone();
+            cx.subscribe(
+                &controller,
+                move |_, event: &crate::connection_ui::controller::ConnectionEvent, _| {
+                    if let crate::connection_ui::controller::ConnectionEvent::Status(message) =
+                        event
+                    {
+                        log.borrow_mut().push(message.clone());
+                    }
+                },
+            )
+            .detach();
+            let (all, _) = agents::rows(cx, AgentSortMode::Workspace, false);
+            let row = all.iter().find(|row| row.agent.id == "gone").unwrap();
+            agents::open_row(row, cx);
+        });
+        shell.settle();
+        assert_eq!(active_host(&mut shell), "remote");
+        assert!(
+            statuses
+                .borrow()
+                .iter()
+                .any(|status| status.ends_with("; opening its workspace.")),
+            "{:?}",
+            statuses.borrow()
+        );
+        assert_eq!(shell.host.last("selectSession")["session_id"], "$2");
     }
 
     /// The agents feature follows the controller ahead of the shell, so a
@@ -1611,4 +1804,678 @@ fn a_tab_dropped_back_on_itself_is_not_clicked(cx: &mut TestAppContext) {
     assert_eq!(shell.selected("editor"), Some(true));
     assert_eq!(shell.selected("server"), Some(false));
     assert_eq!(shell.count("moveWindow") + shell.count("reorderWindow"), 0);
+}
+
+// Commands against a named target, from `useShellCommands.test.tsx`, and the
+// shell over two hosts, from `App.multiHost.test.tsx`.
+
+impl Shell {
+    fn status(&mut self) -> String {
+        self.visual
+            .update(|_, cx| cx.global::<ConnectionUi>().0.read(cx).status().to_owned())
+    }
+
+    fn scope(&mut self) -> crate::connection_ui::host_scope::HostScopeToken {
+        let workspaces = self.workspaces();
+        self.visual
+            .update(|_, cx| workspaces.read(cx).view(cx).scope.expect("connected"))
+    }
+
+    fn run_on(&mut self, id: &'static str, target: super::Target) {
+        let workspaces = self.workspaces();
+        self.visual
+            .update(|window, cx| super::run_command(&workspaces, id, Some(target), window, cx));
+        self.settle();
+    }
+
+    fn dialog_open(&mut self) -> bool {
+        use gpui_kit::component::WindowExt;
+        self.visual
+            .update(|window, cx| window.has_active_dialog(cx))
+    }
+
+    fn value(&mut self, label: &str) -> Option<String> {
+        self.visual
+            .update(|window, _| window.find_by_label(label).value().map(str::to_owned))
+    }
+
+    /// Replaces what the focused field holds and submits it.
+    fn answer(&mut self, text: &str) {
+        self.visual.update(|window, cx| {
+            window.press("secondary-a", cx);
+            window.input(text, cx);
+            window.press("enter", cx);
+        });
+        self.settle();
+    }
+
+    /// A click on whatever carries `label`, as a menu item that has no id.
+    fn click_label(&mut self, label: &str) {
+        use gpui_kit::{Modifiers, MouseButton};
+        let at = self.center(label);
+        self.visual
+            .simulate_mouse_move(at, None, Modifiers::default());
+        self.visual
+            .simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        self.visual
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        self.settle();
+    }
+
+    /// How many closes and renames reached a host.
+    fn acted(&self) -> usize {
+        [
+            "closeWindow",
+            "closePane",
+            "closeSession",
+            "renameSession",
+            "renameWindow",
+        ]
+        .into_iter()
+        .map(|kind| self.count(kind))
+        .sum()
+    }
+
+    fn app_tab_ids(&mut self) -> Vec<String> {
+        let workspaces = self.workspaces();
+        self.visual.update(|_, cx| {
+            workspaces
+                .read(cx)
+                .view(cx)
+                .app_tabs
+                .iter()
+                .map(|tab| tab.id.clone())
+                .collect()
+        })
+    }
+}
+
+#[gpui_kit::test]
+fn a_rename_opens_on_the_name_the_tab_shows(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    // ✓ is a ticker frame and ordinary punctuation; the strip hides a leading
+    // one either way, and the dialog matches the strip.
+    for (generation, (named, shown)) in [
+        ("✳ Fix tests", "Fix tests"),
+        ("✓ Deploy checklist", "Deploy checklist"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut next = world("@1");
+        next.windows[0].name = named.into();
+        shell.publish(vec![snapshot_frame(2 + generation as u64, &next)]);
+        shell.run("window.rename");
+        assert_eq!(shell.value("Tab name").as_deref(), Some(shown));
+        shell.visual.update(|window, cx| window.press("escape", cx));
+        shell.settle();
+    }
+}
+
+#[gpui_kit::test]
+fn an_explicit_target_is_acted_on_alone(cx: &mut TestAppContext) {
+    use super::Target;
+    let tabs = json!([doc("a", "main.rs", 0), doc("b", "lib.rs", 1)]);
+    let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
+    let scope = shell.scope();
+    // On screen: `@1`, split, with `%1` focused. Each target names something else.
+    shell.run_on("window.close", Target::Window(scope.clone(), "@2".into()));
+    assert_eq!(shell.host.last("closeWindow")["window_id"], "@2");
+    assert_eq!(shell.count("closePane"), 0, "not the focused pane");
+    shell.run_on("pane.close", Target::Pane(scope.clone(), "%2".into()));
+    assert_eq!(shell.host.last("closePane")["pane_id"], "%2");
+    shell.run_on(
+        "session.rename",
+        Target::Session(scope.clone(), "$2".into()),
+    );
+    assert_eq!(shell.value("Workspace name").as_deref(), Some("notes"));
+    shell.visual.update(|window, cx| window.press("escape", cx));
+    shell.settle();
+    shell.click("workspace-tab-app:a");
+    shell.run_on("window.close", Target::AppTab(scope, "b".into()));
+    assert_eq!(shell.app_tab_ids(), ["a"]);
+    assert_eq!(shell.selected("main.rs"), Some(true));
+}
+
+#[gpui_kit::test]
+fn a_stale_explicit_target_never_falls_back_to_what_is_on_screen(cx: &mut TestAppContext) {
+    use super::Target;
+    let tabs = json!([doc("a", "main.rs", 0)]);
+    let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
+    let scope = shell.scope();
+    shell.run_on(
+        "window.close",
+        Target::Window(scope.clone(), "@missing".into()),
+    );
+    shell.run_on("pane.close", Target::Pane(scope.clone(), "%missing".into()));
+    shell.run_on(
+        "session.close",
+        Target::Session(scope.clone(), "$missing".into()),
+    );
+    shell.run_on(
+        "session.rename",
+        Target::Session(scope.clone(), "$missing".into()),
+    );
+    assert!(
+        !shell.dialog_open(),
+        "no confirmation or prompt for nothing"
+    );
+    shell.click("workspace-tab-app:a");
+    shell.run_on("window.close", Target::AppTab(scope, "tab-missing".into()));
+    assert_eq!(shell.app_tab_ids(), ["a"]);
+    assert_eq!(shell.acted(), 0, "{:?}", shell.host.kinds());
+}
+
+/// A target read before its host scope was replaced names ids that may now
+/// be another server's: refused, whichever part of the scope moved.
+#[gpui_kit::test]
+fn a_target_from_a_replaced_host_scope_is_refused(cx: &mut TestAppContext) {
+    use super::Target;
+    let mut shell = shell(cx, json!([]), json!({}));
+    let current = shell.scope();
+    let replaced = [
+        crate::connection_ui::host_scope::HostScopeToken {
+            host_profile_id: "replacement".into(),
+            ..current.clone()
+        },
+        crate::connection_ui::host_scope::HostScopeToken {
+            connection_key: "ssh:replacement".into(),
+            ..current.clone()
+        },
+        crate::connection_ui::host_scope::HostScopeToken {
+            connection_epoch: current.connection_epoch + 1,
+            ..current.clone()
+        },
+        crate::connection_ui::host_scope::HostScopeToken {
+            server_identity: Some("server-b".into()),
+            ..current.clone()
+        },
+    ];
+    for stale in replaced {
+        shell.run_on("window.close", Target::Window(stale.clone(), "@1".into()));
+        // The tab menu's Close Pane, captured before the switch.
+        shell.run_on("pane.close", Target::Pane(stale, "%1".into()));
+    }
+    assert_eq!(shell.acted(), 0, "{:?}", shell.host.kinds());
+    // The same ids under the live scope do reach the host.
+    shell.run_on("window.close", Target::Window(current.clone(), "@1".into()));
+    assert_eq!(shell.count("closeWindow"), 1);
+    shell.run_on("pane.close", Target::Pane(current, "%1".into()));
+    assert_eq!(shell.acted(), 2, "{:?}", shell.host.kinds());
+}
+
+#[gpui_kit::test]
+fn a_new_terminal_tab_from_a_document_keeps_the_document(cx: &mut TestAppContext) {
+    let mut notes = doc("b", "notes.md", 1);
+    notes["kind"] = json!("markdown");
+    notes["viewMode"] = json!("split");
+    let tabs = json!([doc("a", "main.rs", 0), notes]);
+    let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
+    for tab in ["workspace-tab-app:a", "workspace-tab-app:b"] {
+        shell.click(tab);
+        shell.run("window.new");
+        assert_eq!(shell.host.last("createWindow")["session_id"], "$1");
+        assert_eq!(shell.app_tab_ids(), ["a", "b"]);
+    }
+    assert_eq!(shell.count("createWindow"), 2);
+}
+
+#[gpui_kit::test]
+fn the_pinned_only_filter_is_set_from_either_palette_command(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    let workspaces = shell.workspaces();
+    let filter = |shell: &mut Shell| {
+        shell.visual.update(|_, cx| {
+            (
+                workspaces.read(cx).pinned_only,
+                cx.global::<commands::Commands>().context().pinned_only,
+            )
+        })
+    };
+    shell.run("workspaces.showPinnedOnly");
+    assert_eq!(filter(&mut shell), (true, true));
+    shell.run("workspaces.showAll");
+    assert_eq!(filter(&mut shell), (false, false));
+    assert!(shell.host.kinds().is_empty(), "nothing goes to tmux");
+}
+
+#[gpui_kit::test]
+fn closing_a_file_tab_says_nothing(cx: &mut TestAppContext) {
+    let tabs = json!([doc("a", "main.rs", 0)]);
+    let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
+    shell.click("workspace-tab-app:a");
+    let before = shell.status();
+    let scope = shell.scope();
+    shell.run_on("window.close", super::Target::AppTab(scope, "a".into()));
+    assert!(shell.app_tab_ids().is_empty());
+    assert_eq!(shell.status(), before, "the tab going is the message");
+}
+
+mod multi_host {
+    use std::{
+        collections::HashMap,
+        rc::Rc,
+        time::{Duration, Instant},
+    };
+
+    use desktop_core::app_state::{AgentSortMode, load_app_state};
+    use gpui_kit::Modifiers;
+
+    use super::{
+        agent_seams::{Branches, Requests, active_host, agent, start_agents_with, two_hosts},
+        *,
+    };
+    use crate::{agents, commands::RowCommandSource, workspaces::Target};
+
+    fn row(
+        shell: &mut Shell,
+        host: &str,
+        session: &str,
+    ) -> (usize, crate::workspaces::rows::WorkspaceRow) {
+        let workspaces = shell.workspaces();
+        shell.visual.update(|_, cx| {
+            workspaces
+                .read(cx)
+                .rows(true, cx)
+                .into_iter()
+                .enumerate()
+                .find(|(_, row)| row.host_profile_id == host && row.session.id == session)
+                .expect("the row is listed")
+        })
+    }
+
+    fn shown(shell: &mut Shell, host: &str) -> bool {
+        shell
+            .visual
+            .update(|_, cx| cx.global::<ConnectionUi>().0.read(cx).link(host).is_some())
+    }
+
+    /// Waits for the New workspace host to reach the saved state: it is
+    /// written off the UI thread.
+    fn remembered(shell: &mut Shell, expected: &str) {
+        let store = shell
+            .visual
+            .update(|_, cx| cx.global::<crate::app::Core>().app_state.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let saved = load_app_state(&store)
+                .ok()
+                .and_then(|state| state.shell.new_workspace_host_profile_id);
+            if saved.as_deref() == Some(expected) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "remembered {saved:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_active_hosts_menu_item_cannot_hide_it(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        shell.click("host-row-button");
+        shell.click_label("L Local");
+        assert!(shown(&mut shell, "local"));
+        assert_eq!(active_host(&mut shell), "local");
+        // Only the peer's item toggles. A disabled item may leave the menu up.
+        if !shell.shows("R Remote") {
+            shell.click("host-row-button");
+        }
+        shell.click_label("R Remote");
+        assert!(!shown(&mut shell, "remote"));
+        assert!(shown(&mut shell, "local"));
+    }
+
+    fn open_new_workspace_on_remote(shell: &mut Shell) {
+        shell.run("session.new");
+        assert!(shell.shows("Host: Local"));
+        remembered(shell, "local");
+        shell.click("new-workspace-host");
+        shell.click_label("R Remote");
+        assert!(shell.shows("Host: Remote"));
+        remembered(shell, "remote");
+    }
+
+    #[gpui_kit::test]
+    fn a_workspace_is_created_on_the_host_picked_in_the_dialog(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        shell.visual.update(|window, cx| {
+            crate::settings::update(
+                |prefs| {
+                    prefs.set_workspace_defaults("remote", Some("/srv/work"), Some("git status"))
+                },
+                window,
+                cx,
+            );
+        });
+        open_new_workspace_on_remote(&mut shell);
+        shell.click("new-workspace-name");
+        shell
+            .visual
+            .update(|window, cx| window.input("release-checks", cx));
+        shell.click("new-workspace-save");
+        assert_eq!(active_host(&mut shell), "remote");
+        let create = shell.host.last("createSession");
+        assert_eq!(create["client"], "client-2");
+        assert_eq!(create["name"], "release-checks");
+        assert_eq!(create["directory"], "/srv/work");
+        assert_eq!(shell.count("createSession"), 1);
+        assert_eq!(
+            shell.host.state().inputs,
+            [("%9".to_owned(), b"git status\n".to_vec())]
+        );
+
+        // The pick, not the host on screen, is where the dialog opens next;
+        // once that host drops, Save is refused.
+        shell.run("session.new");
+        assert!(shell.shows("Host: Remote"));
+        shell.click("new-workspace-name");
+        shell
+            .visual
+            .update(|window, cx| window.input("must-not-create", cx));
+        shell.publish_to(1, vec![frame(6, "disconnected", &[])]);
+        let save = shell
+            .visual
+            .update(|window, _| window.find_by_label("Save").disabled());
+        assert_eq!(save, Some(true));
+        shell.visual.update(|window, cx| window.press("enter", cx));
+        shell.settle();
+        assert_eq!(shell.count("createSession"), 1);
+    }
+
+    #[gpui_kit::test]
+    fn a_host_picked_in_a_cancelled_dialog_is_remembered_but_not_activated(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = two_hosts(cx);
+        let before = shell.host.kinds();
+        open_new_workspace_on_remote(&mut shell);
+        shell.click("new-workspace-cancel");
+        assert!(!shell.dialog_open());
+        assert_eq!(active_host(&mut shell), "local");
+        assert_eq!(shell.host.kinds(), before);
+        shell.run("session.new");
+        assert!(shell.shows("Host: Remote"));
+    }
+
+    #[gpui_kit::test]
+    fn renaming_a_peers_workspace_goes_to_the_peer(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        let (_, notes) = row(&mut shell, "remote", "$2");
+        shell.run_on("session.rename", Target::Session(notes.scope, "$2".into()));
+        assert_eq!(shell.value("Workspace name").as_deref(), Some("notes"));
+        shell.answer("notes-renamed");
+        let rename = shell.host.last("renameSession");
+        assert_eq!(
+            (&rename["client"], &rename["session_id"], &rename["name"]),
+            (&json!("client-2"), &json!("$2"), &json!("notes-renamed"))
+        );
+        assert_eq!(active_host(&mut shell), "local");
+    }
+
+    #[gpui_kit::test]
+    fn closing_a_peers_workspace_asks_and_is_cancelled_if_its_host_went_away(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = two_hosts(cx);
+        let (_, notes) = row(&mut shell, "remote", "$2");
+        shell.run_on("session.close", Target::Session(notes.scope, "$2".into()));
+        shell.click("confirmation-confirm");
+        let close = shell.host.last("closeSession");
+        assert_eq!(
+            (&close["client"], &close["session_id"], &close["confirmed"]),
+            (&json!("client-2"), &json!("$2"), &json!(true))
+        );
+        assert_eq!(close["expected_server_identity"], "tmux");
+
+        // The dialog outlives the host: hidden meanwhile, the close has
+        // nowhere to go and says so rather than landing on the host on screen.
+        let (_, main) = row(&mut shell, "remote", "$1");
+        shell.run_on("session.close", Target::Session(main.scope, "$1".into()));
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.toggle_host_shown("remote", cx)));
+        shell.settle();
+        assert!(!shown(&mut shell, "remote"));
+        shell.click("confirmation-confirm");
+        assert_eq!(shell.count("closeSession"), 1);
+        assert_eq!(
+            shell.status(),
+            "Closing workspace “main” and all of its windows was cancelled because its host connection changed."
+        );
+    }
+
+    #[gpui_kit::test]
+    fn shift_click_pins_a_peers_workspace_on_the_peer(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        let (index, _) = row(&mut shell, "remote", "$1");
+        shell.visual.update(|window, cx| {
+            window.click_with_modifiers(("workspace-row", index), Modifiers::shift(), cx)
+        });
+        shell.settle();
+        let pin = shell.host.last("setPinned");
+        assert_eq!(
+            (&pin["client"], &pin["session_id"], &pin["pinned"]),
+            (&json!("client-2"), &json!("$1"), &json!(true))
+        );
+        assert_eq!(shell.count("selectSession"), 0);
+        assert_eq!(active_host(&mut shell), "local");
+    }
+
+    // Agents on the peer.
+
+    fn row_commands(shell: &mut Shell, id: &str) -> Vec<&'static str> {
+        with_row(shell, id, |source, _, _| source.available.clone())
+    }
+
+    fn run_row(shell: &mut Shell, id: &str, command: &'static str) {
+        with_row(shell, id, |source, window, cx| {
+            (source.run)(command, window, cx)
+        });
+    }
+
+    fn with_row<R>(
+        shell: &mut Shell,
+        id: &str,
+        f: impl FnOnce(&RowCommandSource, &mut gpui_kit::Window, &mut gpui_kit::App) -> R,
+    ) -> R {
+        shell.visual.update(|window, cx| {
+            let (all, _) = agents::rows(cx, AgentSortMode::Workspace, false);
+            let row = all
+                .into_iter()
+                .find(|row| row.agent.id == id)
+                .expect("the agent is listed");
+            let source = agents::view::row_command_source(row, cx);
+            f(&source, window, cx)
+        })
+    }
+
+    #[gpui_kit::test]
+    fn a_peer_agents_tab_is_renamed_on_the_peer_and_resume_waits_for_its_host(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = two_hosts(cx);
+        start_agents_with(
+            &mut shell,
+            HashMap::from([(
+                "client-2",
+                vec![agent("on-remote", "remote", ("$1", "main", "@2", "%3"))],
+            )]),
+            Vec::new(),
+        );
+        let offered = row_commands(&mut shell, "on-remote");
+        assert!(offered.contains(&"agents.renameRow"), "{offered:?}");
+        assert!(!offered.contains(&"agents.resumeRow"), "{offered:?}");
+        run_row(&mut shell, "on-remote", "agents.resumeRow");
+        shell.settle();
+        assert_eq!(
+            shell.status(),
+            "Resume opens a pane on the host on screen; select a workspace on Remote first."
+        );
+
+        run_row(&mut shell, "on-remote", "agents.renameRow");
+        shell.settle();
+        // The tab's name, as the tab shows it.
+        assert_eq!(shell.value("Tab name").as_deref(), Some("server"));
+        shell.answer("Release notes");
+        let rename = shell.host.last("renameWindow");
+        assert_eq!(
+            (&rename["client"], &rename["window_id"], &rename["name"]),
+            (&json!("client-2"), &json!("@2"), &json!("Release notes"))
+        );
+        assert_eq!(active_host(&mut shell), "local");
+    }
+
+    /// On the agent's host, but in a workspace other than the agent's.
+    fn on_remote(
+        cx: &mut TestAppContext,
+        branches: Branches,
+    ) -> (Shell, Requests, Rc<crate::agents::tests::Effects>) {
+        let mut shell = two_hosts(cx);
+        let (requests, clock) = start_agents_with(
+            &mut shell,
+            HashMap::from([(
+                "client-2",
+                vec![agent("on-remote", "remote", ("$2", "notes", "@3", "%4"))],
+            )]),
+            branches,
+        );
+        shell
+            .visual
+            .update(|_, cx| agents::open_pane("remote", "%1", cx))
+            .unwrap();
+        shell.settle();
+        assert_eq!(active_host(&mut shell), "remote");
+        (shell, requests, clock)
+    }
+
+    fn branch(shell: &mut Shell) {
+        run_row(shell, "on-remote", "agents.branchRow");
+        shell.visual.run_until_parked();
+    }
+
+    fn branches(requests: &Requests) -> Vec<(String, String, String)> {
+        requests
+            .borrow()
+            .iter()
+            .filter(|(_, command)| command.operation == "branch")
+            .map(|(client, command)| {
+                (
+                    client.clone(),
+                    command.session_id.clone(),
+                    command.pane_id.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn placed(
+        session: &str,
+        window: &str,
+        pane: &str,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let answer = json!({ "sessionId": session, "windowId": window, "paneId": pane });
+        futures::future::ready(Ok(answer)).boxed()
+    }
+
+    #[gpui_kit::test]
+    fn a_branch_opens_once_its_pane_arrives(cx: &mut TestAppContext) {
+        let (mut shell, requests, _) = on_remote(cx, vec![placed("$2", "@7", "%7")]);
+        let before = shell.host.kinds().len();
+        branch(&mut shell);
+        assert_eq!(
+            branches(&requests),
+            [("client-2".to_owned(), "$2".to_owned(), "%4".to_owned())]
+        );
+        // The reply beat the snapshot: not gone, just not here yet.
+        assert_eq!(shell.host.kinds().len(), before);
+        let mut next = world("@1");
+        next.windows.push(window("@7", "$2", 1, "branch", false));
+        next.panes.push(pane("%7", "@7", "$2", (0, 0, 80, 24)));
+        shell.publish_to(1, vec![snapshot_frame(2, &next)]);
+        let focus = shell.host.last("focusPane");
+        assert_eq!(
+            (&focus["client"], &focus["pane_id"]),
+            (&json!("client-2"), &json!("%7"))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_double_click_sends_one_branch(cx: &mut TestAppContext) {
+        let (mut shell, requests, _) =
+            on_remote(cx, vec![placed("$2", "@3", "%4"), placed("$2", "@3", "%4")]);
+        branch(&mut shell);
+        branch(&mut shell);
+        assert_eq!(branches(&requests).len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn a_branch_whose_pane_never_arrives_says_so_and_stays_put(cx: &mut TestAppContext) {
+        let (mut shell, _, clock) = on_remote(cx, vec![placed("$2", "@7", "%7")]);
+        let before = shell.host.kinds().len();
+        branch(&mut shell);
+        let wait = |shell: &mut Shell, ms: u64| {
+            clock.now.set(clock.now.get() + ms);
+            shell
+                .visual
+                .executor()
+                .advance_clock(Duration::from_millis(ms));
+            shell.visual.run_until_parked();
+        };
+        wait(&mut shell, 4_999);
+        assert!(
+            !shell.status().contains("has not appeared"),
+            "{}",
+            shell.status()
+        );
+        wait(&mut shell, 1);
+        let said = shell.status();
+        assert!(
+            said.starts_with("Branch of ")
+                && said
+                    .ends_with(" has not appeared. The agent may have no saved conversation yet."),
+            "{said}"
+        );
+        assert_eq!(shell.host.kinds().len(), before);
+    }
+
+    #[gpui_kit::test]
+    fn a_refused_branch_shows_the_hosts_error_and_moves_nothing(cx: &mut TestAppContext) {
+        let refused =
+            futures::future::ready(Err("tmux topology generation changed".to_owned())).boxed();
+        let (mut shell, _, _) = on_remote(cx, vec![refused]);
+        let before = shell.host.kinds().len();
+        branch(&mut shell);
+        shell.settle();
+        assert!(
+            shell.status().contains("tmux topology generation changed"),
+            "{}",
+            shell.status()
+        );
+        assert_eq!(shell.host.kinds().len(), before);
+    }
+
+    #[gpui_kit::test]
+    fn a_branch_does_not_pull_back_to_a_host_left_while_it_was_answered(cx: &mut TestAppContext) {
+        let (reply, answer) = futures::channel::oneshot::channel::<Result<Value, String>>();
+        let held = async move { answer.await.unwrap_or_else(|_| Err("dropped".into())) }.boxed();
+        let (mut shell, _, _) = on_remote(cx, vec![held]);
+        branch(&mut shell);
+        let (index, _) = row(&mut shell, "local", "$1");
+        shell
+            .visual
+            .update(|window, cx| window.click(("workspace-row", index), cx));
+        shell.settle();
+        assert_eq!(active_host(&mut shell), "local");
+        let before = shell.host.kinds().len();
+        // A pane that exists: only the user having left keeps it off screen.
+        reply
+            .send(Ok(
+                json!({ "sessionId": "$2", "windowId": "@3", "paneId": "%4" }),
+            ))
+            .unwrap();
+        shell.settle();
+        assert_eq!(active_host(&mut shell), "local");
+        assert_eq!(shell.host.kinds().len(), before, "{:?}", shell.host.kinds());
+    }
 }

@@ -9,7 +9,10 @@ use std::{
     time::Duration,
 };
 
-use desktop_core::app_state::{AppStateStore, WindowGeometry, load_app_state};
+use desktop_core::{
+    app_state::{AppStateStore, WindowGeometry, load_app_state},
+    update_check::AvailableUpdate,
+};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext, Bounds, Context, InteractiveElement, IntoElement,
     OperatingSystem, OwnedMenuItem, ParentElement, Render, Role, Styled, TestAppContext,
@@ -23,8 +26,9 @@ use muxflow_gpui::{
     commands::{self, Commands, keymap::ShortcutOverrides, registry::Platform},
     context_menu::{self, Entry, Item},
     menus::{self, RunCommand},
-    notices,
+    notices, settings,
     ui::shell::Shell,
+    update,
 };
 
 const OS: OperatingSystem = if cfg!(target_os = "macos") {
@@ -501,6 +505,40 @@ fn a_saved_geometry_from_tauri_opens_the_window_there(cx: &mut TestAppContext) {
     );
 }
 
+/// Unreadable saved state takes no writes; shortcuts and preferences change
+/// for this run without a failure notice each, as the shell says it once.
+#[gpui_kit::test]
+fn a_change_while_saved_state_is_unreadable_raises_no_notice(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app-state.json");
+    std::fs::write(&path, b"{ not json").unwrap();
+    let handle = open_shell(&path, 1000., cx);
+    let overrides: ShortcutOverrides =
+        HashMap::from([("commands.show".to_owned(), Some("Ctrl+J".to_owned()))]);
+    with_window(handle, cx, |window, cx| {
+        commands::set_overrides(overrides, window, cx);
+        settings::update(
+            |prefs| prefs.copy_on_select = !prefs.copy_on_select,
+            window,
+            cx,
+        );
+    });
+    for _ in 0..10 {
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    with_window(handle, cx, |window, cx| {
+        assert!(
+            cx.global::<Commands>()
+                .overrides()
+                .contains_key("commands.show")
+        );
+        assert_eq!(window.notifications(cx).len(), 0);
+    });
+    assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+}
+
 #[gpui_kit::test]
 fn the_geometry_is_saved_beside_other_saved_state(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -553,4 +591,225 @@ fn a_problem_notice_can_be_dismissed_without_hovering_it(cx: &mut TestAppContext
     cx.run_until_parked();
     let left = with_window(handle, cx, |window, cx| window.notifications(cx).len());
     assert_eq!(left, 0);
+}
+
+// The update check and its title-bar pill (`useUpdateCheck.test.ts`).
+
+fn release(version: &str) -> AvailableUpdate {
+    AvailableUpdate {
+        version: version.into(),
+        url: "https://github.com/gal064/muxflow/releases/latest".into(),
+    }
+}
+
+type Answers = Rc<RefCell<Vec<Result<Option<AvailableUpdate>, String>>>>;
+
+/// A stub check answering in order, and an install that records its call.
+fn stub_updater(
+    answers: Answers,
+    installed: Rc<Cell<usize>>,
+    install: Result<(), String>,
+) -> (update::Updater, Rc<Cell<usize>>) {
+    let checks = Rc::new(Cell::new(0));
+    let counted = checks.clone();
+    let updater = update::Updater {
+        check: Rc::new(move || {
+            counted.set(counted.get() + 1);
+            let answer = answers.borrow_mut().remove(0);
+            Box::pin(async move { answer })
+        }),
+        install: Rc::new(move || {
+            installed.set(installed.get() + 1);
+            let result = install.clone();
+            Box::pin(async move { result })
+        }),
+    };
+    (updater, checks)
+}
+
+#[gpui_kit::test]
+fn checks_at_start_and_then_daily_keeping_the_last_answer_through_a_failure(
+    cx: &mut TestAppContext,
+) {
+    let (_dir, handle) = app_window(cx);
+    let answers: Answers = Rc::new(RefCell::new(vec![
+        Ok(None),
+        Ok(Some(release("0.2.0"))),
+        Err("update check failed: offline".into()),
+    ]));
+    let (updater, checks) = stub_updater(answers, Rc::default(), Ok(()));
+    cx.update(|cx| update::start_with(updater, cx));
+    cx.run_until_parked();
+    assert_eq!(checks.get(), 1);
+    assert_eq!(cx.update(|cx| update::available(cx)), None);
+    let pill = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, _| {
+            window
+                .try_find_by_label("↑ Update 0.2.0")
+                .map(|pill| pill.description().map(str::to_owned))
+        })
+    };
+    assert_eq!(pill(cx), None);
+
+    cx.executor().advance_clock(update::INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(checks.get(), 2);
+    assert_eq!(
+        pill(cx),
+        Some(Some(
+            "Muxflow 0.2.0 is available. Install the update.".to_owned()
+        ))
+    );
+
+    cx.executor().advance_clock(update::INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(checks.get(), 3);
+    assert_eq!(
+        cx.update(|cx| update::available(cx)),
+        Some(release("0.2.0"))
+    );
+}
+
+fn offer_and_click(
+    install: Result<(), String>,
+    cx: &mut TestAppContext,
+) -> (AnyWindowHandle, Rc<Cell<usize>>, tempfile::TempDir) {
+    let (dir, handle) = app_window(cx);
+    let installed = Rc::new(Cell::new(0));
+    let answers: Answers = Rc::new(RefCell::new(vec![Ok(Some(release("0.2.0")))]));
+    let (updater, _) = stub_updater(answers, installed.clone(), install);
+    cx.update(|cx| update::start_with(updater, cx));
+    cx.run_until_parked();
+    with_window(handle, cx, |window, cx| {
+        click_label(window, "↑ Update 0.2.0", cx)
+    });
+    cx.run_until_parked();
+    with_window(handle, cx, |window, cx| {
+        assert!(window.has_active_dialog(cx));
+        window.find_by_label("Update and restart");
+    });
+    (handle, installed, dir)
+}
+
+#[gpui_kit::test]
+fn the_pill_installs_once_the_user_agrees_to_the_restart(cx: &mut TestAppContext) {
+    let (handle, installed, _dir) = offer_and_click(Ok(()), cx);
+    with_window(handle, cx, |window, cx| {
+        window.click("confirmation-confirm", cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(installed.get(), 1);
+    assert_eq!(cx.opened_url(), None);
+}
+
+#[gpui_kit::test]
+fn declining_the_restart_leaves_everything_alone(cx: &mut TestAppContext) {
+    let (handle, installed, _dir) = offer_and_click(Ok(()), cx);
+    with_window(handle, cx, |window, cx| {
+        window.click("confirmation-cancel", cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(installed.get(), 0);
+    assert_eq!(cx.opened_url(), None);
+}
+
+#[gpui_kit::test]
+fn a_failed_install_opens_the_release_page(cx: &mut TestAppContext) {
+    let (handle, installed, _dir) = offer_and_click(Err("update failed: offline".into()), cx);
+    with_window(handle, cx, |window, cx| {
+        window.click("confirmation-confirm", cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(installed.get(), 1);
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://github.com/gal064/muxflow/releases/latest")
+    );
+}
+
+#[gpui_kit::test]
+fn the_same_problem_shows_again_after_it_was_dismissed(cx: &mut TestAppContext) {
+    let (_dir, handle) = app_window(cx);
+    // A workspace refused twice for the same directory is two refusals.
+    let message =
+        "tmux_action_rejected: workspace start directory /x does not exist or is not a directory";
+    let count = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, cx| window.notifications(cx).len())
+    };
+    with_window(handle, cx, |window, cx| {
+        notices::notify(message, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(count(cx), 1);
+    with_window(handle, cx, |window, cx| click_label(window, "Dismiss", cx));
+    // The card leaves after its exit animation.
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(count(cx), 0);
+    assert!(with_window(handle, cx, |window, cx| {
+        notices::notify(message, window, cx)
+    }));
+    cx.run_until_parked();
+    assert_eq!(count(cx), 1);
+}
+
+#[gpui_kit::test]
+fn shortcuts_are_ignored_while_a_context_menu_is_open(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    boot(&write_state(dir.path(), None), cx);
+    let handle = cx.update(|cx| {
+        gpui_kit::open_window(WindowOptions::default(), cx, |_, cx| {
+            cx.new(|_| Row { ran: Rc::default() })
+        })
+        .expect("open a test window")
+        .0
+    });
+    let palette_opens = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, cx| window.press("secondary-k", cx));
+        cx.run_until_parked();
+        let open = with_window(handle, cx, |window, cx| window.has_active_dialog(cx));
+        with_window(handle, cx, |window, cx| window.close_all_dialogs(cx));
+        cx.run_until_parked();
+        open
+    };
+    assert!(palette_opens(cx), "the shortcut works with no menu open");
+    with_window(handle, cx, |window, cx| window.right_click("row", cx));
+    cx.run_until_parked();
+    with_window(handle, cx, |window, _| {
+        window.find_by_label("Open");
+    });
+    assert!(!palette_opens(cx), "the menu owns the keyboard");
+}
+
+#[gpui_kit::test]
+fn a_second_click_while_installing_is_ignored(cx: &mut TestAppContext) {
+    let (_dir, handle) = app_window(cx);
+    let installs = Rc::new(Cell::new(0));
+    let counted = installs.clone();
+    let updater = update::Updater {
+        check: Rc::new(|| Box::pin(async { Ok(Some(release("0.2.0"))) })),
+        // An install still running when the pill is clicked again.
+        install: Rc::new(move || {
+            counted.set(counted.get() + 1);
+            Box::pin(futures::future::pending())
+        }),
+    };
+    cx.update(|cx| update::start_with(updater, cx));
+    cx.run_until_parked();
+    let click = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, cx| {
+            click_label(window, "↑ Update 0.2.0", cx)
+        });
+        cx.run_until_parked();
+        with_window(handle, cx, |window, cx| window.has_active_dialog(cx))
+    };
+    assert!(click(cx));
+    with_window(handle, cx, |window, cx| {
+        window.click("confirmation-confirm", cx)
+    });
+    cx.run_until_parked();
+    // The second click asks nothing and starts nothing.
+    assert!(!click(cx));
+    assert_eq!(installs.get(), 1);
 }

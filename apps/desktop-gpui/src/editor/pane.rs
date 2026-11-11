@@ -18,6 +18,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement, Styled, StyledImage, Subscription, Task, Window,
     actions,
     assets::IconName,
+    base::TestSupportExt,
     component::{
         Disableable, Selectable, Sizable,
         button::{Button, ButtonVariants},
@@ -45,9 +46,12 @@ use crate::{
     fonts,
     theme::{
         self, Palette,
-        metrics::{BAR_HEIGHT, RADIUS_CONTROL, TYPE_LABEL, TYPE_META, TYPE_SECONDARY, ui},
+        metrics::{
+            BAR_HEIGHT, NARROW_TERMINAL, RADIUS_CONTROL, TYPE_LABEL, TYPE_META, TYPE_SECONDARY,
+            narrower_than, ui,
+        },
     },
-    ui::error_summary::{self, Summary},
+    ui::surface_error::SurfaceError,
     workspaces::{self, model::pin_app_tab},
 };
 
@@ -128,8 +132,6 @@ pub struct DocumentPane {
     image: Option<(String, Arc<Image>)>,
     find: Option<FindBar>,
     go_to: Option<GoTo>,
-    /// The save diagnostic whose details are open.
-    error_details: Option<String>,
     /// The last query and toggles, for the next time find opens.
     remembered: Query,
     _watch: Option<Box<dyn Any>>,
@@ -203,7 +205,6 @@ impl DocumentPane {
             image: None,
             find: None,
             go_to: None,
-            error_details: None,
             remembered: Query::default(),
             _watch: watch,
             _subscriptions: subscriptions,
@@ -766,6 +767,7 @@ impl Render for DocumentPane {
                         this.child(
                             div()
                                 .id("file-loading")
+                                .test_support()
                                 .role(Role::Status)
                                 .aria_label("Loading…")
                                 .px(ui(12.))
@@ -993,71 +995,27 @@ impl DocumentPane {
             .size_full()
             .child(self.toolbar(visible, Some(mode), cx))
             .when_some(error, |this, error| {
-                this.child(self.error_banner(&error, cx))
+                this.child(SurfaceError::new("editor-error", error))
             })
             .child(
                 // Not `h_flex`, which centers its children: the editor and the
-                // preview fill the height.
+                // preview fill the height. A narrow window stacks them, as
+                // `styles.css` does, so neither is squeezed to a sliver.
                 div()
                     .flex()
-                    .flex_row()
+                    .map(|this| {
+                        if narrower_than(NARROW_TERMINAL, window) {
+                            this.flex_col()
+                        } else {
+                            this.flex_row()
+                        }
+                    })
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
                     .children(source)
                     .children(preview),
             )
-    }
-
-    /// A rejected save as a sentence, with the host's diagnostic one
-    /// disclosure away. Port of `ui/SurfaceError.tsx` as the editor used it.
-    fn error_banner(&self, raw: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let palette = theme::palette(cx);
-        let Summary { summary, detail } = error_summary::summarize(raw);
-        // A new rejection opens closed.
-        let open = detail.is_some() && self.error_details.as_deref() == detail.as_deref();
-        div()
-            .id("editor-error")
-            .role(Role::Alert)
-            .aria_label(SharedString::from(summary.clone()))
-            .flex()
-            .flex_col()
-            .items_start()
-            .gap(ui(4.))
-            .px(ui(12.))
-            .py(ui(5.))
-            .bg(palette.danger_wash)
-            .text_color(palette.danger_ink)
-            .text_size(ui(TYPE_SECONDARY))
-            .child(summary)
-            .when_some(detail, |banner, detail| {
-                let shown = detail.clone();
-                banner
-                    .child(
-                        Button::new("editor-error-details")
-                            .ghost()
-                            .xsmall()
-                            .label(if open { "▾ Details" } else { "▸ Details" })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.error_details = (!open).then(|| shown.clone());
-                                cx.notify();
-                            })),
-                    )
-                    .when(open, |banner| {
-                        banner.child(
-                            div()
-                                .id("editor-error-detail")
-                                .role(Role::Paragraph)
-                                .aria_label(SharedString::from(detail.clone()))
-                                .max_h(ui(132.))
-                                .overflow_y_scroll()
-                                .text_color(palette.chrome_ink)
-                                .font_family(fonts::MONO)
-                                .text_size(ui(TYPE_META))
-                                .child(detail),
-                        )
-                    })
-            })
     }
 
     fn find_bar(
