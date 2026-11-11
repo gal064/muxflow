@@ -401,7 +401,9 @@ impl Harness {
         let controller = self.controller.clone();
         cx.update(|cx| {
             cx.subscribe(&controller, move |_, event: &ConnectionEvent, _| {
-                let ConnectionEvent::Status(message) = event;
+                let ConnectionEvent::Status(message) = event else {
+                    return;
+                };
                 writer.lock().unwrap().push(message.clone());
             })
             .detach();
