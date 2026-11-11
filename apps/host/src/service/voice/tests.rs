@@ -1,4 +1,4 @@
-use std::{fs, path::Path, time::Instant};
+use std::{collections::HashSet, fs, path::Path, time::Instant};
 
 use tmux_agent_protocol::v1;
 use tokio::sync::mpsc;
@@ -275,6 +275,66 @@ async fn the_idle_timer_unloads_the_sidecar_and_the_next_request_respawns_it() {
 }
 
 #[tokio::test]
+async fn closed_panes_hold_no_session_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
+    let (sender, _receiver) = mpsc::channel::<SequencerControl>(4);
+    let registration = register_control_event_sink(sender);
+    let connection = registration.id;
+    let (other_sender, _other_receiver) = mpsc::channel::<SequencerControl>(4);
+    let other_registration = register_control_event_sink(other_sender);
+    let other_connection = other_registration.id;
+
+    let live: HashSet<String> = (0..6).map(|index| format!("%{index}")).collect();
+    for index in 0..6 {
+        service
+            .register_session(connection, "server-a", &format!("%{index}"), Some(&live))
+            .unwrap();
+    }
+    // Another server's pane, and a pane another connection's baseline already
+    // lists, are not judged against this connection's server-a topology.
+    let other_server: HashSet<String> = ["%0".to_owned()].into();
+    service
+        .register_session(connection, "server-b", "%0", Some(&other_server))
+        .unwrap();
+    let newer: HashSet<String> = ["%60".to_owned()].into();
+    service
+        .register_session(other_connection, "server-a", "%60", Some(&newer))
+        .unwrap();
+    assert_eq!(service.session_count(), MAX_SESSIONS);
+
+    // Every server-a pane but %0 closes; a new pane registers past the cap.
+    let live: HashSet<String> = ["%0".to_owned(), "%100".to_owned()].into();
+    service
+        .register_session(connection, "server-a", "%100", Some(&live))
+        .unwrap();
+    assert_eq!(service.session_count(), 4);
+    assert_eq!(
+        service.session_connection(&PaneKey {
+            server_identity: "server-a".into(),
+            pane_id: "%60".into(),
+        }),
+        Some(other_connection)
+    );
+
+    // A refresh for a closed pane is a no-op, not a slot and not an error.
+    service
+        .register_session(connection, "server-a", "%5", Some(&live))
+        .unwrap();
+    assert_eq!(service.session_count(), 4);
+    assert!(
+        service
+            .session_connection(&PaneKey {
+                server_identity: "server-a".into(),
+                pane_id: "%5".into(),
+            })
+            .is_none()
+    );
+    drop(other_registration);
+    drop(registration);
+}
+
+#[tokio::test]
 async fn sessions_are_bounded_cleared_by_connection_and_pruned_when_the_connection_is_gone() {
     let dir = tempfile::tempdir().unwrap();
     let service = service(dir.path(), DEFAULT_IDLE_AFTER, ECHO_SIDECAR);
@@ -283,20 +343,20 @@ async fn sessions_are_bounded_cleared_by_connection_and_pruned_when_the_connecti
     let connection = registration.id;
     for index in 0..MAX_SESSIONS {
         service
-            .register_session(connection, "server-a", &format!("%{index}"))
+            .register_session(connection, "server-a", &format!("%{index}"), None)
             .unwrap();
     }
     let error = service
-        .register_session(connection, "server-a", "%999")
+        .register_session(connection, "server-a", "%999", None)
         .unwrap_err();
     assert_eq!(error.code, "voice_too_many_sessions");
     // Re-registering an existing pane refreshes rather than counts.
     service
-        .register_session(connection, "server-a", "%0")
+        .register_session(connection, "server-a", "%0", None)
         .unwrap();
     assert_eq!(
         service
-            .register_session(connection, "server-a", "")
+            .register_session(connection, "server-a", "", None)
             .unwrap_err()
             .code,
         "voice_invalid_request"
@@ -306,7 +366,7 @@ async fn sessions_are_bounded_cleared_by_connection_and_pruned_when_the_connecti
     assert_eq!(service.session_count(), 0);
 
     service
-        .register_session(connection, "server-a", "%77")
+        .register_session(connection, "server-a", "%77", None)
         .unwrap();
     drop(registration);
     assert_eq!(
@@ -327,7 +387,7 @@ async fn a_pushed_reply_is_synthesized_and_sent_only_to_the_session_connection()
     let voice_registration = register_control_event_sink(voice_tx);
     let _other_registration = register_control_event_sink(other_tx);
     service
-        .register_session(voice_registration.id, "server-a", "%7")
+        .register_session(voice_registration.id, "server-a", "%7", None)
         .unwrap();
 
     // No session for this agent: nothing is spoken, nothing is sent.
@@ -442,7 +502,7 @@ async fn a_full_queue_drops_the_reply_but_keeps_the_session() {
         .try_send(SequencerControl::OrderedEvent(v1::HostEvent::default()))
         .unwrap();
     service
-        .register_session(registration.id, "server-a", "%9")
+        .register_session(registration.id, "server-a", "%9", None)
         .unwrap();
     service.push_reply(AgentReply {
         server_identity: "server-a".into(),
@@ -490,7 +550,7 @@ async fn a_failed_synthesis_still_pushes_the_text_with_the_error_in_status() {
     let (voice_tx, mut voice_rx) = mpsc::channel::<SequencerControl>(8);
     let registration = register_control_event_sink(voice_tx);
     service
-        .register_session(registration.id, "server-a", "%1")
+        .register_session(registration.id, "server-a", "%1", None)
         .unwrap();
     service.push_reply(AgentReply {
         server_identity: "server-a".into(),
