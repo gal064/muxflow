@@ -15,7 +15,10 @@ use desktop_core::{
         agent::{AgentCommand, agent_request},
         automation::{AutomationCommand, automation_request},
         delivery_ack,
-        files::upload_manager::{self, UploadManager},
+        files::{
+            self, FileIoManager, editor_manager,
+            upload_manager::{self, UploadManager},
+        },
         helper::{self, HelperInstallReport},
         tmux_action,
     },
@@ -27,6 +30,7 @@ use serde_json::Value;
 use terminal_engine::{Command, EngineHandle, EngineOutput, HubLimits};
 use uuid::Uuid;
 
+use crate::editor::io::FileIoRequest;
 use crate::terminal::integration::transfers::UploadRequest;
 
 use super::{
@@ -125,6 +129,24 @@ pub trait TerminalBackend: Send + Sync {
         _command: AutomationCommand,
     ) -> BoxFuture<'static, Result<Value, String>> {
         futures::future::ready(Err("automations are unavailable here".to_owned())).boxed()
+    }
+    /// Starts an editor read or write (`start_file_read`, `start_file_write`),
+    /// reporting its frames to `events`. Answers with the transfer id.
+    fn start_file_io(
+        &self,
+        _request: FileIoRequest,
+        _events: Arc<dyn EventSink>,
+    ) -> Result<String, String> {
+        Err("files are unavailable here".to_owned())
+    }
+    fn cancel_file_io(&self, _transfer_id: String) {}
+    /// One file-service request (`file_request`), answered with the host's JSON.
+    fn file_request(
+        &self,
+        _client_id: String,
+        _command: Value,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        futures::future::ready(Err("files are unavailable here".to_owned())).boxed()
     }
 }
 
@@ -362,6 +384,73 @@ impl TerminalBackend for NativeBackend {
     ) -> BoxFuture<'static, Result<Value, String>> {
         let clients = self.clients.clone();
         spawned(async move { automation_request(client_id, command, &clients).await })
+    }
+
+    fn start_file_io(
+        &self,
+        request: FileIoRequest,
+        events: Arc<dyn EventSink>,
+    ) -> Result<String, String> {
+        let FileIoRequest {
+            scope,
+            root,
+            path,
+            write,
+        } = request;
+        let (client, profile, server, epoch) = (
+            scope.client_id,
+            scope.profile_id,
+            scope.server_identity,
+            scope.terminal_epoch.to_string(),
+        );
+        match write {
+            None => editor_manager::start_file_read(
+                client,
+                profile,
+                server,
+                epoch,
+                root.path,
+                root.token,
+                path,
+                events,
+                &self.profiles,
+                &self.clients,
+                &FileIoManager,
+            ),
+            Some(write) => editor_manager::start_file_write(
+                client,
+                profile,
+                server,
+                epoch,
+                root.path,
+                root.token,
+                path,
+                write.operation_id,
+                write.base_generation,
+                write.content,
+                events,
+                &self.profiles,
+                &self.clients,
+                &FileIoManager,
+            ),
+        }
+    }
+
+    fn cancel_file_io(&self, transfer_id: String) {
+        // A transfer already finished is the outcome this asked for.
+        let _ = editor_manager::cancel_file_io(transfer_id, &FileIoManager);
+    }
+
+    fn file_request(
+        &self,
+        client_id: String,
+        command: Value,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let clients = self.clients.clone();
+        spawned(async move {
+            let command = serde_json::from_value(command).map_err(|error| error.to_string())?;
+            files::file_request(client_id, command, &clients).await
+        })
     }
 }
 

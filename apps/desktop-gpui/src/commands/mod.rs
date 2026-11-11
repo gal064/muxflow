@@ -37,8 +37,8 @@ use gpui_kit::{
 use crate::{app::Core, notices, ui::shell::Shell};
 
 use keymap::{
-    ShortcutDisposition, ShortcutOverrides, repair_shortcut_collisions, shortcut_disposition,
-    shortcut_from_keystroke,
+    ShortcutDisposition, ShortcutOverrides, command_for_shortcut, repair_shortcut_collisions,
+    shortcut_disposition, shortcut_from_keystroke,
 };
 use quick_open::QuickOpenSource;
 use registry::{
@@ -247,9 +247,15 @@ fn on_keystroke(event: &KeystrokeEvent, window: &mut Window, cx: &mut App) {
             .context_stack
             .iter()
             .any(|context| context.contains(POPUP_MENU_CONTEXT));
-    let text_field = window.has_focused_input(cx);
     let pressed = shortcut_from_keystroke(&event.keystroke);
+    let has_input = window.has_focused_input(cx);
     let commands = cx.global::<Commands>();
+    // A document editor gets first refusal; a chord it does not bind reaches
+    // the app, unless the app's command leaves it to the platform.
+    let editor_fallback = crate::editor::yields_shortcut(event, cx)
+        && command_for_shortcut(&pressed, commands.platform, &commands.overrides)
+            .is_some_and(|command| !command.native_fallback);
+    let text_field = has_input && !editor_fallback;
     let disposition = shortcut_disposition(
         &pressed,
         overlay_open,
