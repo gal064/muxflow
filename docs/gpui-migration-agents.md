@@ -216,7 +216,7 @@ The phase that owns each area fixes these; the Phase 6 parity check confirms the
 T6.6 closed the rest: fixed, already fixed, or matching Tauri (its commit lists each).
 
 - X11 window position is not restored (owner informed).
-- Phase 5: the context-menu key (Shift+F10, Menu) in the Explorer and Git rows, and keyboard row access in Git (T6.1).
+- Phase 5: the context-menu key (Shift+F10, Menu) in the Explorer and Git rows, and keyboard row access in Git. Fixed (T6.1).
 - Phase 5: Git push errors show the host's raw text, not the SurfaceError summary with Details (T6.4).
 - Phase 5: Kit bug, double-click selects nothing in a preview paragraph with inline code (report upstream). Drag-select in the preview is on the owner's Mac prompt.
 

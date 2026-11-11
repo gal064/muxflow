@@ -10,7 +10,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
-        menu::{DropdownMenu, PopupMenuItem},
+        menu::DropdownMenu,
         v_flex,
     },
     div,
@@ -21,6 +21,7 @@ use crate::{
     app::Core,
     commands::dialogs::{escape_ends_composition, is_composing, open_overlay},
     connection_ui::connection_reducer::ConnectionPhase,
+    context_menu::{self, Entry, Item},
     fonts,
     theme::{
         self,
@@ -236,21 +237,21 @@ impl Render for NewWorkspace {
             .dropdown_caret(true)
             .accessibility_label(picker_label)
             .disabled(hosts.is_empty())
-            .dropdown_menu(move |mut menu, _, _| {
-                for host in &hosts {
-                    let this = this.clone();
-                    let id = host.profile_id.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(host_label(host))
-                            .checked(host.profile_id == current)
-                            .disabled(!host.can_mutate)
-                            .on_click(move |_, _, cx| {
-                                this.update(cx, |dialog, cx| dialog.pick(id.clone(), cx))
-                                    .ok();
-                            }),
-                    );
-                }
-                menu
+            .dropdown_menu(move |menu, window, cx| {
+                let entries: Vec<Entry> = hosts
+                    .iter()
+                    .map(|host| {
+                        let (this, id) = (this.clone(), host.profile_id.clone());
+                        Item::new(host_label(host), move |_, cx| {
+                            this.update(cx, |dialog, cx| dialog.pick(id.clone(), cx))
+                                .ok();
+                        })
+                        .checked(host.profile_id == current)
+                        .disabled(!host.can_mutate)
+                        .into()
+                    })
+                    .collect();
+                context_menu::fill(menu, &entries, window, cx)
             });
         v_flex()
             .id("new-workspace")
