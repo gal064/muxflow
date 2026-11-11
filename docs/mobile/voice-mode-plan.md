@@ -363,7 +363,10 @@ Network exceptions map to `class:"network"`.
 - **Voice sessions**: `sessions: Mutex<HashMap<agent_id, Session { connection, since }>>`,
   bounded to 8 entries, 10-min TTL refreshed by the phone's periodic SESSION
   (every 5 min while the screen is open), dropped when the connection closes
-  or the phone sends `agent_id = ""`. `on_agent_reply` ignores agents with no
+  or the phone sends `agent_id = ""`. A pane missing from the connection's
+  topology baseline holds no slot: its entry is pruned on the next SESSION and
+  its own SESSION is a no-op; the phone likewise forgets the Voice controller
+  of a pane a topology snapshot no longer lists. `on_agent_reply` ignores agents with no
   session, so nothing is retained for them. For a session agent it runs
   `speech_text` on a detached task, pushes
   `HostEvent { kind: VOICE_REPLY_TEXT, voice.reply }` to that connection at
