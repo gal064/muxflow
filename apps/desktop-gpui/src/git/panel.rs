@@ -1313,6 +1313,7 @@ impl Render for GitPanel {
         }
         let unavailable = self.unavailable(&state);
         let groups = model::group_entries(&status.entries);
+        let clean = groups.is_empty();
         let lists: Vec<AnyElement> = [
             (
                 "git-conflicts",
@@ -1419,7 +1420,7 @@ impl Render for GitPanel {
                     .min_h_0()
                     .overflow_y_scroll()
                     .children(lists)
-                    .when(status.entries.is_empty(), |this| {
+                    .when(clean, |this| {
                         this.child(quiet("Working tree clean.", &palette))
                     }),
             )
