@@ -16,6 +16,8 @@ Bundles are created as new user-only files (`0600`). Existing files and symlink 
 
 Review a bundle before sharing it. Although the schema excludes private content by construction, timestamps and aggregate operational counters may still reveal when and how often the app was used.
 
+The desktop app also keeps a local incident journal, `incidents.jsonl` in its log directory. It records connection rebuilds and their trigger, stalled panes, link quality changes and refused actions, one JSON line each, with the start of a host error message where one applies. It stays on your machine, is user-only (`0600` in a `0700` directory), and is capped at two files of 2 MiB.
+
 ## Runtime security expectations
 
 - Authentication and host-key verification remain OpenSSH responsibilities; the app does not copy or store private keys or passwords.
