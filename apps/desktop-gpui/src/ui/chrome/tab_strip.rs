@@ -113,12 +113,15 @@ fn close(
     }
 }
 
+/// `.tab-close` and `.tab-pin-toggle`: 18px wide. Kit's compact minimum, 20px, would
+/// widen a tab whose button holds content rather than an icon.
 fn small_button(id: String, label: String) -> Button {
     Button::new(SharedString::from(id))
         .ghost()
         .xsmall()
         .compact()
         .w(ui(18.))
+        .min_w(ui(18.))
         .accessibility_label(label)
 }
 
