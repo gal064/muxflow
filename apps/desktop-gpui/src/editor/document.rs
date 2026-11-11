@@ -245,6 +245,10 @@ impl Document {
                         .language(language)
                         .soft_wrap(markdown)
                         .searchable(false)
+                        // Monaco draws fold arrows only while the pointer is over the
+                        // gutter; Kit's stay on the caret's line, a stray arrow beside
+                        // line 1.
+                        .folding(false)
                 });
                 let subscription = cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {

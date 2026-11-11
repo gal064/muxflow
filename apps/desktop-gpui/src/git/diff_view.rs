@@ -72,6 +72,9 @@ const DIFFERENT_REPOSITORY: &str =
 /// The width at which Monaco put the two sides beside each other.
 const SIDE_BY_SIDE_WIDTH: f32 = 900.;
 
+/// Frames the diff draws transparent while its list measures its rows.
+const SETTLE_FRAMES: u8 = 3;
+
 /// How long a load stays silent before saying it is loading, so a fast open
 /// shows the frame and then the content.
 const LOADING_DELAY: Duration = Duration::from_millis(150);
@@ -117,6 +120,8 @@ pub struct GitDiffView {
     load_task: Option<Task<()>>,
     /// The width the diff was last drawn at.
     width: Rc<Cell<Option<Pixels>>>,
+    /// Frames drawn since the diff was built; it stays transparent for the first few.
+    settled: Rc<Cell<u8>>,
     /// `workflow.git.diffPaint`: from a read to its diff on screen. Empty
     /// unless the perf probe is on.
     paint: PaintReporter,
@@ -157,6 +162,7 @@ impl GitDiffView {
             serial: 0,
             load_task: None,
             width: Rc::default(),
+            settled: Rc::default(),
             paint: PaintReporter::default(),
             _delay: None,
             _subscriptions: subscriptions,
@@ -423,6 +429,7 @@ impl GitDiffView {
                     futures::future::Either::Right((built, _)) => built,
                 };
                 this.update(cx, |this, cx| {
+                    this.settled.set(0);
                     this.body = Some(match built {
                         Built::Blocked(detail) => Body::Blocked(detail),
                         Built::Unreadable => Body::Blocked(UNREADABLE),
@@ -838,6 +845,8 @@ impl Render for GitDiffView {
                 let state = content.clone();
                 let width = rems_to_px(window);
                 let laid_out = self.width.clone();
+                let settled = self.settled.clone();
+                let hidden = settled.get() < SETTLE_FRAMES;
                 // Switched here, from the width the last frame drew at, and not
                 // while painting: the list below counts the rows of the mode it
                 // is built in, so a switch after that left it indexing rows of
@@ -868,6 +877,10 @@ impl Render for GitDiffView {
                                 {
                                     window.request_animation_frame();
                                 }
+                                if settled.get() < SETTLE_FRAMES {
+                                    settled.set(settled.get() + 1);
+                                    window.request_animation_frame();
+                                }
                             },
                             |_, _, _, _| {},
                         )
@@ -876,6 +889,9 @@ impl Render for GitDiffView {
                     )
                     .child(
                         DiffElement::new(content)
+                            // Its first frames hold an empty bordered frame, before the
+                            // rows are measured.
+                            .when(hidden, |diff| diff.opacity(0.))
                             .header_visible(false)
                             // The whole file is one hunk: its `@@` header says
                             // nothing Monaco showed.
