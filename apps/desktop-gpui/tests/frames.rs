@@ -189,7 +189,11 @@ mod frames {
             };
             let palette = palette(cx);
             let entries = std::rc::Rc::new(vec![
-                Entry::from(Item::new("Open", |_, _| {}).command("commands.show")),
+                Entry::from(
+                    Item::new("Open", |_, _| {}).hint(&muxflow_gpui::menus::RunCommand {
+                        id: "commands.show",
+                    }),
+                ),
                 Entry::from(Item::new("Rename…", |_, _| {}).disabled(true)),
                 Entry::Separator,
                 Entry::from(Item::new("Sort by name", |_, _| {}).checked(true)),
