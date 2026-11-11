@@ -887,15 +887,22 @@ impl Pane {
             PaneEvent::Resource(resource) => resource.generation,
             _ => 0,
         };
+        let answered = matches!(event, PaneEvent::Resource(_));
         let (state, effect) = reduce_pane_reveal(self.reveal, event);
         self.reveal = state;
         let event_epoch = shared.hub.generation_epoch();
+        // A pane seeded before its reveal (prewarm) is answered with a bare
+        // `Visible` over the screen it holds, and an idle shell sends nothing
+        // after it. That answer is the host acting on the reveal, so it counts.
+        // A resource carries no reveal token, so a late answer to an earlier
+        // reveal counts too; that only spares a reseed of a pane on screen.
         if matches!(
             effect,
             PaneRevealEffect::Seed(_)
                 | PaneRevealEffect::Output(_)
                 | PaneRevealEffect::Resume { .. }
-        ) {
+        ) || (answered && matches!(effect, PaneRevealEffect::None))
+        {
             self.content_arrivals += 1;
             self.void_watch = None;
         }

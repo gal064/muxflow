@@ -1,6 +1,7 @@
 //! What the shell shows about the connection, floated over it so that nothing
-//! moves the terminal surface: the status pill, the disconnected strip, the
-//! recovery offers, the notices and the helper's consent dialog.
+//! moves the terminal surface: the disconnected strip, the recovery offers, the
+//! notices and the helper's consent dialog. The host and its phase are the
+//! sidebar's host row.
 
 use std::{rc::Rc, time::Duration};
 
@@ -44,16 +45,6 @@ fn strip_title(phase: ConnectionPhase) -> &'static str {
         ConnectionPhase::Reconnecting => "Reconnecting to tmux…",
         ConnectionPhase::Resyncing => "Reconciling authoritative state…",
         ConnectionPhase::Disconnected | ConnectionPhase::Connected => "Disconnected from tmux",
-    }
-}
-
-fn phase_word(phase: ConnectionPhase) -> &'static str {
-    match phase {
-        ConnectionPhase::Connected => "Connected",
-        ConnectionPhase::Connecting => "Connecting",
-        ConnectionPhase::Reconnecting => "Reconnecting",
-        ConnectionPhase::Resyncing => "Reconciling",
-        ConnectionPhase::Disconnected => "Disconnected",
     }
 }
 
@@ -160,42 +151,6 @@ impl ConnectionSurface {
         if self.helper_dialog_open || self.discard_dialog_open {
             window.refresh();
         }
-    }
-
-    fn status_pill(
-        controller: &Entity<ConnectionController>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let state = controller.read(cx);
-        let phase = state
-            .active_host_state()
-            .map_or(ConnectionPhase::Disconnected, |host| host.phase);
-        let color = match phase {
-            ConnectionPhase::Connected => theme::palette(cx).ok,
-            ConnectionPhase::Disconnected => theme::palette(cx).danger,
-            _ => theme::palette(cx).warn,
-        };
-        let label: SharedString =
-            format!("{} · {}", state.active_host_label(), phase_word(phase)).into();
-        let open = controller.clone();
-        h_flex()
-            .id("connection-status-pill")
-            .absolute()
-            .left(ui(8.))
-            .bottom(ui(6.))
-            .gap(ui(6.))
-            .items_center()
-            .child(div().size(ui(7.)).rounded_full().bg(color))
-            .child(
-                Button::new("connection-status")
-                    .ghost()
-                    .xsmall()
-                    .label(label.clone())
-                    .accessibility_label(label)
-                    .on_click(move |_, window, cx| {
-                        open_connection_dialog(open.clone(), window, cx)
-                    }),
-            )
     }
 
     fn disconnected_strip(
@@ -427,8 +382,6 @@ impl Render for ConnectionSurface {
                 Self::profile_recovery_toast(&controller, cx).map(IntoElement::into_any_element),
             )
             .children(Self::app_recovery_toast(&controller, cx).map(IntoElement::into_any_element));
-        root.child(Self::status_pill(&controller, cx))
-            .children(strip)
-            .child(toasts)
+        root.children(strip).child(toasts)
     }
 }

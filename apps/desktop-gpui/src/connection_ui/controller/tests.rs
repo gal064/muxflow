@@ -1689,17 +1689,23 @@ mod surface {
     }
 
     #[gpui_kit::test]
-    fn the_status_pill_is_a_named_button_that_follows_the_phase(cx: &mut TestAppContext) {
+    fn the_host_row_is_a_named_button_that_follows_the_phase(cx: &mut TestAppContext) {
         let harness = two_shown_hosts(cx);
         let mut visual = open(cx, &harness);
         assert_eq!(
-            role_of(&mut visual, "Local · Disconnected"),
+            role_of(
+                &mut visual,
+                "Host Local over local, disconnected. Open the host menu."
+            ),
             Some(Role::Button)
         );
         harness.fake.publish(0, state_frame("connected"));
         visual.run_until_parked();
         assert_eq!(
-            role_of(&mut visual, "Local · Connected"),
+            role_of(
+                &mut visual,
+                "Host Local over local, connected. Open the host menu."
+            ),
             Some(Role::Button)
         );
     }
