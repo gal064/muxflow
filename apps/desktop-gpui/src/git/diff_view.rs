@@ -30,6 +30,7 @@ use gpui_kit::{
 use crate::{
     commands::dialogs,
     fonts,
+    perf::{PaintReporter, PaintTicket},
     theme::{
         self, Palette,
         metrics::{BAR_HEIGHT, TYPE_LABEL, TYPE_META, ui},
@@ -112,6 +113,9 @@ pub struct GitDiffView {
     load_task: Option<Task<()>>,
     /// The width the diff was last drawn at.
     width: Rc<Cell<Option<Pixels>>>,
+    /// `workflow.git.diffPaint`: from a read to its diff on screen. Empty
+    /// unless the perf probe is on.
+    paint: PaintReporter,
     _delay: Option<Task<()>>,
     _subscriptions: [Subscription; 2],
 }
@@ -149,6 +153,7 @@ impl GitDiffView {
             serial: 0,
             load_task: None,
             width: Rc::default(),
+            paint: PaintReporter::default(),
             _delay: None,
             _subscriptions: subscriptions,
         };
@@ -294,6 +299,8 @@ impl GitDiffView {
         };
         self.serial += 1;
         let serial = self.serial;
+        self.paint.abandon();
+        let paint = PaintTicket::start(&["workflow.git.diffPaint"]);
         let shared = self.store.read(cx).state(&key).status;
         // Claimed before the read, so a watch event describing the same
         // status cannot start a second read of it.
@@ -350,6 +357,10 @@ impl GitDiffView {
                             .update(cx, |store, cx| store.accept(&key, status.clone(), cx));
                         let still = model::entry_still_changed(&status, &path, target);
                         this.status = Some(Rc::new(status));
+                        if still {
+                            this.paint.hold(serial, paint);
+                            this.paint.note_committed(serial);
+                        }
                         this.show(still.then_some(diff), cx);
                         this.error = None;
                     }
@@ -707,6 +718,10 @@ fn banner(id: &'static str, role: Role, text: String, palette: &Palette) -> impl
 impl Render for GitDiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::palette(cx);
+        // The diff a read answered is built and drawn in this frame.
+        if self.body.is_some() {
+            crate::perf::after_next_frame(self.paint.paintable(self.serial), window);
+        }
         let title = self.tab.title.clone();
         let retry = |cx: &mut Context<Self>| {
             Button::new("git-diff-retry")

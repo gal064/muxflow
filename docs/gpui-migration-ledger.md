@@ -194,7 +194,7 @@ font row covers them).
 | `app/bridgeFailureText.test.ts` | 13 | port | 2 | tests in connection_ui/controller.rs | done (T2.4) |
 | `app/bridgeFailureText.ts` | 12 | port | 2 | connection_ui/controller.rs user_facing_bridge_failure | done (T2.4) |
 | `app/editorChunkAbsence.test.tsx` | 225 | port | 5 | the chunk-not-fetched probe drops; binary file, file over 10 MiB and disconnected tab in editor/pane_tests.rs (T5.2); binary and oversized diff in git/model.rs `shown_diff` (T5.3); a Markdown preview-only tab makes no editor in editor/pane_tests.rs (T5.4) | done (T5.4) |
-| `app/editorChunkBoundary.test.tsx` | 386 | port | 5 | chunk evaluation order and the 500 ms preview publish delay drop; dirty draft surviving a reconnect in editor/document_tests.rs (T5.2), and the buffer lives in the document, not the editor view, so a preview switch keeps a pending save; the Live Markdown cases wait for Phase 7 | open |
+| `app/editorChunkBoundary.test.tsx` | 386 | port | 5 | chunk evaluation order and the 500 ms preview publish delay drop; dirty draft surviving a reconnect in editor/document_tests.rs (T5.2); the buffer lives in the document, so a switch to the preview and back keeps it and its pending save, editor/pane_tests.rs `switching_to_the_preview_and_back_keeps_the_buffer_and_its_pending_save` (T6.5); the Live Markdown cases wait for Phase 7 | done (T6.5) |
 | `app/helperSetupFeedback.test.tsx` | 82 | port | 2 | helper dialog tests in connection_ui/controller/tests.rs; hook-setup activity is Phase 4 with useAgentHostSetup | done (T2.4) |
 | `app/linkQuality.test.ts` | 112 | port | 2 | tests in connection_ui/link_quality.rs | done (T2.4) |
 | `app/linkQuality.ts` | 161 | port | 2 | connection_ui/link_quality.rs | done (T2.4) |
@@ -204,13 +204,13 @@ font row covers them).
 | `app/paneHoverFocus.ts` | 91 | port | 3 | hover focus in terminal/surface.rs: one decision per entry, rechecked when the timer fires, never taken from anything but another pane | done (T3.6) |
 | `app/paneRouting.test.ts` | 44 | port | 3 | tests in terminal/integration/routing.rs | done (T3.6) |
 | `app/paneRouting.ts` | 60 | port | 3 | terminal/integration/routing.rs; its callers are the agents and notifications in Phase 4 | done (T3.6) |
-| `app/postResyncReseed.test.tsx` | 93 | port | 3 | reseed after resync | open |
+| `app/postResyncReseed.test.tsx` | 93 | port | 3 | the hub reseeds every mounted pane, hub_tests.rs `reseeds_every_mounted_pane_on_request_reopening_a_one_shot_conflict_latch`; only a resync repair sends it, not a connect or a reconnect, connection_ui/controller/tests.rs `only_a_resync_repair_reseeds_the_mounted_panes` (T6.5) | done (T6.5) |
 | `app/reconnectNoticeDedupe.test.tsx` | 129 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
 | `app/shellNavigationCoordinator.ts` | 165 | port | 4 | workspaces/navigation.rs `Coordinator`: one move in flight, only the latest queued | done (T4.1) |
 | `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | tests in files/tests.rs (`current_terminal_file_pane`) | done (T5.1) |
 | `app/terminalFileOpenRoute.ts` | 27 | port | 3 | files/wire.rs `current_terminal_file_pane`, used by editor/open.rs `open_terminal_path` | done (T5.1) |
 | `app/types.ts` | 68 | replace | 2 | Session, Window, Pane, ConnectionSpec, HostProfile come from protocol and desktop-core types | open |
-| `app/useAppAgentController.ts` | 162 | port | 5 | agents/mod.rs: scopes, focus and setup gating from the connection controller, rows across hosts (in the sidebar's own workspace order and pinned filter), the jump, row opening through the shell's `select_pane`, and the palette's row commands; the workflow half is agents/setup.rs; selecting a terminal tab acknowledges its pane (T4.5); bringing an agent's pane here and moving it are workspaces/moves.rs (T4.5). Phase 5: launch and resume need the active root (`agents::view::ActiveRoot`, set by the Explorer) | open |
+| `app/useAppAgentController.ts` | 162 | port | 5 | agents/mod.rs: scopes, focus and setup gating from the connection controller, rows across hosts (in the sidebar's own workspace order and pinned filter), the jump, row opening through the shell's `select_pane`, and the palette's row commands; the workflow half is agents/setup.rs; selecting a terminal tab acknowledges its pane (T4.5); bringing an agent's pane here and moving it are workspaces/moves.rs (T4.5); launch and resume use the root the Explorer publishes as `agents::view::ActiveRoot`. T6.5 tests: files/tests.rs `publishes_the_resolved_root_for_agent_launches_and_withdraws_it`, workspaces/tests.rs `a_launch_opens_under_the_explorers_root_and_waits_for_one` and `asks_agents_only_over_a_writable_epoch_and_focuses_the_active_pane`, agents/tests.rs `removing_the_hooks_withdraws_consent_and_the_window_naming` and `pauses_the_question_while_another_host_question_owns_the_lane` | done (T6.5) |
 | `app/useAppConnectionController.ts` | 944 | port | 2 | connection_ui/controller.rs; terminal hub and state cache, reseeds, echo-lag and input-latency probes, clipboard, file, git, agent and automation frame routing, retireConnection, appFocused and prewarm_terminal_bulk stay with Phase 3 and 4 owners; active-window resolution and the optimistic window with T4.1; after-install agent setup with useAgentHostSetup | done (T2.4) |
 | `app/useAppFileActions.test.tsx` | 196 | port | 5 | tests in files/tests.rs (download origins, scope moved under the save panel) | done (T5.1) |
 | `app/useAppFileActions.ts` | 145 | port | 5 | files/explorer.rs `mutate` and downloads; files/mod.rs `download`, `download_app_tab` | done (T5.1) |
@@ -356,8 +356,8 @@ font row covers them).
 | `features/files/FileEditor.tsx` | 57 | replace | 5 | editor/pane.rs: the Kit code editor (gpui-component `Editor`) with the toolbar, find bar and go-to box | done (T5.2) |
 | `features/files/LiveMarkdownEditor.test.tsx` | 117 | port | 7 | tests of LiveMarkdownEditor.tsx | open |
 | `features/files/LiveMarkdownEditor.tsx` | 154 | port | 7 | ? depends on S4: does Live Markdown fit the Kit editor or gpui-base text | open |
-| `features/files/api.test.ts` | 506 | port | 5 | behavior assertions move to the replacement of api.ts; Explorer half in files/tests.rs (search scope, events, listings, watch release, download events) (T5.1); the text and bulk read cases go with the editor | open |
-| `features/files/api.ts` | 647 | replace | 5 | Tauri file client becomes direct desktop-core calls; its request validation moves with it; Explorer half (T5.1): files/client.rs and files/wire.rs over desktop-core `file_request`, and the shared watch registry in files/watches.rs (one host watch per directory for the tree and the open documents); read and write go with the editor | open |
+| `features/files/api.test.ts` | 506 | port | 5 | Explorer half in files/tests.rs (search scope, events, listings, watch release, download events) (T5.1); editor half in editor/io.rs tests (chunks, verification, image, write answer, `a_write_carries_its_scope_and_the_files_own_line_endings`, `dropping_a_reply_before_its_answer_cancels_the_transfer_once`) and the read-cancel cases in editor/document_tests.rs (T6.5); the renderer open-segment case drops with the invoke boundary, and native still records the segments (`perf_log::FileOpenTiming`) | done (T6.5) |
+| `features/files/api.ts` | 647 | replace | 5 | Tauri file client becomes direct desktop-core calls; Explorer half (T5.1): files/client.rs and files/wire.rs over desktop-core `file_request`, and the shared watch registry in files/watches.rs; read and write: editor/io.rs `BackendIo` and `write_request` over desktop-core `editor_manager`, through connection_ui/backend.rs `start_file_io` (T5.2, T6.5) | done (T6.5) |
 | `features/files/autosave.test.ts` | 104 | port | 5 | editor/autosave.rs tests, and the document-level cases in editor/document_tests.rs | done (T5.2) |
 | `features/files/autosave.ts` | 108 | port | 5 | editor/autosave.rs `Autosave`; driven by editor/document.rs | done (T5.2) |
 | `features/files/directoryCache.test.ts` | 57 | port | 5 | tests in files/tests.rs | done (T5.1) |
@@ -400,7 +400,7 @@ font row covers them).
 | `features/files/saveStatus.ts` | 51 | port | 5 | editor/save_status.rs | done (T5.2) |
 | `features/files/searchCount.test.ts` | 79 | port | 5 | editor/find.rs tests | done (T5.2) |
 | `features/files/searchCount.ts` | 85 | port | 5 | editor/find.rs `count_label`, with the find, replace and go-to-line matching | done (T5.2) |
-| `features/files/types.ts` | 280 | port | 5 | file types, limits, wire shapes; Explorer half (T5.1) in files/wire.rs; editor limits and text types go with the editor | open |
+| `features/files/types.ts` | 280 | port | 5 | file types, limits, wire shapes; Explorer half (T5.1) in files/wire.rs; editor limits and `TextFile`, `BinaryFile`, `Opened` in editor/io.rs, `SaveRequest` in editor/autosave.rs, and the single-file capability's watch in editor/pane.rs `watched_path` (T6.5); `LIVE_MARKDOWN_LIMIT_CHARS` waits for Phase 7 | done (T6.5) |
 | `features/files/useActiveRoot.ts` | 280 | port | 5 | files/explorer.rs probe: one at a time, behind the pane paint gate, backstop that slows once settled and runs only while the window is visible or active; published as `agents::view::ActiveRoot` (with `git_worktree`) by files/mod.rs `publish_root` | done (T5.1) |
 | `features/files/useConnectionTransfers.ts` | 85 | port | 5 | files/downloads.rs `DownloadList` | done (T5.1) |
 | `features/files/useOpenFileTab.ts` | 504 | port | 5 | editor/tabs.rs `open_file_tab` (preview-tab rule), editor/open.rs (explorer, terminal path and Quick Open opens), editor/document.rs (read, watch reconciliation, reload rules) | done (T5.2) |
@@ -409,7 +409,7 @@ font row covers them).
 | `features/files/watchLeases.test.ts` | 208 | port | 5 | tests in files/tests.rs | done (T5.1) |
 | `features/files/watchLeases.ts` | 181 | port | 5 | files/watches.rs `sync_watches`: reachable targets, refusal backoff, unwatch after a failed bootstrap or once an abandoned arming settles, one host watch shared with open documents | done (T5.1) |
 | `features/files/webkitWidgetBuffers.test.ts` | 43 | retire | 5 | CodeMirror widget buffer behavior in WebKit | done (T5.2) |
-| `features/files/wire.ts` | 135 | port | 5 | file wire decode and transfer state validation; Explorer half (T5.1): files/wire.rs and files/downloads.rs `decode_event`; line endings go with the editor | open |
+| `features/files/wire.ts` | 135 | port | 5 | file wire decode and transfer state validation; Explorer half (T5.1): files/wire.rs and files/downloads.rs `decode_event`; line endings in editor/autosave.rs `LineEnding` (`line_endings_are_detected_and_kept_for_typed_lines`), file I/O frames in editor/io.rs | done (T6.5) |
 
 ### `features/git`
 
@@ -501,30 +501,30 @@ font row covers them).
 | `features/terminal/PaneRecovery.ts` | 35 | port | 3 | crates/terminal-engine/src/reveal.rs | done (T3.1) |
 | `features/terminal/PaneRevealState.test.ts` | 161 | port | 3 | tests in crates/terminal-engine/src/reveal.rs | done (T3.1) |
 | `features/terminal/PaneRevealState.ts` | 154 | port | 3 | crates/terminal-engine/src/reveal.rs | done (T3.1) |
-| `features/terminal/TerminalBytes.ts` | 18 | retire | 3 | branded owned-bytes type for a JS copy boundary; Rust ownership makes it a language fact | open |
+| `features/terminal/TerminalBytes.ts` | 18 | retire | 3 | branded owned-bytes type for a JS copy boundary; Rust ownership makes it a language fact | done (T6.5) |
 | `features/terminal/TerminalEventHub.test.ts` | 812 | port | 3 | crates/terminal-engine/src/hub_tests.rs; consumer rejection becomes catch_unwind in engine.rs, which has no injection point for a test; observer failures have no equivalent | done (T3.1) |
 | `features/terminal/TerminalEventHub.ts` | 844 | port | 3 | crates/terminal-engine/src/hub.rs | done (T3.1) |
 | `features/terminal/TerminalGenerationWatermark.ts` | 40 | port | 3 | applied_generation in crates/terminal-engine/src/pane.rs; writes are synchronous, so no version guard is needed | done (T3.1) |
-| `features/terminal/TerminalPane.test.tsx` | 1810 | port | 3 | tests of TerminalPane.tsx; the clipboard chord cases (copy then drop the selection, Mac Super+C) are in tests/terminal_reading.rs (T3.5) | open |
-| `features/terminal/TerminalPane.tsx` | 1621 | port | 3 | event consumer and reveal driver in crates/terminal-engine/src/pane.rs and engine.rs (T3.1); pane entity in terminal/pane.rs and terminal/link.rs, element in terminal/element.rs (T3.3); reconcilePaneGrid in terminal/surface.rs (T3.3); copy, find, the new-output button and return to live in terminal/reading (T3.5); input and integration behavior go to T3.4, T3.6 | open |
-| `features/terminal/TerminalPaneHostHandshake.test.tsx` | 810 | port | 3 | crates/terminal-engine/src/engine_tests.rs (T3.1); the grid-mismatch and double-mount cases go with the terminal view | open |
+| `features/terminal/TerminalPane.test.tsx` | 1810 | port | 3 | reveal, handshake, watchdog, reading across a hide and lazy scrollback in terminal-engine engine_tests.rs, pager.rs and reveal.rs (T3.1, T6.5); grid during a resize in engine_tests.rs and terminal/surface.rs; clipboard chords and returning to live (`typing_or_new_output_takes_a_reader_back_to_live`) in tests/terminal_reading.rs; activity in tests/terminal_input.rs `a_key_or_a_press_is_activity_and_focus_alone_is_not`; font size in workspaces/tests.rs `a_font_size_change_reaches_open_panes_without_remounting_them`; paint spans in perf.rs; the diagnostic banner text in engine_tests.rs `says_it_is_waiting_for_a_seed_and_shows_nothing_until_the_seed_arrives` (T6.5). Retire: the 300 ms paint fallback (the grid is never hidden; the cursor waits for the reveal), the WebKit focus restore, a failing copy, and the other-host and prefetch-from-cache cases, as each host has its own engine and no screen cache | done (T6.5) |
+| `features/terminal/TerminalPane.tsx` | 1621 | port | 3 | event consumer and reveal driver in crates/terminal-engine/src/pane.rs and engine.rs (T3.1); pane entity in terminal/pane.rs and terminal/link.rs, element in terminal/element.rs (T3.3); reconcilePaneGrid in terminal/surface.rs (T3.3); copy, find, the new-output button and return to live in terminal/reading (T3.5); input and integration behavior in terminal/input and terminal/integration (T3.4, T3.6); the paint gate is armed by the mount and action spans close on the first paint in perf.rs (T6.5) | done (T6.5) |
+| `features/terminal/TerminalPaneHostHandshake.test.tsx` | 810 | port | 3 | crates/terminal-engine/src/engine_tests.rs (T3.1), with `reveals_a_pane_whose_only_content_ever_arrives_as_output` (T6.5); grid mismatch in terminal/probes.rs; the double mount is React's and retires | done (T6.5) |
 | `features/terminal/TerminalReadingState.test.ts` | 71 | port | 3 | tests in crates/terminal-engine/src/reading.rs | done (T3.1) |
 | `features/terminal/TerminalReadingState.ts` | 57 | port | 3 | crates/terminal-engine/src/reading.rs | done (T3.1) |
-| `features/terminal/TerminalRenderer.test.ts` | 915 | port | 3 | split: scheduler, xterm callbacks, paste interception retire; pane grid reconciliation ported to terminal/surface.rs (T3.3); restoreDecision is in terminal-engine (T3.1); seed recovery is in terminal-engine (T3.1) and no GPU resource recovery is needed; the search and `activatedTerminalUrl` cases are in terminal/reading/find.rs and links.rs (T3.5) | open |
-| `features/terminal/TerminalRenderer.ts` | 1453 | replace | 3 | XtermRenderer becomes TerminalElement (T3.3); restoreDecision is in terminal-engine (T3.1); pane grid reconciliation in terminal/surface.rs (T3.3); selection, search, the link provider, the OSC 8 `linkHandler` and their activation, the scrollbar and top-of-history detection in terminal/reading (T3.5); no GPU resource recovery is needed in a GPUI element; a paste goes through the host's tmux paste path, which brackets it, instead of xterm's client bracketing (T3.8) | open |
+| `features/terminal/TerminalRenderer.test.ts` | 915 | port | 3 | split: scheduler, xterm callbacks, paste interception, serialize parity and `sanitizeSerializedScreen` retire (the kept screen is the live `Term`); pane grid reconciliation in terminal/surface.rs and tests/terminal.rs `rejects_a_grid_nothing_can_be_laid_out_on_and_notices_when_nothing_changes` (T3.3); the restore decision is the resume check in terminal-engine (T3.1); DEC 2026 in terminal-engine terminal.rs and engine_tests.rs; Shift forcing a local selection in tests/terminal_input.rs; seed recovery is in terminal-engine (T3.1) and no GPU resource recovery is needed; the search and `activatedTerminalUrl` cases are in terminal/reading/find.rs and links.rs (T3.5) | done (T6.5) |
+| `features/terminal/TerminalRenderer.ts` | 1453 | replace | 3 | XtermRenderer becomes TerminalElement (T3.3); the restore decision is the resume check in terminal-engine pane.rs `apply_resume`, tested by engine_tests.rs `refuses_a_tail_for_a_screen_this_side_is_not_holding` (T3.1); pane grid reconciliation in terminal/surface.rs (T3.3); selection, search, the link provider, the OSC 8 `linkHandler` and their activation, the scrollbar and top-of-history detection in terminal/reading (T3.5); no GPU resource recovery is needed in a GPUI element; a paste goes through the host's tmux paste path, which brackets it, instead of xterm's client bracketing (T3.8) | done (T6.5) |
 | `features/terminal/TerminalStateCache.test.ts` | 140 | retire | 3 | tests TerminalStateCache.ts, which retires | done (T3.1) |
 | `features/terminal/TerminalStateCache.ts` | 191 | retire | 3 | xterm serialize cache; hidden panes keep their live grids in crates/terminal-engine/src/engine.rs, bounded at 64 screens and 128 MiB, with the pager flags carried alongside | done (T3.1) |
 | `features/terminal/TerminalTransferSurface.test.tsx` | 906 | port | 3 | batch tests in apps/desktop-gpui/tests/terminal_integration.rs; DOM paste events, the WebView image encoder and point hit-testing retire with the WebView | done (T3.6) |
 | `features/terminal/TerminalTransferSurface.tsx` | 638 | port | 3 | terminal/integration/mod.rs (paste, drop, upload list) and upload.rs (the batch and its review dialog) | done (T3.6) |
 | `features/terminal/TerminalWriteScheduler.test.ts` | 499 | port | 3 | write and acknowledgement tests in crates/terminal-engine/src/terminal.rs and engine_tests.rs; fences, partial records and frame pacing have no equivalent | done (T3.1) |
 | `features/terminal/TerminalWriteScheduler.ts` | 613 | replace | 3 | synchronous parse in stream order in crates/terminal-engine/src/terminal.rs; a frame is acknowledged after it is applied, so the host's delivery window is the bound and nothing can overflow | done (T3.1) |
-| `features/terminal/accessibilityPreference.ts` | 25 | retire | 3 | owner exception: the screen-reader terminal mirror and its setting are not built | open |
-| `features/terminal/api.test.ts` | 748 | port | 3 | behavior assertions move to the replacement of api.ts | open |
-| `features/terminal/api.ts` | 1004 | replace | 3 | 27 invokes and binary event decode become the in-process desktop-core bridge | open |
-| `features/terminal/atlasFontSmoothing.ts` | 157 | retire | 3 | workaround for the xterm WebGL glyph atlas font smoothing | open |
-| `features/terminal/atlasModelInvalidation.test.ts` | 147 | retire | 3 | tests the shared xterm WebGL atlas model invalidation | open |
-| `features/terminal/atlasStaleProbe.test.ts` | 180 | retire | 3 | tests atlasStaleProbe.ts, which retires | open |
-| `features/terminal/atlasStaleProbe.ts` | 176 | retire | 3 | detects a stale xterm WebGL shared atlas | open |
+| `features/terminal/accessibilityPreference.ts` | 25 | retire | 3 | owner exception: the screen-reader terminal mirror and its setting are not built | done (T6.5) |
+| `features/terminal/api.test.ts` | 748 | port | 3 | decode cases in terminal-engine event.rs and connection_ui/bridge_events.rs tests, cumulative credit and failed acks in bridge_events.rs `DeliveryAcks` tests, credit after admission in connection_ui/controller/tests.rs, input frames in desktop-core connection/tests.rs and the 1 MiB refusal in dispatch.rs, with the Tauri wording in terminal/input/mod.rs (T6.5); the perf-measurement, invoke-shape, JS-allocation, throwing-listener, bridge-key and final-producer cases retire with the invoke boundary | done (T6.5) |
+| `features/terminal/api.ts` | 1004 | replace | 3 | 27 invokes and binary event decode become the in-process desktop-core bridge: connection_ui/backend.rs, decode in terminal-engine event.rs and connection_ui/bridge_events.rs; the active host's file-transfer prewarm in connection_ui/controller.rs `prewarm_active_bulk`, tested by `warms_file_transfer_for_the_active_host_only` (T6.5); the bridge measurement invokes retire with the invoke boundary | done (T6.5) |
+| `features/terminal/atlasFontSmoothing.ts` | 157 | retire | 3 | workaround for the xterm WebGL glyph atlas font smoothing | done (T6.5) |
+| `features/terminal/atlasModelInvalidation.test.ts` | 147 | retire | 3 | tests the shared xterm WebGL atlas model invalidation | done (T6.5) |
+| `features/terminal/atlasStaleProbe.test.ts` | 180 | retire | 3 | tests atlasStaleProbe.ts, which retires | done (T6.5) |
+| `features/terminal/atlasStaleProbe.ts` | 176 | retire | 3 | detects a stale xterm WebGL shared atlas | done (T6.5) |
 | `features/terminal/cellMetrics.ts` | 213 | replace | 3 | terminal/cell_metrics.rs: measures the shaped font; snapping rules and `cellsForBox` carried over | done (T3.3) |
 | `features/terminal/clientSize.test.ts` | 208 | port | 3 | tests in terminal/client_size.rs | done (T3.3) |
 | `features/terminal/clientSize.ts` | 112 | port | 3 | terminal/client_size.rs | done (T3.3) |
@@ -551,21 +551,21 @@ font row covers them).
 | `features/terminal/paintTailProbe.ts` | 368 | replace | 3 | terminal/probes.rs (PaintTail): main-thread block and stopped frame clock fingerprints and the `render.paintSlow` incident; the xterm write-backlog fingerprints go | done (T3.3) |
 | `features/terminal/panePaintGate.test.ts` | 118 | port | 3 | tests in terminal/paint_gate.rs | done (T3.3) |
 | `features/terminal/panePaintGate.ts` | 127 | replace | 3 | terminal/paint_gate.rs: the explorer waits for the pane's first paint, armed once per mount; released from TerminalElement. Phase 5 is the caller | done (T3.3) |
-| `features/terminal/panePaintOrdering.test.tsx` | 274 | port | 3 | explorer ordered behind pane paint | open |
-| `features/terminal/rendererDrainBound.test.ts` | 129 | port | 3 | ? xterm write callbacks drop; if the engine keeps a hide drain, port: a drain that never completes is answered by a bound with only the generation actually applied, a late completion cannot advance the published watermark, a sealed writer refuses writes and says so (frozen-pane failure) | open |
+| `features/terminal/panePaintOrdering.test.tsx` | 274 | port | 3 | the pane's mount arms the paint gate (terminal/link.rs `mount`) and the Explorer looks at it once the switch has settled (files/explorer.rs `resolve_behind_paint`): files/tests.rs `holds_the_probe_when_the_pane_arms_later_in_the_same_switch`, tests/terminal.rs `a_remounted_pane_paints_its_retained_screen_without_new_output` (T6.5) | done (T6.5) |
+| `features/terminal/rendererDrainBound.test.ts` | 129 | retire | 3 | the engine writes synchronously and a hide flushes and reports the generation it applied, so there is no drain, async completion or sealed writer; the frozen-pane contract is engine_tests.rs `hides_with_the_applied_generation_and_says_it_kept_the_screen` and `a_reveal_stops_waiting_for_a_hide_that_never_answers`, hub_tests.rs `keeps_output_arriving_after_hide_serialization_outside_the_exact_cutoff_and_available_for_recovery` | done (T6.5) |
 | `features/terminal/rendererResizeOrdering.test.ts` | 140 | retire | 3 | answered: the engine serializes a history rewrite and a resize by construction (one command loop), so this test retires with xterm's write queue | done (T3.3) |
-| `features/terminal/revealPayloadBudget.test.ts` | 112 | port | 3 | reveal payload cost over the Rust contract; reuses tmux-control directly | open |
+| `features/terminal/revealPayloadBudget.test.ts` | 112 | port | 3 | reveal payload cost over the Rust contract in tmux-control/src/replay.rs: nothing printed costs nothing, the bound is inclusive at `REVEAL_TAIL_BOUND`, one character over seeds, an epoch-0 checkpoint is refused (T6.5) | done (T6.5) |
 | `features/terminal/revealRetry.test.ts` | 91 | port | 3 | tests in crates/terminal-engine/src/reveal_retry.rs | done (T3.1) |
 | `features/terminal/revealRetry.ts` | 123 | port | 3 | crates/terminal-engine/src/reveal_retry.rs | done (T3.1) |
-| `features/terminal/staleRestoreSilence.test.ts` | 533 | port | 3 | restore admission and splice refusal decisions | open |
-| `features/terminal/terminalClientLifecycle.test.ts` | 162 | port | 3 | native client ownership | open |
+| `features/terminal/staleRestoreSilence.test.ts` | 533 | port | 3 | splice refusals in terminal-engine terminal.rs `prepend_history` (alternate screen, grid changed, scrollback capped, overlap), journalled as `pane.historySuperseded` with its reason by pager.rs `receive`, without Tauri's scrollback row counts (T6.5); the stale cached restore retires, because the kept screen is the live `Term` and a new epoch drops it | done (T6.5) |
+| `features/terminal/terminalClientLifecycle.test.ts` | 162 | port | 3 | native client ownership: `start_terminal` returns the client in one call, so a failed start leaves none (controller/tests.rs `a_failed_start_reports_its_error_without_a_client`, desktop-core `startup_rollback_releases_both_dispatch_workers`); one bridge per shown host, a replaced or hidden one stopped (`stops_a_hosts_bridge_when_it_stops_being_shown`); the multi-client incident is not kept: a bridge per shown host is normal, so a bridge count no longer marks a reconnect storm, which shows as `link.degraded` and `link.restored` per host | done (T6.5) |
 | `features/terminal/terminalInputPolicy.test.ts` | 327 | port | 3 | translation and clipboard-alias cases in terminal/input/policy.rs (T3.4); copy-on-select cases in tests/terminal_reading.rs (T3.5), OSC 52 cases with T3.6 | partial (T3.4) |
 | `features/terminal/terminalInputPolicy.ts` | 117 | port | 3 | terminal/input/policy.rs, with the keyboard encoding xterm.js did in terminal/input/keys.rs, mouse reports in mouse.rs and IME in ime.rs; `copyCompletedTerminalSelection` and `installTerminalCopyOnSelect` in terminal/reading/selection.rs and mod.rs (T3.5) | partial (T3.4) |
 | `features/terminal/terminalLinkActivation.test.ts` | 13 | port | 3 | tests in terminal/reading/links.rs | done (T3.5) |
 | `features/terminal/terminalLinkActivation.ts` | 9 | port | 3 | terminal/reading/links.rs (`is_link_activation`) | done (T3.5) |
 | `features/terminal/terminalPanePerf.test.ts` | 154 | port | 3 | tests in terminal/probes.rs | done (T3.3) |
 | `features/terminal/terminalPanePerf.ts` | 202 | port | 3 | terminal/probes.rs (PanePerf) | done (T3.3) |
-| `features/terminal/terminalSeedOverlay.test.ts` | 59 | port | 3 | re-assert on the alacritty_terminal grid the seed overlay's erase cases: attributed erase fills through the right edge, erase keeps soft-wrap metadata, adjacent blank spans keep their own backgrounds (the S9 lane does not assert them by name) | open |
+| `features/terminal/terminalSeedOverlay.test.ts` | 59 | port | 3 | terminal-engine terminal.rs `a_seed_overlay_fills_an_attributed_erase_through_the_right_edge`, `a_seed_overlay_restores_adjacent_blank_spans_with_their_own_backgrounds`, `a_seed_overlay_keeps_the_soft_wrap_it_lands_on`; alacritty keeps the wrap on the wrapping row and the host paints overlays before the text (T6.5) | done (T6.5) |
 | `features/terminal/terminalTransferApi.test.ts` | 231 | port | 3 | native clipboard and event decode tests in terminal/integration/transfers.rs | done (T3.6) |
 | `features/terminal/terminalTransferApi.ts` | 346 | replace | 3 | TerminalBackend::start_upload and cancel_upload in connection_ui/backend.rs, straight into desktop-core; only a digest-verified, published completion is pasted | done (T3.6) |
 | `features/terminal/terminalTransferRegistry.test.tsx` | 154 | port | 3 | tests in terminal/integration/transfers.rs | done (T3.6) |
@@ -573,8 +573,8 @@ font row covers them).
 | `features/terminal/terminalTransfers.test.ts` | 208 | port | 3 | tests in terminal/integration/transfers.rs; the canvas PNG encoder cases retire with the WebView | done (T3.6) |
 | `features/terminal/terminalTransfers.ts` | 367 | port | 3 | terminal/integration/transfers.rs; the batch order and cancellation in upload.rs. The WebView image encoder retires: the native reader stages PNGs | done (T3.6) |
 | `features/terminal/terminalViewport.ts` | 66 | port | 3 | ViewportAnchor in crates/terminal-engine/src/terminal.rs | done (T3.3) |
-| `features/terminal/theme.test.ts` | 107 | port | 3 | behavior assertions move to the replacement of theme.ts | open |
-| `features/terminal/theme.ts` | 223 | replace | 3 | reads --term-* CSS properties; becomes the Rust theme and generated palette | open |
+| `features/terminal/theme.test.ts` | 107 | port | 3 | theme/mod.rs `the_dark_terminal_is_ghostty_default_style_dark`, tests/frames.rs `terminal_styles_are_distinct_faces` (T6.5); the palette matching the tokens is CI `palette:check`; the stylesheet fallbacks and the font token retire with the CSS | done (T6.5) |
+| `features/terminal/theme.ts` | 223 | replace | 3 | theme/palette.rs, generated from the tokens and checked by `palette:check`; terminal colours in terminal/element.rs `grid_palette`, search colours and the scrollbar thumb's idle, hover and held alphas in terminal/reading/mod.rs (T6.5) | done (T6.5) |
 | `features/terminal/timeBound.test.ts` | 63 | retire | 3 | tests timeBound.ts, which retires | done (T3.1) |
 | `features/terminal/timeBound.ts` | 63 | retire | 3 | a promise race around calls that could wedge; the engine runs on deadlines and its writes cannot wedge | done (T3.1) |
 | `features/terminal/topologyNotification.test.ts` | 29 | port | 3 | topology notification decode: cases in the shared `topology.json` fixture, run by `crates/terminal-interactions` and vitest | done (T3.2) |
@@ -584,7 +584,7 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/terminal/testing/RustPaneHost.ts` | 72 | retire | 3 | TS shim that spawns the tmux-control terminal_contract example; Rust tests call it in-process | open |
+| `features/terminal/testing/RustPaneHost.ts` | 72 | retire | 3 | TS shim that spawns the tmux-control terminal_contract example; Rust tests drive `PaneResourceStore` in-process (replay.rs, host terminal_tests.rs). The example goes at cutover with this shim, which Tauri's vitest still runs | done (T6.5) |
 
 ### `features/tmux`
 
@@ -624,14 +624,14 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `perf/bootstrap.ts` | 34 | replace | 3 | perf probe enablement becomes a direct desktop-core query | open |
-| `perf/operations.ts` | 27 | port | 3 | operation counters | open |
-| `perf/paintTicket.test.ts` | 20 | port | 3 | tests of paintTicket.ts | open |
-| `perf/paintTicket.ts` | 61 | port | 3 | paint ticket | open |
-| `perf/probe.test.ts` | 261 | port | 3 | tests of probe.ts | open |
-| `perf/probe.ts` | 571 | port | 3 | perf probe keeping the perf-log schema | open |
-| `perf/surfacePaint.test.ts` | 101 | port | 5 | the editor-generation case drops; port the paint-reporter cases: a superseded load keeps the successor's ticket, abandon needs a fresh commit, a stale lifetime publishes nothing | open |
-| `perf/surfacePaint.ts` | 206 | replace | 5 | tracks which lazily mounted Monaco generation is ready; GPUI reports paint from the view | open |
+| `perf/bootstrap.ts` | 34 | replace | 3 | perf.rs `enabled`, a direct desktop-core `perf_log_enabled` query; the app's `perf-log` feature compiles the sink into a release build (T6.5) | done (T6.5) |
+| `perf/operations.ts` | 27 | port | 3 | perf.rs `counter`, the `operations` record with counters and high-water marks; the fixture recorder seam retires, as the Rust hub tests assert behavior directly (T6.5) | done (T6.5) |
+| `perf/paintTicket.test.ts` | 20 | port | 3 | perf.rs `records_nothing_and_hands_out_no_ticket_while_the_probe_is_off` (T6.5) | done (T6.5) |
+| `perf/paintTicket.ts` | 61 | port | 3 | perf.rs `PaintTicket` (T6.5) | done (T6.5) |
+| `perf/probe.test.ts` | 261 | port | 3 | perf.rs tests: coalesced counters, exact retry, line and byte bounds, oversized rows, correlation fields, structured records, pane spans and their bounds (T6.5); the request-outcome and payload-serialization cases retire with the invoke boundary | done (T6.5) |
+| `perf/probe.ts` | 571 | port | 3 | perf.rs keeps the perf-log schema (`summarize-perf-log.py`): samples, milestones, structured records, `operations` and `summary` aggregates, `sinkInvalid` and `recordId`; pane spans for create.tab, create.workspace, pane.split and window.switch with `perf.timeline` in workspaces/mod.rs `perform`, closed on the first paint in terminal/element.rs; `perf.echo` and `perf.terminalPane` go through it (T6.5) | done (T6.5) |
+| `perf/surfacePaint.test.ts` | 101 | port | 5 | perf.rs `PaintReporter` tests: `a_reporter_publishes_once_its_load_is_committed_and_drawn`, `a_superseded_load_retires_only_its_own_ticket`, `nothing_held_after_an_abandon_publishes_until_the_surface_commits_again`, `nothing_publishes_after_the_lifetime_that_armed_it_moved_on`; the editor-generation case drops with Monaco (T6.5) | done (T6.5) |
+| `perf/surfacePaint.ts` | 206 | replace | 5 | perf.rs `PaintReporter` and `after_next_frame`: the view publishes on the frame after it draws the measured load. Wired: `workflow.file.editorPaint` (editor/document.rs, pane.rs), `file.timeToFirstContent` (editor/io.rs), `explorer.expandToPaint`, `workflow.explorer.directoryExpandPaint`, `explorer.externalChangeToPaint`, `workflow.explorer.rootPaint` (files/explorer.rs, view.rs), `workflow.git.panelPaint` (git/panel.rs), `workflow.git.diffPaint` (git/diff_view.rs) (T6.5) | done (T6.5) |
 
 ### `startup`
 
@@ -655,7 +655,7 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `transport/abortable.ts` | 68 | replace | 5 | cancellation by tokio CancellationToken in desktop-core clients | open |
+| `transport/abortable.ts` | 68 | replace | 5 | cancellation is a drop guard calling desktop-core's cancel function, not a tokio token: files/client.rs `Pending`, editor/io.rs `Reply` (reads only; a save on the wire is never dropped, document_tests.rs `a_read_nobody_waits_for_is_stopped_but_a_save_on_the_wire_never_is`), git/client.rs `CancelOnDrop`; a shared watch is released by its last holder, files/tests.rs `the_holder_that_armed_a_watch_leaving_mid_bootstrap_keeps_it_for_the_other` (T6.5) | done (T6.5) |
 
 ### `ui`
 
