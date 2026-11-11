@@ -224,6 +224,12 @@ The phase that owns each area fixes these; the Phase 6 parity check confirms the
 - X11 window position is not restored (owner informed).
 - After clicking a notification popup on X11, the next pointer move over a pane made it tmux-active. Check whether hover focus was on; if not, fix the input path.
 - Agent rows for panes that never existed stay after SessionEnd and have no dismiss.
+- Phase 5: the context-menu key (Shift+F10, Menu) in the Explorer and Git rows, and keyboard row access in Git (T6.1).
+- Phase 5: Git push errors show the host's raw text, not the SurfaceError summary with Details.
+- Phase 5: Settings copy mentions Live Markdown, which arrives in Phase 7.
+- Phase 5: Kit bug, double-click selects nothing in a preview paragraph with inline code (report upstream). Drag-select in the preview is on the owner's Mac prompt.
+- Phase 5: Explorer selection does not follow a renamed file; Delete in a read-only menu looks enabled; a cancelled download row shows "0 B transferred" and raw text; the first row after Load more sometimes has no focus ring.
+- Phase 5: `xdg-open` children of `download_opener.rs` are not reaped (shared with Tauri).
 
 ## Phase 4: Workspaces and panels
 
@@ -240,7 +246,7 @@ through the T2.1 seam.
 | T4.3 `ports-transfers` | sonnet, high, full cycle | `gpui/ports-transfers` | Merged | `daa7af4` | 2 reviewers, 1 round. QA pass on local and SSH hosts; document-tab drags, the dock zones and the agent menu were not run live (headless tests only). Open: upload Cancel waits for the host's response before it reports |
 | `gdev_qa_phase4` | fresh QA | `gpui/integration` | Passed after fixes | | All panels against local and SSH hosts. Found a notification click leaving tmux focus on the old pane, and a tooltip over a context menu |
 | T4.6 `phase4-fixes` | opus, high, full cycle, invariant | `gpui/phase4-fixes` | Merged | `0912995` | Fixed both QA bugs (cross-host navigation was cancelled by a connection change). Ported the topology authority, so Close All Non-Agent Tabs works. No Phase 4 ledger rows left open except the Phase 5 deferrals |
-| T5.1 `explorer` | opus, high, full cycle, invariant | `gpui/explorer` | Running, round 2 | | Round 1 found 14 issues; merging integration and wiring the editor and Git seams |
+| T5.1 `explorer` | opus, high, full cycle, invariant | `gpui/explorer` | Merged | `6604380` | 3 review rounds, QA PASS local and SSH after one dialog-focus crash fix. Wired the editor opener, watcher and download, `ActiveRoot` and Git ignored paths. One shared watch registry serves the tree and open documents |
 | T5.2 `editor` | opus, high, full cycle, large, design | `gpui/editor` | Merged | `1e4a659`, merge `e372bc2` | Kit code editor. 3 review rounds, QA PASS local and SSH. An external edit to an open remote file leaves the tab in Save failed until T5.1 delivers change notices |
 | T5.3 `git-diff` | opus, high, full cycle, design | `gpui/git-diff` | Merged | `ef076e7`, merge `9a9ad34` | 3 review rounds, QA PASS local and SSH, `test:git` passes after a driver fix. Gaps: SurfaceError summary on push errors, keyboard row access, file icons |
 | T5.4 `markdown` | sonnet, high, full cycle, design | `gpui/markdown` | Merged | `587887b` | 2 review rounds, QA PASS local. Kit bug: double-click selects nothing in a paragraph with inline code. Drag-select in the preview not verified (xdotool). Settings copy still mentions Live Markdown |
@@ -336,7 +342,7 @@ final sweep command returning only justified hits.
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
 | 4 | Done, QA passed | `0912995` | |
-| 5 | Running | | T5.2, T5.3 and T5.4 merged; T5.1 in round 2 |
+| 5 | Running, integrated QA | | T5.1 to T5.4 merged; `gdev_qa_phase5` running |
 | 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
