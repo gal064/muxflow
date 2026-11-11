@@ -703,6 +703,25 @@ fn escape_cancels_and_the_confirm_button_confirms(cx: &mut TestAppContext) {
     assert!(!dialog_open(handle, cx));
 }
 
+#[gpui_kit::test]
+fn a_confirmation_spans_a_narrow_window(cx: &mut TestAppContext) {
+    let (_dir, handle) = no_state(cx);
+    let width = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, _| {
+            window.find("surface").bounds().size.width
+        })
+    };
+    open_confirmation(handle, true, cx);
+    assert_eq!(width(cx), px(620.));
+    press(handle, "escape", cx);
+
+    cx.simulate_window_resize(handle, size(px(600.), px(600.)));
+    cx.run_until_parked();
+    open_confirmation(handle, true, cx);
+    // `100vw - 16px`, held inside Kit's own 16px gutter on each side.
+    assert_eq!(width(cx), px(568.));
+}
+
 #[test]
 fn tmux_confirmation_names_its_target() {
     let (title, detail) = dialogs::tmux_confirmation("Close workspace…", "workspace “api”");

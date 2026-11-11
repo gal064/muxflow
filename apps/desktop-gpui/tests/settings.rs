@@ -481,6 +481,85 @@ fn the_notification_check_says_so_when_nothing_can_deliver(cx: &mut TestAppConte
     });
 }
 
+#[test]
+fn the_volume_keys_move_it_as_a_range_input_does() {
+    let at = |key: &str, volume: f32| {
+        settings::dialog::volume_for_key(key, volume).map(|volume| (volume * 100.).round() / 100.)
+    };
+    assert_eq!(at("right", 0.5), Some(0.55));
+    assert_eq!(at("up", 0.5), Some(0.55));
+    assert_eq!(at("left", 0.5), Some(0.45));
+    assert_eq!(at("down", 0.5), Some(0.45));
+    assert_eq!(at("pageup", 0.5), Some(0.6));
+    assert_eq!(at("pagedown", 0.05), Some(0.));
+    assert_eq!(at("home", 0.7), Some(0.));
+    assert_eq!(at("end", 0.7), Some(1.));
+    assert_eq!(at("right", 1.), Some(1.));
+    assert_eq!(at("left", 0.), Some(0.));
+    // Off the grid, as a saved file can be: the step lands back on it.
+    assert_eq!(at("right", 0.33), Some(0.4));
+    assert_eq!(at("a", 0.5), None);
+}
+
+/// Tab reaches the volume, every key that moves it saves it, and Settings opened
+/// again shows the saved value.
+#[gpui_kit::test]
+fn the_volume_is_moved_and_saved_from_the_keyboard(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(
+        dir.path(),
+        json!({
+            "agentSounds": { "enabled": true, "blocked": "subtle", "completed": "subtle", "volume": 0.5 }
+        }),
+    );
+    let handle = open_app(&state, cx);
+    open_settings(handle, Some("Sounds"), cx);
+    let focused = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, _| {
+            window.find_by_label("Agent sound volume").focused() == Some(true)
+        })
+    };
+    for _ in 0..10 {
+        if focused(cx) {
+            break;
+        }
+        press(handle, "tab", cx);
+    }
+    assert!(focused(cx), "Tab never reached the volume");
+
+    let volume = |cx: &mut TestAppContext| prefs(cx).agent_sounds.volume;
+    for (key, expected) in [
+        ("right", 0.55),
+        ("up", 0.6),
+        ("left", 0.55),
+        ("down", 0.5),
+        ("pageup", 0.6),
+        ("pagedown", 0.5),
+        ("home", 0.),
+        ("end", 1.),
+        ("left", 0.95),
+    ] {
+        press(handle, key, cx);
+        assert_eq!(volume(cx), expected, "after {key}");
+    }
+    saved(cx, &state, |value| {
+        value["shell"]["agentSounds"]["volume"] == json!(0.95)
+    });
+
+    press(handle, "escape", cx);
+    open_settings(handle, Some("Sounds"), cx);
+    press(handle, "tab", cx);
+    for _ in 0..10 {
+        if focused(cx) {
+            break;
+        }
+        press(handle, "tab", cx);
+    }
+    assert!(focused(cx), "Tab never reached the reopened volume");
+    press(handle, "left", cx);
+    assert_eq!(volume(cx), 0.9, "reopened at the saved 0.95");
+}
+
 #[gpui_kit::test]
 fn done_closes_every_tab_but_connection_which_has_connect(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

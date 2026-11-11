@@ -9,21 +9,24 @@ use desktop_core::{
     notifications::{emit_test_notification, notification_permission_status},
 };
 use gpui_kit::{
-    App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent, ParentElement,
-    Render, Role, SharedString, Styled, Subscription, Window,
+    AccessibleAction, App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
+    Orientation, ParentElement, Render, Role, SharedString, Styled, Subscription, Window,
+    accesskit::ActionData,
+    base::{SliderIndicator, SliderThumb, SliderTrack, TestSupportExt},
     component::{
-        Disableable, Sizable, WindowExt,
+        ActiveTheme, Disableable, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         checkbox::Checkbox,
         dialog::DialogFooter,
         input::{Input, InputEvent, InputState},
         radio::{Radio, RadioGroup},
-        slider::{Slider, SliderEvent, SliderState},
+        slider::{SliderEvent, SliderState},
         tab::{Tab as TabItem, TabBar},
         v_flex,
     },
     div,
     prelude::*,
+    px, relative,
 };
 
 use super::{
@@ -204,6 +207,36 @@ pub fn font_size_from_text(typed: &str, current: u8) -> (u8, bool) {
     }
 }
 
+/// `<input type="range" min="0" max="1" step="0.05">`.
+const VOLUME_STEP: f32 = 0.05;
+
+/// The volume a range input moves to on `key` from `volume`, as WebKit's does:
+/// an arrow steps, Page Up and Page Down step a tenth of the range, and Home
+/// and End go to the ends.
+pub fn volume_for_key(key: &str, volume: f32) -> Option<f32> {
+    let volume = match key {
+        "left" | "down" => volume - VOLUME_STEP,
+        "right" | "up" => volume + VOLUME_STEP,
+        "pagedown" => volume - 0.1,
+        "pageup" => volume + 0.1,
+        "home" => 0.,
+        "end" => 1.,
+        _ => return None,
+    };
+    Some(snap_volume(volume))
+}
+
+/// On the step grid and in range, where a range input keeps its value.
+fn snap_volume(volume: f32) -> f32 {
+    ((volume / VOLUME_STEP).round() * VOLUME_STEP).clamp(0., 1.)
+}
+
+/// The slider is f32; two decimals keep the saved file as Tauri writes it.
+fn save_volume(volume: f32, window: &mut Window, cx: &mut App) {
+    let volume = (f64::from(volume) * 100.).round() / 100.;
+    update(|prefs| prefs.agent_sounds.volume = volume, window, cx);
+}
+
 pub struct SettingsDialog {
     tab: Tab,
     controller: Option<Entity<ConnectionController>>,
@@ -214,6 +247,7 @@ pub struct SettingsDialog {
     /// The host the two workspace fields describe: the one on screen.
     defaults_host: String,
     volume: Entity<SliderState>,
+    volume_focus: FocusHandle,
     notification_status: Option<String>,
     sending_test: bool,
     test_failure: Option<String>,
@@ -257,7 +291,7 @@ impl SettingsDialog {
             SliderState::new()
                 .min(0.)
                 .max(1.)
-                .step(0.05)
+                .step(VOLUME_STEP)
                 .default_value(prefs.agent_sounds.volume as f32)
         });
         let mut subscriptions = vec![
@@ -279,11 +313,10 @@ impl SettingsDialog {
                     this.commit_defaults(window, cx);
                 }
             }),
+            // The pointer; the keyboard and a screen reader go through `set_volume`.
             cx.subscribe_in(&volume, window, |_, _, event, window, cx| {
                 if let SliderEvent::Change(value) = event {
-                    // The slider is f32; two decimals keep the saved file as Tauri writes it.
-                    let volume = (f64::from(value.end()) * 100.).round() / 100.;
-                    update(|prefs| prefs.agent_sounds.volume = volume, window, cx);
+                    save_volume(value.end(), window, cx);
                 }
             }),
         ];
@@ -308,6 +341,7 @@ impl SettingsDialog {
             startup_command,
             defaults_host,
             volume,
+            volume_focus: cx.focus_handle().tab_stop(true),
             notification_status: None,
             sending_test: false,
             test_failure: None,
@@ -392,6 +426,141 @@ impl SettingsDialog {
             self.check_notifications(cx);
         }
         cx.notify();
+    }
+
+    /// Moves the volume from the keyboard or a screen reader, and saves it.
+    fn set_volume(&mut self, volume: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let volume = snap_volume(volume);
+        self.volume
+            .update(cx, |state, cx| state.set_value(volume, window, cx));
+        save_volume(volume, window, cx);
+    }
+
+    /// A screen reader's request, as `to` turns the volume into a new one.
+    fn volume_action(
+        to: impl Fn(f32, Option<&ActionData>) -> Option<f32> + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl FnMut(Option<&ActionData>, &mut Window, &mut App) + 'static {
+        let this = cx.entity().downgrade();
+        move |data, window, cx| {
+            this.update(cx, |this, cx| {
+                if let Some(volume) = to(this.volume.read(cx).value().end(), data) {
+                    this.set_volume(volume, window, cx);
+                }
+            })
+            .ok();
+        }
+    }
+
+    /// Kit's slider takes no focus, and a screen reader's step on it is not
+    /// saved, so the volume is Kit's base slider parts under one node that
+    /// takes focus and carries the slider's role, name and value, as Tauri's
+    /// range input does. The look is Kit's slider, without its hover ring.
+    fn volume_slider(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let state = self.volume.read(cx);
+        let (volume, fill) = (state.value().end(), state.percentage().end);
+        let (bar, thumb) = (cx.theme().tokens.slider_bar, cx.theme().tokens.slider_thumb);
+        let accent = theme::palette(cx).accent;
+        let ring = self.volume_focus.is_focused(window) && window.last_input_was_keyboard();
+        div()
+            .id("settings-volume")
+            .test_support()
+            .role(Role::Slider)
+            .aria_label("Agent sound volume")
+            // In hundredths, as the range input reports it, not with the f32 noise.
+            .aria_numeric_value((f64::from(volume) * 100.).round() / 100.)
+            .aria_min_numeric_value(0.)
+            .aria_max_numeric_value(1.)
+            .aria_numeric_value_step(f64::from(VOLUME_STEP))
+            .aria_orientation(Orientation::Horizontal)
+            .track_focus(&self.volume_focus)
+            // A press focuses the slider as it does a range input; the thumb
+            // keeps its press from the bubble phase.
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.volume_focus.focus(window, cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.modifiers.modified() {
+                    return;
+                }
+                let volume = this.volume.read(cx).value().end();
+                if let Some(volume) = volume_for_key(&event.keystroke.key, volume) {
+                    this.set_volume(volume, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .on_a11y_action(
+                AccessibleAction::Increment,
+                Self::volume_action(|volume, _| Some(volume + VOLUME_STEP), cx),
+            )
+            .on_a11y_action(
+                AccessibleAction::Decrement,
+                Self::volume_action(|volume, _| Some(volume - VOLUME_STEP), cx),
+            )
+            .on_a11y_action(
+                AccessibleAction::SetValue,
+                Self::volume_action(
+                    |_, data| match data {
+                        Some(ActionData::NumericValue(value)) => Some(*value as f32),
+                        _ => None,
+                    },
+                    cx,
+                ),
+            )
+            .relative()
+            .child(
+                // Inset by half the thumb, so the thumb stays inside the box at
+                // either end, as a range input's does.
+                SliderTrack::new(&self.volume)
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .h_6()
+                    .px(px(8.))
+                    .child(
+                        SliderIndicator::new(&self.volume)
+                            .relative()
+                            .w_full()
+                            .h_1p5()
+                            .rounded_full()
+                            .bg(bar.opacity(0.2))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .h_full()
+                                    .w(relative(fill))
+                                    .rounded_full()
+                                    .bg(bar),
+                            )
+                            .child(
+                                SliderThumb::new(&self.volume)
+                                    .absolute()
+                                    .top(px(-5.))
+                                    .left(relative(fill))
+                                    .ml(px(-8.))
+                                    .size_4()
+                                    .p(px(1.))
+                                    .rounded_full()
+                                    .bg(bar.opacity(0.5))
+                                    .child(div().size_full().rounded_full().bg(thumb)),
+                            ),
+                    ),
+            )
+            // A ring for the keyboard only, as Tauri's `:focus-visible`: 2px, 1px
+            // outside the box.
+            .when(ring, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(ui(-3.))
+                        .left(ui(-3.))
+                        .right(ui(-3.))
+                        .bottom(ui(-3.))
+                        .border_2()
+                        .border_color(accent),
+                )
+            })
     }
 
     /// Asks the OS what it says about notifications. Mounted with the tab
@@ -757,7 +926,7 @@ impl SettingsDialog {
             )
     }
 
-    fn sounds_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn sounds_tab(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let sounds = get(cx).agent_sounds;
         let cue = |mode: AgentSoundMode| mode != AgentSoundMode::None;
         let mode = |on: bool| {
@@ -805,7 +974,7 @@ impl SettingsDialog {
                 v_flex()
                     .gap(ui(4.))
                     .child(caption("Volume", cx))
-                    .child(Slider::new(&self.volume).accessibility_label("Agent sound volume")),
+                    .child(self.volume_slider(window, cx)),
             )
             // Named, because "Sounds" does not imply system notification
             // permission and an unlabelled button under a volume slider reads as
@@ -969,7 +1138,7 @@ impl Render for SettingsDialog {
             Tab::Workspace => self.workspace_tab(cx).into_any_element(),
             Tab::Terminal => self.terminal_tab(cx).into_any_element(),
             Tab::Appearance => self.appearance_tab(cx).into_any_element(),
-            Tab::Sounds => self.sounds_tab(cx).into_any_element(),
+            Tab::Sounds => self.sounds_tab(window, cx).into_any_element(),
             Tab::Accessibility => self.accessibility_tab(cx).into_any_element(),
         };
         v_flex()
