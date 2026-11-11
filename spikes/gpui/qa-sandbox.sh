@@ -29,7 +29,8 @@ state="$root/$name"
 
 entered_env=(env -i "HOME=$state/home" "PATH=$PATH" "USER=${USER:-qa}" "LANG=C.UTF-8"
   "XDG_RUNTIME_DIR=$state/runtime" "ADE_HOST_RUNTIME_DIR=/tmp/host-runtime"
-  "QA_SANDBOX_STATE=$state")
+  "QA_SANDBOX_STATE=$state"
+  "SPIKE_LAVAPIPE_DIR=${SPIKE_LAVAPIPE_DIR:-$HOME/dev/muxflow-gpui-tools/lavapipe}")
 
 child_pid() {
   sed -n 's/.*"child-pid": *\([0-9]*\).*/\1/p' "$state/info"
