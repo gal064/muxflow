@@ -1034,7 +1034,7 @@ impl QuickOpenSource for Source {
             workspaces,
             tabs,
             active_tab_key: view.active_key.clone(),
-            search_key: crate::editor::search_key(cx),
+            search_key: crate::files::search_key(cx),
             cwd: view
                 .active_pane
                 .as_ref()
@@ -1044,7 +1044,7 @@ impl QuickOpenSource for Source {
     }
 
     fn search_files(&self, query: String, cx: &mut App) -> Task<Result<FileSearchResults, String>> {
-        crate::editor::search_files(query, cx)
+        crate::files::search_files(query, cx)
     }
 
     fn choose(&self, item: &QuickOpenItem, _window: &mut Window, cx: &mut App) {
