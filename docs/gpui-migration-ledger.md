@@ -151,10 +151,10 @@ ordering stays.
 | `features/files/LiveMarkdownEditor.tsx` | Depends on S4. Does the editor wrapper exist at all if Live Markdown lands on the Kit editor, or does it become the preview-beside-source fallback (decision 3) |
 | `features/files/liveMarkdown.ts` | Depends on S4. CodeMirror decoration extension; the pure helpers port, the hiding mechanism may not. Its tests (`liveMarkdown.test.ts`, `LiveMarkdownEditor.test.tsx`) follow the answer |
 | `features/files/liveTable.ts` | Depends on S4. Inline editable table; the cell-replace logic ports, the widget does not. `liveTable.test.ts` follows |
-| `features/shell/MarkdownPreview.test.tsx` | Preview keeps the user's selection while content updates, using DOM selection events. Does the Kit Markdown view need the same behavior |
+| `features/shell/MarkdownPreview.test.tsx` | Preview keeps the user's selection while content updates, using DOM selection events. Does the Kit Markdown view need the same behavior. Answered in T5.4: the selection hold, yes (Kit clears a selection when text is replaced); the click slop, yes (Kit reports a release, not a click) |
 | `features/terminal/rendererResizeOrdering.test.ts` | Does the engine serialize a queued history rewrite and a resize by construction, or does the ordering need its own test. Answered in T3.3: by construction, one engine command loop |
 | `features/terminal/rendererDrainBound.test.ts` | Does the engine keep a bounded hide drain with an honest checkpoint watermark? If hiding no longer serializes anything, three xterm-timed cases drop, but the frozen-pane contract still needs a test |
-| `features/files/markdownPreview.ts` | `useSanitizedMarkdown` holds a refresh while the user is selecting in the preview, and `CLICK_SLOP_PX` separates a link click from a selection drag. Does the Kit Markdown view need either (same question as `MarkdownPreview.test.tsx`) |
+| `features/files/markdownPreview.ts` | `useSanitizedMarkdown` holds a refresh while the user is selecting in the preview, and `CLICK_SLOP_PX` separates a link click from a selection drag. Does the Kit Markdown view need either (same question as `MarkdownPreview.test.tsx`). Answered in T5.4: both, see the row above |
 
 ## Not in the ledger
 
@@ -193,7 +193,7 @@ font row covers them).
 | `app/appRecovery.ts` | 51 | port | 2 | connection_ui/app_recovery.rs | done (T2.4) |
 | `app/bridgeFailureText.test.ts` | 13 | port | 2 | tests in connection_ui/controller.rs | done (T2.4) |
 | `app/bridgeFailureText.ts` | 12 | port | 2 | connection_ui/controller.rs user_facing_bridge_failure | done (T2.4) |
-| `app/editorChunkAbsence.test.tsx` | 225 | port | 5 | the chunk-not-fetched probe drops; binary file, file over 10 MiB and disconnected tab in editor/pane_tests.rs (T5.2); binary and oversized diff left to T5.3, Markdown preview-only to T5.4 | open |
+| `app/editorChunkAbsence.test.tsx` | 225 | port | 5 | the chunk-not-fetched probe drops; binary file, file over 10 MiB and disconnected tab in editor/pane_tests.rs (T5.2); binary and oversized diff in git/model.rs `shown_diff` (T5.3); a Markdown preview-only tab makes no editor in editor/pane_tests.rs (T5.4) | done (T5.4) |
 | `app/editorChunkBoundary.test.tsx` | 386 | port | 5 | chunk evaluation order and the 500 ms preview publish delay drop; dirty draft surviving a reconnect in editor/document_tests.rs (T5.2), and the buffer lives in the document, not the editor view, so a preview switch keeps a pending save; the Live Markdown cases wait for Phase 7 | open |
 | `app/helperSetupFeedback.test.tsx` | 82 | port | 2 | helper dialog tests in connection_ui/controller/tests.rs; hook-setup activity is Phase 4 with useAgentHostSetup | done (T2.4) |
 | `app/linkQuality.test.ts` | 112 | port | 2 | tests in connection_ui/link_quality.rs | done (T2.4) |
@@ -389,10 +389,10 @@ font row covers them).
 | `features/files/liveMarkdown.ts` | 1176 | port | 7 | ? depends on S4: CodeMirror decoration extension; pure helpers (block markup, list indent, link targets) port, hiding mechanism does not | open |
 | `features/files/liveTable.test.ts` | 159 | port | 7 | tests of liveTable.ts | open |
 | `features/files/liveTable.ts` | 535 | port | 7 | ? depends on S4: inline editable table; cell-replace logic ports, widget mechanism does not | open |
-| `features/files/markdown.test.ts` | 91 | port | 5 | keep markdownFilePath cases; drop the sanitizer cases with DOMPurify | open |
-| `features/files/markdown.ts` | 32 | port | 5 | markdownFilePath link resolution ports; renderSafeMarkdown and renderSafeSvg retire with DOMPurify | open |
-| `features/files/markdownPreview.test.ts` | 66 | retire | 5 | tests the sanitize debounce and idle scheduling, which retire with DOMPurify | open |
-| `features/files/markdownPreview.ts` | 164 | port | 5 | ? the debounced DOMPurify pass drops (Kit renders natively); `useSanitizedMarkdown`'s selection hold and `CLICK_SLOP_PX` (used by AppTabSurface) port only if the Kit Markdown view needs them, see MarkdownPreview.test.tsx | open |
+| `features/files/markdown.test.ts` | 91 | port | 5 | markdown/link.rs tests (`markdownFilePath` and `isMarkdownFileLink` cases) and markdown/view.rs `only_embedded_raster_images_are_drawn`; the `renderSafeMarkdown` cases retire with DOMPurify, and raw HTML is not drawn (markdown/view.rs `raw_html_is_not_rendered_as_markup`) | done (T5.4) |
+| `features/files/markdown.ts` | 32 | port | 5 | markdown/link.rs `file_path` and `target`; the embedded-image rule is markdown/view.rs `embedded_image`. `renderSafeMarkdown` retires with DOMPurify. The preview draws no SVG, as Tauri did; `renderSafeSvg`'s other use, the binary image tab, stays in editor/pane.rs | done (T5.4) |
+| `features/files/markdownPreview.test.ts` | 66 | retire | 5 | tests the sanitize debounce and idle scheduling, which retire with DOMPurify | done (T5.4) |
+| `features/files/markdownPreview.ts` | 164 | port | 5 | markdown/view.rs `refresh` keeps the selection hold (Kit's `set_text` clears a selection, so a refresh waits while one stands or is dragged). `CLICK_SLOP_PX` stays as markdown/view.rs `is_click`, because Kit reports a link on any button's release over it wherever the press began. The debounced DOMPurify pass retires: Kit parses natively, large text on its own thread | done (T5.4) |
 | `features/files/monaco.ts` | 152 | replace | 5 | theme/mod.rs `syntax()` builds the Kit highlight theme from the palette; Monaco workers, loader and font remeasure drop. The diff washes go with the diff view (T5.3) | done (T5.2) |
 | `features/files/monarch.test.ts` | 93 | port | 5 | editor/language.rs Python and TypeScript capture tests | done (T5.2) |
 | `features/files/monarch.ts` | 109 | port | 5 | editor/language.rs highlight query additions for Python and TypeScript | done (T5.2) |
@@ -444,10 +444,10 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/shell/AppTabSurface.test.tsx` | 644 | port | 5 | read, reload, echo, rescan, bootstrap and save-status cases in editor/document_tests.rs and editor/save_status.rs; T5.2 left the Markdown link case to T5.4 and the watch lease release to the T5.1 watcher | open |
+| `features/shell/AppTabSurface.test.tsx` | 644 | port | 5 | read, reload, echo, rescan, bootstrap and save-status cases in editor/document_tests.rs and editor/save_status.rs; the Markdown link case in markdown/link.rs (T5.4); the watch lease release is left to the T5.1 watcher | open |
 | `features/shell/AppTabSurface.tsx` | 366 | port | 5 | editor/mod.rs `surface` routes document, diff (T5.3 `set_diff_surface`) and preview (T5.4 `set_markdown_preview`); editor/pane.rs draws the document tab | done (T5.2) |
 | `features/shell/DisconnectedStrip.tsx` | 75 | port | 2 | connection_ui/surface.rs | done (T2.4) |
-| `features/shell/MarkdownPreview.test.tsx` | 346 | port | 5 | ? preview keeps selection while content updates; DOM selection mechanics may not apply, keep the behavior | open |
+| `features/shell/MarkdownPreview.test.tsx` | 346 | port | 5 | markdown/view.rs `a_standing_selection_holds_a_change_until_it_is_cleared` and `going_back_to_what_is_shown_drops_a_held_change`; link routing in markdown/link.rs `routes_each_kind_of_link_to_what_it_opens`; the click test in `only_a_left_press_and_release_in_one_place_follows_a_link`. The DOM-node-identity cases drop: Kit's view keeps its parsed document, not nodes | done (T5.4) |
 | `features/shell/RightPanel.tsx` | 120 | port | 2 | right panel container with resizable width | open |
 | `features/shell/SettingsDialog.tsx` | 611 | port | 4 | `settings/dialog.rs` with the live values in `settings/prefs.rs` and `settings/mod.rs`. The terminal screen-reader setting is the agreed exception. Agent setup and the notifier are published by T4.2 through `settings::set_agent_setup` and `settings::set_notifier` | done (T4.4) |
 | `features/shell/TitleBar.test.tsx` | 57 | port | 2 | tests of TitleBar.tsx | open |
