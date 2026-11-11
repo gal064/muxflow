@@ -17,6 +17,7 @@ pub fn init(cx: &mut App) {
     crate::commands::init(cx);
     crate::menus::init(cx);
     crate::connection_ui::init(cx);
+    crate::workspaces::init(cx);
     crate::ui::chrome::init(cx);
     crate::window_state::init(cx);
     crate::terminal::init(cx);

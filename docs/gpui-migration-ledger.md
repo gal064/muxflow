@@ -206,7 +206,7 @@ font row covers them).
 | `app/paneRouting.ts` | 60 | port | 3 | terminal/integration/routing.rs; its callers are the agents and notifications in Phase 4 | done (T3.6) |
 | `app/postResyncReseed.test.tsx` | 93 | port | 3 | reseed after resync | open |
 | `app/reconnectNoticeDedupe.test.tsx` | 129 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
-| `app/shellNavigationCoordinator.ts` | 165 | port | 4 | shell navigation coordinator | open |
+| `app/shellNavigationCoordinator.ts` | 165 | port | 4 | workspaces/navigation.rs `Coordinator`: one move in flight, only the latest queued | done (T4.1) |
 | `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | tests of terminalFileOpenRoute.ts | open |
 | `app/terminalFileOpenRoute.ts` | 27 | port | 3 | terminal file open route check | open |
 | `app/types.ts` | 68 | replace | 2 | Session, Window, Pane, ConnectionSpec, HostProfile come from protocol and desktop-core types | open |
@@ -216,31 +216,31 @@ font row covers them).
 | `app/useAppFileActions.ts` | 145 | port | 5 | file actions entity (mutation, save panel, transfers) | open |
 | `app/useAppHostSettingsActions.ts` | 179 | port | 4 | host connection, profile and helper actions in connection_ui/controller.rs (T2.4); the rest of the host settings actions land with Phase 4 | open |
 | `app/useAppRecoveryController.test.tsx` | 112 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
-| `app/useAppRecoveryController.ts` | 104 | port | 2 | connection_ui/controller.rs; T4.1 rewires its app-state access to the single in-memory owner and adds the flush on close | done (T2.4) |
+| `app/useAppRecoveryController.ts` | 104 | port | 2 | connection_ui/controller.rs; T4.1 rewires its app-state access to the single in-memory owner and adds the flush on close | done (T2.4, T4.1) |
 | `app/useAppShellChrome.test.tsx` | 91 | port | 2 | tests of useAppShellChrome.ts | open |
 | `app/useAppShellChrome.ts` | 59 | port | 2 | rail layout and status-to-notice lifecycle | open |
-| `app/useBulkTabClose.test.tsx` | 117 | port | 4 | tests of useBulkTabClose.ts | open |
-| `app/useBulkTabClose.ts` | 145 | port | 4 | bulk tab close | open |
+| `app/useBulkTabClose.test.tsx` | 117 | port | 4 | set rules and the survivor report in workspaces/model.rs tests; the agent recheck has no presence to test until T4.2 fills `AgentShell` | done (T4.1) |
+| `app/useBulkTabClose.ts` | 145 | port | 4 | workspaces/commands.rs `close_tab_set`, sets from workspaces/model.rs | done (T4.1) |
 | `app/useClientResize.test.tsx` | 421 | port | 3 | tests in terminal/client_size.rs | done (T3.3) |
 | `app/useClientResize.ts` | 320 | port | 3 | terminal/client_size.rs (ClientResize) driven by terminal/surface.rs | done (T3.3) |
-| `app/useFocusHistoryNavigation.test.tsx` | 190 | port | 4 | tests of useFocusHistoryNavigation.ts | open |
-| `app/useFocusHistoryNavigation.ts` | 135 | port | 4 | focus history navigation | open |
+| `app/useFocusHistoryNavigation.test.tsx` | 190 | port | 4 | workspaces/focus_history.rs tests and the Back end-to-end test in workspaces/tests.rs | done (T4.1) |
+| `app/useFocusHistoryNavigation.ts` | 135 | port | 4 | workspaces/mod.rs `step_history`, `back_from_closing` | done (T4.1) |
 | `app/useMissingHelperRecovery.ts` | 176 | port | 2 | connection_ui/helper_recovery.rs | done (T2.4) |
 | `app/usePaneMoves.test.tsx` | 160 | port | 3 | tests of usePaneMoves.ts; the pane-onto-pane join is tested in terminal/integration/frames.rs (T3.6) | open |
 | `app/usePaneMoves.ts` | 201 | port | 3 | pane moves via drop_rules; the pane grab joining a pane beside another is in terminal/surface.rs (T3.6), tab and workspace drops come with drop_rules in Phase 4 | open |
 | `app/usePerHostMemo.test.tsx` | 61 | retire | 2 | tests usePerHostMemo.ts, which retires | open |
 | `app/usePerHostMemo.ts` | 56 | retire | 2 | React hook that memoizes a list per host; entities hold per-host state directly | open |
-| `app/useShellNavigation.test.tsx` | 1378 | port | 4 | tests of useShellNavigation.ts | open |
-| `app/useShellNavigation.ts` | 735 | port | 4 | shell navigation | open |
+| `app/useShellNavigation.test.tsx` | 1378 | port | 4 | coordinator and write-planning cases in workspaces/navigation.rs, the optimistic window in connection_ui/host_links.rs, select and placeholder cases end to end in workspaces/tests.rs; React identity and rerender cases dropped | done (T4.1) |
+| `app/useShellNavigation.ts` | 735 | port | 4 | workspaces/mod.rs `navigate`, `fly`, `land`, app-tab protection and the create placeholder | done (T4.1) |
 | `app/useTerminalFileOpen.ts` | 108 | port | 3 | terminal file open; needs file tabs (Phase 4 and 5): until then a file link click says it is not available (terminal/reading/mod.rs) | open |
-| `app/useTmuxActionPerformer.test.tsx` | 187 | port | 4 | tests of useTmuxActionPerformer.ts | open |
-| `app/useTmuxActionPerformer.ts` | 146 | port | 4 | tmux action performer | open |
-| `app/useWorkspaceCreate.test.tsx` | 142 | port | 4 | tests of useWorkspaceCreate.ts | open |
-| `app/useWorkspaceCreate.ts` | 69 | port | 4 | workspace create with host defaults | open |
-| `app/useWorkspaceDomainController.test.ts` | 27 | port | 4 | tests of useWorkspaceDomainController.ts | open |
-| `app/useWorkspaceDomainController.ts` | 99 | port | 4 | workspace domain controller | open |
-| `app/windowSelection.test.ts` | 79 | port | 4 | tests of windowSelection.ts | open |
-| `app/windowSelection.ts` | 97 | port | 4 | window selection and reorder | open |
+| `app/useTmuxActionPerformer.test.tsx` | 187 | port | 4 | reconciliation cases in workspaces/actions.rs, the refusal and confirmation flows end to end in workspaces/tests.rs | done (T4.1) |
+| `app/useTmuxActionPerformer.ts` | 146 | port | 4 | workspaces/mod.rs `perform`: the target's client and scope, silent or visible feedback, `action.refused` incident | done (T4.1) |
+| `app/useWorkspaceCreate.test.tsx` | 142 | port | 4 | per-host defaults in workspaces/model.rs, the startup command end to end in workspaces/tests.rs | done (T4.1) |
+| `app/useWorkspaceCreate.ts` | 69 | port | 4 | workspaces/mod.rs `create_workspace`, `send_startup` | done (T4.1) |
+| `app/useWorkspaceDomainController.test.ts` | 27 | port | 4 | T4.1: a tmux request needs the link's client, writes and server identity (workspaces/mod.rs `perform`); the file and Git scope half lands with Phase 5 | open |
+| `app/useWorkspaceDomainController.ts` | 99 | port | 4 | T4.1: the tmux request scope in workspaces/mod.rs `perform` and `scope_current`; the live file scope lands with Phase 5 | open |
+| `app/windowSelection.test.ts` | 79 | port | 4 | tests in workspaces/navigation.rs and connection_ui/host_links.rs | done (T4.1) |
+| `app/windowSelection.ts` | 97 | port | 4 | workspaces/navigation.rs; the optimistic window guard in connection_ui/host_links.rs `settle_active_window` | done (T4.1) |
 
 ### `commands`
 
@@ -248,13 +248,13 @@ font row covers them).
 |---|---|---|---|---|---|
 | `commands/CommandPalette.tsx` | 126 | port | 2 | `commands/palette.rs`: own list, not Kit `Command`, whose virtualized rows leave offscreen commands out of the accessibility tree | open |
 | `commands/ConfirmationDialog.tsx` | 49 | replace | 2 | Kit alert dialog, `commands/dialogs.rs`. Cancel holds focus, so Enter cancels. Non-tmux `busy` state is not needed yet | open |
-| `commands/NewWorkspaceDialog.test.tsx` | 118 | port | 4 | tests of NewWorkspaceDialog.tsx | open |
-| `commands/NewWorkspaceDialog.tsx` | 113 | port | 4 | new workspace dialog | open |
+| `commands/NewWorkspaceDialog.test.tsx` | 118 | port | 4 | `default_host` tests in workspaces/dialog.rs; overlay isolation and Escape are Kit's | done (T4.1) |
+| `commands/NewWorkspaceDialog.tsx` | 113 | port | 4 | workspaces/dialog.rs on `open_overlay` | done (T4.1) |
 | `commands/ShortcutEditorDialog.test.tsx` | 43 | port | 2 | `tests/commands.rs` | open |
 | `commands/ShortcutEditorDialog.tsx` | 53 | port | 2 | `commands/shortcut_editor.rs` | open |
 | `commands/TextInputDialog.tsx` | 34 | replace | 2 | Kit dialog, `commands/dialogs.rs`; Enter does not submit while composing | open |
-| `commands/destructiveConfirmation.test.ts` | 84 | port | 2 | title and detail in `tests/commands.rs`; the action checks land in Phase 4 | open |
-| `commands/destructiveConfirmation.ts` | 45 | port | 2 | title and detail in `commands/dialogs.rs`; the action checks need `TmuxAction`, so they land with `features/tmux/actions.ts` in Phase 4 | open |
+| `commands/destructiveConfirmation.test.ts` | 84 | port | 2 | title and detail in `tests/commands.rs`; the action checks in workspaces/actions.rs tests | done (T4.1) |
+| `commands/destructiveConfirmation.ts` | 45 | port | 2 | title and detail in `commands/dialogs.rs`; the action checks in workspaces/actions.rs `is_destructive` and workspaces/commands.rs `close` | done (T4.1) |
 | `commands/fuzzy.test.ts` | 43 | port | 2 | `commands/fuzzy.rs` | open |
 | `commands/fuzzy.ts` | 61 | port | 2 | `commands/fuzzy.rs` | open |
 | `commands/registry.test.ts` | 524 | port | 2 | `commands/{registry,keymap}.rs`, `tests/commands.rs` | open |
@@ -445,7 +445,7 @@ font row covers them).
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
 | `features/shell/AppTabSurface.test.tsx` | 644 | port | 4 | tests of AppTabSurface.tsx | open |
-| `features/shell/AppTabSurface.tsx` | 366 | port | 4 | app tab surface (document, diff, preview routing) | open |
+| `features/shell/AppTabSurface.tsx` | 366 | port | 4 | app tab surface (document, diff, preview routing); T4.1 shows a titled placeholder in ui/chrome/workspace.rs until the surfaces land in Phase 5 | open |
 | `features/shell/DisconnectedStrip.tsx` | 75 | port | 2 | connection_ui/surface.rs | done (T2.4) |
 | `features/shell/MarkdownPreview.test.tsx` | 346 | port | 5 | ? preview keeps selection while content updates; DOM selection mechanics may not apply, keep the behavior | open |
 | `features/shell/RightPanel.tsx` | 120 | port | 2 | right panel container with resizable width | open |
@@ -453,20 +453,20 @@ font row covers them).
 | `features/shell/TitleBar.test.tsx` | 57 | port | 2 | tests of TitleBar.tsx | open |
 | `features/shell/TitleBar.tsx` | 206 | port | 2 | title bar on GPUI client decorations | open |
 | `features/shell/appStateContract.test.ts` | 334 | port | 4 | ? TS half of the shared app-state fixture retires (Rust half stays in app_state.rs); normalize and clamp cases port | open |
-| `features/shell/appStatePersistence.test.ts` | 69 | port | 2 | tests of appStatePersistence.ts | open |
-| `features/shell/appStatePersistence.ts` | 65 | port | 2 | serialized app_state saver with close barrier | open |
-| `features/shell/focusHistory.test.ts` | 98 | port | 4 | tests of focusHistory.ts | open |
-| `features/shell/focusHistory.ts` | 125 | port | 4 | focus history | open |
+| `features/shell/appStatePersistence.test.ts` | 69 | port | 2 | connection_ui/controller/tests.rs (failed save keeps the change) and connection_ui/backend.rs (a late earlier save cannot undo a later one) | done (T4.1) |
+| `features/shell/appStatePersistence.ts` | 65 | port | 2 | connection_ui/controller.rs chained saves and the quit flush; connection_ui/backend.rs numbered partial saves | done (T4.1) |
+| `features/shell/focusHistory.test.ts` | 98 | port | 4 | tests in workspaces/focus_history.rs | done (T4.1) |
+| `features/shell/focusHistory.ts` | 125 | port | 4 | workspaces/focus_history.rs | done (T4.1) |
 | `features/shell/helperUpgrade.test.ts` | 78 | port | 2 | tests in connection_ui/helper_upgrade.rs | done (T2.4) |
 | `features/shell/helperUpgrade.ts` | 89 | port | 2 | connection_ui/helper_upgrade.rs | done (T2.4) |
-| `features/shell/hostLatency.test.ts` | 39 | port | 2 | tests of hostLatency.ts | open |
-| `features/shell/hostLatency.ts` | 72 | port | 2 | host latency readout | open |
+| `features/shell/hostLatency.test.ts` | 39 | port | 2 | tests in workspaces/tests.rs | done (T4.1) |
+| `features/shell/hostLatency.ts` | 72 | port | 2 | workspaces/mod.rs `smoothed_latency`, shown on the sidebar host row | done (T4.1) |
 | `features/shell/hostProfiles.test.ts` | 30 | port | 2 | tests in connection_ui/host_profiles.rs | done (T2.4) |
 | `features/shell/hostProfiles.ts` | 31 | port | 2 | connection_ui/host_profiles.rs | done (T2.4) |
 | `features/shell/hostScope.test.ts` | 43 | port | 2 | tests in connection_ui/host_scope.rs | done (T2.4) |
 | `features/shell/hostScope.ts` | 47 | port | 2 | connection_ui/host_scope.rs | done (T2.4) |
-| `features/shell/model.test.ts` | 806 | port | 4 | tests of model.ts | open |
-| `features/shell/model.ts` | 1018 | port | 4 | shell model (tabs, workspaces, layout) | open |
+| `features/shell/model.test.ts` | 806 | port | 4 | tests in workspaces/model.rs; file and Git cases with Phase 5 | done (T4.1) |
+| `features/shell/model.ts` | 1018 | port | 4 | workspaces/model.rs; file and Git tabs with Phase 5 | done (T4.1) |
 | `features/shell/panelExtensions.ts` | 48 | port | 4 | panel extension host interface | open |
 | `features/shell/responsiveShell.test.ts` | 86 | port | 2 | tests of responsiveShell.ts | open |
 | `features/shell/responsiveShell.ts` | 67 | port | 2 | responsive rail layout | open |
@@ -479,8 +479,8 @@ font row covers them).
 | `features/shell/useDesktopResumeRecovery.ts` | 151 | port | 2 | connection_ui/resume_recovery.rs; the browser online event is polled from getifaddrs on the 5 s check | done (T2.4) |
 | `features/shell/usePersistedAppState.test.tsx` | 89 | port | 4 | tests of usePersistedAppState.ts | open |
 | `features/shell/usePersistedAppState.ts` | 123 | port | 2 | persisted app state loader | open |
-| `features/shell/useShellCommands.test.tsx` | 384 | port | 2 | dispatch in `tests/commands.rs`; each command body tested with its feature | open |
-| `features/shell/useShellCommands.ts` | 443 | port | 2 | `commands/mod.rs` `run` and `on_command`: each command body lands with its feature (Phases 3 to 5) | open |
+| `features/shell/useShellCommands.test.tsx` | 384 | port | 2 | dispatch in `tests/commands.rs`; each command body tested with its feature; T4.1's end to end in workspaces/tests.rs | open |
+| `features/shell/useShellCommands.ts` | 443 | port | 2 | `commands/mod.rs` `run` and `on_command`: each command body lands with its feature (Phases 3 to 5); workspace, tab, window, pane, focus and dock bodies in workspaces/commands.rs (T4.1) | open |
 | `features/shell/useUpdateCheck.test.ts` | 95 | port | 2 | tests of useUpdateCheck.ts | open |
 | `features/shell/useUpdateCheck.ts` | 97 | port | 2 | update check notice over kept update_check.rs | open |
 | `features/shell/useWindowChrome.test.tsx` | 85 | port | 2 | `ui/title_bar.rs` unit tests of `classify`. Window-controls presence is read from the window's decorations | open |
@@ -590,10 +590,10 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/tmux/actionReconciliation.test.ts` | 122 | port | 4 | tests of actionReconciliation.ts | open |
-| `features/tmux/actionReconciliation.ts` | 145 | port | 4 | tmux action reconciliation | open |
-| `features/tmux/actions.test.ts` | 116 | port | 4 | tests of actions.ts | open |
-| `features/tmux/actions.ts` | 195 | port | 4 | tmux actions | open |
+| `features/tmux/actionReconciliation.test.ts` | 122 | port | 4 | tests in workspaces/actions.rs | done (T4.1) |
+| `features/tmux/actionReconciliation.ts` | 145 | port | 4 | workspaces/actions.rs `request_reconciled` | done (T4.1) |
+| `features/tmux/actions.test.ts` | 116 | port | 4 | tests in workspaces/actions.rs | done (T4.1) |
+| `features/tmux/actions.ts` | 195 | port | 4 | workspaces/actions.rs | done (T4.1) |
 
 ### `features/transfers`
 
@@ -606,19 +606,19 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/workspaces/TabStrip.tsx` | 548 | port | 2 | tab strip on Kit tab; pointer-drag source, in-app | open |
-| `features/workspaces/WorkspaceSidebar.hosts.test.tsx` | 234 | port | 2 | multi-host sidebar rows | open |
-| `features/workspaces/WorkspaceSidebar.tsx` | 973 | port | 2 | workspace sidebar on Kit sidebar; pointer-drag source, in-app | open |
+| `features/workspaces/TabStrip.tsx` | 548 | port | 2 | ui/chrome/tab_strip.rs; the pointer-drag source lands with dragDrop (T4.3), Download… and document tooltips with Phase 5; not yet: the per-tab tooltip, the All tabs menu's shortcut glyphs, and opening a tab's menu from the keyboard (no Kit support) | done (T4.1) |
+| `features/workspaces/WorkspaceSidebar.hosts.test.tsx` | 234 | port | 2 | host letters and moves in workspaces/rows.rs, the host row in connection_ui/controller/tests.rs, rows end to end in workspaces/tests.rs | done (T4.1) |
+| `features/workspaces/WorkspaceSidebar.tsx` | 973 | port | 2 | ui/chrome/sidebar.rs; the pointer-drag source lands with dragDrop (T4.3), the agents section is filled through `AgentShell` (T4.2), and the compact row's agent cluster and state indicator with T4.2's marks (rows draw the full layout until then); not yet: phase dots in the host menu | done (T4.1) |
 | `features/workspaces/WorkspaceSwitcher.test.tsx` | 158 | port | 2 | `tests/commands.rs` | open |
-| `features/workspaces/WorkspaceSwitcher.tsx` | 144 | port | 2 | `commands/quick_open.rs`; row and agent-state glyph and file-type icon land with Phases 4 and 5 | open |
-| `features/workspaces/mergedWorkspaceRows.test.ts` | 109 | port | 4 | tests of mergedWorkspaceRows.ts | open |
-| `features/workspaces/mergedWorkspaceRows.ts` | 103 | port | 4 | merged multi-host workspace rows | open |
+| `features/workspaces/WorkspaceSwitcher.tsx` | 144 | port | 2 | `commands/quick_open.rs`; workspace and tab rows from workspaces/commands.rs `Source` (T4.1); agent-state glyph and file-type icon land with T4.2 and Phase 5 | open |
+| `features/workspaces/mergedWorkspaceRows.test.ts` | 109 | port | 4 | tests in workspaces/rows.rs | done (T4.1) |
+| `features/workspaces/mergedWorkspaceRows.ts` | 103 | port | 4 | workspaces/rows.rs | done (T4.1) |
 | `features/workspaces/quickOpen.ts` | 53 | port | 2 | `commands/quick_open.rs` | open |
 | `features/workspaces/transientDrag.test.tsx` | 101 | port | 2 | tests of transientDrag.ts | open |
 | `features/workspaces/transientDrag.ts` | 71 | port | 2 | captured-pointer divider drag | open |
 | `features/workspaces/useQuickOpenSearch.ts` | 48 | port | 2 | `commands/quick_open.rs` `sync_search`; root resolution belongs to the file-search source | open |
-| `features/workspaces/workspaceRows.test.ts` | 223 | port | 4 | tests of workspaceRows.ts | open |
-| `features/workspaces/workspaceRows.ts` | 215 | port | 4 | workspace rows | open |
+| `features/workspaces/workspaceRows.test.ts` | 223 | port | 4 | tests in workspaces/rows.rs | done (T4.1) |
+| `features/workspaces/workspaceRows.ts` | 215 | port | 4 | workspaces/rows.rs | done (T4.1) |
 
 ### `perf`
 

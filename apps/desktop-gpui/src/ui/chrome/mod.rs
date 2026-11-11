@@ -17,6 +17,7 @@ pub mod divider;
 pub mod layout;
 mod right_panel;
 mod sidebar;
+pub(crate) use sidebar::phase_color;
 mod tab_strip;
 mod title_content;
 mod workspace;
@@ -24,15 +25,14 @@ mod workspace;
 use std::sync::{Arc, Mutex};
 
 use desktop_core::{
-    app_state::{self, DockSide, PersistedAppState},
+    app_state::{self, DockSide},
     platform,
 };
 use gpui_kit::{
     AnyView, App, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement,
-    ParentElement, Pixels, Point, Render, SharedString, Styled, WeakEntity, Window, div,
-    prelude::FluentBuilder,
+    ParentElement, Pixels, Point, Render, Styled, WeakEntity, Window, div, prelude::FluentBuilder,
 };
-pub use tab_strip::TabEntry;
+use tokio::task::JoinHandle;
 
 use crate::{
     app::Core,
@@ -48,55 +48,11 @@ use crate::{
         title_content::TitleContent,
         workspace::WorkspaceArea,
     },
+    workspaces::Workspaces,
 };
 
 /// Called once from [`crate::features::init`].
 pub fn init(_cx: &mut App) {}
-
-/// One workspace's saved tabs, until live sessions replace them.
-#[derive(Clone)]
-pub struct WorkspacePlaceholder {
-    pub name: SharedString,
-    pub tabs: Vec<TabEntry>,
-    pub active_tab: Option<SharedString>,
-    pub docked: Option<(SharedString, DockSide)>,
-}
-
-/// Saved tabs per workspace, in saved order. Live data replaces this later.
-fn saved_workspaces(state: &PersistedAppState) -> Vec<WorkspacePlaceholder> {
-    state
-        .workspace_ui
-        .iter()
-        .map(|record| {
-            let mut records: Vec<_> = state
-                .app_tabs
-                .iter()
-                .filter(|tab| {
-                    tab.host_profile_id == record.host_profile_id
-                        && tab.server_identity == record.server_identity
-                        && tab.session_id == record.session_id
-                })
-                .collect();
-            records.sort_by_key(|tab| tab.order);
-            WorkspacePlaceholder {
-                name: record.session_name.clone().into(),
-                tabs: records
-                    .iter()
-                    .map(|tab| TabEntry {
-                        key: tab.id.clone().into(),
-                        title: tab.title.clone().into(),
-                        preview: tab.preview == Some(true),
-                    })
-                    .collect(),
-                active_tab: record.selected_app_tab_id.clone().map(Into::into),
-                docked: record
-                    .docked_app_tab_id
-                    .clone()
-                    .map(|id| (id.into(), record.dock_side.unwrap_or(DockSide::Right))),
-            }
-        })
-        .collect()
-}
 
 pub struct Chrome {
     this: WeakEntity<Self>,
@@ -106,10 +62,9 @@ pub struct Chrome {
     tabs_in_title_bar: bool,
     /// (id, label) of each right-panel segment, built-ins first.
     surfaces: Vec<(String, String)>,
-    workspaces: Vec<WorkspacePlaceholder>,
-    active_workspace: usize,
+    workspaces: Entity<Workspaces>,
     saves: Arc<Mutex<SaveQueue>>,
-    /// Set once a real connection is running; tests keep the placeholder.
+    /// Set once a real connection is running.
     terminal: Option<Entity<TerminalSurface>>,
 }
 
@@ -118,6 +73,8 @@ pub struct Chrome {
 struct SaveQueue {
     pending: Option<Prefs>,
     running: bool,
+    /// The writer while one runs, so quitting can wait for it.
+    runner: Option<JoinHandle<()>>,
 }
 
 impl Chrome {
@@ -125,23 +82,45 @@ impl Chrome {
         let store = cx.global::<Core>().app_state.clone();
         // A broken file shows defaults; `app_state` keeps it write-frozen.
         let state = app_state::load_app_state(&store).unwrap_or_default();
-        let chrome = cx.new(|cx| Self {
-            this: cx.entity().downgrade(),
-            prefs: Prefs::from_shell(&state.shell),
-            drag: None,
-            tabs_in_title_bar: state.shell.tabs_in_title_bar.unwrap_or(true),
-            surfaces: layout::panel_surfaces(state.shell.enabled_panel_extensions.as_deref()),
-            workspaces: saved_workspaces(&state),
-            active_workspace: 0,
-            saves: Arc::default(),
-            terminal: None,
+        let prefs = Prefs::from_shell(&state.shell);
+        let workspaces = Workspaces::new(prefs.pinned_only, cx);
+        let chrome = cx.new(|cx| {
+            cx.observe(&workspaces, |chrome: &mut Self, _, cx| {
+                chrome.sync_terminal_visible(cx);
+                cx.notify();
+            })
+            .detach();
+            // A layout changed just before quitting is still written: the
+            // writer runs on the backend's runtime, which quitting would stop.
+            cx.on_app_quit(|chrome: &mut Self, _| {
+                let runner = chrome.saves.lock().unwrap().runner.take();
+                async move {
+                    if let Some(runner) = runner {
+                        runner.await.ok();
+                    }
+                }
+            })
+            .detach();
+            Self {
+                this: cx.entity().downgrade(),
+                prefs,
+                drag: None,
+                tabs_in_title_bar: state.shell.tabs_in_title_bar.unwrap_or(true),
+                surfaces: layout::panel_surfaces(state.shell.enabled_panel_extensions.as_deref()),
+                workspaces,
+                saves: Arc::default(),
+                terminal: None,
+            }
         });
         if let Some(controller) = cx.try_global::<ConnectionUi>().map(|ui| ui.0.clone()) {
             let surface = TerminalSurface::new(controller, window, cx);
             chrome.update(cx, |chrome, cx| {
+                let weak = surface.downgrade();
+                chrome
+                    .workspaces
+                    .update(cx, |workspaces, _| workspaces.terminal = Some(weak));
                 chrome.terminal = Some(surface);
                 chrome.sync_terminal_visible(cx);
-                cx.observe_self(Self::sync_terminal_visible).detach();
             });
         }
         register_commands(&chrome.downgrade(), cx);
@@ -157,6 +136,10 @@ impl Chrome {
 
     pub fn tabs_in_title_bar(&self) -> bool {
         self.tabs_in_title_bar
+    }
+
+    pub fn workspaces(&self) -> &Entity<Workspaces> {
+        &self.workspaces
     }
 
     /// The committed preferences, or a drag's preview of them.
@@ -188,14 +171,8 @@ impl Chrome {
         layout::rails(&self.prefs, Self::window_width(window))
     }
 
-    fn workspace(&self) -> Option<&WorkspacePlaceholder> {
-        self.workspaces.get(self.active_workspace)
-    }
-
-    fn dock_side(&self) -> DockSide {
-        self.workspace()
-            .and_then(|workspace| workspace.docked.as_ref())
-            .map_or(DockSide::Right, |(_, side)| *side)
+    fn dock_side(&self, cx: &App) -> DockSide {
+        self.workspaces.read(cx).view(cx).dock_side()
     }
 
     /// The command behind the sidebar button and `view.toggleSidebar`.
@@ -218,8 +195,13 @@ impl Chrome {
         self.save(cx);
     }
 
-    fn toggle_pinned_only(&mut self, cx: &mut Context<Self>) {
-        self.prefs.pinned_only = !self.prefs.pinned_only;
+    /// `workspaces.showPinnedOnly` and `workspaces.showAll`, and the filter
+    /// toggle in the sidebar.
+    pub fn set_pinned_only(&mut self, pinned_only: bool, cx: &mut Context<Self>) {
+        self.prefs.pinned_only = pinned_only;
+        self.workspaces.update(cx, |workspaces, cx| {
+            workspaces.set_pinned_only(pinned_only, cx)
+        });
         self.save(cx);
     }
 
@@ -228,53 +210,11 @@ impl Chrome {
         self.save(cx);
     }
 
-    fn select_workspace(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.active_workspace = index;
-        cx.notify();
-    }
-
-    /// As Tauri's `selectAppTab`: the docked tab is already showing, and with a
-    /// dock open the chosen tab takes the dock and the terminal fills the main
-    /// column.
-    fn select_tab(&mut self, key: SharedString, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspaces.get_mut(self.active_workspace) else {
-            return;
-        };
-        match &mut workspace.docked {
-            Some((docked, _)) if *docked == key => return,
-            Some((docked, _)) => {
-                *docked = key;
-                workspace.active_tab = None;
-            }
-            None => workspace.active_tab = Some(key),
-        }
-        cx.notify();
-    }
-
     /// An app tab covers the terminal: the surface stops sizing the client.
     fn sync_terminal_visible(&mut self, cx: &mut Context<Self>) {
-        let visible = self.workspace().is_none_or(|w| w.active_tab.is_none());
+        let visible = self.workspaces.read(cx).view(cx).selected_app_tab.is_none();
         if let Some(terminal) = self.terminal.clone() {
             terminal.update(cx, |surface, cx| surface.set_terminal_visible(visible, cx));
-        }
-    }
-
-    /// Closes a placeholder tab for now; the saved tab returns next launch.
-    /// The real close arrives with document tabs.
-    fn close_tab(&mut self, key: &str, cx: &mut Context<Self>) {
-        if let Some(workspace) = self.workspaces.get_mut(self.active_workspace) {
-            workspace.tabs.retain(|tab| tab.key != key);
-            if workspace.active_tab.as_deref() == Some(key) {
-                workspace.active_tab = None;
-            }
-            if workspace
-                .docked
-                .as_ref()
-                .is_some_and(|(docked, _)| docked == key)
-            {
-                workspace.docked = None;
-            }
-            cx.notify();
         }
     }
 
@@ -298,7 +238,7 @@ impl Chrome {
             Divider::Dock => layout::dock_fraction_at(
                 bounds.size.width.as_f32() / unit,
                 (pointer.x - bounds.left()).as_f32() / unit,
-                self.dock_side(),
+                self.dock_side(cx),
             ),
         };
         self.drag = Some((divider, value));
@@ -358,7 +298,7 @@ impl Chrome {
         }
         let saves = self.saves.clone();
         let store = cx.global::<Core>().app_state.clone();
-        platform::spawn(async move {
+        let runner = platform::spawn(async move {
             loop {
                 let next = {
                     let mut queue = saves.lock().unwrap();
@@ -378,6 +318,7 @@ impl Chrome {
                 }
             }
         });
+        self.saves.lock().unwrap().runner = Some(runner);
     }
 }
 
@@ -395,6 +336,13 @@ fn register_commands(chrome: &WeakEntity<Chrome>, cx: &mut App) {
         });
     }
     bind("view.toggleSidebar", chrome, cx, Chrome::toggle_sidebar);
+    bind("agents.toggleSort", chrome, cx, Chrome::next_agent_sort);
+    bind("workspaces.showPinnedOnly", chrome, cx, |chrome, cx| {
+        chrome.set_pinned_only(true, cx)
+    });
+    bind("workspaces.showAll", chrome, cx, |chrome, cx| {
+        chrome.set_pinned_only(false, cx)
+    });
     bind("view.togglePanel", chrome, cx, Chrome::toggle_panel);
     for (id, surface) in [
         ("view.showFiles", "files"),
@@ -454,17 +402,12 @@ impl Render for Chrome {
                     new_workspace_here: self.tabs_in_title_bar,
                     pinned_only: displayed.pinned_only,
                     agent_sort: displayed.agent_sort,
-                    workspaces: self
-                        .workspaces
-                        .iter()
-                        .map(|workspace| workspace.name.clone())
-                        .collect(),
-                    active_workspace: self.active_workspace,
+                    workspaces: self.workspaces.clone(),
                 })
             })
             .child(WorkspaceArea {
                 chrome: chrome.clone(),
-                workspace: self.workspace().cloned(),
+                workspaces: self.workspaces.clone(),
                 dock_fraction: displayed.dock_fraction,
                 tabs_in_title_bar: self.tabs_in_title_bar,
                 terminal: self.terminal.clone().map(AnyView::from),
