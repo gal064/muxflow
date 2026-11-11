@@ -47,6 +47,7 @@ pub mod editor;
 pub mod features;
 pub mod fonts;
 pub mod git;
+pub mod markdown;
 pub mod menus;
 pub mod notices;
 pub mod paths;
