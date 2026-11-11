@@ -9,6 +9,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    commands,
     theme::{
         self,
         metrics::{TYPE_TITLEBAR, ui},
@@ -18,6 +19,7 @@ use crate::{
         chrome::{Chrome, tab_strip::TabStrip},
         title_bar::{WindowControls, bar_button, disabled_ink, should_show_window_controls},
     },
+    workspaces::focus_history::Direction,
 };
 
 /// A width the macOS traffic lights take from the lead; not UI-scaled.
@@ -35,10 +37,24 @@ impl RenderOnce for TitleContent {
         let chrome = entity.read(cx);
         let rails = chrome.rails(window);
         let in_title_bar = chrome.tabs_in_title_bar();
-        let workspace = chrome.workspace().cloned();
-        let name = workspace
-            .as_ref()
-            .map_or("No workspace".into(), |workspace| workspace.name.clone());
+        let workspaces = chrome.workspaces().clone();
+        let (name, can_back, can_forward, can_create) = {
+            let state = workspaces.read(cx);
+            let name = state
+                .view(cx)
+                .session
+                .map_or_else(|| "No workspace".to_owned(), |session| session.name);
+            let can_create = state
+                .hosts(cx)
+                .iter()
+                .any(|host| host.shown && host.can_mutate);
+            (
+                name,
+                state.can_go(Direction::Back, cx),
+                state.can_go(Direction::Forward, cx),
+                can_create,
+            )
+        };
 
         let disabled_button = |id: &'static str, icon: IconName, label: &'static str| {
             bar_button(id, icon, label, disabled_ink(palette.chrome_faint)).disabled(true)
@@ -70,15 +86,50 @@ impl RenderOnce for TitleContent {
             .tooltip("No agents waiting")
             .disabled(true)
         };
-        let back =
-            || disabled_button("title-back", IconName::ArrowLeft, "Back").tooltip(back_tip.clone());
+        let command_button =
+            |id: &'static str, icon: IconName, label: &'static str, enabled: bool, command| {
+                bar_button(
+                    id,
+                    icon,
+                    label,
+                    if enabled {
+                        palette.chrome_dim
+                    } else {
+                        disabled_ink(palette.chrome_faint)
+                    },
+                )
+                .disabled(!enabled)
+                .on_click(move |_, window, cx| commands::run(command, window, cx))
+            };
+        let back = || {
+            command_button(
+                "title-back",
+                IconName::ArrowLeft,
+                "Back",
+                can_back,
+                "focus.back",
+            )
+            .tooltip(back_tip.clone())
+        };
         let forward = || {
-            disabled_button("title-forward", IconName::ArrowRight, "Forward")
-                .tooltip(forward_tip.clone())
+            command_button(
+                "title-forward",
+                IconName::ArrowRight,
+                "Forward",
+                can_forward,
+                "focus.forward",
+            )
+            .tooltip(forward_tip.clone())
         };
         let new_workspace = || {
-            disabled_button("title-new-workspace", IconName::Plus, "New workspace")
-                .tooltip(new_workspace_tip.clone())
+            command_button(
+                "title-new-workspace",
+                IconName::Plus,
+                "New workspace",
+                can_create,
+                "session.new",
+            )
+            .tooltip(new_workspace_tip.clone())
         };
 
         let rail_ink = move |open: bool, fits: bool| {
@@ -172,12 +223,8 @@ impl RenderOnce for TitleContent {
                     this.child(group().child(new_workspace()))
                 });
 
-            let tabs = workspace.as_ref();
             let strip = TabStrip {
-                chrome: self.0.clone(),
-                tabs: tabs.map_or_else(Vec::new, |w| w.tabs.clone()),
-                active: tabs.and_then(|w| w.active_tab.clone()),
-                docked: tabs.and_then(|w| w.docked.as_ref().map(|(key, _)| key.clone())),
+                workspaces,
                 in_title_bar: true,
             };
 
