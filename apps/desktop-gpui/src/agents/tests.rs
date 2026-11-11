@@ -8,7 +8,10 @@ use std::{
     rc::Rc,
 };
 
-use desktop_core::{app_state::HostSetupDecision, connection::agent::AgentCommand};
+use desktop_core::{
+    app_state::{AgentSoundPreferences, HostSetupDecision},
+    connection::agent::AgentCommand,
+};
 use futures::future::{BoxFuture, FutureExt};
 use gpui_kit::{AppContext, Entity, TestAppContext};
 use serde_json::{Value, json};
@@ -77,7 +80,7 @@ impl AgentEffects for Recorded {
         futures::future::ready(Ok(true)).boxed()
     }
 
-    fn play(&self, event: AttentionKind) {
+    fn play(&self, event: AttentionKind, _: AgentSoundPreferences) {
         self.0.played.borrow_mut().push(event);
     }
 
@@ -639,4 +642,47 @@ fn a_reconnect_snapshot_catches_up_once_on_what_happened_while_away(cx: &mut Tes
     harness.sync(cx, inputs(vec![scope(5, 2)]));
     assert_eq!(asked.get(), 3);
     assert_eq!(harness.effects.shown.borrow().len(), 1);
+}
+
+#[gpui_kit::test]
+fn the_shell_shows_the_current_servers_agents_and_nothing_after_it_changes(
+    cx: &mut TestAppContext,
+) {
+    use crate::workspaces::agents::AgentPresence;
+
+    let harness = Harness::new(
+        cx,
+        snapshot_host(vec![wire_agent("blocked", 7, Some("blocked"), 0)]),
+    );
+    harness.sync(cx, inputs(vec![scope(4, 1)]));
+    let shell = harness
+        .runtime
+        .read_with(cx, |runtime, _| super::agent_shell_from(runtime));
+    let row = shell
+        .workspace("local", "$1")
+        .expect("the agent's workspace");
+    assert_eq!(row.agents.len(), 1);
+    assert_eq!(row.agents[0].state, super::model::DisplayState::Blocked);
+    assert_eq!((row.unread, row.working, row.overflow), (1, false, 0));
+    assert_eq!(row.state, Some(super::model::DisplayState::Blocked));
+    let window = shell.window("local", "@1").expect("the agent's window");
+    assert_eq!(window.presence, AgentPresence::Present);
+    assert_eq!(
+        window.attention,
+        Some((super::model::DisplayState::Blocked, "claude-code".into()))
+    );
+    // A window with no agent is not known to have none.
+    assert!(shell.window("local", "@2").is_none());
+
+    // The host's tmux server was replaced: its old agents say nothing.
+    let mut other = inputs(vec![RequestScope {
+        server_identity: "server-b".into(),
+        ..scope(5, 1)
+    }]);
+    other.focus.server_identity = "server-b".into();
+    harness.sync(cx, other);
+    let shell = harness
+        .runtime
+        .read_with(cx, |runtime, _| super::agent_shell_from(runtime));
+    assert_eq!(shell, crate::workspaces::agents::AgentShell::default());
 }

@@ -29,6 +29,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    agents::view::{adapter_glyph, state_indicator},
     context_menu::{self, Entry, Item},
     fonts,
     theme::{
@@ -36,7 +37,7 @@ use crate::{
         metrics::{BAR_HEIGHT, TYPE_META, ui},
     },
     ui::{
-        chrome::sidebar::{pin_glyph, state_color},
+        chrome::sidebar::pin_glyph,
         title_bar::{bar_button, disabled_ink},
     },
     workspaces::{
@@ -120,6 +121,7 @@ fn small_button(id: String, label: String) -> Button {
 impl RenderOnce for TabStrip {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let palette = theme::palette(cx);
+        let glyphs = crate::settings::get(cx).agent_state_glyphs;
         let state = self.workspaces.read(cx);
         let view = state.view(cx);
         let strip_focus = state.strip_focus.clone();
@@ -223,7 +225,23 @@ impl RenderOnce for TabStrip {
                     }
                     if let Some(state) = attention {
                         label.push(format!("Agent {}", state.word()));
-                        dot = Some(state_color(*state, cx));
+                        dot = Some(*state);
+                    }
+                    // The glyph slot holds the agent living in the tab.
+                    let adapter = crate::workspaces::agents::agent_shell(cx)
+                        .and_then(|shell| shell.window(&view.host, window_id))
+                        .and_then(|agents| agents.attention.as_ref())
+                        .map(|(_, adapter)| adapter.clone());
+                    if let Some(adapter) = adapter {
+                        glyph = Some(
+                            h_flex()
+                                .flex_none()
+                                .items_center()
+                                .gap(ui(3.))
+                                .children(glyph.take())
+                                .child(adapter_glyph(&adapter, palette.chrome_dim))
+                                .into_any_element(),
+                        );
                     }
                     let toggle = if *pinned {
                         format!("Unpin {}", tab.title)
@@ -417,8 +435,8 @@ impl RenderOnce for TabStrip {
                                         .text_color(palette.chrome_faint),
                                 )
                             })
-                            .when_some(dot, |tab, color| {
-                                tab.child(div().flex_none().size(ui(8.)).rounded_full().bg(color))
+                            .when_some(dot, |tab, state| {
+                                tab.child(state_indicator(state, glyphs, 8., cx))
                             }),
                     )
                     .children(trailing)

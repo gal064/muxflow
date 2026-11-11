@@ -85,9 +85,9 @@ impl WorkspaceRow {
 }
 
 /// The verb a row prints beside an agent's name.
-pub fn activity_word(state: super::agents::AgentState) -> &'static str {
+pub fn activity_word(state: crate::agents::model::DisplayState) -> &'static str {
     match state {
-        super::agents::AgentState::Done => "done, unread",
+        crate::agents::model::DisplayState::Done => "done, unread",
         state => state.word(),
     }
 }
@@ -215,7 +215,7 @@ pub fn abbreviate_home(path: Option<String>, home: Option<&str>) -> Option<Strin
 mod tests {
     use super::*;
     use crate::workspaces::{
-        agents::{AgentState, RowAgent},
+        agents::RowAgent,
         model::fixtures::{pane, session, window},
     };
 
@@ -407,11 +407,12 @@ mod tests {
                         id: "a".into(),
                         adapter_id: "codex".into(),
                         name: "codex".into(),
-                        state: AgentState::Blocked,
+                        state: crate::agents::model::DisplayState::Blocked,
                     }],
                     overflow: 2,
                     unread: 1,
                     working: true,
+                    state: Some(crate::agents::model::DisplayState::Blocked),
                 })
             },
         )

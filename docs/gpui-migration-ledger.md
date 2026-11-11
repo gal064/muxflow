@@ -210,7 +210,7 @@ font row covers them).
 | `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | tests of terminalFileOpenRoute.ts | open |
 | `app/terminalFileOpenRoute.ts` | 27 | port | 3 | terminal file open route check | open |
 | `app/types.ts` | 68 | replace | 2 | Session, Window, Pane, ConnectionSpec, HostProfile come from protocol and desktop-core types | open |
-| `app/useAppAgentController.ts` | 162 | port | 4 | agents/mod.rs: scopes, focus and setup gating from the connection controller, rows across hosts, the jump, row opening and the palette's row commands; the workflow half is agents/setup.rs. Open: launch and resume need the active root (`agents::view::ActiveRoot`, set by the Explorer in Phase 5); selecting a terminal tab should acknowledge its pane through `terminal::integration::agents::note_activity` (tab strip owner); bringing an agent's pane here and moving it go with pane moves | open |
+| `app/useAppAgentController.ts` | 162 | port | 4 | agents/mod.rs: scopes, focus and setup gating from the connection controller, rows across hosts (in the sidebar's own workspace order and pinned filter), the jump, row opening through the shell's `select_pane`, and the palette's row commands; the workflow half is agents/setup.rs; selecting a terminal tab acknowledges its pane (T4.5). Open: launch and resume need the active root (`agents::view::ActiveRoot`, set by the Explorer in Phase 5); bringing an agent's pane here and moving it go with pane moves | open |
 | `app/useAppConnectionController.ts` | 944 | port | 2 | connection_ui/controller.rs; terminal hub and state cache, reseeds, echo-lag and input-latency probes, clipboard, file, git, agent and automation frame routing, retireConnection, appFocused and prewarm_terminal_bulk stay with Phase 3 and 4 owners; active-window resolution and the optimistic window with T4.1; after-install agent setup with useAgentHostSetup | done (T2.4) |
 | `app/useAppFileActions.test.tsx` | 196 | port | 5 | tests of useAppFileActions.ts | open |
 | `app/useAppFileActions.ts` | 145 | port | 5 | file actions entity (mutation, save panel, transfers) | open |
@@ -219,7 +219,7 @@ font row covers them).
 | `app/useAppRecoveryController.ts` | 104 | port | 2 | connection_ui/controller.rs; T4.1 rewires its app-state access to the single in-memory owner and adds the flush on close | done (T2.4, T4.1) |
 | `app/useAppShellChrome.test.tsx` | 91 | port | 2 | tests of useAppShellChrome.ts | open |
 | `app/useAppShellChrome.ts` | 59 | port | 2 | rail layout and status-to-notice lifecycle | open |
-| `app/useBulkTabClose.test.tsx` | 117 | port | 4 | set rules and the survivor report in workspaces/model.rs tests; the agent recheck has no presence to test until T4.2 fills `AgentShell` | done (T4.1) |
+| `app/useBulkTabClose.test.tsx` | 117 | port | 4 | set rules and the survivor report in workspaces/model.rs tests; agents mark windows present through `AgentShell` (T4.5), and absence waits for the topology authority, so the recheck still has no absent window to test | done (T4.1) |
 | `app/useBulkTabClose.ts` | 145 | port | 4 | workspaces/commands.rs `close_tab_set`, sets from workspaces/model.rs | done (T4.1) |
 | `app/useClientResize.test.tsx` | 421 | port | 3 | tests in terminal/client_size.rs | done (T3.3) |
 | `app/useClientResize.ts` | 320 | port | 3 | terminal/client_size.rs (ClientResize) driven by terminal/surface.rs | done (T3.3) |
@@ -305,7 +305,7 @@ font row covers them).
 | `features/agents/selectors.test.ts` | 54 | port | 4 | tests in agents/model.rs | done (T4.2) |
 | `features/agents/selectors.ts` | 97 | port | 4 | agents/model.rs selectors and rollups | done (T4.2) |
 | `features/agents/sound.test.ts` | 23 | port | 4 | tests in agents/sound.rs; the localStorage import retires with the WebView | done (T4.2) |
-| `features/agents/sound.ts` | 70 | replace | 4 | agents/sound.rs: the same two cues synthesized and played with rodio, preferences read from app state when a cue plays | done (T4.2) |
+| `features/agents/sound.ts` | 70 | replace | 4 | agents/sound.rs: the same two cues synthesized and played with rodio, preferences read from `settings::get` when a cue plays (T4.5) | done (T4.2, T4.5) |
 | `features/agents/state.test.ts` | 233 | port | 4 | tests in agents/model.rs | done (T4.2) |
 | `features/agents/state.ts` | 153 | port | 4 | agents/model.rs `AgentStore` | done (T4.2) |
 | `features/agents/testFixtures.ts` | 20 | port | 4 | agents/model.rs `fixtures` | done (T4.2) |
@@ -608,7 +608,7 @@ font row covers them).
 |---|---|---|---|---|---|
 | `features/workspaces/TabStrip.tsx` | 548 | port | 2 | ui/chrome/tab_strip.rs; the pointer-drag source lands with dragDrop (T4.3), Download… and document tooltips with Phase 5; not yet: the per-tab tooltip, the All tabs menu's shortcut glyphs, and opening a tab's menu from the keyboard (no Kit support) | done (T4.1) |
 | `features/workspaces/WorkspaceSidebar.hosts.test.tsx` | 234 | port | 2 | host letters and moves in workspaces/rows.rs, the host row in connection_ui/controller/tests.rs, rows end to end in workspaces/tests.rs | done (T4.1) |
-| `features/workspaces/WorkspaceSidebar.tsx` | 973 | port | 2 | ui/chrome/sidebar.rs; the pointer-drag source lands with dragDrop (T4.3), the agents section is filled through `AgentShell` (T4.2), and the compact row's agent cluster and state indicator with T4.2's marks (rows draw the full layout until then); not yet: phase dots in the host menu | done (T4.1) |
+| `features/workspaces/WorkspaceSidebar.tsx` | 973 | port | 2 | ui/chrome/sidebar.rs; the Agents section is `agents::view::AgentsList`, the rows' agent lines, the compact cluster and the state indicator use T4.2's marks through `AgentShell` (T4.5); the pointer-drag source lands with dragDrop (T4.3); not yet: phase dots in the host menu | done (T4.1, T4.5) |
 | `features/workspaces/WorkspaceSwitcher.test.tsx` | 158 | port | 2 | `tests/commands.rs` | open |
 | `features/workspaces/WorkspaceSwitcher.tsx` | 144 | port | 2 | `commands/quick_open.rs`; workspace and tab rows from workspaces/commands.rs `Source` (T4.1); agent-state glyph and file-type icon land with T4.2 and Phase 5 | open |
 | `features/workspaces/mergedWorkspaceRows.test.ts` | 109 | port | 4 | tests in workspaces/rows.rs | done (T4.1) |
@@ -666,7 +666,7 @@ font row covers them).
 | `ui/DelayedLoading.tsx` | 19 | port | 2 | loading text shown after 150 ms (the delay is a CSS animation in styles.css) | open |
 | `ui/Icon.tsx` | 244 | port | 2 | icon path data becomes embedded SVG assets | open |
 | `ui/SetupProgress.tsx` | 6 | port | 2 | setup progress line | open |
-| `ui/StateDot.tsx` | 53 | port | 2 | agents/view.rs `state_indicator`, glyphs from `shell.agent_state_glyphs` | done (T4.2) |
+| `ui/StateDot.tsx` | 53 | port | 2 | agents/view.rs `state_indicator`, glyphs from `settings::get`; the sidebar rows and the tab strip draw it too (T4.5) | done (T4.2, T4.5) |
 | `ui/SurfaceError.tsx` | 50 | port | 2 | surface error with disclosure | open |
 | `ui/appearance.test.ts` | 79 | port | 2 | theme preference and palette parity; palette cases become generator output tests; the System, Light and Dark resolution cases are in `theme::tests` | done (T2.1, T4.4) |
 | `ui/appearance.ts` | 130 | port | 2 | theme preference and UI scale over app_state: `theme::apply`, `settings::update`. The Markdown palette choice is `Prefs::markdown_appearance`, read by the Markdown view in Phase 5 | done (T2.1, T4.4) |

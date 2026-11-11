@@ -1,7 +1,7 @@
 //! The 240px rail: workspaces on top, agents below with a divider between them,
 //! and the host row at the bottom. Port of
 //! `features/workspaces/WorkspaceSidebar.tsx`; the Agents section is the
-//! agents feature's, through [`crate::workspaces::agents::AgentShell`].
+//! agents feature's list ([`crate::agents::view::AgentsList`]).
 
 use desktop_core::app_state::AgentSortMode;
 use gpui_kit::{
@@ -23,6 +23,10 @@ use gpui_kit::{
 };
 
 use crate::{
+    agents::{
+        model::DisplayState,
+        view::{AgentsList, agent_mark, state_indicator},
+    },
     commands,
     connection_ui::{connection_reducer::ConnectionPhase, dialog::open_connection_dialog},
     context_menu::{self, Entry, Item},
@@ -41,11 +45,7 @@ use crate::{
         title_bar::{bar_button, disabled_ink},
     },
     workspaces::{
-        Target, Workspaces,
-        agents::{AgentState, agent_shell},
-        focus_terminal, moved_cursor,
-        rows::WorkspaceRow,
-        run_command,
+        Target, Workspaces, focus_terminal, moved_cursor, rows::WorkspaceRow, run_command,
     },
 };
 
@@ -89,26 +89,6 @@ fn sort_toggle(
                 .text_color(accent)
                 .child(text.into()),
         )
-}
-
-/// The color an agent state draws in.
-pub(super) fn state_color(state: AgentState, cx: &App) -> Rgba {
-    let palette = theme::palette(cx);
-    match state {
-        AgentState::Working => palette.state_working,
-        AgentState::Blocked => palette.state_blocked,
-        AgentState::Done => palette.state_done,
-        AgentState::Idle | AgentState::Unknown => palette.state_unknown,
-    }
-}
-
-/// A state's dot; decorative, so the row or tab names the state in words.
-pub(super) fn state_dot(state: Option<AgentState>, cx: &App) -> gpui_kit::Div {
-    div()
-        .flex_none()
-        .size(ui(7.))
-        .rounded_full()
-        .when_some(state, |this, state| this.bg(state_color(state, cx)))
 }
 
 /// A pushpin, drawn: the default icon set has none.
@@ -247,7 +227,27 @@ fn workspace_row(
             })
     };
     let agents = row.agents.clone();
-    let mark = agent_shell(cx).and_then(|shell| shell.mark.clone());
+    let prefs = crate::settings::get(cx);
+    let (compact, glyphs) = (prefs.compact_workspaces, prefs.agent_state_glyphs);
+    // The row's own colour, which a mark's badge is ringed with.
+    let ring = if selected {
+        palette.accent
+    } else {
+        palette.chrome_bg
+    };
+    // One workspace-level indicator, in the same place in both modes. The
+    // agent lines already say blocked and done in words, so the full row shows
+    // working alone; a compact row has no lines and shows the loudest state.
+    let indicator = if compact {
+        agents.state.filter(|state| {
+            matches!(
+                state,
+                DisplayState::Blocked | DisplayState::Done | DisplayState::Working
+            )
+        })
+    } else {
+        agents.working.then_some(DisplayState::Working)
+    };
     let group: SharedString = format!("workspace-row-{index}").into();
     h_flex()
         .id(("workspace-row", index))
@@ -337,25 +337,70 @@ fn workspace_row(
                         })
                         // The slot stays while empty, so a state arriving cannot
                         // move the name.
-                        .child(state_dot(agents.working.then_some(AgentState::Working), cx))
-                        .child(div().min_w_0().truncate().child(row.session.name.clone())),
+                        .child(state_indicator(
+                            indicator.unwrap_or(DisplayState::Idle),
+                            glyphs,
+                            7.,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(row.session.name.clone()),
+                        )
+                        // A compact row trades the agent lines for their marks
+                        // on the name's line. Decorative: the row's name says it.
+                        .when(compact && !agents.agents.is_empty(), |this| {
+                            this.child(
+                                h_flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(ui(3.))
+                                    .children(agents.agents.iter().map(|agent| {
+                                        agent_mark(
+                                            &agent.adapter_id,
+                                            agent.state,
+                                            glyphs,
+                                            meta,
+                                            ring,
+                                            cx,
+                                        )
+                                    }))
+                                    .when(agents.overflow > 0, |this| {
+                                        this.child(
+                                            div()
+                                                .text_size(ui(TYPE_META))
+                                                .text_color(meta)
+                                                .child(format!("+{}", agents.overflow)),
+                                        )
+                                    }),
+                            )
+                        }),
                 )
-                .children(agents.agents.iter().map(|agent| {
-                    h_flex()
-                        .min_w_0()
-                        .items_center()
-                        .gap(ui(6.))
-                        .pl(ui(18.))
-                        .text_size(ui(TYPE_SECONDARY))
-                        .font_weight(FontWeight::NORMAL)
-                        .text_color(meta)
-                        .child(match &mark {
-                            Some(mark) => mark(&agent.adapter_id, agent.state, cx),
-                            None => state_dot(Some(agent.state), cx).into_any_element(),
-                        })
-                        .child(div().min_w_0().truncate().child(agent.name.clone()))
-                }))
-                .when(agents.overflow > 0, |this| {
+                .when(!compact, |this| {
+                    this.children(agents.agents.iter().map(|agent| {
+                        h_flex()
+                            .min_w_0()
+                            .items_center()
+                            .gap(ui(6.))
+                            .pl(ui(18.))
+                            .text_size(ui(TYPE_SECONDARY))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(meta)
+                            .child(agent_mark(
+                                &agent.adapter_id,
+                                agent.state,
+                                glyphs,
+                                meta,
+                                ring,
+                                cx,
+                            ))
+                            .child(div().min_w_0().truncate().child(agent.name.clone()))
+                    }))
+                })
+                .when(!compact && agents.overflow > 0, |this| {
                     this.child(
                         div()
                             .pl(ui(31.))
@@ -738,7 +783,7 @@ impl RenderOnce for Sidebar {
             })
             .children(items);
 
-        let agents_list = crate::agents::view::AgentsList {
+        let agents_list = AgentsList {
             sort: self.agent_sort,
             pinned_only: self.pinned_only,
         };
