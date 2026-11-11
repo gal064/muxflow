@@ -27,7 +27,7 @@ pub mod shortcut_editor;
 use std::{collections::HashMap, rc::Rc, time::Duration};
 
 use desktop_core::{
-    app_state::{load_app_state, update_app_state},
+    app_state::{PersistedAppState, load_app_state, update_app_state},
     platform,
 };
 use gpui_kit::{
@@ -188,10 +188,24 @@ pub fn run(id: CommandId, window: &mut Window, cx: &mut App) {
 /// How often a pending save is checked for its result.
 const SAVE_POLL: Duration = Duration::from_millis(50);
 
+/// Makes `state`'s shortcuts the live ones without saving them again.
+pub fn reload_overrides(state: &PersistedAppState, cx: &mut App) {
+    if cx.has_global::<Commands>() {
+        let overrides = state.commands.shortcut_overrides.clone();
+        cx.update_global(|commands: &mut Commands, _| commands.overrides = overrides);
+    }
+}
+
 /// Saves the overrides, reports a failure, and applies them at once.
 pub fn set_overrides(overrides: ShortcutOverrides, window: &mut Window, cx: &mut App) {
-    let save = store_overrides(&overrides, cx);
+    // Unreadable saved state takes no writes until it is reset, and the shell
+    // already says so once: the shortcuts live for this run.
+    let frozen = load_app_state(&cx.global::<Core>().app_state).is_err();
+    let save = (!frozen).then(|| store_overrides(&overrides, cx));
     cx.update_global(|commands: &mut Commands, _| commands.overrides = overrides);
+    let Some(save) = save else {
+        return;
+    };
     window
         .spawn(cx, async move |cx| {
             // Polled, not awaited: GPUI's test scheduler rejects a wake from a

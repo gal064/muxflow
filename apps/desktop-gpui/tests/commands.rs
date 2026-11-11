@@ -21,16 +21,20 @@ use gpui_kit::{
     test::{TestEventExt, TestQueryExt, TestWindowExt},
 };
 use muxflow_gpui::{
+    agents::model::DisplayState,
     app::{self, Core},
     commands::{
         self, Commands,
         dialogs::{self, Confirmation, TextPromptRequest},
-        keymap::{ShortcutOverrides, shortcut_for},
+        keymap::{ShortcutDisposition, ShortcutOverrides, shortcut_disposition, shortcut_for},
         quick_open::{
             FileMatch, FileSearchResults, QuickOpenItem, QuickOpenSnapshot, QuickOpenSource,
-            QuickOpenTab, QuickOpenWorkspace,
+            QuickOpenTab, QuickOpenWorkspace, quick_open_items,
         },
-        registry::{COMMANDS, CommandDefinition, Platform, palette_commands},
+        registry::{
+            COMMANDS, CommandContext, CommandDefinition, Platform, command_available,
+            command_by_id, palette_commands,
+        },
     },
     ui::shell::Shell,
 };
@@ -786,6 +790,8 @@ fn a_composition_keeps_arrows_and_enter_from_the_palette(cx: &mut TestAppContext
 
 #[derive(Default)]
 struct FakeSource {
+    /// The searched root; empty reads as "root".
+    root: RefCell<String>,
     searches: RefCell<Vec<String>>,
     chosen: RefCell<Vec<String>>,
     results: RefCell<Option<Result<FileSearchResults, String>>>,
@@ -800,6 +806,7 @@ impl QuickOpenSource for FakeSource {
                 detail: "main · local".into(),
                 active: false,
                 letter: Some("L".into()),
+                attention: Some(DisplayState::Blocked),
             }],
             tabs: vec![QuickOpenTab {
                 key: "t".into(),
@@ -808,7 +815,10 @@ impl QuickOpenSource for FakeSource {
                 is_file: false,
             }],
             active_tab_key: Some("t".into()),
-            search_key: Some("root".into()),
+            search_key: Some(match self.root.borrow().as_str() {
+                "" => "root".to_owned(),
+                root => root.to_owned(),
+            }),
             cwd: Some("/project".into()),
             host_label: "local".into(),
         }
@@ -869,6 +879,11 @@ fn quick_open_lists_tabs_and_workspaces_before_any_typing(cx: &mut TestAppContex
             window.find_by_label("api").role(),
             Some(Role::ListBoxOption)
         );
+        // The workspace says its agent waits, as its sidebar row does.
+        assert_eq!(
+            window.find_by_label("Agent blocked").role(),
+            Some(Role::Image)
+        );
     });
     press(handle, "down", cx);
     press(handle, "enter", cx);
@@ -927,7 +942,51 @@ fn quick_open_keeps_workspaces_when_file_search_fails(cx: &mut TestAppContext) {
             Some(Role::ListBoxOption)
         );
         assert_eq!(window.find_all_by_role(Role::ListBoxOption).len(), 1);
+        assert_eq!(
+            window
+                .find_by_label("File search unavailable. Workspaces and tabs are still searchable.")
+                .role(),
+            Some(Role::Status)
+        );
     });
+}
+
+#[gpui_kit::test]
+fn quick_open_searches_the_new_root_when_the_focused_directory_changes(cx: &mut TestAppContext) {
+    let (_dir, handle) = no_state(cx);
+    let source = Rc::new(FakeSource::default());
+    open_quick_open(handle, source.clone(), cx);
+    type_text(handle, "main", cx);
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    assert_eq!(*source.searches.borrow(), ["main"]);
+    // The focused pane moved to another directory while Quick Open was open.
+    *source.root.borrow_mut() = "other-root".into();
+    with_window(handle, cx, |window, _| window.refresh());
+    cx.run_until_parked();
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    assert_eq!(*source.searches.borrow(), ["main", "main"]);
+}
+
+#[gpui_kit::test]
+fn a_narrow_window_drops_the_quick_open_pane_label(cx: &mut TestAppContext) {
+    let (_dir, handle) = no_state(cx);
+    open_quick_open(handle, Rc::new(FakeSource::default()), cx);
+    let scope = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, _| {
+            let local = window.try_find_by_label("local").is_some();
+            let labelled = window.try_find_by_label("local · focused pane").is_some();
+            (local, labelled)
+        })
+    };
+    assert_eq!(scope(cx), (false, true));
+    cx.simulate_window_resize(
+        handle,
+        gpui_kit::size(gpui_kit::px(470.), gpui_kit::px(600.)),
+    );
+    cx.run_until_parked();
+    assert_eq!(scope(cx), (true, false));
 }
 
 #[gpui_kit::test]
@@ -978,4 +1037,494 @@ fn row_commands_route_to_their_surface_and_report_a_vanished_row(cx: &mut TestAp
     assert_eq!(ran.borrow().len(), 1);
     let notices = with_window(handle, cx, |window, cx| window.notifications(cx).len());
     assert_eq!(notices, 1);
+}
+
+fn palette_rows(handle: AnyWindowHandle, cx: &mut TestAppContext) -> Vec<(f32, Option<bool>)> {
+    with_window(handle, cx, |window, _| {
+        window
+            .find_all_by_role(Role::ListBoxOption)
+            .iter()
+            .map(|row| (row.bounds().origin.y.as_f32(), row.selected()))
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn the_palette_groups_only_an_empty_query_and_says_when_nothing_matches(cx: &mut TestAppContext) {
+    let (_dir, handle) = no_state(cx);
+    press(handle, "secondary-k", cx);
+    // A heading sits between two groups' rows, so a gap taller than a row
+    // marks one. A ranked list would be lying with them, so it has none.
+    let headings = |cx: &mut TestAppContext| {
+        let rows = palette_rows(handle, cx);
+        let row = rows[1].0 - rows[0].0;
+        rows.windows(2)
+            .filter(|pair| pair[1].0 - pair[0].0 > row + 1.)
+            .count()
+    };
+    let mut groups: Vec<&str> = palette_commands().map(|command| command.group).collect();
+    groups.dedup();
+    assert_eq!(headings(cx), groups.len() - 1);
+    type_text(handle, "e", cx);
+    assert!(palette_rows(handle, cx).len() > groups.len());
+    assert_eq!(headings(cx), 0);
+    with_window(handle, cx, |window, _| {
+        assert!(window.try_find_by_label("No matching command.").is_none());
+    });
+
+    type_text(handle, "qqqzzz", cx);
+    assert!(palette_rows(handle, cx).is_empty());
+    with_window(handle, cx, |window, _| {
+        window.find_by_label("No matching command.");
+    });
+}
+
+#[gpui_kit::test]
+fn an_unavailable_palette_row_says_so_and_a_click_does_nothing(cx: &mut TestAppContext) {
+    let (_dir, handle) = no_state(cx);
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    let log = ran.clone();
+    cx.update(|cx| implement_all(log, cx));
+    press(handle, "secondary-k", cx);
+    with_window(handle, cx, |window, cx| {
+        let row = window.find_by_label("Toggle file beside the terminal");
+        assert_eq!(row.description(), Some("Unavailable"));
+        let available = window
+            .find_all_by_label("Toggle sidebar")
+            .into_iter()
+            .find(|row| row.role() == Some(Role::ListBoxOption))
+            .expect("the Toggle sidebar row");
+        assert_eq!(available.description(), None);
+        window.click("command-view.toggleDock", cx);
+    });
+    cx.run_until_parked();
+    assert!(dialog_open(handle, cx), "the palette stays open");
+    assert!(ran.borrow().is_empty());
+}
+
+#[gpui_kit::test]
+fn typing_moves_the_palette_selection_back_to_the_first_row(cx: &mut TestAppContext) {
+    let (_dir, handle) = no_state(cx);
+    press(handle, "secondary-k", cx);
+    for _ in 0..3 {
+        press(handle, "down", cx);
+    }
+    assert_eq!(palette_rows(handle, cx)[3].1, Some(true));
+    type_text(handle, "s", cx);
+    let rows = palette_rows(handle, cx);
+    assert_eq!(rows[0].1, Some(true));
+    assert!(rows[1..].iter().all(|row| row.1 == Some(false)));
+}
+
+fn open_shortcut_editor(handle: AnyWindowHandle, cx: &mut TestAppContext) {
+    with_window(handle, cx, |window, cx| {
+        commands::run("shortcuts.configure", window, cx);
+    });
+    cx.run_until_parked();
+}
+
+fn done_disabled(handle: AnyWindowHandle, cx: &mut TestAppContext) -> bool {
+    with_window(handle, cx, |window, _| {
+        window.find_by_label("Done").disabled() == Some(true)
+    })
+}
+
+fn saved_overrides(path: &Path) -> ShortcutOverrides {
+    let store = AppStateStore::load(path.to_owned());
+    load_app_state(&store).unwrap().commands.shortcut_overrides
+}
+
+#[gpui_kit::test]
+fn shortcut_editor_refuses_a_binding_without_a_modifier(cx: &mut TestAppContext) {
+    let (_dir, handle) = no_state(cx);
+    open_shortcut_editor(handle, cx);
+    // The first field, Show command palette, has focus.
+    with_window(handle, cx, |window, cx| window.press("secondary-a", cx));
+    type_text(handle, "K", cx);
+    assert!(done_disabled(handle, cx));
+    with_window(handle, cx, |window, _| {
+        let alerts = window.find_all_by_role(Role::Alert);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(
+            alerts[0].label(),
+            Some("Shortcuts must include Ctrl, Alt, or Meta. Unsafe bindings are not saved.")
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn clearing_a_shortcut_field_saves_the_binding_removed(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_state(dir.path(), serde_json::json!({}));
+    let handle = open_app(&path, cx);
+    open_shortcut_editor(handle, cx);
+    with_window(handle, cx, |window, cx| window.press("secondary-a", cx));
+    press(handle, "backspace", cx);
+    assert!(!done_disabled(handle, cx));
+    with_window(handle, cx, |window, cx| {
+        window.click("shortcut-editor-done", cx)
+    });
+    cx.run_until_parked();
+    let expected: ShortcutOverrides = HashMap::from([("commands.show".to_owned(), None)]);
+    wait_for_overrides(&path, &expected);
+    press(handle, "secondary-k", cx);
+    assert!(!dialog_open(handle, cx), "the palette has no shortcut now");
+}
+
+#[gpui_kit::test]
+fn escape_closes_the_shortcut_editor_without_saving(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_state(dir.path(), serde_json::json!({}));
+    let handle = open_app(&path, cx);
+    open_shortcut_editor(handle, cx);
+    with_window(handle, cx, |window, cx| window.press("secondary-a", cx));
+    type_text(handle, &format!("{PRIMARY}+J"), cx);
+    press(handle, "escape", cx);
+    assert!(!dialog_open(handle, cx));
+    // Give a save, were one started, time to land.
+    for _ in 0..10 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(saved_overrides(&path), ShortcutOverrides::new());
+    press(handle, "secondary-j", cx);
+    assert!(!dialog_open(handle, cx));
+    press(handle, "secondary-k", cx);
+    assert!(
+        dialog_open(handle, cx),
+        "the old binding still opens the palette"
+    );
+}
+
+#[gpui_kit::test]
+fn the_shortcut_editor_close_button_is_named_and_closes(cx: &mut TestAppContext) {
+    let (_dir, handle) = no_state(cx);
+    open_shortcut_editor(handle, cx);
+    with_window(handle, cx, |window, cx| {
+        let close = window.find_by_label("Close keyboard shortcuts");
+        assert_eq!(close.role(), Some(Role::Button));
+        window.click("shortcut-editor-close", cx);
+    });
+    cx.run_until_parked();
+    assert!(!dialog_open(handle, cx));
+}
+
+fn focused_field_window(
+    cx: &mut TestAppContext,
+) -> (AnyWindowHandle, gpui_kit::Entity<InputState>) {
+    let handle = cx.update(|cx| {
+        gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            input.focus_handle(cx).focus(window, cx);
+            cx.new(|_| FocusedField { input })
+        })
+        .unwrap()
+        .0
+    });
+    let input = with_window(handle, cx, |window, cx| {
+        let focused = window.focused_input(cx).expect("a focused input");
+        focused.as_input().expect("a Kit input").clone()
+    });
+    (handle, input)
+}
+
+#[gpui_kit::test]
+fn escape_from_a_dialog_returns_focus_to_what_had_it(cx: &mut TestAppContext) {
+    let (_dir, _shell) = no_state(cx);
+    cx.update(|cx| commands::set_quick_open_source(Rc::new(FakeSource::default()), cx));
+    let (handle, input) = focused_field_window(cx);
+    let field_focused = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, cx| {
+            input.focus_handle(cx).is_focused(window)
+        })
+    };
+    for command in ["commands.show", "workspaces.switch"] {
+        with_window(handle, cx, |window, cx| commands::run(command, window, cx));
+        cx.run_until_parked();
+        assert!(dialog_open(handle, cx), "{command}");
+        assert!(!field_focused(cx), "{command} takes focus");
+        press(handle, "escape", cx);
+        assert!(!dialog_open(handle, cx), "{command}");
+        assert!(field_focused(cx), "{command} gives focus back");
+    }
+}
+
+/// A document tab's editor: its key context around a Kit input.
+struct EditorField {
+    input: gpui_kit::Entity<InputState>,
+}
+
+impl gpui_kit::Render for EditorField {
+    fn render(
+        &mut self,
+        _: &mut Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        use gpui_kit::{InteractiveElement, ParentElement};
+        // `editor::pane::CONTEXT`, which the crate keeps private.
+        gpui_kit::div()
+            .key_context("FileEditor")
+            .child(Input::new(&self.input))
+    }
+}
+
+#[gpui_kit::test]
+fn an_editor_passes_on_app_chords_it_does_not_handle(cx: &mut TestAppContext) {
+    let (_dir, _shell) = no_state(cx);
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    let log = ran.clone();
+    cx.update(|cx| {
+        implement_all(log, cx);
+        fully_available_context(cx);
+    });
+    let handle = cx.update(|cx| {
+        gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            input.focus_handle(cx).focus(window, cx);
+            cx.new(|_| EditorField { input })
+        })
+        .unwrap()
+        .0
+    });
+    with_window(handle, cx, |_, _| {});
+    let rebind = |overrides: &[(&str, Option<String>)], cx: &mut TestAppContext| {
+        let overrides: ShortcutOverrides = overrides
+            .iter()
+            .map(|(id, chord)| ((*id).to_owned(), chord.clone()))
+            .collect();
+        with_window(handle, cx, move |window, cx| {
+            commands::set_overrides(overrides, window, cx)
+        });
+        cx.run_until_parked();
+    };
+
+    press(handle, "secondary-l", cx);
+    assert_eq!(*ran.borrow(), ["view.togglePanel"], "an unhandled chord");
+    rebind(&[("view.togglePanel", Some(format!("{PRIMARY}+J")))], cx);
+    press(handle, "secondary-j", cx);
+    assert_eq!(ran.borrow().len(), 2, "a rebound unhandled chord");
+
+    // The editor binds Ctrl+G to Go to line.
+    rebind(&[("view.togglePanel", Some("Ctrl+G".to_owned()))], cx);
+    press(handle, "ctrl-g", cx);
+    assert_eq!(ran.borrow().len(), 2, "a chord the editor handles");
+
+    rebind(
+        &[
+            ("view.togglePanel", Some(format!("{PRIMARY}+X"))),
+            ("terminal.copy", None),
+            ("terminal.paste", None),
+        ],
+        cx,
+    );
+    press(handle, "secondary-x", cx);
+    assert_eq!(ran.borrow().len(), 2, "cut stays native");
+    press(handle, "l", cx);
+    assert_eq!(ran.borrow().len(), 2, "typing goes to the editor");
+}
+
+#[test]
+fn moving_a_tab_follows_one_rule_for_terminal_and_app_tabs() {
+    let left = command_by_id("window.moveLeft").unwrap();
+    // An app tab moves while the host is frozen: it is the app's own.
+    let app_tab = CommandContext {
+        has_tab: true,
+        can_move_tab_left: true,
+        ..Default::default()
+    };
+    assert!(command_available(left, &app_tab));
+    let frozen_terminal = CommandContext {
+        has_window: true,
+        ..app_tab
+    };
+    assert!(!command_available(left, &frozen_terminal));
+}
+
+#[test]
+fn deleting_a_host_needs_a_saved_host_picked() {
+    let remove = command_by_id("host.delete").unwrap();
+    let everything_but = CommandContext {
+        can_mutate: true,
+        can_create_workspace: true,
+        has_session: true,
+        has_window: true,
+        has_pane: true,
+        has_tab: true,
+        has_host_profile: false,
+        ..Default::default()
+    };
+    assert!(!command_available(remove, &everything_but));
+}
+
+#[test]
+fn macos_cmd_c_copies_whatever_the_selection() {
+    let none = ShortcutOverrides::new();
+    for selected in [false, true] {
+        assert_eq!(
+            shortcut_disposition(
+                "Meta+C",
+                false,
+                false,
+                Platform::Mac,
+                &none,
+                selected,
+                |_| true
+            ),
+            ShortcutDisposition::Run("terminal.copy"),
+            "selection {selected}"
+        );
+    }
+}
+
+#[test]
+fn quick_open_keeps_its_sections_with_a_query() {
+    let snapshot = QuickOpenSnapshot {
+        workspaces: vec![QuickOpenWorkspace {
+            key: "w".into(),
+            name: "work".into(),
+            detail: "main · local".into(),
+            active: true,
+            letter: None,
+            attention: None,
+        }],
+        tabs: vec![
+            QuickOpenTab {
+                key: "editor".into(),
+                title: "work.ts".into(),
+                file_path: Some("/repo/work.ts".into()),
+                is_file: true,
+            },
+            QuickOpenTab {
+                key: "terminal".into(),
+                title: "wxxxoxxxrxxxk".into(),
+                file_path: None,
+                is_file: false,
+            },
+        ],
+        ..Default::default()
+    };
+    let files = [
+        FileMatch {
+            path: "/repo/work.ts".into(),
+            relative_path: "work.ts".into(),
+            score: 1040,
+        },
+        FileMatch {
+            path: "/repo/workspace.ts".into(),
+            relative_path: "workspace.ts".into(),
+            score: 1035,
+        },
+    ];
+    let keys = |query: &str| -> Vec<String> {
+        quick_open_items(&snapshot, &files, query, None)
+            .into_iter()
+            .map(|item| item.key)
+            .collect()
+    };
+    assert_eq!(keys(""), ["terminal", "workspace:w", "editor"]);
+    // The terminal's scattered match scores below the workspace's exact name,
+    // and still leads: sections first, then score.
+    assert_eq!(
+        keys("work"),
+        [
+            "terminal",
+            "workspace:w",
+            "editor",
+            "file:/repo/workspace.ts"
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn row_commands_from_two_surfaces_each_reach_their_own(cx: &mut TestAppContext) {
+    use commands::{RowCommandSource, RowSurface};
+
+    let (_dir, handle) = no_state(cx);
+    let ran = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|cx| {
+        for (surface, id, name) in [
+            (RowSurface::Files, "files.rename", "files"),
+            (RowSurface::Git, "git.stage", "git"),
+        ] {
+            let log = ran.clone();
+            commands::publish_row_commands(
+                surface,
+                Some(RowCommandSource {
+                    available: vec![id],
+                    run: Rc::new(move |id, _, _| log.borrow_mut().push((name, id))),
+                }),
+                cx,
+            );
+        }
+    });
+    for id in ["git.stage", "files.rename"] {
+        with_window(handle, cx, |window, cx| commands::run(id, window, cx));
+    }
+    assert_eq!(
+        *ran.borrow(),
+        [("git", "git.stage"), ("files", "files.rename")]
+    );
+}
+
+#[gpui_kit::test]
+fn quick_open_says_what_it_lists_and_how_the_search_went(cx: &mut TestAppContext) {
+    let (_dir, handle) = no_state(cx);
+    let source = Rc::new(FakeSource::default());
+    open_quick_open(handle, source.clone(), cx);
+    let shown = |cx: &mut TestAppContext, labels: &[&str]| {
+        with_window(handle, cx, |window, _| {
+            for label in labels {
+                window.find_by_label(label);
+            }
+        })
+    };
+    shown(cx, &["Open tabs & workspaces", "2 results"]);
+
+    // No open tab or workspace matches "rs"; its files are still on their way.
+    type_text(handle, "rs", cx);
+    shown(cx, &["Matches", "Searching files…", "Searching filenames…"]);
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    shown(cx, &["Matches", "1 results"]);
+
+    *source.results.borrow_mut() = Some(Ok(FileSearchResults {
+        matches: Vec::new(),
+        complete: false,
+    }));
+    type_text(handle, "x", cx);
+    cx.executor().advance_clock(DEBOUNCE);
+    cx.run_until_parked();
+    shown(cx, &["0 results", "No matching names or paths."]);
+    with_window(handle, cx, |window, _| {
+        let status = window.find_by_label("Search limited—narrow your query.");
+        assert_eq!(status.role(), Some(Role::Status));
+    });
+}
+
+#[gpui_kit::test]
+fn a_narrow_window_stacks_each_shortcut_field_under_its_title(cx: &mut TestAppContext) {
+    let (_dir, handle) = no_state(cx);
+    open_shortcut_editor(handle, cx);
+    let field = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, _| {
+            let bounds = window
+                .find_by_label("Shortcut for Show command palette")
+                .bounds();
+            (bounds.origin.x, bounds.size.width)
+        })
+    };
+    // Beside the title: a fixed column on the right of a 620 px dialog.
+    let (x, _) = field(cx);
+    assert!(x > gpui_kit::px(400.), "{x:?}");
+    cx.simulate_window_resize(
+        handle,
+        gpui_kit::size(gpui_kit::px(500.), gpui_kit::px(700.)),
+    );
+    cx.run_until_parked();
+    // Under it, as wide as the row.
+    let (x, width) = field(cx);
+    assert!(
+        x < gpui_kit::px(60.) && width > gpui_kit::px(300.),
+        "{x:?} {width:?}"
+    );
 }
