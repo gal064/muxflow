@@ -239,9 +239,9 @@ through the T2.1 seam.
 | T5.2 `editor` | opus, high, full cycle, large, design | `gpui/editor` | Merged | `1e4a659`, merge `e372bc2` | Kit code editor. 3 review rounds, QA PASS local and SSH. An external edit to an open remote file leaves the tab in Save failed until T5.1 delivers change notices |
 | T5.3 `git-diff` | opus, high, full cycle, design | `gpui/git-diff` | Merged | `ef076e7`, merge `9a9ad34` | 3 review rounds, QA PASS local and SSH, `test:git` passes after a driver fix. Gaps: SurfaceError summary on push errors, keyboard row access, file icons |
 | `gdev_qa_phase5` | fresh QA | `gpui/integration` | Passed | `ec39e80` | All 10 steps on local and SSH hosts: browse, edit, external change, Markdown, file operations, diff, stage, commit, push to a scratch remote, gitignore, reconnect, relaunch. Minor: Go to Line leaves the line at the bottom edge; Git panel blank instead of "Working tree clean." when only ignored files exist; the docked tab can sit in the overflow menu (T6.6: the first two fixed; the third matches Tauri) |
-| T6.4 `ledger-shell` | opus, high, full cycle, invariant | `gpui/ledger-shell` | Dispatched | | |
-| T6.5 `ledger-terminal-files` | opus, high, full cycle, invariant | `gpui/ledger-terminal-files` | Dispatched | | |
-| T6.6 `carry-forward` | opus, high, full cycle | `gpui/carry-forward` | Dispatched | | |
+| T6.4 `ledger-shell` | opus, high, full cycle, invariant | `gpui/ledger-shell` | Merged | `6906fa0` | 55 Phase 2 rows closed; `ui/ContextMenu.tsx` left for T6.1. SurfaceError on every surface, update check, loading delay, reduced motion, icons, narrow width. 2 review rounds, QA pass. Deviation: Kit's dialog keeps a 16 px gutter below 600 px (Tauri 8 px) |
+| T6.5 `ledger-terminal-files` | opus, high, full cycle, invariant | `gpui/ledger-terminal-files` | Merged | `f68af3a` | 38 Phase 3 and 5 rows closed. Ported the perf probe (same perf-log schema), fixed a paint-gate arming bug. 3 review rounds, QA pass incl. restore, stale restore, reseed, both perf scripts |
+| T6.6 `carry-forward` | opus, high, full cycle | `gpui/carry-forward` | Merged | `9839d9c` | Fixed paste ordering, the first-workspace identity notice, Settings Live Markdown copy, Working tree clean, Go to Line centering, disabled Delete styling, rename focus, `xdg-open` reaping. The rest verified fixed or matching Tauri. 1 review round, QA pass |
 | T5.4 `markdown` | sonnet, high, full cycle, design | `gpui/markdown` | Merged | `587887b` | 2 review rounds, QA PASS local. Kit bug: double-click selects nothing in a paragraph with inline code. Drag-select in the preview not verified (xdotool). Settings copy still mentions Live Markdown |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
@@ -274,6 +274,7 @@ against a scratch remote over Docker SSH.
 | 2 | T6.1 `accessibility` | Full, large, invariant | opus, high | AccessKit roles and focus order across the UI, keyboard context menus, keyboard access to tabs, title bar and rows | Wave 1 |
 | 2 | T6.2 `visual-parity` | Full, design | sonnet, high | Headless PNG comparison, theme fixes | Wave 1 |
 | 2 | T6.3 `behavior-docs` | Full, docs only, QA skipped | sonnet, medium | The behavior audit docs in the migration plan | Wave 1 |
+| 2 | T6.7 `parity-fixes` | Full | opus, high | Parity bugs wave-1 QA found outside its scope | Wave 1 |
 
 **Integrated QA, root-owned because it needs shared state:** acceptance suites,
 `run-stall.sh`, `run-pause-probe.sh`, and release builds that connect to a local and an
@@ -339,7 +340,7 @@ final sweep command returning only justified hits.
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
 | 4 | Done, QA passed | `0912995` | |
 | 5 | Done | `ec39e80` | Integrated QA passed on local and SSH hosts |
-| 6 | Running, wave 1 dispatched | | T6.4, T6.5 and T6.6 running |
+| 6 | Running, wave 2 dispatched | | Wave 1 merged; T6.1, T6.2, T6.3 and T6.7 running |
 | 7 to 10 | After parity, owner decides | | |
 
 ### Task log
