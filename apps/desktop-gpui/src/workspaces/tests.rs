@@ -1088,3 +1088,348 @@ mod agent_seams {
         );
     }
 }
+
+// Moving by drag and from an agent's menu. Ported from `app/usePaneMoves.test.ts`
+// and `features/dragDrop/dropRules.test.ts`, with the gestures made on the real
+// elements.
+
+impl Shell {
+    fn center(&mut self, label: &str) -> gpui_kit::Point<gpui_kit::Pixels> {
+        self.visual
+            .update(|window, _| window.find_by_label(label).bounds().center())
+    }
+
+    fn drag(
+        &mut self,
+        from: gpui_kit::Point<gpui_kit::Pixels>,
+        to: gpui_kit::Point<gpui_kit::Pixels>,
+    ) {
+        self.visual.update(|window, cx| window.drag(from, to, cx));
+        self.settle();
+    }
+
+    fn count(&self, kind: &str) -> usize {
+        self.host
+            .kinds()
+            .iter()
+            .filter(|seen| *seen == kind)
+            .count()
+    }
+
+    fn moves(&mut self, host: &str, pane: &str) -> Option<super::moves::AgentMoves> {
+        let workspaces = self.workspaces();
+        self.visual
+            .update(|_, cx| workspaces.read(cx).agent_moves(host, pane, cx))
+    }
+}
+
+fn landed(session: &str, window: &str, pane: &str) -> Result<Value, String> {
+    Ok(json!({
+        "sessionId": session, "windowId": window, "paneId": pane,
+        "topologyGeneration": 150,
+    }))
+}
+
+#[gpui_kit::test]
+fn a_tab_dropped_on_a_workspace_moves_its_window_and_leaves_the_view_alone(
+    cx: &mut TestAppContext,
+) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    let (from, to) = (shell.center("server"), shell.center("notes"));
+    shell.drag(from, to);
+    let moved = shell.host.last("moveWindow");
+    assert_eq!(moved["window_id"], "@2");
+    assert_eq!(moved["target_session_id"], "$2");
+    // A move of anything but the pane on screen leaves the view alone.
+    assert_eq!(shell.count("selectSession"), 0);
+    assert_eq!(shell.selected("editor"), Some(true));
+}
+
+#[gpui_kit::test]
+fn the_window_on_screen_is_followed_to_where_the_host_says_it_landed(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    shell
+        .host
+        .state()
+        .answers
+        .push_back(landed("$2", "@1", "%1"));
+    let (from, to) = (shell.center("editor"), shell.center("notes"));
+    shell.drag(from, to);
+    assert_eq!(shell.host.last("moveWindow")["window_id"], "@1");
+    assert_eq!(shell.host.last("selectSession")["session_id"], "$2");
+}
+
+#[gpui_kit::test]
+fn a_document_covering_the_terminal_keeps_the_view_when_the_window_moves(cx: &mut TestAppContext) {
+    let tabs = json!([doc("a", "main.rs", 0)]);
+    let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
+    shell.click("workspace-tab-app:a");
+    shell
+        .host
+        .state()
+        .answers
+        .push_back(landed("$2", "@1", "%1"));
+    let (from, to) = (shell.center("editor"), shell.center("notes"));
+    shell.drag(from, to);
+    assert_eq!(shell.host.last("moveWindow")["window_id"], "@1");
+    assert_eq!(shell.count("selectSession"), 0);
+    assert_eq!(shell.selected("main.rs"), Some(true));
+}
+
+#[gpui_kit::test]
+fn a_drop_that_would_do_nothing_or_is_refused_sends_nothing(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    // Its own workspace.
+    let (from, to) = (shell.center("server"), shell.center("main"));
+    shell.drag(from, to);
+    assert_eq!(shell.count("moveWindow"), 0);
+    // The only tab of `notes` would close it: refused before the host is asked.
+    shell
+        .visual
+        .update(|window, cx| window.click(("workspace-row", 1usize), cx));
+    shell.settle();
+    let (from, to) = (shell.center("shell"), shell.center("main"));
+    shell.drag(from, to);
+    assert_eq!(shell.count("moveWindow"), 0);
+    let said = shell
+        .visual
+        .update(|_, cx| cx.global::<ConnectionUi>().0.read(cx).status().to_owned());
+    assert_eq!(said, crate::dragdrop::rules::CLOSES_WORKSPACE);
+}
+
+#[gpui_kit::test]
+fn a_press_that_does_not_travel_is_still_a_click(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    shell.click("workspace-tab-terminal:@2");
+    assert_eq!(shell.selected("server"), Some(true));
+    assert_eq!(shell.count("moveWindow") + shell.count("reorderWindow"), 0);
+}
+
+#[gpui_kit::test]
+fn a_document_dropped_before_another_reorders_the_strip(cx: &mut TestAppContext) {
+    let tabs = json!([doc("a", "main.rs", 0), doc("b", "lib.rs", 1)]);
+    let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
+    let from = shell.center("lib.rs");
+    let target = shell
+        .visual
+        .update(|window, _| window.find_by_label("main.rs").bounds());
+    // The near edge of its tab is the gap before it.
+    let to = gpui_kit::point(target.left() + px(6.), target.center().y);
+    shell.drag(from, to);
+    let order: Vec<String> = {
+        let workspaces = shell.workspaces();
+        shell.visual.update(|_, cx| {
+            workspaces
+                .read(cx)
+                .view(cx)
+                .app_tabs
+                .iter()
+                .map(|tab| tab.id.clone())
+                .collect()
+        })
+    };
+    assert_eq!(order, ["b", "a"]);
+    // A document's move is the app's own: nothing goes to tmux.
+    assert!(shell.host.kinds().iter().all(|kind| !kind.contains("ove")));
+}
+
+#[gpui_kit::test]
+fn a_document_dropped_at_an_edge_docks_beside_the_terminal(cx: &mut TestAppContext) {
+    let tabs = json!([doc("a", "main.rs", 0)]);
+    let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
+    let from = shell.center("main.rs");
+    shell.drag(from, gpui_kit::point(px(1270.), px(400.)));
+    let workspaces = shell.workspaces();
+    let docked = shell.visual.update(|_, cx| {
+        workspaces
+            .read(cx)
+            .view(cx)
+            .docked
+            .map(|(tab, side)| (tab.id, side))
+    });
+    assert_eq!(
+        docked,
+        Some(("a".to_owned(), desktop_core::app_state::DockSide::Right))
+    );
+}
+
+#[gpui_kit::test]
+fn a_pane_is_named_for_its_tab_and_only_the_host_on_screen_can_move_it(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    let workspaces = shell.workspaces();
+    let label = |shell: &mut Shell, host: &str| {
+        let workspaces = workspaces.clone();
+        let host = host.to_owned();
+        shell.visual.update(|_, cx| {
+            workspaces
+                .read(cx)
+                .pane_payload(&host, "%1", None, cx)
+                .map(|payload| payload.label().to_owned())
+        })
+    };
+    assert_eq!(label(&mut shell, "local").as_deref(), Some("editor"));
+    assert_eq!(label(&mut shell, "elsewhere"), None);
+}
+
+#[gpui_kit::test]
+fn an_agent_is_brought_here_from_another_tab_only(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    // `%3` is in the tab beside the one on screen; `%2` is already beside `%1`.
+    let from_another = shell.moves("local", "%3").expect("on the host on screen");
+    assert!(from_another.bring_here.is_some());
+    let beside = shell.moves("local", "%2").expect("on the host on screen");
+    assert!(beside.bring_here.is_none());
+    assert!(shell.moves("elsewhere", "%3").is_none());
+}
+
+#[gpui_kit::test]
+fn an_agents_own_workspace_is_offered_only_to_split_it_into_a_tab(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    // Sharing a tab: it can leave as a tab of its own, here or in `notes`.
+    let sharing = shell.moves("local", "%2").unwrap();
+    let names: Vec<&str> = sharing
+        .workspaces
+        .iter()
+        .map(|(_, name)| name.as_str())
+        .collect();
+    assert_eq!(names, ["main (as its own tab)", "notes"]);
+    // Alone in its tab: moving it within its workspace would change nothing.
+    let alone = shell.moves("local", "%3").unwrap();
+    let names: Vec<&str> = alone
+        .workspaces
+        .iter()
+        .map(|(_, name)| name.as_str())
+        .collect();
+    assert_eq!(names, ["notes"]);
+}
+
+#[gpui_kit::test]
+fn an_agent_moved_from_its_menu_goes_to_the_chosen_workspace(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    let target = shell.moves("local", "%3").unwrap().workspaces[0].0.clone();
+    let workspaces = shell.workspaces();
+    shell.visual.update(|_, cx| {
+        workspaces.update(cx, |this, cx| {
+            this.move_agent_to_workspace("local", "%3", target, cx)
+        })
+    });
+    shell.settle();
+    let moved = shell.host.last("moveWindow");
+    assert_eq!(moved["window_id"], "@2");
+    assert_eq!(moved["target_session_id"], "$2");
+}
+
+#[gpui_kit::test]
+fn bringing_an_agent_here_splits_it_beside_the_pane_on_screen(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    let workspaces = shell.workspaces();
+    shell
+        .visual
+        .update(|_, cx| workspaces.update(cx, |this, cx| this.bring_agent_here("local", "%3", cx)));
+    shell.settle();
+    let joined = shell.host.last("joinPane");
+    assert_eq!(joined["pane_id"], "%3");
+    assert_eq!(joined["target_pane_id"], "%1");
+    assert_eq!(joined["pane_edge"], "right");
+}
+
+#[test]
+fn only_a_move_of_the_pane_on_screen_is_followed() {
+    use super::actions::{ActionKind, TmuxAction};
+    use super::moves::pane_on_screen_moved_by;
+    let active = Pane {
+        active: true,
+        ..pane("%1", "@1", "$1", (0, 0, 40, 24))
+    };
+    let moved = |kind, window: &str, pane: &str| TmuxAction {
+        window_id: window.to_owned(),
+        pane_id: pane.to_owned(),
+        ..TmuxAction::new(kind)
+    };
+    assert!(
+        pane_on_screen_moved_by(&moved(ActionKind::MoveWindow, "@1", ""), Some(&active)).is_some()
+    );
+    assert!(
+        pane_on_screen_moved_by(&moved(ActionKind::MoveWindow, "@2", ""), Some(&active)).is_none()
+    );
+    assert!(
+        pane_on_screen_moved_by(&moved(ActionKind::BreakPane, "", "%1"), Some(&active)).is_some()
+    );
+    assert!(
+        pane_on_screen_moved_by(&moved(ActionKind::BreakPane, "", "%2"), Some(&active)).is_none()
+    );
+    // The host keeps focus on the pane it had inside a window it joins.
+    assert!(
+        pane_on_screen_moved_by(&moved(ActionKind::JoinPane, "@1", "%1"), Some(&active)).is_none()
+    );
+    assert!(pane_on_screen_moved_by(&moved(ActionKind::MoveWindow, "@1", ""), None).is_none());
+}
+
+#[gpui_kit::test]
+fn escape_ends_a_drag_and_the_release_after_it_drops_nothing(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton};
+    let mut shell = shell(cx, json!([]), json!({}));
+    let (from, over) = (shell.center("server"), shell.center("notes"));
+    let active = |shell: &mut Shell| shell.visual.update(|_, cx| crate::dragdrop::active(cx));
+    shell
+        .visual
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    assert!(!active(&mut shell), "a press alone is no drag");
+    shell
+        .visual
+        .simulate_mouse_move(over, Some(MouseButton::Left), Modifiers::default());
+    assert!(active(&mut shell));
+    shell.visual.update(|window, cx| window.press("escape", cx));
+    assert!(!active(&mut shell));
+    shell
+        .visual
+        .simulate_mouse_up(over, MouseButton::Left, Modifiers::default());
+    shell.settle();
+    assert_eq!(shell.count("moveWindow"), 0);
+    assert_eq!(shell.selected("notes"), Some(false), "and it was no click");
+}
+
+#[gpui_kit::test]
+fn a_pane_grabbed_with_the_link_modifier_joins_beside_another_pane(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton};
+    let mut shell = shell(cx, json!([]), json!({}));
+    let surface = shell
+        .visual
+        .update(|window, _| window.find_by_label("Workspace").bounds());
+    // `%2` is the right half of the window and `%1` the left.
+    let from = gpui_kit::point(
+        surface.left() + surface.size.width * 0.8,
+        surface.center().y,
+    );
+    let to = gpui_kit::point(surface.left() + px(14.), surface.center().y);
+    let modifier = if cfg!(target_os = "macos") {
+        Modifiers::command()
+    } else {
+        Modifiers::control()
+    };
+    shell
+        .visual
+        .simulate_mouse_down(from, MouseButton::Left, modifier);
+    shell
+        .visual
+        .simulate_mouse_move(to, Some(MouseButton::Left), modifier);
+    shell
+        .visual
+        .simulate_mouse_up(to, MouseButton::Left, modifier);
+    shell.settle();
+    let joined = shell.host.last("joinPane");
+    assert_eq!(joined["pane_id"], "%2");
+    assert_eq!(joined["target_pane_id"], "%1");
+    assert_eq!(joined["pane_edge"], "left");
+}
+
+#[gpui_kit::test]
+fn a_tab_dropped_back_on_itself_is_not_clicked(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    let tab = shell.center("server");
+    let beside = gpui_kit::point(tab.x + px(8.), tab.y);
+    shell.drag(tab, beside);
+    assert_eq!(shell.selected("editor"), Some(true));
+    assert_eq!(shell.selected("server"), Some(false));
+    assert_eq!(shell.count("moveWindow") + shell.count("reorderWindow"), 0);
+}

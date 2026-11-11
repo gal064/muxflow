@@ -22,12 +22,13 @@ use std::time::Duration;
 use desktop_core::connection::files::native_clipboard::read_native_terminal_clipboard;
 use desktop_core::platform;
 use gpui_kit::{
-    AnyElement, App, Div, Entity, ExternalPaths, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Point, Role, SharedString, Stateful, StatefulInteractiveElement, Styled, Window,
-    actions,
+    AnyElement, App, Div, Entity, ExternalPaths, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Pixels, Point, Role, SharedString, Stateful, StatefulInteractiveElement, Styled,
+    Window, actions,
     component::{
         Sizable,
         button::{Button, ButtonVariants},
+        progress::Progress,
     },
     div,
     prelude::FluentBuilder,
@@ -42,6 +43,7 @@ use crate::theme::{
 };
 
 use super::pane::TerminalPane;
+use crate::transfers::{TransferFailureKind, TransferState};
 use transfers::{InternalPathDrag, NativeClipboard, parse_file_uri_list};
 use upload::{Source, Uploads};
 
@@ -251,12 +253,16 @@ pub fn upload_list(cx: &mut App) -> Option<AnyElement> {
         };
         let state = progress.state;
         let label = SharedString::from(format!("Upload {name}: {}", state.label()));
-        let action = if state.finished() {
+        // A finished record is one a delivered success would already have
+        // removed, so what is left is a failure, a cancellation or an unknown
+        // outcome: every one of them the user's to close.
+        let action = if state.is_terminal() {
             let id = id.clone();
             Button::new(SharedString::from(format!("upload-dismiss-{id}")))
                 .ghost()
                 .small()
                 .label("Dismiss")
+                .accessibility_label(format!("Dismiss upload {name}"))
                 .on_click(move |_, _, cx| {
                     cx.default_global::<Uploads>().0.dismiss(&id);
                 })
@@ -266,8 +272,13 @@ pub fn upload_list(cx: &mut App) -> Option<AnyElement> {
                 .ghost()
                 .small()
                 .label("Cancel")
+                .accessibility_label(format!("Cancel upload {name}"))
                 .on_click(move |_, window, cx| cancel(&id, window, cx))
         };
+        // Past the point of no return a transfer cannot be cancelled: only
+        // its verdict is left to come.
+        let action = (state.can_cancel() || state.is_terminal()).then_some(action);
+        let note = |text: String| div().text_color(palette.danger_ink).child(text);
         div()
             .id(SharedString::from(format!("upload-{id}")))
             .role(Role::Group)
@@ -290,22 +301,60 @@ pub fn upload_list(cx: &mut App) -> Option<AnyElement> {
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .text_color(palette.chrome_ink_strong)
-                            .child(name),
+                            .child(name.clone()),
                     )
                     .child(state.label()),
             )
+            .child(
+                Progress::new(SharedString::from(format!("upload-progress-{id}")))
+                    .accessibility_label(format!("Upload progress for {name}"))
+                    .map(|bar| match progress.progress_tenths() {
+                        Some(tenths) => bar.value(tenths as f32 / 10.),
+                        None => bar.loading(!state.is_terminal()),
+                    }),
+            )
             .child(progress.progress_text())
-            .when_some(progress.error.clone(), |row, error| {
-                row.child(div().text_color(palette.danger_ink).child(error))
-            })
-            .when_some(progress.cleanup_error.clone(), |row, error| {
+            .when(state == TransferState::Verifying, |row| {
                 row.child(
                     div()
-                        .text_color(palette.danger_ink)
-                        .child(format!("Partial cleanup failed: {error}")),
+                        .id(SharedString::from(format!("upload-commit-{id}")))
+                        .role(Role::Status)
+                        .child("Commit in progress; awaiting the authoritative backend outcome."),
                 )
             })
-            .child(div().flex().justify_end().child(action))
+            .when(
+                progress.failure_kind == Some(TransferFailureKind::StaleScope),
+                |row| {
+                    row.child(note(
+                        "Upload stopped because the connection scope changed.".into(),
+                    ))
+                },
+            )
+            .when(
+                progress.failure_kind == Some(TransferFailureKind::Timeout),
+                |row| {
+                    row.child(note(
+                        "Upload timed out before an authoritative result arrived.".into(),
+                    ))
+                },
+            )
+            .when(progress.outcome.as_deref() == Some("unknown"), |row| {
+                row.child(note(
+                    "The upload outcome is unknown. Inspect the destination before retrying or pasting."
+                        .into(),
+                ))
+            })
+            .when_some(progress.error.clone(), |row, error| row.child(note(error)))
+            .when_some(progress.cleanup_error.clone(), |row, error| {
+                row.child(note(format!("Partial cleanup failed: {error}")))
+            })
+            .when_some(
+                progress.cleanup_status.filter(|_| {
+                    matches!(state, TransferState::Failed | TransferState::Cancelled)
+                }),
+                |row, status| row.child(format!("Cleanup: {}", status.word())),
+            )
+            .child(div().flex().justify_end().children(action))
     });
     Some(
         div()
@@ -330,6 +379,12 @@ pub fn upload_list(cx: &mut App) -> Option<AnyElement> {
             .bg(palette.chrome_raised)
             .text_size(ui(TYPE_SECONDARY))
             .text_color(palette.chrome_ink)
+            .child(
+                div()
+                    .text_color(palette.chrome_ink_strong)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Terminal uploads"),
+            )
             .children(rows)
             .into_any_element(),
     )

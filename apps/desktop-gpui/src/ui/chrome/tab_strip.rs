@@ -7,13 +7,13 @@
 //! and lives on the context menu and the Close command. A document closes in
 //! place, because closing one throws nothing away.
 
-use std::collections::HashMap;
+use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 use desktop_core::app_state::AppTabKind;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Entity, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, MouseUpEvent, ParentElement, RenderOnce, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Window,
+    AnyElement, App, Bounds, ClickEvent, Entity, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, RenderOnce, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, Window,
     assets::IconName,
     base::{Disableable, Tab, Tabs},
     canvas,
@@ -31,6 +31,7 @@ use gpui_kit::{
 use crate::{
     agents::view::{adapter_glyph, state_indicator},
     context_menu::{self, Entry, Item},
+    dragdrop::{self, DropTarget, WorkspaceRef},
     fonts,
     theme::{
         self,
@@ -41,7 +42,9 @@ use crate::{
         title_bar::{bar_button, disabled_ink},
     },
     workspaces::{
-        ShellView, Target, Workspaces, focus_terminal,
+        ShellView, Target, Workspaces,
+        actions::RelativePosition,
+        focus_terminal,
         model::{
             CombinedTab, TabKind, app_key, bulk_close_disabled, tabs_to_close_non_agent,
             tabs_to_close_others, tabs_to_close_right, takes_terminals,
@@ -152,6 +155,25 @@ impl RenderOnce for TabStrip {
         }
         let count = tabs.len();
         let in_title_bar = self.in_title_bar;
+        // Where a drop on this strip lands: a tab of this workspace.
+        let strip_workspace = view.session.as_ref().map(|session| WorkspaceRef {
+            host: view.host.clone(),
+            session_id: session.id.clone(),
+        });
+        // The gap a dragged tab would drop into, and whether a dragged pane
+        // would become a tab of this workspace.
+        let (drop_gap, pane_drop) = match dragdrop::marker(cx) {
+            Some((payload, DropTarget::Tab { key, side, .. })) if !payload.is_pane() => {
+                (Some((key.clone(), *side)), false)
+            }
+            Some((payload, DropTarget::Tab { workspace, .. })) if payload.is_pane() => {
+                (None, *workspace == strip_workspace)
+            }
+            Some((payload, DropTarget::Workspace(workspace))) if payload.is_pane() => {
+                (None, Some(workspace) == strip_workspace.as_ref())
+            }
+            _ => (None, false),
+        };
         // Placeholders take no number: the numbers are what ⌃1–9 select.
         let mut shortcut = 0;
         let numbers: Vec<Option<usize>> = tabs
@@ -321,6 +343,10 @@ impl RenderOnce for TabStrip {
                 let (weak, tab, target) =
                     (self.workspaces.downgrade(), tab.clone(), target.clone());
                 move |event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    // The release that dropped this tab is no click on it.
+                    if dragdrop::just_ended(cx) {
+                        return;
+                    }
                     let Some(this) = weak.upgrade() else {
                         return;
                     };
@@ -363,6 +389,11 @@ impl RenderOnce for TabStrip {
                 }
             };
             let menu = tab_menu(&self.workspaces, &view, tab, &tabs, split && is_active);
+            let cell = Rc::new(Cell::new(Bounds::<Pixels>::default()));
+            let gap = drop_gap
+                .as_ref()
+                .filter(|(key, _)| *key == tab.key)
+                .map(|(_, side)| *side);
             tab_elements.push(
                 div()
                     .id(SharedString::from(format!("tab-cell-{}", tab.key)))
@@ -373,6 +404,49 @@ impl RenderOnce for TabStrip {
                     .max_w(ui(220.))
                     .items_stretch()
                     .on_mouse_up(MouseButton::Middle, middle)
+                    .on_mouse_move({
+                        let (cell, key, workspace) =
+                            (cell.clone(), tab.key.clone(), strip_workspace.clone());
+                        move |event: &MouseMoveEvent, _, cx| {
+                            if !dragdrop::active(cx) {
+                                return;
+                            }
+                            let side = if event.position.x < cell.get().center().x {
+                                RelativePosition::Before
+                            } else {
+                                RelativePosition::After
+                            };
+                            dragdrop::offer(
+                                DropTarget::Tab {
+                                    key: key.clone(),
+                                    side,
+                                    workspace: workspace.clone(),
+                                },
+                                cx,
+                            );
+                        }
+                    })
+                    .child(
+                        canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
+                    // The gap a drop would land in, drawn over the cell's edge.
+                    .when_some(gap, |this, side| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top(ui(3.))
+                                .bottom(ui(3.))
+                                .w(px(3.))
+                                .rounded_full()
+                                .bg(palette.accent)
+                                .map(|bar| match side {
+                                    RelativePosition::Before => bar.left_0(),
+                                    RelativePosition::After => bar.right_0(),
+                                }),
+                        )
+                    })
                     // Drawn over the cell, so the cursor walking the strip
                     // changes no tab's width.
                     .when(keyboard == Some(index), |this| {
@@ -396,6 +470,20 @@ impl RenderOnce for TabStrip {
                             .set_position(index + 1, count)
                             .when(keyboard == Some(index), |tab| tab.aria_active_descendant())
                             .on_click(click)
+                            // Captured: the tab keeps its press from the bar behind
+                            // it, which would move the window.
+                            .capture_any_mouse_down({
+                                let (weak, key) = (self.workspaces.downgrade(), tab.key.clone());
+                                move |event, _, cx| {
+                                    if event.button != MouseButton::Left {
+                                        return;
+                                    }
+                                    let payload = weak
+                                        .upgrade()
+                                        .and_then(|this| this.read(cx).tab_payload(&key, cx));
+                                    dragdrop::press(payload, event.position, cx);
+                                }
+                            })
                             .flex()
                             .min_w_0()
                             .items_center()
@@ -599,6 +687,14 @@ impl RenderOnce for TabStrip {
         let (keys, follow) = (self.workspaces.downgrade(), scroll.clone());
         h_flex()
             .id("tab-strip")
+            .on_mouse_move({
+                let workspace = strip_workspace.clone();
+                move |_: &MouseMoveEvent, _, cx| {
+                    if let Some(workspace) = &workspace {
+                        dragdrop::offer(DropTarget::Workspace(workspace.clone()), cx);
+                    }
+                }
+            })
             .when(!in_title_bar, |this| {
                 this.h(ui(BAR_HEIGHT))
                     .bg(palette.term_bg)
@@ -606,6 +702,12 @@ impl RenderOnce for TabStrip {
                     .border_color(palette.chrome_hairline)
             })
             .when(in_title_bar, |this| this.h_full())
+            // A pane dropped here becomes a tab of this workspace.
+            .when(pane_drop, |this| {
+                this.bg(palette.accent_wash)
+                    .border_1()
+                    .border_color(palette.accent)
+            })
             .w_full()
             .min_w_0()
             .items_stretch()
@@ -698,7 +800,7 @@ fn tab_menu(
     let others = tabs_to_close_others(tabs, &tab.key);
     let right = tabs_to_close_right(tabs, &tab.key);
     let non_agent = tabs_to_close_non_agent(tabs);
-    move |menu, _, _| {
+    move |menu, window, cx| {
         let command = |id: &'static str, target: Option<Target>| {
             let weak = weak.clone();
             move |window: &mut Window, cx: &mut App| {
@@ -791,6 +893,6 @@ fn tab_menu(
             };
             entries.push(item.into());
         }
-        context_menu::fill(menu, &entries)
+        context_menu::fill(menu, &entries, window, cx)
     }
 }

@@ -6,6 +6,11 @@ pub use desktop_core::connection::files::upload_manager::UploadCollisionPolicy;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::transfers::{
+    TransferCleanupStatus, TransferFailureKind, TransferState, empty_is_absent,
+    lifecycle_may_advance, merge_cleanup,
+};
+
 /// Above this, an upload has to be confirmed.
 pub const LARGE_UPLOAD_BYTES: u64 = 500 * 1024 * 1024;
 /// The most records the upload list keeps, newest first.
@@ -203,39 +208,9 @@ fn validate_clipboard_name(name: &str) -> Result<(), String> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum TransferState {
-    Queued,
-    Preflighting,
-    Running,
-    Verifying,
-    Completed,
-    Cancelled,
-    Failed,
-}
-
-impl TransferState {
-    pub fn finished(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Queued => "Queued",
-            Self::Preflighting => "Checking",
-            Self::Running => "Uploading",
-            Self::Verifying => "Verifying",
-            Self::Completed => "Completed",
-            Self::Cancelled => "Cancelled",
-            Self::Failed => "Failed",
-        }
-    }
-}
-
 /// One upload or preflight event from `desktop-core`, the fields this surface
 /// reads. Byte counts are decimal strings on the wire.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferEvent {
     pub transfer_id: String,
@@ -271,8 +246,15 @@ pub struct TransferEvent {
     pub error: Option<String>,
     #[serde(default)]
     pub cleanup_error: Option<String>,
+    #[serde(default, deserialize_with = "empty_is_absent")]
+    pub cleanup_status: Option<TransferCleanupStatus>,
+    #[serde(default, deserialize_with = "empty_is_absent")]
+    pub failure_kind: Option<TransferFailureKind>,
+    /// Bytes a second, a float on the wire.
     #[serde(default)]
-    pub cleanup_status: Option<String>,
+    pub throughput_bytes_per_second: Option<f64>,
+    #[serde(default)]
+    pub eta_seconds: Option<f64>,
     pub server_identity: String,
     pub connection_epoch: String,
 }
@@ -328,19 +310,62 @@ impl TransferEvent {
     pub fn delivered_cleanly(&self) -> bool {
         self.state == TransferState::Completed
             && self.cleanup_error.is_none()
-            && self
-                .cleanup_status
-                .as_deref()
-                .is_none_or(|status| matches!(status, "notNeeded" | "removed"))
+            && self.cleanup_status.is_none_or(|status| {
+                matches!(
+                    status,
+                    TransferCleanupStatus::NotNeeded | TransferCleanupStatus::Removed
+                )
+            })
     }
 
-    /// `"3.0 MiB / 10.0 MiB"`, or how much moved when the total is unknown.
+    /// What a repeated or late frame for the same transfer leaves: the
+    /// lifecycle only moves forward, and cleanup keeps the worse report. Port
+    /// of `mergeCanonicalTransfer`.
+    pub fn merged(self, incoming: Self) -> Self {
+        let cleanup = merge_cleanup(
+            (self.cleanup_status, self.cleanup_error.clone()),
+            (incoming.cleanup_status, incoming.cleanup_error.clone()),
+        );
+        let mut merged = if lifecycle_may_advance(self.state, incoming.state) {
+            incoming
+        } else {
+            self
+        };
+        (merged.cleanup_status, merged.cleanup_error) = cleanup;
+        merged
+    }
+
+    /// `"3.0 MiB / 10.0 MiB · 1.0 MiB/s · 7s remaining"`, or how much moved
+    /// when the total is unknown. Port of `formatProgress`.
     pub fn progress_text(&self) -> String {
         let done = decimal(self.transferred_bytes.as_deref()).unwrap_or(0);
-        match decimal(self.total_bytes.as_deref()) {
+        let bytes = match decimal(self.total_bytes.as_deref()) {
             Some(total) => format!("{} / {}", format_bytes(done), format_bytes(total)),
             None => format!("{} transferred", format_bytes(done)),
-        }
+        };
+        let speed = self
+            .throughput_bytes_per_second
+            .filter(|speed| speed.is_finite() && *speed > 0.)
+            .map(|speed| format!(" · {}/s", format_bytes(speed.floor() as u64)))
+            .unwrap_or_default();
+        let eta = self
+            .eta_seconds
+            .filter(|eta| eta.is_finite() && *eta > 0.)
+            .map(|eta| format!(" · {}s remaining", eta.ceil() as u64))
+            .unwrap_or_default();
+        format!("{bytes}{speed}{eta}")
+    }
+
+    /// How far along, in tenths of a percent, when the total is known.
+    /// Port of `progressPercent`.
+    pub fn progress_tenths(&self) -> Option<u32> {
+        let total = decimal(self.total_bytes.as_deref())?;
+        let done = decimal(self.transferred_bytes.as_deref()).unwrap_or(0);
+        Some(if total == 0 {
+            0
+        } else {
+            (u128::from(done.min(total)) * 1000 / u128::from(total)) as u32
+        })
     }
 }
 
@@ -453,7 +478,7 @@ pub struct UploadRequest {
 }
 
 /// One row of the upload list.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TransferRecord {
     pub pane_id: String,
     pub progress: TransferEvent,
@@ -472,9 +497,9 @@ impl TransferRecords {
             .iter_mut()
             .find(|record| record.progress.transfer_id == progress.transfer_id)
         {
-            // A late progress frame never reopens a finished record.
-            Some(record) if record.progress.state.finished() && !progress.state.finished() => {}
-            Some(record) => record.progress = progress,
+            // A late frame never reopens a finished record or weakens its
+            // cleanup report.
+            Some(record) => record.progress = record.progress.clone().merged(progress),
             None => {
                 self.records.insert(
                     0,
@@ -501,13 +526,13 @@ impl TransferRecords {
     /// The user closes a finished record; one still moving bytes stays.
     pub fn dismiss(&mut self, transfer_id: &str) {
         self.records.retain(|record| {
-            !(record.progress.transfer_id == transfer_id && record.progress.state.finished())
+            !(record.progress.transfer_id == transfer_id && record.progress.state.is_terminal())
         });
     }
 
     pub fn mark_verifying(&mut self, transfer_id: &str) {
         for record in &mut self.records {
-            if record.progress.transfer_id == transfer_id && !record.progress.state.finished() {
+            if record.progress.transfer_id == transfer_id && !record.progress.state.is_terminal() {
                 record.progress.state = TransferState::Verifying;
             }
         }
@@ -819,5 +844,78 @@ mod tests {
         assert_eq!(list.records[0].progress.state, TransferState::Verifying);
         list.dismiss("t2");
         assert_eq!(list.records.len(), 1);
+    }
+
+    #[test]
+    fn a_late_frame_neither_reopens_a_finished_upload_nor_softens_its_cleanup() {
+        let failed = event(
+            "failed",
+            json!({
+                "failureKind": "cleanup", "cleanupStatus": "failed",
+                "cleanupError": "rollback failed", "error": "upload failed",
+            }),
+        );
+        // A late cancellation, with a gentler cleanup, changes nothing.
+        let late = event(
+            "cancelled",
+            json!({"cleanupStatus": "removed", "error": "cancel no-op"}),
+        );
+        assert_eq!(failed.clone().merged(late), failed);
+        // A worse cleanup report is taken, while the lifecycle stays.
+        let worse = event(
+            "failed",
+            json!({"cleanupStatus": "retained", "cleanupError": "quarantined"}),
+        );
+        let merged = worse.merged(event(
+            "failed",
+            json!({"cleanupStatus": "failed", "cleanupError": "rollback unavailable"}),
+        ));
+        assert_eq!(merged.cleanup_status, Some(TransferCleanupStatus::Failed));
+        assert_eq!(
+            merged.cleanup_error.as_deref(),
+            Some("rollback unavailable")
+        );
+        // An active frame never steps back, and a terminal one ends it.
+        let verifying = event("verifying", json!({}));
+        assert_eq!(
+            verifying.clone().merged(event("running", json!({}))).state,
+            TransferState::Verifying
+        );
+        assert_eq!(
+            verifying
+                .merged(event("completed", json!({"outcome": "published"})))
+                .state,
+            TransferState::Completed
+        );
+    }
+
+    #[test]
+    fn progress_reads_with_speed_and_time_left_and_a_fraction_when_the_total_is_known() {
+        let moving = event(
+            "running",
+            json!({
+                "transferredBytes": "1048576", "totalBytes": "4194304",
+                "throughputBytesPerSecond": 524288.9, "etaSeconds": 5.2,
+            }),
+        );
+        assert_eq!(
+            moving.progress_text(),
+            "1.0 MiB / 4.0 MiB · 512.0 KiB/s · 6s remaining"
+        );
+        assert_eq!(moving.progress_tenths(), Some(250));
+        let stalled = event(
+            "running",
+            json!({
+                "transferredBytes": "9", "totalBytes": "4",
+                "throughputBytesPerSecond": 0.0, "etaSeconds": 0.0,
+            }),
+        );
+        assert_eq!(stalled.progress_text(), "9 B / 4 B");
+        assert_eq!(stalled.progress_tenths(), Some(1000), "never past the end");
+        assert_eq!(event("running", json!({})).progress_tenths(), None);
+        assert_eq!(
+            event("running", json!({"totalBytes": "0"})).progress_tenths(),
+            Some(0)
+        );
     }
 }

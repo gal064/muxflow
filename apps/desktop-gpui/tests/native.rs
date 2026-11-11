@@ -414,7 +414,9 @@ impl Render for Row {
                 .h(px(24.))
                 .child("a row")
                 .test_support()
-                .context_menu(move |menu, _, _| context_menu::fill(menu, &entries)),
+                .context_menu(move |menu, window, cx| {
+                    context_menu::fill(menu, &entries, window, cx)
+                }),
         )
     }
 }
