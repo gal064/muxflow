@@ -541,29 +541,23 @@ pub fn agent_setup_row(cx: &App) -> impl IntoElement + use<> {
         .gap(ui(4.))
         .items_start()
         .child(dialog::button(
-            dialog::dim(
-                Button::new("settings-agent-setup")
-                    .label("Set up agent status…")
-                    .disabled(!status.available)
-                    .on_click(move |_, window, cx| {
-                        if let Some(set_up) = set_up.clone() {
-                            window.close_dialog(cx);
-                            set_up(window, cx);
-                        }
-                    }),
-                !status.available,
-            ),
+            Button::new("settings-agent-setup")
+                .label("Set up agent status…")
+                .disabled(!status.available)
+                .on_click(move |_, window, cx| {
+                    if let Some(set_up) = set_up.clone() {
+                        window.close_dialog(cx);
+                        set_up(window, cx);
+                    }
+                }),
             Action::Plain,
+            !status.available,
             &theme::palette(cx),
         ))
         .child(hint(agent_setup_hint(status), cx))
 }
 
 impl SettingsDialog {
-    fn connection_tab(&self, _: &mut Context<Self>) -> impl IntoElement + use<> {
-        div().children(self.form.clone())
-    }
-
     fn workspace_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let prefs = get(cx).clone();
         let host_label = self.controller.as_ref().map_or_else(
@@ -887,6 +881,7 @@ impl SettingsDialog {
             .child(controls(DialogFooter::new().child(dialog::button(
                 button,
                 Action::Primary,
+                false,
                 &palette,
             ))))
     }
@@ -924,7 +919,7 @@ impl Render for SettingsDialog {
         let max_body =
             (max_dialog - ui(CHROME_HEIGHT).to_pixels(rem)).max(ui(BODY_MIN_HEIGHT).to_pixels(rem));
         let body = match self.tab {
-            Tab::Connection => self.connection_tab(cx).into_any_element(),
+            Tab::Connection => div().children(self.form.clone()).into_any_element(),
             Tab::Workspace => self.workspace_tab(cx).into_any_element(),
             Tab::Terminal => self.terminal_tab(cx).into_any_element(),
             Tab::Appearance => self.appearance_tab(cx).into_any_element(),

@@ -110,15 +110,16 @@ pub fn notice_for_status(message: &str) -> Option<StatusNotice> {
 /// problem has the danger border. `actions` are the buttons before Dismiss.
 pub fn card(
     problem: bool,
+    narrow: bool,
     palette: &Palette,
     text: impl Fn() -> AnyElement + 'static,
     actions: impl Fn(&App) -> Vec<Button> + 'static,
 ) -> Notification {
     let palette = *palette;
-    // Kit stretches a notice to the stack's width; a `.toast` is as wide as its text.
+    // Kit stretches a notice to the stack's width; a `.toast` is as wide as its text,
+    // except in a narrow window, which spans it.
     toast::card(Notification::new(), problem, &palette)
-        .w_auto()
-        .self_end()
+        .when(!narrow, |card| card.w_auto().self_end())
         // A problem stays until dismissed: it is the user's to acknowledge.
         .autohide(!problem)
         .content(move |_, _, cx| {
@@ -153,9 +154,10 @@ pub fn card(
 /// toast drew `SurfaceError`. An error text can be any length, so its card
 /// scrolls instead of growing past the window and taking its Dismiss button
 /// with it.
-fn problem_card(message: String, palette: &Palette) -> Notification {
+fn problem_card(message: String, narrow: bool, palette: &Palette) -> Notification {
     card(
         true,
+        narrow,
         palette,
         move || {
             div()
@@ -209,10 +211,11 @@ pub fn notify(message: &str, window: &mut Window, cx: &mut App) -> bool {
         return false;
     };
     let palette = theme::palette(cx);
+    let narrow = narrower_than(NARROW_DIALOGS, window);
     let notification = match notice.severity {
         // A finished download offers to open what it wrote.
         Severity::Info
-            if let Some(download) = crate::files::download_notice(&notice.message, cx) =>
+            if let Some(download) = crate::files::download_notice(&notice.message, narrow, cx) =>
         {
             download
         }
@@ -220,6 +223,7 @@ pub fn notify(message: &str, window: &mut Window, cx: &mut App) -> bool {
             let message = notice.message;
             card(
                 false,
+                narrow,
                 &palette,
                 move || {
                     div()
@@ -230,7 +234,7 @@ pub fn notify(message: &str, window: &mut Window, cx: &mut App) -> bool {
                 |_| Vec::new(),
             )
         }
-        Severity::Problem => problem_card(notice.message, &palette),
+        Severity::Problem => problem_card(notice.message, narrow, &palette),
     };
     window.push_notification(notification.id::<StatusNoticeId>(), cx);
     true

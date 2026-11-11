@@ -93,6 +93,7 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
             } else {
                 Action::Primary
             },
+            false,
             &theme::palette(cx),
         );
         dialog::card(dialog, &theme::palette(cx))
@@ -109,6 +110,7 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
                             .label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                         Action::Plain,
+                        false,
                         &theme::palette(cx),
                     ))
                     .child(confirm_button),
@@ -204,6 +206,7 @@ pub fn open_helper_dialog(
                                 cancel.update(cx, |state, cx| state.cancel_helper_install(cx));
                             }),
                         Action::Plain,
+                        busy,
                         &theme::palette(cx),
                     ))
                     .child(dialog::button(
@@ -214,6 +217,7 @@ pub fn open_helper_dialog(
                                 confirm.update(cx, |state, cx| state.confirm_helper_install(cx));
                             }),
                         Action::Primary,
+                        busy,
                         &theme::palette(cx),
                     )),
             ))
@@ -264,6 +268,7 @@ pub fn open_app_discard_dialog(
                             },
                         ),
                         Action::Plain,
+                        false,
                         &theme::palette(cx),
                     ))
                     .child(dialog::button(
@@ -273,6 +278,7 @@ pub fn open_app_discard_dialog(
                             },
                         ),
                         Action::Danger,
+                        false,
                         &theme::palette(cx),
                     )),
             ))
@@ -591,6 +597,7 @@ impl ConnectionForm {
                                 add.update(cx, |state, cx| state.add_host(cx))
                             }),
                         Action::Plain,
+                        false,
                         &palette,
                     )),
             )
@@ -600,23 +607,16 @@ impl ConnectionForm {
                     .gap(ui(4.))
                     .items_start()
                     .child(dialog::button(
-                        dialog::dim(
-                            Button::new("connection-delete-host")
-                                .label(delete_label)
-                                .disabled(cannot_delete)
-                                .on_click(move |_, window, cx| {
-                                    if let Some(profile) = deletable.clone() {
-                                        confirm_delete_host(
-                                            delete_target.clone(),
-                                            profile,
-                                            window,
-                                            cx,
-                                        );
-                                    }
-                                }),
-                            cannot_delete,
-                        ),
+                        Button::new("connection-delete-host")
+                            .label(delete_label)
+                            .disabled(cannot_delete)
+                            .on_click(move |_, window, cx| {
+                                if let Some(profile) = deletable.clone() {
+                                    confirm_delete_host(delete_target.clone(), profile, window, cx);
+                                }
+                            }),
                         Action::DangerQuiet,
+                        cannot_delete,
                         &palette,
                     ))
                     .child(hint(delete_hint, cx)),
@@ -732,20 +732,18 @@ impl ConnectionForm {
         let probe_action = controller.clone();
         let palette = theme::palette(cx);
         let mut section = v_flex().gap(ui(8.)).items_start().child(dialog::button(
-            dialog::dim(
-                Button::new("connection-check-helper")
-                    .label(if probing {
-                        "Checking helper…"
-                    } else {
-                        "Check helper"
-                    })
-                    .disabled(probing || upgrading)
-                    .on_click(move |_, _, cx| {
-                        probe_action.update(cx, |state, cx| state.probe_helper(cx));
-                    }),
-                probing || upgrading,
-            ),
+            Button::new("connection-check-helper")
+                .label(if probing {
+                    "Checking helper…"
+                } else {
+                    "Check helper"
+                })
+                .disabled(probing || upgrading)
+                .on_click(move |_, _, cx| {
+                    probe_action.update(cx, |state, cx| state.probe_helper(cx));
+                }),
             Action::Plain,
+            probing || upgrading,
             &palette,
         ));
         if let Some(probe) = helper_can_install(&helper) {
@@ -765,6 +763,7 @@ impl ConnectionForm {
                         request.update(cx, |state, cx| state.request_helper_install(cx));
                     }),
                 Action::Primary,
+                false,
                 &palette,
             ));
         }

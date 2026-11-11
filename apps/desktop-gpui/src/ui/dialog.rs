@@ -57,19 +57,13 @@ pub enum Action {
     DangerQuiet,
 }
 
-/// `button:disabled { opacity: .42 }`. Kit re-applies the colors set here over its own
-/// disabled style, so the dimming has to be restated.
-pub fn dim(button: Button, disabled: bool) -> Button {
-    if disabled {
-        button.opacity(0.42)
-    } else {
-        button
-    }
-}
-
 /// A footer button: `:where(.modal-backdrop) button` is bordered on the window
 /// ground and `.primary` / `.danger` fill it.
-pub fn button(button: Button, action: Action, palette: &Palette) -> Button {
+///
+/// `disabled` dims it as `button:disabled` does (`opacity: .42`). Kit replays the colors
+/// set here inside its own disabled state, so the dimming has to be restated; a filled
+/// button keeps Kit's own wash.
+pub fn button(button: Button, action: Action, disabled: bool, palette: &Palette) -> Button {
     let button = button
         .small()
         .h_auto()
@@ -77,6 +71,11 @@ pub fn button(button: Button, action: Action, palette: &Palette) -> Button {
         .py(ui(6.))
         .border_1()
         .text_size(ui(TYPE_ROW));
+    let button = if disabled && matches!(action, Action::Plain | Action::DangerQuiet) {
+        button.opacity(0.42)
+    } else {
+        button
+    };
     match action {
         Action::Plain => button
             .bg(palette.chrome_bg)
