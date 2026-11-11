@@ -240,9 +240,10 @@ through the T2.1 seam.
 | T4.3 `ports-transfers` | sonnet, high, full cycle | `gpui/ports-transfers` | Merged | `daa7af4` | 2 reviewers, 1 round. QA pass on local and SSH hosts; document-tab drags, the dock zones and the agent menu were not run live (headless tests only). Open: upload Cancel waits for the host's response before it reports |
 | `gdev_qa_phase4` | fresh QA | `gpui/integration` | Passed after fixes | | All panels against local and SSH hosts. Found a notification click leaving tmux focus on the old pane, and a tooltip over a context menu |
 | T4.6 `phase4-fixes` | opus, high, full cycle, invariant | `gpui/phase4-fixes` | Merged | `0912995` | Fixed both QA bugs (cross-host navigation was cancelled by a connection change). Ported the topology authority, so Close All Non-Agent Tabs works. No Phase 4 ledger rows left open except the Phase 5 deferrals |
-| T5.1 `explorer` | opus, high, full cycle, invariant | `gpui/explorer` | Dispatched | | |
-| T5.2 `editor` | opus, high, full cycle, large, design | `gpui/editor` | Dispatched | | |
-| T5.3 `git-diff` | opus, high, full cycle, design | `gpui/git-diff` | Dispatched | | |
+| T5.1 `explorer` | opus, high, full cycle, invariant | `gpui/explorer` | Running, round 2 | | Round 1 found 14 issues; merging integration and wiring the editor and Git seams |
+| T5.2 `editor` | opus, high, full cycle, large, design | `gpui/editor` | Merged | `1e4a659`, merge `e372bc2` | Kit code editor. 3 review rounds, QA PASS local and SSH. An external edit to an open remote file leaves the tab in Save failed until T5.1 delivers change notices |
+| T5.3 `git-diff` | opus, high, full cycle, design | `gpui/git-diff` | Merged | `ef076e7`, merge `9a9ad34` | 3 review rounds, QA PASS local and SSH, `test:git` passes after a driver fix. Gaps: SurfaceError summary on push errors, keyboard row access, file icons |
+| T5.4 `markdown` | sonnet, high, full cycle, design | `gpui/markdown` | Dispatched | | |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
 isolated host, headless. **Integrated QA:** `gdev_qa_phase4` exercises every panel
@@ -335,7 +336,7 @@ final sweep command returning only justified hits.
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
 | 4 | Done, QA passed | `0912995` | |
-| 5 | Running, wave 1 dispatched | | T5.1, T5.2 and T5.3 running |
+| 5 | Running, wave 2 dispatched | | T5.2 and T5.3 merged; T5.1 and T5.4 running |
 | 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
