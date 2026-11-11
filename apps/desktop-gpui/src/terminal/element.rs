@@ -7,10 +7,10 @@ use std::time::Instant;
 
 use alacritty_terminal::grid::Dimensions;
 use gpui_kit::{
-    App, BorderStyle, Bounds, ContentMask, Element, ElementId, Entity, FontStyle, FontWeight,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, LineLayout, Pixels, Rgba,
-    ShapedLine, SharedString, StrikethroughStyle, Style, TextAlign, TextRun, UnderlineStyle,
-    Window, fill, outline, point, px, quad, relative, rgb, size,
+    App, Bounds, ContentMask, Element, ElementId, Entity, FontStyle, FontWeight, GlobalElementId,
+    Hsla, InspectorElementId, IntoElement, LayoutId, LineLayout, Pixels, Rgba, ShapedLine,
+    SharedString, StrikethroughStyle, Style, TextAlign, TextRun, UnderlineStyle, Window, fill,
+    outline, point, px, relative, rgb, size,
 };
 
 use crate::theme::{self, Palette as ThemePalette, metrics::ui};
@@ -371,16 +371,6 @@ impl Element for TerminalElement {
             origin,
             cell: size(cell_w, cell_h),
         }));
-        let active_ring = self.pane.read(cx).active.then(|| {
-            quad(
-                bounds,
-                px(0.),
-                gpui_kit::transparent_black(),
-                ui(theme::metrics::FOCUS_RING).to_pixels(window.rem_size()),
-                Hsla::from(theme::palette(cx).accent),
-                BorderStyle::Solid,
-            )
-        });
         let cache_ref = cache.borrow();
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for (row, entry) in cache_ref.rows.iter().enumerate().take(grid.rows) {
@@ -396,10 +386,6 @@ impl Element for TerminalElement {
                         hsla(span.color),
                     ));
                 }
-            }
-            // Under the text: the first column starts at this edge.
-            if let Some(ring) = active_ring {
-                window.paint_quad(ring);
             }
             for (row, entry) in cache_ref.rows.iter().enumerate().take(grid.rows) {
                 let Some(entry) = entry else {
