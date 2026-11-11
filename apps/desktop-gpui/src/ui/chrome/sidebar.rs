@@ -6,8 +6,8 @@
 use desktop_core::app_state::AgentSortMode;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, RenderOnce, Rgba, Role, SharedString, StatefulInteractiveElement, Styled,
-    WeakEntity, Window,
+    MouseMoveEvent, ParentElement, RenderOnce, Rgba, Role, SharedString,
+    StatefulInteractiveElement, Styled, WeakEntity, Window,
     assets::IconName,
     base::{Disableable, HandleEdge, TestSupportExt},
     component::{
@@ -30,6 +30,7 @@ use crate::{
     commands,
     connection_ui::{connection_reducer::ConnectionPhase, dialog::open_connection_dialog},
     context_menu::{self, Entry, Item},
+    dragdrop::{self, DropTarget, WorkspaceRef},
     fonts,
     theme::{
         self,
@@ -161,7 +162,7 @@ fn workspace_row(
     };
     let menu = {
         let (weak, row) = (weak.clone(), row.clone());
-        move |menu: PopupMenu, _: &mut Window, _: &mut gpui_kit::Context<PopupMenu>| {
+        move |menu: PopupMenu, window: &mut Window, cx: &mut gpui_kit::Context<PopupMenu>| {
             let target = Target::Session(row.scope.clone(), row.session.id.clone());
             let command = |id: &'static str| {
                 let (weak, target) = (weak.clone(), target.clone());
@@ -202,6 +203,8 @@ fn workspace_row(
                         .disabled(!row.can_mutate)
                         .into(),
                 ],
+                window,
+                cx,
             )
         }
     };
@@ -282,8 +285,20 @@ fn workspace_row(
         (None, unread)
     };
     let group: SharedString = format!("workspace-row-{index}").into();
+    // A dragged tab, document or pane would land in this workspace.
+    let this_workspace = WorkspaceRef {
+        host: row.host_profile_id.clone(),
+        session_id: row.session.id.clone(),
+    };
+    let drop_target = matches!(
+        dragdrop::marker(cx),
+        Some((_, DropTarget::Workspace(workspace))) if *workspace == this_workspace
+    );
     h_flex()
         .id(("workspace-row", index))
+        .on_mouse_move(move |_: &MouseMoveEvent, _, cx| {
+            dragdrop::offer(DropTarget::Workspace(this_workspace.clone()), cx);
+        })
         .group(group.clone())
         .test_support()
         .role(Role::Button)
@@ -320,6 +335,26 @@ fn workspace_row(
                     .border_2()
                     .border_color(palette.accent)
                     .rounded(ui(RADIUS_ROW + 3.)),
+            )
+        })
+        // On the accent fill of the active row an inset border would vanish:
+        // the marker is an outline outside it.
+        .when(drop_target && !selected, |this| {
+            this.bg(palette.accent_wash)
+                .border_1()
+                .border_color(palette.accent)
+        })
+        .when(drop_target && selected, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top(ui(-2.))
+                    .left(ui(-2.))
+                    .right(ui(-2.))
+                    .bottom(ui(-2.))
+                    .border_2()
+                    .border_color(palette.accent_ink)
+                    .rounded(ui(RADIUS_ROW + 2.)),
             )
         })
         .on_click(click)

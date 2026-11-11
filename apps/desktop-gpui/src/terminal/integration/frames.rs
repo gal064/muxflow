@@ -61,25 +61,7 @@ pub fn divider_key(axis: Axis, key: &str) -> Option<bool> {
     }
 }
 
-/// The half of a pane a grabbed pane would join.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaneEdge {
-    Left,
-    Right,
-    Top,
-    Bottom,
-}
-
-impl PaneEdge {
-    fn wire(self) -> &'static str {
-        match self {
-            Self::Left => "left",
-            Self::Right => "right",
-            Self::Top => "top",
-            Self::Bottom => "bottom",
-        }
-    }
-}
+pub use crate::workspaces::actions::PaneEdge;
 
 /// Port of `paneEdgeAt`: the edge a point falls on, as fractions of the pane
 /// from its left and top, or none in the pane's middle.
@@ -96,19 +78,6 @@ pub fn pane_edge_at(x: f32, y: f32) -> Option<PaneEdge> {
             |best, entry| if entry.1 < best.1 { entry } else { best },
         );
     (distance <= PANE_EDGE_ZONE).then_some(edge)
-}
-
-/// A grabbed pane dropped on another's edge: `planDrop`'s pane case. Both are
-/// in the window on screen, so the join rearranges it and empties nothing.
-pub fn join_action(pane_id: &str, target_pane_id: &str, edge: PaneEdge) -> Option<Value> {
-    (pane_id != target_pane_id).then(|| {
-        json!({
-            "kind": "joinPane",
-            "pane_id": pane_id,
-            "target_pane_id": target_pane_id,
-            "pane_edge": edge.wire(),
-        })
-    })
 }
 
 #[cfg(test)]
@@ -150,19 +119,5 @@ mod tests {
         assert_eq!(pane_edge_at(0.5, 0.5), None);
         // The nearer edge wins in a corner.
         assert_eq!(pane_edge_at(0.05, 0.2), Some(PaneEdge::Left));
-    }
-
-    #[test]
-    fn a_pane_joins_another_and_never_itself() {
-        assert_eq!(
-            join_action("%1", "%2", PaneEdge::Bottom),
-            Some(json!({
-                "kind": "joinPane",
-                "pane_id": "%1",
-                "target_pane_id": "%2",
-                "pane_edge": "bottom",
-            }))
-        );
-        assert_eq!(join_action("%1", "%1", PaneEdge::Left), None);
     }
 }

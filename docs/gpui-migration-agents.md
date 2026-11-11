@@ -235,7 +235,7 @@ through the T2.1 seam.
 | T4.3 `ports-transfers` | Full | sonnet, high | `features/ports`, `transfers`, `dragDrop` | Phase 3 |
 | T4.4 `settings-diagnostics` | sonnet, high, full cycle, design | `gpui/settings-diagnostics` | Merged via T4.5 | `e6e8510` | 1 review round, QA pass. The profile label rename and the tmux identity notice match Tauri |
 | T4.5 `phase4-wiring` | opus, high, full cycle, invariant | `gpui/phase4-wiring` | Merged | `ee8358d` | Merged T4.1, T4.2, T4.4 and joined their seams. 1 review round, QA pass after 2 fixes (a pane move selects its window; a startup command is retried while the bridge reconnects). Open: bulk-close topology authority, `agent.state` diagnostics |
-| T4.3 `ports-transfers` | sonnet, high, full cycle | `gpui/ports-transfers` | Dispatched | | |
+| T4.3 `ports-transfers` | sonnet, high, full cycle | `gpui/ports-transfers` | Ready to merge | | 2 reviewers, 1 round. QA pass on local and SSH hosts; document-tab drags, the dock zones and the agent menu were not run live (headless tests only). Open: upload Cancel waits for the host's response before it reports |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
 isolated host, headless. **Integrated QA:** `gdev_qa_phase4` exercises every panel

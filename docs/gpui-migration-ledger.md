@@ -185,8 +185,8 @@ font row covers them).
 | `app/AppDialogLayer.tsx` | 122 | port | 2 | dialog layer over Kit dialogs | open |
 | `app/AppNoticeLayer.tsx` | 52 | port | 2 | Kit notifications through `notices.rs`. One status notice at a time, a problem stays. The transfer toast is not here yet; it comes with transfers | open |
 | `app/AppRightPanel.tsx` | 89 | port | 2 | right panel host (Explorer, Git, Ports rails) | open |
-| `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | separator rule and naming in terminal/layout.rs and surface.rs; divider, grab and join rules in terminal/integration/frames.rs (T3.6); key and pointer activity reports the pane through terminal/integration/agents.rs `note_activity`; the acknowledgement it drives is tested in agents/tests.rs (T4.2) | done (T4.2) |
-| `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | terminal/surface.rs: pane frames, resting dividers, empty state, region name, and (T3.6) divider drag and arrow-key resize, the attention ring (fed by the agents runtime in Phase 4), hover focus, selecting a pane in tmux on focus, and the link-modifier pane grab, which joins a pane beside another; the grab yields to a link once T3.5's link test is wired into `integration::link_at` | done (T3.6) |
+| `app/TerminalWorkspaceSurface.test.tsx` | 185 | port | 3 | separator rule and naming in terminal/layout.rs and surface.rs; divider rules in terminal/integration/frames.rs (T3.6), the grab's join rule in dragdrop/rules.rs and its gesture in workspaces/tests.rs (T4.3); key and pointer activity reports the pane through terminal/integration/agents.rs `note_activity`; the acknowledgement it drives is tested in agents/tests.rs (T4.2) | done (T4.2) |
+| `app/TerminalWorkspaceSurface.tsx` | 193 | port | 3 | terminal/surface.rs: pane frames, resting dividers, empty state, region name, and (T3.6) divider drag and arrow-key resize, the attention ring (fed by the agents runtime in Phase 4), hover focus, selecting a pane in tmux on focus, and the link-modifier pane grab, a drag through dragdrop (T4.3) that joins a pane beside another; the grab yields to a link once T3.5's link test is wired into `integration::link_at` | done (T3.6) |
 | `app/WorkspaceDock.test.tsx` | 131 | port | 2 | tests of WorkspaceDock.tsx | open |
 | `app/WorkspaceDock.tsx` | 232 | port | 2 | dock layout on Kit dock; also a drop target, not a drag source (see S8) | open |
 | `app/appRecovery.test.ts` | 43 | port | 2 | tests in connection_ui/app_recovery.rs | done (T2.4) |
@@ -226,8 +226,8 @@ font row covers them).
 | `app/useFocusHistoryNavigation.test.tsx` | 190 | port | 4 | workspaces/focus_history.rs tests and the Back end-to-end test in workspaces/tests.rs | done (T4.1) |
 | `app/useFocusHistoryNavigation.ts` | 135 | port | 4 | workspaces/mod.rs `step_history`, `back_from_closing` | done (T4.1) |
 | `app/useMissingHelperRecovery.ts` | 176 | port | 2 | connection_ui/helper_recovery.rs | done (T2.4) |
-| `app/usePaneMoves.test.tsx` | 160 | port | 3 | tests of usePaneMoves.ts; the pane-onto-pane join is tested in terminal/integration/frames.rs (T3.6) | open |
-| `app/usePaneMoves.ts` | 201 | port | 3 | pane moves via drop_rules; the pane grab joining a pane beside another is in terminal/surface.rs (T3.6), tab and workspace drops come with drop_rules in Phase 4 | open |
+| `app/usePaneMoves.test.tsx` | 160 | port | 3 | workspaces/tests.rs (drops end to end on a fake host: the window on screen follows where the host says it landed, a covering document keeps the view, bring-here only from another tab, workspace choices) and `pane_on_screen_moved_by` | done (T4.3) |
+| `app/usePaneMoves.ts` | 201 | port | 3 | workspaces/moves.rs: the drop plan against the host on screen, `Workspaces::run_plan`, the tab, pane and agent payloads, and the agent menu's moves (the pane grab of T3.6 now drags through dragdrop) | done (T4.3) |
 | `app/usePerHostMemo.test.tsx` | 61 | retire | 2 | tests usePerHostMemo.ts, which retires | open |
 | `app/usePerHostMemo.ts` | 56 | retire | 2 | React hook that memoizes a list per host; entities hold per-host state directly | open |
 | `app/useShellNavigation.test.tsx` | 1378 | port | 4 | coordinator and write-planning cases in workspaces/navigation.rs, the optimistic window in connection_ui/host_links.rs, select and placeholder cases end to end in workspaces/tests.rs; React identity and rerender cases dropped | done (T4.1) |
@@ -335,11 +335,11 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/dragDrop/DragGhost.tsx` | 11 | port | 4 | drag ghost view | open |
-| `features/dragDrop/dropRules.test.ts` | 163 | port | 4 | tests of dropRules.ts | open |
-| `features/dragDrop/dropRules.ts` | 158 | port | 4 | drop planning rules | open |
-| `features/dragDrop/pointerDrag.test.ts` | 190 | port | 4 | tests of pointerDrag.ts | open |
-| `features/dragDrop/pointerDrag.ts` | 277 | port | 4 | pointer drag state; mouse capture instead of DOM pointer capture | open |
+| `features/dragDrop/DragGhost.tsx` | 11 | port | 4 | dragdrop/mod.rs `ghost`, dimmed over a refusal | done (T4.3) |
+| `features/dragDrop/dropRules.test.ts` | 163 | port | 4 | tests in dragdrop/rules.rs | done (T4.3) |
+| `features/dragDrop/dropRules.ts` | 158 | port | 4 | dragdrop/rules.rs `plan_drop` | done (T4.3) |
+| `features/dragDrop/pointerDrag.test.ts` | 190 | port | 4 | tests in dragdrop/tests.rs, and the gestures end to end in workspaces/tests.rs | done (T4.3) |
+| `features/dragDrop/pointerDrag.ts` | 277 | port | 4 | dragdrop/mod.rs: window-level mouse listeners and targets that offer themselves under the pointer, instead of DOM pointer capture and a geometry hit test; no grabbing cursor while dragging | done (T4.3) |
 
 ### `features/files`
 
@@ -435,10 +435,10 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/ports/PortsPanel.test.tsx` | 118 | port | 4 | tests of PortsPanel.tsx | open |
-| `features/ports/PortsPanel.tsx` | 162 | port | 4 | ports panel view | open |
-| `features/ports/api.ts` | 38 | replace | 4 | invoke wrapper becomes direct desktop-core calls; parsePort ports | open |
-| `features/ports/usePortForwards.ts` | 37 | port | 4 | port forwards entity | open |
+| `features/ports/PortsPanel.test.tsx` | 118 | port | 4 | tests in ports/tests.rs against a fake transport | done (T4.3) |
+| `features/ports/PortsPanel.tsx` | 162 | port | 4 | ports/view.rs and ports/panel.rs, the right panel's "ports" segment | done (T4.3) |
+| `features/ports/api.ts` | 38 | replace | 4 | direct desktop-core calls in ports/panel.rs (`NativePorts`, polled on a timer); parse_port in ports/model.rs | done (T4.3) |
+| `features/ports/usePortForwards.ts` | 37 | port | 4 | ports/panel.rs `PortsPanel` | done (T4.3) |
 
 ### `features/shell`
 
@@ -569,7 +569,7 @@ font row covers them).
 | `features/terminal/terminalTransferApi.test.ts` | 231 | port | 3 | native clipboard and event decode tests in terminal/integration/transfers.rs | done (T3.6) |
 | `features/terminal/terminalTransferApi.ts` | 346 | replace | 3 | TerminalBackend::start_upload and cancel_upload in connection_ui/backend.rs, straight into desktop-core; only a digest-verified, published completion is pasted | done (T3.6) |
 | `features/terminal/terminalTransferRegistry.test.tsx` | 154 | port | 3 | tests in terminal/integration/transfers.rs | done (T3.6) |
-| `features/terminal/terminalTransferRegistry.ts` | 101 | port | 3 | TransferRecords in terminal/integration/transfers.rs, held app-wide by upload.rs; a finished record is never reopened, the full canonical merge is not ported | done (T3.6) |
+| `features/terminal/terminalTransferRegistry.ts` | 101 | port | 3 | TransferRecords in terminal/integration/transfers.rs, held app-wide by upload.rs; a finished record is never reopened, and a late frame merges as the canonical state does (T4.3); frames are not validated on receipt, `transfers::validate` waits for Phase 5's download decode | done (T3.6, T4.3) |
 | `features/terminal/terminalTransfers.test.ts` | 208 | port | 3 | tests in terminal/integration/transfers.rs; the canvas PNG encoder cases retire with the WebView | done (T3.6) |
 | `features/terminal/terminalTransfers.ts` | 367 | port | 3 | terminal/integration/transfers.rs; the batch order and cancellation in upload.rs. The WebView image encoder retires: the native reader stages PNGs | done (T3.6) |
 | `features/terminal/terminalViewport.ts` | 66 | port | 3 | ViewportAnchor in crates/terminal-engine/src/terminal.rs | done (T3.3) |
@@ -599,16 +599,16 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/transfers/transferState.test.ts` | 69 | port | 4 | tests of transferState.ts | open |
-| `features/transfers/transferState.ts` | 190 | port | 4 | transfer state model | open |
+| `features/transfers/transferState.test.ts` | 69 | port | 4 | tests in transfers.rs | done (T4.3) |
+| `features/transfers/transferState.ts` | 190 | port | 4 | transfers.rs, shared by the terminal upload list (terminal/integration/transfers.rs, which merges late frames as the Tauri state does); `validate` is for Phase 5's download decode | done (T4.3) |
 
 ### `features/workspaces`
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/workspaces/TabStrip.tsx` | 548 | port | 2 | ui/chrome/tab_strip.rs; a terminal tab draws its agent's adapter glyph and `state_indicator` (glyphs from `settings::get`), and selecting it acknowledges its active pane (T4.5); the pointer-drag source lands with dragDrop (T4.3), Download… and document tooltips with Phase 5; not yet: the per-tab tooltip, the All tabs menu's shortcut glyphs, and opening a tab's menu from the keyboard (no Kit support) | done (T4.1, T4.5) |
+| `features/workspaces/TabStrip.tsx` | 548 | port | 2 | ui/chrome/tab_strip.rs; a terminal tab draws its agent's adapter glyph and `state_indicator` (glyphs from `settings::get`), and selecting it acknowledges its active pane (T4.5); a tab is a drag source and a drop target (T4.3), Download… and document tooltips with Phase 5; not yet: the per-tab tooltip, the All tabs menu's shortcut glyphs, and opening a tab's menu from the keyboard (no Kit support) | done (T4.1, T4.3, T4.5) |
 | `features/workspaces/WorkspaceSidebar.hosts.test.tsx` | 234 | port | 2 | host letters and moves in workspaces/rows.rs, the host row in connection_ui/controller/tests.rs, rows end to end in workspaces/tests.rs | done (T4.1) |
-| `features/workspaces/WorkspaceSidebar.tsx` | 973 | port | 2 | ui/chrome/sidebar.rs; the Agents section is `agents::view::AgentsList`, the rows' agent lines, the compact cluster and the state indicator use T4.2's marks through `AgentShell` (T4.5); the pointer-drag source lands with dragDrop (T4.3); not yet: phase dots in the host menu | done (T4.1, T4.5) |
+| `features/workspaces/WorkspaceSidebar.tsx` | 973 | port | 2 | ui/chrome/sidebar.rs; the Agents section is `agents::view::AgentsList`, the rows' agent lines, the compact cluster and the state indicator use T4.2's marks through `AgentShell` (T4.5); a workspace row is a drop target (T4.3); not yet: phase dots in the host menu | done (T4.1, T4.3, T4.5) |
 | `features/workspaces/WorkspaceSwitcher.test.tsx` | 158 | port | 2 | `tests/commands.rs` | open |
 | `features/workspaces/WorkspaceSwitcher.tsx` | 144 | port | 2 | `commands/quick_open.rs`; workspace and tab rows from workspaces/commands.rs `Source` (T4.1); agent-state glyph and file-type icon land with T4.2 and Phase 5 | open |
 | `features/workspaces/mergedWorkspaceRows.test.ts` | 109 | port | 4 | tests in workspaces/rows.rs | done (T4.1) |
