@@ -5,6 +5,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     rc::Rc,
 };
 
@@ -165,6 +166,7 @@ fn inputs(scopes: Vec<RequestScope>) -> RuntimeInputs {
             app_focused: false,
             terminal_visible: true,
         },
+        windows: HashMap::new(),
     }
 }
 
@@ -685,6 +687,77 @@ fn the_shell_shows_the_current_servers_agents_and_nothing_after_it_changes(
         .runtime
         .read_with(cx, |runtime, _| super::agent_shell_from(runtime));
     assert_eq!(shell, crate::workspaces::agents::AgentShell::default());
+}
+
+/// Port of the topology authority in `useAgentRuntime.ts`: a window is known
+/// to hold no agent only from a snapshot asked for against the topology on
+/// screen, and only until tmux moves again.
+#[gpui_kit::test]
+fn a_window_without_an_agent_is_absent_only_under_the_topology_it_was_asked_against(
+    cx: &mut TestAppContext,
+) {
+    use crate::workspaces::agents::AgentPresence;
+
+    let unmapped = std::rc::Rc::new(Cell::new(false));
+    let harness = Harness::new(cx, {
+        let unmapped = unmapped.clone();
+        move |command| {
+            let mut agent = wire_agent("working", 0, None, 0);
+            if unmapped.get() {
+                agent["route"]["paneId"] = json!("");
+                agent["route"]["windowId"] = json!("");
+            }
+            Ok(snapshot_answer(
+                command,
+                vec![agent],
+                vec![wire_adapter("wired")],
+            ))
+        }
+    });
+    let covering = |epoch: u64, topology: u64| RuntimeInputs {
+        windows: HashMap::from([("local".into(), vec!["@1".into(), "@2".into()])]),
+        ..inputs(vec![scope(epoch, topology)])
+    };
+    let shell = |cx: &mut TestAppContext| {
+        harness
+            .runtime
+            .read_with(cx, |runtime, _| super::agent_shell_from(runtime))
+    };
+    let presence = |shell: &crate::workspaces::agents::AgentShell, window: &str| {
+        shell.window("local", window).map(|window| window.presence)
+    };
+    harness.sync(cx, covering(4, 1));
+    let now = shell(cx);
+    assert_eq!(presence(&now, "@1"), Some(AgentPresence::Present));
+    assert_eq!(presence(&now, "@2"), Some(AgentPresence::Absent));
+    // A window the snapshot was not asked about proves nothing.
+    assert_eq!(presence(&now, "@3"), None);
+    assert!(now.current_through("local", 1));
+
+    // tmux moved: until the snapshot asked for now answers, nothing is absent.
+    harness
+        .runtime
+        .update(cx, |runtime, cx| runtime.sync(covering(4, 2), cx));
+    let moving = shell(cx);
+    assert_eq!(presence(&moving, "@2"), None);
+    assert!(!moving.current_through("local", 1));
+    cx.run_until_parked();
+    let now = shell(cx);
+    assert_eq!(presence(&now, "@2"), Some(AgentPresence::Absent));
+    assert!(now.current_through("local", 2));
+
+    // Nor does what the last connection saw, with the same windows.
+    harness
+        .runtime
+        .update(cx, |runtime, cx| runtime.sync(covering(5, 2), cx));
+    assert_eq!(presence(&shell(cx), "@2"), None);
+    cx.run_until_parked();
+    assert_eq!(presence(&shell(cx), "@2"), Some(AgentPresence::Absent));
+
+    // An agent with no window could be in any of them.
+    unmapped.set(true);
+    harness.sync(cx, covering(5, 3));
+    assert_eq!(presence(&shell(cx), "@2"), None);
 }
 
 #[gpui_kit::test]

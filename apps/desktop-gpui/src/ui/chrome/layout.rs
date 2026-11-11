@@ -258,6 +258,17 @@ mod tests {
         assert_eq!(clamped_agents_ratio(Some(0.01)), AGENTS_RATIO_MIN);
     }
 
+    /// Port of `appStateContract.test.ts`'s right panel width cases.
+    #[test]
+    fn the_panel_keeps_a_saved_width_within_half_the_window() {
+        assert_eq!(clamped_panel_width(Some(420.6)), 421.);
+        assert_eq!(clamped_panel_width(Some(9_000.)), MAX_STORED_WIDTH);
+        assert_eq!(clamped_panel_width(Some(f32::NAN)), PANEL_WIDTH);
+        assert_eq!(panel_width_for_window(900., 1_600.), 800.);
+        // Half a narrow window is less than the floor, which still holds.
+        assert_eq!(panel_width_for_window(300., 400.), PANEL_MIN_WIDTH);
+    }
+
     #[test]
     fn ratios_are_saved_without_float_noise() {
         let mut shell = ShellPreferences::default();
