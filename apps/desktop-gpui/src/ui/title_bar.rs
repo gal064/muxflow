@@ -267,7 +267,8 @@ impl RenderOnce for WindowControls {
                     cx.notify();
                 })
             })
-            .on_click(|_, window, _| window.remove_window());
+            // Through the editors' close guard, as a platform close request is.
+            .on_click(|_, window, cx| crate::editor::close_window(window, cx));
         h_flex()
             .id("window-controls")
             .h_full()

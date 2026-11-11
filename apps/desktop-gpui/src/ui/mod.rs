@@ -25,5 +25,6 @@
 //! `find_all_by_role`), as `tests/shell.rs` does.
 
 pub mod chrome;
+pub mod error_summary;
 pub mod shell;
 pub mod title_bar;

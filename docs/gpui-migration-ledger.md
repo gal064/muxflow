@@ -170,7 +170,7 @@ font row covers them).
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
 | `main.tsx` | 73 | replace | 2 | GPUI app main: apply the remembered theme before first paint, report terminal colors to hosts at start and on appearance change, record the startup perf milestones; React, StrictMode and the font gate drop | open |
-| `monaco-languages.d.ts` | 7 | retire | 5 | Monaco language module typings | open |
+| `monaco-languages.d.ts` | 7 | retire | 5 | Monaco language module typings; the Kit editor registers Tree-sitter grammars in editor/language.rs | done (T5.2) |
 | `styles.css` | 2062 | replace | 2 | Rust theme and per-view styles (2,062 lines); its reduced-motion, forced-colors, narrow-width and 150 ms delayed-loading rules are behavior to carry | open |
 | `tokens.css` | 117 | replace | 2 | generated Rust palette from client-core generator | open |
 | `vite-env.d.ts` | 4 | retire | 9 | Vite client typings; the `__MUXFLOW_PERF_BUILD__` switch (set in `vite.config.ts`, not a row) needs a Rust equivalent in the perf work | open |
@@ -193,8 +193,8 @@ font row covers them).
 | `app/appRecovery.ts` | 51 | port | 2 | connection_ui/app_recovery.rs | done (T2.4) |
 | `app/bridgeFailureText.test.ts` | 13 | port | 2 | tests in connection_ui/controller.rs | done (T2.4) |
 | `app/bridgeFailureText.ts` | 12 | port | 2 | connection_ui/controller.rs user_facing_bridge_failure | done (T2.4) |
-| `app/editorChunkAbsence.test.tsx` | 225 | port | 5 | the chunk-not-fetched probe drops; the visible outcomes port: binary file, file over 10 MiB, disconnected tab, binary diff and oversized diff show their message instead of an editor, and a Markdown preview-only tab shows no editor | open |
-| `app/editorChunkBoundary.test.tsx` | 386 | port | 5 | chunk evaluation order and the 500 ms preview publish delay drop; port: dirty draft and its state survive a reconnect without an eager reread, a pending autosave survives the editor unmounting (preview switch), Live Markdown edits share one buffer with source, a live tab over the size limit falls back to source with live disabled | open |
+| `app/editorChunkAbsence.test.tsx` | 225 | port | 5 | the chunk-not-fetched probe drops; binary file, file over 10 MiB and disconnected tab in editor/pane_tests.rs (T5.2); binary and oversized diff left to T5.3, Markdown preview-only to T5.4 | open |
+| `app/editorChunkBoundary.test.tsx` | 386 | port | 5 | chunk evaluation order and the 500 ms preview publish delay drop; dirty draft surviving a reconnect in editor/document_tests.rs (T5.2), and the buffer lives in the document, not the editor view, so a preview switch keeps a pending save; the Live Markdown cases wait for Phase 7 | open |
 | `app/helperSetupFeedback.test.tsx` | 82 | port | 2 | helper dialog tests in connection_ui/controller/tests.rs; hook-setup activity is Phase 4 with useAgentHostSetup | done (T2.4) |
 | `app/linkQuality.test.ts` | 112 | port | 2 | tests in connection_ui/link_quality.rs | done (T2.4) |
 | `app/linkQuality.ts` | 161 | port | 2 | connection_ui/link_quality.rs | done (T2.4) |
@@ -207,8 +207,8 @@ font row covers them).
 | `app/postResyncReseed.test.tsx` | 93 | port | 3 | reseed after resync | open |
 | `app/reconnectNoticeDedupe.test.tsx` | 129 | port | 2 | connection_ui/controller/tests.rs | done (T2.4) |
 | `app/shellNavigationCoordinator.ts` | 165 | port | 4 | workspaces/navigation.rs `Coordinator`: one move in flight, only the latest queued | done (T4.1) |
-| `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | tests of terminalFileOpenRoute.ts | open |
-| `app/terminalFileOpenRoute.ts` | 27 | port | 3 | terminal file open route check | open |
+| `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | editor/open.rs `opens_only_while_the_pane_route_that_asked_still_holds` | done (T5.2) |
+| `app/terminalFileOpenRoute.ts` | 27 | port | 3 | editor/open.rs `current_pane` | done (T5.2) |
 | `app/types.ts` | 68 | replace | 2 | Session, Window, Pane, ConnectionSpec, HostProfile come from protocol and desktop-core types | open |
 | `app/useAppAgentController.ts` | 162 | port | 5 | agents/mod.rs: scopes, focus and setup gating from the connection controller, rows across hosts (in the sidebar's own workspace order and pinned filter), the jump, row opening through the shell's `select_pane`, and the palette's row commands; the workflow half is agents/setup.rs; selecting a terminal tab acknowledges its pane (T4.5); bringing an agent's pane here and moving it are workspaces/moves.rs (T4.5). Phase 5: launch and resume need the active root (`agents::view::ActiveRoot`, set by the Explorer) | open |
 | `app/useAppConnectionController.ts` | 944 | port | 2 | connection_ui/controller.rs; terminal hub and state cache, reseeds, echo-lag and input-latency probes, clipboard, file, git, agent and automation frame routing, retireConnection, appFocused and prewarm_terminal_bulk stay with Phase 3 and 4 owners; active-window resolution and the optimistic window with T4.1; after-install agent setup with useAgentHostSetup | done (T2.4) |
@@ -232,7 +232,7 @@ font row covers them).
 | `app/usePerHostMemo.ts` | 56 | retire | 2 | React hook that memoizes a list per host; entities hold per-host state directly | open |
 | `app/useShellNavigation.test.tsx` | 1378 | port | 4 | coordinator and write-planning cases in workspaces/navigation.rs, the optimistic window in connection_ui/host_links.rs, select and placeholder cases end to end in workspaces/tests.rs; React identity and rerender cases dropped | done (T4.1) |
 | `app/useShellNavigation.ts` | 735 | port | 4 | workspaces/mod.rs `navigate`, `fly`, `land`, app-tab protection and the create placeholder | done (T4.1) |
-| `app/useTerminalFileOpen.ts` | 108 | port | 3 | terminal file open; needs file tabs (Phase 4 and 5): until then a file link click says it is not available (terminal/reading/mod.rs) | open |
+| `app/useTerminalFileOpen.ts` | 108 | port | 3 | editor/open.rs `open_terminal_path`, called from terminal/reading/mod.rs for a file link | done (T5.2) |
 | `app/useTmuxActionPerformer.test.tsx` | 187 | port | 4 | reconciliation cases in workspaces/actions.rs, the refusal and confirmation flows end to end in workspaces/tests.rs | done (T4.1) |
 | `app/useTmuxActionPerformer.ts` | 146 | port | 4 | workspaces/mod.rs `perform`: the target's client and scope, silent or visible feedback, `action.refused` incident | done (T4.1) |
 | `app/useWorkspaceCreate.test.tsx` | 142 | port | 4 | per-host defaults in workspaces/model.rs, the startup command end to end in workspaces/tests.rs | done (T4.1) |
@@ -353,13 +353,13 @@ font row covers them).
 | `features/files/ExplorerRow.tsx` | 131 | port | 5 | explorer row; has an in-app drag source (see S8) | open |
 | `features/files/ExplorerTree.test.tsx` | 760 | port | 5 | tests of ExplorerTree.tsx | open |
 | `features/files/ExplorerTree.tsx` | 624 | port | 5 | explorer tree view; has an in-app drag source (see S8) | open |
-| `features/files/FileEditor.tsx` | 57 | replace | 5 | Kit code editor wrapper replaces the Monaco wrapper | open |
+| `features/files/FileEditor.tsx` | 57 | replace | 5 | editor/pane.rs: the Kit code editor (gpui-component `Editor`) with the toolbar, find bar and go-to box | done (T5.2) |
 | `features/files/LiveMarkdownEditor.test.tsx` | 117 | port | 7 | tests of LiveMarkdownEditor.tsx | open |
 | `features/files/LiveMarkdownEditor.tsx` | 154 | port | 7 | ? depends on S4: does Live Markdown fit the Kit editor or gpui-base text | open |
 | `features/files/api.test.ts` | 506 | port | 5 | behavior assertions move to the replacement of api.ts | open |
 | `features/files/api.ts` | 647 | replace | 5 | Tauri file client becomes direct desktop-core calls; its request validation moves with it | open |
-| `features/files/autosave.test.ts` | 104 | port | 5 | tests of autosave.ts | open |
-| `features/files/autosave.ts` | 108 | port | 5 | autosave controller | open |
+| `features/files/autosave.test.ts` | 104 | port | 5 | editor/autosave.rs tests, and the document-level cases in editor/document_tests.rs | done (T5.2) |
+| `features/files/autosave.ts` | 108 | port | 5 | editor/autosave.rs `Autosave`; driven by editor/document.rs | done (T5.2) |
 | `features/files/directoryCache.test.ts` | 57 | port | 5 | tests of directoryCache.ts | open |
 | `features/files/directoryCache.ts` | 103 | port | 5 | explorer directory cache | open |
 | `features/files/directoryRequests.test.ts` | 82 | port | 5 | tests of directoryRequests.ts | open |
@@ -370,13 +370,13 @@ font row covers them).
 | `features/files/downloadFlow.ts` | 73 | port | 5 | download flow | open |
 | `features/files/downloadStatus.test.ts` | 67 | port | 5 | tests of downloadStatus.ts | open |
 | `features/files/downloadStatus.ts` | 37 | port | 5 | download status | open |
-| `features/files/editorFlushRegistry.test.ts` | 27 | port | 5 | tests of editorFlushRegistry.ts | open |
-| `features/files/editorFlushRegistry.ts` | 26 | port | 5 | editor flush registry | open |
-| `features/files/editorLanguage.test.ts` | 31 | port | 5 | tests of editorLanguage.ts | open |
-| `features/files/editorLanguage.ts` | 34 | port | 5 | extension to Tree-sitter grammar table | open |
-| `features/files/editorLayout.test.tsx` | 118 | retire | 5 | tests editorLayout.ts, which retires | open |
-| `features/files/editorLayout.ts` | 99 | retire | 5 | forces Monaco to re-measure its container; no equivalent layout step in GPUI | open |
-| `features/files/editorText.ts` | 18 | replace | 5 | Monaco font options; becomes editor font settings from the theme | open |
+| `features/files/editorFlushRegistry.test.ts` | 27 | port | 5 | editor/document_tests.rs `flushing_every_editor_waits_for_each_save_and_fails_if_one_does` | done (T5.2) |
+| `features/files/editorFlushRegistry.ts` | 26 | port | 5 | editor/mod.rs `flush_all` over mounted and retiring documents; gates window close, app tab close and bulk close | done (T5.2) |
+| `features/files/editorLanguage.test.ts` | 31 | port | 5 | editor/language.rs tests; `every_grammar_highlights` checks each grammar colors a sample | done (T5.2) |
+| `features/files/editorLanguage.ts` | 34 | port | 5 | editor/language.rs `language_for_path` over eleven Tree-sitter grammars | done (T5.2) |
+| `features/files/editorLayout.test.tsx` | 118 | retire | 5 | tests editorLayout.ts, which retires | done (T5.2) |
+| `features/files/editorLayout.ts` | 99 | retire | 5 | forces Monaco to re-measure its container; no equivalent layout step in GPUI | done (T5.2) |
+| `features/files/editorText.ts` | 18 | replace | 5 | the theme mono font and the Kit editor line height | done (T5.2) |
 | `features/files/explorerWindow.test.ts` | 158 | port | 5 | tests of explorerWindow.ts | open |
 | `features/files/explorerWindow.ts` | 120 | port | 5 | explorer virtual window (4,096 entries gate) | open |
 | `features/files/fileIcons.test.ts` | 58 | port | 5 | tests of fileIcons.ts | open |
@@ -393,22 +393,22 @@ font row covers them).
 | `features/files/markdown.ts` | 32 | port | 5 | markdownFilePath link resolution ports; renderSafeMarkdown and renderSafeSvg retire with DOMPurify | open |
 | `features/files/markdownPreview.test.ts` | 66 | retire | 5 | tests the sanitize debounce and idle scheduling, which retire with DOMPurify | open |
 | `features/files/markdownPreview.ts` | 164 | port | 5 | ? the debounced DOMPurify pass drops (Kit renders natively); `useSanitizedMarkdown`'s selection hold and `CLICK_SLOP_PX` (used by AppTabSurface) port only if the Kit Markdown view needs them, see MarkdownPreview.test.tsx | open |
-| `features/files/monaco.ts` | 152 | replace | 5 | editor theme from the generated palette (syntax colors from the terminal ANSI palette, comments dim, selection, cursor and diff washes, light and dark); Monaco workers, loader and font remeasure drop (open decision 2) | open |
-| `features/files/monarch.test.ts` | 93 | port | 5 | tests of monarch.ts | open |
-| `features/files/monarch.ts` | 109 | port | 5 | Python and TypeScript highlight additions become Tree-sitter highlight queries | open |
-| `features/files/saveStatus.test.tsx` | 229 | port | 5 | tests of saveStatus.ts | open |
-| `features/files/saveStatus.ts` | 51 | port | 5 | calm save status projection | open |
-| `features/files/searchCount.test.ts` | 79 | port | 5 | tests of searchCount.ts | open |
-| `features/files/searchCount.ts` | 85 | port | 5 | search match count with limit | open |
+| `features/files/monaco.ts` | 152 | replace | 5 | theme/mod.rs `syntax()` builds the Kit highlight theme from the palette; Monaco workers, loader and font remeasure drop. The diff washes go with the diff view (T5.3) | done (T5.2) |
+| `features/files/monarch.test.ts` | 93 | port | 5 | editor/language.rs Python and TypeScript capture tests | done (T5.2) |
+| `features/files/monarch.ts` | 109 | port | 5 | editor/language.rs highlight query additions for Python and TypeScript | done (T5.2) |
+| `features/files/saveStatus.test.tsx` | 229 | port | 5 | editor/save_status.rs tests | done (T5.2) |
+| `features/files/saveStatus.ts` | 51 | port | 5 | editor/save_status.rs | done (T5.2) |
+| `features/files/searchCount.test.ts` | 79 | port | 5 | editor/find.rs tests | done (T5.2) |
+| `features/files/searchCount.ts` | 85 | port | 5 | editor/find.rs `count_label`, with the find, replace and go-to-line matching | done (T5.2) |
 | `features/files/types.ts` | 280 | port | 5 | file types, limits, wire shapes | open |
 | `features/files/useActiveRoot.ts` | 280 | port | 5 | active root resolution; waits on pane paint gate | open |
 | `features/files/useConnectionTransfers.ts` | 85 | port | 5 | per-connection download transfers | open |
-| `features/files/useOpenFileTab.ts` | 504 | port | 5 | open file tab flow | open |
+| `features/files/useOpenFileTab.ts` | 504 | port | 5 | editor/tabs.rs `open_file_tab` (preview-tab rule), editor/open.rs (explorer, terminal path and Quick Open opens), editor/document.rs (read, watch reconciliation, reload rules) | done (T5.2) |
 | `features/files/useWorkspaceFiles.test.tsx` | 1402 | port | 5 | tests of useWorkspaceFiles.ts | open |
 | `features/files/useWorkspaceFiles.ts` | 908 | port | 5 | workspace files controller | open |
 | `features/files/watchLeases.test.ts` | 208 | port | 5 | tests of watchLeases.ts | open |
 | `features/files/watchLeases.ts` | 181 | port | 5 | watch leases | open |
-| `features/files/webkitWidgetBuffers.test.ts` | 43 | retire | 5 | CodeMirror widget buffer behavior in WebKit | open |
+| `features/files/webkitWidgetBuffers.test.ts` | 43 | retire | 5 | CodeMirror widget buffer behavior in WebKit | done (T5.2) |
 | `features/files/wire.ts` | 135 | port | 5 | file wire decode and transfer state validation | open |
 
 ### `features/git`
@@ -444,8 +444,8 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/shell/AppTabSurface.test.tsx` | 644 | port | 5 | tests of AppTabSurface.tsx; they land with the document surfaces | open |
-| `features/shell/AppTabSurface.tsx` | 366 | port | 5 | app tab surface (document, diff, preview routing); T4.1 shows a titled placeholder in ui/chrome/workspace.rs until the surfaces land in Phase 5 | open |
+| `features/shell/AppTabSurface.test.tsx` | 644 | port | 5 | read, reload, echo, rescan, bootstrap and save-status cases in editor/document_tests.rs and editor/save_status.rs; T5.2 left the Markdown link case to T5.4 and the watch lease release to the T5.1 watcher | open |
+| `features/shell/AppTabSurface.tsx` | 366 | port | 5 | editor/mod.rs `surface` routes document, diff (T5.3 `set_diff_surface`) and preview (T5.4 `set_markdown_preview`); editor/pane.rs draws the document tab | done (T5.2) |
 | `features/shell/DisconnectedStrip.tsx` | 75 | port | 2 | connection_ui/surface.rs | done (T2.4) |
 | `features/shell/MarkdownPreview.test.tsx` | 346 | port | 5 | ? preview keeps selection while content updates; DOM selection mechanics may not apply, keep the behavior | open |
 | `features/shell/RightPanel.tsx` | 120 | port | 2 | right panel container with resizable width | open |
@@ -616,7 +616,7 @@ font row covers them).
 | `features/workspaces/quickOpen.ts` | 53 | port | 2 | `commands/quick_open.rs` | open |
 | `features/workspaces/transientDrag.test.tsx` | 101 | port | 2 | tests of transientDrag.ts | open |
 | `features/workspaces/transientDrag.ts` | 71 | port | 2 | captured-pointer divider drag | open |
-| `features/workspaces/useQuickOpenSearch.ts` | 48 | port | 2 | `commands/quick_open.rs` `sync_search`; root resolution belongs to the file-search source | open |
+| `features/workspaces/useQuickOpenSearch.ts` | 48 | port | 2 | `commands/quick_open.rs` `sync_search`; the search key, root cache and search in editor/open.rs `search_key` and `search_files` | done (T5.2) |
 | `features/workspaces/workspaceRows.test.ts` | 223 | port | 4 | tests in workspaces/rows.rs | done (T4.1) |
 | `features/workspaces/workspaceRows.ts` | 215 | port | 4 | workspaces/rows.rs | done (T4.1) |
 
@@ -667,9 +667,9 @@ font row covers them).
 | `ui/Icon.tsx` | 244 | port | 2 | icon path data becomes embedded SVG assets | open |
 | `ui/SetupProgress.tsx` | 6 | port | 2 | setup progress line | open |
 | `ui/StateDot.tsx` | 53 | port | 2 | agents/view.rs `state_indicator`, glyphs from `settings::get`; the sidebar rows and the tab strip draw it too (T4.5) | done (T4.2, T4.5) |
-| `ui/SurfaceError.tsx` | 50 | port | 2 | surface error with disclosure | open |
+| `ui/SurfaceError.tsx` | 50 | port | 2 | surface error with disclosure; the editor save error draws it in editor/pane.rs `error_banner` (T5.2), other surfaces still to port | open |
 | `ui/appearance.test.ts` | 79 | port | 2 | theme preference and palette parity; palette cases become generator output tests; the System, Light and Dark resolution cases are in `theme::tests` | done (T2.1, T4.4) |
 | `ui/appearance.ts` | 130 | port | 2 | theme preference and UI scale over app_state: `theme::apply`, `settings::update`. The Markdown palette choice is `Prefs::markdown_appearance`, read by the Markdown view in Phase 5 | done (T2.1, T4.4) |
-| `ui/errorSummary.test.ts` | 109 | port | 2 | tests of errorSummary.ts | open |
-| `ui/errorSummary.ts` | 142 | port | 2 | host rejection to sentence | open |
+| `ui/errorSummary.test.ts` | 109 | port | 2 | ui/error_summary.rs tests | done (T5.2) |
+| `ui/errorSummary.ts` | 142 | port | 2 | ui/error_summary.rs `summarize` | done (T5.2) |
 

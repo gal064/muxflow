@@ -245,7 +245,7 @@ fn in_active_window(cx: &mut App, act: impl FnOnce(&mut Window, &mut App) + 'sta
 fn on_actions(cx: &mut App) {
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Quit, cx| crate::editor::quit(cx));
     cx.on_action(|_: &Minimize, cx| in_active_window(cx, |window, _| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx| in_active_window(cx, |window, _| window.zoom_window()));
     cx.on_action(|_: &ToggleFullScreen, cx| {
