@@ -1653,22 +1653,29 @@ impl Workspaces {
         self.send(&row.host_profile_id.clone(), action, None, cx);
     }
 
+    /// Pins or unpins a tab of the workspace on screen.
     pub fn toggle_window_pin(&mut self, window_id: &str, cx: &mut Context<Self>) {
-        let view = self.view(cx);
-        let (Some(session), Some(window)) = (
-            view.session.clone(),
-            view.windows
+        let host = self.view(cx).host;
+        self.toggle_window_pin_on(&host, window_id, cx);
+    }
+
+    /// Pins or unpins a terminal tab on any shown host.
+    pub fn toggle_window_pin_on(&mut self, host: &str, window_id: &str, cx: &mut Context<Self>) {
+        let Some(window) = self.link(host, cx).and_then(|link| {
+            link.host_state
+                .snapshot
+                .windows
                 .iter()
                 .find(|window| window.id == window_id)
-                .cloned(),
-        ) else {
+                .cloned()
+        }) else {
             return;
         };
         let action = TmuxAction {
             pinned: !window.pinned,
-            ..TmuxAction::window(ActionKind::SetPinned, &session.id, &window.id)
+            ..TmuxAction::window(ActionKind::SetPinned, &window.session_id, &window.id)
         };
-        self.send(&view.host, action, None, cx);
+        self.send(host, action, None, cx);
     }
 
     pub fn toggle_host_shown(&mut self, profile_id: &str, cx: &mut Context<Self>) {

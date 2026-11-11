@@ -671,27 +671,6 @@ impl ConnectionController {
         self.settle(cx);
     }
 
-    /// Puts one window of a shown host on screen, the host made active first:
-    /// where an agent row or a notification leads.
-    pub fn select_window(
-        &mut self,
-        profile_id: &str,
-        session_id: &str,
-        window_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        self.dispatch(HostLinksAction::ActiveSession {
-            profile_id: profile_id.to_owned(),
-            session_id: Some(session_id.to_owned()),
-        });
-        self.dispatch(HostLinksAction::ActiveWindow {
-            profile_id: profile_id.to_owned(),
-            window_id: Some(window_id.to_owned()),
-        });
-        self.activate_host(profile_id, cx);
-        self.settle(cx);
-    }
-
     pub fn save_profile_fields(
         &mut self,
         profile_id: &str,

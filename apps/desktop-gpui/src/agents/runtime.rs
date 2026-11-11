@@ -48,11 +48,6 @@ pub trait AgentTransport {
         client_id: String,
         command: AgentCommand,
     ) -> BoxFuture<'static, Result<Value, String>>;
-    fn tmux_action(
-        &self,
-        client_id: String,
-        action: Value,
-    ) -> BoxFuture<'static, Result<Value, String>>;
 }
 
 pub struct BackendTransport(pub Arc<dyn TerminalBackend>);
@@ -64,14 +59,6 @@ impl AgentTransport for BackendTransport {
         command: AgentCommand,
     ) -> BoxFuture<'static, Result<Value, String>> {
         self.0.agent_request(client_id, command)
-    }
-
-    fn tmux_action(
-        &self,
-        client_id: String,
-        action: Value,
-    ) -> BoxFuture<'static, Result<Value, String>> {
-        self.0.tmux_action(client_id, action)
     }
 }
 
@@ -190,10 +177,6 @@ impl AgentRuntime {
 
     pub fn now_ms(&self) -> u64 {
         self.effects.now_ms()
-    }
-
-    pub(super) fn transport(&self) -> Rc<dyn AgentTransport> {
-        self.transport.clone()
     }
 
     pub(super) fn effects(&self) -> Rc<dyn AgentEffects> {
