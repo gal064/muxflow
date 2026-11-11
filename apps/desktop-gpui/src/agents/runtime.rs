@@ -14,7 +14,7 @@ use std::{
 };
 
 use desktop_core::{
-    app_state::{AppStateStore, HostSetupDecision, load_app_state, update_app_state},
+    app_state::{AgentSoundPreferences, AppStateStore, HostSetupDecision, update_app_state},
     connection::agent::AgentCommand,
     notifications,
 };
@@ -82,8 +82,8 @@ pub trait AgentEffects {
         &self,
         notification: &AgentNativeNotification,
     ) -> BoxFuture<'static, Result<bool, String>>;
-    /// Plays the cue for an event, under the preferences saved at that moment.
-    fn play(&self, event: AttentionKind);
+    /// Plays the cue for an event, under the preferences in force.
+    fn play(&self, event: AttentionKind, preferences: AgentSoundPreferences);
     fn now_ms(&self) -> u64;
     /// Remembers a host's setup answer in app state.
     fn record_decision(&self, host_profile_id: &str, decision: HostSetupDecision);
@@ -113,12 +113,8 @@ impl AgentEffects for NativeEffects {
         .boxed()
     }
 
-    fn play(&self, event: AttentionKind) {
-        // Read when it plays, so a change in Settings applies to the next cue.
-        let saved = load_app_state(&self.app_state)
-            .ok()
-            .and_then(|state| state.shell.agent_sounds);
-        sound::play(event, sound::effective(saved));
+    fn play(&self, event: AttentionKind, preferences: AgentSoundPreferences) {
+        sound::play(event, preferences);
     }
 
     fn now_ms(&self) -> u64 {
@@ -492,7 +488,9 @@ impl AgentRuntime {
         let NotificationDecision::Emit(notification) = decision else {
             return;
         };
-        self.effects.play(notification.event);
+        // Read when it plays, so a change in Settings applies to the next cue.
+        self.effects
+            .play(notification.event, crate::settings::get(cx).agent_sounds);
         let shown = self.effects.notify(&notification);
         cx.spawn(async move |this, cx| {
             // Delivery is attempted once. Persistent in-app attention remains.

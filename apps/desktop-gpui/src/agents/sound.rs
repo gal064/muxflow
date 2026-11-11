@@ -11,29 +11,6 @@ use desktop_core::app_state::{AgentSoundMode, AgentSoundPreferences};
 
 use super::model::AttentionKind;
 
-pub const DEFAULT_PREFERENCES: AgentSoundPreferences = AgentSoundPreferences {
-    enabled: true,
-    blocked: AgentSoundMode::Subtle,
-    completed: AgentSoundMode::Subtle,
-    volume: 0.45,
-};
-
-/// A saved value made safe to use: an out-of-range volume is clamped, a
-/// non-finite one falls back. Nothing saved is the defaults.
-pub fn effective(saved: Option<AgentSoundPreferences>) -> AgentSoundPreferences {
-    let Some(saved) = saved else {
-        return DEFAULT_PREFERENCES;
-    };
-    AgentSoundPreferences {
-        volume: if saved.volume.is_finite() {
-            saved.volume.clamp(0., 1.)
-        } else {
-            DEFAULT_PREFERENCES.volume
-        },
-        ..saved
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoundOutcome {
     Played,
@@ -118,47 +95,24 @@ pub fn play(event: AttentionKind, preferences: AgentSoundPreferences) -> SoundOu
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normalizes_out_of_range_saved_values_and_defaults_nothing_saved() {
-        let saved = AgentSoundPreferences {
-            enabled: true,
-            blocked: AgentSoundMode::Subtle,
-            completed: AgentSoundMode::None,
-            volume: 7.,
-        };
-        assert_eq!(effective(Some(saved)).volume, 1.);
-        let nan = AgentSoundPreferences {
-            enabled: false,
-            volume: f64::NAN,
-            ..DEFAULT_PREFERENCES
-        };
-        assert_eq!(
-            effective(Some(nan)),
-            AgentSoundPreferences {
-                enabled: false,
-                ..DEFAULT_PREFERENCES
-            }
-        );
-        assert_eq!(effective(None), DEFAULT_PREFERENCES);
-    }
+    use crate::settings::prefs::DEFAULT_SOUNDS;
 
     #[test]
     fn reports_disabled_playback_without_touching_an_audio_device() {
         let off = AgentSoundPreferences {
             enabled: false,
-            ..DEFAULT_PREFERENCES
+            ..DEFAULT_SOUNDS
         };
         assert_eq!(play(AttentionKind::Blocked, off), SoundOutcome::Disabled);
         let muted = AgentSoundPreferences {
             blocked: AgentSoundMode::None,
-            ..DEFAULT_PREFERENCES
+            ..DEFAULT_SOUNDS
         };
         assert_eq!(play(AttentionKind::Blocked, muted), SoundOutcome::Disabled);
         assert!(enabled_for(AttentionKind::Completed, &muted));
         let silent = AgentSoundPreferences {
             volume: 0.,
-            ..DEFAULT_PREFERENCES
+            ..DEFAULT_SOUNDS
         };
         assert!(!enabled_for(AttentionKind::Completed, &silent));
     }

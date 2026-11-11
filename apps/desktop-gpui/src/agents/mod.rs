@@ -30,7 +30,6 @@ use desktop_core::{
     platform::AppPaths,
 };
 use gpui_kit::{App, AppContext, Entity, Global, base::Root};
-use serde_json::json;
 
 use crate::{
     app::Core,
@@ -41,7 +40,6 @@ use crate::{
         controller::{ConnectionController, ConnectionEvent},
         helper_upgrade::{HelperOperation, HelperUpgradeState},
         host_links::HostLink,
-        host_profiles::host_letter,
     },
     terminal::integration::{
         agents::PaneActivity,
@@ -49,6 +47,7 @@ use crate::{
     },
 };
 
+use crate::workspaces::agents::{AgentPresence, AgentShell, RowAgent, WindowAgents};
 use list::{AgentListRow, AgentLocation, build_agent_rows, jump_target, unread_count};
 use model::EventScope;
 use notify::AgentFocus;
@@ -94,7 +93,7 @@ pub fn start(
     let activations = activation::ActivationQueue::default();
     let notifications = NativeNotifications::new(Arc::new(activations.clone()), data_dir);
     let effects = Rc::new(NativeEffects {
-        notifications,
+        notifications: notifications.clone(),
         app_state: app_state.clone(),
     });
     let saved = load_app_state(&app_state);
@@ -106,6 +105,31 @@ pub fn start(
         }
         runtime
     });
+    // Settings asks this notifier, the one whose clicks are routed, and offers
+    // this runtime's setup.
+    crate::settings::set_notifier(notifications.clone(), cx);
+    crate::settings::set_agent_setup(
+        crate::settings::AgentSetup {
+            status: Rc::new({
+                let runtime = runtime.downgrade();
+                move |cx| {
+                    runtime
+                        .upgrade()
+                        .map(|runtime| setup_status(runtime.read(cx)))
+                        .unwrap_or_default()
+                }
+            }),
+            set_up: Rc::new({
+                let runtime = runtime.downgrade();
+                move |_, cx| {
+                    runtime
+                        .update(cx, |runtime, cx| runtime.offer_setup(cx))
+                        .ok();
+                }
+            }),
+        },
+        cx,
+    );
     cx.set_global(Agents {
         runtime: runtime.clone(),
         controller: controller.clone(),
@@ -141,8 +165,11 @@ pub fn start(
         }
     })
     .detach();
-    cx.observe(&runtime, |_, cx| publish_row_commands(cx))
-        .detach();
+    cx.observe(&runtime, |_, cx| {
+        publish_shell(cx);
+        publish_row_commands(cx);
+    })
+    .detach();
     activation::poll(activations, cx);
     sync(&controller, &runtime, cx);
 }
@@ -253,53 +280,89 @@ fn sync(controller: &Entity<ConnectionController>, runtime: &Entity<AgentRuntime
     navigate_pending(cx);
 }
 
-/// The host's letter, drawn only when more than one host is shown.
-fn host_marks(controller: &ConnectionController) -> Vec<(String, String, String)> {
-    let shown = controller.links().count();
-    controller
-        .links()
-        .map(|link| {
-            let profile = controller
-                .profiles()
-                .iter()
-                .find(|profile| profile.id == link.profile_id);
-            let label =
-                profile.map_or_else(|| link.profile_id.clone(), |profile| profile.label.clone());
-            let letter = match profile {
-                Some(profile) if shown > 1 => host_letter(profile),
-                _ => String::new(),
-            };
-            (link.profile_id.clone(), label, letter)
-        })
-        .collect()
+/// What Settings says about "Set up agent status…" for the host on screen.
+fn setup_status(runtime: &AgentRuntime) -> crate::settings::AgentSetupStatus {
+    let active = &runtime.inputs.focus.host_profile_id;
+    crate::settings::AgentSetupStatus {
+        available: runtime.setup_offerable(),
+        reports: wiring::host_hook_wiring(runtime.adapters(active)).reports,
+        connected: runtime.active_scope().is_some(),
+    }
 }
 
-/// The sidebar's workspace order across hosts, as `mergeHostRows`: every host's
-/// pinned workspaces, then every host's unpinned ones, each in tmux's order.
-fn workspace_order(controller: &ConnectionController) -> Vec<(String, String, bool)> {
-    let mut order = Vec::new();
-    for pinned in [true, false] {
-        for link in controller.links() {
-            let mut sessions: Vec<_> = link
-                .host_state
-                .snapshot
-                .sessions
-                .iter()
-                .filter(|session| session.pinned == pinned)
-                .collect();
-            sessions.sort_by_key(|session| session.order);
-            order.extend(
-                sessions
-                    .into_iter()
-                    .map(|session| (link.profile_id.clone(), session.id.clone(), pinned)),
+/// How many agents a workspace row lists before it counts the rest.
+const WORKSPACE_ROW_AGENT_LIMIT: usize = 3;
+
+/// What the workspace rows and the tab strip show, rebuilt whole from the
+/// runtime's records. The runtime keeps only each shown host's current
+/// connection and server, so a reconnect leaves nothing stale behind here.
+fn publish_shell(cx: &mut App) {
+    let Some(runtime) = cx
+        .try_global::<Agents>()
+        .map(|agents| agents.runtime.clone())
+    else {
+        return;
+    };
+    let shell = agent_shell_from(runtime.read(cx));
+    if cx.try_global::<AgentShell>() != Some(&shell) {
+        cx.set_global(shell);
+    }
+}
+
+/// Presence is only ever `Present`: a window without an agent stays
+/// `Unknown`, because no snapshot is yet paired with the topology it covered.
+pub(crate) fn agent_shell_from(runtime: &AgentRuntime) -> AgentShell {
+    let mut shell = AgentShell::default();
+    for host in &runtime.inputs.shown {
+        let adapters = runtime.adapters(host);
+        let mut agents = runtime.agents(host);
+        agents.sort_by(|left, right| model::compare_agents(left, right));
+        let rollups = model::derive_rollups(agents.iter().copied());
+        for agent in agents.iter().filter(|agent| !agent.session_id.is_empty()) {
+            let state = model::display_state(agent);
+            let row = shell
+                .workspaces
+                .entry((host.clone(), agent.session_id.clone()))
+                .or_default();
+            if row.agents.len() < WORKSPACE_ROW_AGENT_LIMIT {
+                row.agents.push(RowAgent {
+                    id: agent.id.clone(),
+                    adapter_id: agent.adapter_id.clone(),
+                    name: labels::agent_session_label(agent, adapters),
+                    state,
+                });
+            } else {
+                row.overflow += 1;
+            }
+            if list::needs_attention(state) {
+                row.unread += 1;
+            }
+        }
+        for ((_, session), row) in shell
+            .workspaces
+            .iter_mut()
+            .filter(|((owner, _), _)| owner == host)
+        {
+            let rollup = rollups.by_workspace.get(session);
+            row.working = rollup.is_some_and(|rollup| rollup.working > 0);
+            row.state = rollup.and_then(|rollup| rollup.state);
+        }
+        for (window, rollup) in rollups.by_window {
+            shell.windows.insert(
+                (host.clone(), window),
+                WindowAgents {
+                    attention: rollup.state.zip(rollup.adapter_id),
+                    presence: AgentPresence::Present,
+                },
             );
         }
     }
-    order
+    shell
 }
 
 /// Every shown host's agents as list rows, and the subset the section lists
 /// under the pinned-only filter. The bell and the jump read the whole list.
+/// The workspace order, the host names and the filter are the sidebar's own.
 pub fn rows(
     cx: &App,
     mode: AgentSortMode,
@@ -309,60 +372,41 @@ pub fn rows(
         return (Vec::new(), Vec::new());
     };
     let (controller, runtime) = (agents.controller.read(cx), agents.runtime.read(cx));
-    let marks = host_marks(controller);
-    let order = workspace_order(controller);
-    // The pinned-only filter keeps the workspace on screen, on the active host only.
-    let on_screen = controller
-        .active_link()
-        .and_then(active_window_id)
-        .map(|(session, _)| (controller.active_profile_id(), session));
-    let visible: Vec<_> = order
-        .iter()
-        .filter(|(host, session, pinned)| {
-            *pinned
-                || on_screen
-                    .as_ref()
-                    .is_some_and(|(active, id)| active == host && id == session)
-        })
-        .collect();
+    let workspaces = crate::workspaces::current(cx);
+    let workspaces = workspaces.as_ref().map(|workspaces| workspaces.read(cx));
+    let order = workspaces.map_or_else(Vec::new, |workspaces| workspaces.rows(false, cx));
+    let hosts = workspaces.map_or_else(Vec::new, |workspaces| workspaces.hosts(cx));
+    // The host's letter is drawn only when more than one host is shown.
+    let letters = hosts.iter().filter(|host| host.shown).count() > 1;
     let locate = |agent: &model::AgentRecord| {
-        let link = controller.link(&agent.host_profile_id);
-        let snapshot = link.map(|link| &link.host_state.snapshot);
-        let window = snapshot.and_then(|snapshot| {
-            snapshot
+        let window = controller.link(&agent.host_profile_id).and_then(|link| {
+            link.host_state
+                .snapshot
                 .windows
                 .iter()
                 .find(|window| window.id == agent.window_id)
         });
-        let session = snapshot.and_then(|snapshot| {
-            snapshot
-                .sessions
-                .iter()
-                .find(|session| session.id == agent.session_id)
+        let position = order.iter().position(|row| {
+            row.host_profile_id == agent.host_profile_id && row.session.id == agent.session_id
         });
-        let (label, letter) = marks
+        let host = hosts
             .iter()
-            .find(|(id, ..)| *id == agent.host_profile_id)
-            .map_or_else(
-                || (agent.host_profile_id.clone(), String::new()),
-                |(_, label, letter)| (label.clone(), letter.clone()),
-            );
+            .find(|host| host.profile_id == agent.host_profile_id);
         AgentLocation {
-            workspace_order: order
-                .iter()
-                .position(|(host, session, _)| {
-                    *host == agent.host_profile_id && *session == agent.session_id
-                })
-                .unwrap_or(usize::MAX),
+            workspace_order: position.unwrap_or(usize::MAX),
             workspace_name: if agent.session_name.is_empty() {
                 "unknown workspace".into()
             } else {
                 agent.session_name.clone()
             },
-            host_label: label,
-            host_letter: letter,
+            host_label: host
+                .map_or_else(|| agent.host_profile_id.clone(), |host| host.label.clone()),
+            host_letter: host
+                .filter(|_| letters)
+                .map(|host| host.letter.clone())
+                .unwrap_or_default(),
             tab_index: window.map(|window| window.index),
-            workspace_pinned: session.is_some_and(|session| session.pinned),
+            workspace_pinned: position.is_some_and(|index| order[index].pinned),
             tab_pinned: window.is_some_and(|window| window.pinned),
         }
     };
@@ -384,10 +428,13 @@ pub fn rows(
         runtime.now_ms(),
     );
     let listed = if pinned_only {
+        // The workspaces the sidebar lists: pinned ones and the one on screen.
+        let visible = workspaces.map_or_else(Vec::new, |workspaces| workspaces.rows(true, cx));
         all.iter()
             .filter(|row| {
-                visible.iter().any(|(host, session, _)| {
-                    *host == row.agent.host_profile_id && *session == row.agent.session_id
+                visible.iter().any(|workspace| {
+                    workspace.host_profile_id == row.agent.host_profile_id
+                        && workspace.session.id == row.agent.session_id
                 })
             })
             .cloned()
@@ -398,10 +445,8 @@ pub fn rows(
     (all, listed)
 }
 
-/// Every shown host's rows, unfiltered, in the saved order: what the bell
-/// counts and the jump searches.
-/// Every row, unfiltered. The bell and the jump rank by `compare_agents`,
-/// a total order, so the list's sort mode does not matter here.
+/// Every row, unfiltered: what the bell counts and the jump searches. They
+/// rank by `compare_agents`, a total order, so the sort mode does not matter.
 fn all_rows(cx: &App) -> Vec<AgentListRow> {
     rows(cx, AgentSortMode::Status, false).0
 }
@@ -443,8 +488,7 @@ pub fn open_row(row: &AgentListRow, cx: &mut App) {
             ),
         );
     }
-    let source = format!("Agent {}", agent.display_name);
-    if let Err(reason) = open_pane(&agent.host_profile_id, &agent.pane_id, &source, cx) {
+    if let Err(reason) = open_pane(&agent.host_profile_id, &agent.pane_id, cx) {
         report(
             cx,
             format!(
@@ -455,54 +499,28 @@ pub fn open_row(row: &AgentListRow, cx: &mut App) {
     }
 }
 
-/// Puts `pane_id` on screen: its host made active, its window selected, and
-/// tmux told to focus it. Errors with why the pane is not there.
-pub fn open_pane(
-    profile_id: &str,
-    pane_id: &str,
-    source: &str,
-    cx: &mut App,
-) -> Result<(), String> {
+/// Puts `pane_id` on screen through the shell's navigation: its host made
+/// active, its workspace and window selected, and the pane focused. Errors
+/// with why the pane is not there.
+pub fn open_pane(profile_id: &str, pane_id: &str, cx: &mut App) -> Result<(), String> {
     let Some(agents) = cx.try_global::<Agents>() else {
         return Err("agents are not running".into());
     };
-    let (controller, runtime) = (agents.controller.clone(), agents.runtime.clone());
-    let (pane, client_id, server) = {
-        let controller = controller.read(cx);
+    {
+        let controller = agents.controller.read(cx);
         let link = controller
             .link(profile_id)
             .ok_or("its host is no longer shown")?;
-        let pane = match resolve_terminal_destination(&link.host_state.snapshot.panes, pane_id) {
-            PaneDestination::Target(pane) => pane.clone(),
-            PaneDestination::Unavailable(reason) => return Err(reason),
-        };
-        (
-            pane,
-            link.client_id.clone(),
-            link.host_state.server_identity.clone(),
-        )
-    };
-    controller.update(cx, |controller, cx| {
-        controller.select_window(profile_id, &pane.session_id, &pane.window_id, cx);
-    });
-    let (Some(client_id), Some(server)) = (client_id, server) else {
-        return Ok(());
-    };
-    let action = json!({
-        "kind": "focusPane",
-        "session_id": pane.session_id,
-        "window_id": pane.window_id,
-        "pane_id": pane.id,
-        "expected_server_identity": server,
-    });
-    let answer = runtime.read(cx).transport().tmux_action(client_id, action);
-    let source = source.to_owned();
-    cx.spawn(async move |cx| {
-        if let Err(error) = answer.await {
-            cx.update(|cx| report(cx, format!("{source} could not be focused: {error}")));
+        if let PaneDestination::Unavailable(reason) =
+            resolve_terminal_destination(&link.host_state.snapshot.panes, pane_id)
+        {
+            return Err(reason);
         }
-    })
-    .detach();
+    }
+    let workspaces = crate::workspaces::current(cx).ok_or("no window is open")?;
+    workspaces.update(cx, |workspaces, cx| {
+        workspaces.select_pane(profile_id, pane_id, cx)
+    });
     Ok(())
 }
 
@@ -562,7 +580,7 @@ fn navigate_pending(cx: &mut App) {
             })
     });
     if present {
-        if let Err(reason) = open_pane(&pending.profile_id, &pending.pane_id, &pending.source, cx) {
+        if let Err(reason) = open_pane(&pending.profile_id, &pending.pane_id, cx) {
             report(
                 cx,
                 format!(
