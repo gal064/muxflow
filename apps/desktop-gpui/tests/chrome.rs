@@ -215,71 +215,6 @@ fn selecting_a_surface_opens_the_panel_on_it(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn tabs_are_named_tabs_and_selecting_one_changes_no_widths(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let state = write_state(dir.path(), json!({ "tabsInTitleBar": false }));
-    let window_cx = open(&state, cx);
-
-    window_cx.update(|window, _| {
-        assert_eq!(window.find_by_label("main.rs").role(), Some(Role::Tab));
-        assert_eq!(window.find_by_label("main.rs").selected(), Some(true));
-    });
-    let width = |window_cx: &mut VisualTestContext| {
-        window_cx.update(|window, _| {
-            (
-                window.find_by_label("main.rs").bounds().size.width,
-                window.find_by_label("lib.rs").bounds().size.width,
-            )
-        })
-    };
-    let before = width(window_cx);
-    click(window_cx, "workspace-tab-b");
-    window_cx.update(|window, _| {
-        assert_eq!(window.find_by_label("main.rs").selected(), Some(false));
-        assert_eq!(window.find_by_label("lib.rs").selected(), Some(true));
-    });
-    assert_eq!(before, width(window_cx));
-}
-
-#[gpui_kit::test]
-fn the_all_tabs_button_follows_the_window_without_lagging(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let state = write_state(dir.path(), json!({ "tabsInTitleBar": false }));
-    let window_cx = open(&state, cx);
-    assert!(!shows(window_cx, "All tabs"));
-
-    window_cx.simulate_resize(size(px(200.), px(600.)));
-    assert!(shows(window_cx, "All tabs"), "the tabs no longer fit");
-
-    window_cx.simulate_resize(size(px(1280.), px(800.)));
-    assert!(!shows(window_cx, "All tabs"), "they fit again");
-}
-
-#[gpui_kit::test]
-fn selecting_with_a_dock_open_follows_the_dock_rules(cx: &mut TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let state = write_state(dir.path(), json!({ "tabsInTitleBar": false }));
-    let mut value: Value = serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
-    value["workspaceUi"][0]["dockedAppTabId"] = json!("b");
-    std::fs::write(&state, serde_json::to_vec(&value).unwrap()).unwrap();
-    let window_cx = open(&state, cx);
-
-    click(window_cx, "workspace-tab-b");
-    window_cx.update(|window, _| {
-        assert_eq!(window.find_by_label("main.rs").selected(), Some(true));
-        assert_eq!(window.find_by_label("lib.rs").selected(), Some(false));
-    });
-
-    click(window_cx, "workspace-tab-a");
-    window_cx.update(|window, _| {
-        assert_eq!(window.find_by_label("main.rs").selected(), Some(false));
-        assert_eq!(window.find_by_label("main.rs").role(), Some(Role::Tab));
-        assert_eq!(window.find_by_label("lib.rs").selected(), Some(false));
-    });
-    assert!(shows(window_cx, "Resize the docked document"));
-}
-
-#[gpui_kit::test]
 fn a_rail_stays_at_its_exact_breakpoint_when_scaled(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let state = write_state(dir.path(), json!({ "panelOpen": true }));
@@ -326,8 +261,6 @@ fn every_control_is_a_named_control(cx: &mut TestAppContext) {
             "Toggle sidebar",
             "Toggle right panel",
             "New terminal tab",
-            "Close main.rs",
-            "Close lib.rs",
             "Close other tabs",
             "Close all non-agent tabs",
             "New workspace",

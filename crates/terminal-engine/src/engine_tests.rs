@@ -465,6 +465,18 @@ fn says_nothing_about_an_ordinary_handshake() {
 }
 
 #[test]
+fn a_reveal_the_host_answers_over_the_screen_already_held_is_not_void() {
+    let mut host = Host::connected();
+    host.shown_pane(1, "IDLE PROMPT");
+    host.hide_and_remount();
+    host.resource(|_| {});
+    host.answer_last_visibility(Ok(()));
+    host.advance(Duration::from_secs(20));
+    assert_eq!(host.incidents("pane.revealVoid").len(), 0);
+    assert_eq!(host.seed_requests(), 0);
+    assert_eq!(host.screen(), "IDLE PROMPT");
+}
+#[test]
 fn takes_its_timers_with_it_when_the_pane_unmounts_first() {
     let mut host = Host::connected();
     host.mount();
