@@ -13,7 +13,6 @@ use std::{
 
 use desktop_core::notifications::{ActivationSink, resolve_notification_route};
 use gpui_kit::{App, Global};
-use regex::Regex;
 use serde_json::{Value, json};
 
 use crate::terminal::integration::routing::{
@@ -25,6 +24,9 @@ use super::{Agents, model::Generation, report, wire::RequestScope};
 
 /// How often a click is looked for.
 const POLL: Duration = Duration::from_millis(250);
+/// How long the shell has to put a clicked pane on screen before the route is
+/// taken as stale.
+const FOCUS_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Default)]
 pub struct ActivationQueue(Arc<Mutex<(bool, VecDeque<Value>)>>);
@@ -109,15 +111,6 @@ impl Route {
             "attentionGeneration": self.attention_generation.to_string(),
         })
     }
-}
-
-/// An error that says the topology moved under the focus request.
-pub fn is_stale_focus_error(error: &str) -> bool {
-    Regex::new(
-        r"(?i)stale|generation|no longer|not found|unknown (?:pane|window|session)|authoritative",
-    )
-    .expect("valid pattern")
-    .is_match(error)
 }
 
 struct Pending {
@@ -250,45 +243,67 @@ pub fn activate(route: Route, retry_used: bool, cx: &mut App) {
         Ok(pane) => pane,
         Err(message) => return report(cx, message),
     };
-    controller.update(cx, |controller, cx| {
-        controller.select_window(&host, &pane.session_id, &pane.window_id, cx);
+    let Some(workspaces) = crate::workspaces::current(cx) else {
+        return;
+    };
+    // The shell's own move: workspace, window and pane, with its history.
+    workspaces.update(cx, |workspaces, cx| {
+        workspaces.select_pane(&host, &pane.id, cx)
     });
-    let focus = runtime.read(cx).transport().tmux_action(
-        captured.client_id.clone(),
-        json!({
-            "kind": "focusPane",
-            "session_id": pane.session_id,
-            "window_id": pane.window_id,
-            "pane_id": pane.id,
-            "expected_server_identity": captured.server_identity,
-        }),
-    );
+    let mut waited = Duration::ZERO;
     cx.spawn(async move |cx| {
-        let focused = focus.await;
-        cx.update(|cx| {
-            if let Err(error) = focused {
-                if !retry_used && is_stale_focus_error(&error) {
-                    queue_for_fresh_connection(route, true, cx);
-                    report(
-                        cx,
-                        "Notification topology changed while focusing; refreshing once before resolving the exact destination…".into(),
-                    );
-                    controller.update(cx, |controller, cx| controller.reconnect_host(&host, cx));
-                } else {
-                    report(cx, format!("Notification destination could not be focused: {error}"));
-                }
-                return;
-            }
+        let exact = loop {
+            cx.background_executor().timer(POLL).await;
+            let (arrived, exact) = cx.update(|cx| {
+                let controller = controller.read(cx);
+                let arrived = controller.active_profile_id() == host
+                    && controller.link(&host).is_some_and(|link| {
+                        super::active_window_id(link).is_some_and(|(session, window)| {
+                            session == pane.session_id && window == pane.window_id
+                        }) && link
+                            .host_state
+                            .snapshot
+                            .panes
+                            .iter()
+                            .any(|candidate| candidate.id == pane.id && candidate.active)
+                    });
+                let (_, exact) = active_scope(cx);
+                let exact = exact.filter(|exact| {
+                    exact.client_id == captured.client_id
+                        && exact.connection_epoch == captured.connection_epoch
+                        && exact.host_profile_id == captured.host_profile_id
+                        && exact.server_identity == captured.server_identity
+                });
+                (arrived, exact)
+            });
             // Only over the connection the route was resolved on.
-            let (_, exact) = active_scope(cx);
-            let Some(exact) = exact.filter(|exact| {
-                exact.client_id == captured.client_id
-                    && exact.connection_epoch == captured.connection_epoch
-                    && exact.host_profile_id == captured.host_profile_id
-                    && exact.server_identity == captured.server_identity
-            }) else {
+            let Some(exact) = exact else {
                 return;
             };
+            if arrived {
+                break exact;
+            }
+            waited += POLL;
+            if waited < FOCUS_WAIT {
+                continue;
+            }
+            // The topology moved under the move: resolve once more over a fresh
+            // connection, then give up.
+            cx.update(|cx| {
+                if retry_used {
+                    report(cx, "Notification destination could not be focused.".into());
+                    return;
+                }
+                queue_for_fresh_connection(route.clone(), true, cx);
+                report(
+                    cx,
+                    "Notification topology changed while focusing; refreshing once before resolving the exact destination…".into(),
+                );
+                controller.update(cx, |controller, cx| controller.reconnect_host(&host, cx));
+            });
+            return;
+        };
+        cx.update(|cx| {
             let seen = runtime.update(cx, |runtime, cx| {
                 runtime.mark_seen(exact, route.agent_id.clone(), route.attention_generation, None, cx)
             });
@@ -338,19 +353,6 @@ mod tests {
         assert_eq!(route.attention_generation, u64::MAX - 1);
         assert_eq!(route.to_json(), payload);
         assert_eq!(Route::parse(&json!({ "paneId": "%1" })), None);
-    }
-
-    #[test]
-    fn treats_a_moved_topology_as_stale_and_anything_else_as_final() {
-        for stale in [
-            "stale generation",
-            "pane %4 no longer exists",
-            "unknown pane",
-            "Not Found",
-        ] {
-            assert!(is_stale_focus_error(stale), "{stale}");
-        }
-        assert!(!is_stale_focus_error("permission denied"));
     }
 
     #[test]

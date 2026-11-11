@@ -20,7 +20,7 @@ pub mod wire;
 pub mod wiring;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::{rc::Rc, sync::Arc};
 
@@ -108,28 +108,7 @@ pub fn start(
     // Settings asks this notifier, the one whose clicks are routed, and offers
     // this runtime's setup.
     crate::settings::set_notifier(notifications.clone(), cx);
-    crate::settings::set_agent_setup(
-        crate::settings::AgentSetup {
-            status: Rc::new({
-                let runtime = runtime.downgrade();
-                move |cx| {
-                    runtime
-                        .upgrade()
-                        .map(|runtime| setup_status(runtime.read(cx)))
-                        .unwrap_or_default()
-                }
-            }),
-            set_up: Rc::new({
-                let runtime = runtime.downgrade();
-                move |_, cx| {
-                    runtime
-                        .update(cx, |runtime, cx| runtime.offer_setup(cx))
-                        .ok();
-                }
-            }),
-        },
-        cx,
-    );
+    publish_agent_setup(&runtime, cx);
     cx.set_global(Agents {
         runtime: runtime.clone(),
         controller: controller.clone(),
@@ -247,7 +226,11 @@ pub fn inputs(controller: &ConnectionController) -> RuntimeInputs {
     }
 }
 
-fn sync(controller: &Entity<ConnectionController>, runtime: &Entity<AgentRuntime>, cx: &mut App) {
+pub(crate) fn sync(
+    controller: &Entity<ConnectionController>,
+    runtime: &Entity<AgentRuntime>,
+    cx: &mut App,
+) {
     let (inputs, label, allowed, helper_install) = {
         let controller = controller.read(cx);
         let helper = controller.helper();
@@ -278,6 +261,32 @@ fn sync(controller: &Entity<ConnectionController>, runtime: &Entity<AgentRuntime
     });
     activation::resume_pending(cx);
     navigate_pending(cx);
+}
+
+/// Publishes "Set up agent status…" to Settings: its state, and the prompt.
+fn publish_agent_setup(runtime: &Entity<AgentRuntime>, cx: &mut App) {
+    crate::settings::set_agent_setup(
+        crate::settings::AgentSetup {
+            status: Rc::new({
+                let runtime = runtime.downgrade();
+                move |cx| {
+                    runtime
+                        .upgrade()
+                        .map(|runtime| setup_status(runtime.read(cx)))
+                        .unwrap_or_default()
+                }
+            }),
+            set_up: Rc::new({
+                let runtime = runtime.downgrade();
+                move |_, cx| {
+                    runtime
+                        .update(cx, |runtime, cx| runtime.offer_setup(cx))
+                        .ok();
+                }
+            }),
+        },
+        cx,
+    );
 }
 
 /// What Settings says about "Set up agent status…" for the host on screen.
@@ -315,8 +324,8 @@ pub(crate) fn agent_shell_from(runtime: &AgentRuntime) -> AgentShell {
     let mut shell = AgentShell::default();
     for host in &runtime.inputs.shown {
         let adapters = runtime.adapters(host);
-        let mut agents = runtime.agents(host);
-        agents.sort_by(|left, right| model::compare_agents(left, right));
+        // Loudest first, so each row lists its loudest few.
+        let agents = runtime.agents(host);
         let rollups = model::derive_rollups(agents.iter().copied());
         for agent in agents.iter().filter(|agent| !agent.session_id.is_empty()) {
             let state = model::display_state(agent);

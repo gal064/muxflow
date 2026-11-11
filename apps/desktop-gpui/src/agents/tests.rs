@@ -55,21 +55,17 @@ impl AgentTransport for Transport {
         self.0.requests.borrow_mut().push(command);
         futures::future::ready(answer).boxed()
     }
-
-    fn tmux_action(&self, _: String, _: Value) -> BoxFuture<'static, Result<Value, String>> {
-        futures::future::ready(Ok(json!({}))).boxed()
-    }
 }
 
 #[derive(Default)]
-struct Effects {
+pub(crate) struct Effects {
     shown: RefCell<Vec<AgentNativeNotification>>,
     played: RefCell<Vec<AttentionKind>>,
     decisions: RefCell<Vec<(String, HostSetupDecision)>>,
     now: Cell<u64>,
 }
 
-struct Recorded(Rc<Effects>);
+pub(crate) struct Recorded(pub(crate) Rc<Effects>);
 
 impl AgentEffects for Recorded {
     fn notify(
@@ -96,7 +92,7 @@ impl AgentEffects for Recorded {
     }
 }
 
-fn wire_agent(lifecycle: &str, attention: u64, kind: Option<&str>, seen: u64) -> Value {
+pub(crate) fn wire_agent(lifecycle: &str, attention: u64, kind: Option<&str>, seen: u64) -> Value {
     json!({
         "agentId": "agent-1", "adapterId": "claude-code", "nativeSessionId": "native",
         "displayName": "Claude",
@@ -113,7 +109,7 @@ fn wire_agent(lifecycle: &str, attention: u64, kind: Option<&str>, seen: u64) ->
     })
 }
 
-fn wire_adapter(wiring: &str) -> Value {
+pub(crate) fn wire_adapter(wiring: &str) -> Value {
     json!({
         "id": "claude-code", "displayName": "Claude Code", "supportsLaunch": true,
         "supportsResume": true, "supportsHooks": true, "supportsProcessDetection": true,
@@ -123,7 +119,11 @@ fn wire_adapter(wiring: &str) -> Value {
 }
 
 /// The snapshot a host answers `command` with, on the connection it came over.
-fn snapshot_answer(command: &AgentCommand, agents: Vec<Value>, adapters: Vec<Value>) -> Value {
+pub(crate) fn snapshot_answer(
+    command: &AgentCommand,
+    agents: Vec<Value>,
+    adapters: Vec<Value>,
+) -> Value {
     json!({ "snapshot": {
         "generation": "6", "acceptedGeneration": "6", "agents": agents,
         "authoritative": true, "notificationWatermark": "4", "connectionEpoch": command.connection_epoch,
@@ -685,4 +685,42 @@ fn the_shell_shows_the_current_servers_agents_and_nothing_after_it_changes(
         .runtime
         .read_with(cx, |runtime, _| super::agent_shell_from(runtime));
     assert_eq!(shell, crate::workspaces::agents::AgentShell::default());
+}
+
+#[gpui_kit::test]
+fn settings_offers_this_runtimes_agent_setup(cx: &mut TestAppContext) {
+    use crate::settings::{AgentSetupStatus, agent_setup};
+
+    let harness = Harness::new(cx, setup_host("notWired"));
+    cx.update(|cx| super::publish_agent_setup(&harness.runtime, cx));
+    let status =
+        |cx: &mut TestAppContext| cx.update(|cx| (agent_setup(cx).expect("published").status)(cx));
+    assert_eq!(
+        status(cx),
+        AgentSetupStatus {
+            available: false,
+            reports: false,
+            connected: false
+        }
+    );
+    harness.sync(cx, inputs(vec![scope(4, 1)]));
+    harness
+        .runtime
+        .update(cx, |runtime, cx| runtime.decline_setup(cx));
+    cx.run_until_parked();
+    assert!(!question_open(&harness, cx));
+    assert_eq!(
+        status(cx),
+        AgentSetupStatus {
+            available: true,
+            reports: false,
+            connected: true
+        }
+    );
+    // The button in Settings asks again, even after "Not now".
+    let set_up = cx.update(|cx| agent_setup(cx).expect("published").set_up);
+    let visual = cx.add_empty_window();
+    visual.update(|window, cx| set_up(window, cx));
+    cx.run_until_parked();
+    assert!(question_open(&harness, cx));
 }
