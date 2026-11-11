@@ -18,10 +18,8 @@ use gpui_kit::{
     prelude::*,
 };
 
-use crate::theme::{
-    self,
-    metrics::{RADIUS_PANEL, TYPE_ROW, ui},
-};
+use crate::theme::{self, metrics::ui};
+use crate::ui::dialog::{self, Action};
 
 const CONFIRMATION_WIDTH: f32 = 620.;
 
@@ -67,17 +65,12 @@ pub fn open_overlay(
         let palette = theme::palette(cx);
         let on_confirm = on_confirm.clone();
         let field = field.clone();
-        dialog
+        dialog::place(dialog::card(dialog, &palette), window)
             .entrance(DialogEntrance::None)
             .w(ui(width).to_pixels(window.rem_size()))
-            .margin_top(window.viewport_size().height * 0.12)
             .close_button(false)
             .overlay_closable(backdrop_closes)
-            .text_size(ui(TYPE_ROW))
             .p_0()
-            .bg(palette.chrome_raised)
-            .border_color(palette.chrome_border)
-            .rounded(ui(RADIUS_PANEL))
             .on_ok(move |_, window, cx| {
                 if field.is_focused(window) {
                     on_confirm(window, cx);
@@ -124,23 +117,22 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
         let palette = theme::palette(cx);
         let confirmation = confirmation.clone();
         let confirm = confirmation.clone();
-        let button = Button::new("confirmation-confirm")
-            .label(confirmation.confirm_label.clone())
-            .on_click(move |_, window, cx| {
-                window.close_dialog(cx);
-                (confirm.on_confirm)(window, cx);
-            });
-        let button = if confirmation.destructive {
-            button.danger()
-        } else {
-            button.primary()
-        };
-        alert
+        let button = dialog::button(
+            Button::new("confirmation-confirm")
+                .label(confirmation.confirm_label.clone())
+                .on_click(move |_, window, cx| {
+                    window.close_dialog(cx);
+                    (confirm.on_confirm)(window, cx);
+                }),
+            if confirmation.destructive {
+                Action::Danger
+            } else {
+                Action::Primary
+            },
+            &palette,
+        );
+        dialog::card(alert, &palette)
             .entrance(DialogEntrance::None)
-            .text_size(ui(TYPE_ROW))
-            .bg(palette.chrome_raised)
-            .border_color(palette.chrome_border)
-            .rounded(ui(RADIUS_PANEL))
             .w(ui(CONFIRMATION_WIDTH).to_pixels(window.rem_size()))
             .title(confirmation.title.clone())
             .description(confirmation.detail.clone())
@@ -153,12 +145,14 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
                     .w_full()
                     .justify_end()
                     .gap(ui(8.))
-                    .child(
+                    .child(dialog::button(
                         Button::new("confirmation-cancel")
                             .label("Cancel")
                             .track_focus(&cancel_focus)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
+                        Action::Plain,
+                        &palette,
+                    ))
                     .child(button),
             )
     });

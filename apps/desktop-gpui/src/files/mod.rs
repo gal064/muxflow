@@ -32,13 +32,7 @@ use desktop_core::app_state::{AppTabKind, DockSide, PersistedAppState};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Entity, Global, IntoElement, ParentElement, Styled, Task,
     WeakEntity, Window,
-    component::{
-        Sizable,
-        button::{Button, ButtonVariants},
-        h_flex,
-        notification::{Notification, NotificationType},
-        v_flex,
-    },
+    component::{button::Button, notification::Notification},
     div,
 };
 
@@ -50,8 +44,9 @@ use crate::{
         controller::{ConnectionController, ConnectionEvent},
     },
     git::model::StatusSnapshot,
+    notices,
     terminal::integration::transfers::InternalPathDrag,
-    theme::metrics::ui,
+    theme,
     ui::{chrome::PanelBodies, shell::Shell},
 };
 
@@ -365,56 +360,50 @@ pub fn download_notice(message: &str, cx: &App) -> Option<Notification> {
         .try_global::<Completion>()
         .filter(|completion| completion.message == message)?;
     let (message, destination) = (completion.message.clone(), completion.destination.clone());
-    Some(
-        Notification::new()
-            .with_type(NotificationType::Info)
-            .content(move |_, _, _| {
-                let act = |reveal: bool| {
-                    let destination = destination.clone();
-                    move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
-                        let Some(files) = cx.try_global::<Files>() else {
-                            return;
-                        };
-                        let transport = files.explorer.read(cx).transport();
-                        let result = if reveal {
-                            transport.reveal_download(destination.clone())
-                        } else {
-                            transport.open_download(destination.clone())
-                        };
-                        if let (Err(error), Some(controller)) = (result, files.controller.upgrade())
-                        {
-                            controller
-                                .update(cx, |controller, cx| controller.report_status(error, cx));
-                        }
-                    }
-                };
-                let reveal = reveal_label();
-                v_flex()
-                    .gap(ui(6.))
-                    .child(div().text_sm().child(message.clone()))
-                    .child(
-                        h_flex()
-                            .gap(ui(6.))
-                            .child(
-                                Button::new("download-notice-open")
-                                    .ghost()
-                                    .small()
-                                    .label("Open")
-                                    .accessibility_label(format!("Open {destination}"))
-                                    .on_click(act(false)),
-                            )
-                            .child(
-                                Button::new("download-notice-reveal")
-                                    .ghost()
-                                    .small()
-                                    .label(reveal)
-                                    .accessibility_label(format!("{reveal}: {destination}"))
-                                    .on_click(act(true)),
-                            ),
-                    )
+    let palette = theme::palette(cx);
+    Some(notices::card(
+        false,
+        &palette,
+        {
+            let message = message.clone();
+            move || {
+                div()
+                    .text_color(palette.chrome_dim)
+                    .child(message.clone())
                     .into_any_element()
-            }),
-    )
+            }
+        },
+        move |_| {
+            let act = |reveal: bool| {
+                let destination = destination.clone();
+                move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                    let Some(files) = cx.try_global::<Files>() else {
+                        return;
+                    };
+                    let transport = files.explorer.read(cx).transport();
+                    let result = if reveal {
+                        transport.reveal_download(destination.clone())
+                    } else {
+                        transport.open_download(destination.clone())
+                    };
+                    if let (Err(error), Some(controller)) = (result, files.controller.upgrade()) {
+                        controller.update(cx, |controller, cx| controller.report_status(error, cx));
+                    }
+                }
+            };
+            let reveal = reveal_label();
+            vec![
+                Button::new("download-notice-open")
+                    .label("Open")
+                    .accessibility_label(format!("Open {destination}"))
+                    .on_click(act(false)),
+                Button::new("download-notice-reveal")
+                    .label(reveal)
+                    .accessibility_label(format!("{reveal}: {destination}"))
+                    .on_click(act(true)),
+            ]
+        },
+    ))
 }
 
 // Seams.

@@ -86,6 +86,39 @@ fn image_source(images: &Images, uri: &SharedUri) -> ImageSource {
     }
 }
 
+static IMAGE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"!\[([^\]]*)\]\(\s*<?([^)\s>]*)>?[^)]*\)").expect("a valid pattern")
+});
+
+/// An image the preview will not show, as its alt text in a code span: a browser draws a
+/// blocked image as a box holding the alt text, where Kit's text view leaves blank
+/// space. Fenced code is left as written.
+fn show_blocked_images(markdown: &str) -> String {
+    let mut fenced = false;
+    let mut out = String::with_capacity(markdown.len());
+    for line in markdown.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            fenced = !fenced;
+        }
+        if fenced {
+            out.push_str(line);
+            continue;
+        }
+        out.push_str(&IMAGE.replace_all(line, |found: &regex::Captures| {
+            if EMBEDDED_IMAGE.is_match(&found[2]) {
+                return found[0].to_owned();
+            }
+            let alt = found[1].replace('`', "");
+            if alt.trim().is_empty() {
+                String::new()
+            } else {
+                format!("`{}`", alt.trim())
+            }
+        }));
+    }
+    out
+}
+
 /// Whether a refresh must wait: replacing the text under a selection, or one
 /// being dragged out, would drop it.
 fn holds(selecting: bool, selected: &str) -> bool {
@@ -145,8 +178,9 @@ impl PreviewView {
         if holds(state.is_selecting(), &state.selected_text()) {
             return;
         }
-        self.text
-            .update(cx, |state, cx| state.set_text(&buffer.to_string(), cx));
+        self.text.update(cx, |state, cx| {
+            state.set_text(&show_blocked_images(&buffer.to_string()), cx)
+        });
         self.shown = Some(buffer);
         cx.notify();
     }
@@ -360,6 +394,9 @@ impl Render for PreviewView {
                     .scrollable(true)
                     // Tauri's preview had no syntax colors.
                     .code_block_highlighter(|_| Vec::new())
+                    // Kit labels a block with its language unless it has actions of its
+                    // own; Tauri's preview has no label.
+                    .code_block_actions(|_, _, _| div())
                     .image_source(move |uri| image_source(&images, uri))
                     .on_link_click(move |href: &SharedString, event: &ClickEvent, window, cx| {
                         let pressed = *pressed.lock().expect("the press is never poisoned");
@@ -412,6 +449,18 @@ mod tests {
     };
 
     const PIXEL: &str = "iVBORw0KGgo=";
+
+    #[test]
+    fn a_blocked_image_leaves_its_alt_text_and_an_embedded_one_stays() {
+        let embedded = "![dot](data:image/png;base64,iVBORw0KGgo=)";
+        let text = format!(
+            "![remote](https://example.com/a.png) and ![](x.png) then {embedded}\n```\n![in code](u)\n```\n"
+        );
+        assert_eq!(
+            show_blocked_images(&text),
+            format!("`remote` and  then {embedded}\n```\n![in code](u)\n```\n")
+        );
+    }
 
     #[test]
     fn headings_follow_the_stylesheet_scale() {

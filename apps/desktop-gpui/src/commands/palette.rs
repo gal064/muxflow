@@ -170,6 +170,9 @@ impl CommandPalette {
     }
 }
 
+/// A 13px line at `line-height: normal`.
+const PALETTE_INPUT_HEIGHT: f32 = 17.;
+
 pub fn open(window: &mut Window, cx: &mut App) {
     let palette = cx.new(|cx| CommandPalette::new(window, cx));
     let focus = palette.read(cx).input.focus_handle(cx);
@@ -248,6 +251,11 @@ impl Render for CommandPalette {
                                 .role(Role::ComboBox)
                                 .aria_label("Search commands")
                                 .appearance(false)
+                                // `.palette-input input { padding: 0 }`: the line, with no
+                                // field height of Kit's around it.
+                                .xsmall()
+                                .h(ui(PALETTE_INPUT_HEIGHT))
+                                .p_0()
                                 .text_size(ui(TYPE_MENU)),
                         ),
                     )

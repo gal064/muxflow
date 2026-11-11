@@ -75,6 +75,52 @@ fn python_additions() -> String {
 /// `this` and `super` read as the language's own names, not as variables.
 const SCRIPT_ADDITIONS: &str = "[(this) (super)] @variable.special\n";
 
+/// Monaco's Markdown colours headings, list markers and table pipes as keywords and links
+/// and task boxes as strings; the bundled queries give each its own capture, which the
+/// theme leaves as plain punctuation or one blue for every link. Renaming what they
+/// capture is a smaller change than a second query, and the table and task nodes are
+/// added after them because the bundled one captures neither.
+fn markdown_highlights(bundled: &str) -> String {
+    let mut query = bundled
+        .replace("@title", "@keyword")
+        .replace("@punctuation.list_marker", "@keyword")
+        // The first list of markers is the headings'; the quote marker stays quiet.
+        .replacen("] @punctuation.special", "] @keyword", 1);
+    query.push_str(
+        r#"
+(pipe_table_header "|" @keyword)
+(pipe_table_header (pipe_table_cell) @keyword)
+(pipe_table_delimiter_row) @keyword
+(pipe_table_row "|" @keyword)
+(task_list_marker_checked) @string
+(task_list_marker_unchecked) @string
+(info_string) @string
+"#,
+    );
+    query
+}
+
+/// The inline half: links read as strings, and a code span as the function colour.
+fn markdown_inline_highlights(bundled: &str) -> String {
+    bundled
+        .replace("@link_uri", "@string")
+        .replace("@link_text", "@string")
+        .replace("@text.code.span", "@function")
+}
+
+/// Monaco's Rust grammar spells the primitive types as keywords and colours no call or
+/// definition name, where the bundled query marks both.
+fn rust_highlights(bundled: &str) -> String {
+    bundled
+        .replace(
+            "(primitive_type) @type.builtin",
+            "(primitive_type) @keyword",
+        )
+        .replace("@function.macro", "@none")
+        .replace("@function.method", "@none")
+        .replace("@function", "@none")
+}
+
 /// Registers the additions over the bundled grammars, once per process: the
 /// registry is process-wide, and a second pass would prepend them twice.
 pub fn register() {
@@ -101,6 +147,16 @@ fn register_additions() {
     // The bundled TSX query is TypeScript's extension of the JavaScript one,
     // which on its own leaves JSX and every plain name uncoloured.
     prepend("tsx", SCRIPT_ADDITIONS, Some("javascript"));
+    for (name, rewrite) in [
+        ("rust", rust_highlights as fn(&str) -> String),
+        ("markdown", markdown_highlights),
+        ("markdown_inline", markdown_inline_highlights),
+    ] {
+        if let Some(mut config) = registry.language(name) {
+            config.highlights = rewrite(&config.highlights).into();
+            registry.register(name, &config);
+        }
+    }
 }
 
 /// The bundled grammar a name resolves to, for tests and the surface.
@@ -203,7 +259,7 @@ mod tests {
                 "keyword",
             ),
             ("json", "{\"a\": 1}", "1", "number"),
-            ("markdown", "# Title", "#", "punctuation"),
+            ("markdown", "# Title", "#", "keyword"),
             ("python", "def main():\n    pass", "def", "keyword"),
             ("rust", "fn main() {}", "fn", "keyword"),
             ("toml", "name = \"x\"", "\"x\"", "string"),
@@ -216,6 +272,50 @@ mod tests {
             assert!(
                 name.starts_with(expected),
                 "{language}: {token:?} is {name}, expected {expected}"
+            );
+        }
+    }
+
+    /// What Monaco colours in the Markdown source: headings, list markers, table pipes,
+    /// links and task boxes; quotes and fences stay quiet.
+    #[test]
+    fn markdown_source_is_coloured_as_monaco_colours_it() {
+        let doc = "# Title\n\n- item\n- [x] done\n\n> quoted\n\n| Name | Value |\n|------|-------|\n| a | 1 |\n\nsee [guide](docs/guide.md) and `code`\n\n```rust\nfn main() {}\n```\n";
+        for (token, expected) in [
+            ("#", "keyword"),
+            ("Title", "keyword"),
+            ("-", "keyword"),
+            ("[x]", "string"),
+            ("|------|-------|", "keyword"),
+            ("guide", "string"),
+            ("docs/guide.md", "string"),
+            ("`code`", "function"),
+            ("rust", "string"),
+        ] {
+            let found = captures("markdown", doc);
+            assert!(
+                found
+                    .iter()
+                    .any(|(text, name)| text == token && name.starts_with(expected)),
+                "{token:?} should be {expected}: {found:?}"
+            );
+        }
+        assert!(
+            capture_of("markdown", doc, ">").starts_with("punctuation"),
+            "a quote marker stays quiet"
+        );
+    }
+
+    #[test]
+    fn rust_primitive_types_are_keywords_and_names_are_plain() {
+        let code = "fn main() { let a: u32 = f(1); }";
+        assert_eq!(capture_of("rust", code, "u32"), "keyword");
+        let all = captures("rust", code);
+        for name in ["main", "f"] {
+            assert!(
+                all.iter()
+                    .all(|(text, capture)| text != name || capture == "none"),
+                "{name} is plain: {all:?}"
             );
         }
     }

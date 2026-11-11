@@ -39,6 +39,7 @@ pub struct SurfaceError {
     summary: Option<String>,
     role: Option<Role>,
     dismiss: Option<Dismiss>,
+    bare: bool,
 }
 
 impl SurfaceError {
@@ -50,6 +51,7 @@ impl SurfaceError {
             summary: None,
             role: Some(Role::Alert),
             dismiss: None,
+            bare: false,
         }
     }
 
@@ -65,6 +67,13 @@ impl SurfaceError {
     /// notice: an alert inside an alert would be read twice.
     pub fn no_role(mut self) -> Self {
         self.role = None;
+        self
+    }
+
+    /// Without the padding, wash and size of its own, for a card that is already the
+    /// container: `.toast-body`.
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
         self
     }
 
@@ -131,12 +140,14 @@ impl RenderOnce for SurfaceError {
             .flex_col()
             .items_start()
             .gap(ui(4.))
-            .px(ui(8.))
-            .py(ui(6.))
-            .rounded(ui(RADIUS_CONTROL))
-            .bg(palette.danger_wash)
             .text_color(palette.danger_ink)
-            .text_size(ui(TYPE_SECONDARY));
+            .when(!self.bare, |this| {
+                this.px(ui(8.))
+                    .py(ui(6.))
+                    .rounded(ui(RADIUS_CONTROL))
+                    .bg(palette.danger_wash)
+                    .text_size(ui(TYPE_SECONDARY))
+            });
         let toggle = detail.clone().map(|detail| {
             Button::new(SharedString::from(format!("{id}-toggle")))
                 .ghost()
