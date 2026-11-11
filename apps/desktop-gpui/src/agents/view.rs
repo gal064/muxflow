@@ -316,6 +316,8 @@ fn rename_tab(row: &AgentListRow, window: &mut Window, cx: &mut App) {
 pub struct ActiveRoot {
     pub path: String,
     pub token: String,
+    /// Whether the root is inside a Git worktree, which the Git panel follows.
+    pub git_worktree: bool,
 }
 
 impl gpui_kit::Global for ActiveRoot {}
