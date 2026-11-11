@@ -384,7 +384,7 @@ impl TerminalSurface {
             let pane = cx.new(|cx| {
                 TerminalPane::new(id.clone(), pane_link, pane_metrics, pane_probes, window, cx)
             });
-            link.update(cx, |link, _| link.mount(&id, &pane, size));
+            link.update(cx, |link, cx| link.mount(&id, &pane, size, cx));
             self.pending_focus = true;
             let focused = {
                 let id = id.clone();

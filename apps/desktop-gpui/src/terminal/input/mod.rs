@@ -40,7 +40,7 @@ use crate::connection_ui::backend::TerminalBackend;
 
 use super::link::LinkEvent;
 use super::pane::TerminalPane;
-use latency::{EchoLagProbe, EchoOutput, InputLatency, LinkCounters, Segment, record_perf};
+use latency::{EchoLagProbe, EchoOutput, InputLatency, LinkCounters, Segment};
 use mouse::{MouseReport, ReportAction, ReportButton, encode_mouse};
 use policy::{ClipboardAlias, KeyContext, terminal_clipboard_alias, translate_terminal_key};
 
@@ -140,7 +140,7 @@ impl PaneInput {
         self.echo_timeout = None;
         journal.latency.sample(Segment::EndToEnd, lag);
         if let Some(echo) = outcome.echo {
-            record_perf("perf.echo", echo);
+            crate::perf::record("perf.echo", echo);
         }
         let incident = outcome.incident?;
         let lag_ms = incident.1["lagMs"].as_u64();
@@ -175,6 +175,10 @@ pub(super) fn send(
     paste: bool,
     cx: &mut Context<TerminalPane>,
 ) -> Result<(), String> {
+    // Refused whole rather than split: tmux would run a partial command.
+    if !paste && bytes.len() > tmux_control::MAX_INPUT_REQUEST_BYTES {
+        return Err(oversized_input(bytes.len()));
+    }
     let now = Instant::now();
     let (backend, client_id, connection_epoch) = pane.link().update(cx, |link, _| {
         link.note_input();
@@ -243,6 +247,13 @@ fn send_user_input(
         pane.link()
             .update(cx, |_, cx| cx.emit(LinkEvent::Status(error)));
     }
+}
+
+/// The Tauri app's words for typed input over the atomic limit.
+fn oversized_input(bytes: usize) -> String {
+    format!(
+        "Terminal input is {bytes} bytes; the 1 MiB atomic input limit prevents sending a partial commit."
+    )
 }
 
 /// Typing, by key or by IME commit: the input the echo probe measures.
@@ -604,5 +615,16 @@ pub fn paint(
     {
         pane.read(cx).input.last_paint_sample.set(Some(now));
         InputLatency::global(cx).sample(Segment::Paint, now.saturating_duration_since(since));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn oversized_input_says_what_the_tauri_app_said() {
+        assert_eq!(
+            super::oversized_input(2_000_000),
+            "Terminal input is 2000000 bytes; the 1 MiB atomic input limit prevents sending a partial commit."
+        );
     }
 }

@@ -18,6 +18,7 @@ use muxflow_gpui::{
         TerminalLink, TerminalPane,
         cell_metrics::CellMetrics,
         link::{LinkEvent, POLL_ACTIVE},
+        paint_gate::wait_for_pane_paint,
     },
     theme,
 };
@@ -188,9 +189,9 @@ fn every_flooded_frame_earns_its_credit_and_a_resize_lands_mid_flood(cx: &mut Te
         columns: 80,
         rows: 24,
     };
-    link.update(visual, |link, _| {
+    link.update(visual, |link, cx| {
         link.set_client(Some("client-1".into()), 1);
-        link.mount("%1", &pane, size);
+        link.mount("%1", &pane, size, cx);
     });
     let mut expected = (0_u64, 0_u64);
     let mut send = |frame: Vec<u8>, visual: &mut gpui_kit::VisualTestContext| {
@@ -254,6 +255,22 @@ fn metrics() -> Rc<CellMetrics> {
     })
 }
 
+/// Whether the pane's paint gate has opened. The timeout is far past anything
+/// a test waits, so only a paint opens it.
+fn gate_opened(cx: &mut gpui_kit::VisualTestContext) -> Rc<std::cell::Cell<bool>> {
+    let opened = Rc::new(std::cell::Cell::new(false));
+    let done = opened.clone();
+    cx.update(|_, cx| {
+        let wait = wait_for_pane_paint("qa\0%1", Duration::from_secs(3600), cx);
+        cx.spawn(async move |_| {
+            wait.await;
+            done.set(true);
+        })
+        .detach();
+    });
+    opened
+}
+
 fn text_of(pane: &TerminalPane, row: usize) -> String {
     pane.row_spec(row)
         .map(|spec| {
@@ -280,9 +297,9 @@ fn a_mounted_pane_paints_in_full_then_only_the_rows_that_changed(cx: &mut TestAp
         let probes = link_for_pane.read(cx).probes();
         TerminalPane::new("%1".into(), link_for_pane, metrics(), probes, window, cx)
     });
-    link.update(visual, |link, _| {
+    link.update(visual, |link, cx| {
         link.set_client(Some("client-1".into()), 1);
-        link.mount("%1", &pane, size);
+        link.mount("%1", &pane, size, cx);
     });
     link.read_with(visual, |link, _| {
         link.forward_frame(epoch_frame(7));
@@ -355,18 +372,24 @@ fn a_remounted_pane_paints_its_retained_screen_without_new_output(cx: &mut TestA
         let probes = link_for_pane.read(cx).probes();
         TerminalPane::new("%1".into(), link_for_pane, metrics(), probes, window, cx)
     });
-    link.update(visual, |link, _| {
+    link.update(visual, |link, cx| {
         link.set_client(Some("client-1".into()), 1);
-        link.mount("%1", &first, size);
+        link.mount("%1", &first, size, cx);
     });
+    // Port of `panePaintOrdering.test.tsx`: the mount itself arms the gate, so
+    // whatever waits on this pane in the same switch waits for its screen.
+    let first_paint = gate_opened(visual);
+    visual.run_until_parked();
     link.read_with(visual, |link, _| link.forward_frame(epoch_frame(7)));
     wait_until(visual, |_| !fake.0.lock().unwrap().seeds.is_empty());
     link.read_with(visual, |link, _| {
         link.forward_frame(seed_frame("%1", 1, 1, b"\x1b[2J\x1b[Hkept"));
     });
+    assert!(!first_paint.get(), "opened before the seed painted");
     wait_until(visual, |cx| {
         first.read_with(cx, |pane, _| text_of(pane, 0) == "kept")
     });
+    wait_until(visual, |_| first_paint.get());
     link.update(visual, |link, _| link.unmount("%1"));
     wait_until(visual, |_| {
         fake.0
@@ -381,13 +404,20 @@ fn a_remounted_pane_paints_its_retained_screen_without_new_output(cx: &mut TestA
         let probes = link_for_pane.read(cx).probes();
         TerminalPane::new("%1".into(), link_for_pane, metrics(), probes, window, cx)
     });
-    link.update(visual, |link, _| link.mount("%1", &retained, size));
+    link.update(visual, |link, cx| link.mount("%1", &retained, size, cx));
+    let remount_paint = gate_opened(visual);
+    visual.run_until_parked();
+    assert!(
+        !remount_paint.get(),
+        "the remount did not arm the gate: it opened on the first mount's paint"
+    );
     wait_until(visual, |cx| {
         retained.read_with(cx, |pane, _| pane.terminal().is_some())
     });
     wait_until(visual, |cx| {
         retained.read_with(cx, |pane, _| text_of(pane, 0) == "kept")
     });
+    wait_until(visual, |_| remount_paint.get());
 }
 
 #[gpui_kit::test]

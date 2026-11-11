@@ -797,3 +797,77 @@ fn settings_offers_this_runtimes_agent_setup(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(question_open(&harness, cx));
 }
+
+#[gpui_kit::test]
+fn pauses_the_question_while_another_host_question_owns_the_lane(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx, setup_host("notWired"));
+    let allow = |allowed: bool, cx: &mut TestAppContext| {
+        harness
+            .runtime
+            .update(cx, |runtime, _| runtime.setup.allowed = allowed);
+        harness.sync(cx, inputs(vec![scope(4, 1)]));
+    };
+    allow(false, cx);
+    assert!(
+        !question_open(&harness, cx),
+        "the helper's question goes first"
+    );
+    assert!(
+        harness
+            .runtime
+            .read_with(cx, |runtime, _| !runtime.setup_offerable())
+    );
+    allow(true, cx);
+    assert!(question_open(&harness, cx), "asked once the lane is free");
+    allow(false, cx);
+    assert!(
+        !question_open(&harness, cx),
+        "the lane taken back takes it away"
+    );
+    assert!(harness.effects.decisions.borrow().is_empty());
+}
+
+#[gpui_kit::test]
+fn removing_the_hooks_withdraws_consent_and_the_window_naming(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx, |command| match command.operation.as_str() {
+        "snapshot" => Ok(snapshot_answer(
+            command,
+            vec![],
+            vec![wire_adapter("wired")],
+        )),
+        "hookReview" => Ok(hook_plan(false)),
+        "hookUninstall" => Ok(json!({})),
+        "hostNamingRemove" => Ok(json!({ "hostNaming": "applied" })),
+        other => Err(format!("unexpected {other}")),
+    });
+    harness.sync(cx, inputs(vec![scope(4, 1)]));
+    harness.runtime.update(cx, |runtime, cx| {
+        runtime.review_hooks_for("claude-code", HookAction::Uninstall, cx)
+    });
+    cx.run_until_parked();
+    harness
+        .runtime
+        .update(cx, |runtime, cx| runtime.confirm_review(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        *harness.effects.decisions.borrow(),
+        [("local".to_owned(), HostSetupDecision::Declined)]
+    );
+    let operations = harness.host.operations();
+    for asked in ["hookReview", "hookUninstall", "hostNamingRemove"] {
+        assert!(operations.contains(&asked.to_owned()), "{operations:?}");
+    }
+    let removed = operations
+        .iter()
+        .position(|op| op == "hookUninstall")
+        .unwrap();
+    assert!(
+        operations[removed..].contains(&"snapshot".to_owned()),
+        "the host is read again: {operations:?}"
+    );
+    assert!(
+        harness
+            .runtime
+            .read_with(cx, |runtime, _| runtime.setup.review.is_none())
+    );
+}
