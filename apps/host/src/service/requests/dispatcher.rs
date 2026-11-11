@@ -121,11 +121,17 @@ pub(crate) async fn handle_request(
         }
 
         (Handler::Voice, Some(operation)) => {
-            let active_server_identity = topology_baseline
+            let (active_server_identity, live_panes): (
+                String,
+                Option<std::collections::HashSet<String>>,
+            ) = topology_baseline
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(|(_, identity)| identity.clone())
+                .map(|(snapshot, identity)| {
+                    let panes = snapshot.panes.iter().map(|pane| pane.id.clone());
+                    (identity.clone(), Some(panes.collect()))
+                })
                 .unwrap_or_default();
             super::voice_dispatch::handle(
                 request_id,
@@ -134,6 +140,7 @@ pub(crate) async fn handle_request(
                 control_tx,
                 connection_id,
                 &active_server_identity,
+                live_panes.as_ref(),
                 &cancellation,
                 &closed,
             )

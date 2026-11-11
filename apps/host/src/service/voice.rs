@@ -6,7 +6,7 @@
 //! nothing — no sidecar, no timer, no cache directory.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
@@ -281,6 +281,7 @@ impl VoiceService {
         connection_id: u64,
         server_identity: &str,
         pane_id: &str,
+        live_panes: Option<&HashSet<String>>,
     ) -> Result<(), VoiceError> {
         super::terminal::validate_tmux_id(pane_id, '%')
             .map_err(|_| VoiceError::invalid("pane_id must be a tmux pane id"))?;
@@ -290,6 +291,21 @@ impl VoiceService {
         };
         let mut sessions = self.sessions.lock().unwrap();
         prune_sessions(&mut sessions);
+        // A closed pane holds no slot: a phone keeps refreshing the panes it
+        // once opened Voice on, and tmux never reuses a pane id. Without a
+        // topology baseline yet, nothing is known to be gone.
+        if let Some(live) = live_panes {
+            // Only this connection's entries: another connection's baseline
+            // may already list a pane this one has not seen yet.
+            sessions.retain(|session, entry| {
+                entry.connection_id != connection_id
+                    || session.server_identity != server_identity
+                    || live.contains(&session.pane_id)
+            });
+            if !live.contains(pane_id) {
+                return Ok(());
+            }
+        }
         if !sessions.contains_key(&key) && sessions.len() >= MAX_SESSIONS {
             return Err(VoiceError::new(
                 "voice_too_many_sessions",

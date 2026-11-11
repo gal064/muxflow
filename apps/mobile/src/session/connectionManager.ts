@@ -162,6 +162,9 @@ export async function connectHost(host: SavedHost): Promise<void> {
     // A tmux server can be replaced without dropping the SSH lane. Pane IDs
     // may then be reused, so no Voice controller may survive that boundary.
     onServerIdentityChanged: (serverIdentity) => voiceRegistry.onServerChanged(serverIdentity),
+    // A closed pane's Voice controller is unreachable (no screen can End it)
+    // and would keep re-registering it with the host forever.
+    onPanesChanged: (serverIdentity, paneIds) => voiceRegistry.reconcilePanes(serverIdentity, paneIds),
     // §7.4 routes ACTIVE_ROOT / directory / file-stream events to the files feature.
     onFileEvent: (event) => filesStore.getState().applyFileEvent(event),
     // VOICE_PROVISION / VOICE_REPLY (voice-mode-plan.md §3) go to whichever voice session they name.
