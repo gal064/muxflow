@@ -172,6 +172,53 @@ impl Host {
             .collect()
     }
 
+    /// The banner as the pane last set it; `None` once cleared or never set.
+    fn renderer_diagnostic(&self) -> Option<String> {
+        self.log.iter().rev().find_map(|output| match output {
+            Out::RendererDiagnostic { message, .. } => Some(message.clone()),
+            _ => None,
+        })?
+    }
+
+    fn reading_states(&self) -> Vec<TerminalReadingState> {
+        self.log
+            .iter()
+            .filter_map(|output| match output {
+                Out::ReadingChanged { state, .. } => Some(*state),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn display_offset(&self) -> usize {
+        let terminal = self.engine.pane_terminal(PANE).expect("mounted");
+        terminal.lock().grid().display_offset()
+    }
+
+    /// A shown pane with history, scrolled up one row and reported as read.
+    fn reading_pane(&mut self) {
+        self.shown_pane(1, "a\r\nb\r\nc\r\nd\r\ne\r\nf");
+        self.engine
+            .pane_terminal(PANE)
+            .unwrap()
+            .lock()
+            .scroll_display(Scroll::Delta(1));
+        self.command(Command::Viewport {
+            pane_id: PANE.into(),
+            at_bottom: false,
+        });
+        self.log.clear();
+    }
+
+    fn resume_kept_screen(&mut self, tail: &str) {
+        self.resource(|r| {
+            r.resume_from_renderer = true;
+            r.snapshot_generation = 1;
+            r.tail_through_generation = 3;
+            r.raw_tail = tail.as_bytes().to_vec();
+        });
+    }
+
     fn revealed(&self) -> bool {
         self.log
             .iter()
@@ -306,6 +353,11 @@ fn still_bounds_the_wait_when_neither_the_reveal_nor_the_seed_is_answered() {
     assert_eq!(
         host.incidents("pane.degraded"),
         [json!({ "paneId": PANE, "reason": "paneAwaitingSeed", "attempt": 0 })]
+    );
+    assert!(
+        host.renderer_diagnostic()
+            .is_some_and(|message| message.ends_with("; retrying…")),
+        "the banner says it is retrying"
     );
 }
 
@@ -705,6 +757,7 @@ fn applies_a_grid_change_at_its_place_in_the_stream() {
         sequence,
     });
     assert_eq!(host.engine.pane_terminal(PANE).unwrap().facts().grid, size);
+    assert_eq!(host.seed_requests(), 0, "a resize is not a reset");
 }
 
 #[test]
@@ -1039,4 +1092,126 @@ fn hands_up_an_osc52_write_a_timed_out_synchronized_update_was_holding() {
         })
         .collect();
     assert_eq!(writes, ["copied"]);
+}
+
+#[test]
+fn reveals_a_pane_whose_only_content_ever_arrives_as_output() {
+    let mut host = Host::connected();
+    host.mount();
+    host.answer_last_visibility(Ok(()));
+    // The host's photograph of a pane that has printed nothing yet.
+    host.seed(1, "");
+    host.output(2, "FIRST OUTPUT");
+    assert_eq!(host.screen(), "FIRST OUTPUT");
+    assert!(host.revealed());
+}
+
+#[test]
+fn says_it_is_waiting_for_a_seed_and_shows_nothing_until_the_seed_arrives() {
+    let mut host = Host::connected();
+    host.mount();
+    host.resource(|r| {
+        r.state = PaneResourceState::Released;
+        r.recovery_reason = "Renderer state was released".into();
+    });
+    assert!(!host.revealed(), "the deliberate blank is not content");
+    assert_eq!(host.screen(), "");
+    assert_eq!(
+        host.renderer_diagnostic().as_deref(),
+        Some("Renderer state was released; waiting for a fresh terminal seed…")
+    );
+    host.seed(500, "back");
+    assert!(host.revealed());
+    assert_eq!(
+        host.renderer_diagnostic(),
+        None,
+        "the seed clears the banner"
+    );
+}
+
+/// The old `restoredViewport`: the reader comes back to the rows they left,
+/// and the kept screen is still the one being read, so neither output nor the
+/// reveal's tail is written over it. Typing asks for one seed.
+#[test]
+fn a_kept_screen_comes_back_where_the_reader_left_it_and_nothing_writes_over_it() {
+    let mut host = Host::connected();
+    host.reading_pane();
+    let read = host.screen();
+    host.hide_and_remount();
+    assert_eq!(host.display_offset(), 1);
+    host.output(2, "deferred");
+    host.resume_kept_screen("tail");
+    assert_eq!(host.screen(), read);
+    assert_eq!(host.display_offset(), 1);
+    assert_eq!(host.reading_states(), [TerminalReadingState::Outdated]);
+    assert_eq!(host.seed_requests(), 0);
+    host.command(Command::ReturnToLive {
+        pane_id: PANE.into(),
+        reason: "typed".into(),
+    });
+    assert_eq!(host.seed_requests(), 1);
+}
+
+#[test]
+fn keeps_one_seed_and_the_old_screen_when_going_live_outruns_the_resume() {
+    let mut host = Host::connected();
+    host.reading_pane();
+    let read = host.screen();
+    host.hide_and_remount();
+    host.output(2, "deferred");
+    host.command(Command::ReturnToLive {
+        pane_id: PANE.into(),
+        reason: "typed".into(),
+    });
+    host.resume_kept_screen("late-tail");
+    assert_eq!(host.seed_requests(), 1);
+    assert_eq!(host.screen(), read, "the old screen stays until the seed");
+    host.seed(500, "fresh");
+    assert_eq!(host.screen(), "fresh");
+}
+
+#[test]
+fn output_held_for_the_reveal_is_not_written_once_the_reader_scrolls_away() {
+    let mut host = Host::connected();
+    host.shown_pane(1, "base");
+    host.hide_and_remount();
+    host.output(2, "queued");
+    host.command(Command::Viewport {
+        pane_id: PANE.into(),
+        at_bottom: false,
+    });
+    host.resource(|r| {
+        r.snapshot_generation = 1;
+        r.tail_through_generation = 2;
+        r.generation = 2;
+    });
+    assert_eq!(host.screen(), "base");
+    assert_eq!(
+        host.reading_states().last(),
+        Some(&TerminalReadingState::Outdated)
+    );
+}
+
+#[test]
+fn drops_a_page_in_flight_when_output_makes_the_view_outdated() {
+    let mut host = Host::connected();
+    host.mount();
+    host.seed(1, "screen");
+    host.command(Command::Viewport {
+        pane_id: PANE.into(),
+        at_bottom: false,
+    });
+    host.output(2, "+live");
+    let sequence = host.next_sequence();
+    host.publish(TerminalEvent::Pane(PaneEvent::History {
+        pane_id: PANE.into(),
+        data: b"earlier output".to_vec(),
+        history_size: Some(2_000),
+        sequence,
+    }));
+    let terminal = host.engine.pane_terminal(PANE).unwrap();
+    assert_eq!(terminal.facts().scrollback_rows, 0);
+    let superseded = host.incidents("pane.historySupersededByReseed");
+    assert_eq!(superseded.len(), 1);
+    assert_eq!(superseded[0]["reason"], "screenGone");
 }

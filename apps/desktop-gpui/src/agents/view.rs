@@ -322,7 +322,11 @@ pub struct ActiveRoot {
 
 impl gpui_kit::Global for ActiveRoot {}
 
-fn launch_request(adapter_id: &str, placement: Placement, cx: &App) -> Option<LaunchRequest> {
+pub(crate) fn launch_request(
+    adapter_id: &str,
+    placement: Placement,
+    cx: &App,
+) -> Option<LaunchRequest> {
     let agents = cx.try_global::<Agents>()?;
     let root = cx.try_global::<ActiveRoot>()?;
     let focus = &agents.runtime.read(cx).inputs.focus;

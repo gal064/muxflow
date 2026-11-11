@@ -22,11 +22,12 @@ pub mod model;
 pub mod moves;
 pub mod navigation;
 pub mod rows;
+
 #[cfg(test)]
 mod tests;
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
     sync::Arc,
@@ -1431,6 +1432,14 @@ impl Workspaces {
         // Each round trip is timed on its own, refused or not: a reconciling
         // retry's wait is not the host's latency.
         let round_trip = Rc::new(Cell::new(None::<f64>));
+        // The perf log's view of the action: the pane it ends on painting,
+        // and the app's two ends of the round trip around native's stamps.
+        let span = (feedback == Feedback::Visible)
+            .then(|| pane_paint_span(action.kind))
+            .flatten()
+            .and_then(|span| crate::perf::open_pane_span(span, &client));
+        let (d1, sent_at) = (chrono::Utc::now().timestamp_millis(), Instant::now());
+        let timing = Rc::new(RefCell::new(None::<serde_json::Value>));
         cx.spawn(async move |this, cx| {
             let current = {
                 let (controller, cx, host) = (controller.downgrade(), cx.clone(), host.clone());
@@ -1442,9 +1451,14 @@ impl Workspaces {
                 &scope,
                 captured,
                 |wire| {
-                    let (started, round_trip) = (Instant::now(), round_trip.clone());
-                    backend.tmux_action(client.clone(), wire).inspect(move |_| {
+                    let (started, round_trip, timing) =
+                        (Instant::now(), round_trip.clone(), timing.clone());
+                    backend.tmux_action(client.clone(), wire).inspect(move |answer| {
                         round_trip.set(Some(started.elapsed().as_secs_f64() * 1000.));
+                        *timing.borrow_mut() = answer
+                            .as_ref()
+                            .ok()
+                            .and_then(|answer| answer.get("timing").cloned());
                     })
                 },
                 current,
@@ -1455,6 +1469,11 @@ impl Workspaces {
                 let still = this.scope_current(&host, &scope, cx);
                 if let (true, Some(elapsed)) = (measured, round_trip.get()) {
                     this.latency = Some(smoothed_latency(this.latency, elapsed, Instant::now()));
+                }
+                record_timeline(&action, &result, timing.take(), d1, sent_at);
+                match &result {
+                    Ok(done) if still => crate::perf::target_pane_span(span, done.pane_id.as_deref()),
+                    _ => crate::perf::abandon_pane_span(span),
                 }
                 match &result {
                     Ok(_) => {
@@ -2057,4 +2076,50 @@ pub fn moved_cursor(cursor: Option<usize>, len: usize, key: &str, vertical: bool
         key if key == forward => Some((current + 1).min(last)),
         _ => None,
     }
+}
+
+/// The interactions that end when the pane they produced or showed paints.
+fn pane_paint_span(kind: ActionKind) -> Option<crate::perf::PaneSpan> {
+    use crate::perf::PaneSpan;
+    match kind {
+        ActionKind::CreateSession => Some(PaneSpan::CreateWorkspace),
+        ActionKind::CreateWindow => Some(PaneSpan::CreateTab),
+        ActionKind::SelectWindow => Some(PaneSpan::WindowSwitch),
+        ActionKind::SplitPaneDown | ActionKind::SplitPaneRight => Some(PaneSpan::PaneSplit),
+        _ => None,
+    }
+}
+
+/// One `perf.timeline` record per action, refused or not, for the fast
+/// baseline as much as the slow case. `d1`/`d6` are wall clock because native's
+/// `d2`..`d5` come from two machines; `elapsedMs` is monotonic.
+fn record_timeline(
+    action: &TmuxAction,
+    result: &Result<ActionResult, String>,
+    timing: Option<serde_json::Value>,
+    d1: i64,
+    sent_at: Instant,
+) {
+    if !crate::perf::enabled() {
+        return;
+    }
+    let mut fields = match timing {
+        Some(serde_json::Value::Object(timing)) => timing,
+        _ => serde_json::Map::new(),
+    };
+    fields.insert("action".into(), action.kind.wire_name().into());
+    fields.insert("d1".into(), d1.into());
+    fields.insert("d6".into(), chrono::Utc::now().timestamp_millis().into());
+    fields.insert(
+        "elapsedMs".into(),
+        (sent_at.elapsed().as_millis() as u64).into(),
+    );
+    fields.insert("ok".into(), result.is_ok().into());
+    if let Err(error) = result {
+        fields.insert(
+            "code".into(),
+            error.chars().take(120).collect::<String>().into(),
+        );
+    }
+    crate::perf::record("perf.timeline", serde_json::Value::Object(fields));
 }

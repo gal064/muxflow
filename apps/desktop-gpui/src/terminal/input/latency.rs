@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{App, Global, Task};
 use serde::Serialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::connection_ui::backend::TerminalBackend;
 
@@ -455,24 +455,6 @@ impl InputLatency {
             backend.record_incident("input.latency", record);
         }
     }
-}
-
-/// A perf-log line, written only in a measured process.
-pub fn record_perf(kind: &str, fields: Value) {
-    if !desktop_core::perf_log::sink::perf_log_enabled() {
-        return;
-    }
-    let mut line = Map::new();
-    line.insert("t".into(), chrono::Utc::now().timestamp_millis().into());
-    line.insert("kind".into(), kind.into());
-    if let Value::Object(fields) = fields {
-        line.extend(fields);
-    }
-    let text = Value::Object(line).to_string();
-    desktop_core::platform::spawn(async move {
-        // A probe that fails is never a reason to disturb the terminal.
-        let _ = desktop_core::perf_log::sink::append_perf_log(vec![text]).await;
-    });
 }
 
 #[cfg(test)]
