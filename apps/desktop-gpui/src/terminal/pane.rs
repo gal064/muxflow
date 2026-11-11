@@ -348,6 +348,21 @@ impl Render for TerminalPane {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.focus(&focus, cx);
             })
+            // Any button, before the terminal takes it: the Tauri pane's
+            // `onMouseDownCapture`.
+            .capture_any_mouse_down({
+                let pane = pane.clone();
+                move |_, _, cx| {
+                    let (profile_id, pane_id) = {
+                        let pane = pane.read(cx);
+                        (
+                            pane.link().read(cx).profile_id().to_owned(),
+                            pane.pane_id().clone(),
+                        )
+                    };
+                    super::integration::agents::note_activity(&profile_id, &pane_id, cx);
+                }
+            })
             .child(TerminalElement::new(pane.clone(), focused))
             .when_some(self.diagnostic(), |root, text| {
                 root.child(
