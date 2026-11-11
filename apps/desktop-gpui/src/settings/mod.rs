@@ -155,7 +155,7 @@ pub fn set_agent_setup(setup: AgentSetup, cx: &mut App) {
     cx.set_global(AgentSetupSlot(setup));
 }
 
-fn agent_setup(cx: &App) -> Option<AgentSetup> {
+pub(crate) fn agent_setup(cx: &App) -> Option<AgentSetup> {
     cx.try_global::<AgentSetupSlot>().map(|slot| slot.0.clone())
 }
 

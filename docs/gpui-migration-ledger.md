@@ -312,8 +312,8 @@ font row covers them).
 | `features/agents/types.ts` | 293 | port | 4 | agents/model.rs | done (T4.2) |
 | `features/agents/useAgentHostSetup.test.tsx` | 624 | port | 4 | prompt, decline, install, frozen state, helper auto-setup and reassert cases in agents/tests.rs; host binding through the `consented_scope` refusal there (a switch between review and apply takes the same check) | done (T4.2) |
 | `features/agents/useAgentHostSetup.tsx` | 448 | port | 4 | agents/setup.rs | done (T4.2) |
-| `features/agents/useAgentNotificationActivation.test.tsx` | 115 | port | 4 | route, stale-error and resolution cases in agents/activation.rs; the focus and exact acknowledgement flow is checked in T4.2 QA | done (T4.2) |
-| `features/agents/useAgentNotificationActivation.ts` | 146 | port | 4 | agents/activation.rs: clicks are queued off the notification thread and polled | done (T4.2) |
+| `features/agents/useAgentNotificationActivation.test.tsx` | 115 | port | 4 | route and resolution cases in agents/activation.rs; the stale-error text match is replaced by a wait for the pane to reach the screen (T4.5); the focus and exact acknowledgement flow is checked in QA | done (T4.2, T4.5) |
+| `features/agents/useAgentNotificationActivation.ts` | 146 | port | 4 | agents/activation.rs: clicks are queued off the notification thread and polled; the pane is put on screen by the shell's `select_pane`, and a pane that does not arrive in time is resolved once more over a fresh connection (T4.5) | done (T4.2, T4.5) |
 | `features/agents/useAgentRuntime.test.tsx` | 505 | port | 4 | tests in agents/tests.rs against a scripted host | done (T4.2) |
 | `features/agents/useAgentRuntime.ts` | 378 | port | 4 | agents/runtime.rs. Open: the topology authority (the tmux window set an agent snapshot was paired with, which `useBulkTabClose.ts` uses to protect agent tabs) is not produced; it lands with the bulk tab close port | open |
 | `features/agents/useRecentIdleClock.test.tsx` | 85 | port | 4 | expiration cases in agents/list.rs | done (T4.2) |
@@ -606,7 +606,7 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/workspaces/TabStrip.tsx` | 548 | port | 2 | ui/chrome/tab_strip.rs; the pointer-drag source lands with dragDrop (T4.3), Download… and document tooltips with Phase 5; not yet: the per-tab tooltip, the All tabs menu's shortcut glyphs, and opening a tab's menu from the keyboard (no Kit support) | done (T4.1) |
+| `features/workspaces/TabStrip.tsx` | 548 | port | 2 | ui/chrome/tab_strip.rs; a terminal tab draws its agent's adapter glyph and `state_indicator` (glyphs from `settings::get`), and selecting it acknowledges its active pane (T4.5); the pointer-drag source lands with dragDrop (T4.3), Download… and document tooltips with Phase 5; not yet: the per-tab tooltip, the All tabs menu's shortcut glyphs, and opening a tab's menu from the keyboard (no Kit support) | done (T4.1, T4.5) |
 | `features/workspaces/WorkspaceSidebar.hosts.test.tsx` | 234 | port | 2 | host letters and moves in workspaces/rows.rs, the host row in connection_ui/controller/tests.rs, rows end to end in workspaces/tests.rs | done (T4.1) |
 | `features/workspaces/WorkspaceSidebar.tsx` | 973 | port | 2 | ui/chrome/sidebar.rs; the Agents section is `agents::view::AgentsList`, the rows' agent lines, the compact cluster and the state indicator use T4.2's marks through `AgentShell` (T4.5); the pointer-drag source lands with dragDrop (T4.3); not yet: phase dots in the host menu | done (T4.1, T4.5) |
 | `features/workspaces/WorkspaceSwitcher.test.tsx` | 158 | port | 2 | `tests/commands.rs` | open |

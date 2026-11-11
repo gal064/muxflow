@@ -137,9 +137,16 @@ impl TerminalBackend for FakeHost {
 
     /// Answers what was queued, else what tmux would: the ids it acted on, a
     /// made-up id for what it created, and the next generation.
-    fn tmux_action(&self, _: String, action: Value) -> BoxFuture<'static, Result<Value, String>> {
+    fn tmux_action(
+        &self,
+        client: String,
+        action: Value,
+    ) -> BoxFuture<'static, Result<Value, String>> {
         let mut state = self.state();
-        state.actions.push(action.clone());
+        // Kept with the client it went to, for the tests that use two hosts.
+        let mut recorded = action.clone();
+        recorded["client"] = json!(client);
+        state.actions.push(recorded);
         state.generation += 1;
         let generation = 100 + state.generation;
         let answer = state.answers.pop_front().unwrap_or_else(|| {
@@ -309,7 +316,11 @@ impl Shell {
     }
 
     fn publish(&mut self, frames: Vec<Vec<u8>>) {
-        let sink = self.host.state().sinks[0].clone();
+        self.publish_to(0, frames);
+    }
+
+    fn publish_to(&mut self, bridge: usize, frames: Vec<Vec<u8>>) {
+        let sink = self.host.state().sinks[bridge].clone();
         for frame in frames {
             sink.send(EventBody::Raw(frame)).unwrap();
         }
@@ -348,11 +359,20 @@ impl Shell {
 /// The app's window on a connected local host showing [`world`], with `tabs`
 /// as the saved documents of `main`.
 fn shell(cx: &mut TestAppContext, tabs: Value, shell: Value) -> Shell {
+    shell_with(cx, tabs, shell, &[])
+}
+
+/// [`shell`], with more shown hosts after the local one. Each gets its own
+/// bridge, in order, and says nothing until [`Shell::publish_to`] it.
+fn shell_with(cx: &mut TestAppContext, tabs: Value, shell: Value, more: &[Value]) -> Shell {
     let dir = tempfile::tempdir().unwrap();
     let profiles = dir.path().join("profiles.json");
+    let mut listed = vec![
+        json!({ "id": "local", "label": "Local", "connection": { "mode": "local" }, "shown": true }),
+    ];
+    listed.extend_from_slice(more);
     let saved = json!({
-        "schemaVersion": 1, "lastProfileId": "local",
-        "profiles": [{ "id": "local", "label": "Local", "connection": { "mode": "local" }, "shown": true }],
+        "schemaVersion": 1, "lastProfileId": "local", "profiles": listed,
     });
     std::fs::write(&profiles, saved.to_string()).unwrap();
     let state_path = dir.path().join("app-state.json");
@@ -709,4 +729,318 @@ fn smooths_readings_and_forgets_a_stale_one() {
     assert!((second.milliseconds - 130.).abs() < 1e-9);
     let late = smoothed_latency(Some(second), 50., start + Duration::from_secs(120));
     assert_eq!(late.milliseconds, 50.);
+}
+
+/// The seams between the shell and the agents feature: the agents list reads
+/// the sidebar, and every way to an agent's pane is the shell's own move.
+mod agent_seams {
+    use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
+
+    use desktop_core::{app_state::AgentSortMode, connection::agent::AgentCommand};
+
+    use super::*;
+    use crate::{
+        agents::{
+            self, Agents,
+            activation::{self, Route},
+            runtime::{AgentRuntime, AgentTransport},
+            tests::{Effects, Recorded, snapshot_answer, wire_adapter, wire_agent},
+        },
+        connection_ui::ConnectionUi,
+        terminal::integration::agents::PaneActivity,
+        workspaces::model::terminal_key,
+    };
+
+    type Requests = Rc<RefCell<Vec<(String, AgentCommand)>>>;
+
+    /// Each host's agents, told by the client the request came over.
+    struct ByClient {
+        agents: HashMap<&'static str, Vec<Value>>,
+        requests: Requests,
+    }
+
+    impl AgentTransport for ByClient {
+        fn agent_request(
+            &self,
+            client: String,
+            command: AgentCommand,
+        ) -> BoxFuture<'static, Result<Value, String>> {
+            let answer = match command.operation.as_str() {
+                "snapshot" => Ok(snapshot_answer(
+                    &command,
+                    self.agents
+                        .get(client.as_str())
+                        .cloned()
+                        .unwrap_or_default(),
+                    vec![wire_adapter("wired")],
+                )),
+                other => Err(format!("{other} is only recorded here")),
+            };
+            self.requests.borrow_mut().push((client, command));
+            futures::future::ready(answer).boxed()
+        }
+    }
+
+    fn agent(id: &str, host: &str, place: (&str, &str, &str, &str)) -> Value {
+        let (session, session_name, window, pane) = place;
+        let mut agent = wire_agent("blocked", 7, Some("blocked"), 0);
+        agent["agentId"] = json!(id);
+        let route = &mut agent["route"];
+        route["agentId"] = json!(id);
+        route["hostProfileId"] = json!(host);
+        route["serverIdentity"] = json!("tmux");
+        route["sessionId"] = json!(session);
+        route["sessionNameFallback"] = json!(session_name);
+        route["windowId"] = json!(window);
+        route["paneId"] = json!(pane);
+        agent
+    }
+
+    /// Local, with `notes` pinned, and a second host over ssh showing the
+    /// same [`world`].
+    fn two_hosts(cx: &mut TestAppContext) -> Shell {
+        let remote = json!({
+            "id": "remote", "label": "Remote",
+            "connection": { "mode": "ssh", "profileId": "remote", "target": "remote" },
+            "shown": true,
+        });
+        let mut shell = shell_with(cx, json!([]), json!({}), &[remote]);
+        shell.publish_to(
+            1,
+            vec![frame(6, "connected", &[]), snapshot_frame(1, &world("@1"))],
+        );
+        // A terminal epoch on each, as a live connection has: agents ask over it.
+        let epoch = frame(10, "terminal", &1u64.to_be_bytes());
+        shell.publish(vec![epoch.clone()]);
+        shell.publish_to(1, vec![epoch]);
+        let mut pinned = world("@1");
+        pinned.sessions[1].pinned = true;
+        shell.publish(vec![snapshot_frame(2, &pinned)]);
+        shell
+    }
+
+    /// The runtime on the shell's controller, kept in step with it as
+    /// `agents::start` keeps it.
+    fn start_agents(shell: &mut Shell, agents: HashMap<&'static str, Vec<Value>>) -> Requests {
+        let requests = Requests::default();
+        let transport = Rc::new(ByClient {
+            agents,
+            requests: requests.clone(),
+        });
+        shell.visual.update(|_, cx| {
+            let controller = cx.global::<ConnectionUi>().0.clone();
+            let effects = Rc::new(Recorded(Rc::new(Effects::default())));
+            let runtime = cx.new(|_| AgentRuntime::new(transport, effects));
+            cx.set_global(Agents {
+                runtime: runtime.clone(),
+                controller: controller.clone(),
+            });
+            cx.observe(&controller, {
+                let runtime = runtime.clone();
+                move |controller, cx| agents::sync(&controller, &runtime, cx)
+            })
+            .detach();
+            agents::sync(&controller, &runtime, cx);
+        });
+        shell.settle();
+        requests
+    }
+
+    fn active_host(shell: &mut Shell) -> String {
+        shell
+            .visual
+            .update(|_, cx| cx.global::<ConnectionUi>().0.read(cx).active_profile_id())
+    }
+
+    #[gpui_kit::test]
+    fn selecting_a_terminal_tab_acknowledges_its_active_pane(cx: &mut TestAppContext) {
+        let mut shell = shell(cx, json!([]), json!({}));
+        let noted = Rc::new(RefCell::new(Vec::<(String, String)>::new()));
+        shell.visual.update(|_, cx| {
+            let noted = noted.clone();
+            cx.set_global(PaneActivity(Rc::new(move |host, pane, _| {
+                noted.borrow_mut().push((host.to_owned(), pane.to_owned()))
+            })));
+        });
+        let workspaces = shell.workspaces();
+        shell.visual.update(|_, cx| {
+            workspaces.update(cx, |this, cx| this.select_tab(&terminal_key("@2"), cx))
+        });
+        shell.settle();
+        assert_eq!(*noted.borrow(), [("local".to_owned(), "%3".to_owned())]);
+    }
+
+    #[gpui_kit::test]
+    fn the_agents_list_follows_the_sidebar_order_filter_and_host_letters(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(
+            &mut shell,
+            HashMap::from([
+                (
+                    "client-1",
+                    vec![
+                        agent("in-main", "local", ("$1", "main", "@2", "%3")),
+                        agent("in-notes", "local", ("$2", "notes", "@3", "%4")),
+                    ],
+                ),
+                (
+                    "client-2",
+                    vec![agent("on-remote", "remote", ("$1", "main", "@1", "%1"))],
+                ),
+            ]),
+        );
+        let workspaces = shell.workspaces();
+        let listed = |shell: &mut Shell, pinned_only: bool| {
+            shell.visual.update(|_, cx| {
+                agents::rows(cx, AgentSortMode::Workspace, pinned_only)
+                    .1
+                    .into_iter()
+                    .map(|row| {
+                        (
+                            row.agent.id,
+                            row.location.host_letter,
+                            row.location.host_label,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let sidebar = shell.visual.update(|_, cx| {
+            workspaces
+                .read(cx)
+                .rows(false, cx)
+                .into_iter()
+                .map(|row| (row.host_profile_id, row.session.id))
+                .collect::<Vec<_>>()
+        });
+        let row = |id: &str, letter: &str, label: &str| {
+            (id.to_owned(), letter.to_owned(), label.to_owned())
+        };
+        // The pinned workspace first, as the sidebar draws it.
+        assert_eq!(
+            sidebar[..3],
+            [
+                ("local".to_owned(), "$2".to_owned()),
+                ("local".to_owned(), "$1".to_owned()),
+                ("remote".to_owned(), "$1".to_owned()),
+            ]
+        );
+        assert_eq!(
+            listed(&mut shell, false),
+            [
+                row("in-notes", "L", "Local"),
+                row("in-main", "L", "Local"),
+                row("on-remote", "R", "Remote"),
+            ]
+        );
+        // Pinned only: the pinned workspace and the one on screen.
+        shell
+            .visual
+            .update(|_, cx| workspaces.update(cx, |this, cx| this.set_pinned_only(true, cx)));
+        assert_eq!(
+            listed(&mut shell, true),
+            [row("in-notes", "L", "Local"), row("in-main", "L", "Local")]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn opening_an_agents_pane_is_the_shells_move_on_either_host(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        shell
+            .visual
+            .update(|_, cx| agents::open_pane("local", "%3", cx))
+            .unwrap();
+        shell.settle();
+        let focus = shell.host.last("focusPane");
+        assert_eq!(
+            (focus["pane_id"].as_str(), focus["client"].as_str()),
+            (Some("%3"), Some("client-1"))
+        );
+
+        shell
+            .visual
+            .update(|_, cx| agents::open_pane("remote", "%2", cx))
+            .unwrap();
+        shell.settle();
+        assert_eq!(active_host(&mut shell), "remote");
+        let focus = shell.host.last("focusPane");
+        assert_eq!(
+            (focus["pane_id"].as_str(), focus["client"].as_str()),
+            (Some("%2"), Some("client-2"))
+        );
+
+        let gone = shell
+            .visual
+            .update(|_, cx| agents::open_pane("remote", "%7", cx));
+        assert!(gone.is_err());
+    }
+
+    #[gpui_kit::test]
+    fn a_notification_click_on_another_host_is_the_shells_move_and_acknowledges_on_arrival(
+        cx: &mut TestAppContext,
+    ) {
+        let mut shell = two_hosts(cx);
+        let requests = start_agents(
+            &mut shell,
+            HashMap::from([(
+                "client-2",
+                vec![agent("on-remote", "remote", ("$1", "main", "@2", "%3"))],
+            )]),
+        );
+        let route = Route {
+            host_profile: "remote".into(),
+            server_identity: "tmux".into(),
+            session_id: "$1".into(),
+            session_name: "main".into(),
+            window_id: "@2".into(),
+            window_name: "server".into(),
+            pane_id: "%3".into(),
+            agent_id: "on-remote".into(),
+            attention_generation: 7,
+        };
+        shell
+            .visual
+            .update(|_, cx| activation::activate(route, false, cx));
+        shell.settle();
+        assert_eq!(active_host(&mut shell), "remote");
+        let focus = shell.host.last("focusPane");
+        assert_eq!(
+            (focus["pane_id"].as_str(), focus["client"].as_str()),
+            (Some("%3"), Some("client-2"))
+        );
+        let seen = |requests: &Requests| {
+            requests
+                .borrow()
+                .iter()
+                .filter(|(_, command)| command.operation == "markSeen")
+                .map(|(client, command)| {
+                    (
+                        client.clone(),
+                        command.agent_id.clone(),
+                        command.attention_generation.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            seen(&requests).is_empty(),
+            "not before the pane is on screen"
+        );
+        // The host reports the move; the next poll sees it and acknowledges.
+        shell.publish_to(1, vec![snapshot_frame(2, &world("@2"))]);
+        shell
+            .visual
+            .executor()
+            .advance_clock(Duration::from_millis(250));
+        shell.settle();
+        assert_eq!(
+            seen(&requests),
+            [(
+                "client-2".to_owned(),
+                "on-remote".to_owned(),
+                "7".to_owned()
+            )]
+        );
+    }
 }
