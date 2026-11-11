@@ -23,6 +23,7 @@ pub mod mouse;
 pub mod policy;
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -81,6 +82,16 @@ pub struct PaneInput {
     /// Whether the pane had focus at its last focus change. A pane that never
     /// had focus has nothing to report when the window loses it.
     focused: bool,
+    /// Clipboard pastes still being read, in order, and the input that came
+    /// after the first of them: it waits, so it reaches the program after the
+    /// paste, as it was typed.
+    held: VecDeque<Held>,
+    next_paste: u64,
+}
+
+enum Held {
+    Reading(u64),
+    Ready { bytes: Vec<u8>, paste: bool },
 }
 
 #[derive(Default)]
@@ -236,6 +247,14 @@ fn send_user_input(
     paste: bool,
     cx: &mut Context<TerminalPane>,
 ) {
+    if !pane.input.held.is_empty() {
+        pane.input.held.push_back(Held::Ready { bytes, paste });
+        return;
+    }
+    send_now(pane, bytes, paste, cx);
+}
+
+fn send_now(pane: &mut TerminalPane, bytes: Vec<u8>, paste: bool, cx: &mut Context<TerminalPane>) {
     if pane.link().read(cx).client_id().is_none() {
         return;
     }
@@ -261,13 +280,56 @@ fn send_typed(pane: &mut TerminalPane, bytes: Vec<u8>, cx: &mut Context<Terminal
 /// end becomes one LF first, or it would arrive as two Enters. An end marker
 /// inside the text is removed, so the text cannot end the paste early.
 pub fn paste(pane: &mut TerminalPane, text: &str, cx: &mut Context<TerminalPane>) {
+    super::reading::before_user_input(pane, cx);
+    send_user_input(pane, paste_bytes(text), true, cx);
+}
+
+fn paste_bytes(text: &str) -> Vec<u8> {
     const END: &str = "\x1b[201~";
     let mut text = text.to_owned();
     while text.contains(END) {
         text = text.replace(END, "");
     }
-    super::reading::before_user_input(pane, cx);
-    send_user_input(pane, text.replace("\r\n", "\n").into_bytes(), true, cx);
+    text.replace("\r\n", "\n").into_bytes()
+}
+
+/// A paste whose text is still being read from the clipboard: input that
+/// comes after it waits for it. Every call is answered by [`end_paste`].
+pub fn begin_paste(pane: &mut TerminalPane) -> u64 {
+    let id = pane.input.next_paste;
+    pane.input.next_paste += 1;
+    pane.input.held.push_back(Held::Reading(id));
+    id
+}
+
+/// The clipboard answered: its text, if it had any, takes the paste's place,
+/// and what waited behind it goes out in order.
+pub fn end_paste(
+    pane: &mut TerminalPane,
+    id: u64,
+    text: Option<&str>,
+    cx: &mut Context<TerminalPane>,
+) {
+    let Some(index) = pane
+        .input
+        .held
+        .iter()
+        .position(|held| matches!(held, Held::Reading(reading) if *reading == id))
+    else {
+        return;
+    };
+    if text.is_some() {
+        super::reading::before_user_input(pane, cx);
+    }
+    let bytes = text.map(paste_bytes).unwrap_or_default();
+    pane.input.held[index] = Held::Ready { bytes, paste: true };
+    while matches!(pane.input.held.front(), Some(Held::Ready { .. })) {
+        if let Some(Held::Ready { bytes, paste }) = pane.input.held.pop_front()
+            && !bytes.is_empty()
+        {
+            send_now(pane, bytes, paste, cx);
+        }
+    }
 }
 
 /// Tells a program that asked (DEC 1004) when the pane gains or loses focus,

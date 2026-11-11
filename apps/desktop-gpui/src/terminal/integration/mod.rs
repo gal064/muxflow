@@ -181,6 +181,8 @@ fn paste(pane: &Entity<TerminalPane>, window: &mut Window, cx: &mut App) {
     // Read on the runtime and polled: GPUI's test scheduler refuses a wake from
     // another thread, and the read can wait on the app that owns the clipboard.
     let read = platform::spawn(read_native_terminal_clipboard());
+    // Keys typed while the clipboard is read wait for the paste.
+    let id = pane.update(cx, |pane, _| crate::terminal::input::begin_paste(pane));
     let pane = pane.downgrade();
     window
         .spawn(cx, async move |cx| {
@@ -195,26 +197,32 @@ fn paste(pane: &Entity<TerminalPane>, window: &mut Window, cx: &mut App) {
                 let Some(pane) = pane.upgrade() else {
                     return;
                 };
-                if let Err(error) = deliver(&pane, answer, window, cx) {
+                let text = deliver(&pane, answer, window, cx).unwrap_or_else(|error| {
                     notices::notify(&error, window, cx);
-                }
+                    None
+                });
+                pane.update(cx, |pane, cx| {
+                    crate::terminal::input::end_paste(pane, id, text.as_deref(), cx);
+                });
             });
         })
         .detach();
 }
 
+/// The text to paste, if the clipboard held text; files and images go to the
+/// upload list instead.
 fn deliver(
     pane: &Entity<TerminalPane>,
     answer: Result<Option<serde_json::Value>, String>,
     window: &mut Window,
     cx: &mut App,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let native = answer?.map(NativeClipboard::from_wire).transpose()?;
     let text = match native {
         Some(NativeClipboard::Files { uris }) => {
             let paths = parse_file_uri_list(&uris.join("\n"))?;
             upload::accept(pane, Source::Paths(paths), live_scope(), window, cx);
-            return Ok(());
+            return Ok(None);
         }
         Some(NativeClipboard::Image { staged }) => {
             let source = Source::StagedImage {
@@ -222,17 +230,17 @@ fn deliver(
                 name: staged.name,
             };
             upload::accept(pane, source, live_scope(), window, cx);
-            return Ok(());
+            return Ok(None);
         }
         Some(NativeClipboard::Text { text }) if !text.is_empty() => text,
-        Some(NativeClipboard::Text { .. }) => return Ok(()),
+        Some(NativeClipboard::Text { .. }) => return Ok(None),
         // Nothing the native reader knows: what GPUI's own clipboard holds.
         None => match cx.read_from_clipboard().and_then(|item| item.text()) {
             Some(text) if !text.is_empty() => text,
-            _ => return Ok(()),
+            _ => return Ok(None),
         },
     };
-    pane.update(cx, |pane, cx| paste_text(pane, text, cx))
+    Ok(Some(text))
 }
 
 /// The upload list, in the terminal's bottom-right corner. Port of

@@ -213,23 +213,12 @@ VT parity lane at all five quiesce points, and resizing during heavy output.
 ### Carry-forward from Phases 2 and 3
 
 The phase that owns each area fixes these; the Phase 6 parity check confirms them.
+T6.6 closed the rest: fixed, already fixed, or matching Tauri (its commit lists each).
 
-- Sidebar says "No tmux sessions" while a session is attached; New workspace, Ctrl+N and the split commands have no handler (Phase 4).
-- Connecting renamed an SSH profile's label to its target in `profiles.json`. Compare with Tauri and fix (Phase 4 settings and hosts).
-- A notice "tmux server identity changed; authoritative reconnect required" appears when the first tmux server starts after connect. Compare with Tauri.
-- `pane.revealVoid` with `msWaited 4000` is journalled on every launch.
-- The split focus border overlaps column 0 by about 1 px.
-- Hover focus between splits not tested yet (needs the Settings option, Phase 4).
-- Keys typed within about 200 ms of Ctrl+V arrive before the paste.
 - X11 window position is not restored (owner informed).
-- After clicking a notification popup on X11, the next pointer move over a pane made it tmux-active. Check whether hover focus was on; if not, fix the input path.
-- Agent rows for panes that never existed stay after SessionEnd and have no dismiss.
 - Phase 5: the context-menu key (Shift+F10, Menu) in the Explorer and Git rows, and keyboard row access in Git (T6.1).
-- Phase 5: Git push errors show the host's raw text, not the SurfaceError summary with Details.
-- Phase 5: Settings copy mentions Live Markdown, which arrives in Phase 7.
+- Phase 5: Git push errors show the host's raw text, not the SurfaceError summary with Details (T6.4).
 - Phase 5: Kit bug, double-click selects nothing in a preview paragraph with inline code (report upstream). Drag-select in the preview is on the owner's Mac prompt.
-- Phase 5: Explorer selection does not follow a renamed file; Delete in a read-only menu looks enabled; a cancelled download row shows "0 B transferred" and raw text; the first row after Load more sometimes has no focus ring.
-- Phase 5: `xdg-open` children of `download_opener.rs` are not reaped (shared with Tauri).
 
 ## Phase 4: Workspaces and panels
 
@@ -249,7 +238,7 @@ through the T2.1 seam.
 | T5.1 `explorer` | opus, high, full cycle, invariant | `gpui/explorer` | Merged | `6604380` | 3 review rounds, QA PASS local and SSH after one dialog-focus crash fix. Wired the editor opener, watcher and download, `ActiveRoot` and Git ignored paths. One shared watch registry serves the tree and open documents |
 | T5.2 `editor` | opus, high, full cycle, large, design | `gpui/editor` | Merged | `1e4a659`, merge `e372bc2` | Kit code editor. 3 review rounds, QA PASS local and SSH. An external edit to an open remote file leaves the tab in Save failed until T5.1 delivers change notices |
 | T5.3 `git-diff` | opus, high, full cycle, design | `gpui/git-diff` | Merged | `ef076e7`, merge `9a9ad34` | 3 review rounds, QA PASS local and SSH, `test:git` passes after a driver fix. Gaps: SurfaceError summary on push errors, keyboard row access, file icons |
-| `gdev_qa_phase5` | fresh QA | `gpui/integration` | Passed | `ec39e80` | All 10 steps on local and SSH hosts: browse, edit, external change, Markdown, file operations, diff, stage, commit, push to a scratch remote, gitignore, reconnect, relaunch. Minor: Go to Line leaves the line at the bottom edge; Git panel blank instead of "Working tree clean." when only ignored files exist; the docked tab can sit in the overflow menu |
+| `gdev_qa_phase5` | fresh QA | `gpui/integration` | Passed | `ec39e80` | All 10 steps on local and SSH hosts: browse, edit, external change, Markdown, file operations, diff, stage, commit, push to a scratch remote, gitignore, reconnect, relaunch. Minor: Go to Line leaves the line at the bottom edge; Git panel blank instead of "Working tree clean." when only ignored files exist; the docked tab can sit in the overflow menu (T6.6: the first two fixed; the third matches Tauri) |
 | T6.4 `ledger-shell` | opus, high, full cycle, invariant | `gpui/ledger-shell` | Dispatched | | |
 | T6.5 `ledger-terminal-files` | opus, high, full cycle, invariant | `gpui/ledger-terminal-files` | Dispatched | | |
 | T6.6 `carry-forward` | opus, high, full cycle | `gpui/carry-forward` | Dispatched | | |

@@ -1895,6 +1895,48 @@ fn refuses_a_change_while_read_only_and_follows_a_rename(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn the_keyboard_follows_a_renamed_file(cx: &mut TestAppContext) {
+    let (host, explorer) = opened(cx);
+    update(&explorer, cx, |explorer, _| {
+        explorer.view.focus_key = Some("/repo/a.txt".into());
+    });
+    let renamed = update(&explorer, cx, |explorer, cx| {
+        explorer.mutate(
+            FileMutation::Rename(Relocation {
+                path: "/repo/a.txt".into(),
+                destination: "/repo/z.txt".into(),
+                overwrite: false,
+                confirmed_non_empty: false,
+            }),
+            cx,
+        )
+    });
+    host.answer("mutate", "/repo/a.txt", Ok(json!({})));
+    cx.run_until_parked();
+    assert_eq!(cx.foreground_executor().block_test(renamed), Ok(()));
+    // Another file took the renamed one's place in the list.
+    host.answer(
+        "listDirectory",
+        "/repo",
+        Ok(directory(
+            "/repo",
+            &[
+                ("/repo/src", true),
+                ("/repo/m.txt", false),
+                ("/repo/z.txt", false),
+            ],
+        )),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&explorer, cx),
+        ["/repo/src", "/repo/m.txt", "/repo/z.txt"]
+    );
+    let focused = read(&explorer, cx, |explorer| explorer.view.focus_key.clone());
+    assert_eq!(focused.as_deref(), Some("/repo/z.txt"));
+}
+
+#[gpui_kit::test]
 fn shows_a_failed_change_and_reads_nothing(cx: &mut TestAppContext) {
     let (host, explorer) = opened(cx);
     let created = update(&explorer, cx, |explorer, cx| {

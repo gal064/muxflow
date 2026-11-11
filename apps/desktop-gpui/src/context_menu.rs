@@ -73,7 +73,8 @@ impl Item {
 
     fn popup(&self) -> PopupMenuItem {
         let label = self.label.clone();
-        let item = if self.destructive {
+        // Disabled, it is dimmed like any other item rather than kept red.
+        let item = if self.destructive && !self.disabled {
             PopupMenuItem::element(move |_, cx| {
                 div()
                     .text_color(theme::palette(cx).danger_ink)
@@ -214,5 +215,25 @@ mod tests {
             assert!(menu.focus_handle(cx).is_focused(window));
             assert!(!is_open(window, cx));
         });
+    }
+
+    #[test]
+    fn a_disabled_destructive_item_is_drawn_as_disabled() {
+        let item = |disabled| {
+            Item::new("Delete…", |_, _| {})
+                .destructive()
+                .disabled(disabled)
+        };
+        assert!(matches!(
+            item(false).popup(),
+            PopupMenuItem::ElementItem {
+                disabled: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            item(true).popup(),
+            PopupMenuItem::Item { disabled: true, .. }
+        ));
     }
 }
