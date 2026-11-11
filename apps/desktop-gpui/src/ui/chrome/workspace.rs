@@ -1,12 +1,12 @@
 //! The work area between the rails: the tab strip when the title bar does not
 //! hold it, and the terminal column with its optional docked document, a port of
-//! `app/WorkspaceDock.tsx`'s divider and sizing. Content is a placeholder until
-//! terminals and document panels arrive.
+//! `app/WorkspaceDock.tsx`'s divider and sizing. A document shows a placeholder
+//! until the document panels arrive.
 
 use desktop_core::app_state::DockSide;
 use gpui_kit::{
-    AnyElement, AnyView, App, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role,
-    SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window,
+    AnyElement, AnyView, App, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    Role, SharedString, StatefulInteractiveElement, Styled, WeakEntity, Window,
     base::{HandleEdge, TestSupportExt},
     component::{h_flex, v_flex},
     div,
@@ -17,16 +17,17 @@ use gpui_kit::{
 use crate::{
     theme,
     ui::chrome::{
-        Chrome, WorkspacePlaceholder,
+        Chrome,
         divider::{Divider, DividerDrag, divider},
         tab_strip::TabStrip,
     },
+    workspaces::Workspaces,
 };
 
 #[derive(IntoElement)]
 pub struct WorkspaceArea {
     pub chrome: WeakEntity<Chrome>,
-    pub workspace: Option<WorkspacePlaceholder>,
+    pub workspaces: Entity<Workspaces>,
     pub dock_fraction: f32,
     pub tabs_in_title_bar: bool,
     /// The terminal surface, when a real connection is running.
@@ -36,29 +37,17 @@ pub struct WorkspaceArea {
 impl RenderOnce for WorkspaceArea {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let palette = theme::palette(cx);
-        let workspace = self.workspace;
-        let empty_label: SharedString = "No workspace".into();
-        let (body_label, docked): (SharedString, Option<(SharedString, DockSide)>) = workspace
+        let view = self.workspaces.read(cx).view(cx);
+        // The documents themselves arrive with the file features; until then a
+        // document tab shows its title where its surface will be.
+        let body_label: SharedString = view
+            .selected_app_tab
             .as_ref()
-            .map_or((empty_label.clone(), None), |workspace| {
-                let title_of = |key: &SharedString| {
-                    workspace
-                        .tabs
-                        .iter()
-                        .find(|tab| &tab.key == key)
-                        .map(|tab| tab.title.clone())
-                };
-                let body = workspace
-                    .active_tab
-                    .as_ref()
-                    .and_then(title_of)
-                    .unwrap_or_else(|| "Terminal".into());
-                let docked = workspace
-                    .docked
-                    .as_ref()
-                    .and_then(|(key, side)| title_of(key).map(|title| (title, *side)));
-                (body, docked)
-            });
+            .map_or_else(|| "Terminal".into(), |tab| tab.title.clone().into());
+        let docked: Option<(SharedString, DockSide)> = view
+            .docked
+            .as_ref()
+            .map(|(tab, side)| (tab.title.clone().into(), *side));
 
         let placeholder = |label: SharedString| {
             div()
@@ -69,9 +58,7 @@ impl RenderOnce for WorkspaceArea {
                 .text_color(palette.chrome_faint)
                 .child(label)
         };
-        let terminal = self
-            .terminal
-            .filter(|_| workspace.as_ref().is_none_or(|w| w.active_tab.is_none()));
+        let terminal = self.terminal.filter(|_| view.selected_app_tab.is_none());
         let body = |label: SharedString| -> AnyElement {
             match terminal.clone() {
                 Some(view) => view.into_any_element(),
@@ -80,14 +67,7 @@ impl RenderOnce for WorkspaceArea {
         };
 
         let tabs_strip = (!self.tabs_in_title_bar).then(|| TabStrip {
-            chrome: self.chrome.clone(),
-            tabs: workspace
-                .as_ref()
-                .map_or_else(Vec::new, |workspace| workspace.tabs.clone()),
-            active: workspace.as_ref().and_then(|w| w.active_tab.clone()),
-            docked: workspace
-                .as_ref()
-                .and_then(|w| w.docked.as_ref().map(|(key, _)| key.clone())),
+            workspaces: self.workspaces.clone(),
             in_title_bar: false,
         });
 

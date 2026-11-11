@@ -40,3 +40,4 @@ pub mod theme;
 pub mod tooltips;
 pub mod ui;
 pub mod window_state;
+pub mod workspaces;

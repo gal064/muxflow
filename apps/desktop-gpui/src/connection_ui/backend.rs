@@ -1,12 +1,15 @@
 //! The seam between the connection state machine and `desktop-core`, so tests
 //! can drive every flow without opening a bridge.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use std::sync::mpsc::Sender;
 
 use desktop_core::{
-    app_state::{AppStateStore, PersistedAppState, save_app_state},
+    app_state::{AppStateStore, PersistedAppState, update_app_state},
     connection::{
         self, ConnectionSpec, ProfileStore, TerminalClients, delivery_ack,
         files::upload_manager::{self, UploadManager},
@@ -133,6 +136,9 @@ pub trait ConnectionBackend: TerminalBackend {
         connection: ConnectionSpec,
         allow_upgrade: bool,
     ) -> BoxFuture<'static, Result<HelperInstallReport, String>>;
+    /// Writes `state`'s app tabs and workspace records, and nothing else: the
+    /// shell's preferences, shortcuts and window geometry have writers of their
+    /// own. A save asked for later always wins over one asked for earlier.
     fn save_app_state(&self, state: PersistedAppState) -> BoxFuture<'static, Result<(), String>>;
     /// `None` when the client has not read a host frame yet.
     fn late_requests(&self, client_id: &str) -> Option<u32>;
@@ -148,6 +154,14 @@ pub struct NativeBackend {
     profiles: Arc<ProfileStore>,
     journal: Arc<IncidentJournal>,
     launch: String,
+    save_order: Arc<SaveOrder>,
+}
+
+/// The app-tab saves asked for, and the newest one written.
+#[derive(Default)]
+struct SaveOrder {
+    issued: AtomicU64,
+    applied: AtomicU64,
 }
 
 impl NativeBackend {
@@ -162,6 +176,7 @@ impl NativeBackend {
             profiles,
             journal: Arc::new(journal),
             launch: Uuid::new_v4().simple().to_string()[..8].to_owned(),
+            save_order: Arc::default(),
         }
     }
 }
@@ -388,7 +403,21 @@ impl ConnectionBackend for NativeBackend {
 
     fn save_app_state(&self, state: PersistedAppState) -> BoxFuture<'static, Result<(), String>> {
         let store = self.app_state.clone();
-        spawned(async move { save_app_state(state, &store).await })
+        // Numbered when asked for, so the quit flush, which writes again while
+        // an earlier save may still be waiting for the lock, cannot be undone
+        // by that earlier one landing after it.
+        let order = self.save_order.clone();
+        let number = order.issued.fetch_add(1, Ordering::SeqCst) + 1;
+        spawned(async move {
+            update_app_state(&store, move |current| {
+                if order.applied.fetch_max(number, Ordering::SeqCst) > number {
+                    return;
+                }
+                current.app_tabs = state.app_tabs;
+                current.workspace_ui = state.workspace_ui;
+            })
+            .await
+        })
     }
 
     fn late_requests(&self, client_id: &str) -> Option<u32> {
@@ -507,5 +536,44 @@ mod frame_tests {
     fn an_input_frame_ends_with_the_bytes() {
         let body = input_frame("c", "%1", b"ab");
         assert_eq!(body, [0, 1, b'c', 0, 2, b'%', b'1', b'a', b'b']);
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use desktop_core::app_state::{WorkspaceUiRecord, load_app_state};
+
+    use super::*;
+
+    fn named(name: &str) -> PersistedAppState {
+        PersistedAppState {
+            workspace_ui: vec![WorkspaceUiRecord {
+                host_profile_id: "local".into(),
+                server_identity: "tmux".into(),
+                session_id: "$1".into(),
+                session_name: name.into(),
+                selected_app_tab_id: None,
+                docked_app_tab_id: None,
+                dock_side: None,
+            }],
+            ..PersistedAppState::default()
+        }
+    }
+
+    #[test]
+    fn an_earlier_save_landing_late_does_not_undo_a_later_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(AppStateStore::load(dir.path().join("app-state.json")));
+        let backend = NativeBackend::new(
+            store.clone(),
+            Arc::new(ProfileStore::load(dir.path().join("profiles.json")).unwrap()),
+            IncidentJournal::new(dir.path().join("logs")),
+        );
+        let earlier = backend.save_app_state(named("earlier"));
+        let later = backend.save_app_state(named("later"));
+        futures::executor::block_on(later).unwrap();
+        futures::executor::block_on(earlier).unwrap();
+        let saved = load_app_state(&store).unwrap();
+        assert_eq!(saved.workspace_ui[0].session_name, "later");
     }
 }
