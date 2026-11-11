@@ -249,16 +249,19 @@ pub struct Workspaces {
     pending_create: Option<PendingCreate>,
     bulk_closing: bool,
     context: Option<commands::ContextFields>,
-    /// The workspace list and the tab strip take focus as one stop each; the
-    /// arrows then move a cursor through their items.
     /// The window's terminal, set by the chrome that owns it.
     pub terminal: Option<WeakEntity<crate::terminal::surface::TerminalSurface>>,
+    /// Around the workspace rows, for focus with no row to land on.
     pub list_focus: FocusHandle,
+    /// Each row's own stop in the Tab order, as Tauri's row buttons are, by
+    /// row key.
+    row_focus: HashMap<String, FocusHandle>,
+    /// The tab strip takes focus as one stop, as Tauri's roving tablist does;
+    /// the arrows then move a cursor through its tabs.
     pub strip_focus: FocusHandle,
-    pub list_cursor: Option<usize>,
     pub strip_cursor: Option<usize>,
-    /// The rows' and tabs' order the cursors were set against: a cursor is a
-    /// place in that order, which a move or a close changes under it.
+    /// The tabs' order the cursor was set against: a cursor is a place in
+    /// that order, which a move or a close changes under it.
     cursor_order: u64,
     _subscriptions: Vec<Subscription>,
 }
@@ -295,11 +298,10 @@ impl Workspaces {
                 pending_create: None,
                 bulk_closing: false,
                 context: None,
-                // Tab stops, as Tauri's row buttons and roving tablist are.
                 terminal: None,
-                list_focus: cx.focus_handle().tab_stop(true),
+                list_focus: cx.focus_handle(),
+                row_focus: HashMap::default(),
                 strip_focus: cx.focus_handle().tab_stop(true),
-                list_cursor: None,
                 strip_cursor: None,
                 cursor_order: 0,
                 _subscriptions: subscriptions,
@@ -318,8 +320,6 @@ impl Workspaces {
     pub fn set_pinned_only(&mut self, pinned_only: bool, cx: &mut Context<Self>) {
         if self.pinned_only != pinned_only {
             self.pinned_only = pinned_only;
-            // The filter reorders the list under the cursor.
-            self.list_cursor = None;
             self.publish_context(cx);
             cx.notify();
         }
@@ -602,9 +602,6 @@ impl Workspaces {
         self.retire_pending(cx);
         let order = {
             let mut hasher = std::hash::DefaultHasher::new();
-            for row in self.rows(true, cx) {
-                std::hash::Hash::hash(&row.key, &mut hasher);
-            }
             for tab in &view.tabs {
                 std::hash::Hash::hash(&tab.key, &mut hasher);
             }
@@ -612,7 +609,6 @@ impl Workspaces {
         };
         if order != self.cursor_order {
             self.cursor_order = order;
-            self.list_cursor = None;
             self.strip_cursor = None;
         }
         self.surface_terminal_on_host_switch(&view, cx);
@@ -724,10 +720,9 @@ impl Workspaces {
             };
             if self.last_point.as_ref() != Some(&point) {
                 self.last_point = Some(point.clone());
-                // The keyboard cursors start again from what is now active, as
-                // Tauri's roving tab stop does: one left on an old row or tab
-                // would send Enter somewhere the user no longer is.
-                self.list_cursor = None;
+                // The strip's cursor starts again from what is now active, as
+                // Tauri's roving tab stop does: one left on an old tab would
+                // send Enter somewhere the user no longer is.
                 self.strip_cursor = None;
                 let expected = self.expected.take();
                 if !expected.is_some_and(|expected| landed_at(&expected, &point)) {
@@ -1790,22 +1785,32 @@ impl Workspaces {
 
     // The keyboard.
 
-    /// `focus.workspaces`: the list, with its cursor on the active row.
-    pub fn focus_list(&mut self, window: &mut GpuiWindow, cx: &mut Context<Self>) {
-        let rows = self.rows(true, cx);
-        self.list_cursor = rows
-            .iter()
-            .position(|row| row.active)
-            .or((!rows.is_empty()).then_some(0));
-        self.list_focus.focus(window, cx);
-        cx.notify();
+    /// A workspace row's stop in the Tab order.
+    fn row_focus(&mut self, key: &str, cx: &mut Context<Self>) -> FocusHandle {
+        self.row_focus
+            .entry(key.to_owned())
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone()
     }
 
-    /// The list's keyboard cursor: where it was left, else the active row, so
-    /// focus arriving by Tab starts where the user is.
-    pub fn list_position(&self, cx: &App) -> Option<usize> {
-        self.list_cursor
-            .or_else(|| self.rows(true, cx).iter().position(|row| row.active))
+    /// The stops of `rows`, as drawn; those of rows gone are let go.
+    pub fn row_stops(&mut self, rows: &[WorkspaceRow], cx: &mut Context<Self>) -> Vec<FocusHandle> {
+        self.row_focus
+            .retain(|key, _| rows.iter().any(|row| row.key == *key));
+        rows.iter()
+            .map(|row| self.row_focus(&row.key, cx))
+            .collect()
+    }
+
+    /// `focus.workspaces`: the active row, else the first.
+    pub fn focus_list(&mut self, window: &mut GpuiWindow, cx: &mut Context<Self>) {
+        let rows = self.rows(true, cx);
+        let focus = match rows.iter().find(|row| row.active).or(rows.first()) {
+            Some(row) => self.row_focus(&row.key, cx),
+            None => self.list_focus.clone(),
+        };
+        focus.focus(window, cx);
+        cx.notify();
     }
 
     /// The strip's keyboard cursor, else the active tab.
@@ -2059,21 +2064,50 @@ fn remember_new_workspace_host(host: &str, cx: &App) {
     });
 }
 
-/// Moves a list cursor by a key, as the Tauri lists move focus: arrows step,
-/// Home and End jump. `None` when the key is not one of those.
-pub fn moved_cursor(cursor: Option<usize>, len: usize, key: &str, vertical: bool) -> Option<usize> {
+/// A list row's stop in the Tab order and its neighbours': the workspace and
+/// agent rows are each a button in Tauri, which Up and Down move between.
+#[derive(Clone)]
+pub struct RowKeys {
+    pub focus: FocusHandle,
+    pub up: Option<FocusHandle>,
+    pub down: Option<FocusHandle>,
+}
+
+impl RowKeys {
+    /// Row `at` of rows whose handles are in the order they draw.
+    pub fn for_rows(handles: &[FocusHandle], at: usize) -> Self {
+        Self {
+            focus: handles[at].clone(),
+            up: at.checked_sub(1).map(|up| handles[up].clone()),
+            down: handles.get(at + 1).cloned(),
+        }
+    }
+
+    /// Up and Down move to the row above or below and stop at the ends, as
+    /// Tauri's `focusRelative`. Whether `key` was one of them.
+    pub fn step(&self, key: &str, window: &mut GpuiWindow, cx: &mut App) -> bool {
+        let next = match key {
+            "up" => self.up.as_ref(),
+            "down" => self.down.as_ref(),
+            _ => return false,
+        };
+        if let Some(next) = next {
+            next.focus(window, cx);
+        }
+        true
+    }
+}
+
+/// Moves the tab strip's cursor by a key, as Tauri's strip moves focus: Left
+/// and Right step, Home and End jump. `None` when the key is not one of those.
+pub fn moved_cursor(cursor: Option<usize>, len: usize, key: &str) -> Option<usize> {
     let last = len.checked_sub(1)?;
     let current = cursor.unwrap_or(0).min(last);
-    let (back, forward) = if vertical {
-        ("up", "down")
-    } else {
-        ("left", "right")
-    };
     match key {
         "home" => Some(0),
         "end" => Some(last),
-        key if key == back => Some(current.saturating_sub(1)),
-        key if key == forward => Some((current + 1).min(last)),
+        "left" => Some(current.saturating_sub(1)),
+        "right" => Some((current + 1).min(last)),
         _ => None,
     }
 }

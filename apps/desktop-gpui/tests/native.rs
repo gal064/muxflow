@@ -405,7 +405,11 @@ impl Render for Row {
             move |_: &mut Window, _: &mut App| ran.borrow_mut().push(name)
         };
         let entries = Rc::new(vec![
-            Entry::from(Item::new("Open", log("open")).command("commands.show")),
+            Entry::from(
+                Item::new("Open", log("open")).hint(&muxflow_gpui::menus::RunCommand {
+                    id: "commands.show",
+                }),
+            ),
             Entry::from(Item::new("Rename…", log("rename")).disabled(true)),
             Entry::Separator,
             Entry::from(Item::new("Sort by name", log("sort")).checked(true)),

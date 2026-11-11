@@ -19,6 +19,7 @@ pub fn init(cx: &mut App) {
     // menus, which show Settings once it has a handler.
     crate::settings::init(cx);
     crate::menus::init(cx);
+    crate::context_menu::init(cx);
     crate::connection_ui::init(cx);
     crate::workspaces::init(cx);
     crate::ui::chrome::init(cx);

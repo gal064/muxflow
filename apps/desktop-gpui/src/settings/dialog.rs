@@ -2,13 +2,15 @@
 //! connection form on the first. Copy, order and behavior from
 //! `features/shell/SettingsDialog.tsx`.
 
+use std::rc::Rc;
+
 use desktop_core::{
     app_state::{AgentSoundMode, AppTabViewMode, MarkdownAppearance, ThemePreference},
     notifications::{emit_test_notification, notification_permission_status},
 };
 use gpui_kit::{
-    App, Context, Entity, IntoElement, ParentElement, Render, Role, SharedString, Styled,
-    Subscription, Window,
+    App, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, ParentElement, Render, Role,
+    SharedString, Styled, Subscription, Window,
     component::{
         Disableable, Sizable, WindowExt,
         button::{Button, ButtonVariants},
@@ -894,6 +896,18 @@ fn legend_for_host(label: &str, cx: &App) -> impl IntoElement + use<> {
 
 impl Render for SettingsDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // One Tab stop, the section shown, as Tauri's roving tablist; the
+        // arrows select the next section and take the keyboard to it, wrapping.
+        let focus: Rc<[FocusHandle]> = (0..TABS.len())
+            .map(|ix| {
+                window
+                    .use_keyed_state(("settings-tab-focus", ix), cx, |_, cx| cx.focus_handle())
+                    .read(cx)
+                    .clone()
+                    .tab_stop(TABS[ix].0 == self.tab)
+            })
+            .collect();
+        let accent = theme::palette(cx).accent;
         let tabs = TabBar::new("settings-tabs")
             .segmented()
             .selected_index(
@@ -901,7 +915,39 @@ impl Render for SettingsDialog {
                     .position(|(tab, _)| *tab == self.tab)
                     .unwrap_or(0),
             )
-            .children(TABS.iter().map(|(_, label)| TabItem::new().label(*label)))
+            .children(TABS.iter().enumerate().map(|(ix, (_, label))| {
+                // A ring for the keyboard only, as Tauri's `:focus-visible`.
+                let held = focus[ix].is_focused(window) && window.last_input_was_keyboard();
+                let focus = focus.clone();
+                TabItem::new()
+                    .label(*label)
+                    .track_focus(&focus[ix])
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        // From the section shown, as Tauri moves.
+                        let at = TABS
+                            .iter()
+                            .position(|(tab, _)| *tab == this.tab)
+                            .unwrap_or(0);
+                        let next = match event.keystroke.key.as_str() {
+                            "left" => (at + TABS.len() - 1) % TABS.len(),
+                            "right" => (at + 1) % TABS.len(),
+                            _ => return,
+                        };
+                        this.select_tab(TABS[next].0, window, cx);
+                        focus[next].focus(window, cx);
+                        cx.stop_propagation();
+                    }))
+                    .when(held, |tab| {
+                        tab.relative().child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .border_2()
+                                .border_color(accent)
+                                .rounded(ui(4.)),
+                        )
+                    })
+            }))
             .on_click(cx.listener(|this, index: &usize, window, cx| {
                 if let Some((tab, _)) = TABS.get(*index) {
                     this.select_tab(*tab, window, cx);

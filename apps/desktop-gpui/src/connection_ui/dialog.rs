@@ -473,21 +473,30 @@ impl ConnectionForm {
         v_flex()
             .gap(ui(4.))
             .child(field("Host"))
+            // The kit's group has no role of its own, so the caption above it
+            // would not name it for a screen reader.
             .child(
-                RadioGroup::vertical("connection-saved-hosts")
-                    .children(profiles.iter().map(|profile| {
-                        Radio::new(SharedString::from(format!(
-                            "connection-host-{}",
-                            profile.id
-                        )))
-                        .label(profile.label.clone())
-                    }))
-                    .selected_index(selected)
-                    .on_change(move |index, _, cx| {
-                        if let Some(id) = ids.get(*index) {
-                            picked.update(cx, |state, cx| state.select_profile(id, cx));
-                        }
-                    }),
+                div()
+                    .id("connection-saved-hosts-group")
+                    .test_support()
+                    .role(Role::RadioGroup)
+                    .aria_label("Host")
+                    .child(
+                        RadioGroup::vertical("connection-saved-hosts")
+                            .children(profiles.iter().map(|profile| {
+                                Radio::new(SharedString::from(format!(
+                                    "connection-host-{}",
+                                    profile.id
+                                )))
+                                .label(profile.label.clone())
+                            }))
+                            .selected_index(selected)
+                            .on_change(move |index, _, cx| {
+                                if let Some(id) = ids.get(*index) {
+                                    picked.update(cx, |state, cx| state.select_profile(id, cx));
+                                }
+                            }),
+                    ),
             )
             .child(
                 h_flex()
@@ -529,18 +538,25 @@ impl ConnectionForm {
                 .child("TRANSPORT"),
         );
         fields = fields.child(
-            RadioGroup::horizontal("connection-mode")
-                .child(Radio::new("connection-mode-local").label("Local"))
-                .child(Radio::new("connection-mode-ssh").label("SSH"))
-                .selected_index(Some(usize::from(mode == ConnectionMode::Ssh)))
-                .on_change(move |index, _, cx| {
-                    let next = if *index == 0 {
-                        ConnectionMode::Local
-                    } else {
-                        ConnectionMode::Ssh
-                    };
-                    on_mode.update(cx, |state, cx| state.set_connection_mode(next, cx));
-                }),
+            div()
+                .id("connection-mode-group")
+                .test_support()
+                .role(Role::RadioGroup)
+                .aria_label("Transport")
+                .child(
+                    RadioGroup::horizontal("connection-mode")
+                        .child(Radio::new("connection-mode-local").label("Local"))
+                        .child(Radio::new("connection-mode-ssh").label("SSH"))
+                        .selected_index(Some(usize::from(mode == ConnectionMode::Ssh)))
+                        .on_change(move |index, _, cx| {
+                            let next = if *index == 0 {
+                                ConnectionMode::Local
+                            } else {
+                                ConnectionMode::Ssh
+                            };
+                            on_mode.update(cx, |state, cx| state.set_connection_mode(next, cx));
+                        }),
+                ),
         );
         if mode == ConnectionMode::Ssh {
             fields = fields

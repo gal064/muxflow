@@ -507,7 +507,7 @@ fn choosing_a_workspace_hands_the_keyboard_to_its_terminal(cx: &mut TestAppConte
     shell.settle();
     let (list, focused) = shell.visual.update(|window, cx| {
         (
-            workspaces.read(cx).list_focus.is_focused(window),
+            workspaces.read(cx).list_focus.contains_focused(window, cx),
             window.focused(cx).is_some(),
         )
     });
@@ -515,32 +515,70 @@ fn choosing_a_workspace_hands_the_keyboard_to_its_terminal(cx: &mut TestAppConte
     assert!(focused, "a pane took it");
 }
 
+/// The label of the row, its id starting `row`, that holds the keyboard.
+fn focused_row(shell: &mut Shell, row: &'static str) -> Option<String> {
+    use gpui_kit::ElementId::{Name, NamedInteger};
+    shell.visual.update(|window, _| {
+        window
+            .elements()
+            .into_iter()
+            .filter(|element| match element.path().last() {
+                Some(Name(id) | NamedInteger(id, _)) => id.starts_with(row),
+                _ => false,
+            })
+            .find(|element| element.focused() == Some(true))
+            .and_then(|element| element.label().map(str::to_owned))
+    })
+}
+
 #[gpui_kit::test]
-fn the_list_cursor_starts_on_the_active_row_each_time_focus_arrives(cx: &mut TestAppContext) {
+fn each_workspace_row_is_a_tab_stop_and_the_arrows_move_between_them(cx: &mut TestAppContext) {
     let mut shell = shell(cx, json!([]), json!({}));
     let workspaces = shell.workspaces();
-    shell.visual.update(|window, cx| {
-        workspaces.update(cx, |this, cx| {
-            this.focus_list(window, cx);
-            this.list_cursor = Some(1);
-        });
-    });
-    shell.settle();
-    let focused = shell
+    let label = |shell: &mut Shell, index: usize| {
+        shell
+            .visual
+            .update(|_, cx| workspaces.read(cx).rows(true, cx)[index].label())
+    };
+    let (first, second) = (label(&mut shell, 0), label(&mut shell, 1));
+    // `focus.workspaces` lands on the active row, main.
+    shell
         .visual
-        .update(|window, cx| workspaces.read(cx).list_focus.is_focused(window));
-    assert!(focused, "the list has the keyboard");
-    // A switch made elsewhere must not leave the cursor behind.
-    shell.visual.update(|_, cx| {
-        workspaces.update(cx, |this, cx| this.select_window("@2", cx));
-    });
+        .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_list(window, cx)));
     shell.settle();
-    let (cursor, position) = shell.visual.update(|_, cx| {
+    let list = "workspace-row";
+    assert_eq!(focused_row(&mut shell, list), Some(first.clone()));
+    shell.visual.simulate_keystrokes("down");
+    shell.settle();
+    assert_eq!(focused_row(&mut shell, list), Some(second.clone()));
+    shell.visual.simulate_keystrokes("down");
+    shell.settle();
+    assert_eq!(
+        focused_row(&mut shell, list),
+        Some(second),
+        "Down stops at the end"
+    );
+    shell.visual.simulate_keystrokes("up up");
+    shell.settle();
+    assert_eq!(focused_row(&mut shell, list), Some(first.clone()));
+    // The pin is the pointer's: Tab goes on to the next row.
+    shell.visual.simulate_keystrokes("tab");
+    shell.settle();
+    assert_eq!(focused_row(&mut shell, list), Some(label(&mut shell, 1)));
+    shell.visual.simulate_keystrokes("shift-tab");
+    shell.visual.update(|window, cx| window.press("enter", cx));
+    shell.settle();
+    let (list_held, active) = shell.visual.update(|window, cx| {
         let this = workspaces.read(cx);
-        (this.list_cursor, this.list_position(cx))
+        (
+            this.list_focus.contains_focused(window, cx),
+            this.rows(true, cx)[0].active,
+        )
     });
-    assert_eq!(cursor, None);
-    assert_eq!(position, Some(0), "main, the active row");
+    assert!(
+        active && !list_held,
+        "Enter chooses it and hands the keyboard on"
+    );
 }
 
 #[gpui_kit::test]
@@ -561,7 +599,7 @@ fn focus_left_on_something_gone_comes_back_to_the_terminal(cx: &mut TestAppConte
     let (stray, list, any) = shell.visual.update(|window, cx| {
         (
             stray.is_focused(window),
-            workspaces.read(cx).list_focus.is_focused(window),
+            workspaces.read(cx).list_focus.contains_focused(window, cx),
             window.focused(cx).is_some(),
         )
     });
@@ -941,13 +979,13 @@ fn focus_follows_the_mouse_onto_the_docked_document_and_back(cx: &mut TestAppCon
 
 #[test]
 fn a_moving_cursor_stays_in_its_list() {
-    assert_eq!(moved_cursor(None, 3, "down", true), Some(1));
-    assert_eq!(moved_cursor(Some(2), 3, "down", true), Some(2));
-    assert_eq!(moved_cursor(Some(2), 3, "home", true), Some(0));
-    assert_eq!(moved_cursor(Some(0), 3, "end", false), Some(2));
-    assert_eq!(moved_cursor(Some(1), 3, "left", false), Some(0));
-    assert_eq!(moved_cursor(Some(1), 3, "up", false), None);
-    assert_eq!(moved_cursor(None, 0, "down", true), None);
+    assert_eq!(moved_cursor(None, 3, "right"), Some(1));
+    assert_eq!(moved_cursor(Some(2), 3, "right"), Some(2));
+    assert_eq!(moved_cursor(Some(2), 3, "home"), Some(0));
+    assert_eq!(moved_cursor(Some(0), 3, "end"), Some(2));
+    assert_eq!(moved_cursor(Some(1), 3, "left"), Some(0));
+    assert_eq!(moved_cursor(Some(1), 3, "up"), None);
+    assert_eq!(moved_cursor(None, 0, "right"), None);
 }
 
 #[test]
@@ -1307,6 +1345,60 @@ mod agent_seams {
             .visual
             .update(|_, cx| agents::open_pane("remote", "%7", cx));
         assert!(gone.is_err());
+    }
+
+    #[gpui_kit::test]
+    fn each_agent_row_is_a_tab_stop_walked_by_arrows_with_a_menu(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(
+            &mut shell,
+            HashMap::from([(
+                "client-1",
+                vec![
+                    agent("in-main", "local", ("$1", "main", "@2", "%3")),
+                    agent("in-notes", "local", ("$2", "notes", "@3", "%4")),
+                ],
+            )]),
+        );
+        let workspaces = shell.workspaces();
+        shell
+            .visual
+            .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_list(window, cx)));
+        shell.settle();
+        let on_list = |shell: &mut Shell| focused_row(shell, "agent-row-");
+        let reached = (0..12).any(|_| {
+            shell.visual.simulate_keystrokes("tab");
+            shell.settle();
+            on_list(&mut shell).is_some()
+        });
+        assert!(reached, "Tab reaches the agents list");
+        let first = on_list(&mut shell);
+
+        // in-notes, then in-main, in the sidebar's order.
+        shell.visual.simulate_keystrokes("down");
+        shell.settle();
+        let second = on_list(&mut shell);
+        assert!(
+            second.is_some() && second != first,
+            "Down moves to the next row"
+        );
+        shell.visual.simulate_keystrokes("shift-f10");
+        shell.settle();
+        let open = shell
+            .visual
+            .update(|window, cx| crate::context_menu::is_open(window, cx));
+        assert!(open, "the menu key opens the row's menu");
+        shell.visual.simulate_keystrokes("escape");
+        shell.settle();
+        assert_eq!(on_list(&mut shell), second, "and hands the keyboard back");
+        shell.visual.update(|window, cx| window.press("enter", cx));
+        shell.settle();
+        assert_eq!(shell.host.last("focusPane")["pane_id"], "%3");
+        assert_eq!(
+            on_list(&mut shell),
+            None,
+            "the keyboard goes to the terminal"
+        );
     }
 
     #[gpui_kit::test]
@@ -1767,7 +1859,7 @@ fn a_pane_grabbed_with_the_link_modifier_joins_beside_another_pane(cx: &mut Test
     let mut shell = shell(cx, json!([]), json!({}));
     let surface = shell
         .visual
-        .update(|window, _| window.find_by_label("Workspace").bounds());
+        .update(|window, _| window.find_by_label("Workspace main").bounds());
     // `%2` is the right half of the window and `%1` the left.
     let from = gpui_kit::point(
         surface.left() + surface.size.width * 0.8,
@@ -2478,4 +2570,243 @@ mod multi_host {
         assert_eq!(active_host(&mut shell), "local");
         assert_eq!(shell.host.kinds().len(), before, "{:?}", shell.host.kinds());
     }
+}
+
+/// Which of the buttons named `labels` holds the keyboard, if any.
+fn focused_button(shell: &mut Shell, labels: &[&'static str]) -> Option<&'static str> {
+    shell.visual.update(|window, _| {
+        labels.iter().copied().find(|label| {
+            window
+                .try_find_by_label(label)
+                .is_some_and(|element| element.focused() == Some(true))
+        })
+    })
+}
+
+#[gpui_kit::test]
+fn tab_reaches_the_title_bar_and_the_strip_and_shift_tab_the_panel_tabs(cx: &mut TestAppContext) {
+    let tabs = json!([doc("a", "main.rs", 0), doc("b", "lib.rs", 1)]);
+    let mut shell = shell(
+        cx,
+        tabs,
+        json!({ "tabsInTitleBar": false, "panelOpen": true, "panelSurface": "files" }),
+    );
+    let workspaces = shell.workspaces();
+    // The menus are native on macOS: the button is Linux's.
+    let title_bar: Vec<&'static str> = [
+        "Settings",
+        "Toggle sidebar",
+        "New workspace",
+        "Toggle right panel",
+    ]
+    .into_iter()
+    .chain(cfg!(target_os = "linux").then_some("Main menu"))
+    .collect();
+    // Back from the workspace list through the title bar, in its order.
+    shell
+        .visual
+        .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_list(window, cx)));
+    shell.settle();
+    let mut walked = Vec::new();
+    for _ in 0..8 {
+        shell.visual.simulate_keystrokes("shift-tab");
+        shell.settle();
+        walked.extend(focused_button(&mut shell, &title_bar));
+        if walked.last() == Some(&"Settings") {
+            break;
+        }
+    }
+    let mut expected = title_bar.clone();
+    expected.reverse();
+    assert_eq!(walked, expected);
+
+    // On from the list to the strip, then the documents' close buttons.
+    shell
+        .visual
+        .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_list(window, cx)));
+    shell.settle();
+    let strip = (0..10).position(|_| {
+        shell.visual.simulate_keystrokes("tab");
+        shell.settle();
+        shell
+            .visual
+            .update(|window, cx| workspaces.read(cx).strip_focus.is_focused(window))
+    });
+    assert!(strip.is_some(), "Tab reaches the tab strip");
+    shell.visual.simulate_keystrokes("tab");
+    shell.settle();
+    assert_eq!(
+        focused_button(&mut shell, &["Close main.rs"]),
+        Some("Close main.rs")
+    );
+
+    // Past the start of the window the panel's tabs come, as the last stops in
+    // Tauri's page did; the arrows select a surface, wrapping.
+    shell
+        .visual
+        .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_list(window, cx)));
+    shell.settle();
+    while focused_button(&mut shell, &["Settings"]).is_none() {
+        shell.visual.simulate_keystrokes("shift-tab");
+        shell.settle();
+    }
+    let on_tabs = (0..4).any(|_| {
+        shell.visual.simulate_keystrokes("shift-tab right");
+        shell.settle();
+        shell.selected("Git") == Some(true)
+    });
+    assert!(on_tabs, "Shift+Tab reaches the panel's tabs");
+    shell.visual.simulate_keystrokes("left left");
+    shell.settle();
+    assert_eq!(
+        shell.selected("Automations"),
+        Some(true),
+        "Left wraps to the last"
+    );
+    shell.visual.simulate_keystrokes("right");
+    shell.settle();
+    assert_eq!(
+        shell.selected("Files"),
+        Some(true),
+        "Right wraps to the first"
+    );
+}
+
+#[gpui_kit::test]
+fn the_strip_selects_tabs_and_opens_their_menu_from_the_keyboard(cx: &mut TestAppContext) {
+    let tabs = json!([doc("a", "main.rs", 0), doc("b", "lib.rs", 1)]);
+    let mut shell = shell(cx, tabs, json!({ "tabsInTitleBar": false }));
+    let workspaces = shell.workspaces();
+    shell
+        .visual
+        .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_strip(window, cx)));
+    shell.settle();
+    shell.visual.simulate_keystrokes("end enter");
+    shell.settle();
+    assert_eq!(shell.selected("lib.rs"), Some(true));
+    shell.visual.simulate_keystrokes("home right enter");
+    shell.settle();
+    assert_eq!(shell.selected("server"), Some(true));
+    assert_eq!(shell.selected("lib.rs"), Some(false));
+
+    // Choosing a terminal tab handed the keyboard to its pane.
+    shell
+        .visual
+        .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_strip(window, cx)));
+    shell.settle();
+    shell.visual.simulate_keystrokes("shift-f10");
+    shell.settle();
+    let open = shell
+        .visual
+        .update(|window, cx| crate::context_menu::is_open(window, cx));
+    assert!(open, "the menu key opens the tab's menu");
+    shell.visual.simulate_keystrokes("escape");
+    shell.settle();
+    let back = shell
+        .visual
+        .update(|window, cx| workspaces.read(cx).strip_focus.is_focused(window));
+    assert!(
+        back,
+        "closing the menu hands the keyboard back to the strip"
+    );
+    // The region is named for the workspace on screen, as in Tauri.
+    shell.visual.update(|window, _| {
+        assert_eq!(
+            window.find_by_label("Workspace main").role(),
+            Some(Role::Main)
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_dialog_from_the_host_menu_hands_the_keyboard_back_to_the_host_button(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({}));
+    let workspaces = shell.workspaces();
+    let on_host = |shell: &mut Shell| {
+        shell.visual.update(|window, _| {
+            window.elements().into_iter().any(|element| {
+                element
+                    .label()
+                    .is_some_and(|label| label.starts_with("Host "))
+                    && element.role() == Some(Role::Button)
+                    && element.focused() == Some(true)
+            })
+        })
+    };
+    shell
+        .visual
+        .update(|window, cx| workspaces.update(cx, |this, cx| this.focus_list(window, cx)));
+    shell.settle();
+    let reached = (0..12).any(|_| {
+        shell.visual.simulate_keystrokes("tab");
+        shell.settle();
+        on_host(&mut shell)
+    });
+    assert!(reached, "Tab reaches the host button");
+    shell.visual.update(|window, cx| window.press("enter", cx));
+    shell.settle();
+    shell.settle();
+    // "Connection settings…" is the last item.
+    shell.visual.simulate_keystrokes("end enter");
+    shell.settle();
+    assert!(
+        shell
+            .visual
+            .update(gpui_kit::component::WindowExt::has_active_dialog)
+    );
+    shell.visual.simulate_keystrokes("escape");
+    shell.settle();
+    assert!(
+        !shell
+            .visual
+            .update(gpui_kit::component::WindowExt::has_active_dialog)
+    );
+    assert!(
+        on_host(&mut shell),
+        "back where the menu opened, as in Tauri"
+    );
+}
+
+/// Two stops, under Kit's root as the app is.
+struct TwoStops([gpui_kit::FocusHandle; 2]);
+
+impl gpui_kit::Render for TwoStops {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        use gpui_kit::{InteractiveElement as _, ParentElement as _, Styled as _};
+        gpui_kit::div()
+            .size_full()
+            .child(gpui_kit::div().id("first").size_4().track_focus(&self.0[0]))
+            .child(gpui_kit::div().id("last").size_4().track_focus(&self.0[1]))
+    }
+}
+
+#[gpui_kit::test]
+fn tab_with_the_keyboard_nowhere_goes_to_the_first_stop(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::ui::chrome::init(cx);
+    });
+    let stops = cx.new(|cx| TwoStops([0, 1].map(|_| cx.focus_handle().tab_stop(true))));
+    let (_, visual) = cx.add_window_view({
+        let stops = stops.clone();
+        move |window, cx| gpui_kit::base::Root::new(stops, window, cx)
+    });
+    let focused = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| {
+            stops
+                .read(cx)
+                .0
+                .iter()
+                .position(|stop| stop.is_focused(window))
+        })
+    };
+    visual.simulate_keystrokes("tab");
+    assert_eq!(focused(visual), Some(0));
+    visual.update(|window, cx| window.blur(cx));
+    visual.simulate_keystrokes("shift-tab");
+    assert_eq!(focused(visual), Some(1));
 }

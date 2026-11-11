@@ -53,7 +53,29 @@ use crate::{
 };
 
 /// Called once from [`crate::features::init`].
-pub fn init(_cx: &mut App) {}
+pub fn init(cx: &mut App) {
+    // Tab with the keyboard nowhere, at start or after a dialog that opened
+    // over nothing, goes to the first stop (Shift+Tab the last), as from a
+    // page's body in Tauri. Kit binds Tab only along a focused path.
+    cx.intercept_keystrokes(|event, window, cx| {
+        let (key, modifiers) = (&event.keystroke.key, event.keystroke.modifiers);
+        if key != "tab"
+            || modifiers.control
+            || modifiers.alt
+            || modifiers.platform
+            || window.focused(cx).is_some()
+        {
+            return;
+        }
+        if modifiers.shift {
+            window.focus_prev(cx);
+        } else {
+            window.focus_next(cx);
+        }
+        cx.stop_propagation();
+    })
+    .detach();
+}
 
 pub struct Chrome {
     this: WeakEntity<Self>,

@@ -24,7 +24,7 @@ use gpui_kit::{
     component::{
         IconName, WindowExt,
         input::{Copy, Cut, Paste, Redo, SelectAll, Undo},
-        menu::{DropdownMenu, PopupMenu, PopupMenuItem},
+        menu::{DropdownMenu, PopupMenu},
     },
 };
 
@@ -34,6 +34,7 @@ use crate::{
         keymap::{normalize_shortcut, shortcut_for},
         registry::{COMMANDS, CommandId, Platform, command_by_id},
     },
+    context_menu::{self, Entry, Item},
     ui::title_bar::bar_button,
 };
 
@@ -284,26 +285,40 @@ pub fn init(cx: &mut App) {
 
 /// The menus as a popup, for Linux: each top-level menu is a submenu.
 fn popup(menu: PopupMenu, window: &mut Window, cx: &mut gpui_kit::Context<PopupMenu>) -> PopupMenu {
-    let menus = cx.get_menus().unwrap_or_default();
-    menus.into_iter().fold(menu, |menu, owned| {
-        let items = owned.items;
-        menu.submenu(owned.name, window, cx, move |submenu, _, _| {
-            items.iter().fold(submenu, |submenu, item| match item {
-                OwnedMenuItem::Separator => submenu.separator(),
-                OwnedMenuItem::Action {
-                    name,
-                    action,
-                    disabled,
-                    ..
-                } => submenu.item(
-                    PopupMenuItem::new(name.clone())
-                        .action(action.boxed_clone())
-                        .disabled(*disabled),
-                ),
-                OwnedMenuItem::Submenu(_) | OwnedMenuItem::SystemMenu(_) => submenu,
-            })
+    let entries: Vec<Entry> = cx
+        .get_menus()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|owned| {
+            let items = owned
+                .items
+                .into_iter()
+                .filter_map(|item| match item {
+                    OwnedMenuItem::Separator => Some(Entry::Separator),
+                    OwnedMenuItem::Action {
+                        name,
+                        action,
+                        disabled,
+                        ..
+                    } => {
+                        let hint = action.boxed_clone();
+                        let run = move |window: &mut Window, cx: &mut App| {
+                            window.dispatch_action(action.boxed_clone(), cx);
+                        };
+                        Some(
+                            Item::new(name, run)
+                                .hint(hint.as_ref())
+                                .disabled(disabled)
+                                .into(),
+                        )
+                    }
+                    OwnedMenuItem::Submenu(_) | OwnedMenuItem::SystemMenu(_) => None,
+                })
+                .collect();
+            Entry::submenu(owned.name, items, false)
         })
-    })
+        .collect();
+    context_menu::fill(menu, &entries, window, cx)
 }
 
 /// The title bar's button for the menus, on Linux, where no native menu bar

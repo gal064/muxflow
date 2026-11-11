@@ -3,10 +3,12 @@
 //! `features/workspaces/WorkspaceSidebar.tsx`; the Agents section is the
 //! agents feature's list ([`crate::agents::view::AgentsList`]).
 
+use std::rc::Rc;
+
 use desktop_core::app_state::AgentSortMode;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseMoveEvent, ParentElement, RenderOnce, Rgba, Role, SharedString,
+    MouseMoveEvent, ParentElement, RenderOnce, Rgba, Role, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, WeakEntity, Window,
     assets::IconName,
     base::{Disableable, HandleEdge, TestSupportExt},
@@ -14,7 +16,7 @@ use gpui_kit::{
         Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
+        menu::{ContextMenuExt, DropdownMenu, PopupMenu},
         v_flex,
     },
     div,
@@ -45,9 +47,7 @@ use crate::{
         },
         title_bar::{bar_button, disabled_ink},
     },
-    workspaces::{
-        Target, Workspaces, focus_terminal, moved_cursor, rows::WorkspaceRow, run_command,
-    },
+    workspaces::{RowKeys, Target, Workspaces, focus_terminal, rows::WorkspaceRow, run_command},
 };
 
 #[derive(IntoElement)]
@@ -114,13 +114,15 @@ pub(crate) fn phase_color(phase: ConnectionPhase, cx: &App) -> Rgba {
 
 /// One workspace's row. `index` is its flat place in the list, which is the
 /// number beside it and what ⌘1–9 selects; `moves` says whether it can move up
-/// and down among its own host's rows.
+/// and down among its own host's rows. Its menu comes back with it, for the
+/// keyboard to open.
 fn workspace_row(
     row: WorkspaceRow,
     index: usize,
     moves: (bool, bool),
-    keyboard: bool,
+    keys: RowKeys,
     workspaces: &Entity<Workspaces>,
+    window: &Window,
     cx: &App,
 ) -> AnyElement {
     let palette = theme::palette(cx);
@@ -142,7 +144,6 @@ fn workspace_row(
             let Some(this) = weak.upgrade() else {
                 return;
             };
-            this.update(cx, |this, _| this.list_cursor = Some(index));
             // Shift pins rather than selects: the row moving to the top is
             // often not the one you are working in.
             if event.modifiers().shift {
@@ -153,14 +154,12 @@ fn workspace_row(
                     run_command(&this, "session.rename", Some(target), window, cx);
                 }
             } else {
-                // The cursor follows the pointer, so a ring never sits on a
-                // row other than the one just chosen.
                 this.update(cx, |this, cx| this.select_row(&row, cx));
                 focus_terminal(&this, window, cx);
             }
         }
     };
-    let menu = {
+    let menu: context_menu::Builder = Rc::new({
         let (weak, row) = (weak.clone(), row.clone());
         move |menu: PopupMenu, window: &mut Window, cx: &mut gpui_kit::Context<PopupMenu>| {
             let target = Target::Session(row.scope.clone(), row.session.id.clone());
@@ -207,7 +206,7 @@ fn workspace_row(
                 cx,
             )
         }
-    };
+    });
     let pin_label = if row.pinned {
         "Unpin workspace"
     } else {
@@ -222,6 +221,8 @@ fn workspace_row(
             .size(ui(20.))
             .accessibility_label(pin_label)
             .tooltip(pin_label)
+            // A pointer affordance: the menu is the keyboard's way to pin.
+            .tab_stop(false)
             .child(pin_glyph(meta))
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
@@ -304,9 +305,30 @@ fn workspace_row(
         .role(Role::Button)
         .aria_label(row.label())
         .aria_selected(selected)
-        // The list keeps the keyboard; this tells a screen reader which row
-        // the cursor is on.
-        .when(keyboard, |this| this.aria_active_descendant())
+        .track_focus(&keys.focus)
+        .on_key_down({
+            let (keys, menu) = (keys.clone(), menu.clone());
+            move |event: &KeyDownEvent, window, cx| {
+                if context_menu::is_menu_key(&event.keystroke) {
+                    let menu = menu.clone();
+                    context_menu::open(
+                        move |popup, window, cx| menu(popup, window, cx),
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                }
+                // A modified arrow belongs to a binding, not to the list.
+                if event.keystroke.modifiers.modified() {
+                    return;
+                }
+                // Enter and Space click it.
+                if keys.step(&event.keystroke.key, window, cx) {
+                    cx.stop_propagation();
+                }
+            }
+        })
         .relative()
         .min_h(ui(28.))
         .pl(ui(8.))
@@ -322,20 +344,31 @@ fn workspace_row(
         .when(!selected, |this| {
             this.hover(|style| style.bg(palette.chrome_hover))
         })
-        // Outside the row, as Tauri's focus outline: drawn inside, it would
-        // vanish on the accent fill and push every row below it down.
-        .when(keyboard, |this| {
-            this.child(
-                div()
-                    .absolute()
-                    .top(ui(-3.))
-                    .left(ui(-3.))
-                    .right(ui(-3.))
-                    .bottom(ui(-3.))
-                    .border_2()
-                    .border_color(palette.accent)
-                    .rounded(ui(RADIUS_ROW + 3.)),
-            )
+        // Inside the row: Tauri's outline sits outside it, where the list's
+        // scroll clips it and the next row's fill covers it. On the accent
+        // fill, where an accent ring would vanish, it is in the ink colour and
+        // set in, with fill on both sides of it. Only for the keyboard, as
+        // `:focus-visible`.
+        .when(keys.focus.is_focused(window), |this| {
+            this.when(window.last_input_was_keyboard(), |this| {
+                let (inset, color) = if selected {
+                    (2., palette.accent_ink)
+                } else {
+                    (0., palette.accent)
+                };
+                this.child(
+                    div()
+                        .absolute()
+                        .top(ui(inset))
+                        .left(ui(inset))
+                        .right(ui(inset))
+                        .bottom(ui(inset))
+                        .border_2()
+                        .border_color(color)
+                        .rounded(ui(RADIUS_ROW - inset)),
+                )
+            })
+            .child(context_menu::anchor(&keys.focus))
         })
         // On the accent fill of the active row an inset border would vanish:
         // the marker is an outline outside it.
@@ -494,7 +527,7 @@ fn workspace_row(
                 .group_hover(group, |style| style.visible())
                 .child(pin_toggle),
         )
-        .context_menu(menu)
+        .context_menu(move |popup, window, cx| menu(popup, window, cx))
         .into_any_element()
 }
 
@@ -577,40 +610,43 @@ fn host_row(workspaces: &Entity<Workspaces>, cx: &App) -> AnyElement {
                         .child(active.transport),
                 ),
         )
-        .dropdown_menu(move |mut menu, _, _| {
-            for host in &hosts {
-                let label = if host.shown && host.phase != ConnectionPhase::Connected {
-                    format!(
-                        "{} {} · {}",
-                        host.letter,
-                        host.label,
-                        host.phase.wire_name()
-                    )
-                } else {
-                    format!("{} {}", host.letter, host.label)
-                };
-                let (weak, id) = (weak.clone(), host.profile_id.clone());
-                menu = menu.item(
-                    PopupMenuItem::new(label)
-                        .checked(host.shown)
-                        // The active host is always shown, so its item cannot
-                        // be unchecked.
-                        .disabled(host.active)
-                        .on_click(move |_, _, cx| {
-                            weak.update(cx, |this, cx| this.toggle_host_shown(&id, cx))
-                                .ok();
-                        }),
-                );
-            }
+        .dropdown_menu(move |menu, window, cx| {
+            let mut entries: Vec<Entry> = hosts
+                .iter()
+                .map(|host| {
+                    let label = if host.shown && host.phase != ConnectionPhase::Connected {
+                        format!(
+                            "{} {} · {}",
+                            host.letter,
+                            host.label,
+                            host.phase.wire_name()
+                        )
+                    } else {
+                        format!("{} {}", host.letter, host.label)
+                    };
+                    let (weak, id) = (weak.clone(), host.profile_id.clone());
+                    Item::new(label, move |_, cx| {
+                        weak.update(cx, |this, cx| this.toggle_host_shown(&id, cx))
+                            .ok();
+                    })
+                    .checked(host.shown)
+                    // The active host is always shown, so its item cannot be
+                    // unchecked.
+                    .disabled(host.active)
+                    .into()
+                })
+                .collect();
             let controller = controller.clone();
-            menu.separator()
-                .item(
-                    PopupMenuItem::new("Connection settings…").on_click(move |_, window, cx| {
-                        if let Some(controller) = controller.clone() {
-                            open_connection_dialog(controller, window, cx);
-                        }
-                    }),
-                )
+            entries.push(Entry::Separator);
+            entries.push(
+                Item::new("Connection settings…", move |window, cx| {
+                    if let Some(controller) = controller.clone() {
+                        open_connection_dialog(controller, window, cx);
+                    }
+                })
+                .into(),
+            );
+            context_menu::fill(menu, &entries, window, cx)
         });
     div()
         .id("host-row")
@@ -648,10 +684,6 @@ impl RenderOnce for Sidebar {
         let can_create = hosts.iter().any(|host| host.shown && host.can_mutate);
         let shown_hosts = hosts.iter().filter(|host| host.shown).count();
         let list_focus = state.list_focus.clone();
-        let keyboard = list_focus
-            .is_focused(window)
-            .then(|| state.list_position(cx))
-            .flatten();
         let section_head = |left: AnyElement, right: AnyElement| {
             h_flex()
                 .flex_none()
@@ -717,6 +749,30 @@ impl RenderOnce for Sidebar {
                 .update(cx, |chrome, cx| chrome.next_agent_sort(cx))
                 .ok();
         });
+        // The section's own menu has no row to open from: as in Tauri, the
+        // toggle is the keyboard's way in, being what the header can focus.
+        let ordering_focus = window
+            .use_keyed_state("agents-sort-focus", cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let ordering = div()
+            .relative()
+            .child(ordering.track_focus(&ordering_focus).on_key_down(
+                |event: &KeyDownEvent, window, cx| {
+                    if context_menu::is_menu_key(&event.keystroke) {
+                        context_menu::open(
+                            |menu, window, cx| {
+                                let entries = crate::agents::view::section_menu(cx);
+                                context_menu::fill(menu, &entries, window, cx)
+                            },
+                            window,
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .child(context_menu::anchor(&ordering_focus));
 
         let quiet = |text: &'static str| {
             div()
@@ -746,8 +802,22 @@ impl RenderOnce for Sidebar {
         // a glyph repeated down every pinned row said. Each row keeps its flat
         // number, which is its address.
         let any_pinned = rows.iter().any(|row| row.pinned);
+        let handles = self
+            .workspaces
+            .update(cx, |this, cx| this.row_stops(&rows, cx));
+        let scroll = window
+            .use_keyed_state("sidebar-workspaces-scroll", cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone();
         let mut items: Vec<AnyElement> = Vec::new();
         for (index, row) in rows.iter().enumerate() {
+            context_menu::reveal_when_focused(
+                format!("workspace-reveal-{}", row.key),
+                &handles[index],
+                &scroll,
+                window,
+                cx,
+            );
             if any_pinned && index == 0 {
                 items.push(list_divider(
                     "sidebar-workspaces-pinned",
@@ -769,13 +839,12 @@ impl RenderOnce for Sidebar {
                 row.clone(),
                 index,
                 moves(row),
-                keyboard == Some(index),
+                RowKeys::for_rows(&handles, index),
                 &self.workspaces,
+                window,
                 cx,
             ));
         }
-        let count = rows.len();
-        let keys = self.workspaces.downgrade();
         let workspaces_list = div()
             .id("sidebar-workspaces-list")
             .role(Role::List)
@@ -784,32 +853,7 @@ impl RenderOnce for Sidebar {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                let Some(this) = keys.upgrade() else {
-                    return;
-                };
-                // A modified arrow belongs to a binding, not to the cursor.
-                if event.keystroke.modifiers.modified() {
-                    return;
-                }
-                let key = event.keystroke.key.as_str();
-                let cursor = this.read(cx).list_position(cx);
-                if let Some(next) = moved_cursor(cursor, count, key, true) {
-                    this.update(cx, |this, cx| {
-                        this.list_cursor = Some(next);
-                        cx.notify();
-                    });
-                    cx.stop_propagation();
-                } else if matches!(key, "enter" | "space") {
-                    let row = cursor
-                        .and_then(|index| this.read(cx).rows(true, cx).into_iter().nth(index));
-                    if let Some(row) = row {
-                        this.update(cx, |this, cx| this.select_row(&row, cx));
-                        focus_terminal(&this, window, cx);
-                    }
-                    cx.stop_propagation();
-                }
-            })
+            .track_scroll(&scroll)
             .when(rows.is_empty(), |this| {
                 this.child(quiet(if shown_hosts > 1 {
                     "No tmux sessions on the shown hosts yet."
