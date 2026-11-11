@@ -10,7 +10,7 @@ use gpui_kit::{
     Window,
     base::RootPlugin,
     component::{
-        ActiveTheme, Sizable, WindowExt,
+        Sizable, WindowExt,
         button::{Button, ButtonVariants},
         h_flex, v_flex,
     },
@@ -18,13 +18,11 @@ use gpui_kit::{
     prelude::*,
 };
 
-use crate::notices;
 use crate::theme::{
     self,
-    metrics::{
-        NARROW_DIALOGS, TITLEBAR_HEIGHT, TYPE_META, TYPE_ROW, TYPE_SECONDARY, narrower_than, ui,
-    },
+    metrics::{NARROW_DIALOGS, TITLEBAR_HEIGHT, TYPE_SECONDARY, narrower_than, ui},
 };
+use crate::{notices, ui::toast};
 
 use super::{
     ConnectionUi,
@@ -240,6 +238,7 @@ impl ConnectionSurface {
         controller: &Entity<ConnectionController>,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
+        let palette = theme::palette(cx);
         let recovery = controller.read(cx).profile_recovery()?.clone();
         let reset = controller.clone();
         Some(toast(
@@ -255,7 +254,6 @@ impl ConnectionSurface {
         )
         .child(
             Button::new("connection-profile-recovery-confirm")
-                .xsmall()
                 .label("Confirm recovered defaults…")
                 .on_click(move |_, window, cx| {
                     let target = reset.clone();
@@ -272,7 +270,7 @@ impl ConnectionSurface {
                         window,
                         cx,
                     );
-                }),
+                }).map(|button| toast::button(button, &palette)),
         ))
     }
 
@@ -280,6 +278,7 @@ impl ConnectionSurface {
         controller: &Entity<ConnectionController>,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
+        let palette = theme::palette(cx);
         let error = controller.read(cx).app_state_recovery()?.to_owned();
         let reset = controller.clone();
         Some(
@@ -292,7 +291,6 @@ impl ConnectionSurface {
             )
             .child(
                 Button::new("connection-state-recovery-reset")
-                    .xsmall()
                     .label("Reset saved shell state…")
                     .on_click(move |_, window, cx| {
                         let target = reset.clone();
@@ -311,7 +309,7 @@ impl ConnectionSurface {
                             window,
                             cx,
                         );
-                    }),
+                    }).map(|button| toast::button(button, &palette)),
             ),
         )
     }
@@ -320,6 +318,7 @@ impl ConnectionSurface {
         controller: &Entity<ConnectionController>,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
+        let palette = theme::palette(cx);
         let offer = controller.read(cx).app_recovery()?.clone();
         if offer.phase != AppRecoveryPhase::Offered {
             return None;
@@ -344,21 +343,17 @@ impl ConnectionSurface {
                     .gap(ui(6.))
                     .child(
                         Button::new("connection-app-recovery-restore")
-                            .xsmall()
-                            .primary()
                             .label("Restore app tabs")
                             .on_click(move |_, _, cx| {
                                 restore.update(cx, |controller, cx| controller.restore_app_tabs(cx));
-                            }),
+                            }).map(|button| toast::button(button, &palette)),
                     )
                     .child(
                         Button::new("connection-app-recovery-discard")
-                            .xsmall()
-                            .ghost()
                             .label("Discard old tabs…")
                             .on_click(move |_, _, cx| {
                                 discard.update(cx, |state, cx| state.request_app_tab_discard(cx));
-                            }),
+                            }).map(|button| toast::button(button, &palette)),
                     ),
             ),
         )
@@ -373,32 +368,13 @@ fn toast(
     cx: &App,
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
     let palette = theme::palette(cx);
-    v_flex()
-        .id(id)
+    toast::card(v_flex().id(id), true, &palette)
         .occlude()
         .role(role)
         .aria_label(title.clone())
         .w_full()
-        .gap(ui(6.))
-        .p(ui(10.))
-        .rounded(cx.theme().radius)
-        .bg(palette.chrome_raised)
-        .border_1()
-        .border_color(palette.chrome_border)
-        .shadow_md()
-        .text_size(ui(TYPE_SECONDARY))
-        .child(
-            div()
-                .font_weight(FontWeight(600.))
-                .text_size(ui(TYPE_ROW))
-                .child(title),
-        )
-        .child(
-            div()
-                .text_color(palette.chrome_dim)
-                .text_size(ui(TYPE_META))
-                .child(body),
-        )
+        .child(div().font_weight(FontWeight::BOLD).child(title))
+        .child(div().text_color(palette.chrome_dim).child(body))
 }
 
 impl Render for ConnectionSurface {
@@ -422,9 +398,13 @@ impl Render for ConnectionSurface {
             .absolute()
             .map(|this| {
                 if narrow {
-                    this.left(ui(8.)).right(ui(8.)).bottom(ui(8.))
+                    this.left(ui(toast::NARROW_MARGIN))
+                        .right(ui(toast::NARROW_MARGIN))
+                        .bottom(ui(toast::NARROW_MARGIN))
                 } else {
-                    this.w(ui(340.)).right(ui(12.)).bottom(ui(12.))
+                    this.w(ui(toast::WIDTH))
+                        .right(ui(toast::MARGIN))
+                        .bottom(ui(toast::MARGIN))
                 }
             })
             .gap(ui(8.))

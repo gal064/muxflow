@@ -5,17 +5,19 @@ use std::rc::Rc;
 
 use desktop_core::connection::{ConnectionSpec, helper::HelperRollback, profiles::HostProfile};
 use gpui_kit::{
-    App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyBinding, NoAction, Render, Role,
+    App, Context, Entity, FocusHandle, IntoElement, KeyBinding, NoAction, Render, Role,
     SharedString, Subscription, Window,
     base::TestSupportExt,
     component::{
         Disableable, Sizable, WindowExt,
-        button::{Button, ButtonVariants},
+        button::Button,
         checkbox::Checkbox,
         dialog::DialogFooter,
         h_flex,
         input::{Input, InputEvent, InputState},
         radio::{Radio, RadioGroup},
+        searchable_list::SearchableListItem,
+        select::{Select, SelectEvent, SelectState},
         spinner::Spinner,
         v_flex,
     },
@@ -25,9 +27,12 @@ use gpui_kit::{
 
 use crate::theme::{
     self,
-    metrics::{TYPE_LABEL, TYPE_META, TYPE_ROW, TYPE_SECONDARY, ui},
+    metrics::{TYPE_LABEL, TYPE_ROW, TYPE_SECONDARY, ui},
 };
-use crate::ui::surface_error::SurfaceError;
+use crate::ui::{
+    dialog::{self, Action},
+    surface_error::SurfaceError,
+};
 
 use super::{
     controller::{ConnectionController, ConnectionMode},
@@ -36,6 +41,10 @@ use super::{
 };
 
 const CONFIRM_WIDTH: f32 = 420.;
+
+/// `.settings-body input, select`: `min-height: 30px`, a 4px radius.
+pub const FIELD_HEIGHT: f32 = 30.;
+pub const RADIUS_FIELD: f32 = 4.;
 
 type DialogAction = Box<dyn Fn(&mut Window, &mut App)>;
 
@@ -72,18 +81,22 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
     let confirmation = Rc::new(confirmation);
     window.open_dialog(cx, move |dialog, window, cx| {
         let confirm = confirmation.clone();
-        let mut confirm_button = Button::new("confirmation-confirm")
-            .label(confirmation.confirm_label)
-            .on_click(move |_, window, cx| {
-                window.close_dialog(cx);
-                (confirm.on_confirm)(window, cx);
-            });
-        confirm_button = if confirmation.destructive {
-            confirm_button.danger()
-        } else {
-            confirm_button.primary()
-        };
-        dialog
+        let confirm_button = dialog::button(
+            Button::new("confirmation-confirm")
+                .label(confirmation.confirm_label)
+                .on_click(move |_, window, cx| {
+                    window.close_dialog(cx);
+                    (confirm.on_confirm)(window, cx);
+                }),
+            if confirmation.destructive {
+                Action::Danger
+            } else {
+                Action::Primary
+            },
+            &theme::palette(cx),
+        );
+        dialog::card(dialog, &theme::palette(cx))
+            .p(ui(20.))
             .title(confirmation.title)
             .w(ui(CONFIRM_WIDTH).to_pixels(window.rem_size()))
             .close_button(false)
@@ -91,12 +104,13 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
             .child(detail_text(confirmation.detail.clone(), cx))
             .footer(controls(
                 DialogFooter::new()
-                    .child(
+                    .child(dialog::button(
                         Button::new("confirmation-cancel")
-                            .ghost()
                             .label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
+                        Action::Plain,
+                        &theme::palette(cx),
+                    ))
                     .child(confirm_button),
             ))
     });
@@ -150,7 +164,8 @@ pub fn open_helper_dialog(
         let confirm = controller.clone();
         let escaped = controller.clone();
         let closed_by_kit = closed_by_kit.clone();
-        dialog
+        dialog::card(dialog, &theme::palette(cx))
+            .p(ui(20.))
             .title(helper_title(busy, probe.installed))
             .w(ui(CONFIRM_WIDTH).to_pixels(window.rem_size()))
             .close_button(false)
@@ -181,24 +196,26 @@ pub fn open_helper_dialog(
             )
             .footer(controls(
                 DialogFooter::new()
-                    .child(
+                    .child(dialog::button(
                         Button::new("helper-cancel")
-                            .ghost()
                             .label("Cancel")
                             .disabled(busy)
                             .on_click(move |_, _, cx| {
                                 cancel.update(cx, |state, cx| state.cancel_helper_install(cx));
                             }),
-                    )
-                    .child(
+                        Action::Plain,
+                        &theme::palette(cx),
+                    ))
+                    .child(dialog::button(
                         Button::new("helper-confirm")
-                            .primary()
                             .label(confirm_label)
                             .disabled(busy)
                             .on_click(move |_, _, cx| {
                                 confirm.update(cx, |state, cx| state.confirm_helper_install(cx));
                             }),
-                    ),
+                        Action::Primary,
+                        &theme::palette(cx),
+                    )),
             ))
     });
 }
@@ -221,7 +238,8 @@ pub fn open_app_discard_dialog(
         let confirm = controller.clone();
         let escaped = controller.clone();
         let closed_by_kit = closed_by_kit.clone();
-        dialog
+        dialog::card(dialog, &theme::palette(cx))
+            .p(ui(20.))
             .title("Discard app tabs from replaced server?")
             .w(ui(CONFIRM_WIDTH).to_pixels(window.rem_size()))
             .close_button(false)
@@ -239,18 +257,56 @@ pub fn open_app_discard_dialog(
             ))
             .footer(controls(
                 DialogFooter::new()
-                    .child(Button::new("app-discard-cancel").ghost().label("Cancel").on_click(
-                        move |_, _, cx| {
-                            cancel.update(cx, |state, cx| state.cancel_app_tab_discard(cx));
-                        },
+                    .child(dialog::button(
+                        Button::new("app-discard-cancel").label("Cancel").on_click(
+                            move |_, _, cx| {
+                                cancel.update(cx, |state, cx| state.cancel_app_tab_discard(cx));
+                            },
+                        ),
+                        Action::Plain,
+                        &theme::palette(cx),
                     ))
-                    .child(Button::new("app-discard-confirm").danger().label("Discard old tabs").on_click(
-                        move |_, _, cx| {
-                            confirm.update(cx, |state, cx| state.confirm_app_tab_discard(cx));
-                        },
+                    .child(dialog::button(
+                        Button::new("app-discard-confirm").label("Discard old tabs").on_click(
+                            move |_, _, cx| {
+                                confirm.update(cx, |state, cx| state.confirm_app_tab_discard(cx));
+                            },
+                        ),
+                        Action::Danger,
+                        &theme::palette(cx),
                     )),
             ))
     });
+}
+
+/// A saved host in the picker: shown by label, identified by id.
+#[derive(Clone)]
+pub struct HostItem {
+    id: String,
+    label: SharedString,
+}
+
+impl SearchableListItem for HostItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &String {
+        &self.id
+    }
+}
+
+fn host_items(controller: &ConnectionController) -> Vec<HostItem> {
+    controller
+        .profiles()
+        .iter()
+        .map(|profile| HostItem {
+            id: profile.id.clone(),
+            label: profile.label.clone().into(),
+        })
+        .collect()
 }
 
 /// The form behind "Connection…": saved hosts, the connect fields and the
@@ -260,6 +316,8 @@ pub struct ConnectionForm {
     ssh_target: Entity<InputState>,
     ssh_config: Entity<InputState>,
     letter: Entity<InputState>,
+    /// The saved hosts, `Host` in Tauri's form. Its value is the profile id.
+    hosts: Entity<SelectState<Vec<HostItem>>>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -274,10 +332,19 @@ impl ConnectionForm {
             cx.new(|cx| InputState::new(window, cx).placeholder("Host or config alias"));
         let ssh_config = cx.new(|cx| InputState::new(window, cx).placeholder("Optional path"));
         let letter = cx.new(|cx| InputState::new(window, cx));
+        let hosts =
+            cx.new(|cx| SelectState::new(host_items(controller.read(cx)), None, window, cx));
         let mut subscriptions = vec![cx.observe_in(&controller, window, |this, _, window, cx| {
             this.sync_inputs(window, cx);
             cx.notify();
         })];
+        subscriptions.push(cx.subscribe(&hosts, |this, _, event, cx| {
+            let SelectEvent::Confirm(Some(id)) = event else {
+                return;
+            };
+            this.controller
+                .update(cx, |state, cx| state.select_profile(id, cx));
+        }));
         controller.update(cx, |state, cx| state.hold_form(true, cx));
         subscriptions.push(cx.on_release({
             let controller = controller.downgrade();
@@ -332,6 +399,7 @@ impl ConnectionForm {
             ssh_target,
             ssh_config,
             letter,
+            hosts,
             _subscriptions: subscriptions,
         };
         this.sync_inputs(window, cx);
@@ -360,6 +428,14 @@ impl ConnectionForm {
         set_if_different(&self.ssh_target, target, window, cx);
         set_if_different(&self.ssh_config, config, window, cx);
         set_if_different(&self.letter, letter, window, cx);
+        let (items, selected) = {
+            let state = self.controller.read(cx);
+            (host_items(state), state.selected_profile_id().to_owned())
+        };
+        self.hosts.update(cx, |hosts, cx| {
+            hosts.set_items(items, window, cx);
+            hosts.set_selected_value(&selected, window, cx);
+        });
         if let Some(placeholder) = placeholder {
             self.letter.update(cx, |input, cx| {
                 input.set_placeholder(placeholder, window, cx)
@@ -381,18 +457,31 @@ fn selected_profile(state: &ConnectionController) -> Option<&HostProfile> {
         .find(|profile| profile.id == state.selected_profile_id())
 }
 
-fn field(label: &'static str) -> impl IntoElement + use<> {
+/// A field's caption: `.settings-body label`.
+fn field(label: &'static str, cx: &App) -> impl IntoElement + use<> {
     div()
         .text_size(ui(TYPE_SECONDARY))
-        .font_weight(FontWeight(600.))
+        .text_color(theme::palette(cx).chrome_dim)
         .child(label)
 }
 
+/// `.settings-hint`.
 fn hint<T: Into<SharedString>>(text: T, cx: &App) -> impl IntoElement + use<T> {
     div()
-        .text_size(ui(TYPE_META))
+        .text_size(ui(TYPE_SECONDARY))
+        .line_height(ui(TYPE_SECONDARY * 1.5))
         .text_color(theme::palette(cx).chrome_dim)
         .child(text.into())
+}
+
+/// `.settings-hint { margin: -6px 0 4px 22px }`: tucked under the field or checkbox
+/// above it, and lined up with its label.
+fn indented_hint<T: Into<SharedString>>(text: T, cx: &App) -> impl IntoElement + use<T> {
+    div()
+        .mt(ui(-6.))
+        .mb(ui(4.))
+        .pl(ui(22.))
+        .child(hint(text, cx))
 }
 
 fn helper_can_install(state: &HelperUpgradeState) -> Option<&RemoteHelperProbe> {
@@ -450,17 +539,11 @@ impl ConnectionForm {
     fn saved_hosts(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let controller = self.controller.clone();
         let state = controller.read(cx);
-        let profiles: Vec<HostProfile> = state.profiles().to_vec();
-        let selected = profiles
-            .iter()
-            .position(|profile| profile.id == state.selected_profile_id());
-        let picked = controller.clone();
-        let ids: Vec<String> = profiles.iter().map(|profile| profile.id.clone()).collect();
         let add = controller.clone();
         let deletable = state.deletable_profile().cloned();
         let delete_hint = if deletable.is_some() {
             "Removes it from this machine only. The host itself is not touched."
-        } else if profiles.len() <= 1 {
+        } else if state.profiles().len() <= 1 {
             "The last saved host cannot be removed."
         } else {
             "Pick a saved host above to remove it."
@@ -470,51 +553,75 @@ impl ConnectionForm {
             |profile| format!("Delete “{}”…", profile.label),
         );
         let delete_target = controller.clone();
+        let cannot_delete = deletable.is_none();
+        let palette = theme::palette(cx);
         v_flex()
-            .gap(ui(4.))
-            .child(field("Host"))
-            .child(
-                RadioGroup::vertical("connection-saved-hosts")
-                    .children(profiles.iter().map(|profile| {
-                        Radio::new(SharedString::from(format!(
-                            "connection-host-{}",
-                            profile.id
-                        )))
-                        .label(profile.label.clone())
-                    }))
-                    .selected_index(selected)
-                    .on_change(move |index, _, cx| {
-                        if let Some(id) = ids.get(*index) {
-                            picked.update(cx, |state, cx| state.select_profile(id, cx));
-                        }
-                    }),
-            )
+            .gap(ui(12.))
+            // `.settings-host-picker`: the field and "+ Add host" on one row, aligned
+            // to the field's bottom.
             .child(
                 h_flex()
-                    .gap(ui(6.))
+                    .items_end()
+                    .gap(ui(8.))
                     .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(ui(5.))
+                            .child(field("Host", cx))
+                            .child(
+                                Select::new(&self.hosts)
+                                    .id("connection-saved-hosts")
+                                    .accessibility_label("Host")
+                                    .placeholder("New host…")
+                                    .w_full()
+                                    .h(ui(FIELD_HEIGHT))
+                                    .px(ui(6.))
+                                    .rounded(ui(RADIUS_FIELD))
+                                    .border_color(palette.chrome_border)
+                                    .bg(palette.chrome_bg)
+                                    .text_color(palette.chrome_ink)
+                                    .text_size(ui(TYPE_ROW)),
+                            ),
+                    )
+                    .child(dialog::button(
                         Button::new("connection-add-host")
-                            .ghost()
-                            .xsmall()
                             .label("+ Add host")
                             .on_click(move |_, _, cx| {
                                 add.update(cx, |state, cx| state.add_host(cx))
                             }),
-                    )
-                    .child(
-                        Button::new("connection-delete-host")
-                            .ghost()
-                            .xsmall()
-                            .label(delete_label)
-                            .disabled(deletable.is_none())
-                            .on_click(move |_, window, cx| {
-                                if let Some(profile) = deletable.clone() {
-                                    confirm_delete_host(delete_target.clone(), profile, window, cx);
-                                }
-                            }),
-                    ),
+                        Action::Plain,
+                        &palette,
+                    )),
             )
-            .child(hint(delete_hint, cx))
+            // Its own row under the picker: the one control that destroys something.
+            .child(
+                v_flex()
+                    .gap(ui(4.))
+                    .items_start()
+                    .child(dialog::button(
+                        dialog::dim(
+                            Button::new("connection-delete-host")
+                                .label(delete_label)
+                                .disabled(cannot_delete)
+                                .on_click(move |_, window, cx| {
+                                    if let Some(profile) = deletable.clone() {
+                                        confirm_delete_host(
+                                            delete_target.clone(),
+                                            profile,
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                }),
+                            cannot_delete,
+                        ),
+                        Action::DangerQuiet,
+                        &palette,
+                    ))
+                    .child(hint(delete_hint, cx)),
+            )
+            .child(crate::settings::dialog::agent_setup_row(cx))
     }
 
     fn connection_fields(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -522,39 +629,45 @@ impl ConnectionForm {
         let state = controller.read(cx);
         let mode = state.connection_mode();
         let on_mode = controller.clone();
-        let mut fields = v_flex().gap(ui(6.)).child(
-            div()
-                .text_size(ui(TYPE_LABEL))
-                .text_color(theme::palette(cx).chrome_faint)
-                .child("TRANSPORT"),
-        );
-        fields = fields.child(
-            RadioGroup::horizontal("connection-mode")
-                .child(Radio::new("connection-mode-local").label("Local"))
-                .child(Radio::new("connection-mode-ssh").label("SSH"))
-                .selected_index(Some(usize::from(mode == ConnectionMode::Ssh)))
-                .on_change(move |index, _, cx| {
-                    let next = if *index == 0 {
-                        ConnectionMode::Local
-                    } else {
-                        ConnectionMode::Ssh
-                    };
-                    on_mode.update(cx, |state, cx| state.set_connection_mode(next, cx));
-                }),
+        let mut fields = v_flex().gap(ui(12.)).child(
+            v_flex()
+                .gap(ui(4.))
+                .child(
+                    div()
+                        .text_size(ui(TYPE_LABEL))
+                        .text_color(theme::palette(cx).chrome_faint)
+                        .child("TRANSPORT"),
+                )
+                .child(
+                    RadioGroup::horizontal("connection-mode")
+                        .child(Radio::new("connection-mode-local").label("Local"))
+                        .child(Radio::new("connection-mode-ssh").label("SSH"))
+                        .selected_index(Some(usize::from(mode == ConnectionMode::Ssh)))
+                        .on_change(move |index, _, cx| {
+                            let next = if *index == 0 {
+                                ConnectionMode::Local
+                            } else {
+                                ConnectionMode::Ssh
+                            };
+                            on_mode.update(cx, |state, cx| state.set_connection_mode(next, cx));
+                        }),
+                ),
         );
         if mode == ConnectionMode::Ssh {
             fields = fields
-                .child(field("SSH host"))
                 .child(
-                    Input::new(&self.ssh_target)
-                        .id("connection-ssh-target")
-                        .aria_label("SSH host"),
+                    v_flex().gap(ui(5.)).child(field("SSH host", cx)).child(
+                        Input::new(&self.ssh_target)
+                            .id("connection-ssh-target")
+                            .aria_label("SSH host"),
+                    ),
                 )
-                .child(field("SSH config"))
                 .child(
-                    Input::new(&self.ssh_config)
-                        .id("connection-ssh-config")
-                        .aria_label("SSH config"),
+                    v_flex().gap(ui(5.)).child(field("SSH config", cx)).child(
+                        Input::new(&self.ssh_config)
+                            .id("connection-ssh-config")
+                            .aria_label("SSH config"),
+                    ),
                 );
         }
         fields
@@ -568,10 +681,18 @@ impl ConnectionForm {
         let toggled = controller.clone();
         Some(
             v_flex()
-                .gap(ui(4.))
-                .child(field("Letter"))
-                .child(Input::new(&self.letter).id("connection-host-letter").aria_label("Host letter"))
-                .child(hint(
+                .gap(ui(12.))
+                .child(
+                    v_flex()
+                        .gap(ui(5.))
+                        .child(field("Letter", cx))
+                        .child(
+                            Input::new(&self.letter)
+                                .id("connection-host-letter")
+                                .aria_label("Host letter"),
+                        ),
+                )
+                .child(indented_hint(
                     "Drawn before this host’s workspaces and agents when more than one host is shown. Empty uses the first letter of the label.",
                     cx,
                 ))
@@ -588,7 +709,7 @@ impl ConnectionForm {
                             });
                         }),
                 )
-                .child(hint(
+                .child(indented_hint(
                     if is_active {
                         "The host on screen is always shown."
                     } else {
@@ -609,27 +730,29 @@ impl ConnectionForm {
         let probing = matches!(helper, HelperUpgradeState::Probing { .. });
         let upgrading = matches!(helper, HelperUpgradeState::Upgrading { .. });
         let probe_action = controller.clone();
-        let mut section = v_flex().gap(ui(6.)).child(
-            Button::new("connection-check-helper")
-                .ghost()
-                .xsmall()
-                .label(if probing {
-                    "Checking helper…"
-                } else {
-                    "Check helper"
-                })
-                .disabled(probing || upgrading)
-                .on_click(move |_, _, cx| {
-                    probe_action.update(cx, |state, cx| state.probe_helper(cx));
-                }),
-        );
+        let palette = theme::palette(cx);
+        let mut section = v_flex().gap(ui(8.)).items_start().child(dialog::button(
+            dialog::dim(
+                Button::new("connection-check-helper")
+                    .label(if probing {
+                        "Checking helper…"
+                    } else {
+                        "Check helper"
+                    })
+                    .disabled(probing || upgrading)
+                    .on_click(move |_, _, cx| {
+                        probe_action.update(cx, |state, cx| state.probe_helper(cx));
+                    }),
+                probing || upgrading,
+            ),
+            Action::Plain,
+            &palette,
+        ));
         if let Some(probe) = helper_can_install(&helper) {
             let request = controller.clone();
             let focus = self.focus.clone();
-            section = section.child(
+            section = section.child(dialog::button(
                 Button::new("connection-install-helper")
-                    .primary()
-                    .xsmall()
                     .label(if probe.installed {
                         "Upgrade helper…"
                     } else {
@@ -641,7 +764,9 @@ impl ConnectionForm {
                         window.focus(&focus, cx);
                         request.update(cx, |state, cx| state.request_helper_install(cx));
                     }),
-            );
+                Action::Primary,
+                &palette,
+            ));
         }
         match &helper {
             HelperUpgradeState::Ready { probe, .. } => {

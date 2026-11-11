@@ -2236,7 +2236,7 @@ mod surface {
         visual.run_until_parked();
         for label in [
             "Connect",
-            "Close",
+            "Host",
             "+ Add host",
             "Local",
             "SSH",

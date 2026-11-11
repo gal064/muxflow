@@ -7,8 +7,8 @@ use desktop_core::{
     notifications::{emit_test_notification, notification_permission_status},
 };
 use gpui_kit::{
-    App, Context, Entity, IntoElement, ParentElement, Render, Role, SharedString, Styled,
-    Subscription, Window,
+    App, Context, Entity, FontWeight, IntoElement, ParentElement, Render, Role, SharedString,
+    Styled, Subscription, Window,
     component::{
         Disableable, Sizable, WindowExt,
         button::{Button, ButtonVariants},
@@ -29,7 +29,10 @@ use super::{
     prefs::{AUTOMATIONS_EXTENSION, UI_SCALES, clamped_terminal_font_size},
     update,
 };
-use crate::ui::surface_error::SurfaceError;
+use crate::ui::{
+    dialog::{self, Action},
+    surface_error::SurfaceError,
+};
 use crate::{
     commands,
     connection_ui::{
@@ -44,12 +47,12 @@ use crate::{
 };
 
 const DIALOG_WIDTH: f32 = 620.;
-/// The most the body may take, in CSS pixels, before it scrolls under the tabs.
-const BODY_MAX_HEIGHT: f32 = 420.;
-/// What the dialog needs besides the body (title, tabs, footer and the margin
-/// the dialog keeps from the window edge), so a short window shrinks the body
-/// and the footer stays on screen.
-const CHROME_HEIGHT: f32 = 190.;
+/// `.settings-dialog { max-height: min(640px, 78vh) }`.
+const DIALOG_MAX_HEIGHT: f32 = 640.;
+const DIALOG_MAX_VIEWPORT: f32 = 0.78;
+/// What the dialog needs besides the body: the header with its tabs and the footer,
+/// so a short window shrinks the body and the footer stays on screen.
+const CHROME_HEIGHT: f32 = 136.;
 /// The body never shrinks below this, even in a window too short for the rest.
 const BODY_MIN_HEIGHT: f32 = 120.;
 
@@ -130,10 +133,10 @@ pub fn open_with(
     cx: &mut App,
 ) {
     let view = cx.new(|cx| SettingsDialog::new(tab, controller, window, cx));
-    window.open_dialog(cx, move |dialog, window, _| {
-        dialog
-            .title("Settings")
+    window.open_dialog(cx, move |dialog, window, cx| {
+        dialog::place(dialog::card(dialog, &theme::palette(cx)), window)
             .close_button(false)
+            .p_0()
             // Enter belongs to the focused control, not to a default button.
             .on_ok(|_, _, _| false)
             // Escape closes without Done; typed text still has to count.
@@ -528,31 +531,37 @@ fn radios<T: Copy + PartialEq + 'static>(
         )
 }
 
+/// "Set up agent status…" and why it is off, in the Connection tab under Delete.
+pub fn agent_setup_row(cx: &App) -> impl IntoElement + use<> {
+    let status = agent_setup(cx)
+        .map(|setup| (setup.status)(cx))
+        .unwrap_or_default();
+    let set_up = agent_setup(cx).map(|setup| setup.set_up);
+    v_flex()
+        .gap(ui(4.))
+        .items_start()
+        .child(dialog::button(
+            dialog::dim(
+                Button::new("settings-agent-setup")
+                    .label("Set up agent status…")
+                    .disabled(!status.available)
+                    .on_click(move |_, window, cx| {
+                        if let Some(set_up) = set_up.clone() {
+                            window.close_dialog(cx);
+                            set_up(window, cx);
+                        }
+                    }),
+                !status.available,
+            ),
+            Action::Plain,
+            &theme::palette(cx),
+        ))
+        .child(hint(agent_setup_hint(status), cx))
+}
+
 impl SettingsDialog {
-    fn connection_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let status = agent_setup(cx)
-            .map(|setup| (setup.status)(cx))
-            .unwrap_or_default();
-        let set_up = agent_setup(cx).map(|setup| setup.set_up);
-        v_flex().gap(ui(12.)).children(self.form.clone()).child(
-            v_flex()
-                .gap(ui(4.))
-                .items_start()
-                .child(
-                    Button::new("settings-agent-setup")
-                        .ghost()
-                        .xsmall()
-                        .label("Set up agent status…")
-                        .disabled(!status.available)
-                        .on_click(move |_, window, cx| {
-                            if let Some(set_up) = set_up.clone() {
-                                window.close_dialog(cx);
-                                set_up(window, cx);
-                            }
-                        }),
-                )
-                .child(hint(agent_setup_hint(status), cx)),
-        )
+    fn connection_tab(&self, _: &mut Context<Self>) -> impl IntoElement + use<> {
+        div().children(self.form.clone())
     }
 
     fn workspace_tab(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -848,40 +857,38 @@ impl SettingsDialog {
         ))
     }
 
+    /// `.settings-dialog > footer`: the one button, Connect on the first tab and Done on
+    /// the rest. Escape closes the dialog.
     fn footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let connect = self.controller.clone();
-        let mut footer = DialogFooter::new();
-        if self.tab == Tab::Connection {
-            footer = footer
-                .child(
-                    Button::new("connection-close")
-                        .ghost()
-                        .label("Close")
-                        .on_click(|_, window, cx| window.close_dialog(cx)),
-                )
-                .child(
-                    Button::new("connection-connect")
-                        .primary()
-                        .label("Connect")
-                        .on_click(move |_, window, cx| {
-                            if let Some(controller) = connect.as_ref() {
-                                controller.update(cx, |state, cx| state.connect(cx));
-                            }
-                            window.close_dialog(cx);
-                        }),
-                );
+        let palette = theme::palette(cx);
+        let button = if self.tab == Tab::Connection {
+            Button::new("connection-connect")
+                .label("Connect")
+                .on_click(move |_, window, cx| {
+                    if let Some(controller) = connect.as_ref() {
+                        controller.update(cx, |state, cx| state.connect(cx));
+                    }
+                    window.close_dialog(cx);
+                })
         } else {
-            footer = footer.child(
-                Button::new("settings-done")
-                    .primary()
-                    .label("Done")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.commit_pending(window, cx);
-                        window.close_dialog(cx);
-                    })),
-            );
-        }
-        controls(footer)
+            Button::new("settings-done")
+                .label("Done")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.commit_pending(window, cx);
+                    window.close_dialog(cx);
+                }))
+        };
+        div()
+            .border_t_1()
+            .border_color(palette.chrome_hairline)
+            .px(ui(16.))
+            .py(ui(12.))
+            .child(controls(DialogFooter::new().child(dialog::button(
+                button,
+                Action::Primary,
+                &palette,
+            ))))
     }
 }
 
@@ -894,8 +901,11 @@ fn legend_for_host(label: &str, cx: &App) -> impl IntoElement + use<> {
 
 impl Render for SettingsDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = theme::palette(cx);
+        // `.segment` is 11.5px; Kit's smallest tab is 12px.
         let tabs = TabBar::new("settings-tabs")
             .segmented()
+            .xsmall()
             .selected_index(
                 TABS.iter()
                     .position(|(tab, _)| *tab == self.tab)
@@ -908,10 +918,11 @@ impl Render for SettingsDialog {
                 }
             }));
         let rem = window.rem_size();
-        let max_body = ui(BODY_MAX_HEIGHT).to_pixels(rem).min(
-            (window.viewport_size().height - ui(CHROME_HEIGHT).to_pixels(rem))
-                .max(ui(BODY_MIN_HEIGHT).to_pixels(rem)),
-        );
+        let max_dialog = ui(DIALOG_MAX_HEIGHT)
+            .to_pixels(rem)
+            .min(window.viewport_size().height * DIALOG_MAX_VIEWPORT);
+        let max_body =
+            (max_dialog - ui(CHROME_HEIGHT).to_pixels(rem)).max(ui(BODY_MIN_HEIGHT).to_pixels(rem));
         let body = match self.tab {
             Tab::Connection => self.connection_tab(cx).into_any_element(),
             Tab::Workspace => self.workspace_tab(cx).into_any_element(),
@@ -924,14 +935,28 @@ impl Render for SettingsDialog {
             .id("settings-dialog")
             .role(Role::Dialog)
             .aria_label("Settings")
-            .gap(ui(12.))
-            .child(tabs)
+            // `.settings-dialog > header`.
+            .child(
+                v_flex()
+                    .gap(ui(10.))
+                    .px(ui(16.))
+                    .py(ui(14.))
+                    .border_b_1()
+                    .border_color(palette.chrome_hairline)
+                    .child(
+                        div()
+                            .text_size(ui(16.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("Settings"),
+                    )
+                    .child(tabs),
+            )
             .child(
                 div()
                     .id("settings-body")
                     .max_h(max_body)
                     .overflow_y_scroll()
-                    .pr(ui(4.))
+                    .p(ui(16.))
                     .child(body),
             )
             .child(self.footer(cx))
