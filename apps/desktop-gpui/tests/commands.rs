@@ -352,6 +352,7 @@ fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestApp
             "commands.show",
             "workspaces.switch",
             "shortcuts.configure",
+            "settings.show",
             "view.toggleSidebar",
             "view.togglePanel",
             "view.showFiles",
