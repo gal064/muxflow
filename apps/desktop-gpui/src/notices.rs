@@ -11,20 +11,22 @@
 use std::sync::LazyLock;
 
 use gpui_kit::{
-    App, Window,
+    Anchor, AnyElement, App, Window,
     component::{
-        ActiveTheme, Sizable, Theme, WindowExt,
-        button::{Button, ButtonVariants},
-        notification::{Notification, NotificationSettings, NotificationType},
+        ActiveTheme, Theme, WindowExt, button::Button, h_flex, notification::Notification, v_flex,
     },
     div,
     prelude::*,
+    relative,
 };
 use regex::Regex;
 
 use crate::{
-    theme::metrics::{NARROW_DIALOGS, narrower_than, ui},
-    ui::surface_error::SurfaceError,
+    theme::{
+        self, Palette,
+        metrics::{NARROW_DIALOGS, narrower_than, ui},
+    },
+    ui::{surface_error::SurfaceError, toast},
 };
 
 /// Matches the height of the Tauri notice's error details.
@@ -104,42 +106,97 @@ pub fn notice_for_status(message: &str) -> Option<StatusNotice> {
     })
 }
 
-/// A problem as a sentence with the host's text behind Details, as Tauri's
-/// toast drew `SurfaceError`. An error text can be any length, so its card
-/// scrolls instead of growing past the window and taking its Dismiss button
-/// with it.
-fn problem_card(message: String) -> Notification {
-    Notification::new()
-        .with_type(NotificationType::Error)
-        .autohide(false)
-        .content(move |_, _, _| {
-            div()
-                .id("problem-notice-text")
-                .max_h(ui(PROBLEM_MAX_HEIGHT))
-                .overflow_y_scroll()
-                .text_sm()
-                // The card itself is the alert, so the text inside it is not one.
-                .child(SurfaceError::new("problem-notice-error", message.clone()).no_role())
+/// A notice as `.toast` draws it: the text, then bordered buttons ending in Dismiss. A
+/// problem has the danger border. `actions` are the buttons before Dismiss.
+pub fn card(
+    problem: bool,
+    palette: &Palette,
+    text: impl Fn() -> AnyElement + 'static,
+    actions: impl Fn(&App) -> Vec<Button> + 'static,
+) -> Notification {
+    let palette = *palette;
+    // Kit stretches a notice to the stack's width; a `.toast` is as wide as its text.
+    toast::card(Notification::new(), problem, &palette)
+        .w_auto()
+        .self_end()
+        // A problem stays until dismissed: it is the user's to acknowledge.
+        .autohide(!problem)
+        .content(move |_, _, cx| {
+            let notice = cx.entity();
+            let dismiss = toast::button(
+                Button::new("dismiss-notice")
+                    .label("Dismiss")
+                    .on_click(move |_, window, cx| {
+                        notice.update(cx, |notice, cx| notice.dismiss(window, cx))
+                    }),
+                &palette,
+            );
+            v_flex()
+                .gap(ui(5.))
+                .line_height(relative(toast::LINE))
+                .child(text())
+                .child(
+                    h_flex()
+                        .gap(ui(6.))
+                        .children(
+                            actions(cx)
+                                .into_iter()
+                                .map(|button| toast::button(button, &palette)),
+                        )
+                        .child(dismiss),
+                )
                 .into_any_element()
         })
 }
 
-/// Kit draws notices at one width; `styles.css` spans a 600 CSS px or narrower
-/// window with them instead, 8 px in from each side. Called each frame from the
-/// shell, and writes only on a change: the theme is shared and observed.
+/// A problem as a sentence with the host's text behind Details, as Tauri's
+/// toast drew `SurfaceError`. An error text can be any length, so its card
+/// scrolls instead of growing past the window and taking its Dismiss button
+/// with it.
+fn problem_card(message: String, palette: &Palette) -> Notification {
+    card(
+        true,
+        palette,
+        move || {
+            div()
+                .id("problem-notice-text")
+                .max_h(ui(PROBLEM_MAX_HEIGHT))
+                .overflow_y_scroll()
+                // The card itself is the alert, so the text inside it is not one.
+                .child(
+                    SurfaceError::new("problem-notice-error", message.clone())
+                        .no_role()
+                        .bare(),
+                )
+                .into_any_element()
+        },
+        |_| Vec::new(),
+    )
+}
+
+/// Kit's notices sit top right at one width; `styles.css` puts a `.toast` at the bottom
+/// right, and a 600 CSS px or narrower window spans it 8 px in from each side. Called
+/// each frame from the shell, and writes only on a change: the theme is shared and
+/// observed.
 pub fn fit_to(window: &Window, cx: &mut App) {
-    let defaults = NotificationSettings::default();
-    let (width, side) = if narrower_than(NARROW_DIALOGS, window) {
-        let margin = ui(8.).to_pixels(window.rem_size());
+    let (width, margin) = if narrower_than(NARROW_DIALOGS, window) {
+        let margin = ui(toast::NARROW_MARGIN).to_pixels(window.rem_size());
         (window.viewport_size().width - margin * 2., margin)
     } else {
-        (defaults.width, defaults.margins.right)
+        let margin = ui(toast::MARGIN).to_pixels(window.rem_size());
+        (ui(toast::WIDTH).to_pixels(window.rem_size()), margin)
     };
     let current = &cx.theme().notification;
-    if current.width != width || current.margins.right != side {
+    if current.placement != Anchor::BottomRight
+        || current.width != width
+        || current.margins.right != margin
+        || current.margins.bottom != margin
+    {
         let settings = &mut Theme::global_mut(cx).notification;
+        settings.placement = Anchor::BottomRight;
         settings.width = width;
-        settings.margins.right = side;
+        settings.margins.right = margin;
+        settings.margins.bottom = margin;
     }
 }
 
@@ -151,6 +208,7 @@ pub fn notify(message: &str, window: &mut Window, cx: &mut App) -> bool {
     let Some(notice) = notice_for_status(message) else {
         return false;
     };
+    let palette = theme::palette(cx);
     let notification = match notice.severity {
         // A finished download offers to open what it wrote.
         Severity::Info
@@ -158,19 +216,21 @@ pub fn notify(message: &str, window: &mut Window, cx: &mut App) -> bool {
         {
             download
         }
-        Severity::Info => Notification::info(notice.message),
-        // Kit's own close button shows only while the pointer is on the card, so a
-        // notice that stays offers a visible way to go.
-        Severity::Problem => problem_card(notice.message).action(|_, _, cx| {
-            let notice = cx.entity();
-            Button::new("dismiss-notice")
-                .ghost()
-                .small()
-                .label("Dismiss")
-                .on_click(move |_, window, cx| {
-                    notice.update(cx, |notice, cx| notice.dismiss(window, cx));
-                })
-        }),
+        Severity::Info => {
+            let message = notice.message;
+            card(
+                false,
+                &palette,
+                move || {
+                    div()
+                        .text_color(palette.chrome_dim)
+                        .child(message.clone())
+                        .into_any_element()
+                },
+                |_| Vec::new(),
+            )
+        }
+        Severity::Problem => problem_card(notice.message, &palette),
     };
     window.push_notification(notification.id::<StatusNoticeId>(), cx);
     true

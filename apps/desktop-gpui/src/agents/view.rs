@@ -38,7 +38,10 @@ use crate::{
             TYPE_SECONDARY, narrower_than, ui,
         },
     },
-    ui::surface_error::SurfaceError,
+    ui::{
+        dialog::{self, Action, Prose},
+        surface_error::SurfaceError,
+    },
     workspaces,
 };
 
@@ -1230,13 +1233,23 @@ impl AgentsSurface {
 
 const QUESTION_RETRY_MS: u64 = 500;
 
-const DIALOG_WIDTH: f32 = 520.;
+/// `.host-setup` and `.hook-review`.
+const SETUP_WIDTH: f32 = 560.;
+const REVIEW_WIDTH: f32 = 620.;
+
+/// `.host-setup-body p { line-height: 1.45 }`.
+const PARAGRAPH_LINE: f32 = 1.45;
 
 fn paragraph(text: impl Into<SharedString>, cx: &App) -> AnyElement {
+    paragraph_of(text.into(), cx)
+}
+
+fn paragraph_of(content: impl IntoElement, cx: &App) -> AnyElement {
     div()
         .text_size(ui(TYPE_ROW))
+        .line_height(relative(PARAGRAPH_LINE))
         .text_color(theme::palette(cx).chrome_dim)
-        .child(text.into())
+        .child(content)
         .into_any_element()
 }
 
@@ -1273,16 +1286,30 @@ fn setup_body(question: &SetupQuestion, cx: &App) -> Vec<AnyElement> {
         "Agents on this host cannot report what they are doing yet. Setting up adds this app’s lifecycle hooks alongside whatever is already configured — nothing existing is replaced, and a timestamped backup is written before the first change.",
         cx,
     )];
+    let palette = theme::palette(cx);
     body.extend(question.targets.iter().map(|adapter| {
+        // `.host-setup-paths li`.
         v_flex()
             .gap(ui(2.))
+            .px(ui(10.))
+            .py(ui(8.))
+            .border_1()
+            .border_color(palette.chrome_hairline)
+            .rounded(ui(RADIUS_CONTROL))
+            .bg(palette.chrome_bg)
             .child(
                 div()
-                    .text_size(ui(TYPE_ROW))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(palette.chrome_ink)
                     .child(adapter.display_name.clone()),
             )
-            .child(code(adapter.hook_config_path.clone(), cx))
+            .child(
+                div()
+                    .font_family(fonts::MONO)
+                    .text_size(ui(TYPE_META))
+                    .text_color(palette.chrome_dim)
+                    .child(adapter.hook_config_path.clone()),
+            )
             .into_any_element()
     }));
     body.push(paragraph(
@@ -1290,8 +1317,9 @@ fn setup_body(question: &SetupQuestion, cx: &App) -> Vec<AnyElement> {
         cx,
     ));
     if question.targets.iter().any(|adapter| adapter.id == "codex") {
-        body.push(paragraph(
-            "New tmux panes also get an empty CODEX_EXEC_SERVER_URL, which keeps Codex off its shared background server so its hooks can tell which pane they came from, and ~/.codex/config.toml gets daemon_auto_start = false, so Codex on this host no longer starts that server on its own or warns about it.",
+        // The host's own text is plain; this one names files and settings.
+        body.push(paragraph_of(
+            Prose::new("New tmux panes also get an empty `CODEX_EXEC_SERVER_URL`, which keeps Codex off its shared background server so its hooks can tell which pane they came from, and `~/.codex/config.toml` gets `daemon_auto_start = false`, so Codex on this host no longer starts that server on its own or warns about it."),
             cx,
         ));
     }
@@ -1328,15 +1356,36 @@ fn open_setup_dialog(
             return dialog;
         };
         let busy = question.activity.is_some();
+        let palette = theme::palette(cx);
         let (decline, review, accept, escaped) = (
             runtime.clone(),
             runtime.clone(),
             runtime.clone(),
             runtime.clone(),
         );
-        dialog
-            .title(format!("Set up agent status on {}?", question.label))
-            .w(ui(DIALOG_WIDTH).to_pixels(window.rem_size()))
+        dialog::card(dialog, &palette)
+            // The title block sits flush on the body, as the header does in `styles.css`.
+            .title(
+                v_flex()
+                    .mb(ui(-8.))
+                    .child(
+                        div()
+                            .text_size(ui(TYPE_META))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(palette.chrome_faint)
+                            .child("One-time setup"),
+                    )
+                    .child(
+                        div()
+                            .mt(ui(2.))
+                            .text_size(ui(16.))
+                            .font_weight(FontWeight::BOLD)
+                            .child(format!("Set up agent status on {}?", question.label)),
+                    ),
+            )
+            .centered()
+            .w(ui(SETUP_WIDTH).to_pixels(window.rem_size()))
+            .p(ui(20.))
             .close_button(false)
             .keyboard(!busy)
             .overlay_closable(false)
@@ -1352,28 +1401,27 @@ fn open_setup_dialog(
                     .id("host-setup")
                     .role(Role::AlertDialog)
                     .gap(ui(10.))
-                    .child(
-                        div()
-                            .text_size(ui(TYPE_LABEL))
-                            .text_color(theme::palette(cx).chrome_faint)
-                            .child("One-time setup"),
-                    )
                     .children(setup_body(&question, cx)),
             )
             .footer(
                 DialogFooter::new()
-                    .child(
+                    .gap(ui(8.))
+                    .mt(ui(-6.))
+                    .pt(ui(12.))
+                    .border_t_1()
+                    .border_color(palette.chrome_hairline)
+                    .child(dialog::button(
                         Button::new("host-setup-decline")
-                            .ghost()
                             .label("Not now")
                             .disabled(busy)
                             .on_click(move |_, _, cx| {
                                 decline.update(cx, |runtime, cx| runtime.decline_setup(cx))
                             }),
-                    )
-                    .child(
+                        Action::Plain,
+                        &palette,
+                    ))
+                    .child(dialog::button(
                         Button::new("host-setup-review")
-                            .ghost()
                             .label(if question.activity == Some(Activity::Review) {
                                 "Loading review…"
                             } else {
@@ -1383,10 +1431,11 @@ fn open_setup_dialog(
                             .on_click(move |_, _, cx| {
                                 review.update(cx, |runtime, cx| runtime.review_setup(cx))
                             }),
-                    )
-                    .child(
+                        Action::Plain,
+                        &palette,
+                    ))
+                    .child(dialog::button(
                         Button::new("host-setup-accept")
-                            .primary()
                             .label(if question.activity == Some(Activity::Install) {
                                 "Setting up…"
                             } else {
@@ -1396,7 +1445,9 @@ fn open_setup_dialog(
                             .on_click(move |_, _, cx| {
                                 accept.update(cx, |runtime, cx| runtime.accept_setup(cx))
                             }),
-                    ),
+                        Action::Primary,
+                        &palette,
+                    )),
             )
     });
 }
@@ -1541,18 +1592,24 @@ fn open_review_dialog(
         let installing = open.review.action == HookAction::Install;
         let verb = if installing { "Install" } else { "Uninstall" };
         let (cancel, confirm, escaped) = (runtime.clone(), runtime.clone(), runtime.clone());
-        let confirm_button = Button::new("hook-review-confirm")
-            .label(if open.applying {
-                "Applying…".to_owned()
-            } else {
-                format!("{verb} reviewed hooks")
-            })
-            .disabled(open.applying)
-            .on_click(move |_, _, cx| confirm.update(cx, |runtime, cx| runtime.confirm_review(cx)));
-        let confirm_button = if installing { confirm_button.primary() } else { confirm_button.danger() };
-        dialog
+        let palette = theme::palette(cx);
+        let confirm_button = dialog::button(
+            Button::new("hook-review-confirm")
+                .label(if open.applying {
+                    "Applying…".to_owned()
+                } else {
+                    format!("{verb} reviewed hooks")
+                })
+                .disabled(open.applying)
+                .on_click(move |_, _, cx| confirm.update(cx, |runtime, cx| runtime.confirm_review(cx))),
+            if installing { Action::Primary } else { Action::Danger },
+            &palette,
+        );
+        dialog::card(dialog, &palette)
             .title(format!("{verb} {} hooks?", open.review.adapter_display_name))
-            .w(ui(DIALOG_WIDTH).to_pixels(window.rem_size()))
+            .centered()
+            .p(ui(20.))
+            .w(ui(REVIEW_WIDTH).to_pixels(window.rem_size()))
             .close_button(false)
             .keyboard(!open.applying)
             .overlay_closable(false)
@@ -1601,13 +1658,14 @@ fn open_review_dialog(
             )
             .footer(
                 DialogFooter::new()
-                    .child(
+                    .child(dialog::button(
                         Button::new("hook-review-cancel")
-                            .ghost()
                             .label("Cancel")
                             .disabled(open.applying)
                             .on_click(move |_, _, cx| cancel.update(cx, |runtime, cx| runtime.cancel_review(cx))),
-                    )
+                        Action::Plain,
+                        &palette,
+                    ))
                     .child(confirm_button),
             )
     });
