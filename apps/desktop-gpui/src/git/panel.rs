@@ -10,27 +10,28 @@
 use std::{collections::HashMap, rc::Rc};
 
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FontWeight,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FontWeight,
     InteractiveElement, IntoElement, MouseButton, ParentElement, Render, Role, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Window,
-    assets::IconName,
     base::TestSupportExt,
     component::{
         Disableable, Icon, Sizable,
-        button::{Button, ButtonVariants, DropdownButton},
+        button::{Button, ButtonVariants},
         h_flex,
         input::{Enter, Textarea, TextareaState},
-        menu::{ContextMenuExt, PopupMenu},
+        menu::{ContextMenuExt, DropdownMenu as _, PopupMenu},
         v_flex,
     },
     div,
     prelude::FluentBuilder,
+    px, relative, svg,
 };
 
 use crate::ui::icons::Glyph;
 use crate::{
     commands::{self, RowCommandSource, RowSurface, dialogs, registry::CommandId},
     context_menu::{Entry, Item, fill},
+    files::{icons::file_icon, wire::FileKind},
     fonts,
     terminal::integration::transfers::InternalPathDrag,
     theme::{
@@ -48,6 +49,13 @@ use super::{
     },
     store::{GitRepositories, RepositoryState},
 };
+
+/// `box-shadow: inset 1px 0 0 color-mix(in srgb, var(--shadow) 22%, transparent)`.
+fn split_hairline(palette: &Palette) -> gpui_kit::Hsla {
+    let mut color = gpui_kit::Hsla::from(palette.shadow);
+    color.a *= 0.22;
+    color
+}
 
 /// Rows a group draws before "Show more", and how many each press adds.
 const FIRST_ROWS: usize = 200;
@@ -742,6 +750,20 @@ fn alert_line(id: &'static str, text: String, palette: &Palette) -> impl IntoEle
         .child(text)
 }
 
+/// The Tauri group heading is an `h3`, so the browser's 1em margin (10.5px at the
+/// label size) sits on both sides of its 8px and 3px padding.
+/// The extra half pixel is the heading's taller line box in the capture; the
+/// bottom side needs none.
+const SECTION_LABEL_TOP: f32 = 8. + 10.5 + 0.5;
+const SECTION_LABEL_BOTTOM: f32 = 3. + 10.5;
+/// `line-height: normal` of the 12px mono face the rows use, which sets the
+/// 21px row pitch.
+const ROW_LINE: f32 = 1.3;
+
+/// `line-height: normal` of the sans face: GPUI's default is taller, which
+/// spread the heading and the rows.
+const PANEL_LINE: f32 = 1.21;
+
 fn state_color(kind: ChangeKind, conflicted: bool, palette: &Palette) -> gpui_kit::Rgba {
     if conflicted {
         return palette.chrome_faint;
@@ -836,8 +858,8 @@ impl GitPanel {
                 .child(
                     div()
                         .px(ui(12.))
-                        .pt(ui(8.))
-                        .pb(ui(3.))
+                        .pt(ui(SECTION_LABEL_TOP))
+                        .pb(ui(SECTION_LABEL_BOTTOM))
                         .text_size(ui(TYPE_LABEL))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(palette.chrome_faint)
@@ -877,6 +899,7 @@ impl GitPanel {
         let key = format!("{}-{}", model::target_name(target), entry.path);
         let group = SharedString::from(format!("git-row-group-{key}"));
         let (name, dir) = model::split_display_path(&entry.display_path);
+        let (shape, tint) = file_icon(name, FileKind::File, None, false);
         let title = model::status_title(entry, target);
         let code = model::status_code(entry, target);
         let color = state_color(model::kind_for(entry, target), entry.conflicted, palette);
@@ -908,6 +931,7 @@ impl GitPanel {
             .py(ui(3.))
             .font_family(fonts::MONO)
             .text_size(ui(12.))
+            .line_height(relative(ROW_LINE))
             .text_color(palette.chrome_ink)
             .group_hover(group.clone(), |style| style.bg(palette.chrome_hover))
             // The conflict bar is the item's, and takes its width from the
@@ -943,10 +967,11 @@ impl GitPanel {
                 })
             })
             .child(
-                Icon::new(IconName::File)
+                svg()
+                    .data(shape.svg())
                     .size(ui(12.))
                     .flex_none()
-                    .text_color(palette.chrome_dim),
+                    .text_color(tint.color(palette)),
             )
             .child(div().min_w_0().truncate().child(name.to_owned()))
             .when(!dir.is_empty(), |this| {
@@ -1174,37 +1199,65 @@ impl GitPanel {
             .flatten()
             .collect::<Vec<_>>()
             .join(" ");
-        let commit = DropdownButton::new("git-commit")
-            .button(
+        // `.split-button`: Commit and its caret are one control, with a hairline between
+        // the halves.
+        let more_disabled = unavailable || busy;
+        let more_actions = {
+            let this = cx.entity().downgrade();
+            let disabled = nothing_staged || !can_push;
+            move |menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>| {
+                let this = this.clone();
+                let entries = [Item::new("Commit & Push", move |window, cx| {
+                    this.update(cx, |this, cx| this.run(Work::CommitAndPush, window, cx))
+                        .ok();
+                })
+                .disabled(disabled)
+                .into()];
+                fill(menu, &entries, window, cx)
+            }
+        };
+        let commit = h_flex()
+            .flex_1()
+            .min_w_0()
+            .child(
                 Button::new("git-commit-submit")
                     .primary()
                     .xsmall()
                     .flex_1()
                     .min_w_0()
+                    .rounded_tr(px(0.))
+                    .rounded_br(px(0.))
                     .label(format!("Commit {staged} staged"))
                     .disabled(unavailable || busy || nothing_staged)
                     .on_click(
                         cx.listener(|this, _, window, cx| this.run(Work::Commit, window, cx)),
                     ),
             )
-            .menu_accessibility_label("More commit actions")
-            .disabled(unavailable || busy)
-            .flex_1()
-            .min_w_0()
-            .dropdown_menu({
-                let this = cx.entity().downgrade();
-                let disabled = nothing_staged || !can_push;
-                move |menu, window, cx| {
-                    let this = this.clone();
-                    let entries = [Item::new("Commit & Push", move |window, cx| {
-                        this.update(cx, |this, cx| this.run(Work::CommitAndPush, window, cx))
-                            .ok();
-                    })
-                    .disabled(disabled)
-                    .into()];
-                    fill(menu, &entries, window, cx)
-                }
-            });
+            .child(
+                div()
+                    .relative()
+                    .child(
+                        Button::new("git-commit-more")
+                            .primary()
+                            .xsmall()
+                            .dropdown_caret(true)
+                            .accessibility_label("More commit actions")
+                            .disabled(more_disabled)
+                            .px(ui(7.))
+                            .rounded_tl(px(0.))
+                            .rounded_bl(px(0.))
+                            .dropdown_menu_with_anchor(Anchor::TopRight, more_actions),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(px(1.))
+                            .bg(split_hairline(palette)),
+                    ),
+            );
         v_flex()
             .id("git-commit")
             .flex_none()
@@ -1237,6 +1290,10 @@ impl GitPanel {
                     Button::new("git-push")
                         .outline()
                         .xsmall()
+                        .bg(palette.chrome_raised)
+                        .text_color(palette.chrome_ink)
+                        // Kit replays the colors above inside its disabled state.
+                        .when(unavailable || busy || !can_push, |push| push.opacity(0.42))
                         .label("Push")
                         .accessibility_label("Push to upstream")
                         .disabled(unavailable || busy || !can_push)
@@ -1362,6 +1419,7 @@ impl Render for GitPanel {
             .role(Role::Region)
             .aria_label("Source Control")
             .size_full()
+            .line_height(relative(PANEL_LINE))
             .min_h_0()
             .overflow_hidden()
             .child(
@@ -1377,7 +1435,7 @@ impl Render for GitPanel {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .gap(ui(1.))
+                            .gap(ui(2.))
                             .child(
                                 div()
                                     .truncate()

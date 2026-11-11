@@ -609,6 +609,8 @@ impl Render for QuickOpen {
                                     .role(Role::ComboBox)
                                     .aria_label("Search files, workspaces, and tabs")
                                     .appearance(false)
+                                    .xsmall()
+                                    .p_0()
                                     .text_size(ui(TYPE_MENU)),
                             ),
                         ),

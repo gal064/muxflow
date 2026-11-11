@@ -2035,6 +2035,44 @@ mod surface {
     }
 
     #[gpui_kit::test]
+    fn the_host_picker_follows_the_controller(cx: &mut TestAppContext) {
+        let harness = two_shown_hosts(cx);
+        let mut visual = open(cx, &harness);
+        visual.update(|window, cx| {
+            crate::connection_ui::dialog::open_connection_dialog(
+                harness.controller.clone(),
+                window,
+                cx,
+            );
+        });
+        visual.run_until_parked();
+        let shown = |visual: &mut VisualTestContext| {
+            visual.update(|window, _| {
+                window
+                    .find_by_label("Host")
+                    .value()
+                    .map(str::to_owned)
+                    .unwrap_or_default()
+            })
+        };
+        let local = shown(&mut visual);
+        harness.update(cx, |state, cx| state.select_profile("remote-a", cx));
+        visual.run_until_parked();
+        let remote = shown(&mut visual);
+        assert_ne!(
+            local, remote,
+            "picking a host changes what the picker shows"
+        );
+        harness.update(cx, |state, cx| state.add_host(cx));
+        visual.run_until_parked();
+        assert_ne!(
+            shown(&mut visual),
+            remote,
+            "a new host leaves the picker empty"
+        );
+    }
+
+    #[gpui_kit::test]
     fn enter_on_the_focused_install_button_installs(cx: &mut TestAppContext) {
         let harness = two_step_helper_prompt(cx);
         let mut visual = open(cx, &harness);
@@ -2236,7 +2274,7 @@ mod surface {
         visual.run_until_parked();
         for label in [
             "Connect",
-            "Close",
+            "Host",
             "+ Add host",
             "Local",
             "SSH",

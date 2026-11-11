@@ -1,6 +1,7 @@
 //! The preview entity: one Kit Markdown view following one document's buffer.
 
 use std::{
+    cell::Cell,
     collections::HashMap,
     rc::Rc,
     sync::{Arc, Mutex},
@@ -9,12 +10,12 @@ use std::{
 use base64::Engine as _;
 use desktop_core::app_state::{AppTabRecord, MarkdownAppearance};
 use gpui_kit::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, FontWeight, HighlightStyle, Image,
-    ImageCacheError, ImageFormat, ImageSource, InteractiveElement, IntoElement, MouseButton,
+    AnyElement, App, AppContext, Bounds, ClickEvent, Context, Entity, FontWeight, HighlightStyle,
+    Image, ImageCacheError, ImageFormat, ImageSource, InteractiveElement, IntoElement, MouseButton,
     ParentElement, Pixels, Point, Render, Role, SharedString, SharedUri,
     StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Window,
     base::{TextView, TextViewStyle, text::TextViewState},
-    div,
+    canvas, div,
     prelude::FluentBuilder,
     px, relative, rems,
 };
@@ -85,6 +86,61 @@ fn image_source(images: &Images, uri: &SharedUri) -> ImageSource {
     }
 }
 
+static IMAGE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"!\[([^\]]*)\]\(\s*<?([^)\s>]*)>?[^)]*\)").expect("a valid pattern")
+});
+
+/// An image the preview will not show, as its alt text in a code span: a browser draws a
+/// blocked image as a box holding the alt text, where Kit's text view leaves blank
+/// space. Fenced code and inline code are left as written.
+fn show_blocked_images(markdown: &str) -> String {
+    // The open fence's marker: a fence closes only on the same character, as long.
+    let mut fence: Option<(char, usize)> = None;
+    let mut out = String::with_capacity(markdown.len());
+    for line in markdown.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let marker = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'));
+        let run = marker.map_or(0, |m| trimmed.chars().take_while(|c| *c == m).count());
+        match (fence, marker) {
+            (None, Some(m)) if run >= 3 && !(m == '`' && trimmed[run..].contains('`')) => {
+                fence = Some((m, run));
+                out.push_str(line);
+                continue;
+            }
+            (Some((open, len)), _) => {
+                if marker == Some(open) && run >= len && trimmed[run..].trim().is_empty() {
+                    fence = None;
+                }
+                out.push_str(line);
+                continue;
+            }
+            _ => {}
+        }
+        // Odd pieces between backticks are inline code.
+        for (index, piece) in line.split('`').enumerate() {
+            if index > 0 {
+                out.push('`');
+            }
+            if index % 2 == 1 {
+                out.push_str(piece);
+            } else {
+                out.push_str(&IMAGE.replace_all(piece, alt_text));
+            }
+        }
+    }
+    out
+}
+
+fn alt_text(found: &regex::Captures) -> String {
+    if EMBEDDED_IMAGE.is_match(&found[2]) {
+        return found[0].to_owned();
+    }
+    match found[1].trim() {
+        "" => String::new(),
+        alt => format!("`{alt}`"),
+    }
+}
+
 /// Whether a refresh must wait: replacing the text under a selection, or one
 /// being dragged out, would drop it.
 fn holds(selecting: bool, selected: &str) -> bool {
@@ -100,6 +156,9 @@ pub struct PreviewView {
     /// Where the last left press in the preview landed, to tell a click from
     /// a drag that ends on a link.
     pressed: Arc<Mutex<Option<Point<Pixels>>>>,
+    /// The pane's width at the last layout, which the column's side padding
+    /// follows.
+    pane_width: Rc<Cell<Option<Pixels>>>,
     title: SharedString,
     session_id: String,
     _subscriptions: Vec<Subscription>,
@@ -119,6 +178,7 @@ impl PreviewView {
             shown: None,
             images: Images::default(),
             pressed: Arc::default(),
+            pane_width: Rc::default(),
             title: record.title.clone().into(),
             session_id: record.session_id.clone(),
             _subscriptions: subscriptions,
@@ -140,8 +200,9 @@ impl PreviewView {
         if holds(state.is_selecting(), &state.selected_text()) {
             return;
         }
-        self.text
-            .update(cx, |state, cx| state.set_text(&buffer.to_string(), cx));
+        self.text.update(cx, |state, cx| {
+            state.set_text(&show_blocked_images(&buffer.to_string()), cx)
+        });
         self.shown = Some(buffer);
         cx.notify();
     }
@@ -159,6 +220,20 @@ fn palette(cx: &App) -> (Palette, bool) {
 }
 
 /// The `.markdown-preview` rules of `styles.css`.
+/// A heading's size in ems of the body text, from `styles.css` for levels 1 to 3 and
+/// the browser's own for the rest. Kit's steps are gentler and left the title
+/// visibly smaller.
+fn heading_scale(level: u8) -> f32 {
+    match level {
+        1 => 2.,
+        2 => 1.55,
+        3 => 1.25,
+        4 => 1.,
+        5 => 0.83,
+        _ => 0.67,
+    }
+}
+
 fn style(p: &Palette, dark: bool) -> TextViewStyle {
     let rounded = StyleRefinement::default().rounded(px(8.));
     // Kit fills a table from the app's theme unless told otherwise.
@@ -172,8 +247,9 @@ fn style(p: &Palette, dark: bool) -> TextViewStyle {
         .with_code_background(p.chrome_raised.into())
         .with_border(p.chrome_border.into())
         .with_paragraph_gap(rems(1.))
-        .with_heading(move |_| {
+        .with_heading(move |level| {
             StyleRefinement::default()
+                .text_size(px(FONT_SIZE * heading_scale(level)))
                 .text_color(strong)
                 .font_weight(FontWeight::SEMIBOLD)
         })
@@ -262,6 +338,14 @@ fn follow(origin: &Origin, href: &str, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// The side padding that centers the 720px column in a pane `width` wide, and never
+/// less than the gutter.
+fn column_padding(width: Option<Pixels>, gutter: Pixels) -> Pixels {
+    width.map_or(gutter, |width| {
+        ((width - px(CONTENT_WIDTH)) / 2.).max(gutter)
+    })
+}
+
 impl Render for PreviewView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (palette, dark) = palette(cx);
@@ -279,6 +363,11 @@ impl Render for PreviewView {
         let images = self.images.clone();
         // `clamp(20px, 4vw, 48px)`.
         let gutter = (window.viewport_size().width * 0.04).clamp(px(20.), px(48.));
+        // Tauri's column is a centered 720px child of a full-width scroller, so
+        // its scrollbar sits at the pane edge. Here the scroller is the text view,
+        // so the column is made by padding instead of by a maximum width.
+        let side = column_padding(self.pane_width.get(), gutter);
+        let measured = self.pane_width.clone();
         div()
             .id("markdown-preview")
             .role(Role::Article)
@@ -309,12 +398,27 @@ impl Render for PreviewView {
                 }
             })
             .child(
+                canvas(
+                    move |bounds: Bounds<Pixels>, window, _| {
+                        if measured.replace(Some(bounds.size.width)) != Some(bounds.size.width) {
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(
                 TextView::new(&self.text)
                     .style(style(&palette, dark))
                     .selectable(true)
                     .scrollable(true)
                     // Tauri's preview had no syntax colors.
                     .code_block_highlighter(|_| Vec::new())
+                    // Kit labels a block with its language unless it has actions of its
+                    // own; Tauri's preview has no label.
+                    .code_block_actions(|_, _, _| div())
                     .image_source(move |uri| image_source(&images, uri))
                     .on_link_click(move |href: &SharedString, event: &ClickEvent, window, cx| {
                         let pressed = *pressed.lock().expect("the press is never poisoned");
@@ -323,11 +427,10 @@ impl Render for PreviewView {
                         }
                     })
                     .w_full()
-                    .max_w(px(CONTENT_WIDTH) + gutter * 2.)
                     .h_full()
                     .pt(px(48.))
                     .pb(px(80.))
-                    .px(gutter),
+                    .px(side),
             )
     }
 }
@@ -368,6 +471,43 @@ mod tests {
     };
 
     const PIXEL: &str = "iVBORw0KGgo=";
+
+    #[test]
+    fn a_blocked_image_leaves_its_alt_text_and_an_embedded_one_stays() {
+        let embedded = "![dot](data:image/png;base64,iVBORw0KGgo=)";
+        let text = format!(
+            "![remote](https://example.com/a.png) and ![](x.png) then {embedded}\n```\n![in code](u)\n```\n"
+        );
+        assert_eq!(
+            show_blocked_images(&text),
+            format!("`remote` and  then {embedded}\n```\n![in code](u)\n```\n")
+        );
+        // A badge inside a link keeps the link; inline code and a longer or other-marker
+        // fence are not images.
+        let more = "[![build](b.svg)](ci)\n`![syntax](u)`\n~~~\n```\n![a](u)\n~~~\n![b](u)\n";
+        assert_eq!(
+            show_blocked_images(more),
+            "[`build`](ci)\n`![syntax](u)`\n~~~\n```\n![a](u)\n~~~\n`b`\n"
+        );
+    }
+
+    #[test]
+    fn headings_follow_the_stylesheet_scale() {
+        assert_eq!(
+            (1..=3).map(heading_scale).collect::<Vec<_>>(),
+            [2., 1.55, 1.25]
+        );
+        assert!(heading_scale(6) < heading_scale(5) && heading_scale(5) < heading_scale(4));
+    }
+
+    #[test]
+    fn the_column_is_centered_by_padding_and_never_tighter_than_the_gutter() {
+        let gutter = px(48.);
+        assert_eq!(column_padding(None, gutter), gutter);
+        assert_eq!(column_padding(Some(px(1000.)), gutter), px(140.));
+        assert_eq!(column_padding(Some(px(800.)), gutter), gutter);
+        assert_eq!(column_padding(Some(px(150.)), gutter), gutter);
+    }
 
     #[test]
     fn only_embedded_raster_images_are_drawn() {
