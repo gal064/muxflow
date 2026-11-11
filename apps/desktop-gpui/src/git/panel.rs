@@ -27,6 +27,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
 };
 
+use crate::ui::icons::Glyph;
 use crate::{
     commands::{self, RowCommandSource, RowSurface, dialogs, registry::CommandId},
     context_menu::{Entry, Item, fill},
@@ -36,6 +37,7 @@ use crate::{
         self, Palette,
         metrics::{RADIUS_CONTROL, TYPE_LABEL, TYPE_META, TYPE_SECONDARY, ui},
     },
+    ui::surface_error::SurfaceError,
 };
 
 use super::{
@@ -708,8 +710,8 @@ fn quiet(text: impl Into<SharedString>, palette: &Palette) -> gpui_kit::Div {
         .child(text.into())
 }
 
-/// `.surface-error`: the rejection as the host worded it.
-fn surface_error(id: &'static str, text: String, palette: &Palette) -> impl IntoElement {
+/// `.surface-error` with no disclosure: a state the app words itself.
+fn alert_line(id: &'static str, text: String, palette: &Palette) -> impl IntoElement {
     div()
         .id(id)
         .role(Role::Alert)
@@ -952,7 +954,7 @@ impl GitPanel {
                     })
                     .child(code),
             );
-        let action = |id: String, icon: IconName, label: &'static str| {
+        let action = |id: String, icon: Glyph, label: &'static str| {
             Button::new(SharedString::from(id))
                 .ghost()
                 .xsmall()
@@ -984,11 +986,7 @@ impl GitPanel {
                         .child(
                             action(
                                 format!("git-stage-{key}"),
-                                if staged {
-                                    IconName::Minus
-                                } else {
-                                    IconName::Plus
-                                },
+                                if staged { Glyph::Minus } else { Glyph::Plus },
                                 if staged { "Unstage file" } else { "Stage file" },
                             )
                             .on_click(cx.listener(
@@ -1016,7 +1014,7 @@ impl GitPanel {
                         .child(
                             action(
                                 format!("git-discard-{key}"),
-                                IconName::Undo2,
+                                Glyph::Discard,
                                 if entry.untracked {
                                     "Delete untracked file"
                                 } else {
@@ -1239,7 +1237,7 @@ impl GitPanel {
                 )
             })
             .when_some(self.form.error.clone(), |this, error| {
-                this.child(surface_error("git-commit-error", error, palette))
+                this.child(SurfaceError::new("git-commit-error", error))
             })
             .when_some(self.form.output.as_ref(), |this, (result, verb)| {
                 let failed = !result.applied() || result.refresh_failed;
@@ -1383,7 +1381,7 @@ impl Render for GitPanel {
                             .accessibility_label("Refresh Git status")
                             .tooltip("Refresh Git status")
                             .icon(
-                                Icon::new(IconName::RefreshCw)
+                                Icon::new(Glyph::Refresh)
                                     .size(ui(14.))
                                     .text_color(palette.chrome_dim),
                             )
@@ -1391,7 +1389,7 @@ impl Render for GitPanel {
                     ),
             )
             .when_some(state.error.clone(), |this, error| {
-                this.child(surface_error("git-error", error, &palette))
+                this.child(SurfaceError::new("git-error", error))
             })
             .when(status.copy_detection_incomplete, |this| {
                 this.child(
@@ -1406,7 +1404,7 @@ impl Render for GitPanel {
                 )
             })
             .when(!status.authoritative, |this| {
-                this.child(surface_error(
+                this.child(alert_line(
                     "git-resync",
                     "Git status is resynchronizing. Mutations are disabled.".into(),
                     &palette,

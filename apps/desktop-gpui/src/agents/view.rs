@@ -34,9 +34,11 @@ use crate::{
     theme::{
         self, Palette,
         metrics::{
-            RADIUS_CONTROL, RADIUS_ROW, TYPE_LABEL, TYPE_META, TYPE_ROW, TYPE_SECONDARY, ui,
+            NARROW_DIALOGS, RADIUS_CONTROL, RADIUS_ROW, TYPE_LABEL, TYPE_META, TYPE_ROW,
+            TYPE_SECONDARY, narrower_than, ui,
         },
     },
+    ui::surface_error::SurfaceError,
     workspaces,
 };
 
@@ -1243,19 +1245,14 @@ fn code(text: impl Into<SharedString>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn error_line(error: &str, cx: &App) -> AnyElement {
-    div()
-        .id("agents-dialog-error")
-        .role(Role::Alert)
-        .text_size(ui(TYPE_SECONDARY))
-        .text_color(theme::palette(cx).danger_ink)
-        .child(error.to_owned())
-        .into_any_element()
+fn error_line(error: &str) -> AnyElement {
+    SurfaceError::new("agents-dialog-error", error).into_any_element()
 }
 
 fn progress(text: &'static str, cx: &App) -> AnyElement {
     h_flex()
         .id("agents-dialog-progress")
+        .test_support()
         .role(Role::Status)
         .aria_label(text)
         .gap(ui(8.))
@@ -1302,7 +1299,7 @@ fn setup_body(question: &SetupQuestion, cx: &App) -> Vec<AnyElement> {
             .into_any_element(),
     );
     if let Some(error) = &question.error {
-        body.push(error_line(error, cx));
+        body.push(error_line(error));
     }
     if let Some(activity) = question.activity {
         body.push(progress(
@@ -1411,6 +1408,7 @@ fn or_none(hash: &str) -> String {
 fn preview_block(id: String, label: String, text: &str, palette: &Palette) -> impl IntoElement {
     div()
         .id(SharedString::from(id))
+        .test_support()
         .aria_label(label)
         .p(ui(8.))
         .rounded(ui(RADIUS_ROW))
@@ -1423,7 +1421,9 @@ fn preview_block(id: String, label: String, text: &str, palette: &Palette) -> im
         .children(text.lines().map(|line| div().child(line.to_owned())))
 }
 
-fn change_rows(open: &OpenReview, cx: &App) -> Vec<AnyElement> {
+/// `narrow` stacks Before over After, as `styles.css` does in a window 600 CSS
+/// px or narrower.
+fn change_rows(open: &OpenReview, narrow: bool, cx: &App) -> Vec<AnyElement> {
     let palette = theme::palette(cx);
     open.review
         .changes
@@ -1504,8 +1504,9 @@ fn change_rows(open: &OpenReview, cx: &App) -> Vec<AnyElement> {
                                 ))
                         };
                         this.child(
-                            h_flex()
-                                .items_start()
+                            div()
+                                .flex()
+                                .map(|pair| if narrow { pair.flex_col() } else { pair.items_start() })
                                 .gap(ui(8.))
                                 .child(side("Before · redacted", &change.before_preview))
                                 .child(side("After · redacted", &change.after_preview)),
@@ -1578,7 +1579,7 @@ fn open_review_dialog(
                         ),
                         cx,
                     ))
-                    .children(change_rows(&open, cx))
+                    .children(change_rows(&open, narrower_than(NARROW_DIALOGS, window), cx))
                     .when_some(open.review.trust_guidance.clone(), |this, guidance| this.child(paragraph(guidance, cx)))
                     .when_some(open.review.backup_path.clone(), |this, backup| {
                         this.child(paragraph(format!("Backup: {backup}"), cx))
@@ -1586,7 +1587,7 @@ fn open_review_dialog(
                     .when(open.review.already_installed, |this| {
                         this.child(paragraph("The managed hook is already current. Confirming is idempotent.", cx))
                     })
-                    .when_some(open.error.clone(), |this, error| this.child(error_line(&error, cx)))
+                    .when_some(open.error.clone(), |this, error| this.child(error_line(&error)))
                     .when(open.applying, |this| {
                         this.child(progress(
                             if installing { "Installing agent hooks…" } else { "Removing agent hooks…" },
@@ -1606,4 +1607,206 @@ fn open_review_dialog(
                     .child(confirm_button),
             )
     });
+}
+
+/// The dialogs' busy lines, as `SetupProgress` speaks them in Tauri.
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use desktop_core::connection::agent::AgentCommand;
+    use futures::future::{BoxFuture, FutureExt};
+    use gpui_kit::{TestAppContext, VisualTestContext, test::TestQueryExt};
+    use serde_json::Value;
+
+    use super::*;
+    use crate::{
+        agents::{
+            runtime::AgentTransport,
+            setup::{Activity, ConsentedHost, OpenReview, SetupQuestion},
+            tests::{Effects, Recorded},
+            wire::HookReview,
+        },
+        app::{self, Core},
+    };
+
+    struct Unused;
+
+    impl AgentTransport for Unused {
+        fn agent_request(
+            &self,
+            _: String,
+            _: AgentCommand,
+        ) -> BoxFuture<'static, Result<Value, String>> {
+            futures::future::ready(Err("not asked here".into())).boxed()
+        }
+    }
+
+    /// A runtime and a window root that can hold its dialogs.
+    fn rooted(cx: &mut TestAppContext) -> (Entity<AgentRuntime>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            app::init(Core::at(Path::new("/nonexistent/app-state.json")), cx);
+        });
+        let runtime = cx.new(|_| {
+            AgentRuntime::new(
+                Rc::new(Unused),
+                Rc::new(Recorded(Rc::new(Effects::default()))),
+            )
+        });
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let empty = cx.new(|_| EmptyView);
+            gpui_kit::base::Root::new(empty, window, cx)
+        });
+        (runtime, visual)
+    }
+
+    fn status_role(visual: &mut VisualTestContext, line: &str) -> Option<Role> {
+        visual.update(|window, _| {
+            window
+                .try_find_by_label(line)
+                .and_then(|element| element.role())
+        })
+    }
+
+    /// The dialogs read the runtime on every build, as the surface redraws them.
+    fn redraw(visual: &mut VisualTestContext) {
+        visual.update(|window, _| window.refresh());
+        visual.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn the_setup_prompt_says_what_it_is_doing_while_busy(cx: &mut TestAppContext) {
+        let (runtime, visual) = rooted(cx);
+        runtime.update(visual, |runtime, _| {
+            runtime.setup.question = Some(SetupQuestion {
+                id: 1,
+                host: None,
+                label: "This Mac".into(),
+                targets: Vec::new(),
+                activity: None,
+                error: None,
+            })
+        });
+        visual.update(|window, cx| open_setup_dialog(runtime.clone(), Rc::new(|_| {}), window, cx));
+        visual.run_until_parked();
+        let lines = ["Setting up agent hooks…", "Loading the hook changes…"];
+        for line in lines {
+            assert_eq!(status_role(visual, line), None, "idle: {line}");
+        }
+        for (activity, line) in [(Activity::Install, lines[0]), (Activity::Review, lines[1])] {
+            runtime.update(visual, |runtime, _| {
+                runtime.setup.question.as_mut().unwrap().activity = Some(activity)
+            });
+            redraw(visual);
+            assert_eq!(status_role(visual, line), Some(Role::Status), "{line}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_hook_review_says_what_it_is_applying(cx: &mut TestAppContext) {
+        let (runtime, visual) = rooted(cx);
+        let review = |action, applying| OpenReview {
+            review: HookReview {
+                adapter_id: "claude-code".into(),
+                adapter_display_name: "Claude Code".into(),
+                action,
+                revision: "confirm".into(),
+                already_installed: false,
+                changes: Vec::new(),
+                managed_label: "muxflow/v1".into(),
+                trust_guidance: None,
+                backup_path: None,
+            },
+            host: ConsentedHost {
+                profile_id: "local".into(),
+                identity: "local".into(),
+            },
+            applying,
+            error: None,
+        };
+        runtime.update(visual, |runtime, _| {
+            runtime.setup.review = Some(review(HookAction::Install, false))
+        });
+        visual
+            .update(|window, cx| open_review_dialog(runtime.clone(), Rc::new(|_| {}), window, cx));
+        visual.run_until_parked();
+        assert_eq!(status_role(visual, "Installing agent hooks…"), None);
+        for (action, line) in [
+            (HookAction::Install, "Installing agent hooks…"),
+            (HookAction::Uninstall, "Removing agent hooks…"),
+        ] {
+            runtime.update(visual, |runtime, _| {
+                runtime.setup.review = Some(review(action, true))
+            });
+            redraw(visual);
+            assert_eq!(status_role(visual, line), Some(Role::Status), "{line}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_narrow_window_stacks_before_over_after(cx: &mut TestAppContext) {
+        let (runtime, visual) = rooted(cx);
+        let change = crate::agents::wire::HookChange {
+            path: "/cfg/settings.json".into(),
+            summary: String::new(),
+            owner: String::new(),
+            command: String::new(),
+            events: Vec::new(),
+            creates_config: false,
+            removes_config: false,
+            diff_preview: String::new(),
+            before_preview: "{}".into(),
+            after_preview: "{ \"hooks\": {} }".into(),
+            before_hash: String::new(),
+            after_hash: String::new(),
+            preview_truncated: false,
+        };
+        runtime.update(visual, |runtime, _| {
+            runtime.setup.review = Some(OpenReview {
+                review: HookReview {
+                    adapter_id: "claude-code".into(),
+                    adapter_display_name: "Claude Code".into(),
+                    action: HookAction::Install,
+                    revision: "confirm".into(),
+                    already_installed: false,
+                    changes: vec![change],
+                    managed_label: "muxflow/v1".into(),
+                    trust_guidance: None,
+                    backup_path: None,
+                },
+                host: ConsentedHost {
+                    profile_id: "local".into(),
+                    identity: "local".into(),
+                },
+                applying: false,
+                error: None,
+            })
+        });
+        visual.simulate_resize(gpui_kit::size(gpui_kit::px(1200.), gpui_kit::px(900.)));
+        visual
+            .update(|window, cx| open_review_dialog(runtime.clone(), Rc::new(|_| {}), window, cx));
+        visual.run_until_parked();
+        let sides = |visual: &mut VisualTestContext| {
+            redraw(visual);
+            visual.update(|window, _| {
+                let at = |label: &str| window.find_by_label(label).bounds().origin;
+                (
+                    at("Before · redacted for /cfg/settings.json"),
+                    at("After · redacted for /cfg/settings.json"),
+                )
+            })
+        };
+        let (before, after) = sides(visual);
+        assert!(
+            after.x > before.x && after.y == before.y,
+            "{before:?} {after:?}"
+        );
+        visual.simulate_resize(gpui_kit::size(gpui_kit::px(500.), gpui_kit::px(900.)));
+        let (before, after) = sides(visual);
+        assert!(
+            after.y > before.y && after.x == before.x,
+            "{before:?} {after:?}"
+        );
+    }
 }

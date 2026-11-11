@@ -7,21 +7,9 @@
 
 use gpui_kit::Rgba;
 
-use crate::theme::Palette;
+use crate::{theme::Palette, ui::icons::glyph};
 
 use super::wire::{FileKind, TargetKind};
-
-/// The SVG for a 16-unit glyph drawn in the TypeScript set's 1.4 stroke.
-macro_rules! glyph {
-    ($body:literal) => {
-        concat!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.4">"##,
-            $body,
-            "</svg>"
-        )
-        .as_bytes()
-    };
-}
 
 pub const CHEVRON_RIGHT: &[u8] = glyph!(r#"<path d="M6.25 3.75 10.5 8l-4.25 4.25"/>"#);
 pub const CHEVRON_DOWN: &[u8] = glyph!(r#"<path d="M3.75 6.25 8 10.5l4.25-4.25"/>"#);

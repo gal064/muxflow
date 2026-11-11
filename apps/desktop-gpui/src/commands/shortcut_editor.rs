@@ -25,7 +25,7 @@ use super::{
 };
 use crate::theme::{
     self,
-    metrics::{TYPE_META, TYPE_SECONDARY, ui},
+    metrics::{NARROW_DIALOGS, TYPE_META, TYPE_SECONDARY, narrower_than, ui},
 };
 
 const WIDTH: f32 = 620.;
@@ -104,13 +104,23 @@ impl ShortcutEditor {
         cx.notify();
     }
 
-    fn render_row(&self, row: &Row, cx: &App) -> impl IntoElement + use<> {
+    /// `narrow` stacks the field under the title, as `styles.css` does in a
+    /// window 600 CSS px or narrower.
+    fn render_row(&self, row: &Row, narrow: bool, cx: &App) -> impl IntoElement + use<> {
         let colors = theme::palette(cx);
         let value = field_value(row.command, self.platform, &self.draft);
         let glyphs = shortcut_glyphs(Some(&value), self.platform);
-        h_flex()
+        div()
+            .flex()
+            .map(|row| {
+                if narrow {
+                    row.flex_col().items_start()
+                } else {
+                    row.items_center()
+                }
+            })
             .py(ui(6.))
-            .gap(ui(12.))
+            .gap(ui(if narrow { 4. } else { 12. }))
             .child(
                 v_flex()
                     .flex_1()
@@ -130,7 +140,13 @@ impl ShortcutEditor {
             )
             .child(
                 h_flex()
-                    .w(ui(200.))
+                    .map(|field| {
+                        if narrow {
+                            field.w_full()
+                        } else {
+                            field.w(ui(200.))
+                        }
+                    })
                     .flex_none()
                     .gap(ui(6.))
                     .child(
@@ -182,6 +198,7 @@ impl Render for ShortcutEditor {
             })
             .collect();
         let blocked = unsafe_bindings || !conflicts.is_empty();
+        let narrow = narrower_than(NARROW_DIALOGS, window);
         let max_height = ui(MAX_HEIGHT)
             .to_pixels(window.rem_size())
             .min(window.viewport_size().height * VIEWPORT_LIMIT);
@@ -200,7 +217,7 @@ impl Render for ShortcutEditor {
         let rows: Vec<_> = self
             .rows
             .iter()
-            .map(|row| self.render_row(row, cx))
+            .map(|row| self.render_row(row, narrow, cx))
             .collect();
         v_flex()
             .id("shortcut-editor")

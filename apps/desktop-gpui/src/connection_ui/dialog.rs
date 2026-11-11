@@ -7,6 +7,7 @@ use desktop_core::connection::{ConnectionSpec, helper::HelperRollback, profiles:
 use gpui_kit::{
     App, Context, Entity, FocusHandle, FontWeight, IntoElement, KeyBinding, NoAction, Render, Role,
     SharedString, Subscription, Window,
+    base::TestSupportExt,
     component::{
         Disableable, Sizable, WindowExt,
         button::{Button, ButtonVariants},
@@ -15,6 +16,7 @@ use gpui_kit::{
         h_flex,
         input::{Input, InputEvent, InputState},
         radio::{Radio, RadioGroup},
+        spinner::Spinner,
         v_flex,
     },
     div,
@@ -25,6 +27,7 @@ use crate::theme::{
     self,
     metrics::{TYPE_LABEL, TYPE_META, TYPE_ROW, TYPE_SECONDARY, ui},
 };
+use crate::ui::surface_error::SurfaceError;
 
 use super::{
     controller::{ConnectionController, ConnectionMode},
@@ -160,10 +163,19 @@ pub fn open_helper_dialog(
             .child(
                 div()
                     .id("helper-dialog-detail")
+                    .test_support()
                     .when(busy, |detail| {
                         detail
                             .role(Role::Status)
                             .aria_label(helper_detail(busy, &probe))
+                    })
+                    // Tauri's SetupProgress: a spinner says the wait is work.
+                    .when(busy, |detail| {
+                        detail
+                            .flex()
+                            .gap(ui(8.))
+                            .items_center()
+                            .child(Spinner::new().small())
                     })
                     .child(detail_text(helper_detail(busy, &probe).into(), cx)),
             )
@@ -266,6 +278,15 @@ impl ConnectionForm {
             this.sync_inputs(window, cx);
             cx.notify();
         })];
+        controller.update(cx, |state, cx| state.hold_form(true, cx));
+        subscriptions.push(cx.on_release({
+            let controller = controller.downgrade();
+            move |_, cx| {
+                controller
+                    .update(cx, |state, cx| state.hold_form(false, cx))
+                    .ok();
+            }
+        }));
         subscriptions.push(
             cx.subscribe_in(&ssh_target, window, |this, input, event, _, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -661,15 +682,8 @@ impl ConnectionForm {
                 ..
             } => {
                 section = section.child(
-                    div()
-                        .id("connection-helper-failure")
-                        .role(Role::Alert)
-                        .text_color(theme::palette(cx).danger)
-                        .text_size(ui(TYPE_SECONDARY))
-                        .child(format!(
-                            "{} {message}",
-                            helper_failure_summary(*rollback, probe.as_ref())
-                        )),
+                    SurfaceError::new("connection-helper-failure", message.clone())
+                        .summary(helper_failure_summary(*rollback, probe.as_ref())),
                 );
             }
             HelperUpgradeState::Succeeded {

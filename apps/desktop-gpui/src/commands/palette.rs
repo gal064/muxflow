@@ -6,7 +6,7 @@ use gpui_kit::{
     ParentElement, Render, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
     Subscription, TestSupportExt, Window,
     component::{
-        Icon, IconName, Sizable, WindowExt, h_flex,
+        Icon, Sizable, WindowExt, h_flex,
         input::{Input, InputEvent, InputState, MoveDown, MoveUp},
         v_flex,
     },
@@ -30,6 +30,7 @@ use crate::theme::{
         TYPE_ROW, ui,
     },
 };
+use crate::ui::icons::Glyph;
 
 /// Fourteen rows plus the padding.
 const VISIBLE_ROWS: f32 = 14.;
@@ -236,7 +237,7 @@ impl Render for CommandPalette {
                     .border_b_1()
                     .border_color(colors.chrome_hairline)
                     .child(
-                        Icon::new(IconName::Search)
+                        Icon::new(Glyph::Search)
                             .xsmall()
                             .text_color(colors.chrome_faint),
                     )
@@ -260,6 +261,9 @@ impl Render for CommandPalette {
             )
             .child(if list.is_empty() {
                 div()
+                    .id("command-palette-empty")
+                    .aria_label("No matching command.")
+                    .test_support()
                     .px(ui(14.))
                     .py(ui(12.))
                     .text_color(colors.chrome_dim)
