@@ -243,7 +243,7 @@ through the T2.1 seam.
 | T5.1 `explorer` | opus, high, full cycle, invariant | `gpui/explorer` | Running, round 2 | | Round 1 found 14 issues; merging integration and wiring the editor and Git seams |
 | T5.2 `editor` | opus, high, full cycle, large, design | `gpui/editor` | Merged | `1e4a659`, merge `e372bc2` | Kit code editor. 3 review rounds, QA PASS local and SSH. An external edit to an open remote file leaves the tab in Save failed until T5.1 delivers change notices |
 | T5.3 `git-diff` | opus, high, full cycle, design | `gpui/git-diff` | Merged | `ef076e7`, merge `9a9ad34` | 3 review rounds, QA PASS local and SSH, `test:git` passes after a driver fix. Gaps: SurfaceError summary on push errors, keyboard row access, file icons |
-| T5.4 `markdown` | sonnet, high, full cycle, design | `gpui/markdown` | Dispatched | | |
+| T5.4 `markdown` | sonnet, high, full cycle, design | `gpui/markdown` | Merged | `587887b` | 2 review rounds, QA PASS local. Kit bug: double-click selects nothing in a paragraph with inline code. Drag-select in the preview not verified (xdotool). Settings copy still mentions Live Markdown |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
 isolated host, headless. **Integrated QA:** `gdev_qa_phase4` exercises every panel
@@ -336,7 +336,7 @@ final sweep command returning only justified hits.
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
 | 4 | Done, QA passed | `0912995` | |
-| 5 | Running, wave 2 dispatched | | T5.2 and T5.3 merged; T5.1 and T5.4 running |
+| 5 | Running | | T5.2, T5.3 and T5.4 merged; T5.1 in round 2 |
 | 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
