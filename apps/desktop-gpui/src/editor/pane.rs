@@ -970,6 +970,16 @@ impl DocumentPane {
             let target = editor.read(cx).focus_handle(cx);
             window.defer(cx, move |window, cx| window.focus(&target, cx));
         }
+        // And comes back from an editor the preview hides, which would keep it
+        // unseen and stop the app's shortcuts as a field does.
+        if editor.is_none()
+            && self
+                .editor(cx)
+                .is_some_and(|editor| editor.read(cx).focus_handle(cx).is_focused(window))
+        {
+            let target = self.focus.clone();
+            window.defer(cx, move |window, cx| window.focus(&target, cx));
+        }
         if self.find.is_some() {
             self.refresh_matches(cx);
         }

@@ -5,8 +5,8 @@
 use std::{collections::HashMap, rc::Rc};
 
 use gpui_kit::{
-    AnyElement, App, Global, InteractiveElement, IntoElement, ParentElement, RenderOnce, Role,
-    StatefulInteractiveElement, Styled, WeakEntity, Window,
+    AnyElement, App, Global, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+    RenderOnce, Role, StatefulInteractiveElement, Styled, WeakEntity, Window,
     base::{HandleEdge, Tab, Tabs, TestSupportExt},
     component::{h_flex, v_flex},
     div,
@@ -64,6 +64,20 @@ impl RenderOnce for RightPanel {
             .find(|(id, _)| *id == self.surface)
             .map_or("Files", |(_, label)| label.as_str())
             .to_owned();
+        // One stop in the Tab order on the selected segment, as Tauri's
+        // roving tabindex: the arrows select the next segment, wrapping.
+        let focus = window
+            .use_keyed_state("panel-tabs-focus", cx, |_, cx| {
+                cx.focus_handle().tab_stop(true)
+            })
+            .read(cx)
+            .clone();
+        let held = focus.is_focused(window);
+        // A ring for the keyboard only, as Tauri's `:focus-visible`.
+        let keyboard = window.last_input_was_keyboard();
+        let ids: Vec<String> = self.surfaces.iter().map(|(id, _)| id.clone()).collect();
+        let at = ids.iter().position(|id| *id == self.surface);
+        let keys = self.chrome.clone();
         v_flex()
             .id("right-panel")
             .test_support()
@@ -80,6 +94,23 @@ impl RenderOnce for RightPanel {
             .child(
                 Tabs::new("panel-tabs")
                     .aria_label("Panel surface")
+                    .aria_size_of_set(tab_count)
+                    .track_focus(&focus)
+                    .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                        if event.keystroke.modifiers.modified() || ids.is_empty() {
+                            return;
+                        }
+                        let current = at.unwrap_or(0);
+                        let next = match event.keystroke.key.as_str() {
+                            "left" => (current + ids.len() - 1) % ids.len(),
+                            "right" => (current + 1) % ids.len(),
+                            _ => return,
+                        };
+                        let surface = ids[next].clone();
+                        keys.update(cx, |chrome, cx| chrome.show_surface(&surface, cx))
+                            .ok();
+                        cx.stop_propagation();
+                    })
                     .flex()
                     .items_stretch()
                     .h(ui(BAR_HEIGHT))
@@ -98,7 +129,9 @@ impl RenderOnce for RightPanel {
                                 Tab::new(format!("panel-tab-{id}"))
                                     .selected(selected)
                                     .accessibility_label(label.clone())
-                                    .set_position(index + 1, tab_count)
+                                    // AccessKit counts from zero.
+                                    .set_position(index, tab_count)
+                                    .when(selected && held, |tab| tab.aria_active_descendant())
                                     .on_click(move |_, _, cx| {
                                         chrome
                                             .update(cx, |chrome, cx| {
@@ -115,6 +148,16 @@ impl RenderOnce for RightPanel {
                                         palette.chrome_dim
                                     })
                                     .child(label.clone())
+                                    .when(selected && held && keyboard, |tab| {
+                                        tab.child(
+                                            div()
+                                                .absolute()
+                                                .inset_0()
+                                                .border_2()
+                                                .border_color(palette.accent)
+                                                .rounded(ui(4.)),
+                                        )
+                                    })
                                     .when(selected, |tab| {
                                         tab.child(
                                             div()

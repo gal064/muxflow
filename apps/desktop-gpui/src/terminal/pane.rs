@@ -84,7 +84,10 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let focus = cx.focus_handle();
+        // A stop in the Tab order, as xterm's input is in Tauri. Tab inside
+        // the pane is the shell's, so the keyboard leaves by the mouse or a
+        // shortcut, as there.
+        let focus = cx.focus_handle().tab_stop(true);
         let subscriptions = vec![
             cx.on_focus(&focus, window, Self::focus_changed),
             cx.on_blur(&focus, window, Self::focus_changed),

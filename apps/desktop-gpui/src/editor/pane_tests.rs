@@ -519,3 +519,25 @@ fn switching_to_the_preview_and_back_keeps_the_buffer_and_its_pending_save(
     assert_eq!(back, editor, "the same editor comes back");
     assert_eq!(cx.update(|_, cx| back.read(cx).text().to_string()), "two");
 }
+
+#[gpui_kit::test]
+fn the_preview_takes_the_keyboard_back_from_the_editor_it_hides(cx: &mut TestAppContext) {
+    let (pane, _, cx) = open_tab(
+        cx,
+        markdown_tab(AppTabViewMode::Split),
+        Some(text("one")),
+        true,
+    );
+    let editor = editor(&pane, cx);
+    cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle(cx), cx));
+    draw(cx);
+    // As the Preview button asks the app state to.
+    cx.update(|_, cx| {
+        pane.update(cx, |pane, _| {
+            pane.record.view_mode = Some(AppTabViewMode::Preview)
+        })
+    });
+    draw(cx);
+    // Not the hidden editor, where the app's shortcuts would stop as at a field.
+    assert!(cx.update(|window, cx| pane.read(cx).focus.is_focused(window)));
+}

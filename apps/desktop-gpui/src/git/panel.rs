@@ -10,9 +10,9 @@
 use std::{collections::HashMap, rc::Rc};
 
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FontWeight,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Render, Role, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
+    FontWeight, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
+    Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Window,
     base::TestSupportExt,
     component::{
         Disableable, Icon, Sizable,
@@ -133,6 +133,12 @@ pub struct GitPanel {
     /// The row the palette means: the last one focused or right-clicked, by
     /// path, since a refresh replaces every entry.
     focused: Option<(String, Target)>,
+    /// Where staging or unstaging that row takes the keyboard: to the file in
+    /// its new group. Tauri's row went and left the keyboard in the panel;
+    /// here it would fall to the editor.
+    follow: Option<(String, Target)>,
+    /// The groups' scroll, which keeps a row the keyboard reaches in view.
+    scroll: ScrollHandle,
     /// Whether the panel is on screen: only then do its rows answer the palette.
     shown: bool,
     /// What is being applied to each row, by path, while the host decides.
@@ -147,6 +153,13 @@ pub struct GitPanel {
 
 impl EventEmitter<PanelEvent> for GitPanel {}
 
+/// A row's stop in the Tab order, and the row with its actions around it.
+#[derive(Clone)]
+struct RowFocus {
+    row: FocusHandle,
+    within: FocusHandle,
+}
+
 impl GitPanel {
     pub fn new(store: Entity<GitRepositories>, cx: &mut Context<Self>) -> Self {
         let observed = cx.observe(&store, |this, _, cx| {
@@ -158,6 +171,8 @@ impl GitPanel {
             context: PanelContext::default(),
             key: None,
             focused: None,
+            follow: None,
+            scroll: ScrollHandle::new(),
             shown: false,
             pending: HashMap::new(),
             limits: HashMap::new(),
@@ -266,6 +281,7 @@ impl GitPanel {
         // Re-selecting the same row is not a state change.
         if self.focused.as_ref() != Some(&row) {
             self.focused = Some(row);
+            self.follow = None;
             self.publish_rows(cx);
         }
     }
@@ -302,6 +318,15 @@ impl GitPanel {
             confirmation_token: None,
         };
         let repository_id = status.repository.id.clone();
+        if matches!(kind, MutationKind::StageFile | MutationKind::UnstageFile)
+            && self.focused == Some((entry.path.clone(), target))
+        {
+            let to = match target {
+                Target::Staged => Target::Unstaged,
+                Target::Unstaged => Target::Staged,
+            };
+            self.follow = Some((entry.path.clone(), to));
+        }
         let (path, subject) = (
             entry.path.clone(),
             format!("{} {}", kind.label(), entry.display_path),
@@ -328,12 +353,18 @@ impl GitPanel {
                 this.pending.remove(&path);
                 match result {
                     Ok(result) => {
+                        if !result.applied() {
+                            this.follow = None;
+                        }
                         this.accept(&key, &result, cx);
                         if this.key.as_deref() != Some(&key) || model::needs_notice(&result) {
                             this.message(model::result_message(&result, &subject), cx);
                         }
                     }
-                    Err(error) => this.message(error, cx),
+                    Err(error) => {
+                        this.follow = None;
+                        this.message(error, cx)
+                    }
                 }
                 cx.notify();
             })
@@ -834,6 +865,7 @@ impl GitPanel {
         target: Target,
         mutable: bool,
         palette: &Palette,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if entries.is_empty() {
@@ -847,9 +879,10 @@ impl GitPanel {
             .scope
             .as_ref()
             .map(|scope| (scope.host_profile_id.clone(), scope.server_identity.clone()));
-        let rows = shown
+        let rows: Vec<AnyElement> = shown
             .iter()
-            .map(|entry| self.render_row(entry, target, mutable, host.clone(), palette, cx));
+            .map(|entry| self.render_row(entry, target, mutable, host.clone(), palette, window, cx))
+            .collect();
         Some(
             v_flex()
                 .id(id)
@@ -886,6 +919,7 @@ impl GitPanel {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_row(
         &self,
         entry: &StatusEntry,
@@ -893,10 +927,68 @@ impl GitPanel {
         mutable: bool,
         host: Option<(String, String)>,
         palette: &Palette,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let staged = target == Target::Staged;
         let key = format!("{}-{}", model::target_name(target), entry.path);
+        // Each row is a stop in the Tab order, as Tauri's row buttons, and
+        // shows its actions while it or one of them holds the keyboard.
+        let row_focus = |key: &str, window: &mut Window, cx: &mut Context<Self>| {
+            window
+                .use_keyed_state(
+                    SharedString::from(format!("git-row-focus-{key}")),
+                    cx,
+                    |_, cx| RowFocus {
+                        row: cx.focus_handle().tab_stop(true),
+                        within: cx.focus_handle(),
+                    },
+                )
+                .read(cx)
+                .clone()
+        };
+        let focus = row_focus(&key, window, cx);
+        // Staged or unstaged from the keyboard, the file takes it to its new
+        // group in the frame its old row goes, before the keyboard is left to
+        // whatever claims it next.
+        let from = match target {
+            Target::Staged => Target::Unstaged,
+            Target::Unstaged => Target::Staged,
+        };
+        if self.follow == Some((entry.path.clone(), target))
+            && model::kind_for(entry, from) == ChangeKind::None
+        {
+            let left = row_focus(
+                &format!("{}-{}", model::target_name(from), entry.path),
+                window,
+                cx,
+            );
+            if left.within.contains_focused(window, cx) {
+                window.focus(&focus.row, cx);
+            }
+            // Focus within is read from the last frame, which has no new row:
+            // draw again so the row shows its actions as a reached row does.
+            cx.defer_in(window, |this, _, cx| {
+                this.follow = None;
+                cx.notify();
+            });
+        }
+        crate::context_menu::reveal_when_focused(
+            format!("git-row-reveal-{key}"),
+            &focus.row,
+            &self.scroll,
+            window,
+            cx,
+        );
+        let focused = focus.row.is_focused(window);
+        let within = focus.within.contains_focused(window, cx);
+        // Tabbing onto a row selects it, as a press does.
+        if focused && self.focused.as_ref() != Some(&(entry.path.clone(), target)) {
+            let entry = entry.clone();
+            cx.defer_in(window, move |this, _, cx| {
+                this.focus_row(&entry, target, cx)
+            });
+        }
         let group = SharedString::from(format!("git-row-group-{key}"));
         let (name, dir) = model::split_display_path(&entry.display_path);
         let (shape, tint) = file_icon(name, FileKind::File, None, false);
@@ -908,7 +1000,17 @@ impl GitPanel {
         let offers_actions = mutable && !entry.conflicted && !entry.submodule;
         let tooltip = SharedString::from(format!("{} · {title}", entry.display_path));
         let weak = cx.entity().downgrade();
-        let (open, focus, right) = (entry.clone(), entry.clone(), entry.clone());
+        let (open, press, right) = (entry.clone(), entry.clone(), entry.clone());
+        let menu_entry = entry.clone();
+        let menu: crate::context_menu::Builder = Rc::new(
+            move |menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>| {
+                let entries = weak
+                    .upgrade()
+                    .map(|panel| panel.read(cx).menu_entries(&menu_entry, target, &panel, cx))
+                    .unwrap_or_default();
+                fill(menu, &entries, window, cx)
+            },
+        );
         let drag = entry
             .absolute_path
             .clone()
@@ -924,6 +1026,23 @@ impl GitPanel {
             .test_support()
             .role(Role::Button)
             .aria_label(entry.display_path.clone())
+            .track_focus(&focus.row)
+            // Not a listener: the menu reads the panel as it is built.
+            // Enter and Space click it, as a single press: the preview.
+            .on_key_down({
+                let menu = menu.clone();
+                move |event: &KeyDownEvent, window, cx| {
+                    if crate::context_menu::is_menu_key(&event.keystroke) {
+                        let menu = menu.clone();
+                        crate::context_menu::open(
+                            move |popup, window, cx| menu(popup, window, cx),
+                            window,
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }
+                }
+            })
             .w_full()
             .items_center()
             .gap(ui(6.))
@@ -950,7 +1069,7 @@ impl GitPanel {
             })
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| this.focus_row(&focus, target, cx)),
+                cx.listener(move |this, _, _, cx| this.focus_row(&press, target, cx)),
             )
             .on_mouse_down(
                 MouseButton::Right,
@@ -994,7 +1113,8 @@ impl GitPanel {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(color)
                     .when(offers_actions, |this| {
-                        this.group_hover(group.clone(), |style| style.invisible())
+                        this.when(within, |this| this.invisible())
+                            .group_hover(group.clone(), |style| style.invisible())
                     })
                     .child(code),
             );
@@ -1016,7 +1136,9 @@ impl GitPanel {
                 .top_0()
                 .bottom_0()
                 .items_center()
-                .invisible()
+                // Hidden actions are out of the Tab order, so they follow the
+                // row in it only while the row has the keyboard.
+                .when(!within, |this| this.invisible())
                 .group_hover(group.clone(), |style| style.visible())
                 // The actions sit over the row: a press on them is not a press
                 // on the row, which would open the diff.
@@ -1085,14 +1207,6 @@ impl GitPanel {
         };
         let copied =
             entry.index_kind == ChangeKind::Copied || entry.worktree_kind == ChangeKind::Copied;
-        let menu_entry = entry.clone();
-        let menu = move |menu: PopupMenu, window: &mut Window, cx: &mut Context<PopupMenu>| {
-            let entries = weak
-                .upgrade()
-                .map(|panel| panel.read(cx).menu_entries(&menu_entry, target, &panel, cx))
-                .unwrap_or_default();
-            fill(menu, &entries, window, cx)
-        };
         v_flex()
             .id(SharedString::from(format!("git-item-{key}")))
             .group(group)
@@ -1103,9 +1217,23 @@ impl GitPanel {
             .child(
                 div()
                     .relative()
+                    .track_focus(&focus.within)
                     .child(button)
                     .children(actions)
-                    .context_menu(menu),
+                    // A ring for the keyboard only, as Tauri's `:focus-visible`.
+                    .when(focused && window.last_input_was_keyboard(), |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .border_2()
+                                .border_color(palette.accent),
+                        )
+                    })
+                    .when(focused, |this| {
+                        this.child(crate::context_menu::anchor(&focus.row))
+                    })
+                    .context_menu(move |popup, window, cx| menu(popup, window, cx)),
             )
             .when_some(self.pending.get(&entry.path), |this, label| {
                 this.child(note((*label).to_owned()))
@@ -1409,7 +1537,16 @@ impl Render for GitPanel {
         ]
         .into_iter()
         .filter_map(|(id, title, entries, target)| {
-            self.render_group(id, title, entries, target, !unavailable, &palette, cx)
+            self.render_group(
+                id,
+                title,
+                entries,
+                target,
+                !unavailable,
+                &palette,
+                window,
+                cx,
+            )
         })
         .collect();
         let form = self.render_form(&status, unavailable, &palette, window, cx);
@@ -1497,6 +1634,7 @@ impl Render for GitPanel {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .children(lists)
                     .when(clean, |this| {
                         this.child(quiet("Working tree clean.", &palette))

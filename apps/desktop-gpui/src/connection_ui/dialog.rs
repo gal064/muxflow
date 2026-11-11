@@ -631,6 +631,12 @@ impl ConnectionForm {
         let on_mode = controller.clone();
         let mut fields = v_flex().gap(ui(12.)).child(
             v_flex()
+                // The kit's group has no role of its own, so the caption above it
+                // would not name it for a screen reader.
+                .id("connection-mode-group")
+                .test_support()
+                .role(Role::RadioGroup)
+                .aria_label("Transport")
                 .gap(ui(4.))
                 .child(
                     div()

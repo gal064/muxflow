@@ -662,7 +662,7 @@ font row covers them).
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
 | `ui/AgentStateIndicator.tsx` | 39 | port | 2 | agents/view.rs `state_indicator` | done (T4.2) |
-| `ui/ContextMenu.tsx` | 211 | replace | 2 | Kit `PopupMenu` through `context_menu.rs`. Left for T6.1: opening from the keyboard, Home/End, and opening on the checked item | open |
+| `ui/ContextMenu.tsx` | 211 | replace | 2 | Kit `PopupMenu` through `context_menu.rs`, which adds what Kit lacks: `open` on Shift+F10 or the Menu key under the row's `anchor` (every surface Tauri opens from the keyboard: tabs, workspace and agent rows, the agents sort toggle, Explorer and Git rows), Home/End, Tab within the menu, opening on the checked item when the keyboard opens it, and focus back to the opener before an item runs (context_menu.rs, files/tests.rs, git/tests.rs and workspaces/tests.rs keyboard tests). Terminal panes have no context menu in Tauri either | done (T6.1) |
 | `ui/DelayedLoading.tsx` | 19 | port | 2 | the 150 ms delay before "Loading…" in editor/pane.rs and git/diff_view.rs (editor/pane_tests.rs, git/tests.rs) | done (T6.4) |
 | `ui/Icon.tsx` | 244 | port | 2 | ui/icons.rs `Glyph`, embedded SVG drawn in the text color (test renders each); the file-type shapes in files/icons.rs | done (T6.4) |
 | `ui/SetupProgress.tsx` | 6 | port | 2 | agents/view.rs `progress`; the helper dialog's busy line in connection_ui/dialog.rs | done (T6.4) |

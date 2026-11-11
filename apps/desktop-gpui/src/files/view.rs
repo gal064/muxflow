@@ -27,7 +27,7 @@ use gpui_kit::{
 
 use crate::{
     commands::{self, Commands, RowCommandSource, RowSurface, registry::CommandId},
-    context_menu::{Entry, Item, fill},
+    context_menu::{self, Entry, Item, fill},
     terminal::integration::transfers::InternalPathDrag,
     theme::{
         self, Palette,
@@ -232,7 +232,8 @@ pub struct ViewState {
 impl ViewState {
     pub fn new(cx: &mut App) -> Self {
         Self {
-            focus: cx.focus_handle(),
+            // One stop for the tree, as Tauri's roving tabindex gives it.
+            focus: cx.focus_handle().tab_stop(true),
             scroll: UniformListScrollHandle::new(),
             focus_key: None,
             last_focus_index: 0,
@@ -514,6 +515,19 @@ impl Explorer {
         let index = self.view.focus_index();
         let last = rows.len() - 1;
         let row = &rows[index];
+        // Every file action is on the menu, so the keyboard needs a way to it.
+        if context_menu::is_menu_key(&event.keystroke) {
+            if let Some(entry) = row.entry() {
+                let menu = self.entry_menu(entry, cx);
+                context_menu::open(
+                    move |popup, window, cx| fill(popup, &menu, window, cx),
+                    window,
+                    cx,
+                );
+                cx.stop_propagation();
+            }
+            return;
+        }
         let modifiers = &event.keystroke.modifiers;
         if modifiers.control || modifiers.platform || modifiers.alt {
             return;
@@ -723,13 +737,14 @@ impl Explorer {
         )
     }
 
-    /// `focused` is the keyboard's row; `ring` whether the tree holds focus,
-    /// which shows it as `:focus-visible` would.
+    /// `focused` is the keyboard's row; `held` whether the tree holds focus,
+    /// and `ring` whether that shows, as `:focus-visible` would.
     fn render_row(
         &self,
         index: usize,
         row: &Row,
         focused: bool,
+        held: bool,
         ring: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -747,11 +762,18 @@ impl Explorer {
             .pl(ui(indent))
             .pr(ui(5.))
             .aria_level(row.depth + 1)
-            .aria_position_in_set(row.position)
-            .aria_size_of_set(row.size)
+            // AccessKit counts from zero; the bridges add one.
+            .aria_position_in_set(row.position - 1)
             .aria_selected(focused)
+            // The tree keeps the keyboard; this tells a screen reader which
+            // row it is on, as Tauri's roving focus did.
+            .when(focused && held, |this| this.aria_active_descendant())
             .when(focused && ring, |this| {
                 this.border_2().border_color(palette.accent).rounded(ui(3.))
+            })
+            .when(focused, |this| {
+                this.relative()
+                    .child(context_menu::anchor(&self.view.focus))
             });
         let Some(entry) = row.entry().cloned() else {
             let RowKind::More { directory } = &row.kind else {
@@ -1062,11 +1084,12 @@ impl Render for Explorer {
                         let rows = this.view.rows.clone();
                         // Found by key, so once per frame rather than per row.
                         let focus = this.view.focus_index();
-                        let ring = this.view.keyboard && this.view.focus.is_focused(window);
+                        let held = this.view.focus.is_focused(window);
+                        let ring = this.view.keyboard && held;
                         range
                             .filter_map(|index| {
                                 rows.get(index).map(|row| {
-                                    this.render_row(index, row, index == focus, ring, cx)
+                                    this.render_row(index, row, index == focus, held, ring, cx)
                                 })
                             })
                             .collect::<Vec<_>>()

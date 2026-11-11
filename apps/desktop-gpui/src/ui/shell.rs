@@ -53,5 +53,6 @@ impl Render for Shell {
             .text_size(ui(TYPE_ROW))
             .child(TitleBar::new(title, tabs_in_bar))
             .child(div().flex_1().min_h_0().child(self.chrome.clone()))
+            .children(crate::context_menu::keyboard_menu(window, cx))
     }
 }
