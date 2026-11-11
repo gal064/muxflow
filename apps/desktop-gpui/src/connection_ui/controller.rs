@@ -1227,12 +1227,7 @@ impl ConnectionController {
         }
     }
 
-    /// Returns whether a verdict was just spoken.
-    fn apply_link_quality(
-        &mut self,
-        change: Option<LinkQualityChange>,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn apply_link_quality(&mut self, change: Option<LinkQualityChange>, cx: &mut Context<Self>) {
         match change {
             Some(LinkQualityChange::Degraded {
                 state,
@@ -1253,7 +1248,6 @@ impl ConnectionController {
                     describe_link_quality(state, &self.link_quality_host().unwrap_or_default());
                 self.link_quality_verdict = verdict.clone();
                 self.set_status(verdict, cx);
-                true
             }
             Some(LinkQualityChange::Cleared { after_ms }) => {
                 self.incident(
@@ -1261,9 +1255,8 @@ impl ConnectionController {
                     json!({ "state": "ok", "afterMs": after_ms }),
                 );
                 self.link_quality_verdict.clear();
-                false
             }
-            None => false,
+            None => {}
         }
     }
 
@@ -1862,9 +1855,7 @@ impl ConnectionController {
         );
         let shown = user_facing_bridge_failure(&detail).to_owned();
         // A host with no tmux server yet: the first workspace starts one, and
-        // the bridge reconnects to attach to it. That is not a lost link. The
-        // Tauri app announces it, but its next status replaces the notice in
-        // the same render, so it is never seen there either.
+        // the bridge reconnects to attach to it. That is not a lost link.
         let was_connected = self.links.link(profile_id).is_some_and(|link| {
             link.host_state.phase == ConnectionPhase::Connected
                 && !(error == Some(SERVER_IDENTITY_CHANGED)
@@ -1872,15 +1863,12 @@ impl ConnectionController {
         });
         let active = self.is_active(profile_id);
         // An error while the link is up is the link dropping under the app:
-        // exactly one per outage. A verdict spoken here is the notice for this
-        // drop; the raw failure would only be a second line saying less.
-        let verdict_spoken =
-            if error.is_some() && was_connected && active && self.link_quality_host().is_some() {
-                let change = self.link_quality.note_link_lost(self.backend.now_ms());
-                self.apply_link_quality(change, cx)
-            } else {
-                false
-            };
+        // exactly one per outage. Its verdict stays a notice, as Tauri meant
+        // it to, though Tauri's next status also covered that one.
+        if error.is_some() && was_connected && active && self.link_quality_host().is_some() {
+            let change = self.link_quality.note_link_lost(self.backend.now_ms());
+            self.apply_link_quality(change, cx);
+        }
         let line = if active && !self.link_quality_verdict.is_empty() {
             self.link_quality_verdict.clone()
         } else {
@@ -1890,8 +1878,11 @@ impl ConnectionController {
             profile_id: profile_id.to_owned(),
             detail: line,
         });
-        // Once reconnecting, the strip already shows this exact cause.
-        if was_connected && !verdict_spoken {
+        // The strip shows this cause once the link stays down. The bridge
+        // follows every error with the link's next state, which replaced this
+        // notice in the Tauri app before it was drawn, so only a detach, which
+        // nothing follows, is a notice of its own.
+        if was_connected && error.is_none() {
             self.announce(profile_id, shown, cx);
         }
         // Helper recovery is the active host's. A host beside it keeps its
