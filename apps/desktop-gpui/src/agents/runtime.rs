@@ -134,6 +134,18 @@ pub struct RuntimeInputs {
     pub shown: Vec<String>,
     /// The active host and where the user is in it.
     pub focus: AgentFocus,
+    /// Per host, the tmux windows of the topology its scope's generation
+    /// names: what a snapshot asked for under that scope covers.
+    pub windows: HashMap<String, Vec<String>>,
+}
+
+/// The tmux windows an accepted agent snapshot was asked for against. While
+/// the host's scope, topology generation included, is still the one it was
+/// asked under, a covered window with no agent provably has none. Port of
+/// `AgentTopologyAuthority`.
+struct TopologyAuthority {
+    scope: RequestScope,
+    windows: Vec<String>,
 }
 
 /// A line for the status channel.
@@ -154,6 +166,9 @@ pub struct AgentRuntime {
     attention: HashMap<String, Vec<String>>,
     recent_clock: Option<(u64, Task<()>)>,
     pub(super) setup: super::setup::SetupState,
+    /// Per host, the topology its last accepted requested snapshot covered.
+    /// Pushed snapshots carry no window set, so only a request sets it.
+    authorities: HashMap<String, TopologyAuthority>,
 }
 
 impl EventEmitter<AgentStatus> for AgentRuntime {}
@@ -172,6 +187,7 @@ impl AgentRuntime {
             attention: HashMap::new(),
             recent_clock: None,
             setup: super::setup::SetupState::default(),
+            authorities: HashMap::new(),
         }
     }
 
@@ -279,6 +295,7 @@ impl AgentRuntime {
             self.requests.remove(&host);
             if !keys.contains_key(&host) && shown.contains(&host) {
                 changed |= self.store.disconnect(&host);
+                self.authorities.remove(&host);
             }
         }
         let gone: Vec<String> = self
@@ -290,6 +307,7 @@ impl AgentRuntime {
             .collect();
         for host in gone {
             changed |= self.store.remove(&host);
+            self.authorities.remove(&host);
         }
         for scope in wanted {
             if self.requests.contains_key(&scope.host_profile_id) {
@@ -300,10 +318,13 @@ impl AgentRuntime {
                 .transport
                 .agent_request(scope.client_id.clone(), command);
             let host = scope.host_profile_id.clone();
+            let windows = self.inputs.windows.get(&host).cloned().unwrap_or_default();
             let task = cx.spawn(async move |this, cx| {
                 let answer = answer.await;
-                this.update(cx, |this, cx| this.snapshot_answered(&scope, answer, cx))
-                    .ok();
+                this.update(cx, |this, cx| {
+                    this.snapshot_answered(scope, windows, answer, cx)
+                })
+                .ok();
             });
             self.requests
                 .insert(host.clone(), (keys[&host].clone(), task));
@@ -315,7 +336,8 @@ impl AgentRuntime {
 
     fn snapshot_answered(
         &mut self,
-        scope: &RequestScope,
+        scope: RequestScope,
+        windows: Vec<String>,
         answer: Result<Value, String>,
         cx: &mut Context<Self>,
     ) {
@@ -326,13 +348,20 @@ impl AgentRuntime {
             wire::map_snapshot(&scope.event_scope(), snapshot)
         });
         match mapped {
-            Ok(snapshot) => self.accept(
-                WireEvent::Snapshot {
-                    snapshot,
-                    replayed: true,
-                },
-                cx,
-            ),
+            Ok(snapshot) => {
+                let host = scope.host_profile_id.clone();
+                let accepted = self.accept(
+                    WireEvent::Snapshot {
+                        snapshot,
+                        replayed: true,
+                    },
+                    cx,
+                );
+                if accepted {
+                    self.authorities
+                        .insert(host, TopologyAuthority { scope, windows });
+                }
+            }
             Err(error) => self.status(
                 format!(
                     "Agent snapshot unavailable for {}: {error}",
@@ -355,18 +384,21 @@ impl AgentRuntime {
             .map_err(|error| error.to_string())
             .and_then(|payload| wire::map_pushed(&scope, label, &payload));
         match mapped {
-            Ok(Some(event)) => self.accept(event, cx),
+            Ok(Some(event)) => {
+                self.accept(event, cx);
+            }
             Ok(None) => {}
             Err(error) => eprintln!("muxflow: agent event dropped: {error}"),
         }
     }
 
-    pub fn accept(&mut self, event: WireEvent, cx: &mut Context<Self>) {
+    /// Applies one event; answers whether the store took it.
+    pub fn accept(&mut self, event: WireEvent, cx: &mut Context<Self>) -> bool {
         let host = event.host_profile_id().to_owned();
         // A straggler from a bridge being torn down must not resurrect the
         // slice the request side just dropped.
         if !self.inputs.shown.contains(&host) {
-            return;
+            return false;
         }
         let previous = self
             .store
@@ -374,7 +406,7 @@ impl AgentRuntime {
             .map(|host| host.by_id.clone())
             .unwrap_or_default();
         if !self.store.apply(&event) {
-            return;
+            return false;
         }
         let next_records = self
             .store
@@ -438,6 +470,22 @@ impl AgentRuntime {
             }
         }
         self.changed(cx);
+        true
+    }
+
+    /// The windows of `host` an agent snapshot was paired with, and the
+    /// topology generation they belong to, while that pairing is still the
+    /// host's current scope and its records are authoritative. Any move in
+    /// tmux makes it stale until the snapshot asked for then arrives.
+    pub fn topology_authority(&self, host: &str) -> Option<(&[String], u64)> {
+        let authority = self.authorities.get(host)?;
+        let scope = &authority.scope;
+        let records = self.store.host(host)?;
+        (self.scope(host) == Some(scope)
+            && records.authoritative
+            && records.server_identity.as_deref() == Some(scope.server_identity.as_str())
+            && records.connection_epoch == Some(scope.connection_epoch))
+        .then_some((authority.windows.as_slice(), scope.topology_generation))
     }
 
     fn process_transition(

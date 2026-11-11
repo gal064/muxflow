@@ -7,9 +7,9 @@ use std::{rc::Rc, time::Duration};
 
 use desktop_core::app_state::AgentSortMode;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Render, RenderOnce, Rgba, Role, SharedString, StatefulInteractiveElement,
-    Styled, Subscription, Task, Window,
+    AnyElement, App, AppContext as _, Context, EmptyView, Entity, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Render, RenderOnce, Rgba, Role, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, Window,
     base::{RootPlugin, TestSupportExt},
     component::{
         Disableable, Sizable, WindowExt,
@@ -806,7 +806,15 @@ fn agent_row(row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &A
             this.hover(|style| style.bg(palette.chrome_hover))
         })
         .when(unavailable, |this| this.opacity(0.5))
-        .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
+        // The row keeps the pointer while its menu is open over it, so the
+        // tooltip's delay would end with it drawn over the menu's first item.
+        .tooltip(move |window, cx| {
+            if crate::context_menu::is_open(window, cx) {
+                cx.new(|_| EmptyView).into()
+            } else {
+                Tooltip::new(title.clone()).build(window, cx)
+            }
+        })
         .on_mouse_down(MouseButton::Left, move |event, _, cx| {
             let payload = agent_drag_payload(&drag, &drag_label, cx);
             dragdrop::press(payload, event.position, cx);

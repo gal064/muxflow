@@ -216,6 +216,17 @@ pub fn inputs(controller: &ConnectionController) -> RuntimeInputs {
             focus.window_id = window;
         }
     }
+    // Read with the scopes, so each window set is the one its generation names.
+    let windows = controller
+        .links()
+        .map(|link| {
+            let ids = link.host_state.snapshot.windows.iter();
+            (
+                link.profile_id.clone(),
+                ids.map(|window| window.id.clone()).collect(),
+            )
+        })
+        .collect();
     RuntimeInputs {
         scopes,
         shown: controller
@@ -223,6 +234,7 @@ pub fn inputs(controller: &ConnectionController) -> RuntimeInputs {
             .map(|link| link.profile_id.clone())
             .collect(),
         focus,
+        windows,
     }
 }
 
@@ -318,8 +330,10 @@ fn publish_shell(cx: &mut App) {
     }
 }
 
-/// Presence is only ever `Present`: a window without an agent stays
-/// `Unknown`, because no snapshot is yet paired with the topology it covered.
+/// A window with an agent is `Present`. One without is `Absent` only when the
+/// host's agent snapshot was asked for against the topology on screen now and
+/// covered that window, and no agent lacks a window to prove it is elsewhere;
+/// otherwise it is left out, which the shell reads as `Unknown`.
 pub(crate) fn agent_shell_from(runtime: &AgentRuntime) -> AgentShell {
     let mut shell = AgentShell::default();
     for host in &runtime.inputs.shown {
@@ -364,6 +378,23 @@ pub(crate) fn agent_shell_from(runtime: &AgentRuntime) -> AgentShell {
                     presence: AgentPresence::Present,
                 },
             );
+        }
+        if let Some((covered, generation)) = runtime.topology_authority(host) {
+            shell.generations.insert(host.clone(), generation);
+            let unmapped = agents.iter().any(|agent| {
+                agent.session_id.is_empty()
+                    || agent.window_id.is_empty()
+                    || agent.pane_id.is_empty()
+            });
+            for window in covered.iter().filter(|_| !unmapped) {
+                shell
+                    .windows
+                    .entry((host.clone(), window.clone()))
+                    .or_insert(WindowAgents {
+                        attention: None,
+                        presence: AgentPresence::Absent,
+                    });
+            }
         }
     }
     shell
