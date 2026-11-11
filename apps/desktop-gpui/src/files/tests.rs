@@ -3233,6 +3233,57 @@ mod view {
     }
 
     #[gpui_kit::test]
+    fn renames_from_the_keyboard_menu_and_hands_focus_back_to_the_tree(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            app::init(Core::at(Path::new("/nonexistent/app-state.json")), cx);
+            crate::context_menu::init(cx);
+        });
+        let host = Rc::new(Host::default());
+        let transport = Rc::new(Transport(host.clone()));
+        let explorer = cx.new(|cx| Explorer::new(transport, cx));
+        let shown = cx.new(|_| crate::context_menu::WithMenus(explorer.clone().into()));
+        let (_, visual) =
+            cx.add_window_view(move |window, cx| gpui_kit::base::Root::new(shown, window, cx));
+        explorer.update(visual, |explorer, cx| {
+            explorer.set_inputs(inputs("%1", "/repo", "client"), cx)
+        });
+        visual.run_until_parked();
+        host.answer(
+            "resolveActiveRoot",
+            "",
+            Ok(root_answer("root", "/repo", "%1")),
+        );
+        visual.run_until_parked();
+        host.answer(
+            "watchDirectory",
+            "/repo",
+            Ok(directory("/repo", &[("/repo/a.txt", false)])),
+        );
+        visual.run_until_parked();
+        let tree = visual.update(|window, cx| {
+            let focus = explorer.read(cx).view.focus.clone();
+            window.focus(&focus, cx);
+            focus
+        });
+
+        visual.simulate_keystrokes("shift-f10");
+        visual.update(|window, cx| {
+            assert!(crate::context_menu::is_open(window, cx));
+        });
+        // Open, Open to the Side, Rename…
+        visual.simulate_keystrokes("home down down enter");
+        visual.run_until_parked();
+        assert!(dialog_open(visual), "Rename… opens its dialog");
+        visual.simulate_keystrokes("escape");
+        visual.run_until_parked();
+        assert!(!dialog_open(visual));
+        visual.update(|window, _| {
+            assert!(tree.is_focused(window), "focus is back on the tree");
+        });
+    }
+
+    #[gpui_kit::test]
     fn shows_a_failed_change_in_its_dialog(cx: &mut TestAppContext) {
         let (host, explorer, visual) = rooted(cx);
         let statuses = statuses(&explorer, visual);

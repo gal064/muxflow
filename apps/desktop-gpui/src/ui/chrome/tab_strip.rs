@@ -20,7 +20,7 @@ use gpui_kit::{
         Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
+        menu::{ContextMenuExt, DropdownMenu, PopupMenu},
     },
     div,
     prelude::FluentBuilder,
@@ -194,6 +194,8 @@ impl RenderOnce for TabStrip {
             .collect();
 
         let mut tab_elements: Vec<AnyElement> = Vec::new();
+        // Each tab's menu, for the keyboard to open on the cursor's tab.
+        let mut menus: Vec<Option<context_menu::Builder>> = Vec::new();
         for (index, tab) in tabs.iter().enumerate() {
             let is_active = active.as_deref() == Some(tab.key.as_str());
             let is_docked = docked.as_deref() == Some(tab.key.as_str());
@@ -212,7 +214,8 @@ impl RenderOnce for TabStrip {
                             Tab::new(id)
                                 .disabled(true)
                                 .accessibility_label(tab.title.clone())
-                                .set_position(index + 1, count)
+                                // AccessKit counts from zero; the bridges add one.
+                                .set_position(index, count)
                                 .flex()
                                 .items_center()
                                 .gap(ui(6.))
@@ -224,6 +227,7 @@ impl RenderOnce for TabStrip {
                         )
                         .into_any_element(),
                 );
+                menus.push(None);
                 continue;
             }
             let target = target(&view, tab);
@@ -291,6 +295,9 @@ impl RenderOnce for TabStrip {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 small_button(format!("pin-{}", tab.key), toggle)
+                                    // A pointer affordance: the menu is the
+                                    // keyboard's way to pin, as in Tauri.
+                                    .tab_stop(false)
                                     .child(pin_glyph(palette.chrome_faint))
                                     .tooltip(if *pinned { "Unpin tab" } else { "Pin tab" })
                                     .on_click(move |_, _, cx| {
@@ -400,7 +407,14 @@ impl RenderOnce for TabStrip {
                     close(&strip, target.clone(), window, cx)
                 }
             };
-            let menu = tab_menu(&self.workspaces, &view, tab, &tabs, split && is_active);
+            let menu: context_menu::Builder = Rc::new(tab_menu(
+                &self.workspaces,
+                &view,
+                tab,
+                &tabs,
+                split && is_active,
+            ));
+            menus.push(Some(menu.clone()));
             let cell = Rc::new(Cell::new(Bounds::<Pixels>::default()));
             let gap = drop_gap
                 .as_ref()
@@ -474,12 +488,13 @@ impl RenderOnce for TabStrip {
                                 .border_color(palette.accent)
                                 .rounded(ui(4.)),
                         )
+                        .child(context_menu::anchor(&strip_focus))
                     })
                     .child(
                         Tab::new(id)
                             .selected(is_active)
                             .accessibility_label(label.join(" "))
-                            .set_position(index + 1, count)
+                            .set_position(index, count)
                             .when(keyboard == Some(index), |tab| tab.aria_active_descendant())
                             .on_click(click)
                             // Captured: the tab keeps its press from the bar behind
@@ -553,7 +568,7 @@ impl RenderOnce for TabStrip {
                                 .opacity(opacity),
                         )
                     })
-                    .context_menu(menu)
+                    .context_menu(move |popup, window, cx| menu(popup, window, cx))
                     .into_any_element(),
             );
         }
@@ -667,27 +682,29 @@ impl RenderOnce for TabStrip {
             let weak = self.workspaces.downgrade();
             let scroll = scroll.clone();
             bar_button("all-tabs", Glyph::More, "All tabs", palette.chrome_dim).dropdown_menu(
-                move |mut menu, _, _| {
-                    for (index, (key, label, checked, pending)) in entries.iter().enumerate() {
-                        let (weak, key, reveal) = (weak.clone(), key.clone(), scroll.clone());
-                        menu = menu.item(
-                            PopupMenuItem::new(label.clone())
-                                .checked(*checked)
-                                .disabled(*pending)
-                                .on_click(move |_, window, cx| {
-                                    weak.update(cx, |this, cx| this.select_tab(&key, cx)).ok();
-                                    // Also for the tab already selected: the
-                                    // one this list was opened to find.
-                                    reveal.scroll_to_item(index);
-                                    if let (Some(this), true) =
-                                        (weak.upgrade(), key.starts_with("terminal:"))
-                                    {
-                                        focus_terminal(&this, window, cx);
-                                    }
-                                }),
-                        );
-                    }
-                    menu
+                move |menu, window, cx| {
+                    let items: Vec<Entry> = entries
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (key, label, checked, pending))| {
+                            let (weak, key, reveal) = (weak.clone(), key.clone(), scroll.clone());
+                            Item::new(label.clone(), move |window, cx| {
+                                weak.update(cx, |this, cx| this.select_tab(&key, cx)).ok();
+                                // Also for the tab already selected: the one
+                                // this list was opened to find.
+                                reveal.scroll_to_item(index);
+                                if let (Some(this), true) =
+                                    (weak.upgrade(), key.starts_with("terminal:"))
+                                {
+                                    focus_terminal(&this, window, cx);
+                                }
+                            })
+                            .checked(*checked)
+                            .disabled(*pending)
+                            .into()
+                        })
+                        .collect();
+                    context_menu::fill(menu, &items, window, cx)
                 },
             )
         };
@@ -724,17 +741,32 @@ impl RenderOnce for TabStrip {
             .child(
                 Tabs::new("workspace-tabs")
                     .aria_label("Terminal tabs and documents")
+                    // The bridges read a set's size from its container.
+                    .aria_size_of_set(count)
                     .track_focus(&strip_focus)
                     .on_key_down(move |event: &KeyDownEvent, window, cx| {
                         let Some(this) = keys.upgrade() else {
                             return;
                         };
+                        if context_menu::is_menu_key(&event.keystroke) {
+                            let cursor = this.read(cx).strip_position(cx);
+                            let menu = cursor.and_then(|index| menus.get(index).cloned().flatten());
+                            if let Some(menu) = menu {
+                                context_menu::open(
+                                    move |popup, window, cx| menu(popup, window, cx),
+                                    window,
+                                    cx,
+                                );
+                            }
+                            cx.stop_propagation();
+                            return;
+                        }
                         if event.keystroke.modifiers.modified() {
                             return;
                         }
                         let key = event.keystroke.key.as_str();
                         let cursor = this.read(cx).strip_position(cx);
-                        if let Some(next) = moved_cursor(cursor, count, key, false) {
+                        if let Some(next) = moved_cursor(cursor, count, key) {
                             this.update(cx, |this, cx| {
                                 this.strip_cursor = Some(next);
                                 cx.notify();
