@@ -83,19 +83,43 @@ fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
 fn xdg_open(target: &Path) -> Result<(), String> {
     use std::process::{Command, Stdio};
 
-    Command::new("xdg-open")
+    let mut command = Command::new("xdg-open");
+    command
         .arg(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("could not open the download: {error}"))?;
+        .stderr(Stdio::null());
+    spawn_reaped(command).map_err(|error| format!("could not open the download: {error}"))?;
     Ok(())
+}
+
+/// Starts a program without waiting for it, and waits on a thread of its own:
+/// a child nobody waits for stays a zombie until the app exits.
+#[cfg(not(target_os = "macos"))]
+fn spawn_reaped(mut command: std::process::Command) -> std::io::Result<u32> {
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_opener_that_exits_is_reaped() {
+        let pid = spawn_reaped(std::process::Command::new("true")).unwrap();
+        let entry = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while entry.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!entry.exists(), "the exited opener was left a zombie");
+    }
 
     #[test]
     fn only_a_path_this_session_published_may_be_opened() {
