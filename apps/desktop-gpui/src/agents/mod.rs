@@ -248,7 +248,7 @@ pub(crate) fn sync(
         let helper = controller.helper();
         (
             inputs(controller),
-            controller.active_host_label(),
+            controller.setup_host_label(),
             // Another host-level consent question owns the modal lane.
             !helper.owns_host_setup_lane() && !controller.app_recovery_modal_open(),
             matches!(

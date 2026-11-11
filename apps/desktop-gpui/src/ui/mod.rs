@@ -25,8 +25,11 @@
 //! `find_all_by_role`), as `tests/shell.rs` does.
 
 pub mod chrome;
+pub mod dialog;
 pub mod error_summary;
 pub mod icons;
 pub mod shell;
 pub mod surface_error;
 pub mod title_bar;
+pub mod toast;
+pub mod toolbar;

@@ -476,6 +476,15 @@ impl ConnectionController {
             .unwrap_or_else(|| "Local".to_owned())
     }
 
+    /// What `App.tsx` calls `hostLabel`, which the one-time agent setup names the host
+    /// by: "local", or the SSH target as typed.
+    pub fn setup_host_label(&self) -> String {
+        match &self.connection {
+            ConnectionSpec::Local => "local".to_owned(),
+            ConnectionSpec::Ssh { target, .. } => target.clone(),
+        }
+    }
+
     /// The saved host the form is editing, when it is one Delete may remove.
     pub fn deletable_profile(&self) -> Option<&HostProfile> {
         if self.profiles.len() <= 1 {
