@@ -113,7 +113,7 @@ impl CellMetrics {
 }
 
 /// JetBrains Mono ligates through `calt`, which a terminal grid cannot show.
-fn terminal_font_features() -> FontFeatures {
+pub(crate) fn terminal_font_features() -> FontFeatures {
     FontFeatures(Arc::new(
         ["calt", "liga", "clig", "dlig"]
             .iter()

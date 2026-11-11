@@ -1,7 +1,7 @@
 //! The work area between the rails: the tab strip when the title bar does not
 //! hold it, and the terminal column with its optional docked document, a port of
-//! `app/WorkspaceDock.tsx`'s divider and sizing. A document shows a placeholder
-//! until the document panels arrive.
+//! `app/WorkspaceDock.tsx`'s divider and sizing. A document tab's surface comes
+//! from [`crate::editor::surface`].
 
 use desktop_core::app_state::DockSide;
 use gpui_kit::{
@@ -40,33 +40,36 @@ impl RenderOnce for WorkspaceArea {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let palette = theme::palette(cx);
         let view = self.workspaces.read(cx).view(cx);
-        // The documents themselves arrive with the file features; until then a
-        // document tab shows its title where its surface will be.
-        let body_label: SharedString = view
-            .selected_app_tab
-            .as_ref()
-            .map_or_else(|| "Terminal".into(), |tab| tab.title.clone().into());
-        let docked: Option<(SharedString, DockSide)> = view
-            .docked
-            .as_ref()
-            .map(|(tab, side)| (tab.title.clone().into(), *side));
-
-        let placeholder = |label: SharedString| {
+        let docked: Option<(SharedString, DockSide, AnyElement)> =
+            view.docked.as_ref().map(|(tab, side)| {
+                (
+                    tab.title.clone().into(),
+                    *side,
+                    crate::editor::surface(tab, window, cx),
+                )
+            });
+        let placeholder = || {
             div()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(palette.chrome_faint)
-                .child(label)
+                .child("Terminal")
+                .into_any_element()
         };
-        let terminal = self.terminal.filter(|_| view.selected_app_tab.is_none());
-        let body = |label: SharedString| -> AnyElement {
-            match terminal.clone() {
-                Some(view) => view.into_any_element(),
-                None => placeholder(label).into_any_element(),
-            }
+        crate::editor::shown(
+            view.selected_app_tab.as_ref(),
+            view.docked.as_ref().map(|(tab, _)| tab),
+            window,
+            cx,
+        );
+        let body = match (&view.selected_app_tab, self.terminal) {
+            (Some(tab), _) => crate::editor::surface(tab, window, cx),
+            (None, Some(terminal)) => terminal.into_any_element(),
+            (None, None) => placeholder(),
         };
+        let mut body = Some(body);
 
         let tabs_strip = (!self.tabs_in_title_bar).then(|| TabStrip {
             workspaces: self.workspaces.clone(),
@@ -82,7 +85,7 @@ impl RenderOnce for WorkspaceArea {
         let chrome = self.chrome.clone();
         let dock_on_right = docked
             .as_ref()
-            .is_none_or(|(_, side)| *side == DockSide::Right);
+            .is_none_or(|(_, side, _)| *side == DockSide::Right);
         let share = relative(self.dock_fraction);
         // A saved docked tab with no record is the same as no dock at all.
         let no_dock = docked.is_none();
@@ -123,9 +126,10 @@ impl RenderOnce for WorkspaceArea {
                             })
                             .ok();
                     })
-                    .when_some(docked, |this, (title, side)| {
+                    .when_some(docked, |this, (title, side, surface)| {
                         let doc = div()
                             .id("docked-document")
+                            .key_context(crate::editor::DOCKED_CONTEXT)
                             .role(Role::Group)
                             .aria_label(title.clone())
                             .relative()
@@ -138,7 +142,7 @@ impl RenderOnce for WorkspaceArea {
                                 DockSide::Right => doc.border_l_1(),
                                 DockSide::Left => doc.border_r_1(),
                             })
-                            .child(placeholder(title))
+                            .child(surface)
                             .child(divider(
                                 self.chrome.clone(),
                                 Divider::Dock,
@@ -153,24 +157,14 @@ impl RenderOnce for WorkspaceArea {
                             ));
                         match side {
                             DockSide::Right => this
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .h_full()
-                                        .child(body(body_label.clone())),
-                                )
+                                .child(div().flex_1().min_w_0().h_full().children(body.take()))
                                 .child(doc),
-                            DockSide::Left => this.child(doc).child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_full()
-                                    .child(body(body_label.clone())),
-                            ),
+                            DockSide::Left => this
+                                .child(doc)
+                                .child(div().flex_1().min_w_0().h_full().children(body.take())),
                         }
                     })
-                    .when(no_dock, |this| this.child(body(body_label.clone())))
+                    .when(no_dock, |this| this.children(body.take()))
                     .when(dock_zones, |this| {
                         let zone = |side: DockSide| {
                             let zone = div()
