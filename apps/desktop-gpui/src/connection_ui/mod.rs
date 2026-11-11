@@ -82,7 +82,8 @@ pub fn start(cx: &mut App) -> Result<(), String> {
         cx.new(|cx| ConnectionController::new(backend.clone(), profiles, app_state, cx));
     cx.set_global(ConnectionUi(controller.clone()));
     crate::agents::start(controller.clone(), backend.clone(), cx);
-    crate::automations::start(controller.clone(), backend, cx);
+    crate::automations::start(controller.clone(), backend.clone(), cx);
+    crate::git::start(controller.clone(), backend, cx);
     crate::ports::start(controller.clone(), cx);
 
     let (sender, mut resumed) = mpsc::unbounded();

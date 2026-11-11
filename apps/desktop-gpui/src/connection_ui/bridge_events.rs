@@ -55,6 +55,11 @@ pub enum BridgeEvent {
     },
     /// A host's automations changed; the panel lists them again.
     AutomationChanged,
+    /// A Git watch's status or error, as the host's JSON; the Git feature
+    /// reads it.
+    GitService {
+        payload: String,
+    },
     /// A valid frame this module has no reaction to.
     Ignored,
 }
@@ -199,7 +204,12 @@ pub fn decode_frame(frame: &[u8]) -> Result<BridgeEvent, String> {
             require_host_sequence(sequence, "automation event")?;
             Ok(BridgeEvent::AutomationChanged)
         }
-        1 | 2 | 8 | 9 | 11 | 12 | 13 | 18 => Ok(BridgeEvent::Ignored),
+        13 => {
+            require_host_sequence(sequence, "Git event")?;
+            let payload = text(data, "Git event payload")?;
+            Ok(BridgeEvent::GitService { payload })
+        }
+        1 | 2 | 8 | 9 | 11 | 12 | 18 => Ok(BridgeEvent::Ignored),
         kind => Err(format!("unknown terminal frame kind {kind}")),
     }
 }
@@ -469,6 +479,13 @@ mod tests {
             Ok(BridgeEvent::AutomationChanged)
         );
         assert!(decode_frame(&frame(19, "automation", 0, b"")).is_err());
+        assert_eq!(
+            decode_frame(&frame(13, "git", 3, br#"{"rootToken":"r"}"#)),
+            Ok(BridgeEvent::GitService {
+                payload: r#"{"rootToken":"r"}"#.into()
+            })
+        );
+        assert!(decode_frame(&frame(13, "git", 0, b"{}")).is_err());
     }
 
     #[test]

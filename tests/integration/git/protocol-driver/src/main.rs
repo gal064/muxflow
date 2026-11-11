@@ -172,8 +172,14 @@ fn main() -> Result<(), String> {
         .git
         .and_then(|git| git.diff)
         .ok_or("staged diff omitted payload")?;
-    if staged_diff.patch.is_empty() || staged_diff.source_generation.is_empty() {
-        return Err("staged diff omitted patch/generation".into());
+    // A client never receives the patch: the host keeps it for hunk mutations
+    // and sends the two sides instead, inline while they are this small.
+    if staged_diff.old_content != b"base\n"
+        || staged_diff.new_content != b"changed\n"
+        || staged_diff.hunk_count != 1
+        || staged_diff.source_generation.is_empty()
+    {
+        return Err("staged diff omitted contents/hunks/generation".into());
     }
 
     let staged_status = staged.status.unwrap();

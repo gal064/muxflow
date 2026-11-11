@@ -113,6 +113,8 @@ pub enum ConnectionEvent {
     AgentService(AgentServiceFrame),
     /// A host's automations changed. Every host's, as the panel may show any.
     AutomationChanged { profile_id: String },
+    /// A Git watch's status or error; the Git feature routes it by root token.
+    GitService { payload: String },
 }
 
 pub struct AgentServiceFrame {
@@ -1733,6 +1735,9 @@ impl ConnectionController {
             BridgeEvent::AutomationChanged => cx.emit(ConnectionEvent::AutomationChanged {
                 profile_id: profile_id.to_owned(),
             }),
+            BridgeEvent::GitService { payload } => {
+                cx.emit(ConnectionEvent::GitService { payload });
+            }
             BridgeEvent::Ignored => {}
         }
     }
