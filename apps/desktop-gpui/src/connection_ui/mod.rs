@@ -36,7 +36,7 @@ use gpui_kit::{App, AppContext, Entity, Global, base::Root};
 
 use crate::app::Core;
 
-use backend::NativeBackend;
+use backend::{NativeBackend, TerminalBackend as _};
 use controller::ConnectionController;
 use surface::ConnectionSurface;
 
@@ -78,6 +78,13 @@ pub fn start(cx: &mut App) -> Result<(), String> {
         IncidentJournal::new(log_dir),
     ));
     crate::terminal::integration::colors::start(backend.clone(), cx);
+    if cfg!(target_os = "linux") {
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        backend.record_incident(
+            "window.chrome",
+            crate::ui::title_bar::chrome_incident(desktop.as_deref()),
+        );
+    }
     let controller =
         cx.new(|cx| ConnectionController::new(backend.clone(), profiles, app_state, cx));
     cx.set_global(ConnectionUi(controller.clone()));

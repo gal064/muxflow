@@ -983,6 +983,29 @@ fn asks_nothing_for_a_file_the_status_says_no_longer_changed(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn only_a_slow_diff_says_it_is_loading(cx: &mut TestAppContext) {
+    let panel = Panel::new(cx, |command| {
+        (command.operation != "diff").then(|| Ok(json!({ "status": status(1) })))
+    });
+    let view = diff_view(&panel, "repo", cx);
+    let shown = |cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| (view.loading(), view.loading_shown()))
+    };
+    // DelayedLoading's 150 ms: a fast diff never flashes the line.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(140));
+    assert_eq!(shown(cx), (true, false));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(10));
+    assert_eq!(shown(cx), (true, true));
+    panel
+        .fake
+        .release("diff", Ok(diff_response("repo", b"a.txt", 1)));
+    assert_eq!(shown(cx), (false, false));
+}
+
+#[gpui_kit::test]
 fn surfaces_a_failed_shared_bootstrap_instead_of_loading_forever(cx: &mut TestAppContext) {
     let panel = Panel::new(cx, |_| Some(Err("helper gone".into())));
     let view = diff_view(&panel, "repo", cx);
