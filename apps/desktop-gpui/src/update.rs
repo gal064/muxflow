@@ -42,7 +42,7 @@ pub fn available(cx: &App) -> Option<AvailableUpdate> {
 /// The real check and install. Called from [`crate::app::run`] only, so a test
 /// window never reaches the network.
 pub fn start(cx: &mut App) {
-    let running = running_version(env!("CARGO_PKG_VERSION"));
+    let running = running_version(&app_version());
     start_with(
         Updater {
             check: Rc::new(move || Box::pin(update_check::check_for_update(running))),
@@ -178,6 +178,17 @@ fn wait_for_close(mut pipe: impl std::io::Read) {
     let _ = std::io::copy(&mut pipe, &mut std::io::sink());
 }
 
+/// The release this build is. Read where the Tauri app reads its own, so
+/// `release/set-version.sh` stays the one writer of the number.
+fn app_version() -> String {
+    serde_json::from_str::<serde_json::Value>(include_str!(
+        "../../desktop/src-tauri/tauri.conf.json"
+    ))
+    .ok()
+    .and_then(|config| Some(config.get("version")?.as_str()?.to_owned()))
+    .unwrap_or_default()
+}
+
 /// `X.Y.Z` as the check compares it. An unversioned build reads as 0.0.0, so
 /// every published release is offered to it.
 fn running_version(version: &str) -> (u64, u64, u64) {
@@ -188,7 +199,14 @@ fn running_version(version: &str) -> (u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{running_version, wait_for_close};
+    use super::{app_version, running_version, wait_for_close};
+
+    #[test]
+    fn the_app_reports_the_release_version() {
+        let version = app_version();
+        assert_eq!(version.split('.').count(), 3, "{version:?}");
+        assert_ne!(running_version(&version), (0, 0, 0));
+    }
 
     #[test]
     fn an_unversioned_build_reads_as_zero() {
