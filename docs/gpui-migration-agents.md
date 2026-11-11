@@ -242,6 +242,9 @@ through the T2.1 seam.
 | T6.4 `ledger-shell` | opus, high, full cycle, invariant | `gpui/ledger-shell` | Merged | `6906fa0` | 55 Phase 2 rows closed; `ui/ContextMenu.tsx` left for T6.1. SurfaceError on every surface, update check, loading delay, reduced motion, icons, narrow width. 2 review rounds, QA pass. Deviation: Kit's dialog keeps a 16 px gutter below 600 px (Tauri 8 px) |
 | T6.5 `ledger-terminal-files` | opus, high, full cycle, invariant | `gpui/ledger-terminal-files` | Merged | `f68af3a` | 38 Phase 3 and 5 rows closed. Ported the perf probe (same perf-log schema), fixed a paint-gate arming bug. 3 review rounds, QA pass incl. restore, stale restore, reseed, both perf scripts |
 | T6.6 `carry-forward` | opus, high, full cycle | `gpui/carry-forward` | Merged | `9839d9c` | Fixed paste ordering, the first-workspace identity notice, Settings Live Markdown copy, Working tree clean, Go to Line centering, disabled Delete styling, rename focus, `xdg-open` reaping. The rest verified fixed or matching Tauri. 1 review round, QA pass |
+| T6.3 `behavior-docs` | sonnet, medium, full cycle, docs only | `gpui/behavior-docs` | Merged | `2f6ebe0` | `docs/gpui-behavior-audit.md`: 116 statements hold, 3 differ or are missing (all keyboard, routed to T6.1), Mac items for the owner prompt, cutover edits listed. The incident-journal gap was fixed at the root (`674fc7e`) |
+| T6.7 `parity-fixes` | opus, high, full cycle | `gpui/parity-fixes` | Merged | `26d930f` | Fixed the transient "host bridge closed" notice and the 0.0.0 app version. Ports after a host switch, the New workspace default host, the blank terminal after relaunch and the attention-generation toast all match Tauri (checked side by side). QA pass |
+| T6.2 `visual-parity` | sonnet, high, full cycle, design | `gpui/visual-parity` | Merged | `c5187a5` | Fixed a diff crash across 900 px, scrim, toasts, setup dialog, Settings Connection tab, split Commit, Markdown source colours, diff row colours, palette band. Accepted (Kit or rasterization): heading letter-spacing, textarea grip, hatched diff fillers, line pitch within 1 px, editor gutter and find widget, context-menu row size, preview mid-word breaks, radio size, dialog width below 600 px. Open: tab strip pitch (Tauri reference build was stale), preview a few px short |
 | T5.4 `markdown` | sonnet, high, full cycle, design | `gpui/markdown` | Merged | `587887b` | 2 review rounds, QA PASS local. Kit bug: double-click selects nothing in a paragraph with inline code. Drag-select in the preview not verified (xdotool). Settings copy still mentions Live Markdown |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
@@ -340,7 +343,7 @@ final sweep command returning only justified hits.
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
 | 4 | Done, QA passed | `0912995` | |
 | 5 | Done | `ec39e80` | Integrated QA passed on local and SSH hosts |
-| 6 | Running, wave 2 dispatched | | Wave 1 merged; T6.1, T6.2, T6.3 and T6.7 running |
+| 6 | Running, wave 2 | | T6.2, T6.3 and T6.7 merged; T6.1 finishing |
 | 7 to 10 | After parity, owner decides | | |
 
 ### Task log
