@@ -66,6 +66,15 @@ use super::{
 #[cfg(test)]
 mod tests;
 
+/// Whether an event can change what this module derives. A file event changes
+/// nothing of its own: the Explorer reads it from the event alone.
+fn settles(event: &BridgeEvent) -> bool {
+    !matches!(
+        event,
+        BridgeEvent::Ignored | BridgeEvent::FileService { .. }
+    )
+}
+
 /// The native supervisor appends why this side tore a bridge down, for the
 /// journal; the words a person reads stay the plain failure.
 const LOCAL_TEARDOWN_MARKER: &str = " (torn down locally:";
@@ -113,6 +122,10 @@ pub enum ConnectionEvent {
     AgentService(AgentServiceFrame),
     /// A host's automations changed. Every host's, as the panel may show any.
     AutomationChanged { profile_id: String },
+    /// A file-service event from the active host. A host beside it relays
+    /// topology and agents only: its root change must not move the Explorer
+    /// onto a machine the user is not looking at.
+    FileService { payload: String },
     /// A Git watch's status or error; the Git feature routes it by root token.
     GitService { payload: String },
 }
@@ -1565,7 +1578,7 @@ impl ConnectionController {
             let decoded = decode_frame(&frame);
             match decoded {
                 Ok(event) => {
-                    changed |= event != BridgeEvent::Ignored;
+                    changed |= settles(&event);
                     if let (BridgeEvent::GenerationEpoch(epoch), Some(bridge)) =
                         (&event, self.bridge_mut(profile_id, token))
                     {
@@ -1735,6 +1748,11 @@ impl ConnectionController {
             BridgeEvent::AutomationChanged => cx.emit(ConnectionEvent::AutomationChanged {
                 profile_id: profile_id.to_owned(),
             }),
+            BridgeEvent::FileService { payload } => {
+                if self.is_active(profile_id) {
+                    cx.emit(ConnectionEvent::FileService { payload });
+                }
+            }
             BridgeEvent::GitService { payload } => {
                 cx.emit(ConnectionEvent::GitService { payload });
             }

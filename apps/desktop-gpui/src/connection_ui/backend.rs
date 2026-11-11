@@ -230,6 +230,11 @@ struct SaveOrder {
 }
 
 impl NativeBackend {
+    /// What the Explorer's file service and downloads go through.
+    pub fn file_service(&self) -> (Arc<TerminalClients>, Arc<ProfileStore>) {
+        (self.clients.clone(), self.profiles.clone())
+    }
+
     pub fn new(
         app_state: Arc<AppStateStore>,
         profiles: Arc<ProfileStore>,
