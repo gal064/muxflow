@@ -14,11 +14,7 @@ mod tests;
 
 use std::{rc::Rc, sync::Arc};
 
-use desktop_core::app_state::load_app_state;
-use gpui_kit::{App, AppContext, Entity, Global, IntoElement, base::Root};
-
 use crate::{
-    app::Core,
     connection_ui::{
         backend::TerminalBackend,
         connection_reducer::ConnectionPhase,
@@ -26,6 +22,7 @@ use crate::{
     },
     ui::chrome::PanelBodies,
 };
+use gpui_kit::{App, AppContext, Entity, Global, IntoElement, base::Root};
 
 use panel::{AutomationsPanel, BackendTransport, PanelEvent, PanelHost, system_clock};
 
@@ -68,6 +65,12 @@ pub fn start(
         }
     })
     .detach();
+    // A start directory changed in Settings applies to the next run.
+    cx.observe_global::<crate::settings::Settings>({
+        let (controller, panel) = (controller.clone(), panel.clone());
+        move |cx| sync(&controller, &panel, cx)
+    })
+    .detach();
     cx.observe(&controller, {
         let panel = panel.clone();
         move |controller, cx| sync(&controller, &panel, cx)
@@ -86,7 +89,7 @@ pub fn start(
                 pane_id,
                 source,
             } => {
-                if crate::agents::open_pane(profile_id, pane_id, source, cx).is_err() {
+                if crate::agents::open_pane(profile_id, pane_id, cx).is_err() {
                     controller.update(cx, |controller, cx| {
                         controller.report_status(format!("{source}'s tab is no longer open."), cx)
                     });
@@ -100,9 +103,7 @@ pub fn start(
 
 /// The shown hosts, as the panel needs them.
 fn sync(controller: &Entity<ConnectionController>, panel: &Entity<AutomationsPanel>, cx: &mut App) {
-    let defaults = load_app_state(&cx.global::<Core>().app_state)
-        .map(|state| state.workspace_defaults)
-        .unwrap_or_default();
+    let settings = crate::settings::get(cx);
     let controller = controller.read(cx);
     let hosts = controller
         .links()
@@ -126,9 +127,7 @@ fn sync(controller: &Entity<ConnectionController>, panel: &Entity<AutomationsPan
                     .iter()
                     .map(|pane| pane.id.clone())
                     .collect(),
-                start_directory: defaults
-                    .get(&link.profile_id)
-                    .and_then(|defaults| defaults.directory.clone()),
+                start_directory: settings.defaults_for(&link.profile_id).directory,
             }
         })
         .collect();
