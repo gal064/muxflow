@@ -527,3 +527,41 @@ fn a_reset_of_saved_state_makes_its_defaults_live(cx: &mut TestAppContext) {
     );
     assert!(palette_opens(cx));
 }
+
+#[gpui_kit::test]
+fn tab_reaches_the_sections_as_one_stop_and_the_arrows_move_between_them(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = write_state(dir.path(), json!({}));
+    let handle = open_app(&state, cx);
+    open_settings(handle, Some("Accessibility"), cx);
+    let selected = |cx: &mut TestAppContext| {
+        with_window(handle, cx, |window, _| {
+            window
+                .elements()
+                .into_iter()
+                .filter(|tab| tab.path().contains(&"settings-tabs".into()))
+                .find(|tab| tab.role() == Some(Role::Tab) && tab.selected() == Some(true))
+                .and_then(|tab| tab.label().map(str::to_owned))
+        })
+    };
+    // Right does nothing on this section's checkboxes; on a section it moves.
+    let reached = (0..20).any(|_| {
+        press(handle, "tab", cx);
+        press(handle, "right", cx);
+        selected(cx).as_deref() != Some("Accessibility")
+    });
+    assert!(reached, "Tab reaches a section");
+    assert_eq!(selected(cx).as_deref(), Some("Connection"), "Right wraps");
+    press(handle, "left", cx);
+    assert_eq!(selected(cx).as_deref(), Some("Accessibility"), "Left wraps");
+    press(handle, "left", cx);
+    assert_eq!(selected(cx).as_deref(), Some("Sounds"));
+    // One stop, as Tauri's tablist: Tab leaves the sections, Shift+Tab comes
+    // back to the one shown.
+    press(handle, "tab", cx);
+    press(handle, "right", cx);
+    assert_eq!(selected(cx).as_deref(), Some("Sounds"));
+    press(handle, "shift-tab", cx);
+    press(handle, "right", cx);
+    assert_ne!(selected(cx).as_deref(), Some("Sounds"));
+}

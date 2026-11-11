@@ -104,7 +104,10 @@ impl RenderOnce for WorkspaceArea {
             .id("workspace")
             .test_support()
             .role(Role::Main)
-            .aria_label("Workspace")
+            .aria_label(match &view.session {
+                Some(session) => format!("Workspace {}", session.name),
+                None => "Workspace".to_owned(),
+            })
             .flex_1()
             .min_w_0()
             .min_h_0()
