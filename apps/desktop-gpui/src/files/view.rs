@@ -227,7 +227,7 @@ pub struct ViewState {
     pub rows: Rc<Vec<Row>>,
     published: Option<Vec<CommandId>>,
     /// Whether the Files segment is drawn.
-    shown: bool,
+    pub(super) shown: bool,
 }
 
 impl ViewState {
@@ -324,6 +324,9 @@ impl Explorer {
 
     pub(super) fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.view.shown = shown;
+        if !shown {
+            self.due_paints.clear();
+        }
         self.publish_row_commands(cx);
     }
 
@@ -972,6 +975,9 @@ fn quiet(text: impl Into<SharedString>, palette: &Palette) -> AnyElement {
 
 impl Render for Explorer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for ticket in self.due_paints.drain(..) {
+            crate::perf::after_next_frame(Some(ticket), window);
+        }
         let palette = theme::palette(cx);
         let root = self.tree.root.clone();
         let root_name = root

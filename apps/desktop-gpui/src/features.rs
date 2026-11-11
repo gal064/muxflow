@@ -32,4 +32,5 @@ pub fn init(cx: &mut App) {
     crate::files::init(cx);
     crate::git::init(cx);
     crate::markdown::init(cx);
+    crate::perf::init(cx);
 }

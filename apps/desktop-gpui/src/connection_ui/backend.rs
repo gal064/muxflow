@@ -210,6 +210,9 @@ pub trait ConnectionBackend: TerminalBackend {
     /// Milliseconds on one clock that keeps counting through a suspend.
     fn now_ms(&self) -> u64;
     fn network_online(&self) -> bool;
+    /// Opens the client's file-transfer connection ahead of its first use.
+    /// Native warms once per terminal epoch, so asking again is free.
+    fn prewarm_bulk(&self, _client_id: String) {}
 }
 
 pub struct NativeBackend {
@@ -593,6 +596,11 @@ impl ConnectionBackend for NativeBackend {
             })
             .await
         })
+    }
+
+    fn prewarm_bulk(&self, client_id: String) {
+        // Nobody waits on a warmup; the first transfer opens its own if this fails.
+        let _ = connection::prewarm_terminal_bulk(client_id, &self.clients);
     }
 
     fn late_requests(&self, client_id: &str) -> Option<u32> {

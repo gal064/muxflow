@@ -17,16 +17,20 @@ use crate::editor::{
     io::{BinaryFile, Slot, TextFile},
 };
 
+/// Whether the document told the host to stop a transfer.
+type Cancelled = Rc<Cell<bool>>;
+
 struct Write {
     content: String,
     base: String,
     operation: String,
     slot: Slot<String>,
+    cancelled: Cancelled,
 }
 
 #[derive(Default)]
 struct Host {
-    reads: RefCell<Vec<(FileScope, Slot<Opened>)>>,
+    reads: RefCell<Vec<(FileScope, Slot<Opened>, Cancelled)>>,
     writes: RefCell<Vec<Write>>,
 }
 
@@ -34,18 +38,22 @@ struct Io(Rc<Host>);
 
 impl FileIo for Io {
     fn read(&self, scope: &FileScope, _: &Root, _: &str) -> Reply<Opened> {
-        let (reply, slot) = Reply::pending();
-        self.0.reads.borrow_mut().push((scope.clone(), slot));
+        let (reply, slot, cancelled) = Reply::pending();
+        self.0
+            .reads
+            .borrow_mut()
+            .push((scope.clone(), slot, cancelled));
         reply
     }
 
     fn write(&self, _: &FileScope, _: &Root, _: &str, save: &SaveRequest) -> Reply<String> {
-        let (reply, slot) = Reply::pending();
+        let (reply, slot, cancelled) = Reply::pending();
         self.0.writes.borrow_mut().push(Write {
             content: save.content.to_string(),
             base: save.generation.clone(),
             operation: save.operation_id.clone(),
             slot,
+            cancelled,
         });
         reply
     }
@@ -142,6 +150,10 @@ impl Fixture {
     fn write(&self, index: usize, result: Result<String, String>, cx: &mut TestAppContext) {
         let slot = self.host.writes.borrow()[index].slot.clone();
         answer(&slot, result, cx);
+    }
+
+    fn read_cancelled(&self, index: usize) -> bool {
+        self.host.reads.borrow()[index].2.get()
     }
 
     fn reads(&self) -> usize {
@@ -241,6 +253,10 @@ fn a_read_cut_off_by_a_disconnect_restarts_once_when_the_connection_returns(
 ) {
     let fixture = open(cx, true);
     fixture.reconnect(None, cx);
+    assert!(
+        fixture.read_cancelled(0),
+        "the host stops the abandoned read"
+    );
     // An answer to the abandoned read changes nothing.
     fixture.read(0, text("stale", "1"), cx);
     assert_eq!(fixture.content(cx), Content::Loading);
@@ -299,6 +315,11 @@ fn a_reload_asked_on_an_earlier_connection_is_dropped_for_the_new_watch(cx: &mut
     assert_eq!(fixture.reads(), 2);
     fixture.reconnect(Some(scope(2)), cx);
     assert_eq!(fixture.reads(), 2, "not asked again on the new connection");
+    assert!(fixture.read_cancelled(1), "the obsolete reload is stopped");
+    assert!(
+        !fixture.read_cancelled(0),
+        "an answered read has nothing to stop"
+    );
     fixture.read(1, Err("terminal_epoch_rejected: stale".into()), cx);
     assert_eq!(
         fixture.content(cx),
@@ -626,4 +647,34 @@ fn flushing_every_editor_waits_for_each_save_and_fails_if_one_does(cx: &mut Test
         *out.borrow(),
         Some(Err("One or more editor files could not be saved.".into()))
     );
+}
+
+#[gpui_kit::test]
+fn a_read_nobody_waits_for_is_stopped_but_a_save_on_the_wire_never_is(cx: &mut TestAppContext) {
+    let fixture = open(cx, true);
+    let Fixture { host, document, .. } = fixture;
+    drop(document);
+    cx.update(|_| {});
+    cx.run_until_parked();
+    assert!(
+        host.reads.borrow()[0].2.get(),
+        "a read nobody waits for is stopped"
+    );
+
+    let fixture = open(cx, true);
+    fixture.read(0, text("a", "1"), cx);
+    fixture.edit("b", cx);
+    saved_after_debounce(cx);
+    assert_eq!(fixture.writes(), 1);
+    // A disconnect and the flush a closing tab runs both leave the save on the
+    // wire: a write the host may already have applied is answered, never
+    // abandoned.
+    fixture.reconnect(None, cx);
+    let flushed = fixture.flush(cx);
+    assert!(!fixture.host.writes.borrow()[0].cancelled.get());
+    assert!(flushed.borrow().is_none(), "the flush waits for the save");
+    fixture.write(0, Ok("2".into()), cx);
+    settle(cx);
+    assert_eq!(*flushed.borrow(), Some(Ok(())));
+    assert!(!fixture.host.writes.borrow()[0].cancelled.get());
 }

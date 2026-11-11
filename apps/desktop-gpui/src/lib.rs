@@ -53,6 +53,7 @@ pub mod markdown;
 pub mod menus;
 pub mod notices;
 pub mod paths;
+pub mod perf;
 pub mod ports;
 pub mod settings;
 pub mod terminal;
