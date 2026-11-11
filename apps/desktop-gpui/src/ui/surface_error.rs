@@ -39,6 +39,7 @@ pub struct SurfaceError {
     summary: Option<String>,
     role: Option<Role>,
     dismiss: Option<Dismiss>,
+    bare: bool,
 }
 
 impl SurfaceError {
@@ -50,6 +51,7 @@ impl SurfaceError {
             summary: None,
             role: Some(Role::Alert),
             dismiss: None,
+            bare: false,
         }
     }
 
@@ -65,6 +67,13 @@ impl SurfaceError {
     /// notice: an alert inside an alert would be read twice.
     pub fn no_role(mut self) -> Self {
         self.role = None;
+        self
+    }
+
+    /// Without the padding, wash and size of its own, for a card that is already the
+    /// container: `.toast-body`.
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
         self
     }
 
@@ -84,6 +93,27 @@ pub fn headline(raw: &str, summary: Option<&str>) -> Summary {
         },
         None => error_summary::summarize(raw),
     }
+}
+
+/// GPUI breaks a line after any hyphen, so `git push -u` could wrap between the
+/// dash and its letter, where a browser keeps a flag whole. A non-breaking
+/// hyphen keeps it together; the accessible name keeps the plain text.
+fn keep_flags_whole(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut before: Option<char> = None;
+    while let Some(c) = chars.next() {
+        // A dash that opens a flag: after a space or its own first dash, before
+        // a letter or the second dash. `well-known` is left alone.
+        let flag = c == '-'
+            && before.is_some_and(|b| b.is_whitespace() || b == '-')
+            && chars
+                .peek()
+                .is_some_and(|next| next.is_alphanumeric() || *next == '-');
+        kept.push(if flag { '\u{2011}' } else { c });
+        before = Some(c);
+    }
+    kept
 }
 
 impl RenderOnce for SurfaceError {
@@ -110,12 +140,14 @@ impl RenderOnce for SurfaceError {
             .flex_col()
             .items_start()
             .gap(ui(4.))
-            .px(ui(8.))
-            .py(ui(6.))
-            .rounded(ui(RADIUS_CONTROL))
-            .bg(palette.danger_wash)
             .text_color(palette.danger_ink)
-            .text_size(ui(TYPE_SECONDARY));
+            .when(!self.bare, |this| {
+                this.px(ui(8.))
+                    .py(ui(6.))
+                    .rounded(ui(RADIUS_CONTROL))
+                    .bg(palette.danger_wash)
+                    .text_size(ui(TYPE_SECONDARY))
+            });
         let toggle = detail.clone().map(|detail| {
             Button::new(SharedString::from(format!("{id}-toggle")))
                 .ghost()
@@ -137,7 +169,7 @@ impl RenderOnce for SurfaceError {
                 .on_click(move |_, window, cx| dismiss(window, cx))
         });
         banner
-            .child(summary)
+            .child(keep_flags_whole(&summary))
             .when(toggle.is_some() || dismiss.is_some(), |this| {
                 this.child(h_flex().gap(ui(4.)).children(toggle).children(dismiss))
             })
@@ -162,6 +194,18 @@ impl RenderOnce for SurfaceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flag_is_not_broken_after_its_dash() {
+        assert_eq!(
+            keep_flags_whole("git push --set-upstream"),
+            "git push \u{2011}\u{2011}set-upstream"
+        );
+        assert_eq!(
+            keep_flags_whole("run git push -u once, a well-known step"),
+            "run git push \u{2011}u once, a well-known step"
+        );
+    }
 
     #[test]
     fn a_given_sentence_leads_and_the_raw_text_is_disclosed() {

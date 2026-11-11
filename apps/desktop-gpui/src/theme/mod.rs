@@ -72,6 +72,16 @@ fn resolve_dark(preference: ThemePreference, system: WindowAppearance) -> bool {
     }
 }
 
+/// The modal backdrop of `styles.css`: `--shadow` at 35%, over whatever the dialog
+/// covers. Kit's own overlay is a flat 5% black, which left a dialog barely
+/// lifted off the window in the light theme.
+fn scrim(shadow: Rgba) -> Rgba {
+    Rgba {
+        a: shadow.a * 0.35,
+        ..shadow
+    }
+}
+
 fn hex(color: Rgba) -> String {
     let channel = |value: f32| (value * 255.).round() as u8;
     format!(
@@ -132,6 +142,7 @@ fn kit_config(palette: &Palette, is_dark: bool, scale: f32) -> ThemeConfig {
         ("title_bar.border", p.chrome_hairline),
         ("drop_target.background", p.accent_wash),
         ("window.border", p.chrome_border),
+        ("overlay", scrim(p.shadow)),
     ]
     .into_iter()
     .map(|(key, color)| (key.to_owned(), hex(color).into()))
@@ -216,6 +227,12 @@ mod tests {
         assert_eq!(hex(palette.term_cursor), "#ffffffff");
         assert_eq!(hex(palette.term_selection_bg), "#ffffffff");
         assert_eq!(hex(palette.term_selection_fg), "#282c34ff");
+    }
+
+    #[test]
+    fn the_backdrop_is_the_shadow_at_35_percent() {
+        assert_eq!(hex(scrim(light().shadow)), "#18181b16");
+        assert_eq!(hex(scrim(dark().shadow)), "#00000059");
     }
 
     #[test]

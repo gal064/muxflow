@@ -16,12 +16,14 @@ use gpui_kit::{
     },
     div,
     prelude::*,
+    px,
 };
 
 use crate::theme::{
     self,
-    metrics::{RADIUS_PANEL, TYPE_ROW, ui},
+    metrics::{NARROW_DIALOGS, narrower_than, ui},
 };
+use crate::ui::dialog::{self, Action};
 
 const CONFIRMATION_WIDTH: f32 = 620.;
 
@@ -67,17 +69,12 @@ pub fn open_overlay(
         let palette = theme::palette(cx);
         let on_confirm = on_confirm.clone();
         let field = field.clone();
-        dialog
+        dialog::place(dialog::card(dialog, &palette), window)
             .entrance(DialogEntrance::None)
             .w(ui(width).to_pixels(window.rem_size()))
-            .margin_top(window.viewport_size().height * 0.12)
             .close_button(false)
             .overlay_closable(backdrop_closes)
-            .text_size(ui(TYPE_ROW))
             .p_0()
-            .bg(palette.chrome_raised)
-            .border_color(palette.chrome_border)
-            .rounded(ui(RADIUS_PANEL))
             .on_ok(move |_, window, cx| {
                 if field.is_focused(window) {
                     on_confirm(window, cx);
@@ -124,24 +121,33 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
         let palette = theme::palette(cx);
         let confirmation = confirmation.clone();
         let confirm = confirmation.clone();
-        let button = Button::new("confirmation-confirm")
-            .label(confirmation.confirm_label.clone())
-            .on_click(move |_, window, cx| {
-                window.close_dialog(cx);
-                (confirm.on_confirm)(window, cx);
-            });
-        let button = if confirmation.destructive {
-            button.danger()
+        let button = dialog::button(
+            Button::new("confirmation-confirm")
+                .label(confirmation.confirm_label.clone())
+                .on_click(move |_, window, cx| {
+                    window.close_dialog(cx);
+                    (confirm.on_confirm)(window, cx);
+                }),
+            if confirmation.destructive {
+                Action::Danger
+            } else {
+                Action::Primary
+            },
+            false,
+            &palette,
+        );
+        // `.confirmation` spans a window 600 CSS px or narrower, centered; otherwise it sits
+        // 12vh down, as every `.modal-backdrop` dialog does.
+        let narrow = narrower_than(NARROW_DIALOGS, window);
+        let alert = dialog::card(alert, &palette).entrance(DialogEntrance::None);
+        let alert = if narrow {
+            alert.w(window.viewport_size().width - px(16.)).centered()
         } else {
-            button.primary()
+            alert
+                .width(ui(CONFIRMATION_WIDTH).to_pixels(window.rem_size()))
+                .margin_top(window.viewport_size().height * 0.12)
         };
         alert
-            .entrance(DialogEntrance::None)
-            .text_size(ui(TYPE_ROW))
-            .bg(palette.chrome_raised)
-            .border_color(palette.chrome_border)
-            .rounded(ui(RADIUS_PANEL))
-            .w(ui(CONFIRMATION_WIDTH).to_pixels(window.rem_size()))
             .title(confirmation.title.clone())
             .description(confirmation.detail.clone())
             .on_ok(|_, _, cx| {
@@ -153,12 +159,15 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
                     .w_full()
                     .justify_end()
                     .gap(ui(8.))
-                    .child(
+                    .child(dialog::button(
                         Button::new("confirmation-cancel")
                             .label("Cancel")
                             .track_focus(&cancel_focus)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
+                        Action::Plain,
+                        false,
+                        &palette,
+                    ))
                     .child(button),
             )
     });
