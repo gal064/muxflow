@@ -413,6 +413,9 @@ impl Render for PreviewView {
                 TextView::new(&self.text)
                     .style(style(&palette, dark))
                     .selectable(true)
+                    // Kit's scrolling text view pads outside its list, so text clips at the
+                    // padding where `.markdown-preview` scrolls it to the pane's edges. Our own
+                    // scroller would fix that, but lays out every block on every frame.
                     .scrollable(true)
                     // Tauri's preview had no syntax colors.
                     .code_block_highlighter(|_| Vec::new())
