@@ -846,6 +846,42 @@ fn a_narrow_window_caps_tabs_tighter(cx: &mut TestAppContext) {
     assert!(width(&mut shell) <= px(150.));
 }
 
+/// Tabs follow each other with no gap, each as wide as Tauri's terminal `.tab`:
+/// `.tab-select`'s 14px left padding, the number, a 6px gap, the title, 2px of right
+/// padding, then the pin toggle's 18px slot and its 4px margin.
+#[gpui_kit::test]
+fn terminal_tabs_are_as_wide_as_in_tauri(cx: &mut TestAppContext) {
+    let mut shell = shell(cx, json!([]), json!({ "tabsInTitleBar": false }));
+    let (pitch, number, title) = shell.visual.update(|window, _| {
+        let tab = |id: &'static str| window.find(id).bounds().left();
+        let width = |family: &'static str, size: f32, text: &'static str| {
+            let run = gpui_kit::TextRun {
+                len: text.len(),
+                font: gpui_kit::font(family),
+                color: gpui_kit::Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .shape_line(text.into(), px(size), &[run], None)
+                .width
+        };
+        (
+            tab("workspace-tab-terminal:@2") - tab("workspace-tab-terminal:@1"),
+            width(crate::fonts::MONO, 11., "1"),
+            width(crate::fonts::SANS, 13., "editor"),
+        )
+    });
+    let expected = px(14.) + number + px(6.) + title + px(2.) + px(18.) + px(4.);
+    // Layout rounds the tab to whole pixels.
+    assert!(
+        (pitch - expected).abs() < px(1.),
+        "pitch {pitch:?}, expected {expected:?}"
+    );
+}
+
 #[gpui_kit::test]
 fn selecting_with_a_dock_open_follows_the_dock_rules(cx: &mut TestAppContext) {
     let tabs = json!([doc("a", "main.rs", 0), doc("b", "lib.rs", 1)]);
