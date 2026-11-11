@@ -588,19 +588,7 @@ impl Workspaces {
 
     fn controller_changed(&mut self, cx: &mut Context<Self>) {
         let view = self.view(cx);
-        let scope = view.scope.clone();
-        // A different connection: what was in flight belongs to the old one.
-        let same = match (&self.flight_scope, &scope) {
-            (Some(old), Some(new)) => same_host_connection(old, new),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            self.coordinator.invalidate();
-            self.protected_app_tab = None;
-            self.pending = None;
-            self.flight_scope = scope.clone();
-        }
+        self.follow_connection(view.scope.as_ref());
         let client = self
             .controller
             .as_ref()
@@ -631,6 +619,21 @@ impl Workspaces {
         self.finish_host_handoffs(&view, cx);
         self.publish_context(cx);
         cx.notify();
+    }
+
+    /// A different connection: what was in flight belongs to the old one.
+    fn follow_connection(&mut self, scope: Option<&HostScopeToken>) {
+        let same = match (&self.flight_scope, scope) {
+            (Some(old), Some(new)) => same_host_connection(old, new),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.coordinator.invalidate();
+            self.protected_app_tab = None;
+            self.pending = None;
+            self.flight_scope = scope.cloned();
+        }
     }
 
     fn retire_pending(&mut self, cx: &App) {
@@ -1236,6 +1239,11 @@ impl Workspaces {
     }
 
     fn navigate(&mut self, intent: Intent, already_there: bool, cx: &mut Context<Self>) {
+        // A move can be asked for on a host switch the shell has not followed
+        // yet, as a notification click does from the agents feature's own
+        // observer. It is planned on the connection now on screen, so catch
+        // up first: following later would drop it as the old one's.
+        self.follow_connection(Some(&intent.scope));
         let Some((id, intent)) = self.coordinator.navigate(intent.key.clone(), intent) else {
             return;
         };
