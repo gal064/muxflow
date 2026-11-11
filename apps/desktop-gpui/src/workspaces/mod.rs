@@ -1130,6 +1130,9 @@ impl Workspaces {
                     .as_ref()
                     .is_some_and(|(docked, _)| docked.id == *tab_id)
                 {
+                    // Already on screen; choosing it goes to it.
+                    crate::editor::request_focus(tab_id, cx);
+                    cx.notify();
                     return;
                 }
                 if let Some(session) = &view.session {

@@ -146,8 +146,51 @@ fn kit_config(palette: &Palette, is_dark: bool, scale: f32) -> ThemeConfig {
         "radius": metrics::RADIUS_CONTROL as usize,
         "radius.lg": metrics::RADIUS_PANEL as usize,
         "colors": colors,
+        "highlight": syntax(p),
     }))
     .expect("the Muxflow theme is valid Kit config")
+}
+
+/// The document surfaces' colors, port of `features/files/monaco.ts`. Syntax
+/// is the terminal's ANSI palette, so an editor and a terminal showing the
+/// same file agree about what a string looks like. Plain code is the chrome
+/// ink, and punctuation, operators and comments the app's quiet ink: the ANSI
+/// dim grey is too faint on this ground for the most common quiet token.
+fn syntax(p: &Palette) -> serde_json::Value {
+    let style = |color: Rgba| json!({ "color": hex(color) });
+    let italic = |color: Rgba| json!({ "color": hex(color), "font_style": "italic" });
+    let bold = |color: Rgba| json!({ "color": hex(color), "font_weight": 700 });
+    json!({
+        "editor.background": hex(p.chrome_bg),
+        "editor.foreground": hex(p.chrome_ink),
+        "editor.gutter.background": hex(p.chrome_bg),
+        "editor.line_number": hex(p.chrome_faint),
+        "editor.active_line_number": hex(p.chrome_ink),
+        "editor.active_line.background": hex(p.chrome_hover),
+        "syntax": {
+            "comment": italic(p.chrome_dim),
+            "keyword": style(p.term_13),
+            "string": style(p.term_2),
+            "string.escape": style(p.term_3),
+            "string.regex": style(p.term_1),
+            "number": style(p.term_3),
+            "boolean": style(p.term_3),
+            "constant": style(p.term_3),
+            "attribute": style(p.term_3),
+            "type": style(p.term_6),
+            "constructor": style(p.term_6),
+            "function": style(p.term_12),
+            "tag": style(p.term_12),
+            "title": bold(p.term_12),
+            "variable.special": italic(p.term_1),
+            "punctuation": style(p.chrome_dim),
+            "operator": style(p.chrome_dim),
+            "text.literal": style(p.term_2),
+            "link_uri": style(p.term_4),
+            "emphasis": italic(p.chrome_ink),
+            "emphasis.strong": bold(p.chrome_ink),
+        },
+    })
 }
 
 #[cfg(test)]

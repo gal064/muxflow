@@ -470,7 +470,22 @@ impl Workspaces {
             return;
         };
         self.bulk_closing = true;
+        let flush = crate::editor::flush_all(cx);
         cx.spawn(async move |this, cx| {
+            // Every buffer saves before anything closes; a failed save closes nothing.
+            if let Err(error) = flush.await {
+                this.update(cx, |this, cx| {
+                    this.bulk_closing = false;
+                    if this.scope_current(&host, &scope, cx) {
+                        this.report(
+                            format!("Could not close those tabs because an editor did not save: {error}"),
+                            cx,
+                        );
+                    }
+                })
+                .ok();
+                return;
+            }
             let terminals: Vec<String> = tabs.iter().filter_map(|tab| tab.window_id().map(str::to_owned)).collect();
             let (mut closed, mut failed, mut skipped) = (0, 0, 0);
             let current = |cx: &mut gpui_kit::AsyncApp| {
@@ -479,6 +494,14 @@ impl Workspaces {
             let finish = |cx: &mut gpui_kit::AsyncApp| {
                 this.update(cx, |this, _| this.bulk_closing = false).ok();
             };
+            // The flush can take a while on a slow link; the set was taken before it.
+            if !current(cx) {
+                this.update(cx, |this, cx| {
+                    this.report("Closing those tabs was cancelled because the terminal layout changed.", cx)
+                })
+                .ok();
+                return finish(cx);
+            }
             for (index, window_id) in terminals.iter().enumerate() {
                 let found = this
                     .read_with(cx, |this, cx| {
@@ -626,15 +649,43 @@ pub fn run(
         "view.toggleDock" => return this.update(cx, |this, cx| this.toggle_dock(cx)),
         _ => {}
     }
-    let Some(subject) = this.read(cx).subject(target.as_ref(), cx) else {
+    let Some(mut subject) = this.read(cx).subject(target.as_ref(), cx) else {
         return;
     };
+    // A docked document holding focus is what an ambient command acts on, so
+    // closing from its editor never closes the terminal beside it.
+    if target.is_none()
+        && let Some((docked, _)) = this.read(cx).view(cx).docked
+        && crate::editor::holds_focus(window)
+    {
+        subject.app_tab = Some(docked);
+    }
     if id == "window.close"
         && let Some(tab) = &subject.app_tab
     {
-        // No notice: the tab leaving the strip is the whole message.
-        let tab = tab.id.clone();
-        this.update(cx, |this, cx| this.close_document(&tab, true, cx));
+        // Every buffer saves first, and a failed save keeps the tab. No
+        // notice otherwise: the tab leaving the strip is the whole message.
+        let (tab, title) = (tab.id.clone(), tab.title.clone());
+        let (host, scope) = (subject.host.clone(), subject.scope.clone());
+        let flush = crate::editor::flush_all(cx);
+        let this = this.downgrade();
+        cx.spawn(async move |cx| {
+            let saved = flush.await;
+            this.update(cx, |this, cx| {
+                if !this.scope_current(&host, &scope, cx) {
+                    return;
+                }
+                match saved {
+                    Ok(()) => this.close_document(&tab, true, cx),
+                    Err(error) => this.report(
+                        format!("Could not close {title} because its editor did not save: {error}"),
+                        cx,
+                    ),
+                }
+            })
+            .ok();
+        })
+        .detach();
         return;
     }
     if definition.destructive {
@@ -983,7 +1034,7 @@ impl QuickOpenSource for Source {
             workspaces,
             tabs,
             active_tab_key: view.active_key.clone(),
-            search_key: None,
+            search_key: crate::editor::search_key(cx),
             cwd: view
                 .active_pane
                 .as_ref()
@@ -992,15 +1043,8 @@ impl QuickOpenSource for Source {
         }
     }
 
-    fn search_files(
-        &self,
-        _query: String,
-        _cx: &mut App,
-    ) -> Task<Result<FileSearchResults, String>> {
-        Task::ready(Ok(FileSearchResults {
-            matches: Vec::new(),
-            complete: true,
-        }))
+    fn search_files(&self, query: String, cx: &mut App) -> Task<Result<FileSearchResults, String>> {
+        crate::editor::search_files(query, cx)
     }
 
     fn choose(&self, item: &QuickOpenItem, _window: &mut Window, cx: &mut App) {
@@ -1018,7 +1062,7 @@ impl QuickOpenSource for Source {
                 }
             }),
             QuickOpenKind::Tab(tab) => this.update(cx, |this, cx| this.select_tab(&tab.key, cx)),
-            QuickOpenKind::File(_) => {}
+            QuickOpenKind::File(file) => crate::editor::open_search_match(&file.path, cx),
         }
     }
 }
