@@ -230,10 +230,12 @@ through the T2.1 seam.
 
 | Task | Mode | Model, effort | Touches | Depends on |
 |---|---|---|---|---|
-| T4.1 `workspaces-shell` | Full, large, design | opus, high | `features/workspaces`, `shell`, `tmux` | Phase 3 |
-| T4.2 `agents-automations` | Full, invariant | opus, high | `features/agents`, `automations`, sounds | Phase 3 |
+| T4.1 `workspaces-shell` | opus, high, full cycle, large, design | `gpui/workspaces-shell` | Merged via T4.5 | `7cf0fee` | 5 review rounds. Its QA failed 4 runs on focus; the last fix was re-checked by T4.5's QA. Fixed the revealVoid false positive in terminal-engine |
+| T4.2 `agents-automations` | opus, high, full cycle, invariant | `gpui/agents-automations` | Merged via T4.5 | `4f175dc` | 2 review rounds. Adds rodio, so CI needs `libasound2-dev`. Agent launch and resume need Phase 5's `ActiveRoot` |
 | T4.3 `ports-transfers` | Full | sonnet, high | `features/ports`, `transfers`, `dragDrop` | Phase 3 |
-| T4.4 `settings-diagnostics` | Full, design | sonnet, high | Settings, `diagnostics`, `startup` | Phase 3 |
+| T4.4 `settings-diagnostics` | sonnet, high, full cycle, design | `gpui/settings-diagnostics` | Merged via T4.5 | `e6e8510` | 1 review round, QA pass. The profile label rename and the tmux identity notice match Tauri |
+| T4.5 `phase4-wiring` | opus, high, full cycle, invariant | `gpui/phase4-wiring` | Merged | `ee8358d` | Merged T4.1, T4.2, T4.4 and joined their seams. 1 review round, QA pass after 2 fixes (a pane move selects its window; a startup command is retried while the bridge reconnects). Open: bulk-close topology authority, `agent.state` diagnostics |
+| T4.3 `ports-transfers` | sonnet, high, full cycle | `gpui/ports-transfers` | Dispatched | | |
 
 **Tests:** ported logic tests per module. **Worker QA:** drive the panel against an
 isolated host, headless. **Integrated QA:** `gdev_qa_phase4` exercises every panel
@@ -325,7 +327,7 @@ final sweep command returning only justified hits.
 | 1 | Done. `gdev_qa_phase1` passed | `7a4f66c`, `9c13af4`, `1b7df0a`, `29ee6f3` | Known: `test:git` fails on `origin/main` too, in the driver's patch check, so T5.3 must fix or retire it. `test:lifecycle` failed 1 of 34 runs at line 320, cause not found |
 | 2 | Done, QA passed | `08f8108` | X11 window position is open for the owner |
 | 3 | Done, QA passed | `e5e5f77` | Carry-forward items below |
-| 4 | Running | | T4.1, T4.2 and T4.4 running; T4.3 next |
+| 4 | Running | `ee8358d` | T4.3 running |
 | 5 to 6 | Approved | | |
 | 7 to 10 | After parity, owner decides | | |
 
