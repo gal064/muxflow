@@ -2174,6 +2174,10 @@ mod surface {
                 .map(str::to_owned)
         });
         assert_eq!(placeholder.as_deref(), Some("L"));
+        for group in ["Host", "Transport"] {
+            let role = visual.update(|window, _| window.find_by_label(group).role());
+            assert_eq!(role, Some(Role::RadioGroup), "{group} names its radios");
+        }
         visual.update(|window, cx| {
             window.click("connection-host-letter", cx);
             window.input("z", cx);

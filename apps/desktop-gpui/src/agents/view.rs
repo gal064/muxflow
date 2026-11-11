@@ -7,9 +7,10 @@ use std::{rc::Rc, time::Duration};
 
 use desktop_core::app_state::AgentSortMode;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, EmptyView, Entity, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Render, RenderOnce, Rgba, Role, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, Window,
+    AnyElement, App, AppContext as _, Context, EmptyView, Entity, FocusHandle, FontWeight,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render, RenderOnce,
+    Rgba, Role, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
+    Window,
     base::{RootPlugin, TestSupportExt},
     component::{
         Disableable, Sizable, WindowExt,
@@ -56,6 +57,7 @@ use super::{
     wire::{HookAction, LaunchRequest},
     wiring::{hook_wiring_notice, host_hook_wiring},
 };
+use crate::workspaces::RowKeys;
 
 // Adapter marks, as `AgentIcon` draws them. Rendered as masks: the ink is the
 // text color, so only the shapes and their stroke widths are here.
@@ -598,7 +600,7 @@ fn move_entries(row: &AgentListRow, cx: &App) -> Vec<Entry> {
 }
 
 /// The section's own menu: set up, launch, and hook review, for the host on screen.
-fn section_menu(cx: &App) -> Vec<Entry> {
+pub(crate) fn section_menu(cx: &App) -> Vec<Entry> {
     let Some(agents) = cx.try_global::<Agents>() else {
         return vec![
             Item::new("No agent adapters available", |_, _| {})
@@ -771,12 +773,22 @@ fn row_action(
         .compact()
         .size(ui(18.))
         .disabled(disabled)
+        // A pointer affordance: the row's menu is the keyboard's way to both.
+        .tab_stop(false)
         .accessibility_label(label)
         .tooltip(label)
         .child(svg().data(icon).size(ui(12.)).text_color(ink))
 }
 
-fn agent_row(row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &App) -> AnyElement {
+fn agent_row(
+    row: &AgentListRow,
+    key: &str,
+    selected: bool,
+    glyphs: bool,
+    keys: RowKeys,
+    window: &Window,
+    cx: &App,
+) -> AnyElement {
     let palette = theme::palette(cx);
     let adapters = adapters_for(&row.agent, cx);
     let session_label = agent_session_label(&row.agent, &adapters);
@@ -790,6 +802,8 @@ fn agent_row(row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &A
     let pin = row.clone();
     let branch_row = row.clone();
     let menu_row = row.clone();
+    let key_row = row.clone();
+    let focused = keys.focus.is_focused(window);
     let title = row_title(row, &session_label);
     let unavailable = !row.routable;
     let drag = row.clone();
@@ -800,6 +814,29 @@ fn agent_row(row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &A
         .role(Role::Button)
         .aria_label(row_label(row, &session_label))
         .aria_selected(selected)
+        .track_focus(&keys.focus)
+        .on_key_down({
+            let keys = keys.clone();
+            move |event: &KeyDownEvent, window, cx| {
+                if crate::context_menu::is_menu_key(&event.keystroke) {
+                    let entries = row_menu(&key_row, cx);
+                    crate::context_menu::open(
+                        move |menu, window, cx| fill(menu, &entries, window, cx),
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                    return;
+                }
+                if event.keystroke.modifiers.modified() {
+                    return;
+                }
+                // Enter and Space click it.
+                if keys.step(&event.keystroke.key, window, cx) {
+                    cx.stop_propagation();
+                }
+            }
+        })
         .flex_1()
         .min_w_0()
         .items_center()
@@ -829,7 +866,7 @@ fn agent_row(row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &A
         })
         // Shift-click pins the agent's tab rather than navigating to it, as it
         // does in the tab strip and the workspace list.
-        .on_click(move |event, _, cx| {
+        .on_click(move |event, window, cx| {
             if dragdrop::just_ended(cx) {
                 return;
             }
@@ -837,6 +874,11 @@ fn agent_row(row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &A
                 toggle_tab_pin(&click, cx);
             } else if click.routable {
                 open_row(&click, cx);
+                // The keyboard goes with it, as the pane Tauri made active
+                // took it.
+                if let Some(workspaces) = crate::workspaces::current(cx) {
+                    crate::workspaces::focus_terminal(&workspaces, window, cx);
+                }
             }
         })
         .child(agent_mark(
@@ -878,6 +920,25 @@ fn agent_row(row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &A
         .w_full()
         .mb(ui(1.))
         .child(button)
+        // Outside the row, as the workspace list draws its own, and only
+        // for the keyboard, as `:focus-visible`.
+        .when(focused, |this| {
+            this.relative()
+                .when(window.last_input_was_keyboard(), |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top(ui(-2.))
+                            .left(ui(-2.))
+                            .right(ui(-2.))
+                            .bottom(ui(-2.))
+                            .border_2()
+                            .border_color(palette.accent)
+                            .rounded(ui(RADIUS_CONTROL + 2.)),
+                    )
+                })
+                .child(crate::context_menu::anchor(&keys.focus))
+        })
         .child(
             h_flex()
                 .flex_none()
@@ -977,10 +1038,39 @@ pub struct AgentsList {
     pub pinned_only: bool,
 }
 
+/// The rows in the order [`AgentsList`] draws them under `sort`.
+fn display_order(rows: &[AgentListRow], sort: AgentSortMode) -> Vec<&AgentListRow> {
+    match sort {
+        AgentSortMode::Workspace => {
+            let groups = group_by_workspace(rows);
+            // Pinned workspaces' groups draw first when any are pinned.
+            let (pinned, others): (Vec<_>, Vec<_>) =
+                groups.into_iter().partition(|group| group.pinned);
+            pinned
+                .into_iter()
+                .chain(others)
+                .flat_map(|group| group.rows)
+                .collect()
+        }
+        AgentSortMode::Pinned => group_by_pin(rows)
+            .into_iter()
+            .flat_map(|(_, half)| half)
+            .collect(),
+        AgentSortMode::Status => group_by_status(rows)
+            .into_iter()
+            .flat_map(|(_, _, group)| group)
+            .collect(),
+    }
+}
+
 impl RenderOnce for AgentsList {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let palette = theme::palette(cx);
         let (_, rows) = super::rows(cx, self.sort, self.pinned_only);
+        let scroll = window
+            .use_keyed_state("agents-list-scroll", cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone();
         let (notice, glyphs, selected) = match cx.try_global::<Agents>() {
             Some(agents) => {
                 let runtime = agents.runtime.read(cx);
@@ -1005,6 +1095,43 @@ impl RenderOnce for AgentsList {
         };
         let row_key =
             |row: &AgentListRow| format!("{}-{}", row.agent.host_profile_id, row.agent.id);
+        // Up and Down follow the rows as they draw, so the keys come from the
+        // display order rather than the list's.
+        let order: Vec<String> = display_order(&rows, self.sort)
+            .into_iter()
+            .map(row_key)
+            .collect();
+        let handles: Vec<FocusHandle> = order
+            .iter()
+            .map(|key| {
+                let focus = window
+                    .use_keyed_state(
+                        SharedString::from(format!("agent-focus-{key}")),
+                        cx,
+                        |_, cx| cx.focus_handle().tab_stop(true),
+                    )
+                    .read(cx)
+                    .clone();
+                crate::context_menu::reveal_when_focused(
+                    format!("agent-reveal-{key}"),
+                    &focus,
+                    &scroll,
+                    window,
+                    cx,
+                );
+                focus
+            })
+            .collect();
+        let keys_for = |row: &AgentListRow| {
+            let at = order
+                .iter()
+                .position(|key| *key == row_key(row))
+                .unwrap_or(0);
+            RowKeys::for_rows(&handles, at)
+        };
+        let agent_row = |row: &AgentListRow, key: &str, selected: bool, glyphs: bool, cx: &App| {
+            agent_row(row, key, selected, glyphs, keys_for(row), window, cx)
+        };
         let quiet = |text: &'static str| {
             div()
                 .px(ui(12.))
@@ -1108,6 +1235,7 @@ impl RenderOnce for AgentsList {
                     div()
                         .id("agents-notice")
                         .role(Role::Note)
+                        .aria_label(notice.clone())
                         .flex_none()
                         .px(ui(8.))
                         .py(ui(5.))
@@ -1123,6 +1251,7 @@ impl RenderOnce for AgentsList {
                     .test_support()
                     .role(Role::List)
                     .aria_label("Agents")
+                    .track_scroll(&scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -1328,6 +1457,7 @@ fn open_setup_dialog(
             return dialog;
         };
         let busy = question.activity.is_some();
+        let title = SharedString::from(format!("Set up agent status on {}?", question.label));
         let (decline, review, accept, escaped) = (
             runtime.clone(),
             runtime.clone(),
@@ -1335,7 +1465,7 @@ fn open_setup_dialog(
             runtime.clone(),
         );
         dialog
-            .title(format!("Set up agent status on {}?", question.label))
+            .title(title.clone())
             .w(ui(DIALOG_WIDTH).to_pixels(window.rem_size()))
             .close_button(false)
             .keyboard(!busy)
@@ -1350,7 +1480,9 @@ fn open_setup_dialog(
             .child(
                 v_flex()
                     .id("host-setup")
+                    .test_support()
                     .role(Role::AlertDialog)
+                    .aria_label(title)
                     .gap(ui(10.))
                     .child(
                         div()
@@ -1540,6 +1672,7 @@ fn open_review_dialog(
         };
         let installing = open.review.action == HookAction::Install;
         let verb = if installing { "Install" } else { "Uninstall" };
+        let title = SharedString::from(format!("{verb} {} hooks?", open.review.adapter_display_name));
         let (cancel, confirm, escaped) = (runtime.clone(), runtime.clone(), runtime.clone());
         let confirm_button = Button::new("hook-review-confirm")
             .label(if open.applying {
@@ -1551,7 +1684,7 @@ fn open_review_dialog(
             .on_click(move |_, _, cx| confirm.update(cx, |runtime, cx| runtime.confirm_review(cx)));
         let confirm_button = if installing { confirm_button.primary() } else { confirm_button.danger() };
         dialog
-            .title(format!("{verb} {} hooks?", open.review.adapter_display_name))
+            .title(title.clone())
             .w(ui(DIALOG_WIDTH).to_pixels(window.rem_size()))
             .close_button(false)
             .keyboard(!open.applying)
@@ -1566,7 +1699,9 @@ fn open_review_dialog(
             .child(
                 v_flex()
                     .id("hook-review")
+                    .test_support()
                     .role(Role::AlertDialog)
+                    .aria_label(title)
                     .gap(ui(10.))
                     .max_h(ui(480.))
                     .overflow_y_scroll()
@@ -1673,6 +1808,16 @@ mod tests {
         })
     }
 
+    fn alert_names(visual: &mut VisualTestContext) -> Vec<String> {
+        visual.update(|window, _| {
+            window
+                .find_all_by_role(Role::AlertDialog)
+                .iter()
+                .filter_map(|element| element.label().map(str::to_owned))
+                .collect()
+        })
+    }
+
     /// The dialogs read the runtime on every build, as the surface redraws them.
     fn redraw(visual: &mut VisualTestContext) {
         visual.update(|window, _| window.refresh());
@@ -1694,6 +1839,11 @@ mod tests {
         });
         visual.update(|window, cx| open_setup_dialog(runtime.clone(), Rc::new(|_| {}), window, cx));
         visual.run_until_parked();
+        assert_eq!(
+            alert_names(visual),
+            ["Set up agent status on This Mac?"],
+            "named by its title"
+        );
         let lines = ["Setting up agent hooks…", "Loading the hook changes…"];
         for line in lines {
             assert_eq!(status_role(visual, line), None, "idle: {line}");
@@ -1735,6 +1885,11 @@ mod tests {
         visual
             .update(|window, cx| open_review_dialog(runtime.clone(), Rc::new(|_| {}), window, cx));
         visual.run_until_parked();
+        assert_eq!(
+            alert_names(visual),
+            ["Install Claude Code hooks?"],
+            "named by its title"
+        );
         assert_eq!(status_role(visual, "Installing agent hooks…"), None);
         for (action, line) in [
             (HookAction::Install, "Installing agent hooks…"),
