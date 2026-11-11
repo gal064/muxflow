@@ -1292,6 +1292,8 @@ impl GitPanel {
                         .xsmall()
                         .bg(palette.chrome_raised)
                         .text_color(palette.chrome_ink)
+                        // Kit replays the colors above inside its disabled state.
+                        .when(unavailable || busy || !can_push, |push| push.opacity(0.42))
                         .label("Push")
                         .accessibility_label("Push to upstream")
                         .disabled(unavailable || busy || !can_push)

@@ -355,7 +355,7 @@ fn reconcile(controller: &Entity<ConnectionController>, explorer: &Entity<Explor
 
 /// The completion notice, with Open and the reveal action, when `message` is
 /// the one announcing the finished download.
-pub fn download_notice(message: &str, cx: &App) -> Option<Notification> {
+pub fn download_notice(message: &str, narrow: bool, cx: &App) -> Option<Notification> {
     let completion = cx
         .try_global::<Completion>()
         .filter(|completion| completion.message == message)?;
@@ -363,6 +363,7 @@ pub fn download_notice(message: &str, cx: &App) -> Option<Notification> {
     let palette = theme::palette(cx);
     Some(notices::card(
         false,
+        narrow,
         &palette,
         {
             let message = message.clone();
