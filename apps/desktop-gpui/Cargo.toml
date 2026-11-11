@@ -16,6 +16,7 @@ name = "muxflow-gpui"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 desktop-core = { path = "../../crates/desktop-core" }
 dirs = "6"
@@ -29,6 +30,8 @@ regex = "1"
 rodio = { version = "0.23", default-features = false, features = ["playback"] }
 serde.workspace = true
 serde_json.workspace = true
+# The Git diff view draws a whole-file patch with Kit's `Diff`.
+similar = "2.7"
 tokio.workspace = true
 alacritty_terminal = { version = "=0.26.0", default-features = false }
 terminal-engine = { path = "../../crates/terminal-engine" }

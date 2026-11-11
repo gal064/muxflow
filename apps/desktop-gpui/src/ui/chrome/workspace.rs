@@ -3,7 +3,9 @@
 //! `app/WorkspaceDock.tsx`'s divider and sizing. A document shows a placeholder
 //! until the document panels arrive.
 
-use desktop_core::app_state::DockSide;
+use std::cell::Cell;
+
+use desktop_core::app_state::{AppTabRecord, DockSide};
 use gpui_kit::{
     AnyElement, AnyView, App, Entity, InteractiveElement, IntoElement, MouseMoveEvent,
     ParentElement, RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled, WeakEntity,
@@ -61,10 +63,17 @@ impl RenderOnce for WorkspaceArea {
                 .child(label)
         };
         let terminal = self.terminal.filter(|_| view.selected_app_tab.is_none());
+        // Until the document area routes every kind, only a Git diff draws.
+        let surface = |tab: Option<&AppTabRecord>, window: &mut Window, cx: &mut App| {
+            Cell::new(tab.and_then(|tab| crate::git::diff_surface(tab, window, cx)))
+        };
+        let selected = surface(view.selected_app_tab.as_ref(), window, cx);
+        let docked_surface = surface(view.docked.as_ref().map(|(tab, _)| tab), window, cx);
         let body = |label: SharedString| -> AnyElement {
-            match terminal.clone() {
-                Some(view) => view.into_any_element(),
-                None => placeholder(label).into_any_element(),
+            match (terminal.clone(), selected.take()) {
+                (Some(view), _) => view.into_any_element(),
+                (None, Some(surface)) => surface,
+                (None, None) => placeholder(label).into_any_element(),
             }
         };
 
@@ -138,7 +147,10 @@ impl RenderOnce for WorkspaceArea {
                                 DockSide::Right => doc.border_l_1(),
                                 DockSide::Left => doc.border_r_1(),
                             })
-                            .child(placeholder(title))
+                            .child(match docked_surface.take() {
+                                Some(surface) => surface,
+                                None => placeholder(title).into_any_element(),
+                            })
                             .child(divider(
                                 self.chrome.clone(),
                                 Divider::Dock,
