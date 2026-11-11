@@ -22,11 +22,15 @@
 //! | [`tooltips`] | A control's name with its shortcut |
 //! | [`window_state`] | Window geometry, restored and saved |
 //! | [`terminal`] | Terminal panes: engine link, element, sizing, and the input, reading and integration seams |
+//! | [`agents`] | Agents list, agent status, notifications, sounds and host hook setup |
+//! | [`automations`] | The host's scheduled agent runs, as a right-panel segment |
 //!
 //! Colors and metrics come from [`theme`]. Controls follow the accessibility
 //! baseline in [`ui`].
 
+pub mod agents;
 pub mod app;
+pub mod automations;
 pub mod commands;
 pub mod connection_ui;
 pub mod context_menu;

@@ -738,21 +738,9 @@ impl RenderOnce for Sidebar {
             })
             .children(items);
 
-        let agents_list = match agent_shell(cx).and_then(|shell| shell.section.clone()) {
-            Some(section) => section(window, cx),
-            None => div()
-                .id("sidebar-agents-list")
-                .role(Role::List)
-                .aria_label("Agents")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .child(quiet(if self.pinned_only {
-                    "No agents in pinned workspaces."
-                } else {
-                    "No agents detected."
-                }))
-                .into_any_element(),
+        let agents_list = crate::agents::view::AgentsList {
+            sort: self.agent_sort,
+            pinned_only: self.pinned_only,
         };
 
         let host = host_row(&self.workspaces, cx);

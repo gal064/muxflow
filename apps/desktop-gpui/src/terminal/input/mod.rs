@@ -312,6 +312,14 @@ fn on_key_down(
     let platform = Platform::current();
     // A key that becomes no bytes here still vouches for the text it types.
     pane.update(cx, |pane, _| pane.input.echo.note_key(Instant::now()));
+    let (profile_id, pane_id) = {
+        let pane = pane.read(cx);
+        (
+            pane.link().read(cx).profile_id().to_owned(),
+            pane.pane_id().clone(),
+        )
+    };
+    super::integration::agents::note_activity(&profile_id, &pane_id, cx);
     if let Some(alias) = terminal_clipboard_alias(keystroke, platform) {
         // Claimed outright, so the chord never also reaches the program.
         cx.stop_propagation();

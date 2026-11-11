@@ -326,6 +326,9 @@ impl TerminalSurface {
             return;
         }
         self.terminal_visible = visible;
+        cx.set_global(crate::terminal::integration::agents::TerminalVisibility(
+            visible,
+        ));
         if visible {
             self.schedule_resize(cx);
         } else {
@@ -969,7 +972,12 @@ impl Render for TerminalSurface {
             .and_then(|target| target.window_name.clone())
             .map_or_else(
                 || "Terminal".to_owned(),
-                |name| format!("Terminal tab {name}"),
+                |name| {
+                    // The agent CLI's own status ticker is a second report of
+                    // a state the app draws itself; screen readers skip it too.
+                    let name = crate::agents::labels::strip_agent_status_glyphs(&name);
+                    format!("Terminal tab {name}")
+                },
             )
             .into();
         let surface = self.surface_box();

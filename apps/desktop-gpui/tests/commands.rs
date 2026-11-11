@@ -361,6 +361,7 @@ fn unimplemented_commands_are_marked_unavailable_and_do_nothing(cx: &mut TestApp
             "focus.tabs",
             "focus.back",
             "focus.forward",
+            "agents.jumpUnread",
             "agents.toggleSort",
             "workspaces.showPinnedOnly",
             "workspace.select1",

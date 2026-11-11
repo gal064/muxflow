@@ -11,7 +11,10 @@ use std::sync::mpsc::Sender;
 use desktop_core::{
     app_state::{AppStateStore, PersistedAppState, update_app_state},
     connection::{
-        self, ConnectionSpec, ProfileStore, TerminalClients, delivery_ack,
+        self, ConnectionSpec, ProfileStore, TerminalClients,
+        agent::{AgentCommand, agent_request},
+        automation::{AutomationCommand, automation_request},
+        delivery_ack,
         files::upload_manager::{self, UploadManager},
         helper::{self, HelperInstallReport},
         tmux_action,
@@ -107,6 +110,22 @@ pub trait TerminalBackend: Send + Sync {
         events: Arc<dyn EventSink>,
     ) -> Result<String, String>;
     fn cancel_upload(&self, transfer_id: String) -> Result<Value, String>;
+    /// One agent request, answered with the host's JSON (`agent_request`).
+    fn agent_request(
+        &self,
+        _client_id: String,
+        _command: AgentCommand,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        futures::future::ready(Err("agents are unavailable here".to_owned())).boxed()
+    }
+    /// One Automations panel request (`automation_request`).
+    fn automation_request(
+        &self,
+        _client_id: String,
+        _command: AutomationCommand,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        futures::future::ready(Err("automations are unavailable here".to_owned())).boxed()
+    }
 }
 
 pub trait ConnectionBackend: TerminalBackend {
@@ -333,6 +352,24 @@ impl TerminalBackend for NativeBackend {
 
     fn cancel_upload(&self, transfer_id: String) -> Result<Value, String> {
         upload_manager::cancel_terminal_upload(transfer_id, &UploadManager)
+    }
+
+    fn agent_request(
+        &self,
+        client_id: String,
+        command: AgentCommand,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let clients = self.clients.clone();
+        spawned(async move { agent_request(client_id, command, &clients).await })
+    }
+
+    fn automation_request(
+        &self,
+        client_id: String,
+        command: AutomationCommand,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let clients = self.clients.clone();
+        spawned(async move { automation_request(client_id, command, &clients).await })
     }
 }
 
