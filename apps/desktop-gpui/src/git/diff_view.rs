@@ -19,7 +19,7 @@ use gpui_kit::{
     canvas,
     component::{
         Disableable, Sizable,
-        button::{Button, ButtonVariants},
+        button::Button,
         diff::{Diff as DiffElement, DiffFile, DiffHunkSeparator, DiffMode, DiffState},
         h_flex, v_flex,
     },
@@ -35,7 +35,10 @@ use crate::{
         self, Palette,
         metrics::{BAR_HEIGHT, TYPE_LABEL, TYPE_META, ui},
     },
-    ui::surface_error::SurfaceError,
+    ui::{
+        surface_error::SurfaceError,
+        toolbar::{Tone, toolbar_button},
+    },
 };
 
 use super::{
@@ -835,30 +838,33 @@ impl Render for GitDiffView {
                 let state = content.clone();
                 let width = rems_to_px(window);
                 let laid_out = self.width.clone();
+                // Switched here, from the width the last frame drew at, and not
+                // while painting: the list below counts the rows of the mode it
+                // is built in, so a switch after that left it indexing rows of
+                // the other mode, and the window panicked on narrowing.
+                if let Some(last) = laid_out.get() {
+                    let mode = if last >= width {
+                        DiffMode::Split
+                    } else {
+                        DiffMode::Unified
+                    };
+                    if state.read(cx).mode() != mode {
+                        state.update(cx, |state, cx| state.set_mode(mode, cx));
+                        window.request_animation_frame();
+                    }
+                }
                 div()
                     .relative()
                     .size_full()
                     .child(
                         canvas(
-                            move |bounds: Bounds<Pixels>, window, cx| {
-                                // Monaco's own switch: inline when narrow.
-                                let mode = if bounds.size.width >= width {
-                                    DiffMode::Split
-                                } else {
-                                    DiffMode::Unified
-                                };
-                                let moved = state.read(cx).mode() != mode;
-                                if moved {
-                                    state.update(cx, |state, cx| state.set_mode(mode, cx));
-                                }
-                                // The diff was laid out this frame in the old
-                                // mode and wraps to the width it last drew at,
-                                // so a change needs one more frame, as Monaco's
-                                // automatic layout gave it. A notify while
-                                // drawing schedules nothing; this does.
+                            move |bounds: Bounds<Pixels>, window, _| {
+                                // The diff wraps to the width it last drew at, so a
+                                // change needs one more frame, as Monaco's automatic
+                                // layout gave it. A notify while drawing schedules
+                                // nothing; this does.
                                 if laid_out.replace(Some(bounds.size.width))
                                     != Some(bounds.size.width)
-                                    || moved
                                 {
                                     window.request_animation_frame();
                                 }
@@ -944,29 +950,41 @@ impl Render for GitDiffView {
                                         .child(format!("Hunk {}", index + 1)),
                                 )
                                 .child(
-                                    Button::new(id("apply"))
-                                        .outline()
-                                        .xsmall()
-                                        .label(if staged { "Unstage" } else { "Stage" })
-                                        .disabled(busy || !can_mutate)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                    toolbar_button(
+                                        Button::new(id("apply")).label(if staged {
+                                            "Unstage"
+                                        } else {
+                                            "Stage"
+                                        }),
+                                        Tone::Plain,
+                                        busy || !can_mutate,
+                                        &palette,
+                                    )
+                                    .disabled(busy || !can_mutate)
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
                                             let kind = if staged {
                                                 MutationKind::UnstageHunk
                                             } else {
                                                 MutationKind::StageHunk
                                             };
                                             this.mutate(kind, index, cx)
-                                        })),
+                                        },
+                                    )),
                                 )
                                 .child(
-                                    Button::new(id("discard"))
-                                        .danger()
-                                        .xsmall()
-                                        .label("Discard…")
-                                        .disabled(busy || !can_mutate)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                    toolbar_button(
+                                        Button::new(id("discard")).label("Discard…"),
+                                        Tone::Danger,
+                                        busy || !can_mutate,
+                                        &palette,
+                                    )
+                                    .disabled(busy || !can_mutate)
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
                                             this.request_discard(index, window, cx)
-                                        })),
+                                        },
+                                    )),
                                 )
                         })),
                 )
