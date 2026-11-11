@@ -1000,43 +1000,32 @@ fn detail(harness: &Harness, cx: &mut TestAppContext) -> String {
     harness.read(cx, |state| state.active_link().unwrap().detail.clone())
 }
 
+fn phase(harness: &Harness, cx: &mut TestAppContext) -> ConnectionPhase {
+    harness.read(cx, |state| state.active_host_state().unwrap().phase)
+}
+
+/// The bridge follows every error with the link's next state, as here. Tauri
+/// drew only that state, so the error is never a notice of its own.
 #[gpui_kit::test]
-fn shows_a_repeated_failure_once_and_speaks_again_for_a_new_outage(cx: &mut TestAppContext) {
-    let harness = ssh_host(cx, |fake| {
-        queue_answer(fake, Ok(probe_of(true, true)));
-        queue_answer(fake, Ok(probe_of(true, true)));
-    });
+fn a_drop_the_next_state_supersedes_is_no_notice(cx: &mut TestAppContext) {
+    let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, true))));
     let statuses = harness.statuses(cx);
     harness.publish(cx, 0, vec![state_frame("connected")]);
     harness.publish(cx, 0, vec![error_frame(UNREACHABLE)]);
-    assert_eq!(count(&statuses, UNREACHABLE), 1);
-
-    harness.publish(cx, 0, vec![state_frame("disconnected")]);
     harness.publish(
         cx,
         0,
-        vec![error_frame(UNREACHABLE), error_frame(UNREACHABLE)],
+        vec![state_frame("disconnected"), state_frame("reconnecting")],
     );
-    assert_eq!(count(&statuses, UNREACHABLE), 1);
-    assert_eq!(detail(&harness, cx), UNREACHABLE);
-
-    harness.publish(cx, 0, vec![error_frame(REFUSED), error_frame(REFUSED)]);
-    assert_eq!(count(&statuses, REFUSED), 0);
-    assert_eq!(detail(&harness, cx), REFUSED);
-
-    harness.publish(
-        cx,
-        0,
-        vec![state_frame("reconnecting"), state_frame("connected")],
-    );
-    harness.publish(cx, 0, vec![state_frame("disconnected")]);
-    harness.publish(cx, 0, vec![error_frame(REFUSED)]);
-    assert_eq!(count(&statuses, REFUSED), 0);
-    assert_eq!(detail(&harness, cx), REFUSED);
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    assert_eq!(count(&statuses, UNREACHABLE), 0);
+    assert_eq!(phase(&harness, cx), ConnectionPhase::Connected);
 }
 
+/// A link that stays down is reported where it was in Tauri: the phase the
+/// strip and the host row draw, with the cause as the detail.
 #[gpui_kit::test]
-fn shows_a_failed_reconnect_in_the_strip_without_duplicating_its_cause(cx: &mut TestAppContext) {
+fn a_link_that_stays_down_keeps_its_cause_in_the_strip(cx: &mut TestAppContext) {
     let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, true))));
     let statuses = harness.statuses(cx);
     harness.publish(cx, 0, vec![state_frame("connected")]);
@@ -1045,18 +1034,31 @@ fn shows_a_failed_reconnect_in_the_strip_without_duplicating_its_cause(cx: &mut 
         0,
         vec![error_frame(UNREACHABLE), state_frame("disconnected")],
     );
-    assert_eq!(count(&statuses, UNREACHABLE), 1);
-
-    harness.update(cx, |state, cx| state.reconnect(cx));
-    harness.publish(cx, 1, vec![error_frame(UNREACHABLE)]);
-    assert_eq!(count(&statuses, UNREACHABLE), 1);
+    assert_eq!(phase(&harness, cx), ConnectionPhase::Disconnected);
     assert_eq!(detail(&harness, cx), UNREACHABLE);
+
+    harness.publish(
+        cx,
+        0,
+        vec![error_frame(REFUSED), state_frame("disconnected")],
+    );
+    assert_eq!(detail(&harness, cx), REFUSED);
+    assert_eq!(count(&statuses, UNREACHABLE) + count(&statuses, REFUSED), 0);
+}
+
+/// Nothing follows a detach, so it stays a notice.
+#[gpui_kit::test]
+fn a_detach_is_still_a_notice(cx: &mut TestAppContext) {
+    let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, true))));
+    let statuses = harness.statuses(cx);
+    harness.publish(cx, 0, vec![state_frame("connected")]);
+    harness.publish(cx, 0, vec![frame(5, "session ended", 1, &[])]);
+    assert_eq!(count(&statuses, "Detached: session ended"), 1);
 }
 
 #[gpui_kit::test]
 fn strips_the_local_teardown_suffix_from_what_the_user_reads(cx: &mut TestAppContext) {
     let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, true))));
-    let statuses = harness.statuses(cx);
     harness.publish(cx, 0, vec![state_frame("connected")]);
     harness.publish(
         cx,
@@ -1065,9 +1067,11 @@ fn strips_the_local_teardown_suffix_from_what_the_user_reads(cx: &mut TestAppCon
             "connection lost (torn down locally: reader task exited)",
         )],
     );
-    assert_eq!(count(&statuses, "connection lost"), 1);
     assert_eq!(detail(&harness, cx), "connection lost");
 }
+
+const VERDICT: &str =
+    "Your connection to qa-host is unstable; Muxflow keeps losing the link and reconnecting.";
 
 #[gpui_kit::test]
 fn the_first_tmux_server_starting_is_no_lost_link(cx: &mut TestAppContext) {
@@ -1080,8 +1084,6 @@ fn the_first_tmux_server_starting_is_no_lost_link(cx: &mut TestAppContext) {
         vec![state_frame("connected"), world("tmux:none", 1, &[])],
     );
     harness.publish(cx, 0, vec![error_frame(CHANGED)]);
-    assert_eq!(count(&statuses, CHANGED), 0);
-    // A server that was already running and is replaced is a real loss.
     harness.publish(
         cx,
         0,
@@ -1090,25 +1092,36 @@ fn the_first_tmux_server_starting_is_no_lost_link(cx: &mut TestAppContext) {
             world("srv-qa", 2, &[("$0", "home")]),
         ],
     );
-    harness.publish(cx, 0, vec![error_frame(CHANGED)]);
-    assert_eq!(count(&statuses, CHANGED), 1);
-}
-
-#[gpui_kit::test]
-fn a_host_without_a_tmux_server_still_reports_a_lost_link(cx: &mut TestAppContext) {
-    let harness = ssh_host(cx, |fake| queue_answer(fake, Ok(probe_of(true, true))));
-    let statuses = harness.statuses(cx);
-    harness.publish(
-        cx,
-        0,
-        vec![state_frame("connected"), world("tmux:none", 1, &[])],
-    );
+    // One real loss after it: not yet a link that keeps dropping.
     harness.publish(cx, 0, vec![error_frame(UNREACHABLE)]);
-    assert_eq!(count(&statuses, UNREACHABLE), 1);
+    assert_eq!(count(&statuses, VERDICT), 0);
+}
+
+/// Only that exact case is excused: a running server replaced, or any other
+/// drop on a host with no server, still counts toward the verdict.
+#[gpui_kit::test]
+fn every_other_drop_counts_as_a_lost_link(cx: &mut TestAppContext) {
+    const CHANGED: &str = "tmux server identity changed; authoritative reconnect required";
+    for (identity, first) in [("srv-qa", CHANGED), ("tmux:none", UNREACHABLE)] {
+        let harness = ssh_host(cx, |fake| {
+            queue_answer(fake, Ok(probe_of(true, true)));
+            queue_answer(fake, Ok(probe_of(true, true)));
+        });
+        let statuses = harness.statuses(cx);
+        harness.publish(
+            cx,
+            0,
+            vec![state_frame("connected"), world(identity, 1, &[])],
+        );
+        harness.publish(cx, 0, vec![error_frame(first)]);
+        harness.publish(cx, 0, vec![state_frame("connected")]);
+        harness.publish(cx, 0, vec![error_frame(UNREACHABLE)]);
+        assert_eq!(count(&statuses, VERDICT), 1, "{identity}");
+    }
 }
 
 #[gpui_kit::test]
-fn a_second_drop_inside_the_window_speaks_the_verdict_instead(cx: &mut TestAppContext) {
+fn a_second_drop_inside_the_window_speaks_the_verdict(cx: &mut TestAppContext) {
     let harness = ssh_host(cx, |fake| {
         queue_answer(fake, Ok(probe_of(true, true)));
         queue_answer(fake, Ok(probe_of(true, true)));
@@ -1122,11 +1135,9 @@ fn a_second_drop_inside_the_window_speaks_the_verdict_instead(cx: &mut TestAppCo
         vec![state_frame("reconnecting"), state_frame("connected")],
     );
     harness.publish(cx, 0, vec![error_frame(UNREACHABLE)]);
-    let verdict =
-        "Your connection to qa-host is unstable; Muxflow keeps losing the link and reconnecting.";
-    assert_eq!(count(&statuses, verdict), 1);
-    assert_eq!(count(&statuses, UNREACHABLE), 1);
-    assert_eq!(detail(&harness, cx), verdict);
+    assert_eq!(count(&statuses, VERDICT), 1);
+    assert_eq!(count(&statuses, UNREACHABLE), 0);
+    assert_eq!(detail(&harness, cx), VERDICT);
 }
 
 // Several hosts.
