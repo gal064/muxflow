@@ -33,7 +33,7 @@ use std::{
 };
 
 use desktop_core::{
-    app_state::{AppTabRecord, DockSide, PersistedAppState, load_app_state, update_app_state},
+    app_state::{AppTabRecord, DockSide, PersistedAppState, update_app_state},
     connection::ConnectionSpec,
     platform,
 };
@@ -1073,6 +1073,15 @@ impl Workspaces {
         match &tab.kind {
             TabKind::Terminal { window_id, .. } => {
                 let window_id = window_id.clone();
+                // Choosing the tab is looking at its agent.
+                if let Some(pane) = view
+                    .snapshot
+                    .panes
+                    .iter()
+                    .find(|pane| pane.window_id == window_id && pane.active)
+                {
+                    crate::terminal::integration::agents::note_activity(&view.host, &pane.id, cx);
+                }
                 self.select_window(&window_id, cx);
             }
             TabKind::App { tab_id, .. } => {
@@ -1520,11 +1529,7 @@ impl Workspaces {
             return;
         };
         let host = view.host.clone();
-        // From the store, not the controller's copy: the defaults are the
-        // settings' to write, and that copy is current only for the tabs.
-        let defaults = load_app_state(&cx.global::<Core>().app_state)
-            .map(|state| model::workspace_defaults_for(&state, &host))
-            .unwrap_or_default();
+        let defaults = crate::settings::get(cx).defaults_for(&host);
         let intent = self.begin_intent(true);
         self.supersede_queued(cx);
         let title = if name.is_empty() {

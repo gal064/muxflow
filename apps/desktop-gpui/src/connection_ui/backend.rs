@@ -605,4 +605,30 @@ mod save_tests {
         let saved = load_app_state(&store).unwrap();
         assert_eq!(saved.workspace_ui[0].session_name, "later");
     }
+
+    #[test]
+    fn a_tab_save_keeps_a_setting_saved_after_its_snapshot_was_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app-state.json");
+        let store = Arc::new(AppStateStore::load(path.clone()));
+        let backend = NativeBackend::new(
+            store.clone(),
+            Arc::new(ProfileStore::load(dir.path().join("profiles.json")).unwrap()),
+            IncidentJournal::new(dir.path().join("logs")),
+        );
+        // The controller's base, read before Settings saved.
+        let stale = load_app_state(&store).unwrap();
+        futures::executor::block_on(update_app_state(&store, |state| {
+            state.shell.compact_workspaces = Some(false);
+        }))
+        .unwrap();
+        futures::executor::block_on(backend.save_app_state(PersistedAppState {
+            workspace_ui: named("tabs").workspace_ui,
+            ..stale
+        }))
+        .unwrap();
+        let on_disk = load_app_state(&AppStateStore::load(path)).unwrap();
+        assert_eq!(on_disk.shell.compact_workspaces, Some(false));
+        assert_eq!(on_disk.workspace_ui[0].session_name, "tabs");
+    }
 }

@@ -15,6 +15,7 @@ use gpui_kit::{App, Context, Entity, Task, WeakEntity, Window};
 use tmux_control::{Pane, Session, TmuxSnapshot, Window as TmuxWindow};
 
 use crate::{
+    agents::labels::strip_agent_status_glyphs,
     commands::{
         self,
         dialogs::{
@@ -38,7 +39,7 @@ use super::{
     model::{
         CombinedTab, TabKind, bulk_close_complete_status, bulk_close_outcome_status, close_app_tab,
         dock_app_tab, ordered_sessions, pin_app_tab, reorder_app_tab, selectable_tabs,
-        strip_agent_status_glyphs, undock_app_tab,
+        undock_app_tab,
     },
     navigation::{PaneDirection, adjacent_pane, relative_window_reorder_action},
 };
@@ -710,7 +711,7 @@ pub fn run(
                     label: "Tab name".into(),
                     // As the tab shows it: a saved rename locks, so a ticker
                     // frame left in the field would be frozen into the name.
-                    initial_value: strip_agent_status_glyphs(&target.name),
+                    initial_value: strip_agent_status_glyphs(&target.name).to_owned(),
                     submit: Rc::new(move |name, _, cx| {
                         let action = TmuxAction {
                             name,

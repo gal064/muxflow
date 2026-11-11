@@ -9,15 +9,13 @@
 //! [`ConnectionController::update_app_state`]:
 //! crate::connection_ui::controller::ConnectionController::update_app_state
 
-use std::sync::LazyLock;
-
 use desktop_core::app_state::{
-    AppTabKind, AppTabRecord, DockSide, PersistedAppState, WorkspaceDefaults, WorkspaceUiRecord,
+    AppTabKind, AppTabRecord, DockSide, PersistedAppState, WorkspaceUiRecord,
 };
-use regex::Regex;
 use tmux_control::{Session, Window};
 
-use super::agents::{AgentPresence, AgentState};
+use super::agents::AgentPresence;
+use crate::agents::model::DisplayState;
 
 /// The performer's acknowledgement of an action the host took. Routine:
 /// [`crate::notices`] keeps it off the screen.
@@ -32,7 +30,7 @@ pub enum TabKind {
         zoomed: bool,
         /// The host's flag; a document has no window to pin.
         pinned: bool,
-        attention: Option<AgentState>,
+        attention: Option<DisplayState>,
         presence: AgentPresence,
     },
     App {
@@ -135,32 +133,6 @@ pub fn ordered_sessions(sessions: &[Session]) -> Vec<&Session> {
     ordered
 }
 
-/// Claude Code's and Codex's status markers at the start of a window title.
-/// The app draws its own state, and the UI font has no glyph for several of
-/// them. Only these known prefixes go; a title someone starts with an emoji
-/// keeps it. Port of `withoutStatusGlyphs` from client-core's `agentLabels`.
-static AGENT_STATUS_GLYPHS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^(?:(?:\[ [.!] \]|π -|[\u{00B7}\u{2713}-\u{2718}\u{2722}\u{2733}\u{2736}\u{273B}\u{273D}\u{25D0}-\u{25D3}\u{2800}-\u{28FF}][\u{FE0E}\u{FE0F}]?)\s*)+",
-    )
-    .expect("a valid pattern")
-});
-
-pub fn without_status_glyphs(title: &str) -> String {
-    AGENT_STATUS_GLYPHS.replace(title, "").trim().to_owned()
-}
-
-/// A tmux window title without a leading agent ticker; a title that is only
-/// the ticker keeps it, since a blank tab is worse than a frame.
-pub fn strip_agent_status_glyphs(title: &str) -> String {
-    let stripped = without_status_glyphs(title);
-    if stripped.is_empty() {
-        title.trim().to_owned()
-    } else {
-        stripped
-    }
-}
-
 /// A workspace's document tabs, in their order. None without a server
 /// identity: a tab belongs to one tmux server.
 pub fn app_tabs_for_workspace<'a>(
@@ -192,7 +164,7 @@ pub fn app_tabs_for_workspace<'a>(
 /// What the strip knows about the agents in one window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowAgentInfo {
-    pub attention: Option<AgentState>,
+    pub attention: Option<DisplayState>,
     pub presence: AgentPresence,
 }
 
@@ -219,7 +191,7 @@ pub fn combine_workspace_tabs(
             // Independent of agent authority: animated titles move the topology
             // before the agent snapshot does, and tying the two together made
             // the title flicker between the glyph and the stripped name.
-            title: strip_agent_status_glyphs(&window.name),
+            title: crate::agents::labels::strip_agent_status_glyphs(&window.name).to_owned(),
             can_move_left: index > 0,
             can_move_right: index + 1 < window_count,
             kind: TabKind::Terminal {
@@ -615,15 +587,6 @@ pub fn move_app_tab_to_workspace(
     true
 }
 
-/// What a new workspace on one host starts with; never another host's values.
-pub fn workspace_defaults_for(state: &PersistedAppState, host: &str) -> WorkspaceDefaults {
-    state
-        .workspace_defaults
-        .get(host)
-        .cloned()
-        .unwrap_or_default()
-}
-
 /// Whether a host-side window change should uncover the terminal under a
 /// document: only a real switch inside the same workspace. When the old window
 /// left the workspace (moved or closed), tmux picking another is not someone
@@ -952,7 +915,7 @@ mod tests {
             &refs,
             &tabs,
             |id| WindowAgentInfo {
-                attention: (id == "@1").then_some(AgentState::Idle),
+                attention: (id == "@1").then_some(DisplayState::Idle),
                 presence: match id {
                     "@1" => AgentPresence::Present,
                     "@2" => AgentPresence::Absent,
@@ -971,31 +934,6 @@ mod tests {
             keys(&tabs_to_close_non_agent(&unknown_strip)),
             ["app:a", "app:b"]
         );
-    }
-
-    #[test]
-    fn strips_known_status_tickers() {
-        assert_eq!(strip_agent_status_glyphs("✳ Fix tests"), "Fix tests");
-        assert_eq!(
-            strip_agent_status_glyphs("✓ Deploy checklist"),
-            "Deploy checklist"
-        );
-        assert_eq!(
-            strip_agent_status_glyphs("\u{2819} \u{2819} Codex"),
-            "Codex"
-        );
-        assert_eq!(strip_agent_status_glyphs("[ ! ] Waiting"), "Waiting");
-        assert_eq!(
-            strip_agent_status_glyphs("π - session - dir"),
-            "session - dir"
-        );
-        assert_eq!(
-            strip_agent_status_glyphs("✳\u{FE0F} Emoji presentation"),
-            "Emoji presentation"
-        );
-        // A title that is only the ticker keeps it; any other emoji stays.
-        assert_eq!(strip_agent_status_glyphs("✳ "), "✳");
-        assert_eq!(strip_agent_status_glyphs("🚀 launch"), "🚀 launch");
     }
 
     #[test]
@@ -1253,25 +1191,5 @@ mod tests {
             Some("@2"),
             false
         ));
-    }
-
-    #[test]
-    fn workspace_defaults_are_per_host() {
-        let mut state = PersistedAppState::default();
-        state.workspace_defaults.insert(
-            "local".into(),
-            WorkspaceDefaults {
-                directory: Some("/srv".into()),
-                startup_command: None,
-            },
-        );
-        assert_eq!(
-            workspace_defaults_for(&state, "local").directory.as_deref(),
-            Some("/srv")
-        );
-        assert_eq!(
-            workspace_defaults_for(&state, "other"),
-            WorkspaceDefaults::default()
-        );
     }
 }

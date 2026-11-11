@@ -1,38 +1,16 @@
-//! The seam the agents feature fills: what the sidebar and the tab strip show
-//! about agents, and the Agents section under the sidebar divider.
+//! What the sidebar rows and the tab strip show about agents. The agents
+//! feature fills it from its runtime ([`crate::agents::publish_shell`]); the
+//! workspace shell only reads it.
 //!
-//! The workspace shell only reads this. Everything starts empty, which the
-//! shell treats as "not known yet": a terminal tab's presence is
-//! [`AgentPresence::Unknown`], so Close All Non-Agent Tabs leaves every
-//! terminal open until agents are known.
+//! Everything starts empty, which the shell treats as "not known yet": a
+//! terminal tab's presence is [`AgentPresence::Unknown`], so Close All
+//! Non-Agent Tabs leaves every terminal open until agents are known.
 
-use std::{collections::HashMap, rc::Rc};
+use std::collections::HashMap;
 
-use gpui_kit::{AnyElement, App, Global, Window};
+use gpui_kit::{App, Global};
 
-/// One agent's state as the rows draw it. `Done` is an idle agent whose
-/// finished turn nobody has looked at yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AgentState {
-    Working,
-    Blocked,
-    Idle,
-    Unknown,
-    Done,
-}
-
-impl AgentState {
-    /// The word the rows and labels use for it.
-    pub fn word(self) -> &'static str {
-        match self {
-            Self::Working => "working",
-            Self::Blocked => "blocked",
-            Self::Idle => "idle",
-            Self::Unknown => "unknown",
-            Self::Done => "done",
-        }
-    }
-}
+use crate::agents::model::DisplayState;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AgentPresence {
@@ -48,7 +26,7 @@ pub struct RowAgent {
     pub id: String,
     pub adapter_id: String,
     pub name: String,
-    pub state: AgentState,
+    pub state: DisplayState,
 }
 
 /// What a workspace row says about its agents.
@@ -61,28 +39,22 @@ pub struct WorkspaceAgents {
     /// Agents waiting on a person.
     pub unread: usize,
     pub working: bool,
+    /// The loudest state across the workspace.
+    pub state: Option<DisplayState>,
 }
 
 /// What a terminal tab says about the agents in its window.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WindowAgents {
     /// The loudest agent's state, and its adapter for the tab's mark.
-    pub attention: Option<(AgentState, String)>,
+    pub attention: Option<(DisplayState, String)>,
     pub presence: AgentPresence,
 }
 
-type Section = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
-type Mark = Rc<dyn Fn(&str, AgentState, &App) -> AnyElement>;
-
-/// Filled by the agents feature with `cx.set_global` or `cx.update_global`;
-/// the shell re-renders when it changes.
-#[derive(Clone, Default)]
+/// Set by the agents feature with `cx.set_global`; the shell re-renders when
+/// it changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentShell {
-    /// The Agents section's list, under the sidebar divider. Without it the
-    /// section says no agents were detected.
-    pub section: Option<Section>,
-    /// An agent's mark (adapter icon with its state); a state dot without it.
-    pub mark: Option<Mark>,
     /// Keyed by (host profile id, session id).
     pub workspaces: HashMap<(String, String), WorkspaceAgents>,
     /// Keyed by (host profile id, window id). The keys carry no connection:
@@ -113,7 +85,7 @@ impl AgentShell {
     }
 }
 
-/// The installed seam; `None` until the agents feature installs it.
+/// The installed seam; `None` until the workspaces feature starts.
 pub fn agent_shell(cx: &App) -> Option<&AgentShell> {
     cx.try_global::<AgentShell>()
 }

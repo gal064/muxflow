@@ -9,7 +9,7 @@ use std::{
 };
 
 use desktop_core::{
-    app_state::{AppStateStore, PersistedAppState, WorkspaceDefaults, update_app_state},
+    app_state::{AppStateStore, PersistedAppState},
     connection::{ConnectionSpec, ProfileStore, helper::HelperInstallReport},
     platform::{EventBody, EventSink},
 };
@@ -551,19 +551,13 @@ fn a_new_window_shows_a_placeholder_until_the_host_has_it(cx: &mut TestAppContex
 fn creating_a_workspace_sends_its_startup_command_once(cx: &mut TestAppContext) {
     let mut shell = shell(cx, json!([]), json!({}));
     let workspaces = shell.workspaces();
-    // Written to the store, as the settings do.
-    shell.visual.update(|_, cx| {
-        let store = cx.global::<Core>().app_state.clone();
-        futures::executor::block_on(update_app_state(&store, |state| {
-            state.workspace_defaults.insert(
-                "local".into(),
-                WorkspaceDefaults {
-                    directory: Some("/repo".into()),
-                    startup_command: Some("make dev".into()),
-                },
-            );
-        }))
-        .unwrap();
+    // Set in Settings, and in force at once.
+    shell.visual.update(|window, cx| {
+        crate::settings::update(
+            |prefs| prefs.set_workspace_defaults("local", Some("/repo"), Some("make dev")),
+            window,
+            cx,
+        );
         workspaces.update(cx, |this, cx| this.create_workspace("api".into(), cx));
     });
     shell.settle();

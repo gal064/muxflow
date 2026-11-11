@@ -280,6 +280,10 @@ mod tests {
             "uiScale": 1.15, "terminalFontSize": 40,
         })));
         assert_eq!((odd.ui_scale, odd.terminal_font_size), (1.0, 20));
+        let loud = Prefs::from_state(&state_from(serde_json::json!({
+            "agentSounds": { "enabled": true, "blocked": "subtle", "completed": "none", "volume": 7 },
+        })));
+        assert_eq!(loud.agent_sounds.volume, 1.);
     }
 
     #[test]

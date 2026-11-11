@@ -5,7 +5,7 @@
 
 use std::{rc::Rc, time::Duration};
 
-use desktop_core::app_state::{AgentSortMode, load_app_state};
+use desktop_core::app_state::AgentSortMode;
 use gpui_kit::{
     AnyElement, App, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
     Render, RenderOnce, Rgba, Role, SharedString, StatefulInteractiveElement, Styled, Subscription,
@@ -28,12 +28,7 @@ use gpui_kit::{
 use serde_json::json;
 
 use crate::{
-    app::Core,
-    commands::{
-        RowCommandSource,
-        dialogs::{TextPromptRequest, open_text_prompt},
-        registry::CommandId,
-    },
+    commands::{RowCommandSource, registry::CommandId},
     context_menu::{Entry, Item, fill},
     fonts,
     theme::{
@@ -46,7 +41,7 @@ use crate::{
 
 use super::{
     Agents, BRANCH_PANE_WAIT_MS, PendingOpen,
-    labels::{agent_session_label, strip_agent_status_glyphs},
+    labels::agent_session_label,
     list::{
         AgentListRow, group_by_pin, group_by_status, group_by_workspace, needs_attention,
         selected_agent_id_for_pane,
@@ -133,6 +128,15 @@ pub fn state_indicator(state: DisplayState, glyphs: bool, size: f32, cx: &App) -
     .into_any_element()
 }
 
+/// An adapter's icon alone: a terminal tab's glyph for the agent in it.
+pub fn adapter_glyph(adapter_id: &str, ink: Rgba) -> gpui_kit::Svg {
+    svg()
+        .data(adapter_icon(adapter_id))
+        .flex_none()
+        .size(ui(13.))
+        .text_color(ink)
+}
+
 /// The adapter mark with its state docked to it, or beside it with glyphs on.
 pub fn agent_mark(
     adapter_id: &str,
@@ -143,11 +147,7 @@ pub fn agent_mark(
     cx: &App,
 ) -> AnyElement {
     let palette = theme::palette(cx);
-    let icon = svg()
-        .data(adapter_icon(adapter_id))
-        .flex_none()
-        .size(ui(13.))
-        .text_color(ink);
+    let icon = adapter_glyph(adapter_id, ink);
     if glyphs {
         return h_flex()
             .flex_none()
@@ -318,52 +318,23 @@ fn toggle_tab_pin(row: &AgentListRow, cx: &mut App) {
     );
 }
 
+/// The shell's Rename terminal tab, aimed at the agent's window on its own
+/// host. Nothing happens once that host's tmux is another server.
 fn rename_tab(row: &AgentListRow, window: &mut Window, cx: &mut App) {
-    let agent = row.agent.clone();
+    let agent = &row.agent;
     let scope = cx.try_global::<Agents>().and_then(|agents| {
         agents
-            .runtime
+            .controller
             .read(cx)
-            .scope(&agent.host_profile_id)
-            .map(|scope| scope.identity())
+            .link(&agent.host_profile_id)
+            .map(|link| link.scope())
+            .filter(|scope| scope.server_identity.as_deref() == Some(&agent.server_identity))
     });
-    // The name as the tab shows it: a saved rename locks, so a ticker frame
-    // left in the field would be frozen into the stored name.
-    let initial = strip_agent_status_glyphs(&agent.window_name).to_owned();
-    open_text_prompt(
-        TextPromptRequest {
-            title: "Rename terminal tab".into(),
-            label: "Tab name".into(),
-            initial_value: initial,
-            submit: Rc::new(move |name, _, cx| {
-                let current = cx.try_global::<Agents>().and_then(|agents| {
-                    agents
-                        .runtime
-                        .read(cx)
-                        .scope(&agent.host_profile_id)
-                        .map(|scope| scope.identity())
-                });
-                if current.is_none() || current != scope {
-                    return report(
-                        cx,
-                        "Terminal-tab rename was cancelled because its host scope changed.".into(),
-                    );
-                }
-                host_action(
-                    &agent,
-                    json!({
-                        "kind": "renameWindow",
-                        "session_id": agent.session_id,
-                        "window_id": agent.window_id,
-                        "name": name,
-                    }),
-                    cx,
-                );
-            }),
-        },
-        window,
-        cx,
-    );
+    let (Some(scope), Some(workspaces)) = (scope, crate::workspaces::current(cx)) else {
+        return;
+    };
+    let target = crate::workspaces::Target::Window(scope, agent.window_id.clone());
+    crate::workspaces::run_command(&workspaces, "window.rename", Some(target), window, cx);
 }
 
 /// The root a launch or resume opens under: the Explorer's, once it exists.
@@ -954,8 +925,7 @@ impl RenderOnce for AgentsList {
                 let focus = &runtime.inputs.focus;
                 (
                     hook_wiring_notice(&host_hook_wiring(runtime.adapters(&focus.host_profile_id))),
-                    load_app_state(&cx.global::<Core>().app_state)
-                        .is_ok_and(|state| state.shell.agent_state_glyphs),
+                    crate::settings::get(cx).agent_state_glyphs,
                     selected_agent_id_for_pane(
                         &rows,
                         Some(&focus.pane_id),
