@@ -36,10 +36,9 @@
 //!   separator and a destructive (red) item read as unnamed menu items; the
 //!   Settings section list has no name (Kit's tab bar takes none); Kit's radio
 //!   groups count positions from one, one too many; a dialog's outer frame has
-//!   no name; Kit's slider takes no focus, so the sound volume is out of the
-//!   keyboard's reach, and a screen reader's step moves it without the change
-//!   event the setting is saved on; disabled controls read as enabled, and
-//!   nothing reads as expanded, on AccessKit's Linux bridge.
+//!   no name; disabled controls read as enabled, and nothing reads as expanded,
+//!   on AccessKit's Linux bridge. Kit's slider takes no focus, so the one
+//!   slider, the sound volume, is built on Kit's base slider parts instead.
 //!
 //! Static text needs none of this. A journey finds a control by its name: on
 //! Linux the tree reports no role name and window-relative bounds, and

@@ -16,7 +16,6 @@ use gpui_kit::{
     },
     div,
     prelude::*,
-    px,
 };
 
 use crate::theme::{
@@ -137,15 +136,16 @@ pub fn open_confirmation(confirmation: Confirmation, window: &mut Window, cx: &m
             &palette,
         );
         // `.confirmation` spans a window 600 CSS px or narrower, centered; otherwise it sits
-        // 12vh down, as every `.modal-backdrop` dialog does.
-        let narrow = narrower_than(NARROW_DIALOGS, window);
-        let alert = dialog::card(alert, &palette).entrance(DialogEntrance::None);
-        let alert = if narrow {
-            alert.w(window.viewport_size().width - px(16.)).centered()
+        // 12vh down, as every `.modal-backdrop` dialog does. Kit narrows the card to the
+        // window, but keeps a 16px gutter where Tauri keeps 8. `width`, not the style's `w`,
+        // which Kit's own width overrides.
+        let alert = dialog::card(alert, &palette)
+            .entrance(DialogEntrance::None)
+            .width(ui(CONFIRMATION_WIDTH).to_pixels(window.rem_size()));
+        let alert = if narrower_than(NARROW_DIALOGS, window) {
+            alert.centered()
         } else {
-            alert
-                .width(ui(CONFIRMATION_WIDTH).to_pixels(window.rem_size()))
-                .margin_top(window.viewport_size().height * 0.12)
+            alert.margin_top(window.viewport_size().height * 0.12)
         };
         alert
             .title(confirmation.title.clone())
