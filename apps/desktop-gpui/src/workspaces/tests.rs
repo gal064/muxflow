@@ -543,6 +543,53 @@ fn focus_left_on_something_gone_comes_back_to_the_terminal(cx: &mut TestAppConte
     });
     assert!(!stray && !list && any, "a pane has the keyboard");
 }
+
+/// Port of `useBulkTabClose.test.tsx`'s recheck: presence is read when each
+/// terminal's turn comes, not from the set, so one that may hold an agent
+/// stays even though the set names it.
+#[gpui_kit::test]
+fn closing_non_agent_tabs_keeps_a_window_that_may_hold_an_agent(cx: &mut TestAppContext) {
+    use super::agents::{AgentPresence, AgentShell, WindowAgents};
+
+    let mut shell = shell(cx, json!([]), json!({}));
+    let workspaces = shell.workspaces();
+    // The set holds both windows, but only `@1` is known to be agent-free.
+    let (scope, set) = shell.visual.update(|_, cx| {
+        let view = workspaces.read(cx).view(cx);
+        (view.scope.clone(), view.tabs.clone())
+    });
+    shell.visual.update(|_, cx| {
+        let window = |presence| WindowAgents {
+            attention: None,
+            presence,
+        };
+        cx.set_global(AgentShell {
+            windows: std::collections::HashMap::from([
+                (("local".into(), "@1".into()), window(AgentPresence::Absent)),
+                (
+                    ("local".into(), "@2".into()),
+                    window(AgentPresence::Present),
+                ),
+            ]),
+            generations: std::collections::HashMap::from([("local".into(), u64::MAX)]),
+            ..AgentShell::default()
+        });
+    });
+    shell
+        .visual
+        .update(|_, cx| workspaces.update(cx, |this, cx| this.close_tab_set(scope, set, true, cx)));
+    shell.settle();
+    let closed: Vec<Value> = shell
+        .host
+        .state()
+        .actions
+        .iter()
+        .filter(|action| action["kind"] == "closeWindow")
+        .map(|action| action["window_id"].clone())
+        .collect();
+    assert_eq!(closed, [json!("@1")]);
+}
+
 #[gpui_kit::test]
 fn split_and_close_reach_the_focused_pane(cx: &mut TestAppContext) {
     let mut shell = shell(cx, json!([]), json!({}));
@@ -1018,6 +1065,47 @@ mod agent_seams {
             .visual
             .update(|_, cx| agents::open_pane("remote", "%7", cx));
         assert!(gone.is_err());
+    }
+
+    /// The agents feature follows the controller ahead of the shell, so a
+    /// click that brings another host on screen starts its move before the
+    /// shell has seen the switch. That move belongs to the host now shown and
+    /// must keep its last step, the pane itself.
+    #[gpui_kit::test]
+    fn a_notification_click_from_another_host_reaches_its_pane(cx: &mut TestAppContext) {
+        let mut shell = two_hosts(cx);
+        start_agents(&mut shell, HashMap::new());
+        shell
+            .visual
+            .update(|_, cx| agents::open_pane("remote", "%4", cx))
+            .unwrap();
+        shell.settle();
+        assert_eq!(active_host(&mut shell), "remote");
+        let route = Route {
+            host_profile: "local".into(),
+            server_identity: "tmux".into(),
+            session_id: "$1".into(),
+            session_name: "main".into(),
+            window_id: "@1".into(),
+            window_name: "editor".into(),
+            pane_id: "%2".into(),
+            agent_id: "waiting".into(),
+            attention_generation: 7,
+        };
+        shell.visual.update(|_, cx| {
+            activation::activate(route, false, cx);
+            // As `agents::start`'s observer does, before the shell's runs.
+            let agents = cx.global::<Agents>();
+            let (controller, runtime) = (agents.controller.clone(), agents.runtime.clone());
+            agents::sync(&controller, &runtime, cx);
+        });
+        shell.settle();
+        assert_eq!(active_host(&mut shell), "local");
+        let focus = shell.host.last("focusPane");
+        assert_eq!(
+            (focus["pane_id"].as_str(), focus["client"].as_str()),
+            (Some("%2"), Some("client-1"))
+        );
     }
 
     #[gpui_kit::test]

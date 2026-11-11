@@ -12,7 +12,8 @@
 use std::rc::Rc;
 
 use gpui_kit::{
-    App, Context, IntoElement, ParentElement, SharedString, Styled, Window,
+    App, Context, DismissEvent, FocusHandle, Focusable, Global, IntoElement, ParentElement,
+    SharedString, Styled, Window,
     component::menu::{PopupMenu, PopupMenuItem},
     div,
 };
@@ -123,8 +124,44 @@ impl From<Item> for Entry {
     }
 }
 
+/// The last menu opened, until it closes. Kit focuses an open menu, so the
+/// menu is open while it, or a submenu inside it, holds focus. Closing gives
+/// focus back only when there was focus to give back, so the close itself
+/// also ends it.
+struct OpenMenu(FocusHandle);
+
+impl Global for OpenMenu {}
+
+/// Whether a context menu is open: a tooltip asked for now would be drawn
+/// over it.
+pub fn is_open(window: &Window, cx: &App) -> bool {
+    cx.try_global::<OpenMenu>()
+        .is_some_and(|open| open.0.contains_focused(window, cx))
+}
+
 /// Fills `menu` with `entries`.
 pub fn fill(
+    menu: PopupMenu,
+    entries: &[Entry],
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let focus = menu.focus_handle(cx);
+    cx.set_global(OpenMenu(focus));
+    cx.subscribe_self(|menu: &mut PopupMenu, _: &DismissEvent, cx| {
+        let focus = menu.focus_handle(cx);
+        if cx
+            .try_global::<OpenMenu>()
+            .is_some_and(|open| open.0 == focus)
+        {
+            cx.remove_global::<OpenMenu>();
+        }
+    })
+    .detach();
+    fill_entries(menu, entries, window, cx)
+}
+
+fn fill_entries(
     menu: PopupMenu,
     entries: &[Entry],
     window: &mut Window,
@@ -142,8 +179,40 @@ pub fn fill(
         Entry::Submenu { label, entries, .. } => {
             let entries = entries.clone();
             menu.submenu(label.clone(), window, cx, move |menu, window, cx| {
-                fill(menu, &entries, window, cx)
+                fill_entries(menu, &entries, window, cx)
             })
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{Focusable, TestAppContext};
+
+    use super::*;
+
+    #[gpui_kit::test]
+    fn a_menu_counts_as_open_while_it_holds_focus(cx: &mut TestAppContext) {
+        let visual = cx.add_empty_window();
+        let menu = visual.update(|window, cx| {
+            gpui_kit::init(cx);
+            assert!(!is_open(window, cx));
+            let menu = PopupMenu::build(window, cx, |menu, window, cx| {
+                fill(menu, &[Entry::Separator], window, cx)
+            });
+            menu.focus_handle(cx).focus(window, cx);
+            assert!(is_open(window, cx));
+            window.blur(cx);
+            assert!(!is_open(window, cx));
+
+            // Closed with nothing focused before it: focus stays on it.
+            menu.focus_handle(cx).focus(window, cx);
+            menu.update(cx, |_, cx| cx.emit(DismissEvent));
+            menu
+        });
+        visual.update(|window, cx| {
+            assert!(menu.focus_handle(cx).is_focused(window));
+            assert!(!is_open(window, cx));
+        });
+    }
 }

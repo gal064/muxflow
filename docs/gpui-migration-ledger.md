@@ -27,19 +27,20 @@ so a task may change a view test's row to retire, with a reason.
 
 | Scope | port | replace | retire | Total |
 |---|---|---|---|---|
-| All | 343 files / 74,428 lines | 34 files / 9,835 lines | 26 files / 2,521 lines | 403 files / 86,784 lines |
+| All | 341 files / 74,199 lines | 34 files / 9,835 lines | 28 files / 2,750 lines | 403 files / 86,784 lines |
 | Production | 177 files / 36,198 lines | 34 files / 9,835 lines | 14 files / 1,029 lines | 225 files / 47,062 lines |
-| Tests | 166 files / 38,230 lines | 0 files / 0 lines | 12 files / 1,492 lines | 178 files / 39,722 lines |
+| Tests | 164 files / 38,001 lines | 0 files / 0 lines | 14 files / 1,721 lines | 178 files / 39,722 lines |
 
 By target phase:
 
 | Target phase | port | replace | retire | Total files |
 |---|---|---|---|---|
-| 2 | 89 | 10 | 5 | 104 |
-| 3 | 88 | 11 | 11 | 110 |
-| 4 | 91 | 5 | 0 | 96 |
-| 5 | 75 | 8 | 8 | 91 |
-| 8 | 0 | 0 | 1 | 1 |
+| 2 | 91 | 10 | 5 | 106 |
+| 3 | 86 | 11 | 13 | 110 |
+| 4 | 84 | 5 | 1 | 90 |
+| 5 | 74 | 8 | 8 | 90 |
+| 7 | 6 | 0 | 0 | 6 |
+| 9 | 0 | 0 | 1 | 1 |
 
 Test files marked `port` are a mix. Where a file has retire-worthy cases (React render
 mechanics, xterm or Monaco internals) the target column says which cases drop.
@@ -151,7 +152,6 @@ ordering stays.
 | `features/files/liveMarkdown.ts` | Depends on S4. CodeMirror decoration extension; the pure helpers port, the hiding mechanism may not. Its tests (`liveMarkdown.test.ts`, `LiveMarkdownEditor.test.tsx`) follow the answer |
 | `features/files/liveTable.ts` | Depends on S4. Inline editable table; the cell-replace logic ports, the widget does not. `liveTable.test.ts` follows |
 | `features/shell/MarkdownPreview.test.tsx` | Preview keeps the user's selection while content updates, using DOM selection events. Does the Kit Markdown view need the same behavior |
-| `features/shell/appStateContract.test.ts` | Shared fixture moved to `crates/desktop-core/src/persistedAppState.contract.json` in Phase 1; which half of the test survives |
 | `features/terminal/rendererResizeOrdering.test.ts` | Does the engine serialize a queued history rewrite and a resize by construction, or does the ordering need its own test. Answered in T3.3: by construction, one engine command loop |
 | `features/terminal/rendererDrainBound.test.ts` | Does the engine keep a bounded hide drain with an honest checkpoint watermark? If hiding no longer serializes anything, three xterm-timed cases drop, but the frozen-pane contract still needs a test |
 | `features/files/markdownPreview.ts` | `useSanitizedMarkdown` holds a refresh while the user is selecting in the preview, and `CLICK_SLOP_PX` separates a link click from a selection drag. Does the Kit Markdown view need either (same question as `MarkdownPreview.test.tsx`) |
@@ -210,7 +210,7 @@ font row covers them).
 | `app/terminalFileOpenRoute.test.ts` | 36 | port | 3 | tests of terminalFileOpenRoute.ts | open |
 | `app/terminalFileOpenRoute.ts` | 27 | port | 3 | terminal file open route check | open |
 | `app/types.ts` | 68 | replace | 2 | Session, Window, Pane, ConnectionSpec, HostProfile come from protocol and desktop-core types | open |
-| `app/useAppAgentController.ts` | 162 | port | 4 | agents/mod.rs: scopes, focus and setup gating from the connection controller, rows across hosts (in the sidebar's own workspace order and pinned filter), the jump, row opening through the shell's `select_pane`, and the palette's row commands; the workflow half is agents/setup.rs; selecting a terminal tab acknowledges its pane (T4.5). Open: launch and resume need the active root (`agents::view::ActiveRoot`, set by the Explorer in Phase 5); bringing an agent's pane here and moving it go with pane moves | open |
+| `app/useAppAgentController.ts` | 162 | port | 5 | agents/mod.rs: scopes, focus and setup gating from the connection controller, rows across hosts (in the sidebar's own workspace order and pinned filter), the jump, row opening through the shell's `select_pane`, and the palette's row commands; the workflow half is agents/setup.rs; selecting a terminal tab acknowledges its pane (T4.5); bringing an agent's pane here and moving it are workspaces/moves.rs (T4.5). Phase 5: launch and resume need the active root (`agents::view::ActiveRoot`, set by the Explorer) | open |
 | `app/useAppConnectionController.ts` | 944 | port | 2 | connection_ui/controller.rs; terminal hub and state cache, reseeds, echo-lag and input-latency probes, clipboard, file, git, agent and automation frame routing, retireConnection, appFocused and prewarm_terminal_bulk stay with Phase 3 and 4 owners; active-window resolution and the optimistic window with T4.1; after-install agent setup with useAgentHostSetup | done (T2.4) |
 | `app/useAppFileActions.test.tsx` | 196 | port | 5 | tests of useAppFileActions.ts | open |
 | `app/useAppFileActions.ts` | 145 | port | 5 | file actions entity (mutation, save panel, transfers) | open |
@@ -219,7 +219,7 @@ font row covers them).
 | `app/useAppRecoveryController.ts` | 104 | port | 2 | connection_ui/controller.rs; T4.1 rewires its app-state access to the single in-memory owner and adds the flush on close | done (T2.4, T4.1) |
 | `app/useAppShellChrome.test.tsx` | 91 | port | 2 | tests of useAppShellChrome.ts | open |
 | `app/useAppShellChrome.ts` | 59 | port | 2 | rail layout and status-to-notice lifecycle | open |
-| `app/useBulkTabClose.test.tsx` | 117 | port | 4 | set rules and the survivor report in workspaces/model.rs tests; agents mark windows present through `AgentShell` (T4.5), and absence waits for the topology authority, so the recheck still has no absent window to test | done (T4.1) |
+| `app/useBulkTabClose.test.tsx` | 117 | port | 4 | set rules and the survivor report in workspaces/model.rs tests; the commit-time recheck in workspaces/tests.rs `closing_non_agent_tabs_keeps_a_window_that_may_hold_an_agent` (T4.6) | done (T4.1, T4.6) |
 | `app/useBulkTabClose.ts` | 145 | port | 4 | workspaces/commands.rs `close_tab_set`, sets from workspaces/model.rs | done (T4.1) |
 | `app/useClientResize.test.tsx` | 421 | port | 3 | tests in terminal/client_size.rs | done (T3.3) |
 | `app/useClientResize.ts` | 320 | port | 3 | terminal/client_size.rs (ClientResize) driven by terminal/surface.rs | done (T3.3) |
@@ -237,8 +237,8 @@ font row covers them).
 | `app/useTmuxActionPerformer.ts` | 146 | port | 4 | workspaces/mod.rs `perform`: the target's client and scope, silent or visible feedback, `action.refused` incident | done (T4.1) |
 | `app/useWorkspaceCreate.test.tsx` | 142 | port | 4 | per-host defaults in workspaces/model.rs, the startup command end to end in workspaces/tests.rs | done (T4.1) |
 | `app/useWorkspaceCreate.ts` | 69 | port | 4 | workspaces/mod.rs `create_workspace`, `send_startup` | done (T4.1) |
-| `app/useWorkspaceDomainController.test.ts` | 27 | port | 4 | T4.1: a tmux request needs the link's client, writes and server identity (workspaces/mod.rs `perform`); the file and Git scope half lands with Phase 5 | open |
-| `app/useWorkspaceDomainController.ts` | 99 | port | 4 | T4.1: the tmux request scope in workspaces/mod.rs `perform` and `scope_current`; the live file scope lands with Phase 5 | open |
+| `app/useWorkspaceDomainController.test.ts` | 27 | port | 5 | tmux half in T4.1: a tmux request needs the link's client, writes and server identity (workspaces/mod.rs `perform`). Phase 5: the file and Git scope half | open |
+| `app/useWorkspaceDomainController.ts` | 99 | port | 5 | tmux half in T4.1: the tmux request scope in workspaces/mod.rs `perform` and `scope_current`. Phase 5: the live file scope | open |
 | `app/windowSelection.test.ts` | 79 | port | 4 | tests in workspaces/navigation.rs and connection_ui/host_links.rs | done (T4.1) |
 | `app/windowSelection.ts` | 97 | port | 4 | workspaces/navigation.rs; the optimistic window guard in connection_ui/host_links.rs `settle_active_window` | done (T4.1) |
 
@@ -315,7 +315,7 @@ font row covers them).
 | `features/agents/useAgentNotificationActivation.test.tsx` | 115 | port | 4 | route and resolution cases in agents/activation.rs; the stale-error text match is replaced by a wait for the pane to reach the screen (T4.5); the focus and exact acknowledgement flow is checked in QA | done (T4.2, T4.5) |
 | `features/agents/useAgentNotificationActivation.ts` | 146 | port | 4 | agents/activation.rs: clicks are queued off the notification thread and polled; the pane is put on screen by the shell's `select_pane`, and a pane that does not arrive in time is resolved once more over a fresh connection (T4.5) | done (T4.2, T4.5) |
 | `features/agents/useAgentRuntime.test.tsx` | 505 | port | 4 | tests in agents/tests.rs against a scripted host | done (T4.2) |
-| `features/agents/useAgentRuntime.ts` | 378 | port | 4 | agents/runtime.rs. Open: the topology authority (the tmux window set an agent snapshot was paired with, which `useBulkTabClose.ts` uses to protect agent tabs) is not produced; it lands with the bulk tab close port | open |
+| `features/agents/useAgentRuntime.ts` | 378 | port | 4 | agents/runtime.rs; the topology authority (the tmux window set each requested snapshot was asked against, current while the scope's topology generation is) is `AgentRuntime::topology_authority`, which agents/mod.rs `agent_shell_from` turns into `AgentPresence::Absent` for the bulk tab close (T4.6) | done (T4.2, T4.6) |
 | `features/agents/useRecentIdleClock.test.tsx` | 85 | port | 4 | expiration cases in agents/list.rs | done (T4.2) |
 | `features/agents/useRecentIdleClock.ts` | 33 | port | 4 | agents/runtime.rs `arm_recent_clock`: one timer at the nearest expiration | done (T4.2) |
 
@@ -444,15 +444,15 @@ font row covers them).
 
 | File | Lines | Disposition | Phase | Target or reason | Status |
 |---|---|---|---|---|---|
-| `features/shell/AppTabSurface.test.tsx` | 644 | port | 4 | tests of AppTabSurface.tsx | open |
-| `features/shell/AppTabSurface.tsx` | 366 | port | 4 | app tab surface (document, diff, preview routing); T4.1 shows a titled placeholder in ui/chrome/workspace.rs until the surfaces land in Phase 5 | open |
+| `features/shell/AppTabSurface.test.tsx` | 644 | port | 5 | tests of AppTabSurface.tsx; they land with the document surfaces | open |
+| `features/shell/AppTabSurface.tsx` | 366 | port | 5 | app tab surface (document, diff, preview routing); T4.1 shows a titled placeholder in ui/chrome/workspace.rs until the surfaces land in Phase 5 | open |
 | `features/shell/DisconnectedStrip.tsx` | 75 | port | 2 | connection_ui/surface.rs | done (T2.4) |
 | `features/shell/MarkdownPreview.test.tsx` | 346 | port | 5 | ? preview keeps selection while content updates; DOM selection mechanics may not apply, keep the behavior | open |
 | `features/shell/RightPanel.tsx` | 120 | port | 2 | right panel container with resizable width | open |
 | `features/shell/SettingsDialog.tsx` | 611 | port | 4 | `settings/dialog.rs` with the live values in `settings/prefs.rs` and `settings/mod.rs`. The terminal screen-reader setting is the agreed exception. Agent setup and the notifier are published by T4.2 through `settings::set_agent_setup` and `settings::set_notifier` | done (T4.4) |
 | `features/shell/TitleBar.test.tsx` | 57 | port | 2 | tests of TitleBar.tsx | open |
 | `features/shell/TitleBar.tsx` | 206 | port | 2 | title bar on GPUI client decorations | open |
-| `features/shell/appStateContract.test.ts` | 334 | port | 4 | ? TS half of the shared app-state fixture retires (Rust half stays in app_state.rs); normalize and clamp cases port | open |
+| `features/shell/appStateContract.test.ts` | 334 | port | 4 | the fixture stays with desktop-core app_state.rs `app_state_contract_matches_the_frontend_shape`; the TS key-set cases retire with the TS app; normalize and clamp cases in ui/chrome/layout.rs and settings/prefs.rs tests. Not ported: the 1,024-entry cap on workspace defaults (desktop-core refuses a larger state on load; reaching it takes over 1,024 hosts) | done (T4.1, T4.4, T4.6) |
 | `features/shell/appStatePersistence.test.ts` | 69 | port | 2 | connection_ui/controller/tests.rs (failed save keeps the change) and connection_ui/backend.rs (a late earlier save cannot undo a later one) | done (T4.1) |
 | `features/shell/appStatePersistence.ts` | 65 | port | 2 | connection_ui/controller.rs chained saves and the quit flush; connection_ui/backend.rs numbered partial saves | done (T4.1) |
 | `features/shell/focusHistory.test.ts` | 98 | port | 4 | tests in workspaces/focus_history.rs | done (T4.1) |
@@ -467,17 +467,17 @@ font row covers them).
 | `features/shell/hostScope.ts` | 47 | port | 2 | connection_ui/host_scope.rs | done (T2.4) |
 | `features/shell/model.test.ts` | 806 | port | 4 | tests in workspaces/model.rs; file and Git cases with Phase 5 | done (T4.1) |
 | `features/shell/model.ts` | 1018 | port | 4 | workspaces/model.rs; file and Git tabs with Phase 5 | done (T4.1) |
-| `features/shell/panelExtensions.ts` | 48 | port | 4 | panel extension host interface | open |
+| `features/shell/panelExtensions.ts` | 48 | port | 4 | ui/chrome/right_panel.rs `PanelBodies::register` with layout.rs `panel_surfaces`; the host and events in automations/panel.rs `PanelHost` and `PanelEvent`; the toggle in settings/prefs.rs `set_panel_extension` | done (T4.2, T4.4) |
 | `features/shell/responsiveShell.test.ts` | 86 | port | 2 | tests of responsiveShell.ts | open |
 | `features/shell/responsiveShell.ts` | 67 | port | 2 | responsive rail layout | open |
-| `features/shell/shellComponents.test.tsx` | 2301 | port | 4 | shell component behavior; React render mechanics cases dropped while porting | open |
+| `features/shell/shellComponents.test.tsx` | 2301 | port | 4 | logic cases in agents/list.rs, workspaces/rows.rs, workspaces/model.rs, workspaces/tests.rs, dragdrop/rules.rs, commands/registry.rs and tests/settings.rs; marks, classes and CSS are view behavior, checked by T4.2 and T4.5 QA. Elsewhere: Download and document tabs with Phase 5, the update pill with `useUpdateCheck.ts`, All-tabs shortcut glyphs as on `TabStrip.tsx`, title-bar controls with `TitleBar.tsx`; Phase 5, with the document tabs: tests for menu commands kept on the connection that opened the menu (the menus capture that scope in their target) and for manual tab scrolling through background updates | done (T4.1, T4.2, T4.3, T4.5) |
 | `features/shell/statusNotice.test.ts` | 94 | port | 2 | `notices.rs` unit tests | done (T2.4, T2.5) |
 | `features/shell/statusNotice.ts` | 96 | port | 2 | `notices.rs`; one notice at a time, a problem stays until dismissed | done (T2.4, T2.5) |
-| `features/shell/types.ts` | 458 | port | 4 | shell and persisted app-state types with normalization | open |
+| `features/shell/types.ts` | 458 | port | 4 | storage in desktop-core app_state.rs; clamps and fallbacks in ui/chrome/layout.rs `Prefs::from_shell` and settings/prefs.rs `Prefs::from_state`; the renamed agent orderings as serde aliases. Values serde refuses could never be saved, so their TS fallbacks retire | done (T4.1, T4.4) |
 | `features/shell/useAppearance.ts` | 33 | port | 2 | `settings::update` applies a changed theme or size through `theme::apply`; `Shell` follows the OS while the choice is System | done (T4.4) |
 | `features/shell/useDesktopResumeRecovery.test.ts` | 81 | port | 2 | tests in connection_ui/resume_recovery.rs | done (T2.4) |
 | `features/shell/useDesktopResumeRecovery.ts` | 151 | port | 2 | connection_ui/resume_recovery.rs; the browser online event is polled from getifaddrs on the 5 s check | done (T2.4) |
-| `features/shell/usePersistedAppState.test.tsx` | 89 | port | 4 | tests of usePersistedAppState.ts | open |
+| `features/shell/usePersistedAppState.test.tsx` | 89 | retire | 4 | tests only the localStorage sound import, which retires with the WebView (as `sound.test.ts`); app state has held the value since that import shipped | done (T4.6) |
 | `features/shell/usePersistedAppState.ts` | 123 | port | 2 | persisted app state loader | open |
 | `features/shell/useShellCommands.test.tsx` | 384 | port | 2 | dispatch in `tests/commands.rs`; each command body tested with its feature; T4.1's end to end in workspaces/tests.rs | open |
 | `features/shell/useShellCommands.ts` | 443 | port | 2 | `commands/mod.rs` `run` and `on_command`: each command body lands with its feature (Phases 3 to 5); workspace, tab, window, pane, focus and dock bodies in workspaces/commands.rs (T4.1) | open |
