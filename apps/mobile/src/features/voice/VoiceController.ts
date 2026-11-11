@@ -165,6 +165,11 @@ export class VoiceController {
     return this.disposed;
   }
 
+  /** Its Voice screen is on display. */
+  get isFocused(): boolean {
+    return this.focused;
+  }
+
   get pendingSubmission(): Promise<void> | undefined {
     return this.submission;
   }

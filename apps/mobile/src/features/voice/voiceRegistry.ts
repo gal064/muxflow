@@ -52,6 +52,26 @@ export class VoiceRegistry {
     for (const survivor of this.controllers.values()) survivor.reregister();
   }
 
+  /**
+   * A topology snapshot names the panes alive on `serverIdentity`. Controllers
+   * for any other pane are forgotten locally: the pane is gone, so nothing can
+   * End it, and its refresh would hold a host session slot. No `voiceSession("")`
+   * goes out — that clears every pane on the connection — and the host drops a
+   * closed pane's registration itself. An empty set is treated as a transient
+   * snapshot, not "every pane closed". The controller on screen is kept so its
+   * transcript and playback survive the pane; a later snapshot forgets it.
+   */
+  reconcilePanes(serverIdentity: string, livePaneIds: ReadonlySet<string>): void {
+    if (livePaneIds.size === 0 || this.serverIdentity !== serverIdentity) return;
+    for (const [sessionKey, controller] of this.controllers) {
+      const { paneId } = controller.target;
+      if (livePaneIds.has(paneId) || controller.isFocused) continue;
+      this.controllers.delete(sessionKey);
+      controller.dispose();
+      this.log?.(`[muxflow] voice pane=${paneId} forgotten (pane gone)`);
+    }
+  }
+
   /** Settles when every utterance now on its way to a pane has landed or failed; undefined when none is. */
   pendingSubmissions(): Promise<void> | undefined {
     const pending = [...this.controllers.values()].flatMap((controller) => controller.pendingSubmission ?? []);
