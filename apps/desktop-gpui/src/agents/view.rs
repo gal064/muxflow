@@ -24,7 +24,7 @@ use gpui_kit::{
     },
     div,
     prelude::FluentBuilder,
-    px, relative, svg,
+    relative, svg,
 };
 
 use crate::{
@@ -41,6 +41,7 @@ use crate::{
     },
     ui::{
         dialog::{self, Action, Prose},
+        motion,
         surface_error::SurfaceError,
     },
     workspaces,
@@ -108,10 +109,7 @@ fn state_color(state: DisplayState, palette: &Palette) -> Rgba {
 pub fn state_indicator(state: DisplayState, glyphs: bool, size: f32, cx: &App) -> AnyElement {
     let palette = theme::palette(cx);
     if state == DisplayState::Working && !glyphs {
-        return Spinner::new()
-            .with_size(px(size))
-            .color(palette.chrome_ink.into())
-            .into_any_element();
+        return motion::Spinner::new(size, palette.chrome_ink).into_any_element();
     }
     let dot = div().flex_none().size(ui(size)).rounded_full();
     if state == DisplayState::Idle {
@@ -180,11 +178,9 @@ pub fn agent_mark(
             .border_1()
             .border_color(ring);
         match state {
-            DisplayState::Working => badge.bg(ring).child(
-                Spinner::new()
-                    .with_size(px(5.))
-                    .color(palette.chrome_ink.into()),
-            ),
+            DisplayState::Working => badge
+                .bg(ring)
+                .child(motion::Spinner::new(5., palette.chrome_ink)),
             DisplayState::Unknown => badge
                 .bg(ring)
                 .border_dashed()
