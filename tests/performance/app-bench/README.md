@@ -12,7 +12,8 @@ same window geometry, against identically seeded scratch state.
 | `bench_linux.py` | Linux driver (Wayland, Hyprland, amdgpu or any DRM driver with fdinfo) |
 | `run-macos.sh`, `bench_macos.py` | macOS entry point and driver, same scenarios and result layout |
 | `benchlib.py` | `/proc` CPU/memory/GPU accounting and window statistics, shared |
-| `summarize.py` | Writes `summary.md`: median [min-max] per app and the Tauri/GPUI ratio |
+| `summarize.py` | Writes `summary.md`: median [min-max] per app and the Tauri/GPUI ratio; with a second results dir (a GPUI-only rerun after a fix), a before/after column |
+| `frameprobe.py` | GPUI frame rate (Wayland commits) and per-thread CPU and GPU cost with 6 working agents and no output, against the static-dot variant |
 | `sizes.sh` | Scenario 1: binary and package sizes |
 | `workloads/` | Output generators, the typing probe, the remote sampler, the agent replay |
 
@@ -38,6 +39,9 @@ BENCH_SSH_CONFIG=/path/ssh_config BENCH_RECORDINGS=/path/recordings \
   tests/performance/app-bench/run-linux.sh /short/scratch/root [--runs 3 --hosts local,ssh ...]
 ```
 
+A fix is measured by rerunning only GPUI (`--apps gpui`) into a second
+results directory and passing both to `summarize.py <results> <after>`.
+
 The scratch root holds the apps' `HOME`, `ADE_HOST_RUNTIME_DIR` and
 `TMUX_TMPDIR`; tmux and the helper put sockets there, so the path must stay
 short (107 bytes for `.../t/tmux-UID/b`, 103 on macOS). The apps never see the
@@ -58,7 +62,8 @@ renderer as the session) with one headless 1920x1080@60 output, renders on the
 real GPU, and puts the apps, `grim` captures and `wtype` keys on it. A window
 there is visible and gets frame callbacks; it is not throttled. Nothing is
 sent to the session compositor, and every `hyprctl` call is checked against
-the session's instance signature. `BENCH_COMPOSITOR=session` uses the live
+the session's instance signature and must belong to the Hyprland process the
+runner started (its `hyprland.lock` names that pid). `BENCH_COMPOSITOR=session` uses the live
 session instead; only do that on an unlocked desktop that is yours to drive,
 because keys and window rules then go to that session.
 
@@ -130,6 +135,9 @@ capture, ~16 ms):
    tmux server like a real hook), one row goes done and back every ~10 s.
 10. Spinner: the same 6 agents working, panes silent (`--idle` replays 5 s and
     stops), 60 s visible, then 60 s with the window on another workspace.
+11. Spinner baseline (`--scenarios still`): the same 6 rows and silent panes,
+    driven working and then done through the same hooks, so only the motion
+    is gone; 60 s visible. The spinner's cost is scenario 10 minus this.
 
 ### Recording agent sessions
 
