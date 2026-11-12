@@ -92,21 +92,12 @@ const MARKDOWN_APPEARANCES: [(MarkdownAppearance, &str); 3] = [
     (MarkdownAppearance::Dark, "Dark"),
 ];
 
-/// No Live: this app has no Live Markdown view yet.
-const MARKDOWN_VIEWS: [(AppTabViewMode, &str); 3] = [
+const MARKDOWN_VIEWS: [(AppTabViewMode, &str); 4] = [
     (AppTabViewMode::Source, "Source"),
+    (AppTabViewMode::Live, "Live"),
     (AppTabViewMode::Preview, "Preview"),
     (AppTabViewMode::Split, "Split"),
 ];
-
-/// A saved Live opens as Source, so it reads as Source here; the saved value
-/// is left alone until another view is picked.
-fn shown_markdown_view(saved: AppTabViewMode) -> AppTabViewMode {
-    match saved {
-        AppTabViewMode::Live => AppTabViewMode::Source,
-        other => other,
-    }
-}
 
 /// Called once from [`super::init`]: `host.delete` is the Delete button of the
 /// open Connection tab, so it is offered only while there is a host to delete.
@@ -764,7 +755,7 @@ impl SettingsDialog {
                     "settings-markdown-view",
                     "Default Markdown view",
                     &MARKDOWN_VIEWS,
-                    shown_markdown_view(prefs.default_markdown_view),
+                    prefs.default_markdown_view,
                     |view, window, cx| update(|prefs| prefs.default_markdown_view = view, window, cx),
                 ))
                 .child(hint(
@@ -920,7 +911,7 @@ impl SettingsDialog {
                         },
                     ))
                     .child(hint(
-                        "Colors for Markdown in Preview. Muxflow default follows the theme; Source always does.",
+                        "Colors for Markdown in Live and Preview. Muxflow default follows the theme; Source always does.",
                         cx,
                     )),
             )
