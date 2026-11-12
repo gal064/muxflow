@@ -1375,3 +1375,121 @@ fn a_row_is_a_tab_stop_with_its_actions_next_and_its_menu_on_the_menu_key(cx: &m
         "with its actions, as a row the keyboard reached"
     );
 }
+
+/// Tauri commits on Ctrl+Enter or Meta+Enter. On a Mac the Kit binds only
+/// Cmd+Enter, so this runs as one.
+#[gpui_kit::test]
+fn commits_on_ctrl_enter_in_the_message_box_on_a_mac_too(cx: &mut TestAppContext) {
+    use gpui_kit::{
+        Modifiers, OperatingSystem, PlatformInfo, PlatformTarget, test::TestQueryExt as _,
+    };
+
+    cx.set_platform_info(PlatformInfo {
+        os: OperatingSystem::Mac,
+        target: PlatformTarget::Native,
+    });
+    let staged = status_in("repo", 1, vec![entry(A, "a.txt", "modified", "none")]);
+    let panel = Panel::new(cx, move |command| {
+        Some(Ok(match command.operation.as_str() {
+            "commit" => applied(2),
+            _ => json!({ "status": staged.clone() }),
+        }))
+    });
+    cx.update(|cx| {
+        crate::theme::apply(
+            desktop_core::app_state::ThemePreference::Light,
+            1.,
+            gpui_kit::WindowAppearance::Light,
+            cx,
+        );
+        super::panel::init(cx);
+    });
+    let shown = panel.panel.clone();
+    let (_, visual) =
+        cx.add_window_view(move |window, cx| gpui_kit::base::Root::new(shown, window, cx));
+    let context = PanelContext::new(Some(root("t")), live(1), true);
+    panel
+        .panel
+        .update(visual, |panel, cx| panel.set_context(context, cx));
+    visual.run_until_parked();
+    panel.panel.update_in(visual, |panel, window, cx| {
+        panel.set_message("message", window, cx)
+    });
+    visual.run_until_parked();
+    let field = visual.update(|window, _| window.find_by_label("Commit message").bounds().center());
+    visual.simulate_click(field, Modifiers::none());
+    visual.simulate_keystrokes("ctrl-enter");
+    visual.run_until_parked();
+    assert_eq!(panel.fake.operations(), ["watch", "commit"]);
+}
+
+/// `GitDiffSurface.tsx`: an open diff whose file was staged and committed says
+/// so.
+#[gpui_kit::test]
+fn an_open_diff_says_its_file_no_longer_changed_after_a_stage_and_commit(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt as _;
+
+    let phase = Rc::new(std::cell::Cell::new(0));
+    let host = phase.clone();
+    let panel = Panel::new(cx, move |command| {
+        let status = |phase| match phase {
+            0 => status(1),
+            1 => status_in("repo", 2, vec![entry(A, "a.txt", "modified", "none")]),
+            _ => status_in("repo", 3, vec![]),
+        };
+        Some(Ok(match command.operation.as_str() {
+            "diff" => diff_response("repo", b"a.txt", 1),
+            "mutate" => {
+                host.set(1);
+                json!({ "command": { "outcome": "applied", "status": status(1) } })
+            }
+            "commit" => {
+                host.set(2);
+                json!({ "command": { "outcome": "applied", "status": status(2) } })
+            }
+            _ => json!({ "status": status(host.get()) }),
+        }))
+    });
+    cx.update(|cx| {
+        crate::theme::apply(
+            desktop_core::app_state::ThemePreference::Light,
+            1.,
+            gpui_kit::WindowAppearance::Light,
+            cx,
+        )
+    });
+    panel.point_at("t", 1, cx);
+    let owner = panel.panel.clone();
+    let record = tab("repo");
+    let (view, visual) = cx.add_window_view(move |_, cx| GitDiffView::new(owner, record, cx));
+    visual.run_until_parked();
+    assert_eq!(view.read_with(visual, |view, _| view.shown()), (true, None));
+
+    let entry = panel.panel.read_with(visual, |panel, cx| {
+        panel.status(cx).unwrap().entries[0].clone()
+    });
+    panel.panel.update(visual, |panel, cx| {
+        panel.mutate_file(&entry, Target::Unstaged, MutationKind::StageFile, None, cx)
+    });
+    visual.run_until_parked();
+    panel.panel.update_in(visual, |panel, window, cx| {
+        panel.set_message("message", window, cx);
+        panel.run(Work::Commit, window, cx);
+    });
+    visual.run_until_parked();
+    assert_eq!(phase.get(), 2, "committed");
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(500));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.render_frame(cx));
+
+    let (shown, loading) = view.read_with(visual, |view, _| (view.shown(), view.loading()));
+    assert_eq!((shown, loading), ((false, None), false));
+    let said = visual.update(|window, _| {
+        window
+            .try_find("git-diff-empty")
+            .is_some_and(|element| element.visible())
+    });
+    assert!(said, "This file no longer has unstaged changes.");
+}

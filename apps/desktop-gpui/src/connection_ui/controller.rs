@@ -178,6 +178,10 @@ struct LinkRuntime {
     terminal_events: Option<Subscription>,
     /// The tmux server the engine's screens describe.
     server_identity: Option<String>,
+    /// The bridge is reconnecting only to attach to the tmux server the first
+    /// workspace started. Until it is back, or drops for real, that is no
+    /// outage to show.
+    adopting_first_server: bool,
 }
 
 pub struct ConnectionController {
@@ -461,6 +465,14 @@ impl ConnectionController {
 
     pub fn active_host_state(&self) -> Option<&NormalizedHostState> {
         self.active_link().map(|link| &link.host_state)
+    }
+
+    /// The active link is down only to attach to the tmux server its first
+    /// workspace started: not an outage the shell shows.
+    pub fn adopting_first_server(&self) -> bool {
+        self.runtimes
+            .get(&self.active_profile_id())
+            .is_some_and(|runtime| runtime.adopting_first_server)
     }
 
     pub fn active_host_label(&self) -> String {
@@ -1865,11 +1877,18 @@ impl ConnectionController {
         let shown = user_facing_bridge_failure(&detail).to_owned();
         // A host with no tmux server yet: the first workspace starts one, and
         // the bridge reconnects to attach to it. That is not a lost link.
-        let was_connected = self.links.link(profile_id).is_some_and(|link| {
-            link.host_state.phase == ConnectionPhase::Connected
-                && !(error == Some(SERVER_IDENTITY_CHANGED)
-                    && link.host_state.server_identity.as_deref() == Some(NO_TMUX_SERVER))
-        });
+        let connected = self
+            .links
+            .link(profile_id)
+            .filter(|link| link.host_state.phase == ConnectionPhase::Connected);
+        let adopting = error == Some(SERVER_IDENTITY_CHANGED)
+            && connected.is_some_and(|link| {
+                link.host_state.server_identity.as_deref() == Some(NO_TMUX_SERVER)
+            });
+        let was_connected = connected.is_some() && !adopting;
+        if let Some(runtime) = self.runtimes.get_mut(profile_id) {
+            runtime.adopting_first_server = adopting;
+        }
         let active = self.is_active(profile_id);
         // An error while the link is up is the link dropping under the app:
         // exactly one per outage. Its verdict stays a notice, as Tauri meant
@@ -1883,10 +1902,12 @@ impl ConnectionController {
         } else {
             shown.clone()
         };
-        self.dispatch(HostLinksAction::Detail {
-            profile_id: profile_id.to_owned(),
-            detail: line,
-        });
+        if !adopting {
+            self.dispatch(HostLinksAction::Detail {
+                profile_id: profile_id.to_owned(),
+                detail: line,
+            });
+        }
         // The strip shows this cause once the link stays down. The bridge
         // follows every error with the link's next state, which replaced this
         // notice in the Tauri app before it was drawn, so only a detach, which
@@ -1940,6 +1961,9 @@ impl ConnectionController {
         // Per event: a batch can hold `resyncing` and `connected` together.
         self.observe_transitions(cx);
         if phase == ConnectionPhase::Connected {
+            if let Some(runtime) = self.runtimes.get_mut(profile_id) {
+                runtime.adopting_first_server = false;
+            }
             self.dispatch(HostLinksAction::Detail {
                 profile_id: profile_id.to_owned(),
                 detail: String::new(),

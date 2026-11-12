@@ -95,8 +95,12 @@ pub fn app_menus(commands: &Commands, platform: Platform) -> Vec<Menu> {
         MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
     ]));
     let mut view: Vec<MenuItem> = VIEW.iter().map(|id| item(id)).collect();
-    view.push(MenuItem::separator());
-    view.push(MenuItem::action("Toggle Full Screen", ToggleFullScreen));
+    // AppKit adds its own "Enter Full Screen" to a View menu: a second item
+    // of ours would sit beside it.
+    if platform != Platform::Mac {
+        view.push(MenuItem::separator());
+        view.push(MenuItem::action("Toggle Full Screen", ToggleFullScreen));
+    }
     menus.push(Menu::new("View").items(view));
     menus.push(Menu::new("Window").items([
         MenuItem::action("Minimize", Minimize),
@@ -106,7 +110,7 @@ pub fn app_menus(commands: &Commands, platform: Platform) -> Vec<Menu> {
 }
 
 /// `Meta+Shift+E` as GPUI writes it, or `None` for a key it has no name for.
-fn gpui_keystroke(shortcut: &str) -> Option<String> {
+pub(crate) fn gpui_keystroke(shortcut: &str) -> Option<String> {
     let normalized = normalize_shortcut(shortcut);
     let (key, modifiers) = normalized.rsplit_once('+').map_or_else(
         || (normalized.as_str(), Vec::new()),
@@ -123,7 +127,15 @@ fn gpui_keystroke(shortcut: &str) -> Option<String> {
         key if key.chars().count() == 1
             || matches!(
                 key,
-                "Enter" | "Escape" | "Tab" | "Space" | "Backspace" | "Delete" | "Home" | "End"
+                "Enter"
+                    | "Escape"
+                    | "Tab"
+                    | "Space"
+                    | "Backspace"
+                    | "Delete"
+                    | "Insert"
+                    | "Home"
+                    | "End"
             )
             || key
                 .strip_prefix('F')
@@ -276,7 +288,6 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("cmd-h", Hide, Some("!Root")),
             KeyBinding::new("alt-cmd-h", HideOthers, Some("!Root")),
             KeyBinding::new("cmd-m", Minimize, Some("!Root")),
-            KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, Some("!Root")),
         ]);
     }
     refresh(cx);
